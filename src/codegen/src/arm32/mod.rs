@@ -4867,39 +4867,281 @@ impl Backend for Arm32Backend {
                         }
                         code
                     }
-                    crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::Div { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                        // Software division: R0 = R0 / R1
-                        // R2 = 0 (quotient), R3 = R0 (remainder)
-                        // CMP R1, #0; BEQ done
-                        // loop: CMP R3, R1; BLO done
-                        //   SUB R3, R3, R1; ADD R2, R2, #1; B loop
-                        // done: MOV R0, R2
-                        // MOV R2, #0
-                        code.extend_from_slice(&0xE3A02000u32.to_le_bytes()); // MOV R2, #0
-                        // MOV R3, R0
-                        code.extend_from_slice(&0xE1A03000u32.to_le_bytes()); // MOV R3, R0
-                        // CMP R1, #0
-                        code.extend_from_slice(&0xE3510000u32.to_le_bytes()); // CMP R1, #0
-                        // BEQ +3 (to done: MOV R0,R2)
-                        code.extend_from_slice(&0x0A000003u32.to_le_bytes()); // BEQ +3
-                        // loop: CMP R3, R1
-                        code.extend_from_slice(&0xE1530001u32.to_le_bytes()); // CMP R3, R1
-                        // BLO +2 (to done)
-                        code.extend_from_slice(&0x3A000002u32.to_le_bytes()); // BLO +2
-                        // SUB R3, R3, R1
-                        code.extend_from_slice(&0xE0433001u32.to_le_bytes()); // SUB R3, R3, R1
-                        // ADD R2, R2, #1
-                        code.extend_from_slice(&0xE2822001u32.to_le_bytes()); // ADD R2, R2, #1
-                        // B loop (offset = -6)
-                        code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes()); // B -6
-                        // done: MOV R0, R2
-                        code.extend_from_slice(&0xE1A00002u32.to_le_bytes()); // MOV R0, R2
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+
+                        // Type-aware division. The result type determines
+                        // signedness and width:
+                        //   - I32            → signed 32-bit (software loop
+                        //                       with sign normalization +
+                        //                       quotient negation)
+                        //   - U32 (and the
+                        //     default `None`)→ unsigned 32-bit (plain
+                        //                       subtractive loop)
+                        //   - I64            → signed 64-bit (shift-subtract
+                        //                       loop with sign handling)
+                        //   - U64            → unsigned 64-bit (plain
+                        //                       shift-subtract loop)
+                        //
+                        // ARMv7-A makes SDIV/UDIV optional (via the IDIV
+                        // extension); to remain compatible with all ARMv7
+                        // cores (and QEMU's default CPU model), we use the
+                        // software division loops rather than the hardware
+                        // instructions. Signed division normalizes both
+                        // operands to be non-negative, runs the unsigned
+                        // loop, then negates the quotient if exactly one
+                        // operand was negative.
+                        let is_signed = matches!(
+                            ty.as_ref(),
+                            Some(crate::ir::IRType::I32) | Some(crate::ir::IRType::I64)
+                        );
+                        let is_64bit = matches!(
+                            ty.as_ref(),
+                            Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64)
+                        );
+
+                        if is_64bit {
+                            // === 64-bit division ===
+                            // Load dividend into R0:R1 and divisor into R2:R3.
+                            code.extend(ss_load_value_64(
+                                Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots,
+                            ));
+                            code.extend(ss_load_value_64(
+                                Gpr::R2, Gpr::R3, rhs, &vreg_stack_slots,
+                            ));
+
+                            // PUSH {R4, R5, R6, R7, R8, R9} — save callee-saved
+                            // registers we clobber below. Register list:
+                            // (1<<4)|(1<<5)|(1<<6)|(1<<7)|(1<<8)|(1<<9) = 0x03F0.
+                            code.extend_from_slice(&encode_stm(
+                                Condition::Al, true, false, false, true,
+                                Gpr::R13.encoding(), 0x03F0,
+                            ));
+
+                            if is_signed {
+                                // Signed 64-bit: normalize dividend and
+                                // divisor to be non-negative, track XOR of
+                                // signs in R12 (0 = same, 1 = differ).
+                                // TST R1, #0x80000000  (sign bit of dividend_hi)
+                                if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_TST, true,
+                                        Gpr::R1.encoding(), 0, rot, imm8,
+                                    ));
+                                }
+                                // R12 = (R1 < 0) ? 1 : 0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Pl, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 0,
+                                )); // MOVPL R12, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 1,
+                                )); // MOVMI R12, #1
+                                // BEQ +1 (skip 64-bit negate if positive)
+                                code.extend_from_slice(&encode_branch(
+                                    Condition::Eq, false, 1,
+                                ));
+                                // RSBS R0, R0, #0  (low word, sets C = !borrow)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_RSB, true,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                ));
+                                // SBC R1, R1, #0   (high word, with borrow)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_SBC, false,
+                                    Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                ));
+                                // TST R3, #0x80000000  (sign bit of divisor_hi)
+                                if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_TST, true,
+                                        Gpr::R3.encoding(), 0, rot, imm8,
+                                    ));
+                                }
+                                // Toggle R12 if R3 < 0  → R12 = (signs differ)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, DP_EOR, false,
+                                    Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+                                )); // EORMI R12, R12, #1
+                                // BEQ +1 (skip 64-bit negate if positive)
+                                code.extend_from_slice(&encode_branch(
+                                    Condition::Eq, false, 1,
+                                ));
+                                // RSBS R2, R2, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_RSB, true,
+                                    Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 0,
+                                ));
+                                // SBC R3, R3, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_SBC, false,
+                                    Gpr::R3.encoding(), Gpr::R3.encoding(), 0, 0,
+                                ));
+                            }
+
+                            // Init remainder=0, quotient=0, counter=64.
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), 0, 0,
+                            )); // MOV R4, #0 (rem_lo)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+                            )); // MOV R5, #0 (rem_hi)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R6.encoding(), 0, 0,
+                            )); // MOV R6, #0 (quot_lo)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 0,
+                            )); // MOV R7, #0 (quot_hi)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R8.encoding(), 0, 64,
+                            )); // MOV R8, #64 (counter)
+
+                            // Check divisor == 0 (skip the loop entirely if so).
+                            // CMP R2, #0; CMPEQ R3, #0; BEQ +17 (skip 18-instr loop body).
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R2.encoding(), 0, 0, 0,
+                            ));
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Eq, DP_CMP, true,
+                                Gpr::R3.encoding(), 0, 0, 0,
+                            ));
+                            code.extend_from_slice(&encode_branch(
+                                Condition::Eq, false, 17,
+                            ));
+
+                            // === 64-bit unsigned division loop ===
+                            code.extend(emit_arm32_udiv64_loop());
+
+                            // MOV R0, R6 (quotient low); MOV R1, R7 (quotient high)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_MOV, false, 0,
+                                Gpr::R0.encoding(), Gpr::R6.encoding(),
+                            ));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_MOV, false, 0,
+                                Gpr::R1.encoding(), Gpr::R7.encoding(),
+                            ));
+
+                            // For signed division: negate quotient if signs differed.
+                            if is_signed {
+                                // CMP R12, #0; BEQ +1 (skip negate); RSBS R0, R0, #0; SBC R1, R1, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_CMP, true,
+                                    Gpr::R12.encoding(), 0, 0, 0,
+                                ));
+                                code.extend_from_slice(&encode_branch(
+                                    Condition::Eq, false, 1,
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_RSB, true,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_SBC, false,
+                                    Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                ));
+                            }
+
+                            // POP {R4, R5, R6, R7, R8, R9}
+                            code.extend_from_slice(&encode_ldm(
+                                Condition::Al, false, true, false, true,
+                                Gpr::R13.encoding(), 0x03F0,
+                            ));
+
+                            // Store 64-bit quotient.
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                        } else {
+                            // === 32-bit division ===
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+
+                            if is_signed {
+                                // Signed 32-bit: normalize signs of dividend
+                                // and divisor before the unsigned loop, then
+                                // negate the quotient if exactly one operand
+                                // was negative. R12 holds the XOR-of-signs
+                                // flag (0 = same, 1 = differ).
+                                // TST R0, #0x80000000  (sign bit of dividend)
+                                if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_TST, true,
+                                        Gpr::R0.encoding(), 0, rot, imm8,
+                                    ));
+                                }
+                                // R12 = (R0 < 0) ? 1 : 0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 1,
+                                )); // MOVMI R12, #1
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Pl, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 0,
+                                )); // MOVPL R12, #0
+                                // TST R1, #0x80000000  (sign bit of divisor)
+                                if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_TST, true,
+                                        Gpr::R1.encoding(), 0, rot, imm8,
+                                    ));
+                                }
+                                // Toggle R12 if R1 < 0  → R12 = (signs differ)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, DP_EOR, false,
+                                    Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+                                )); // EORMI R12, R12, #1
+                                // Negate dividend if negative
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, 0b0011, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                )); // RSBMI R0, R0, #0
+                                // Negate divisor if negative
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Mi, 0b0011, false,
+                                    Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                )); // RSBMI R1, R1, #0
+                            }
+
+                            // Software division: R0 = R0 / R1
+                            // R2 = 0 (quotient), R3 = R0 (remainder)
+                            // CMP R1, #0; BEQ done
+                            // loop: CMP R3, R1; BLO done
+                            //   SUB R3, R3, R1; ADD R2, R2, #1; B loop
+                            // done: MOV R0, R2
+                            code.extend_from_slice(&0xE3A02000u32.to_le_bytes()); // MOV R2, #0
+                            code.extend_from_slice(&0xE1A03000u32.to_le_bytes()); // MOV R3, R0
+                            code.extend_from_slice(&0xE3510000u32.to_le_bytes()); // CMP R1, #0
+                            code.extend_from_slice(&0x0A000003u32.to_le_bytes()); // BEQ +3 (to done)
+                            code.extend_from_slice(&0xE1530001u32.to_le_bytes()); // loop: CMP R3, R1
+                            code.extend_from_slice(&0x3A000002u32.to_le_bytes()); // BLO +2 (to done)
+                            code.extend_from_slice(&0xE0433001u32.to_le_bytes()); // SUB R3, R3, R1
+                            code.extend_from_slice(&0xE2822001u32.to_le_bytes()); // ADD R2, R2, #1
+                            code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes()); // B loop (-6)
+                            code.extend_from_slice(&0xE1A00002u32.to_le_bytes()); // done: MOV R0, R2
+
+                            // For signed division: negate quotient if signs differed.
+                            if is_signed {
+                                // CMP R12, #0; RSBNE R0, R0, #0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_CMP, true,
+                                    Gpr::R12.encoding(), 0, 0, 0,
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Ne, 0b0011, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                )); // RSBNE R0, R0, #0
+                            }
+
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                            // Zero high word (32-bit result in 64-bit slot)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                            )); // MOV R1, #0
+                            code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                        }
                         code
                     }
 
@@ -6189,27 +6431,47 @@ impl Backend for Arm32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        // ARM32 GetAddress: emit a placeholder `MOV R0, #0`
-                        // (32-bit absolute address placeholder) plus an
-                        // R_ARM_ABS32 relocation entry so the linker can
-                        // patch in the symbol's runtime address. If the
-                        // relocation system is not wired up for ARM32 yet,
-                        // we still emit the warning so the missing symbol
-                        // resolution is visible at runtime.
+                        // ARM32 GetAddress: emit a PC-relative literal-pool
+                        // load that fetches the symbol's absolute runtime
+                        // address into R0. The pattern is:
                         //
-                        // The relocation offset is the byte offset of the
-                        // MOV's immediate within this instruction's encoded
-                        // output. `load_immediate_arm32(R0, 0)` emits a
-                        // single `MOV R0, #0` (4 bytes), with the immediate
-                        // embedded in the instruction word itself. The
-                        // relocation patches the entire 4-byte word, so the
-                        // relocation offset is the start of the instruction.
+                        //   LDR R0, [PC, #0]   ; loads from PC+8 = .word
+                        //   B   +0              ; skip over the .word
+                        //   .word 0             ; placeholder, patched by
+                        //                       ; R_ARM_ABS32 to the symbol's
+                        //                       ; absolute runtime address
+                        //
+                        // At runtime, PC reads as (LDR_addr + 8) in ARM mode,
+                        // so `LDR R0, [PC, #0]` loads from LDR_addr+8, which
+                        // is exactly the .word placeholder emitted two
+                        // instructions later. The `B +0` (branch to
+                        // PC+0 = B_addr+8 = .word_addr+4) skips over the
+                        // .word so the CPU doesn't try to execute the patched
+                        // address as an instruction.
+                        //
+                        // The link-time patcher (in encode_program) handles
+                        // R_ARM_ABS32 by writing
+                        //   base_addr + text_offset + target_offset
+                        // into the 4-byte .word, where target_offset is the
+                        // symbol's offset within all_code (looked up in
+                        // func_offsets).
+                        code.extend_from_slice(&encode_ls_imm(
+                            Condition::Al, true, true, false, false, true,
+                            Gpr::R15.encoding(), Gpr::R0.encoding(), 0,
+                        )); // LDR R0, [PC, #0]
+                        code.extend_from_slice(&encode_branch(
+                            Condition::Al, false, 0,
+                        )); // B +0 (skip the .word)
+                        // Relocation offset = byte offset of the .word
+                        // placeholder (which is at current_byte_offset +
+                        // size_of(LDR) + size_of(B) = +8 bytes from the
+                        // start of this instruction's emitted code).
                         let reloc_offset = current_byte_offset + code.len() as u64;
-                        log::warn!(
-                            "GetAddress for '{}' — emitting placeholder 0 (reloc at func byte {})",
+                        log::debug!(
+                            "GetAddress for '{}' — emitting literal-pool load (R_ARM_ABS32 reloc at func byte {})",
                             name, reloc_offset
                         );
-                        code.extend_from_slice(&load_immediate_arm32(Gpr::R0, 0));
+                        code.extend_from_slice(&0u32.to_le_bytes()); // .word 0
                         relocations.push(RelocationEntry {
                             offset: reloc_offset,
                             symbol: name.clone(),
@@ -6225,9 +6487,25 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Free ──
-                    crate::ir::IRInstr::Free { ptr: _ } => {
-                        // UDF trap
-                        0xE7F000F0u32.to_le_bytes().to_vec()
+                    crate::ir::IRInstr::Free { ptr } => {
+                        let mut code = Vec::new();
+                        // Lower `free ptr` to a call to the `__vuma_free`
+                        // runtime stub (munmap wrapper). Per AAPCS, the
+                        // first argument goes in R0, so we load the pointer
+                        // from its vreg stack slot into R0, then emit a BL
+                        // with an R_ARM_CALL relocation that the link-time
+                        // patcher resolves to the `__vuma_free` stub offset.
+                        code.extend(ss_load_value(ptr, &vreg_stack_slots, Gpr::R0));
+                        let bl_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend_from_slice(&encode_branch(
+                            Condition::Al, true, 0,
+                        )); // BL __vuma_free (placeholder; patched later)
+                        relocations.push(RelocationEntry {
+                            offset: bl_offset_in_func,
+                            symbol: "__vuma_free".to_string(),
+                            reloc_type: "R_ARM_CALL".to_string(),
+                        });
+                        code
                     }
 
                     // ── Phi ──
@@ -6800,7 +7078,8 @@ impl Backend for Arm32Backend {
         //   lseek=19, stat=106, fstat=108, kill=37, getcwd=183, chdir=12,
         //   ioctl=54, fcntl=55, connect=283, poll=168, nanosleep=162,
         //   mprotect=125, dup=41, recv=291, send=290, shutdown=293,
-        //   bind=282, listen=284, accept=285, setsockopt=294.
+        //   bind=282, listen=284, accept=285, setsockopt=294,
+        //   lstat=107, dup3=358, recvfrom=371, sendto=370.
         //
         // Note: socket=281 (0x119) and epoll_create1=356 (0x164) do NOT fit
         // in a single ARM rotated-immediate MOV (which encodes an 8-bit value
@@ -6889,6 +7168,25 @@ impl Backend for Arm32Backend {
                 // suffices for callers that only need 4 args (addr, len,
                 // prot, flags) — the kernel will read R4/R5 for fd/offset.
                 ("mmap2", 192),
+                // ── W8: 4 more POSIX syscall stubs ──
+                // ARM EABI syscall numbers:
+                //   lstat     = 107  (like stat but doesn't follow symlinks)
+                //   dup3      = 358  (dup2 with flags; needed when dup2 is
+                //                     unavailable or for O_CLOEXEC)
+                //   recvfrom  = 371  (recv with source-address capture)
+                //   sendto    = 370  (send with destination-address)
+                // recvfrom/sendto take 6 args but the kernel reads R4/R5
+                // for args 5-6 (src_addr, addrlen) directly from the calling
+                // convention's stack-passed slots — the simple `MOV R7,#num ;
+                // SVC #0 ; BX LR` stub works for callers that pass the
+                // address-args via R4/R5 themselves. (VUMA's calling
+                // convention passes args 1-4 in R0-R3, so callers needing
+                // args 5-6 must put them on the stack per AAPCS — the same
+                // caveat applies to mmap2 above.)
+                ("lstat", 107),
+                ("dup3", 358),
+                ("recvfrom", 371),
+                ("sendto", 370),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -7250,6 +7548,49 @@ impl Backend for Arm32Backend {
                         ]);
                         let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FFFFFF);
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    }
+                } else if reloc.reloc_type == "R_ARM_ABS32" {
+                    // Absolute address relocation: patch the 4-byte literal
+                    // pool entry (emitted by GetAddress) with the symbol's
+                    // absolute runtime address. The runtime address is
+                    //   base_addr + text_offset + target_offset
+                    // where:
+                    //   - base_addr = 0x10000 (the ELF load base, see the
+                    //     build_arm32_elf_2seg call below)
+                    //   - text_offset = ELF header (52) + 3 program headers
+                    //     (3 * 32 = 96) = 148 (the file offset where the
+                    //     text segment / `all_code` begins)
+                    //   - target_offset = the symbol's offset within
+                    //     `all_code`, looked up in `func_offsets`
+                    //
+                    // Look up the target symbol (with the usual `fn_`
+                    // prefix fallback for monomorphized function names).
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        const BASE_ADDR: u32 = 0x10000;
+                        const TEXT_OFFSET: u32 = 148; // 52 (ehdr) + 3*32 (3 phdrs)
+                        let abs_addr: u32 = BASE_ADDR
+                            .wrapping_add(TEXT_OFFSET)
+                            .wrapping_add(target_offset as u32);
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&abs_addr.to_le_bytes());
+                    } else {
+                        // Unresolved symbol — leave the .word as 0 so the
+                        // program fails loudly (NULL pointer dereference)
+                        // rather than silently calling the wrong address.
+                        log::warn!(
+                            "unresolved R_ARM_ABS32 relocation: symbol '{}' in '{}' \
+                             at 0x{:X} — leaving literal-pool entry as 0",
+                            reloc.symbol, func.name, reloc.offset
+                        );
                     }
                 }
             }

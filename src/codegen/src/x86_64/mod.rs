@@ -1453,6 +1453,116 @@ pub fn encode_subss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode MULSD xmm, xmm (F2 0F 59 /r)
+pub fn encode_mulsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF2); code.push(0x0F); code.push(0x59);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode MULSS xmm, xmm (F3 0F 59 /r)
+pub fn encode_mulss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF3); code.push(0x0F); code.push(0x59);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode DIVSD xmm, xmm (F2 0F 5E /r)
+pub fn encode_divsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF2); code.push(0x0F); code.push(0x5E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode DIVSS xmm, xmm (F3 0F 5E /r)
+pub fn encode_divss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF3); code.push(0x0F); code.push(0x5E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SQRTSD xmm, xmm (F2 0F 51 /r)
+pub fn encode_sqrtsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF2); code.push(0x0F); code.push(0x51);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SQRTSS xmm, xmm (F3 0F 51 /r)
+pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF3); code.push(0x0F); code.push(0x51);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode MINSD xmm, xmm (F2 0F 5D /r)
+pub fn encode_minsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF2); code.push(0x0F); code.push(0x5D);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode MAXSD xmm, xmm (F2 0F 5F /r)
+pub fn encode_maxsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0xF2); code.push(0x0F); code.push(0x5F);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode UCOMISD xmm, xmm (66 0F 2E /r) — unordered compare scalar double
+pub fn encode_ucomisd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0x66); code.push(0x0F); code.push(0x2E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode UCOMISS xmm, xmm (0F 2E /r) — unordered compare scalar single
+pub fn encode_ucomiss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
+    code.push(0x0F); code.push(0x2E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 // ===========================================================================
 // x86_64 Mnemonic Disassembler
 // ===========================================================================
@@ -2716,263 +2826,179 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
 fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     let mut stubs = Vec::new();
 
-    // write(fd, buf, count) → ssize_t  [syscall 1]
-    // args: RDI=fd, RSI=buf, RDX=count → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));  // sys_write
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("write".to_string(), code));
+    // -- Helper: encode a simple "mov eax, #num ; syscall ; ret" stub --
+    // For syscalls whose SystemV argument registers (RDI, RSI, RDX, RCX,
+    // R8, R9) already match the syscall argument registers (RDI, RSI, RDX,
+    // R10, R8, R9) -- i.e. those taking <=3 args -- the stub is just three
+    // instructions.  The table below lists every such syscall we expose.
+    let simple_stub = |num: i32| -> Vec<u8> {
+        let mut code = Vec::with_capacity(14);
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, num));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        code
+    };
+
+    // -- Simple stubs (args already in correct registers) --
+    // Linux x86_64 syscall numbers.  Each entry maps a VUMA-visible
+    // function name to its syscall number; the stub body is the canonical
+    // "mov eax, #num ; syscall ; ret" sequence.
+    for (name, num) in [
+        // Core I/O & process
+        ("read", 0), ("write", 1), ("open", 2), ("close", 3),
+        ("stat", 4), ("fstat", 5), ("lstat", 6), ("poll", 7),
+        ("lseek", 8), ("mprotect", 10),
+        ("munmap", 11),
+        ("brk", 12),
+        // Signal-related (simple variants; sigaction needs a 4th arg, kept inline)
+        ("rt_sigprocmask", 14),
+        ("rt_sigreturn", 15),
+        ("ioctl", 16), ("pipe", 22), ("dup", 32), ("dup2", 33),
+        ("nanosleep", 35), ("alarm", 37),
+        ("getpid", 39), ("fork", 57), ("execve", 59), ("exit_group", 231),
+        ("kill", 62), ("getcwd", 79), ("chdir", 80), ("fcntl", 72),
+        ("unlink", 87),
+        // Time
+        ("gettimeofday", 96),
+        ("clock_gettime", 228),
+        // Networking
+        ("socket", 41), ("connect", 42), ("accept", 43),
+        ("send", 44), ("recv", 45), ("sendto", 44), ("recvfrom", 45),
+        ("bind", 49), ("listen", 50), ("shutdown", 48),
+        // epoll (create1 is simple; ctl needs RCX->R10, kept inline)
+        ("epoll_create1", 291),
+        // dup3 (modern variant of dup2)
+        ("dup3", 292),
+        // VUMA heap-free helper -- same as munmap
+        ("__vuma_free", 11),
+    ] {
+        stubs.push((name.to_string(), simple_stub(num)));
     }
 
-    // open(pathname, flags, mode) → int  [syscall 2]
-    // args: RDI=pathname, RSI=flags, RDX=mode → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));  // sys_open
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("open".to_string(), code));
-    }
+    // -- Complex stubs (need register shuffling or special encoding) --
+    // These can't be expressed as a single "mov eax,#num ; syscall ; ret"
+    // because they require moving the 4th argument from RCX (SystemV) to
+    // R10 (syscall ABI), setting an extra constant argument, or have
+    // non-trivial control flow.
 
-    // close(fd) → int  [syscall 3]
-    // args: RDI=fd → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));  // sys_close
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("close".to_string(), code));
-    }
-
-    // mmap(addr, length, prot, flags, fd, offset) → void*  [syscall 9]
-    // args: RDI=addr, RSI=length, RDX=prot, RCX=flags, R8=fd, R9=offset
-    // syscall: RDI=addr, RSI=length, RDX=prot, R10=flags, R8=fd, R9=offset
-    // Need to move 4th arg from RCX → R10 before syscall
+    // mmap(addr, length, prot, flags, fd, offset) -> void*  [syscall 9]
+    // Need to move 4th arg from RCX -> R10 before syscall
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));   // sys_mmap
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
         code.extend(encode_syscall());                      // syscall
         code.extend(encode_ret());                          // ret
         stubs.push(("mmap".to_string(), code));
     }
 
-    // munmap(addr, length) → int  [syscall 11]
-    // args: RDI=addr, RSI=length → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));  // sys_munmap
-        code.extend(encode_syscall());                      // syscall
-        code.extend(encode_ret());                          // ret
-        stubs.push(("munmap".to_string(), code));
-    }
-
-    // unlink(pathname) → int  [syscall 87]
-    // args: RDI=pathname → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 87));  // sys_unlink
-        code.extend(encode_syscall());                      // syscall
-        code.extend(encode_ret());                          // ret
-        stubs.push(("unlink".to_string(), code));
-    }
-
-    // read(fd, buf, count) → ssize_t  [syscall 0]
-    // args: RDI=fd, RSI=buf, RDX=count → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));   // sys_read
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("read".to_string(), code));
-    }
-
-    // exit(code) → void  [syscall 60]
-    // args: RDI=code → same as syscall convention
+    // exit(code) -> void  [syscall 60]
+    // No ret -- exit never returns.  Include INT3 as a safety guard.
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 60));  // sys_exit
         code.extend(encode_syscall());                     // syscall
-        // No ret — exit never returns.  Include INT3 as safety guard.
-        code.extend(encode_int3());
+        code.extend(encode_int3());                        // safety guard
         stubs.push(("exit".to_string(), code));
     }
 
-    // __vuma_alloc(size) → void*  [mmap wrapper]
-    // args: RDI=size → mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-    // mmap args: RDI=addr(NULL=0), RSI=length, RDX=prot, R10=flags, R8=fd, R9=offset
+    // __vuma_alloc(size) -> void*  [mmap wrapper]
+    // args: RDI=size -> mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     {
         let mut code = Vec::new();
-        // Save size in RSI (length)
         code.extend(encode_mov_reg_reg(Gpr::Rsi, Gpr::Rdi));  // RSI = size
-        // RDI = 0 (addr = NULL)
-        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // RDI = 0
-        // RDX = 3 (PROT_READ|PROT_WRITE)
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));
-        // R10 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
-        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));
-        // R8 = -1 (fd = -1)
-        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));
-        // R9 = 0 (offset = 0)
-        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
-        // RAX = 9 (sys_mmap)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // RDI = 0 (NULL addr)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));       // RDX = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));    // R10 = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));    // R8 = -1 (fd)
+        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));    // R9 = 0 (offset)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));       // sys_mmap
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("__vuma_alloc".to_string(), code));
     }
 
-    // __vuma_free(addr, size) → void  [munmap wrapper]
-    // args: RDI=addr, RSI=size → same as munmap syscall
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));  // sys_munmap
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("__vuma_free".to_string(), code));
-    }
-
-    // sigaction(signum, act, oldact) → long  [syscall 13 = rt_sigaction]
-    // Kernel signature: rt_sigaction(int signum, const struct sigaction *act,
-    //                                 struct sigaction *oldact, size_t sigsetsize)
-    // VUMA declares 3 args; the 4th (sigsetsize) must be 8 on x86_64.
-    // args: RDI=signum, RSI=act, RDX=oldact → same as syscall for first 3
-    // R10 must be set to 8 (sigsetsize) before the syscall.
+    // sigaction(signum, act, oldact) -> long  [syscall 13 = rt_sigaction]
+    // Kernel wants a 4th arg (sigsetsize=8); VUMA declares 3 args, so we
+    // must load R10 = 8 before the syscall.
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 13));  // sys_rt_sigaction
         code.extend(encode_mov_reg_imm32(Gpr::R10, 8));   // sigsetsize = 8
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
         stubs.push(("sigaction".to_string(), code));
     }
 
-    // alarm(seconds) → unsigned int  [syscall 37]
-    // args: RDI=seconds → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 37));  // sys_alarm
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("alarm".to_string(), code));
-    }
-
-    // pipe(int pipefd[2]) → int  [syscall 22]
-    // args: RDI=pipefd → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 22));  // sys_pipe
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("pipe".to_string(), code));
-    }
-
-    // dup2(int oldfd, int newfd) → int  [syscall 33]
-    // args: RDI=oldfd, RSI=newfd → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 33));  // sys_dup2
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("dup2".to_string(), code));
-    }
-
-    // getpid() → pid_t  [syscall 39]
-    // args: none
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 39));  // sys_getpid
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("getpid".to_string(), code));
-    }
-
-    // fork() → pid_t  [syscall 57]
-    // args: none
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 57));  // sys_fork
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("fork".to_string(), code));
-    }
-
-    // execve(const char *pathname, char *const argv[], char *const envp[]) → int  [syscall 59]
-    // args: RDI=pathname, RSI=argv, RDX=envp → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 59));  // sys_execve
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("execve".to_string(), code));
-    }
-
-    // waitpid(pid, wstatus, options) → pid_t  [syscall 61 = sys_wait4]
-    // VUMA declares: fn waitpid(pid: i64, status: Address, options: i64) -> i64;
-    // args: RDI=pid, RSI=wstatus, RDX=options → same as syscall for first 3
-    // R10 must be 0 (NULL rusage) before the syscall.
+    // waitpid(pid, wstatus, options) -> pid_t  [syscall 61 = sys_wait4]
+    // VUMA declares 3 args; the 4th (rusage) must be NULL (0).
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
         code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10)); // rusage = NULL
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
         stubs.push(("waitpid".to_string(), code));
     }
 
-    // wait4(pid, wstatus, options, rusage) → pid_t  [syscall 61]
-    // Full wait4 syscall with all 4 args. VUMA declares:
-    //   fn wait4(pid: i64, wstatus: Address, options: i64, rusage: Address) -> i64;
-    // args: RDI=pid, RSI=wstatus, RDX=options, RCX=rusage
-    // syscall: RDI=pid, RSI=wstatus, RDX=options, R10=rusage
-    // Need to move 4th arg from RCX → R10 before syscall
+    // wait4(pid, wstatus, options, rusage) -> pid_t  [syscall 61]
+    // Full 4-arg wait4: move RCX -> R10 before syscall.
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10 (rusage)
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10 (rusage)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
         stubs.push(("wait4".to_string(), code));
     }
 
-    // futex(uaddr, futex_op, val, timeout, uaddr2, val3) → int  [syscall 202]
-    // Kernel signature: futex(u32 *uaddr, int futex_op, u32 val,
-    //                          const struct timespec *timeout,
-    //                          u32 *uaddr2, u32 val3)
-    // args: RDI=uaddr, RSI=futex_op, RDX=val, RCX=timeout, R8=uaddr2, R9=val3
-    // syscall: RDI=uaddr, RSI=futex_op, RDX=val, R10=timeout, R8=uaddr2, R9=val3
-    // Need to move 4th arg from RCX → R10 before syscall
+    // futex(uaddr, futex_op, val, timeout, uaddr2, val3) -> int  [syscall 202]
+    // 4th arg (timeout) is in RCX under SysV but R10 for syscall.
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 202)); // sys_futex
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10 (timeout)
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10 (timeout)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
         stubs.push(("futex".to_string(), code));
     }
 
-    // strcmp(const char *s1, const char *s2) → int
-    // Not a syscall — implemented as a small assembly loop.
-    // Register usage: AL = byte from s1, CL = byte from s2,
-    // RDI and RSI are advanced each iteration.
+    // setsockopt(sockfd, level, optname, optval, optlen) -> int  [syscall 54]
+    // 4th arg (optval) is in RCX under SysV but R10 for syscall.
     {
-        // .loop:
-        //   8A 07           mov al, [rdi]
-        //   8A 0E           mov cl, [rsi]
-        //   38 C8           cmp al, cl
-        //   75 0C           jne .done (+12)
-        //   84 C0           test al, al
-        //   74 08           jz .done (+8)
-        //   48 FF C7        inc rdi
-        //   48 FF C6        inc rsi
-        //   EB EC           jmp .loop (-20)
-        // .done:
-        //   0F B6 C0        movzx eax, al
-        //   0F B6 C9        movzx ecx, cl
-        //   29 C8           sub eax, ecx
-        //   C3              ret
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 54));  // sys_setsockopt
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("setsockopt".to_string(), code));
+    }
+
+    // epoll_ctl(epfd, op, fd, event) -> int  [syscall 233]
+    // 4th arg (event) is in RCX under SysV but R10 for syscall.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 233)); // sys_epoll_ctl
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("epoll_ctl".to_string(), code));
+    }
+
+    // epoll_wait(epfd, events, maxevents, timeout) -> int  [syscall 232]
+    // 4th arg (timeout) is in RCX under SysV but R10 for syscall.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 232)); // sys_epoll_wait
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("epoll_wait".to_string(), code));
+    }
+
+    // strcmp(const char *s1, const char *s2) -> int
+    // Not a syscall -- implemented as a small assembly loop.
+    {
         let code: Vec<u8> = vec![
             0x8A, 0x07,                         // mov al, [rdi]
             0x8A, 0x0E,                         // mov cl, [rsi]
@@ -2991,297 +3017,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("strcmp".to_string(), code));
     }
 
-    // ── Network / epoll syscall stubs ────────────────────────────────────
-    // These are needed by programs that use socket, epoll, etc.
-    // On x86_64 Linux, the 4th argument differs between the SystemV calling
-    // convention (RCX) and the syscall convention (R10), so any stub with
-    // ≥4 args must move RCX → R10 before the syscall instruction.
-
-    // socket(domain, type, protocol) → int  [syscall 41]
-    // args: RDI=domain, RSI=type, RDX=protocol → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 41));  // sys_socket
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("socket".to_string(), code));
-    }
-
-    // setsockopt(sockfd, level, optname, optval, optlen) → int  [syscall 54]
-    // args: RDI=sockfd, RSI=level, RDX=optname, RCX=optval, R8=optlen
-    // syscall: RDI=sockfd, RSI=level, RDX=optname, R10=optval, R8=optlen
-    // Need to move 4th arg from RCX → R10
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 54));  // sys_setsockopt
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("setsockopt".to_string(), code));
-    }
-
-    // bind(sockfd, addr, addrlen) → int  [syscall 49]
-    // args: RDI=sockfd, RSI=addr, RDX=addrlen → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 49));  // sys_bind
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("bind".to_string(), code));
-    }
-
-    // listen(sockfd, backlog) → int  [syscall 50]
-    // args: RDI=sockfd, RSI=backlog → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 50));  // sys_listen
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("listen".to_string(), code));
-    }
-
-    // accept(sockfd, addr, addrlen) → int  [syscall 43]
-    // args: RDI=sockfd, RSI=addr, RDX=addrlen → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 43));  // sys_accept
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("accept".to_string(), code));
-    }
-
-    // epoll_create1(flags) → int  [syscall 291]
-    // args: RDI=flags → same as syscall convention
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 291)); // sys_epoll_create1
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("epoll_create1".to_string(), code));
-    }
-
-    // epoll_ctl(epfd, op, fd, event) → int  [syscall 233]
-    // args: RDI=epfd, RSI=op, RDX=fd, RCX=event
-    // syscall: RDI=epfd, RSI=op, RDX=fd, R10=event
-    // Need to move 4th arg from RCX → R10
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 233)); // sys_epoll_ctl
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("epoll_ctl".to_string(), code));
-    }
-
-    // epoll_wait(epfd, events, maxevents, timeout) → int  [syscall 232]
-    // args: RDI=epfd, RSI=events, RDX=maxevents, RCX=timeout
-    // syscall: RDI=epfd, RSI=events, RDX=maxevents, R10=timeout
-    // Need to move 4th arg from RCX → R10
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 232)); // sys_epoll_wait
-        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_ret());                         // ret
-        stubs.push(("epoll_wait".to_string(), code));
-    }
-
-    // ── Additional POSIX syscall stubs ─────────────────────────────
-    // These are simple "mov eax, #num; syscall; ret" stubs for syscalls
-    // where the SysV register convention matches the syscall convention
-    // (args in RDI, RSI, RDX, R10, R8, R9).
-
-    // lseek(fd, offset, whence) → off_t  [syscall 8]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 8));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("lseek".to_string(), code));
-    }
-
-    // stat(path, statbuf) → int  [syscall 4]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("stat".to_string(), code));
-    }
-
-    // fstat(fd, statbuf) → int  [syscall 5]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 5));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("fstat".to_string(), code));
-    }
-
-    // lstat(path, statbuf) → int  [syscall 6]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 6));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("lstat".to_string(), code));
-    }
-
-    // kill(pid, sig) → int  [syscall 62]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 62));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("kill".to_string(), code));
-    }
-
-    // getcwd(buf, size) → char*  [syscall 79]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 79));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("getcwd".to_string(), code));
-    }
-
-    // chdir(path) → int  [syscall 80]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 80));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("chdir".to_string(), code));
-    }
-
-    // ioctl(fd, request, ...) → int  [syscall 16]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 16));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("ioctl".to_string(), code));
-    }
-
-    // fcntl(fd, cmd, ...) → int  [syscall 72]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 72));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("fcntl".to_string(), code));
-    }
-
-    // recv(fd, buf, len, flags) → ssize_t  [syscall 45]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 45));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("recv".to_string(), code));
-    }
-
-    // send(fd, buf, len, flags) → ssize_t  [syscall 44]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 44));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("send".to_string(), code));
-    }
-
-    // recvfrom(fd, buf, len, flags, addr, addrlen) → ssize_t  [syscall 45]
-    // (recvfrom is syscall 45 on x86_64, same as recv but with addr params)
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 45));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("recvfrom".to_string(), code));
-    }
-
-    // sendto(fd, buf, len, flags, addr, addrlen) → ssize_t  [syscall 44]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 44));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("sendto".to_string(), code));
-    }
-
-    // shutdown(fd, how) → int  [syscall 48]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 48));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("shutdown".to_string(), code));
-    }
-
-    // connect(fd, addr, addrlen) → int  [syscall 42]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 42));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("connect".to_string(), code));
-    }
-
-    // poll(fds, nfds, timeout) → int  [syscall 7]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 7));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("poll".to_string(), code));
-    }
-
-    // nanosleep(req, rem) → int  [syscall 35]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 35));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("nanosleep".to_string(), code));
-    }
-
-    // mprotect(addr, len, prot) → int  [syscall 10]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 10));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("mprotect".to_string(), code));
-    }
-
-    // dup(fd) → int  [syscall 32]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 32));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("dup".to_string(), code));
-    }
-
-    // dup3(oldfd, newfd, flags) → int  [syscall 292]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 292));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("dup3".to_string(), code));
-    }
-
-    // exit_group(status) → void  [syscall 231]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 231));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("exit_group".to_string(), code));
-    }
-
-    // print_int(n) → void
+    // print_int(n) -> void
     // Converts integer to decimal string and writes to stdout.
     // Args: RDI = integer value
     // Uses raw x86_64 byte encoding for portability.
@@ -3295,7 +3031,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // mov r8, rdi (save n in r8)
         code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi
 
-        // ── Negative-number handling ─────────────────────────────────
+        // -- Negative-number handling --
         // If r8 is negative, emit a leading '-' to stdout (write syscall)
         // and negate r8 so the unsigned decimal loop below produces the
         // correct magnitude digits. Without this, signed DIV alone would
@@ -3349,8 +3085,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Use signed IDIV (F7 /7) instead of unsigned DIV (F7 /6).  Because
         // we negate negative inputs above, r8 is always non-negative on
         // entry to the loop, so the dividend rdx:rax is a non-negative
-        // 128-bit value and signed/unsigned division agree — but IDIV is
-        // required to honour the spirit of the i64→decimal conversion
+        // 128-bit value and signed/unsigned division agree -- but IDIV is
+        // required to honour the spirit of the i64->decimal conversion
         // contract for `print_int`.
         code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
         code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
@@ -3393,7 +3129,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Save buf (rdi) in r8, count (rsi) in r9
         code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi (buf)
         code.extend_from_slice(&[0x49, 0x89, 0xF1]); // mov r9, rsi (count)
-        // Check count == 0 → skip
+        // Check count == 0 -> skip
         code.extend_from_slice(&[0x4D, 0x85, 0xC9]); // test r9, r9
         code.extend_from_slice(&[0x74, 0x3C]); // jz +60 (to pop rbp; ret)
 
@@ -3436,6 +3172,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0x5D]); // pop rbp
         code.extend_from_slice(&[0xC3]); // ret
         stubs.push(("print_hex".to_string(), code));
+    }
+
+    // print_newline() -> void
+    // Writes a single newline (0x0A) byte to stdout (fd=1).
+    // Uses the red-zone-free pattern: push 0x0A (sign-extended to 8 bytes
+    // on the stack, with 0x0A as the low byte in little-endian), point
+    // RSI at it, write(1, rsp, 1), pop to restore RSP, ret.
+    {
+        let mut code = Vec::new();
+        code.extend_from_slice(&[0x6A, 0x0A]);                  // push 0x0A (newline char)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1));          // mov edi, 1 (stdout)
+        code.extend_from_slice(&[0x48, 0x89, 0xE6]);             // mov rsi, rsp
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1));          // mov edx, 1
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));          // mov rax, 1 (sys_write)
+        code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rax));                       // pop rax (restore stack)
+        code.extend(encode_ret());
+        stubs.push(("print_newline".to_string(), code));
     }
 
     stubs

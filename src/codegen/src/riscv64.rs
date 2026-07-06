@@ -6120,6 +6120,22 @@ impl Backend for RiscV64Backend {
                 ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                // ── Additional POSIX syscall stubs (RISC-V generic ABI) ──
+                ("lseek", 62), ("stat", 80), ("fstat", 80),
+                ("kill", 129), ("getcwd", 17), ("chdir", 49),
+                ("ioctl", 73), ("fcntl", 72), ("connect", 203),
+                ("poll", 168), ("nanosleep", 101), ("mprotect", 226),
+                ("dup", 23), ("exit_group", 94),
+                ("recv", 207), ("send", 206), ("shutdown", 210),
+                ("bind", 200), ("listen", 201), ("accept", 202),
+                ("setsockopt", 194),
+                ("waitpid", 260),
+                ("brk", 214),
+                ("clock_gettime", 113),
+                ("gettimeofday", 169),
+                ("rt_sigprocmask", 135),
+                ("dup3", 24), ("lstat", 82),
+                ("recvfrom", 207), ("sendto", 206),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

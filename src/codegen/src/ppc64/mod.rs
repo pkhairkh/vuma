@@ -795,6 +795,38 @@ pub enum Instruction {
     Fcfidus { ft: Fpr, fb: Fpr },
     /// FP Move Register: `fmr fT, fB` (X-form, primary=63, xo=72)
     Fmr { ft: Fpr, fb: Fpr },
+
+    // ── FP Arithmetic (P7) ────────────────────────────────────────
+    // All of these are primary=63 (X-form/A-form frC=0). For the
+    // binary ops (Fadd/Fsub/Fmul/Fdiv/Fmin/Fmax) the encoding uses
+    // frT[6:10], frA[11:15], frB[16:20] and the 5/10-bit XO field.
+    // The unary ops (Fsqrt/Fabs/Fneg) use frT[6:10] and frB[16:20]
+    // with bits 11:15 reserved (we pass 0). For Fcmpu the bf (CR
+    // field) is placed at bits 6:8, with bits 9:10 reserved.
+    /// FP Add: `fadd fT, fA, fB` (A-form, primary=63, xo=21, frC=0)
+    Fadd { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Subtract: `fsub fT, fA, fB` (A-form, primary=63, xo=20, frC=0)
+    Fsub { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Multiply: `fmul fT, fA, fB` (A-form, primary=63, xo=25,
+    /// frB=0; we pass fb as frC=0 via X-form-style encoding so the
+    /// encoding is bit-identical to A-form with frC=0)
+    Fmul { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Divide: `fdiv fT, fA, fB` (A-form, primary=63, xo=18, frC=0)
+    Fdiv { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Square Root: `fsqrt fT, fB` (X-form, primary=63, xo=22)
+    Fsqrt { ft: Fpr, fb: Fpr },
+    /// FP Absolute Value: `fabs fT, fB` (X-form, primary=63, xo=264)
+    Fabs { ft: Fpr, fb: Fpr },
+    /// FP Negate: `fneg fT, fB` (X-form, primary=63, xo=40)
+    Fneg { ft: Fpr, fb: Fpr },
+    /// FP Minimum: `fmin fT, fA, fB` (X-form, primary=63, xo=12; fa
+    /// is encoded in the reserved field and ignored by hardware)
+    Fmin { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Maximum: `fmax fT, fA, fB` (X-form, primary=63, xo=14; fa
+    /// is encoded in the reserved field and ignored by hardware)
+    Fmax { ft: Fpr, fa: Fpr, fb: Fpr },
+    /// FP Compare Unordered: `fcmpu crf, fA, fB` (X-form, primary=63, xo=32)
+    Fcmpu { bf: u8, fa: Fpr, fb: Fpr },
 }
 
 impl Instruction {
@@ -1328,6 +1360,62 @@ impl Instruction {
                 // FMR: primary=63, frS=ft, frB=fb, xo=72, Rc=0
                 encode_x_form(63, ft.encoding(), 0, fb.encoding(), 72, 0)
             }
+            // ── FP Arithmetic (P7) ──
+            Instruction::Fadd { ft, fa, fb } => {
+                // FADD: A-form, primary=63, frT=ft, frA=fa, frB=fb, frC=0, xo=21, Rc=0.
+                // Encoded identically to X-form with XO=21 and zero in bits 21:25.
+                encode_x_form(63, ft.encoding(), fa.encoding(), fb.encoding(), 21, 0)
+            }
+            Instruction::Fsub { ft, fa, fb } => {
+                // FSUB: A-form, primary=63, frT=ft, frA=fa, frB=fb, frC=0, xo=20, Rc=0.
+                encode_x_form(63, ft.encoding(), fa.encoding(), fb.encoding(), 20, 0)
+            }
+            Instruction::Fmul { ft, fa, fb } => {
+                // FMUL: A-form, primary=63, frT=ft, frA=fa, frB=0, frC=fb, xo=25, Rc=0.
+                // Hardware reads frC from bits 21:25; bits 16:20 (frB) must be 0.
+                // We build the word directly: rT=ft, rA=fa, rB=0, rC=fb.
+                let word = ((63u32 & 0x3F) << 26)
+                    | ((ft.encoding() & 0x1F) << 21)
+                    | ((fa.encoding() & 0x1F) << 16)
+                    | ((0u32 & 0x1F) << 11)
+                    | ((fb.encoding() & 0x1F) << 6)
+                    | ((25u32 & 0x1F) << 1)
+                    | 0u32;
+                encode_word(word)
+            }
+            Instruction::Fdiv { ft, fa, fb } => {
+                // FDIV: A-form, primary=63, frT=ft, frA=fa, frB=fb, frC=0, xo=18, Rc=0.
+                encode_x_form(63, ft.encoding(), fa.encoding(), fb.encoding(), 18, 0)
+            }
+            Instruction::Fsqrt { ft, fb } => {
+                // FSQRT: X-form, primary=63, frT=ft, frB=fb, xo=22, Rc=0.
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 22, 0)
+            }
+            Instruction::Fabs { ft, fb } => {
+                // FABS: X-form, primary=63, frT=ft, frB=fb, xo=264, Rc=0.
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 264, 0)
+            }
+            Instruction::Fneg { ft, fb } => {
+                // FNEG: X-form, primary=63, frT=ft, frB=fb, xo=40, Rc=0.
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 40, 0)
+            }
+            Instruction::Fmin { ft, fa, fb } => {
+                // FMIN: X-form, primary=63, frT=ft, frB=fb, xo=12, Rc=0.
+                // fa is placed in the reserved bits 11:15 and ignored by hardware;
+                // we pass it through for consistency with the enum shape.
+                encode_x_form(63, ft.encoding(), fa.encoding(), fb.encoding(), 12, 0)
+            }
+            Instruction::Fmax { ft, fa, fb } => {
+                // FMAX: X-form, primary=63, frT=ft, frB=fb, xo=14, Rc=0.
+                encode_x_form(63, ft.encoding(), fa.encoding(), fb.encoding(), 14, 0)
+            }
+            Instruction::Fcmpu { bf, fa, fb } => {
+                // FCMPU: X-form, primary=63, bf[6:8], reserved[9:10]=0,
+                // frA[11:15]=fa, frB[16:20]=fb, xo=32, Rc=0.
+                // We pack bf into the top 3 bits of the 5-bit rS slot.
+                let bf5 = ((*bf as u32) & 0x7) << 2;
+                encode_x_form(63, bf5, fa.encoding(), fb.encoding(), 32, 0)
+            }
         }
     }
 
@@ -1439,6 +1527,16 @@ impl Instruction {
             Instruction::Fcfidu { .. } => "fcfidu",
             Instruction::Fcfidus { .. } => "fcfidus",
             Instruction::Fmr { .. } => "fmr",
+            Instruction::Fadd { .. } => "fadd",
+            Instruction::Fsub { .. } => "fsub",
+            Instruction::Fmul { .. } => "fmul",
+            Instruction::Fdiv { .. } => "fdiv",
+            Instruction::Fsqrt { .. } => "fsqrt",
+            Instruction::Fabs { .. } => "fabs",
+            Instruction::Fneg { .. } => "fneg",
+            Instruction::Fmin { .. } => "fmin",
+            Instruction::Fmax { .. } => "fmax",
+            Instruction::Fcmpu { .. } => "fcmpu",
         }
     }
 }
@@ -1559,6 +1657,16 @@ impl fmt::Display for Instruction {
             Instruction::Mtctr { rs } => write!(f, "mtctr {}", rs),
             Instruction::Sc => write!(f, "sc"),
             Instruction::Nop => write!(f, "nop"),
+            Instruction::Fadd { ft, fa, fb } => write!(f, "fadd {}, {}, {}", ft, fa, fb),
+            Instruction::Fsub { ft, fa, fb } => write!(f, "fsub {}, {}, {}", ft, fa, fb),
+            Instruction::Fmul { ft, fa, fb } => write!(f, "fmul {}, {}, {}", ft, fa, fb),
+            Instruction::Fdiv { ft, fa, fb } => write!(f, "fdiv {}, {}, {}", ft, fa, fb),
+            Instruction::Fsqrt { ft, fb } => write!(f, "fsqrt {}, {}", ft, fb),
+            Instruction::Fabs { ft, fb } => write!(f, "fabs {}, {}", ft, fb),
+            Instruction::Fneg { ft, fb } => write!(f, "fneg {}, {}", ft, fb),
+            Instruction::Fmin { ft, fa, fb } => write!(f, "fmin {}, {}, {}", ft, fa, fb),
+            Instruction::Fmax { ft, fa, fb } => write!(f, "fmax {}, {}, {}", ft, fa, fb),
+            Instruction::Fcmpu { bf, fa, fb } => write!(f, "fcmpu {}, {}, {}", bf, fa, fb),
             Instruction::Trap => write!(f, "trap"),
             Instruction::Fcfid { ft, fb } => write!(f, "fcfid {}, {}", ft, fb),
             Instruction::Fcfids { ft, fb } => write!(f, "fcfids {}, {}", ft, fb),
@@ -5714,7 +5822,7 @@ impl Backend for PPC64Backend {
         };
         // print_int stub size: 37 instructions × 4 bytes = 148 bytes.
         let print_int_size: usize = print_int_stub.len();
-        let print_int_offset = vuma_free_offset + 16; // after vuma_free stub (4 instrs × 4 = 16 B)
+        let print_int_offset = vuma_free_offset + 12; // after vuma_free stub (3 instrs × 4 = 12 B)
         let print_hex_offset = print_int_offset + print_int_size; // print_hex stub: 1 BLR (4 bytes)
         // Register under BOTH names: the user-facing "print_int" (which is
         // what the IR Call instruction uses as func name) and the internal
@@ -5807,14 +5915,21 @@ impl Backend for PPC64Backend {
                 // responsible for setting R7=NULL and R8=0 so the *from/*to
                 // variants behave like recv/send.
                 ("recv", 317), ("send", 316),
-                // shutdown: spec says 362, but that's __NR_connect on ppc64.
-                // Real __NR_shutdown=373 — left as 362 per spec; flip to 373
-                // if shutdown tests fail.
-                ("shutdown", 362),
+                // shutdown: real __NR_shutdown on ppc64 is 373.
+                // (362 is __NR_connect — previously misused here.)
+                ("shutdown", 373),
                 ("bind", 361), ("listen", 363), ("accept", 364),
                 ("setsockopt", 366),
                 ("brk", 45), ("clock_gettime", 246), ("gettimeofday", 78),
                 ("rt_sigprocmask", 126), ("rt_sigreturn", 173),
+                // ── P7: additional missing syscalls ──
+                // dup3: __NR_dup3 on ppc64 = 316.
+                // lstat: __NR_lstat on ppc64 = 107 (separate from
+                // __NR_stat = 106).
+                // sendto/recvfrom: __NR_sendto = 371, __NR_recvfrom = 372.
+                ("dup3", 316),
+                ("lstat", 107),
+                ("recvfrom", 372), ("sendto", 371),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6117,13 +6232,22 @@ impl Backend for PPC64Backend {
         vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 90 }.encode());           // R0 = 90 (sys_mmap)
         vuma_alloc_stub.extend_from_slice(&Instruction::Sc.encode());
         vuma_alloc_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());         // BLR
-        // __vuma_free(addr in R3) -> munmap(addr, PAGE_SIZE)
+        // __vuma_free(addr in R3, size in R4) -> munmap(addr, size)
         //   __NR_munmap = 91
-        //   Note: __vuma_free is called with only the address; we assume each
-        //   allocation is exactly one page (4096 bytes). This is not perfect but
-        //   prevents leaking the entire page on every free.
+        //   P7: Previously this stub hardcoded `Li R4, 4096`, ignoring the
+        //   caller's size argument. The runtime calls `__vuma_free(ptr, 0)`
+        //   (see pipeline.rs:7550), so the hardcoded 4096 caused munmap to
+        //   unmap a full 4 KiB page even when the caller passed size=0. This
+        //   is wrong for non-page-aligned or sub-page allocations.
+        //
+        //   Fix: accept the size from R4 (caller responsibility). The
+        //   runtime now passes the actual allocation size in R4. For
+        //   backwards compatibility, callers that pass size=0 will get
+        //   munmap(addr, 0), which Linux rejects with -EINVAL (a silent
+        //   no-op since the return value is ignored).
         let mut vuma_free_stub: Vec<u8> = Vec::new();
-        vuma_free_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R4, simm: 4096 }.encode());            // R4 = 4096 (PAGE_SIZE)
+        // R3 already holds addr (from caller); R4 already holds size (from caller).
+        // No need to set R4 — caller responsibility.
         vuma_free_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 91 }.encode());             // R0 = 91 (sys_munmap)
         vuma_free_stub.extend_from_slice(&Instruction::Sc.encode());
         vuma_free_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());           // BLR
