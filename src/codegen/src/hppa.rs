@@ -94,14 +94,17 @@ impl Backend for HppaBackend {
         elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
         elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
 
-        // Phdr 1: LOAD (text, RX)
-        elf.extend_from_slice(&1u32.to_be_bytes()); // p_type
-        elf.extend_from_slice(&text_offset.to_be_bytes()); // p_offset
+        // Phdr 1: LOAD (text, RX) — include ELF header in segment so
+        // p_offset (0) ≡ p_vaddr (0x10000) mod p_align (0x1000). This is
+        // required by qemu's ELF loader (and the ELF spec).
+        let text_filesz = text_offset + code.len() as u32;
+        elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset = 0 (include header)
         elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr
         elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr
-        elf.extend_from_slice(&(code.len() as u32).to_be_bytes()); // p_filesz
-        elf.extend_from_slice(&(code.len() as u32).to_be_bytes()); // p_memsz
-        elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags
+        elf.extend_from_slice(&text_filesz.to_be_bytes()); // p_filesz (header + code)
+        elf.extend_from_slice(&text_filesz.to_be_bytes()); // p_memsz
+        elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
         elf.extend_from_slice(&0x1000u32.to_be_bytes()); // p_align
         // Phdr 2: LOAD (data, RW)
         elf.extend_from_slice(&1u32.to_be_bytes());
