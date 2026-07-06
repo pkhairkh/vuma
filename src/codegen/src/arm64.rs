@@ -1135,6 +1135,42 @@ pub enum Instruction {
         to_double: bool,
     },
 
+    // ---- Floating-point arithmetic ----
+    /// FP add: `FADD Dd, Dn, Dm` (double=true) or `FADD Sd, Sn, Sm` (double=false)
+    Fadd {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        double: bool,
+    },
+    /// FP subtract: `FSUB Dd, Dn, Dm` (double=true) or `FSUB Sd, Sn, Sm` (double=false)
+    Fsub {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        double: bool,
+    },
+    /// FP multiply: `FMUL Dd, Dn, Dm` (double=true) or `FMUL Sd, Sn, Sm` (double=false)
+    Fmul {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        double: bool,
+    },
+    /// FP divide: `FDIV Dd, Dn, Dm` (double=true) or `FDIV Sd, Sn, Sm` (double=false)
+    Fdiv {
+        rd: Register,
+        rn: Register,
+        rm: Register,
+        double: bool,
+    },
+    /// FP compare: `FCMP Dn, Dm` (double=true) or `FCMP Sn, Sm` (double=false)
+    Fcmp {
+        rn: Register,
+        rm: Register,
+        double: bool,
+    },
+
     // ---- Barriers ----
     /// Data memory barrier: `DMB option`
     DMB { option: BarrierOption },
@@ -1984,6 +2020,30 @@ impl Instruction {
                     0x1EE60000u32 // FCVT Sd, Dn
                 };
                 Ok(base | (rn.encoding() << 5) | rd.encoding())
+            }
+
+            // ---- FP arithmetic (double-precision encodings; the `double`
+            //      flag is informational for these encoders, which always
+            //      emit the double-precision form). ----
+            // FADD: 0x1E282800
+            Instruction::Fadd { rd, rn, rm, double: _ } => {
+                Ok(0x1E282800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
+            // FSUB: 0x1E283800
+            Instruction::Fsub { rd, rn, rm, double: _ } => {
+                Ok(0x1E283800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
+            // FMUL: 0x1E200800
+            Instruction::Fmul { rd, rn, rm, double: _ } => {
+                Ok(0x1E200800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
+            // FDIV: 0x1E201800
+            Instruction::Fdiv { rd, rn, rm, double: _ } => {
+                Ok(0x1E201800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
+            // FCMP: 0x1E202000 (double-precision)
+            Instruction::Fcmp { rn, rm, double: _ } => {
+                Ok(0x1E202000u32 | (rm.encoding() << 16) | (rn.encoding() << 5))
             }
 
             // ---- DMB ----
@@ -3181,6 +3241,26 @@ impl std::fmt::Display for Instruction {
                 } else {
                     write!(f, "fcvt s{}, d{}", rd.encoding(), rn.encoding())
                 }
+            }
+            Instruction::Fadd { rd, rn, rm, double } => {
+                let p = if *double { "d" } else { "s" };
+                write!(f, "fadd {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+            }
+            Instruction::Fsub { rd, rn, rm, double } => {
+                let p = if *double { "d" } else { "s" };
+                write!(f, "fsub {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+            }
+            Instruction::Fmul { rd, rn, rm, double } => {
+                let p = if *double { "d" } else { "s" };
+                write!(f, "fmul {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+            }
+            Instruction::Fdiv { rd, rn, rm, double } => {
+                let p = if *double { "d" } else { "s" };
+                write!(f, "fdiv {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+            }
+            Instruction::Fcmp { rn, rm, double } => {
+                let p = if *double { "d" } else { "s" };
+                write!(f, "fcmp {}{}, {}{}", p, rn.encoding(), p, rm.encoding())
             }
             Instruction::DMB { option } => write!(f, "dmb {}", option),
             Instruction::DSB { option } => write!(f, "dsb {}", option),
