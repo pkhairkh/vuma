@@ -1646,40 +1646,53 @@ impl Backend for M68kBackend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
-        // BSR.L main — 6 bytes (0x61 0x00 0xFF 0xFF + 4-byte disp32).
-        // BSR.L disp32: target = PC + disp32, where PC = address of the extension word (offset+2).
+        // BSR.L main — 6 bytes: opcode 0x61FF + 4-byte disp32.
+        // m68k BSR encoding: word 0x6100 | disp8. If disp8 == 0xFF, it's
+        // BSR.L (32-bit displacement follows). If disp8 == 0x00, it's BSR.W
+        // (16-bit displacement follows). The code previously emitted 0x6100
+        // (BSR.W) with 0xFFFF as the displacement — that branched to an odd
+        // address and crashed. Fix: emit 0x61FF (BSR.L) + 4-byte disp32.
+        // BSR.L disp32: target = PC + disp32, where PC = address after the
+        // opcode word (offset+2).
         let brasl_offset_in_start = start_stub.len();
-        start_stub.extend_from_slice(&[0x61, 0x00, 0xFF, 0xFF]);
+        start_stub.extend_from_slice(&[0x61, 0xFF]);
         start_stub.extend_from_slice(&0u32.to_be_bytes());
-        // MOVE.L D0, D1 — 0x2040 | (1<<9) | 0 = 0x2240.
-        start_stub.extend_from_slice(&[0x22, 0x40]);
+        // MOVE.L D0, D1 — move main's return value (D0) to D1 (exit code arg).
+        // m68k MOVE.L encoding: 0x20ss | (dst_reg << 9) | (dst_mode << 6) |
+        //   (src_reg << 3) | src_mode, where ss=10 for long.
+        // For D0 → D1: dst_reg=1, dst_mode=000 (Dn), src_reg=0, src_mode=000 (Dn).
+        // = 0x2000 | 0x0200 | 0x0000 | 0x0000 | 0x0000 = 0x2200.
+        // (Previous code used 0x2240 which is MOVEA.L D0, A1 — wrong register
+        //  type. MOVEA.L moves to an address register, but D1 is a data
+        //  register and the exit syscall takes the code in D1 as a value.)
+        start_stub.extend_from_slice(&[0x22, 0x00]);
         // MOVEQ #1, D0 — 0x7001.
         start_stub.extend_from_slice(&[0x70, 0x01]);
         // TRAP #0
         start_stub.extend(Instruction::Trap0.encode());
 
         // ── Patch _start BSR.L to main ──
-        // BSR.L disp32: target = (PC at extension word) + disp32.
-        // Extension word is at offset brasl_offset_in_start + 2.
+        // BSR.L disp32: target = (PC at displacement word) + disp32.
+        // Displacement word is at offset brasl_offset_in_start + 2.
         let main_key = func_offsets
             .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            let bsr_ext_abs = BASE_ADDR + text_offset + brasl_offset_in_start as u64 + 2;
+            let bsr_disp_abs = BASE_ADDR + text_offset + brasl_offset_in_start as u64 + 2;
             let main_abs = BASE_ADDR + text_offset + main_offset as u64;
-            let disp = (main_abs as i64 - bsr_ext_abs as i64) as i32;
+            let disp = (main_abs as i64 - bsr_disp_abs as i64) as i32;
             let disp_be = disp.to_be_bytes();
-            start_stub[brasl_offset_in_start + 4..brasl_offset_in_start + 8]
+            start_stub[brasl_offset_in_start + 2..brasl_offset_in_start + 6]
                 .copy_from_slice(&disp_be);
         } else {
             // No main function — point BSR.L to the FFI return-0 stub.
-            let bsr_ext_abs = BASE_ADDR + text_offset + brasl_offset_in_start as u64 + 2;
+            let bsr_disp_abs = BASE_ADDR + text_offset + brasl_offset_in_start as u64 + 2;
             let ffi_abs = BASE_ADDR + text_offset + ffi_stub_offset as u64;
-            let disp = (ffi_abs as i64 - bsr_ext_abs as i64) as i32;
+            let disp = (ffi_abs as i64 - bsr_disp_abs as i64) as i32;
             let disp_be = disp.to_be_bytes();
-            start_stub[brasl_offset_in_start + 4..brasl_offset_in_start + 8]
+            start_stub[brasl_offset_in_start + 2..brasl_offset_in_start + 6]
                 .copy_from_slice(&disp_be);
         }
 
