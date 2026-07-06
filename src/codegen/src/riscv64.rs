@@ -4961,10 +4961,84 @@ impl Backend for RiscV64Backend {
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
                     // ── BinOp (generic) ──────────────────────────────────────
-                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
+
+                        // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic
+                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                        if is_fp {
+                            let is_f64 = matches!(ty, Some(IRType::F64));
+                            // Load lhs/rhs bit patterns into FPRs
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+                            if is_f64 {
+                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(Instruction::FmvDX { rd: Fpr::F1, rs1: Gpr::T1 }.encode());
+                            } else {
+                                code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(Instruction::FmvWX { rd: Fpr::F1, rs1: Gpr::T1 }.encode());
+                            }
+                            match op {
+                                BinOpKind::Add => {
+                                    if is_f64 { code.extend(Instruction::FaddD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                    else { code.extend(Instruction::FaddS { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                }
+                                BinOpKind::Sub => {
+                                    if is_f64 { code.extend(Instruction::FsubD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                    else { code.extend(Instruction::FsubS { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                }
+                                BinOpKind::Mul => {
+                                    if is_f64 { code.extend(Instruction::FmulD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                    else { code.extend(Instruction::FmulS { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                }
+                                BinOpKind::SDiv | BinOpKind::UDiv => {
+                                    if is_f64 { code.extend(Instruction::FdivD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                    else { code.extend(Instruction::FdivS { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
+                                }
+                                BinOpKind::Eq | BinOpKind::Ne | BinOpKind::SLt | BinOpKind::SLe
+                                | BinOpKind::SGt | BinOpKind::SGe | BinOpKind::ULt | BinOpKind::ULe
+                                | BinOpKind::UGt | BinOpKind::UGe => {
+                                    // FP comparison — delegate to Cmp handler logic
+                                    let cond = match op {
+                                        BinOpKind::Eq | BinOpKind::Ne => 0x02, // CEQ
+                                        BinOpKind::SLt | BinOpKind::ULt => 0x01, // CLT
+                                        BinOpKind::SLe | BinOpKind::ULe => 0x03, // CLE
+                                        BinOpKind::SGt | BinOpKind::UGt => 0x01, // CLT (swapped)
+                                        BinOpKind::SGe | BinOpKind::UGe => 0x03, // CLE (swapped)
+                                        _ => 0x02,
+                                    };
+                                    let swap = matches!(op, BinOpKind::SGt | BinOpKind::UGt | BinOpKind::SGe | BinOpKind::UGe);
+                                    if swap {
+                                        if is_f64 { code.extend(Instruction::FeqD { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode()); }
+                                        else { code.extend(Instruction::FeqS { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode()); }
+                                    }
+                                    match cond {
+                                        0x01 => { if is_f64 { code.extend(Instruction::FltD { rd: Gpr::T0, rs1: if swap {Fpr::F1} else {Fpr::F0}, rs2: if swap {Fpr::F0} else {Fpr::F1} }.encode()); } else { code.extend(Instruction::FltS { rd: Gpr::T0, rs1: if swap {Fpr::F1} else {Fpr::F0}, rs2: if swap {Fpr::F0} else {Fpr::F1} }.encode()); } }
+                                        0x02 => { if is_f64 { code.extend(Instruction::FeqD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); } else { code.extend(Instruction::FeqS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); } }
+                                        0x03 => { if is_f64 { code.extend(Instruction::FleD { rd: Gpr::T0, rs1: if swap {Fpr::F1} else {Fpr::F0}, rs2: if swap {Fpr::F0} else {Fpr::F1} }.encode()); } else { code.extend(Instruction::FleS { rd: Gpr::T0, rs1: if swap {Fpr::F1} else {Fpr::F0}, rs2: if swap {Fpr::F0} else {Fpr::F1} }.encode()); } }
+                                        _ => {}
+                                    }
+                                    if matches!(op, BinOpKind::Ne) {
+                                        code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+                                    }
+                                }
+                                _ => {
+                                    // Other FP ops (And/Or/Xor/Shl/etc.) — fall through to integer
+                                    if is_f64 { code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode()); }
+                                    else { code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode()); }
+                                }
+                            }
+                            // Move result back to GPR
+                            if is_f64 {
+                                code.extend(Instruction::FmvXD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                            } else {
+                                code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                            }
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                            code
+                        } else {
 
                         match op {
                             BinOpKind::Ror | BinOpKind::Rol => {
@@ -5009,6 +5083,7 @@ impl Backend for RiscV64Backend {
                         }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                         code
+                        } // end else (integer path)
                     }
 
                     IRInstr::Add { dst, lhs, rhs, .. } => {
