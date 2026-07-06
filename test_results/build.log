@@ -162,9 +162,9 @@ warning: unused variable: `data_offset`
      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/backend.rs:2888:13
+    --> src/codegen/src/backend.rs:2900:13
      |
-2888 |         let mut external_symbols: Vec<String> = Vec::new();
+2900 |         let mut external_symbols: Vec<String> = Vec::new();
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
@@ -365,9 +365,9 @@ warning: unused variable: `rd_reg`
      |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unused variable: `rd_reg`
-    --> src/codegen/src/riscv64.rs:6457:29
+    --> src/codegen/src/riscv64.rs:6467:29
      |
-6457 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+6467 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
      |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unreachable pattern
@@ -804,22 +804,52 @@ warning: constant `DP_RSC` is never used
     |
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: function `arm32_compute_frame_size` is never used
-    --> src/codegen/src/arm32/mod.rs:3235:4
+warning: function `resolve_gpr_arm32` is never used
+    --> src/codegen/src/arm32/mod.rs:3181:4
      |
-3235 | fn arm32_compute_frame_size(func: &IRFunction) -> usize {
+3181 | fn resolve_gpr_arm32(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `arm32_compute_frame_size` is never used
+    --> src/codegen/src/arm32/mod.rs:3232:4
+     |
+3232 | fn arm32_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: fields `is_unconditional` and `condition` are never read
-    --> src/codegen/src/arm32/mod.rs:3968:13
+    --> src/codegen/src/arm32/mod.rs:3965:13
      |
-3964 |         struct BranchFixup {
+3961 |         struct BranchFixup {
      |                ----------- fields in this struct
 ...
-3968 |             is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
+3965 |             is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
      |             ^^^^^^^^^^^^^^^^
-3969 |             condition: Condition,   // condition code (AL for unconditional)
+3966 |             condition: Condition,   // condition code (AL for unconditional)
      |             ^^^^^^^^^
+
+warning: function `encode_vcvt_f64_u32` is never used
+    --> src/codegen/src/arm32/mod.rs:8596:4
+     |
+8596 | fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_vcvt_f64_s32` is never used
+    --> src/codegen/src/arm32/mod.rs:8623:4
+     |
+8623 | fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_vcvt_u32_f64` is never used
+    --> src/codegen/src/arm32/mod.rs:8650:4
+     |
+8650 | fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_vcvt_s32_f64` is never used
+    --> src/codegen/src/arm32/mod.rs:8677:4
+     |
+8677 | fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^^^^^^^
 
 warning: variant `BCond19` is never constructed
   --> src/codegen/src/emit.rs:93:5
@@ -1112,6 +1142,7 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
+warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
@@ -1292,7 +1323,6 @@ warning: missing documentation for a macro
 250 | macro_rules! log_trace {
     | ^^^^^^^^^^^^^^^^^^^^^^
 
-warning: `vuma-cor` (lib) generated 1 warning
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
-warning: `vuma-codegen` (lib) generated 142 warnings (run `cargo fix --lib -p vuma-codegen` to apply 57 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 57.88s
+warning: `vuma-codegen` (lib) generated 147 warnings (run `cargo fix --lib -p vuma-codegen` to apply 57 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 34.85s
