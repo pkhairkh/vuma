@@ -122,6 +122,9 @@ const FN_CVT_L_D: u32 = 0x25; // cvt.l.d
 
 // COP1 function code for FP arithmetic (sub.d)
 const FN_SUB_D: u32 = 0x01; // sub.d
+const FN_ADD_D: u32 = 0x00; // add.d
+const FN_MUL_D: u32 = 0x02; // mul.d
+const FN_DIV_D: u32 = 0x03; // div.d
 
 // COP1 fmt field values for move instructions
 const FMT_MF: u32 = 0x00; // MFC1
@@ -768,8 +771,14 @@ pub enum Instruction {
     CvtLD { fd: Fpr, fs: Fpr },
 
     // ── Coprocessor 1: FP Arithmetic ───────────────────────────────────
+    /// FP Add Double: `add.d fd, fs, ft` (fmt=D, func=0x00)
+    AddD { fd: Fpr, fs: Fpr, ft: Fpr },
     /// FP Subtract Double: `sub.d fd, fs, ft` (fmt=D, func=0x01)
     SubD { fd: Fpr, fs: Fpr, ft: Fpr },
+    /// FP Multiply Double: `mul.d fd, fs, ft` (fmt=D, func=0x02)
+    MulD { fd: Fpr, fs: Fpr, ft: Fpr },
+    /// FP Divide Double: `div.d fd, fs, ft` (fmt=D, func=0x03)
+    DivD { fd: Fpr, fs: Fpr, ft: Fpr },
 
     // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────────────
     /// Move Word to Coprocessor 1: `mtc1 rt, fs` (GPR→FPR, 32-bit)
@@ -1322,9 +1331,17 @@ impl Instruction {
             }
 
             // ── Coprocessor 1: FP Arithmetic ──────────────────────────
-            // sub.d fd, fs, ft: COP1 fmt=D, ft, fs, fd, func=0x01
+            Instruction::AddD { fd, fs, ft } => {
+                encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_ADD_D)
+            }
             Instruction::SubD { fd, fs, ft } => {
                 encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_SUB_D)
+            }
+            Instruction::MulD { fd, fs, ft } => {
+                encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_MUL_D)
+            }
+            Instruction::DivD { fd, fs, ft } => {
+                encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_DIV_D)
             }
 
             // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────
@@ -1455,7 +1472,10 @@ impl Instruction {
             Instruction::CvtDL { .. } => "cvt.d.l",
             Instruction::CvtLS { .. } => "cvt.l.s",
             Instruction::CvtLD { .. } => "cvt.l.d",
+            Instruction::AddD { .. } => "add.d",
             Instruction::SubD { .. } => "sub.d",
+            Instruction::MulD { .. } => "mul.d",
+            Instruction::DivD { .. } => "div.d",
             Instruction::Mtc1 { .. } => "mtc1",
             Instruction::Mfc1 { .. } => "mfc1",
             Instruction::Dmtc1 { .. } => "dmtc1",
@@ -1564,7 +1584,10 @@ impl fmt::Display for Instruction {
             Instruction::CvtDL { fd, fs } => write!(f, "cvt.d.l {}, {}", fd, fs),
             Instruction::CvtLS { fd, fs } => write!(f, "cvt.l.s {}, {}", fd, fs),
             Instruction::CvtLD { fd, fs } => write!(f, "cvt.l.d {}, {}", fd, fs),
+            Instruction::AddD { fd, fs, ft } => write!(f, "add.d {}, {}, {}", fd, fs, ft),
             Instruction::SubD { fd, fs, ft } => write!(f, "sub.d {}, {}, {}", fd, fs, ft),
+            Instruction::MulD { fd, fs, ft } => write!(f, "mul.d {}, {}, {}", fd, fs, ft),
+            Instruction::DivD { fd, fs, ft } => write!(f, "div.d {}, {}, {}", fd, fs, ft),
             Instruction::Mtc1 { rt, fs } => write!(f, "mtc1 {}, {}", rt, fs),
             Instruction::Mfc1 { rt, fs } => write!(f, "mfc1 {}, {}", rt, fs),
             Instruction::Dmtc1 { rt, fs } => write!(f, "dmtc1 {}, {}", rt, fs),
@@ -2819,6 +2842,26 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
 
                     let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
 
+                    // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic
+                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    if is_fp {
+                        // Move GPR bit patterns to FPRs
+                        code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); code.extend_from_slice(&encode_nop());
+                        code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop());
+                        match actual_op {
+                            BinOpKind::Add => { code.extend_from_slice(&Instruction::AddD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            BinOpKind::Sub => { code.extend_from_slice(&Instruction::SubD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            BinOpKind::Mul => { code.extend_from_slice(&Instruction::MulD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            BinOpKind::SDiv | BinOpKind::UDiv => { code.extend_from_slice(&Instruction::DivD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            _ => {
+                                // Other ops (And/Or/Xor/Shl/etc.) — fall through to integer
+                            }
+                        }
+                        // Move result back to GPR
+                        code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); code.extend_from_slice(&encode_nop());
+                        code.extend(ss_sd(Gpr::T0, dst_off));
+                    } else {
+
                     match actual_op {
                         BinOpKind::Add => {
                             // Use 64-bit DADDU (preserves 64-bit pointers)
@@ -2940,6 +2983,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
+                    } // end else (integer path)
                 }
 
                 // ── Add/Sub/Mul/Div (dedicated IR instructions) ──
