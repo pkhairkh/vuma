@@ -2679,29 +2679,23 @@ fn emit_instr(
             );
         }
         IRInstr::Branch { target: _ } => {
-            // This is an instruction-level branch (not a terminator).
-            // Emit a placeholder BA (will be patched if needed).
-            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+            // Instruction-level branch (not terminator). Redundant with
+            // the Jump terminator that follows. Emit NOPs to avoid
+            // unpatched self-loop BA.
+            code.extend_from_slice(&encode_nop());
             code.extend_from_slice(&encode_nop());
         }
         IRInstr::CondBranch {
-            cond,
+            cond: _,
             true_target: _,
             false_target: _,
         } => {
-            // Instruction-level conditional branch.
-            code.extend(ss_load_value(cond, vreg_stack_slots, Gpr::L0));
-            code.extend_from_slice(
-                &Instruction::Subcc {
-                    rd: Gpr::G0,
-                    rs1: Gpr::L0,
-                    rs2: Gpr::G0,
-                }
-                .encode(),
-            );
-            code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
+            // Instruction-level CondBranch (not terminator). Redundant with
+            // the Branch terminator that follows. Emit NOPs.
             code.extend_from_slice(&encode_nop());
-            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_nop());
             code.extend_from_slice(&encode_nop());
         }
         IRInstr::Call {
