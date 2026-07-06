@@ -315,7 +315,6 @@ const OPC_FCMP_D: u32 = 0x0C2;
 // SYSCALL / BREAK — full-word matches (no register fields used).
 // Encoding in mod.rs: Syscall = 0x002B0000, Break = 0x002A0000.
 const WORD_SYSCALL: u32 = 0x002B0000;
-#[allow(dead_code)]
 const WORD_BREAK: u32 = 0x002A0000;
 
 // ---------------------------------------------------------------------------

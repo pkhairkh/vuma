@@ -382,7 +382,6 @@ fn encode_3r(opcode: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
 /// Encode a 4R format instruction.
 ///
 /// Format: `opcode[31:20] | ra[19:15] | rk[14:10] | rj[9:5] | rd[4:0]`
-#[allow(dead_code)]
 fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
     let word = ((opcode & 0xFFF) << 20)
         | ((ra & 0x1F) << 15)
@@ -395,7 +394,6 @@ fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
 /// Encode a 2RI8 format instruction.
 ///
 /// Format: `opcode[31:22] | I8[21:14] | rj[9:5] | rd[4:0]`
-#[allow(dead_code)]
 fn encode_2ri8(opcode: u32, imm8: u32, rj: u32, rd: u32) -> [u8; 4] {
     let word = ((opcode & 0x3FF) << 22) | ((imm8 & 0xFF) << 14) | ((rj & 0x1F) << 5) | (rd & 0x1F);
     word.to_le_bytes()
@@ -693,34 +691,23 @@ const OPC_CTZ_D: u32 = 0x000000C;
 /// POPCNT.D (population count, doubleword): opcode 0x000000E in 2R format.
 const OPC_POPCNT_D: u32 = 0x000000E;
 
-#[allow(dead_code)]
 const OPC_REVB_2H: u32 = 0x000000C;
-#[allow(dead_code)]
 const OPC_REVB_4H: u32 = 0x000000D;
-#[allow(dead_code)]
 const OPC_REVB_2W: u32 = 0x000000E;
-#[allow(dead_code)]
 const OPC_BITREV_4B: u32 = 0x0000012;
-#[allow(dead_code)]
 const OPC_BITREV_8B: u32 = 0x0000013;
-#[allow(dead_code)]
 const OPC_CPBYTE: u32 = 0x0000057;
 
 // 2R: special opcodes for move/clover
-#[allow(dead_code)]
 const OPC_MOVCF2GR: u32 = 0x0000055;
-#[allow(dead_code)]
 const OPC_MOVGR2CF: u32 = 0x0000054;
 
 // ===========================================================================
 // 4R-format Opcodes (bits[31:20])
 // ===========================================================================
 
-#[allow(dead_code)]
 const OPC_BYTEREV_D: u32 = 0x009;
-#[allow(dead_code)]
 const OPC_BYTEREV_W: u32 = 0x00A;
-#[allow(dead_code)]
 const OPC_BYTEREV_H: u32 = 0x00B;
 
 // ===========================================================================
@@ -730,7 +717,6 @@ const OPC_BYTEREV_H: u32 = 0x00B;
 const OPC_SLLI_W: u32 = 0x0081;
 const OPC_SRLI_W: u32 = 0x0089;
 const OPC_SRAI_W: u32 = 0x0091;
-#[allow(dead_code)]
 const OPC_ROTRI_W: u32 = 0x0099;
 
 // ===========================================================================
@@ -740,7 +726,6 @@ const OPC_ROTRI_W: u32 = 0x0099;
 const OPC_SLLI_D: u32 = 0x0041;
 const OPC_SRLI_D: u32 = 0x0045;
 const OPC_SRAI_D: u32 = 0x0049;
-#[allow(dead_code)]
 const OPC_ROTRI_D: u32 = 0x004D;
 
 // ===========================================================================

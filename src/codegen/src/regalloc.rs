@@ -2377,7 +2377,6 @@ impl TargetAgnosticRegAlloc {
 }
 
 /// Check if a physical register appears in the callee-saved lists.
-#[allow(dead_code)]
 fn self_is_callee_saved(
     _caller_gprs: &[crate::backend::PhysicalReg],
     callee_gprs: &[crate::backend::PhysicalReg],

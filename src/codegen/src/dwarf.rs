@@ -132,27 +132,22 @@ const DW_LANG_VUMA: u16 = 0x8001;
 // -- Call Frame Information (CFI) constants --
 
 /// CFI opcode: advance location by 1 * code_alignment_factor.
-#[allow(dead_code)]
 const DW_CFA_ADVANCE_LOC: u8 = 0x40;
 /// CFI opcode: define CFA rule (register + offset).
 const DW_CFA_DEF_CFA: u8 = 0x0C;
 /// CFI opcode: offset — register saved at CFA + offset.
 const DW_CFA_OFFSET: u8 = 0x80;
 /// CFI opcode: restore register to initial state.
-#[allow(dead_code)]
 const DW_CFA_RESTORE: u8 = 0xC0;
 /// CFI extended opcode: def_cfa_offset — change CFA offset only.
-#[allow(dead_code)]
 const DW_CFA_DEF_CFA_OFFSET: u8 = 0x0E;
 
 /// CIE augmentation string (empty — no augmentation).
-#[allow(dead_code)]
 const CIE_AUGMENTATION: &[u8] = b"";
 
 /// DWARF CIE identifier (0xFFFFFFFF for 64-bit DWARF, 0xFFFFFFFF for 32-bit).
 const CIE_ID_32: u32 = 0xFFFFFFFF;
 /// DWARF CIE identifier for 64-bit DWARF format.
-#[allow(dead_code)]
 const CIE_ID_64: u64 = 0xFFFFFFFFFFFFFFFF;
 
 /// Frame version for DWARF v4.
