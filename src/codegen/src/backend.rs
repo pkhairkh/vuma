@@ -18,6 +18,7 @@ use crate::armeb::ArmEbBackend;
 use crate::aarch64_be::AArch64BeBackend;
 use crate::m68k::M68kBackend;
 use crate::alpha::AlphaBackend;
+use crate::hppa::HppaBackend;
 use crate::x86_64::X86_64Backend;
 use std::collections::HashMap;
 use std::fmt;
@@ -527,6 +528,8 @@ pub enum BackendKind {
     M68k,
     /// DEC Alpha (alpha).
     Alpha,
+    /// HP PA-RISC (hppa).
+    Hppa,
 }
 
 impl BackendKind {
@@ -551,6 +554,7 @@ impl BackendKind {
             BackendKind::AArch64Be => "aarch64_be",
             BackendKind::M68k => "m68k",
             BackendKind::Alpha => "alpha",
+            BackendKind::Hppa => "hppa",
         }
     }
 
@@ -569,7 +573,7 @@ impl BackendKind {
             BackendKind::Arm32 | BackendKind::Mips64 | BackendKind::Wasm32 |
             BackendKind::PowerPC64 | BackendKind::PowerPC64LE | BackendKind::Sparc64 |
             BackendKind::S390X => BackendTier::Complete,
-            BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha => BackendTier::Complete,
+            BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha | BackendKind::Hppa => BackendTier::Complete,
         }
     }
 }
@@ -3137,6 +3141,7 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::AArch64Be => Ok(Box::new(AArch64BeBackend::new())),
         BackendKind::M68k => Ok(Box::new(M68kBackend::new())),
         BackendKind::Alpha => Ok(Box::new(AlphaBackend::new())),
+        BackendKind::Hppa => Ok(Box::new(HppaBackend::new())),
     }
 }
 

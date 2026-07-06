@@ -1369,6 +1369,7 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
         "aarch64_be" | "aarch64be" => Some(BackendKind::AArch64Be),
         "m68k" => Some(BackendKind::M68k),
         "alpha" => Some(BackendKind::Alpha),
+        "hppa" | "parisc" => Some(BackendKind::Hppa),
         _ => None,
     }
 }

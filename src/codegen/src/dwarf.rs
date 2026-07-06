@@ -412,6 +412,7 @@ impl DwarfBuilder {
             BackendKind::AArch64Be    => (8, 4),
             BackendKind::M68k         => (4, 2),
             BackendKind::Alpha        => (8, 4),
+            BackendKind::Hppa         => (4, 4),
         };
         Self::with_config(addr_size, min_inst)
     }
@@ -640,7 +641,7 @@ impl DwarfBuilder {
                     return_address_reg: 31, // %i7
                 });
             }
-            BackendKind::S390X | BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha => {
+            BackendKind::S390X | BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha | BackendKind::Hppa => {
                 // s390x: %r15 = SP (reg 15), %r14 = return address (reg 14),
                 // %r11 = frame pointer (reg 11).  Instructions are 2-byte aligned
                 // (the shortest format, RR, is 2 bytes).
