@@ -39,6 +39,15 @@ fn swap_u64(buf: &mut [u8], off: usize) {
 fn swap_le_elf_to_be(elf: &mut Vec<u8>) {
     if elf.len() < 64 { return; }
 
+    // 0. Read PHDR offsets BEFORE swapping — the bytes are still LE here.
+    //    (Reading them after the header-field swaps below would interpret
+    //    already-BE bytes as LE, giving huge wrong offsets and skipping
+    //    the PHDR swap loop entirely.)
+    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+    let header_end = phoff + phnum * phentsize;
+
     // 1. EI_DATA: ELFDATA2LSB (1) → ELFDATA2MSB (2)
     elf[5] = 2;
 
@@ -58,11 +67,9 @@ fn swap_le_elf_to_be(elf: &mut Vec<u8>) {
     swap_u16(elf, 62); // e_shstrndx
 
     // 3. Program headers (each 56 bytes at e_phoff)
-    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
     for i in 0..phnum {
-        let base = phoff + i * 56;
-        if base + 56 > elf.len() { break; }
+        let base = phoff + i * phentsize;
+        if base + phentsize > elf.len() { break; }
         swap_u32(elf, base);      // p_type
         swap_u32(elf, base + 4);  // p_flags
         swap_u64(elf, base + 8);  // p_offset
@@ -73,19 +80,29 @@ fn swap_le_elf_to_be(elf: &mut Vec<u8>) {
         swap_u64(elf, base + 48); // p_align
     }
 
-    // 4. Swap all 4-byte instruction words in the text segment
-    //    Text starts at file offset = phdr_end = 64 + phnum*56
-    //    (mips64 has no section headers — e_shoff=0)
-    let text_start = 64 + phnum * 56;
-    // Pad to page alignment
-    let text_offset = ((text_start as u64 + 0xFFFF) / 0x10000) * 0x10000;
-    let text_offset = text_offset as usize;
-    // Actually, mips64 text_offset = phdr_end (no page alignment)
-    let text_offset = text_start;
-    let mut i = text_offset;
-    while i + 4 <= elf.len() {
-        swap_u32(elf, i);
-        i += 4;
+    // 4. Swap all 4-byte instruction words in the executable LOAD segment(s).
+    //    The first LOAD segment typically has p_offset=0 (includes ELF header
+    //    + PHDRs). We must NOT re-flip those header bytes — they're already
+    //    in BE order after the per-field swaps above. Start flipping from
+    //    header_end onward, and only inside segments with PF_X set.
+    let mut off = phoff;
+    for _ in 0..phnum {
+        if off + phentsize > elf.len() { break; }
+        // Read PHDR fields AFTER the per-field swap above (so they're now BE).
+        let p_flags  = u32::from_be_bytes(elf[off + 4..off + 8].try_into().unwrap());
+        let p_offset = u64::from_be_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
+        let p_filesz = u64::from_be_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
+        // PF_X = 0x1 — only flip inside executable segments.
+        if p_flags & 1 != 0 {
+            let start = p_offset.max(header_end);
+            let end = (p_offset + p_filesz).min(elf.len());
+            let mut i = start;
+            while i + 4 <= end {
+                swap_u32(elf, i);
+                i += 4;
+            }
+        }
+        off += phentsize;
     }
 }
 

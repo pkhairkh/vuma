@@ -232,11 +232,15 @@ const LR: Gpr = Gpr::R14;
 // ===========================================================================
 
 /// Encode LGHI R1, imm16 (Load Halfword Immediate, sign-extended to 64-bit).
-/// Format: RI-a, 4 bytes.
+/// Format: RI-a, 4 bytes. op1=0xA7, op2=0x9.
+/// (Per qemu's decoder: RI op2=0x9 = LGHI. Despite IBM PoP listing op2=0x9 as
+///  AGHI, qemu executes it as LGHI. The disassembler confirms: `a7 f9 ...` is
+///  displayed as "lghi". This is the encoding that actually loads the
+///  immediate into the register.)
 fn encode_lghi(r1: Gpr, imm: i16) -> [u8; 4] {
     let word = (0xA7u32 << 24)
         | ((r1.encoding() as u32 & 0xF) << 20)
-        | (0x9u32 << 16)
+        | (0x9u32 << 16)  // op2=0x9 = LGHI (per qemu execution)
         | (imm as u16 as u32);
     word.to_be_bytes()
 }
@@ -252,9 +256,11 @@ fn encode_lgfi(r1: Gpr, imm: i32) -> [u8; 6] {
 }
 
 /// Encode AGFI R1, imm32 (Add Fullword Immediate to 64-bit register).
-/// Format: RIL-b, 6 bytes. op1=0xEC, op2=0x9.
+/// Format: RIL-b, 6 bytes. op1=0xC0, op2=0x9.
+/// (RIL format uses op1=0xC0 for all variants — LGFI/AGFI/SGFI/BRASL/BRCL/LARL.
+///  0xEC is for RIE/RISL/RSL formats which have a different field layout.)
 fn encode_agfi(r1: Gpr, imm: i32) -> [u8; 6] {
-    let op1: u8 = 0xEC;
+    let op1: u8 = 0xC0;
     let op2: u8 = 0x9;
     let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
     let imm_be = imm.to_be_bytes();
@@ -262,9 +268,9 @@ fn encode_agfi(r1: Gpr, imm: i32) -> [u8; 6] {
 }
 
 /// Encode SGFI R1, imm32 (Subtract Fullword Immediate from 64-bit register).
-/// Format: RIL-b, 6 bytes. op1=0xEC, op2=0xA.
+/// Format: RIL-b, 6 bytes. op1=0xC0, op2=0xA.
 fn encode_sgfi(r1: Gpr, imm: i32) -> [u8; 6] {
-    let op1: u8 = 0xEC;
+    let op1: u8 = 0xC0;
     let op2: u8 = 0xA;
     let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
     let imm_be = imm.to_be_bytes();
@@ -273,32 +279,29 @@ fn encode_sgfi(r1: Gpr, imm: i32) -> [u8; 6] {
 
 /// Encode a 6-byte RXY-a instruction.
 ///
-/// Format:
+/// Format (per IBM s390x PoP):
 ///   byte 0: opcode1 (8 bits)
 ///   byte 1: R1 (4 bits, high nibble) | X2 (4 bits, low nibble)
-///   byte 2: B2 (4 bits, high nibble) | D2[11:8] (4 bits, low nibble)
-///   byte 3: D2[7:0] (8 bits)
-///   byte 4: DL2 (8 bits)
-///   byte 5: DH2 (4 bits, high nibble) | opcode2 (4 bits, low nibble)
+///   byte 2: B2 (4 bits, high nibble) | DL2[11:8] (4 bits, low nibble)
+///   byte 3: DL2[7:0] (8 bits)
+///   byte 4: DH2 (8 bits)
+///   byte 5: opcode2 (8 bits — the FULL byte, not just the low nibble)
 ///
-/// Displacement = sign_extend(DH2:DL2:D2, 20) → 20-bit signed value
-/// (with the top 4 bits used for sign extension when needed).
+/// Displacement = sign_extend(DH2:DL2, 20) → 20-bit signed value
 fn encode_rxy_a(op1: u8, op2: u8, r1: Gpr, x2: Gpr, b2: Gpr, disp: i32) -> [u8; 6] {
-    // Use 20-bit signed displacement.
+    // 20-bit signed displacement: DH2 (8 bits) << 12 | DL2 (12 bits).
     let d = disp as i64;
-    // 20-bit two's-complement representation: sign-extend by masking to 20 bits
-    // and using the bit pattern as the low 20 bits of a 32-bit value.
-    let d20 = (d & 0xFFFFF) as u32; // low 20 bits
-    let d_low_12 = (d20 & 0xFFF) as u8; // bits 0-11
-    let d_mid_8 = ((d20 >> 12) & 0xFF) as u8; // bits 12-19
-    let d_high_4 = ((d20 >> 20) & 0xF) as u8; // bits 20-23 (for sign extension; will be 0 or F)
+    let d20 = (d & 0xFFFFF) as u32; // low 20 bits (two's-complement for negatives)
+    let dl2_low_8 = (d20 & 0xFF) as u8;            // byte 3: DL2[7:0]
+    let dl2_high_4 = ((d20 >> 8) & 0xF) as u8;     // byte 2 low nibble: DL2[11:8]
+    let dh2 = ((d20 >> 12) & 0xFF) as u8;          // byte 4: DH2
 
     let byte0 = op1;
     let byte1 = ((r1.encoding() & 0xF) << 4) | (x2.encoding() & 0xF);
-    let byte2 = ((b2.encoding() & 0xF) << 4) | ((d20 >> 8) & 0xF) as u8;
-    let byte3 = d_low_12;
-    let byte4 = d_mid_8;
-    let byte5 = ((d_high_4 & 0xF) << 4) | (op2 & 0xF);
+    let byte2 = ((b2.encoding() & 0xF) << 4) | dl2_high_4;
+    let byte3 = dl2_low_8;
+    let byte4 = dh2;
+    let byte5 = op2; // FULL 8-bit opcode2 (e.g., 0x04 for LG, 0x24 for STG)
     [byte0, byte1, byte2, byte3, byte4, byte5]
 }
 
@@ -372,6 +375,41 @@ fn encode_agr(r1: Gpr, r2: Gpr) -> [u8; 4] {
 /// Encode SGR R1, R2 (Subtract 64-bit). R1 -= R2. op1=0xB9, op2=0x09.
 fn encode_sgr(r1: Gpr, r2: Gpr) -> [u8; 4] {
     encode_rre(0xB9, 0x09, r1, r2)
+}
+
+/// Adjust SP (R15) by a signed immediate.
+///
+/// Uses LGHI (load |imm| into scratch S1) + SGR/AGR (subtract/add S1 to SP).
+/// This avoids the AGFI/AGHI opcode ambiguity between IBM's PoP and qemu's
+/// decoder (both op2=0x9 in RIL/RI format are treated by qemu as IILF/LGHI
+/// = load, not add). LGHI (op2=0x9 in RI) and SGR/AGR (RRE format) are
+/// unambiguous and confirmed working under qemu.
+fn adjust_sp(imm: i32) -> Vec<u8> {
+    let mut code = Vec::new();
+    if imm == 0 {
+        return code;
+    }
+    if (-32768..=32767).contains(&imm) {
+        if imm < 0 {
+            // SP -= |imm|:  LGHI S1, |imm|;  SGR SP, S1
+            code.extend_from_slice(&encode_lghi(S1, (-imm) as i16));
+            code.extend_from_slice(&encode_sgr(SP, S1));
+        } else {
+            // SP += imm:  LGHI S1, imm;  AGR SP, S1
+            code.extend_from_slice(&encode_lghi(S1, imm as i16));
+            code.extend_from_slice(&encode_agr(SP, S1));
+        }
+    } else {
+        // Large immediate: use LGFI (32-bit load) instead of LGHI.
+        if imm < 0 {
+            code.extend_from_slice(&encode_lgfi(S1, -imm));
+            code.extend_from_slice(&encode_sgr(SP, S1));
+        } else {
+            code.extend_from_slice(&encode_lgfi(S1, imm));
+            code.extend_from_slice(&encode_agr(SP, S1));
+        }
+    }
+    code
 }
 
 /// Encode MSGR R1, R2 (Multiply Single 64-bit). R1 = R1 * R2 (low 64 bits).
@@ -519,9 +557,13 @@ fn encode_larl(r1: Gpr, disp: i32) -> [u8; 6] {
     [op1, byte1, disp_be[0], disp_be[1], disp_be[2], disp_be[3]]
 }
 
-/// Encode BR R2 (Branch via Register). Format: RR, 2 bytes. op1=0x07.
+/// Encode BR R2 (Branch Register), which is really BCR 0xF, R2
+/// (Branch on Condition Always, target = address in R2).
+/// Format: RR, 2 bytes. op1=0x07, M1=0xF (unconditional), R2=register.
 fn encode_br(r2: Gpr) -> [u8; 2] {
-    let byte1 = ((r2.encoding() & 0xF) << 4) | (r2.encoding() & 0xF);
+    // BCR format: [0x07, M1<<4 | R2]
+    // M1 = 0xF = unconditional branch (this is what makes it "BR" not "BCR cond").
+    let byte1 = (0xFu8 << 4) | (r2.encoding() & 0xF);
     [0x07, byte1]
 }
 
@@ -817,8 +859,9 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     let mut code: Vec<u8> = Vec::new();
     let mut relocations: Vec<RelocationEntry> = Vec::new();
 
-    // AGFI SP, -frame_size   (SP -= frame_size; AGFI = Add Granule Fullword Immediate)
-    code.extend_from_slice(&encode_agfi(SP, -(frame_size as i32)));
+    // AGFI SP, -frame_size  →  AGHI SP, -frame_size (or LGFI+SGR for large frames)
+    // SP -= frame_size; allocate stack frame
+    code.extend(adjust_sp(-(frame_size as i32)));
     // STG LR, frame_size-16(SP)  — save LR at top of frame
     code.extend_from_slice(&encode_stg(LR, SP, lr_save_off));
     // STG FP, frame_size-8(SP)   — save old FP just below LR
@@ -927,8 +970,8 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 code.extend_from_slice(&encode_lg(LR, SP, lr_save_off));
                 // LG FP, fp_save_off(SP)  — restore old FP
                 code.extend_from_slice(&encode_lg(FP, SP, fp_save_off));
-                // AGFI SP, frame_size  — deallocate frame
-                code.extend_from_slice(&encode_agfi(SP, frame_size as i32));
+                // Deallocate frame: SP += frame_size
+                code.extend(adjust_sp(frame_size as i32));
                 // BR LR  — return
                 code.extend_from_slice(&encode_br(LR));
             }
@@ -986,7 +1029,7 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 // Simplified: just return.
                 code.extend_from_slice(&encode_lg(LR, SP, lr_save_off));
                 code.extend_from_slice(&encode_lg(FP, SP, fp_save_off));
-                code.extend_from_slice(&encode_agfi(SP, frame_size as i32));
+                code.extend(adjust_sp(frame_size as i32));
                 code.extend_from_slice(&encode_br(LR));
             }
             crate::ir::IRTerminator::Resume { .. } => {
@@ -1437,7 +1480,7 @@ fn emit_instr(
             }
             code.extend_from_slice(&encode_lg(LR, SP, _lr_save_off));
             code.extend_from_slice(&encode_lg(FP, SP, _fp_save_off));
-            code.extend_from_slice(&encode_agfi(SP, _frame_size as i32));
+            code.extend(adjust_sp(_frame_size as i32));
             code.extend_from_slice(&encode_br(LR));
         }
         IRInstr::Branch { target: _ } => {

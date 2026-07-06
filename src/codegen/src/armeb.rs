@@ -39,12 +39,6 @@ fn swap_le_elf32_to_be(elf: &mut Vec<u8>) {
     let phnum = u16::from_le_bytes(elf[44..46].try_into().unwrap()) as usize;
     let shoff = u32::from_le_bytes(elf[32..36].try_into().unwrap()) as usize;
     let shnum = u16::from_le_bytes(elf[48..50].try_into().unwrap()) as usize;
-    // Read text p_offset from first phdr (still LE)
-    let text_offset = if phnum > 0 && phoff + 8 <= elf.len() {
-        u32::from_le_bytes(elf[phoff + 4..phoff + 8].try_into().unwrap()) as usize
-    } else {
-        52 + phnum * 32
-    };
 
     // 1. EI_DATA: ELFDATA2LSB (1) → ELFDATA2MSB (2)
     elf[5] = 2;
@@ -76,11 +70,32 @@ fn swap_le_elf32_to_be(elf: &mut Vec<u8>) {
         }
     }
 
-    // 5. Swap all 4-byte instruction words in text segment
-    let mut i = text_offset;
-    while i + 4 <= elf.len() {
-        swap_u32(elf, i);
-        i += 4;
+    // 5. Swap all 4-byte instruction words in the executable LOAD segment(s).
+    //    The first LOAD segment has p_offset=0 (includes ELF header + PHDRs).
+    //    We must NOT re-flip those header bytes — they're already in BE order
+    //    after the per-field swaps above. Start flipping from header_end
+    //    onward, and only inside segments with PF_X set.
+    let header_end = phoff + phnum * 32;
+    let mut off = phoff;
+    for _ in 0..phnum {
+        if off + 32 > elf.len() { break; }
+        // Read PHDR fields AFTER the per-field swap above (so they're now BE).
+        // ELF32 Phdr layout: p_type(0), p_offset(4), p_vaddr(8), p_paddr(12),
+        //   p_filesz(16), p_memsz(20), p_flags(24), p_align(28).
+        let p_flags  = u32::from_be_bytes(elf[off + 24..off + 28].try_into().unwrap());
+        let p_offset = u32::from_be_bytes(elf[off + 4..off + 8].try_into().unwrap()) as usize;
+        let p_filesz = u32::from_be_bytes(elf[off + 16..off + 20].try_into().unwrap()) as usize;
+        // PF_X = 0x1 — only flip inside executable segments.
+        if p_flags & 1 != 0 {
+            let start = p_offset.max(header_end);
+            let end = (p_offset + p_filesz).min(elf.len());
+            let mut i = start;
+            while i + 4 <= end {
+                swap_u32(elf, i);
+                i += 4;
+            }
+        }
+        off += 32;
     }
 }
 
