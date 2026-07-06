@@ -4094,6 +4094,8 @@ fn em_machine_for_backend(backend: BackendKind) -> Result<u16> {
         BackendKind::Mips64Be => Ok(EM_MIPS),
         BackendKind::ArmEb => Ok(EM_ARM),
         BackendKind::AArch64Be => Ok(EM_AARCH64),
+        BackendKind::M68k => Ok(4), // EM_68K
+        BackendKind::Alpha => Ok(0x9026), // EM_ALPHA
         BackendKind::Wasm32 => Err(CodegenError::ElfError(
             "Wasm32 does not use ELF format — use emit_wasm() instead".to_string(),
         )),
@@ -4121,7 +4123,9 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
         BackendKind::S390X => Ok(23),
         BackendKind::Mips64Be => Ok(4), // R_MIPS_26
         BackendKind::ArmEb => Ok(28), // R_ARM_CALL
-        BackendKind::AArch64Be => Ok(283), // R_AARCH64_CALL26 (PC-relative 32-bit doubleword / halfword)
+        BackendKind::AArch64Be => Ok(283),
+        BackendKind::M68k => Ok(1), // R_68K_32
+        BackendKind::Alpha => Ok(2), // R_ALPHA_REFQUAD // R_AARCH64_CALL26 (PC-relative 32-bit doubleword / halfword)
         BackendKind::Wasm32 => {
             Err(CodegenError::ElfError(
                 "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
@@ -4876,6 +4880,8 @@ pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
         BackendKind::Mips64Be => 8,
         BackendKind::ArmEb => 4,
         BackendKind::AArch64Be => 8,
+        BackendKind::M68k => 2,
+        BackendKind::Alpha => 8,
     }
 }
 
