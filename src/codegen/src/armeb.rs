@@ -71,10 +71,13 @@ fn swap_le_elf32_to_be(elf: &mut Vec<u8>) {
     }
 
     // 5. Swap all 4-byte instruction words in the executable LOAD segment(s).
-    //    The first LOAD segment has p_offset=0 (includes ELF header + PHDRs).
-    //    We must NOT re-flip those header bytes — they're already in BE order
-    //    after the per-field swaps above. Start flipping from header_end
-    //    onward, and only inside segments with PF_X set.
+    //    ARM armeb Linux uses BE32 mode (classic big-endian), where instructions
+    //    are stored in big-endian byte order (unlike BE8 where instructions
+    //    are LE). qemu-armeb reads instructions as BE u32, so we must swap
+    //    every 4-byte instruction word from LE (as produced by the arm32
+    //    encoder) to BE.
+    //    Skip the ELF + PHDR header bytes (already swapped field-by-field
+    //    above); only swap from header_end onward, inside PF_X segments.
     let header_end = phoff + phnum * 32;
     let mut off = phoff;
     for _ in 0..phnum {
@@ -121,6 +124,7 @@ impl Backend for ArmEbBackend {
     }
 
     fn return_stub(&self) -> Vec<u8> {
+        // BE32: swap instruction words from LE to BE.
         let mut code = self.inner.return_stub();
         for i in (0..code.len()).step_by(4) {
             if i + 4 <= code.len() { swap_u32(&mut code, i); }
@@ -129,6 +133,7 @@ impl Backend for ArmEbBackend {
     }
 
     fn trampoline(&self, entry_addr: u64) -> Vec<u8> {
+        // BE32: swap instruction words from LE to BE.
         let mut code = self.inner.trampoline(entry_addr);
         for i in (0..code.len()).step_by(4) {
             if i + 4 <= code.len() { swap_u32(&mut code, i); }
@@ -137,6 +142,7 @@ impl Backend for ArmEbBackend {
     }
 
     fn disassemble(&self, code: &[u8], base_addr: u64) -> Vec<String> {
+        // BE32: swap BE→LE before handing to the LE disassembler.
         let mut swapped = code.to_vec();
         for i in (0..swapped.len()).step_by(4) {
             if i + 4 <= swapped.len() { swap_u32(&mut swapped, i); }
