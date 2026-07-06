@@ -5922,6 +5922,8 @@ impl Backend for PPC64Backend {
                 ("setsockopt", 366),
                 ("brk", 45), ("clock_gettime", 246), ("gettimeofday", 78),
                 ("rt_sigprocmask", 126), ("rt_sigreturn", 173),
+                ("dup3", 316), ("lstat", 107),
+                ("recvfrom", 372), ("sendto", 371),
                 // ── P7: additional missing syscalls ──
                 // dup3: __NR_dup3 on ppc64 = 316.
                 // lstat: __NR_lstat on ppc64 = 107 (separate from

@@ -7162,6 +7162,8 @@ impl Backend for Arm32Backend {
                 ("clock_gettime", 263),
                 ("gettimeofday", 78),
                 ("rt_sigprocmask", 126),
+                ("lstat", 107), ("dup3", 358),
+                ("recvfrom", 371), ("sendto", 370),
                 // mmap2 takes the same 6 args as mmap but with the offset
                 // in pages (4096-byte units) rather than bytes; on ARM EABI
                 // args 5-6 are on the caller's stack but a simple stub
