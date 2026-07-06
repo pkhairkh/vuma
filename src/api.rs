@@ -1364,6 +1364,9 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
         "ppc64le" | "powerpc64le" | "ppcle" => Some(BackendKind::PowerPC64LE),
         "sparc64" | "sparc" => Some(BackendKind::Sparc64),
         "s390x" | "s390" => Some(BackendKind::S390X),
+        "mips64be" | "mips64-be" => Some(BackendKind::Mips64Be),
+        "armeb" | "arm-be" => Some(BackendKind::ArmEb),
+        "aarch64_be" | "aarch64be" => Some(BackendKind::AArch64Be),
         _ => None,
     }
 }
