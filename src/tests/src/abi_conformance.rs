@@ -935,7 +935,7 @@ fn expected_cas_patterns(kind: BackendKind) -> Vec<&'static str> {
         BackendKind::RiscV32 => vec!["lr.w", "sc.w"],
         BackendKind::Arm32 => vec!["ldrex", "strex"],
         BackendKind::Mips64 => vec!["lld", "scd"],
-        BackendKind::PowerPC64 => vec!["ldarx", "stdcx"],
+        BackendKind::PowerPC64 | BackendKind::PowerPC64LE => vec!["ldarx", "stdcx"],
         BackendKind::LoongArch64 => vec!["ll.d", "sc.d"],
         BackendKind::Wasm32 => vec!["cmpxchg"],
     }
@@ -1173,7 +1173,7 @@ fn expected_fp_conv_patterns(kind: BackendKind) -> Vec<&'static str> {
         BackendKind::RiscV64 | BackendKind::RiscV32 => vec!["fcvt.d.l", "fcvt.l.d"],
         BackendKind::Arm32 => vec!["vcvt", "fsito"],
         BackendKind::Mips64 => vec!["dmtc1", "cvt.l.d", "cvt.d.l", "dmfc1"],
-        BackendKind::PowerPC64 => vec!["fcfid", "fctidz"],
+        BackendKind::PowerPC64 | BackendKind::PowerPC64LE => vec!["fcfid", "fctidz"],
         BackendKind::LoongArch64 => vec!["ffint.d.l", "ftintrz.l.d"],
         BackendKind::Wasm32 => vec!["f64.convert_i64_s", "i64.trunc_f64_s"],
     }
