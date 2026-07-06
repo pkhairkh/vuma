@@ -107,6 +107,12 @@ warning: unused import: `IRTerminator`
 14 | use crate::ir::{IRFunction, IRInstr, IRTerminator};
    |                                      ^^^^^^^^^^^^
 
+warning: unused imports: `PhysicalReg` and `RegClass`
+  --> src/codegen/src/sparc64.rs:57:19
+   |
+57 |     BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+   |                   ^^^^^^^^^^^  ^^^^^^^^
+
 warning: unused imports: `AllocatedBlock`, `AllocatedInstruction`, `PhysicalReg`, `RegClass`, and `RelocationEntry`
   --> src/codegen/src/x86_64/mod.rs:35:5
    |
@@ -156,15 +162,15 @@ warning: unused variable: `data_offset`
      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `data_offset`
-    --> src/codegen/src/backend.rs:1825:9
+    --> src/codegen/src/backend.rs:1838:9
      |
-1825 |     let data_offset = data_vaddr - base_addr; // file offset for data segment
+1838 |     let data_offset = data_vaddr - base_addr; // file offset for data segment
      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/backend.rs:2900:13
+    --> src/codegen/src/backend.rs:2913:13
      |
-2900 |         let mut external_symbols: Vec<String> = Vec::new();
+2913 |         let mut external_symbols: Vec<String> = Vec::new();
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
@@ -172,49 +178,49 @@ warning: variable does not need to be mutable
      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `ffi_stub_offset`
-    --> src/codegen/src/backend.rs:2550:13
+    --> src/codegen/src/backend.rs:2563:13
      |
-2550 |         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+2563 |         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ffi_stub_offset`
 
 warning: unreachable pattern
-   --> src/codegen/src/dwarf.rs:605:13
+   --> src/codegen/src/dwarf.rs:609:13
     |
-603 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+607 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
     |             -------------------- matches all the relevant values
-604 |             BackendKind::X86_32 => self.set_cie_x86_64(),
-605 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+608 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+609 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
     |             ^^^^^^^^^^^^^^^^^^^^ no value can reach this
     |
     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
 
 warning: unreachable pattern
-   --> src/codegen/src/dwarf.rs:606:13
+   --> src/codegen/src/dwarf.rs:610:13
     |
-604 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+608 |             BackendKind::X86_32 => self.set_cie_x86_64(),
     |             ------------------- matches all the relevant values
-605 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
-606 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+609 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+610 |             BackendKind::X86_32 => self.set_cie_x86_64(),
     |             ^^^^^^^^^^^^^^^^^^^ no value can reach this
 
 warning: variable does not need to be mutable
-   --> src/codegen/src/emit.rs:900:21
+   --> src/codegen/src/emit.rs:903:21
     |
-900 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+903 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
     |                     ----^^^^^^^^^^^^^^^^^^^^^^
     |                     |
     |                     help: remove this `mut`
 
 warning: unused variable: `immediate_scratch_used`
-   --> src/codegen/src/emit.rs:900:21
+   --> src/codegen/src/emit.rs:903:21
     |
-900 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+903 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_immediate_scratch_used`
 
 warning: value assigned to `external_symbols` is never read
-    --> src/codegen/src/emit.rs:4188:45
+    --> src/codegen/src/emit.rs:4197:45
      |
-4188 |     let mut external_symbols: Vec<String> = Vec::new();
+4197 |     let mut external_symbols: Vec<String> = Vec::new();
      |                                             ^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -285,6 +291,30 @@ warning: unused variable: `out`
     |
 127 |         out: u32,
     |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: value assigned to `p` is never read
+   --> src/codegen/src/ppc64le.rs:175:23
+    |
+175 |     swap_u16(elf, p); p += 2; // e_shstrndx
+    |                       ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `q` is never read
+   --> src/codegen/src/ppc64le.rs:209:27
+    |
+209 |         swap_u64(elf, q); q += 8; // p_align
+    |                           ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `q` is never read
+   --> src/codegen/src/ppc64le.rs:245:27
+    |
+245 |         swap_u64(elf, q); q += 8; // sh_entsize
+    |                           ^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
 
 warning: unused variable: `id`
     --> src/codegen/src/regalloc.rs:2773:44
@@ -804,6 +834,32 @@ warning: unused variable: `ty`
 3921 |             ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
      |                                                                          ^^ help: try ignoring the field: `ty: _`
 
+warning: unused variable: `phi_map`
+    --> src/codegen/src/sparc64.rs:1834:9
+     |
+1834 |     let phi_map = func.build_phi_map();
+     |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_phi_map`
+
+warning: unused variable: `blk_idx`
+    --> src/codegen/src/sparc64.rs:1908:10
+     |
+1908 |     for (blk_idx, block) in func.blocks.iter().enumerate() {
+     |          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blk_idx`
+
+warning: unused variable: `bne_off`
+    --> src/codegen/src/sparc64.rs:3343:17
+     |
+3343 |             let bne_off = code.len();
+     |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bne_off`
+
+warning: value assigned to `stub_offset` is never read
+    --> src/codegen/src/sparc64.rs:4591:9
+     |
+4591 |         stub_offset += print_hex_stub.len();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
 warning: variable `main_func_type` is assigned to, but never used
     --> src/codegen/src/wasm32/mod.rs:3900:13
      |
@@ -923,207 +979,207 @@ warning: variant `BCond19` is never constructed
    = note: `BranchFormat` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: constant `STT_NOTYPE` is never used
-   --> src/codegen/src/emit.rs:178:7
+   --> src/codegen/src/emit.rs:181:7
     |
-178 | const STT_NOTYPE: u8 = 0;
+181 | const STT_NOTYPE: u8 = 0;
     |       ^^^^^^^^^^
 
 warning: constant `R_AARCH64_JUMP26` is never used
-   --> src/codegen/src/emit.rs:197:7
+   --> src/codegen/src/emit.rs:200:7
     |
-197 | const R_AARCH64_JUMP26: u32 = 282;
+200 | const R_AARCH64_JUMP26: u32 = 282;
     |       ^^^^^^^^^^^^^^^^
 
 warning: constant `R_AARCH64_ADR_PREL_PG_HI21` is never used
-   --> src/codegen/src/emit.rs:200:7
+   --> src/codegen/src/emit.rs:203:7
     |
-200 | const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+203 | const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_AARCH64_LDST64_ABS_LO12_NC` is never used
-   --> src/codegen/src/emit.rs:203:7
+   --> src/codegen/src/emit.rs:206:7
     |
-203 | const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+206 | const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_X86_64_64` is never used
-   --> src/codegen/src/emit.rs:210:7
+   --> src/codegen/src/emit.rs:213:7
     |
-210 | const R_X86_64_64: u32 = 1;
+213 | const R_X86_64_64: u32 = 1;
     |       ^^^^^^^^^^^
 
 warning: constant `R_X86_64_PC32` is never used
-   --> src/codegen/src/emit.rs:212:7
+   --> src/codegen/src/emit.rs:215:7
     |
-212 | const R_X86_64_PC32: u32 = 2;
+215 | const R_X86_64_PC32: u32 = 2;
     |       ^^^^^^^^^^^^^
 
 warning: constant `R_X86_64_32` is never used
-   --> src/codegen/src/emit.rs:217:7
+   --> src/codegen/src/emit.rs:220:7
     |
-217 | const R_X86_64_32: u32 = 10;
+220 | const R_X86_64_32: u32 = 10;
     |       ^^^^^^^^^^^
 
 warning: constant `R_X86_64_32S` is never used
-   --> src/codegen/src/emit.rs:219:7
+   --> src/codegen/src/emit.rs:222:7
     |
-219 | const R_X86_64_32S: u32 = 11;
+222 | const R_X86_64_32S: u32 = 11;
     |       ^^^^^^^^^^^^
 
 warning: constant `R_RISCV_JAL` is never used
-   --> src/codegen/src/emit.rs:226:7
+   --> src/codegen/src/emit.rs:229:7
     |
-226 | const R_RISCV_JAL: u32 = 2;
+229 | const R_RISCV_JAL: u32 = 2;
     |       ^^^^^^^^^^^
 
 warning: constant `R_RISCV_BRANCH` is never used
-   --> src/codegen/src/emit.rs:228:7
+   --> src/codegen/src/emit.rs:231:7
     |
-228 | const R_RISCV_BRANCH: u32 = 16;
+231 | const R_RISCV_BRANCH: u32 = 16;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_RISCV_CALL_PLT` is never used
-   --> src/codegen/src/emit.rs:232:7
+   --> src/codegen/src/emit.rs:235:7
     |
-232 | const R_RISCV_CALL_PLT: u32 = 19;
+235 | const R_RISCV_CALL_PLT: u32 = 19;
     |       ^^^^^^^^^^^^^^^^
 
 warning: constant `R_RISCV_PCREL_HI20` is never used
-   --> src/codegen/src/emit.rs:234:7
+   --> src/codegen/src/emit.rs:237:7
     |
-234 | const R_RISCV_PCREL_HI20: u32 = 23;
+237 | const R_RISCV_PCREL_HI20: u32 = 23;
     |       ^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_RISCV_PCREL_LO12_I` is never used
-   --> src/codegen/src/emit.rs:236:7
+   --> src/codegen/src/emit.rs:239:7
     |
-236 | const R_RISCV_PCREL_LO12_I: u32 = 24;
+239 | const R_RISCV_PCREL_LO12_I: u32 = 24;
     |       ^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_RISCV_HI20` is never used
-   --> src/codegen/src/emit.rs:238:7
+   --> src/codegen/src/emit.rs:241:7
     |
-238 | const R_RISCV_HI20: u32 = 26;
+241 | const R_RISCV_HI20: u32 = 26;
     |       ^^^^^^^^^^^^
 
 warning: constant `R_RISCV_LO12_I` is never used
-   --> src/codegen/src/emit.rs:240:7
+   --> src/codegen/src/emit.rs:243:7
     |
-240 | const R_RISCV_LO12_I: u32 = 27;
+243 | const R_RISCV_LO12_I: u32 = 27;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_MIPS_32` is never used
-   --> src/codegen/src/emit.rs:247:7
+   --> src/codegen/src/emit.rs:250:7
     |
-247 | const R_MIPS_32: u32 = 2;
+250 | const R_MIPS_32: u32 = 2;
     |       ^^^^^^^^^
 
 warning: constant `R_MIPS_HI16` is never used
-   --> src/codegen/src/emit.rs:251:7
+   --> src/codegen/src/emit.rs:254:7
     |
-251 | const R_MIPS_HI16: u32 = 5;
+254 | const R_MIPS_HI16: u32 = 5;
     |       ^^^^^^^^^^^
 
 warning: constant `R_MIPS_LO16` is never used
-   --> src/codegen/src/emit.rs:253:7
+   --> src/codegen/src/emit.rs:256:7
     |
-253 | const R_MIPS_LO16: u32 = 6;
+256 | const R_MIPS_LO16: u32 = 6;
     |       ^^^^^^^^^^^
 
 warning: constant `R_MIPS_GPREL16` is never used
-   --> src/codegen/src/emit.rs:255:7
+   --> src/codegen/src/emit.rs:258:7
     |
-255 | const R_MIPS_GPREL16: u32 = 7;
+258 | const R_MIPS_GPREL16: u32 = 7;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_MIPS_CALL16` is never used
-   --> src/codegen/src/emit.rs:257:7
+   --> src/codegen/src/emit.rs:260:7
     |
-257 | const R_MIPS_CALL16: u32 = 11;
+260 | const R_MIPS_CALL16: u32 = 11;
     |       ^^^^^^^^^^^^^
 
 warning: constant `R_MIPS_64` is never used
-   --> src/codegen/src/emit.rs:259:7
+   --> src/codegen/src/emit.rs:262:7
     |
-259 | const R_MIPS_64: u32 = 18;
+262 | const R_MIPS_64: u32 = 18;
     |       ^^^^^^^^^
 
 warning: constant `R_PPC64_REL32` is never used
-   --> src/codegen/src/emit.rs:268:7
+   --> src/codegen/src/emit.rs:271:7
     |
-268 | const R_PPC64_REL32: u32 = 26;
+271 | const R_PPC64_REL32: u32 = 26;
     |       ^^^^^^^^^^^^^
 
 warning: constant `R_PPC64_ADDR32` is never used
-   --> src/codegen/src/emit.rs:270:7
+   --> src/codegen/src/emit.rs:273:7
     |
-270 | const R_PPC64_ADDR32: u32 = 20;
+273 | const R_PPC64_ADDR32: u32 = 20;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_PPC64_ADDR64` is never used
-   --> src/codegen/src/emit.rs:272:7
+   --> src/codegen/src/emit.rs:275:7
     |
-272 | const R_PPC64_ADDR64: u32 = 38;
+275 | const R_PPC64_ADDR64: u32 = 38;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_LARCH_PCALA_HI20` is never used
-   --> src/codegen/src/emit.rs:279:7
+   --> src/codegen/src/emit.rs:282:7
     |
-279 | const R_LARCH_PCALA_HI20: u32 = 44;
+282 | const R_LARCH_PCALA_HI20: u32 = 44;
     |       ^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_LARCH_PCALA_LO12` is never used
-   --> src/codegen/src/emit.rs:281:7
+   --> src/codegen/src/emit.rs:284:7
     |
-281 | const R_LARCH_PCALA_LO12: u32 = 45;
+284 | const R_LARCH_PCALA_LO12: u32 = 45;
     |       ^^^^^^^^^^^^^^^^^^
 
 warning: constant `R_LARCH_32` is never used
-   --> src/codegen/src/emit.rs:285:7
+   --> src/codegen/src/emit.rs:288:7
     |
-285 | const R_LARCH_32: u32 = 77;
+288 | const R_LARCH_32: u32 = 77;
     |       ^^^^^^^^^^
 
 warning: constant `R_LARCH_64` is never used
-   --> src/codegen/src/emit.rs:287:7
+   --> src/codegen/src/emit.rs:290:7
     |
-287 | const R_LARCH_64: u32 = 79;
+290 | const R_LARCH_64: u32 = 79;
     |       ^^^^^^^^^^
 
 warning: constant `R_LARCH_CALL36` is never used
-   --> src/codegen/src/emit.rs:289:7
+   --> src/codegen/src/emit.rs:292:7
     |
-289 | const R_LARCH_CALL36: u32 = 89;
+292 | const R_LARCH_CALL36: u32 = 89;
     |       ^^^^^^^^^^^^^^
 
 warning: constant `R_ARM_ABS32` is never used
-   --> src/codegen/src/emit.rs:296:7
+   --> src/codegen/src/emit.rs:299:7
     |
-296 | const R_ARM_ABS32: u32 = 2;
+299 | const R_ARM_ABS32: u32 = 2;
     |       ^^^^^^^^^^^
 
 warning: constant `R_ARM_REL32` is never used
-   --> src/codegen/src/emit.rs:298:7
+   --> src/codegen/src/emit.rs:301:7
     |
-298 | const R_ARM_REL32: u32 = 3;
+301 | const R_ARM_REL32: u32 = 3;
     |       ^^^^^^^^^^^
 
 warning: constant `R_ARM_JUMP24` is never used
-   --> src/codegen/src/emit.rs:302:7
+   --> src/codegen/src/emit.rs:305:7
     |
-302 | const R_ARM_JUMP24: u32 = 29;
+305 | const R_ARM_JUMP24: u32 = 29;
     |       ^^^^^^^^^^^^
 
 warning: constant `R_ARM_MOVW_ABS_NC` is never used
-   --> src/codegen/src/emit.rs:304:7
+   --> src/codegen/src/emit.rs:307:7
     |
-304 | const R_ARM_MOVW_ABS_NC: u32 = 43;
+307 | const R_ARM_MOVW_ABS_NC: u32 = 43;
     |       ^^^^^^^^^^^^^^^^^
 
 warning: constant `R_ARM_MOVT_ABS` is never used
-   --> src/codegen/src/emit.rs:306:7
+   --> src/codegen/src/emit.rs:309:7
     |
-306 | const R_ARM_MOVT_ABS: u32 = 44;
+309 | const R_ARM_MOVT_ABS: u32 = 44;
     |       ^^^^^^^^^^^^^^
 
 warning: function `encode_2ri8` is never used
@@ -1438,6 +1494,228 @@ warning: function `collect_vreg_ids` is never used
 4407 | fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
      |    ^^^^^^^^^^^^^^^^
 
+warning: constant `S4` is never used
+   --> src/codegen/src/s390x.rs:218:7
+    |
+218 | const S4: Gpr = Gpr::R4;
+    |       ^^
+
+warning: constant `S6` is never used
+   --> src/codegen/src/s390x.rs:220:7
+    |
+220 | const S6: Gpr = Gpr::R6;
+    |       ^^
+
+warning: constant `S7` is never used
+   --> src/codegen/src/s390x.rs:221:7
+    |
+221 | const S7: Gpr = Gpr::R7;
+    |       ^^
+
+warning: function `encode_sgfi` is never used
+   --> src/codegen/src/s390x.rs:266:4
+    |
+266 | fn encode_sgfi(r1: Gpr, imm: i32) -> [u8; 6] {
+    |    ^^^^^^^^^^^
+
+warning: function `encode_srag` is never used
+   --> src/codegen/src/s390x.rs:474:4
+    |
+474 | fn encode_srag(r1: Gpr, r3: Gpr, imm: u32) -> [u8; 6] {
+    |    ^^^^^^^^^^^
+
+warning: function `ss_ld_typed` is never used
+   --> src/codegen/src/s390x.rs:606:4
+    |
+606 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+    |    ^^^^^^^^^^^
+
+warning: function `ss_st_typed` is never used
+   --> src/codegen/src/s390x.rs:650:4
+    |
+650 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+    |    ^^^^^^^^^^^
+
+warning: constant `OP2_FBICC` is never used
+  --> src/codegen/src/sparc64.rs:77:7
+   |
+77 | const OP2_FBICC: u32 = 0x06;
+   |       ^^^^^^^^^
+
+warning: constant `OP2_BPCC` is never used
+  --> src/codegen/src/sparc64.rs:78:7
+   |
+78 | const OP2_BPCC: u32 = 0x01;
+   |       ^^^^^^^^
+
+warning: constant `OP2_BPR` is never used
+  --> src/codegen/src/sparc64.rs:79:7
+   |
+79 | const OP2_BPR: u32 = 0x03;
+   |       ^^^^^^^
+
+warning: constant `OP3_ADDC` is never used
+  --> src/codegen/src/sparc64.rs:90:7
+   |
+90 | const OP3_ADDC: u32 = 0x08;
+   |       ^^^^^^^^
+
+warning: constant `OP3_UMUL` is never used
+  --> src/codegen/src/sparc64.rs:92:7
+   |
+92 | const OP3_UMUL: u32 = 0x0A; // V8 32-bit unsigned multiply
+   |       ^^^^^^^^
+
+warning: constant `OP3_SMUL` is never used
+  --> src/codegen/src/sparc64.rs:93:7
+   |
+93 | const OP3_SMUL: u32 = 0x0B; // V8 32-bit signed multiply
+   |       ^^^^^^^^
+
+warning: constant `OP3_SDIV` is never used
+  --> src/codegen/src/sparc64.rs:96:7
+   |
+96 | const OP3_SDIV: u32 = 0x0E; // V8 32-bit signed divide
+   |       ^^^^^^^^
+
+warning: constant `OP3_UDIV` is never used
+  --> src/codegen/src/sparc64.rs:97:7
+   |
+97 | const OP3_UDIV: u32 = 0x0F; // V8 32-bit unsigned divide
+   |       ^^^^^^^^
+
+warning: constant `OP3_ANDCC` is never used
+   --> src/codegen/src/sparc64.rs:100:7
+    |
+100 | const OP3_ANDCC: u32 = 0x11;
+    |       ^^^^^^^^^
+
+warning: constant `OP3_ORCC` is never used
+   --> src/codegen/src/sparc64.rs:101:7
+    |
+101 | const OP3_ORCC: u32 = 0x12;
+    |       ^^^^^^^^
+
+warning: constant `OP3_XORCC` is never used
+   --> src/codegen/src/sparc64.rs:102:7
+    |
+102 | const OP3_XORCC: u32 = 0x13;
+    |       ^^^^^^^^^
+
+warning: constant `OP3_ANDNCC` is never used
+   --> src/codegen/src/sparc64.rs:104:7
+    |
+104 | const OP3_ANDNCC: u32 = 0x15;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_ORNCC` is never used
+   --> src/codegen/src/sparc64.rs:105:7
+    |
+105 | const OP3_ORNCC: u32 = 0x16;
+    |       ^^^^^^^^^
+
+warning: constant `OP3_XNORCC` is never used
+   --> src/codegen/src/sparc64.rs:106:7
+    |
+106 | const OP3_XNORCC: u32 = 0x17;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_ADDCCC` is never used
+   --> src/codegen/src/sparc64.rs:107:7
+    |
+107 | const OP3_ADDCCC: u32 = 0x18;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_UDIVCC` is never used
+   --> src/codegen/src/sparc64.rs:108:7
+    |
+108 | const OP3_UDIVCC: u32 = 0x1C;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_SDIVCC` is never used
+   --> src/codegen/src/sparc64.rs:109:7
+    |
+109 | const OP3_SDIVCC: u32 = 0x1E;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_UMULCC` is never used
+   --> src/codegen/src/sparc64.rs:111:7
+    |
+111 | const OP3_UMULCC: u32 = 0x1A;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_SMULCC` is never used
+   --> src/codegen/src/sparc64.rs:112:7
+    |
+112 | const OP3_SMULCC: u32 = 0x1B;
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_LDD` is never used
+   --> src/codegen/src/sparc64.rs:123:7
+    |
+123 | const OP3_LDD: u32 = 0x03;
+    |       ^^^^^^^
+
+warning: constant `OP3_STD` is never used
+   --> src/codegen/src/sparc64.rs:133:7
+    |
+133 | const OP3_STD: u32 = 0x07;
+    |       ^^^^^^^
+
+warning: constant `OP3_RETT` is never used
+   --> src/codegen/src/sparc64.rs:138:7
+    |
+138 | const OP3_RETT: u32 = 0x39;
+    |       ^^^^^^^^
+
+warning: constant `OP3_RETURN` is never used
+   --> src/codegen/src/sparc64.rs:139:7
+    |
+139 | const OP3_RETURN: u32 = 0x39; // RETURN (V9) shares op3 with RETT (V8)
+    |       ^^^^^^^^^^
+
+warning: constant `OP3_TICC` is never used
+   --> src/codegen/src/sparc64.rs:142:7
+    |
+142 | const OP3_TICC: u32 = 0x3A;
+    |       ^^^^^^^^
+
+warning: constant `COND_BPOS` is never used
+   --> src/codegen/src/sparc64.rs:159:7
+    |
+159 | const COND_BPOS: u32 = 0x0E;
+    |       ^^^^^^^^^
+
+warning: constant `COND_BNEG` is never used
+   --> src/codegen/src/sparc64.rs:160:7
+    |
+160 | const COND_BNEG: u32 = 0x06;
+    |       ^^^^^^^^^
+
+warning: constant `COND_BVC` is never used
+   --> src/codegen/src/sparc64.rs:161:7
+    |
+161 | const COND_BVC: u32 = 0x0F;
+    |       ^^^^^^^^
+
+warning: constant `COND_BVS` is never used
+   --> src/codegen/src/sparc64.rs:162:7
+    |
+162 | const COND_BVS: u32 = 0x07;
+    |       ^^^^^^^^
+
+warning: function `ss_ld_typed` is never used
+    --> src/codegen/src/sparc64.rs:1492:4
+     |
+1492 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+     |    ^^^^^^^^^^^
+
+warning: function `ss_st_typed` is never used
+    --> src/codegen/src/sparc64.rs:1625:4
+     |
+1625 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+     |    ^^^^^^^^^^^
+
 warning: function `skip_leb128` is never used
     --> src/codegen/src/wasm32/mod.rs:1714:4
      |
@@ -1538,9 +1816,9 @@ warning: unused import: `InterproceduralAllocFlow`
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused import: `serde::de::Error`
-   --> src/api.rs:736:9
+   --> src/api.rs:738:9
     |
-736 |     use serde::de::Error;
+738 |     use serde::de::Error;
     |         ^^^^^^^^^^^^^^^^
 
 warning: variable does not need to be mutable
@@ -1708,5 +1986,5 @@ warning: missing documentation for a macro
     | ^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
-warning: `vuma-codegen` (lib) generated 211 warnings (run `cargo fix --lib -p vuma-codegen` to apply 61 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 56.51s
+warning: `vuma-codegen` (lib) generated 256 warnings (run `cargo fix --lib -p vuma-codegen` to apply 65 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 1m 07s
