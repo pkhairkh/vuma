@@ -28,7 +28,9 @@
 //! - `memory_safety` — Compile-time and runtime memory safety checks (E041–E050).
 
 pub mod arm32;
+pub mod armeb;
 pub mod arm64;
+pub mod aarch64_be;
 pub mod backend;
 pub mod control_flow;
 pub mod dwarf;
@@ -37,6 +39,7 @@ pub mod ir;
 pub mod loongarch64;
 pub mod memory_safety;
 pub mod mips64;
+pub mod mips64be;
 pub mod opt;
 pub mod egraph;
 pub mod closures;
