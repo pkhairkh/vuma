@@ -308,19 +308,12 @@ fn op_reg(op: u32, ra: Gpr, rb: Gpr, rc: Gpr, function: u32) -> u32 {
 
 #[inline]
 fn op_lit(op: u32, ra: Gpr, lit: u8, rc: Gpr, function: u32) -> u32 {
-    // Alpha Operate format (literal form):
-    //   bits 31-26: opcode (6 bits)
-    //   bits 25-21: ra (5 bits)
-    //   bits 20-16: rb (5 bits)
-    //   bit 15: 1 (literal form)
-    //   bits 14-7: literal (8 bits)
-    //   bits 6-5: 00 (reserved)
-    //   bits 4-0: rc (5 bits)
-    // NOTE: literal form uses the SAME function field as register form (bits 11-5),
-    //   but bits 14-7 hold the literal instead of being zero. The function field
-    //   is still needed to distinguish sub-operations (e.g., BIS vs AND vs OR).
-    (op << 26) | ((ra.encoding() as u32) << 21) | (1u32 << 15)
-        | ((lit as u32 & 0xFF) << 7) | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
+    // Alpha Operate literal form:
+    //   op(6) | ra(5) | lit(5) | 1(1) | reserved(3) | function(7) | rc(5)
+    // The literal occupies bits 20-16 (same field as rb in register form),
+    // NOT bits 14-7. The 5-bit literal range is 0-31.
+    (op << 26) | ((ra.encoding() as u32) << 21) | ((lit as u32 & 0x1F) << 16)
+        | (1u32 << 15) | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
 }
 
 #[inline]
@@ -387,6 +380,7 @@ const S0: Gpr = Gpr::R1;  // T0
 const S1: Gpr = Gpr::R2;  // T1
 const S2: Gpr = Gpr::R3;  // T2
 const S3: Gpr = Gpr::R8;  // T7
+const S4: Gpr = Gpr::R9;  // T8 (extra scratch for division)
 const FP: Gpr = Gpr::R15; // FP
 const SP: Gpr = Gpr::R30; // SP
 const RA: Gpr = Gpr::R26; // RA
@@ -798,8 +792,14 @@ fn emit_instr(
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // DIVQU: unsigned 64-bit divide, quotient in rc.
-            code.extend(Instruction::Divq { ra: S0, rb: S1, rc: S0 }.encode());
+            // Alpha has NO hardware integer divide — use software loop.
+            code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode()); // S2=0
+            code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes()); // CMPULT
+            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes()); // BNE +4
+            code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
+            code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
+            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes()); // BR -4
+            code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
@@ -1062,19 +1062,44 @@ fn emit_binop(
         BinOpKind::UDiv | BinOpKind::SDiv => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Divq { ra: S0, rb: S1, rc: S0 }.encode());
+            // Alpha has NO hardware integer divide. Emit a simple
+            // subtract-and-count loop: quotient = 0; while (S0 >= S1)
+            // { S0 -= S1; quotient++; } S0 = quotient.
+            // Uses S2=quotient, S3=temp for compare.
+            // ADDQ ZERO, ZERO, S2 (quotient = 0)
+            code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode());
+            // CMPULT S0, S1, S3 (S3 = 1 if S0 < S1, i.e., done)
+            code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes());
+            // BNE S3, +4 (skip 3 instructions: SUBQ+ADDQLI+BR)
+            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes());
+            // SUBQ S0, S1, S0
+            code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
+            // ADDQ S2, 1, S2 (quotient++)
+            code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
+            // BR ZERO, -4 (back to CMPULT)
+            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes());
+            // OR S2, ZERO, S0 (S0 = quotient)
+            code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::SRem | BinOpKind::URem => {
             // remainder = lhs - (lhs / rhs) * rhs
+            // Since Alpha has no hardware divide, use the subtract loop
+            // and compute remainder = dividend - quotient * divisor.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // S2 = S0 / S1
-            code.extend(Instruction::Divq { ra: S0, rb: S1, rc: S2 }.encode());
-            // S2 = S2 * S1
+            // Save original dividend in S4 before division clobbers S0
+            code.extend(Instruction::Or { ra: S0, rb: ZERO, rc: S4 }.encode());
+            // Division loop (same as UDiv above)
+            code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode()); // S2=0
+            code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes()); // CMPULT
+            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes()); // BNE +4
+            code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
+            code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
+            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes()); // BR -4
+            // S2 = quotient. Remainder = S4 - S2 * S1
             code.extend(Instruction::Mulq { ra: S2, rb: S1, rc: S2 }.encode());
-            // S0 = S0 - S2
-            code.extend(Instruction::Subq { ra: S0, rb: S2, rc: S0 }.encode());
+            code.extend(Instruction::Subq { ra: S4, rb: S2, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::And => {
