@@ -45,11 +45,13 @@ pub mod effects;
 pub mod escape_analysis;
 pub mod alias_analysis;
 pub mod ppc64;
+pub mod ppc64le;
 pub mod regalloc;
 pub mod riscv_common;
 pub mod riscv64;
 pub mod riscv32;
 pub mod scg_to_ir;
+pub mod sparc64;
 pub mod target_desc;
 pub mod wasm32;
 pub mod x86_64;
@@ -91,6 +93,12 @@ pub use mips64::Mips64Backend;
 
 /// Re-export PowerPC64 backend types.
 pub use ppc64::PPC64Backend;
+
+/// Re-export PowerPC64 little-endian backend types.
+pub use ppc64le::PPC64LEBackend;
+
+/// Re-export SPARC V9 (sparc64) backend types.
+pub use sparc64::Sparc64Backend;
 
 /// Re-export target description types.
 pub use target_desc::{

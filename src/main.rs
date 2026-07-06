@@ -148,6 +148,10 @@ enum IsaArg {
     Mips64,
     #[value(name = "ppc64")]
     Ppc64,
+    #[value(name = "ppc64le")]
+    Ppc64le,
+    #[value(name = "sparc64")]
+    Sparc64,
 }
 
 impl From<IsaArg> for BackendKind {
@@ -161,6 +165,8 @@ impl From<IsaArg> for BackendKind {
             IsaArg::Arm32 => BackendKind::Arm32,
             IsaArg::Mips64 => BackendKind::Mips64,
             IsaArg::Ppc64 => BackendKind::PowerPC64,
+            IsaArg::Ppc64le => BackendKind::PowerPC64LE,
+            IsaArg::Sparc64 => BackendKind::Sparc64,
         }
     }
 }
@@ -180,6 +186,7 @@ fn host_isa() -> Option<IsaArg> {
         "riscv64" => Some(IsaArg::Riscv64),
         "arm" => Some(IsaArg::Arm32),
         "powerpc64" => Some(IsaArg::Ppc64),
+        "powerpc64le" => Some(IsaArg::Ppc64le),
         "mips" => Some(IsaArg::Mips64), // closest match; endian may need a runtime check
         "loongarch64" => Some(IsaArg::Loongarch64),
         _ => None,
@@ -361,7 +368,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Supported backend list.
 const SUPPORTED_BACKENDS: &str =
-    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32";
+    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32, sparc64";
 
 /// Build the long version string.
 fn version_long() -> String {
@@ -1314,15 +1321,17 @@ fn cmd_bench(_cli: &Cli) {
     });
 
     if !sha256d_source.is_empty() {
-        let backends: [(BackendKind, &str); 8] = [
+        let backends: [(BackendKind, &str); 10] = [
             (BackendKind::AArch64, "aarch64"),
             (BackendKind::X86_64, "x86_64"),
             (BackendKind::RiscV64, "riscv64"),
             (BackendKind::Arm32, "arm32"),
             (BackendKind::Mips64, "mips64"),
             (BackendKind::PowerPC64, "ppc64"),
+            (BackendKind::PowerPC64LE, "ppc64le"),
             (BackendKind::LoongArch64, "loongarch64"),
             (BackendKind::Wasm32, "wasm32"),
+            (BackendKind::Sparc64, "sparc64"),
         ];
 
         println!("  {:15} {:>12} {:>12} {:>12}", "Backend", "Time (ms)", "Size (B)", "Instrs");
