@@ -1367,6 +1367,8 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
         "mips64be" | "mips64-be" => Some(BackendKind::Mips64Be),
         "armeb" | "arm-be" => Some(BackendKind::ArmEb),
         "aarch64_be" | "aarch64be" => Some(BackendKind::AArch64Be),
+        "m68k" => Some(BackendKind::M68k),
+        "alpha" => Some(BackendKind::Alpha),
         _ => None,
     }
 }
