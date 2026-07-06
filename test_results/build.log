@@ -162,14 +162,20 @@ warning: unused variable: `data_offset`
      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/backend.rs:2849:13
+    --> src/codegen/src/backend.rs:2888:13
      |
-2849 |         let mut external_symbols: Vec<String> = Vec::new();
+2888 |         let mut external_symbols: Vec<String> = Vec::new();
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
      |
      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `ffi_stub_offset`
+    --> src/codegen/src/backend.rs:2550:13
+     |
+2550 |         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+     |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ffi_stub_offset`
 
 warning: unreachable pattern
    --> src/codegen/src/dwarf.rs:610:13
@@ -206,9 +212,9 @@ warning: unused variable: `immediate_scratch_used`
     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_immediate_scratch_used`
 
 warning: value assigned to `external_symbols` is never read
-    --> src/codegen/src/emit.rs:4162:45
+    --> src/codegen/src/emit.rs:4221:45
      |
-4162 |     let mut external_symbols: Vec<String> = Vec::new();
+4221 |     let mut external_symbols: Vec<String> = Vec::new();
      |                                             ^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -221,33 +227,33 @@ warning: unused variable: `tt`
      |                                     ^^ help: if this is intentional, prefix it with an underscore: `_tt`
 
 warning: unused variable: `ty`
-    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1691:68
+    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1759:68
      |
-1691 |                 IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+1759 |                 IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
      |                                                                    ^^ help: try ignoring the field: `ty: _`
 
 warning: unused variable: `bnez_off`
-    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1856:25
+    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1924:25
      |
-1856 |                     let bnez_off = byte_offset + code.len();
+1924 |                     let bnez_off = byte_offset + code.len();
      |                         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bnez_off`
 
 warning: unused variable: `loop_start`
-    --> src/codegen/src/mips64/mod.rs:3005:33
+    --> src/codegen/src/mips64/mod.rs:3078:33
      |
-3005 | ...                   let loop_start = code.len();
+3078 | ...                   let loop_start = code.len();
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
 
 warning: unused variable: `loop_start`
-    --> src/codegen/src/mips64/mod.rs:3024:33
+    --> src/codegen/src/mips64/mod.rs:3097:33
      |
-3024 | ...                   let loop_start = code.len();
+3097 | ...                   let loop_start = code.len();
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
 
 warning: unused variable: `loop_start`
-    --> src/codegen/src/mips64/mod.rs:3045:33
+    --> src/codegen/src/mips64/mod.rs:3118:33
      |
-3045 | ...                   let loop_start = code.len();
+3118 | ...                   let loop_start = code.len();
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
 
 warning: unused variable: `x`
@@ -359,9 +365,9 @@ warning: unused variable: `rd_reg`
      |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unused variable: `rd_reg`
-    --> src/codegen/src/riscv64.rs:6366:29
+    --> src/codegen/src/riscv64.rs:6457:29
      |
-6366 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+6457 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
      |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unreachable pattern
@@ -750,12 +756,6 @@ warning: unreachable pattern
 2519 |             Instruction::Srai { rd, rs1, shamt } => write!(f, "sraiw {}, {}, {}", rd, rs1, shamt),
      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
 
-warning: unused variable: `rd_reg`
-    --> src/codegen/src/riscv32.rs:6632:29
-     |
-6632 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
-     |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
-
 warning: unused variable: `while_cond`
     --> src/codegen/src/scg_to_ir.rs:1380:9
      |
@@ -899,81 +899,81 @@ warning: fields `name`, `line`, and `offset_expr` are never read
     = note: `AccessInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
 warning: function `mips64_compute_frame_size` is never used
-    --> src/codegen/src/mips64/mod.rs:1751:4
+    --> src/codegen/src/mips64/mod.rs:1796:4
      |
-1751 | fn mips64_compute_frame_size(func: &IRFunction) -> usize {
+1796 | fn mips64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `ALLOCATABLE_GPRS` is never used
-    --> src/codegen/src/mips64/mod.rs:1769:7
+    --> src/codegen/src/mips64/mod.rs:1814:7
      |
-1769 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+1814 | const ALLOCATABLE_GPRS: &[Gpr] = &[
      |       ^^^^^^^^^^^^^^^^
 
 warning: function `map_vreg_to_gpr` is never used
-    --> src/codegen/src/mips64/mod.rs:1806:4
+    --> src/codegen/src/mips64/mod.rs:1851:4
      |
-1806 | fn map_vreg_to_gpr(
+1851 | fn map_vreg_to_gpr(
      |    ^^^^^^^^^^^^^^^
 
 warning: function `vreg_id` is never used
-    --> src/codegen/src/mips64/mod.rs:1838:4
+    --> src/codegen/src/mips64/mod.rs:1883:4
      |
-1838 | fn vreg_id(val: &IRValue) -> u32 {
+1883 | fn vreg_id(val: &IRValue) -> u32 {
      |    ^^^^^^^
 
 warning: function `resolve_value` is never used
-    --> src/codegen/src/mips64/mod.rs:1854:4
+    --> src/codegen/src/mips64/mod.rs:1899:4
      |
-1854 | fn resolve_value(
+1899 | fn resolve_value(
      |    ^^^^^^^^^^^^^
 
 warning: function `lower_binop` is never used
-    --> src/codegen/src/mips64/mod.rs:2029:4
+    --> src/codegen/src/mips64/mod.rs:2074:4
      |
-2029 | fn lower_binop(
+2074 | fn lower_binop(
      |    ^^^^^^^^^^^
 
 warning: function `lower_binop_typed` is never used
-    --> src/codegen/src/mips64/mod.rs:2042:4
+    --> src/codegen/src/mips64/mod.rs:2087:4
      |
-2042 | fn lower_binop_typed(
+2087 | fn lower_binop_typed(
      |    ^^^^^^^^^^^^^^^^^
 
 warning: function `ss_ld_typed` is never used
-    --> src/codegen/src/mips64/mod.rs:2702:8
+    --> src/codegen/src/mips64/mod.rs:2747:8
      |
-2702 |     fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+2747 |     fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
      |        ^^^^^^^^^^^
 
 warning: function `ss_sd_typed` is never used
-    --> src/codegen/src/mips64/mod.rs:2727:8
+    --> src/codegen/src/mips64/mod.rs:2772:8
      |
-2727 |     fn ss_sd_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+2772 |     fn ss_sd_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
      |        ^^^^^^^^^^^
 
 warning: function `lower_ir_instr` is never used
-    --> src/codegen/src/mips64/mod.rs:3794:4
+    --> src/codegen/src/mips64/mod.rs:3914:4
      |
-3794 | fn lower_ir_instr(
+3914 | fn lower_ir_instr(
      |    ^^^^^^^^^^^^^^
 
 warning: constant `PAGE_SIZE` is never used
-    --> src/codegen/src/mips64/mod.rs:4791:15
+    --> src/codegen/src/mips64/mod.rs:4911:15
      |
-4791 |         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
+4911 |         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
      |               ^^^^^^^^^
 
 warning: constant `FP_SCRATCH_SIZE` is never used
-    --> src/codegen/src/ppc64/mod.rs:1835:7
+    --> src/codegen/src/ppc64/mod.rs:1943:7
      |
-1835 | const FP_SCRATCH_SIZE: u32 = 16;
+1943 | const FP_SCRATCH_SIZE: u32 = 16;
      |       ^^^^^^^^^^^^^^^
 
 warning: function `ppc64_compute_frame_size` is never used
-    --> src/codegen/src/ppc64/mod.rs:1842:4
+    --> src/codegen/src/ppc64/mod.rs:1950:4
      |
-1842 | fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
+1950 | fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `riscv64_compute_frame_size` is never used
@@ -1058,21 +1058,21 @@ warning: function `lower_terminator` is never used
      |    ^^^^^^^^^^^^^^^^
 
 warning: function `x86_64_compute_frame_size` is never used
-    --> src/codegen/src/x86_64/mod.rs:3472:4
+    --> src/codegen/src/x86_64/mod.rs:3239:4
      |
-3472 | fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
+3239 | fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/x86_64/mod.rs:3498:4
+    --> src/codegen/src/x86_64/mod.rs:3265:4
      |
-3498 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+3265 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
      |    ^^^^^^^^^^^
 
 warning: function `emit_cmp_setcc` is never used
-    --> src/codegen/src/x86_64/mod.rs:3557:4
+    --> src/codegen/src/x86_64/mod.rs:3324:4
      |
-3557 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+3324 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
      |    ^^^^^^^^^^^^^^
 
 warning: function `rex_prefix` is never used
@@ -1082,21 +1082,21 @@ warning: function `rex_prefix` is never used
     |    ^^^^^^^^^^
 
 warning: function `x86_32_compute_frame_size` is never used
-    --> src/codegen/src/x86_32/mod.rs:2808:4
+    --> src/codegen/src/x86_32/mod.rs:2946:4
      |
-2808 | fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
+2946 | fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/x86_32/mod.rs:2834:4
+    --> src/codegen/src/x86_32/mod.rs:2972:4
      |
-2834 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+2972 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
      |    ^^^^^^^^^^^
 
 warning: function `emit_cmp_setcc` is never used
-    --> src/codegen/src/x86_32/mod.rs:2893:4
+    --> src/codegen/src/x86_32/mod.rs:3031:4
      |
-2893 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+3031 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
      |    ^^^^^^^^^^^^^^
 
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
@@ -1295,4 +1295,4 @@ warning: missing documentation for a macro
 warning: `vuma-cor` (lib) generated 1 warning
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
 warning: `vuma-codegen` (lib) generated 142 warnings (run `cargo fix --lib -p vuma-codegen` to apply 57 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 55.24s
+    Finished `release-fast` profile [optimized] target(s) in 57.88s
