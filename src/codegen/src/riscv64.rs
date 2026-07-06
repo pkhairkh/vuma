@@ -6297,6 +6297,16 @@ impl Backend for RiscV64Backend {
                 stubs.push(("fork".to_string(), code));
             }
 
+            // rt_sigreturn (139) — special: no args, never returns.
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 139 }.encode());
+                code.extend(Instruction::Ecall.encode());
+                // Defensive: if the kernel ever does return, trap.
+                code.extend(Instruction::Ebreak.encode());
+                stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
             stubs
         };
 

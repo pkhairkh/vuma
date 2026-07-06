@@ -2914,7 +2914,6 @@ impl Default for Arm32Backend {
 /// ARM data-processing immediates are encoded as an 8-bit value rotated right
 /// by `2 * rotate` bits. Returns `Some((rotate, imm8))` if the value can be
 /// represented, or `None` otherwise.
-#[allow(dead_code)]
 fn try_encode_arm_imm(val: u32) -> Option<(u32, u32)> {
     // 0 is a special case: rotate=0, imm8=0
     if val == 0 {
@@ -3040,7 +3039,6 @@ fn emit_arm32_udiv64_loop() -> Vec<u8> {
 /// `MOV Rd, #imm8, rotate`. For larger values, emits a `MOV Rd, #low16`
 /// followed by `ORR Rd, Rd, #high16` (each 16-bit half encoded as a rotated
 /// immediate, possibly requiring further decomposition).
-#[allow(dead_code)]
 fn load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8> {
     let mut code = Vec::new();
 
@@ -3180,7 +3178,6 @@ fn load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8> {
 ///
 /// Returns `(Gpr, Vec<u8>)` where the bytes are any pre-code that must be
 /// emitted before the main instruction (e.g., immediate loads).
-#[allow(dead_code)]
 fn resolve_gpr_arm32(
     val: &crate::ir::IRValue,
     reg_map: &std::collections::HashMap<u32, Gpr>,
@@ -8596,7 +8593,6 @@ fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
 /// ARM VFP encoding (A1):
 ///   cond 1110 1D11 1000 Vd 101 1 11 M 0 Vm
 ///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=1 (unsigned)
-#[allow(dead_code)]
 fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
@@ -8624,7 +8620,6 @@ fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
 /// ARM VFP encoding (A1):
 ///   cond 1110 1D11 1000 Vd 101 1 01 M 0 Vm
 ///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=0 (signed)
-#[allow(dead_code)]
 fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
@@ -8652,7 +8647,6 @@ fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
 /// ARM VFP encoding (A1):
 ///   cond 1110 1D11 1101 Vd 101 1 11 M 0 Vm
 ///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=1 (unsigned)
-#[allow(dead_code)]
 fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8680,7 +8674,6 @@ fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
 /// ARM VFP encoding (A1):
 ///   cond 1110 1D11 1101 Vd 101 1 01 M 0 Vm
 ///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=0 (signed)
-#[allow(dead_code)]
 fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8707,7 +8700,6 @@ fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
 ///
 /// ARM VFP encoding (A1):
 ///   cond 1110 0D11 Vn Dd 1011 N 0 M 0 Vm
-#[allow(dead_code)]
 fn encode_vadd_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
@@ -8734,7 +8726,6 @@ fn encode_vadd_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
 ///
 /// ARM VFP encoding (A1):
 ///   cond 1110 0D11 Vn Dd 1011 N 1 M 0 Vm   (bit [6] = 1 for subtract)
-#[allow(dead_code)]
 fn encode_vsub_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
@@ -8761,7 +8752,6 @@ fn encode_vsub_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
 ///
 /// ARM VFP encoding (A1):
 ///   cond 1110 0D10 Vn Dd 1011 N 0 M 0 Vm   ([21:20]=10 for multiply)
-#[allow(dead_code)]
 fn encode_vmul_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
@@ -8789,7 +8779,6 @@ fn encode_vmul_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
 /// ARM VFP encoding (A1):
 ///   cond 1110 0D00 Vn Dd 1011 N 0 M 0 Vm  ... actually: cond 1110 1D00 Vn Dd 1011 N 0 M 0 Vm
 ///   Encoding for VDIV.F64 D0, D0, D0 = 0xEE800B00
-#[allow(dead_code)]
 fn encode_vdiv_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;

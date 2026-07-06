@@ -2790,6 +2790,18 @@ impl Backend for AArch64Backend {
                 stubs.push(("fork".to_string(), code));
             }
 
+            // rt_sigreturn (139) — special: no args, never returns.
+            // The kernel restores the saved signal context and resumes
+            // execution at the interrupted PC. Emit just ECALL with no RET.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_x8(139));
+                code.extend_from_slice(&svc);
+                // Defensive: if the kernel ever does return, trap.
+                code.extend_from_slice(&0xD4200000u32.to_le_bytes()); // BRK #0
+                stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
             stubs
         };
 
