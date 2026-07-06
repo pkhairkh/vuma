@@ -3012,8 +3012,8 @@ fn lower_ir_instr_ppc64(
                         Instruction::Ld { rt: d, ra: scratch, ds: 0 }
                     }
                 }
-                IRType::F32 => Instruction::Lfs { ft: Fpr::F0, ra: a, d: off },
-                IRType::F64 => Instruction::Lfd { ft: Fpr::F0, ra: a, d: off },
+                IRType::F32 => Instruction::Lwz { rt: d, ra: a, d: off },
+                IRType::F64 => Instruction::Ld { rt: d, ra: a, ds: off },
                 _ => Instruction::Ld { rt: d, ra: a, ds: off }, // fallback: 64-bit
             };
             result.push(emit_alloc_instr(

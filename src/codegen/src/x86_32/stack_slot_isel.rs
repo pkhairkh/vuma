@@ -749,6 +749,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             }
                         }
                         BinOpKind::SDiv => {
+                            // x86_32 only has 32-bit IDIV. For 64-bit types,
+                            // this truncates to the low 32 bits.
+                            if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
+                                log::warn!("x86_32: 64-bit division truncated to 32-bit (no paired-word IDIV)");
+                            }
                             code.extend(load_value(lhs, Gpr::Rax));
                             code.extend(encode_cqo());
                             code.extend(load_value(rhs, Gpr::Rcx));
@@ -756,6 +761,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         BinOpKind::UDiv => {
+                            if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
+                                log::warn!("x86_32: 64-bit division truncated to 32-bit (no paired-word DIV)");
+                            }
                             code.extend(load_value(lhs, Gpr::Rax));
                             code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
                             code.extend(load_value(rhs, Gpr::Rcx));
@@ -1648,7 +1656,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 //      For simplicity we skip the bit-0 fix-up;
                                 //      the error is at most 1 ULP for f64.
                                 code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));  // CL = 1
-                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rax));  // save
+                                // Save original value — on x86_32 there's no R10,
+                                // so use PUSH/POP to preserve RAX across the SHR.
+                                code.extend(encode_push(Gpr::Rax));  // save original
                                 code.extend(encode_shr_reg_cl(Gpr::Rax));  // RAX >>= 1
                                 if dst_is_f32 {
                                     code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
@@ -1659,6 +1669,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
                                     code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
+                                // Restore original RAX (we pushed it before the SHR)
+                                code.extend(encode_pop(Gpr::Rcx));  // pop saved value into RCX (discard)
                             } else {
                                 // u32 → float: zero-extend to 64-bit (which fits in
                                 // signed i64), then use 64-bit signed conversion.
