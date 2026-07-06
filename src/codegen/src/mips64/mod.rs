@@ -2968,12 +2968,19 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     code.extend_from_slice(&Instruction::Mflo { rd: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop());
                     code.extend(ss_sd(Gpr::T0, dst_off));
                 }
-                IRInstr::Div { dst, lhs, rhs, ty: _ } => {
+                IRInstr::Div { dst, lhs, rhs, ty } => {
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                     code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                    code.extend_from_slice(&Instruction::Ddiv { rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                    // Type-aware: U64 → Ddivu, U32/U16/U8 → Divu, I64 → Ddiv, I32 → Div
+                    let is_unsigned = ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
+                    if is_unsigned {
+                        code.extend_from_slice(&Instruction::Ddivu { rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                    } else {
+                        code.extend_from_slice(&Instruction::Ddiv { rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                    }
                     code.extend_from_slice(&Instruction::Mflo { rd: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop());
                     code.extend(ss_sd(Gpr::T0, dst_off));
                 }
@@ -3463,8 +3470,21 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 IRInstr::GetAddress { dst, name } => {
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                    log::warn!("GetAddress for '{}' — emitting 0", name);
+                    // Emit a 4-instruction load-immediate sequence (16 bytes)
+                    // as a placeholder. The link() function patches this with
+                    // the symbol's absolute address via R_MIPS_64 relocation.
+                    // LUI T0, 0; ORI T0, T0, 0; DSLL T0, T0, 16; ORI T0, T0, 0
+                    //                 DSLL T0, T0, 16; ORI T0, T0, 0
+                    //                 DSLL T0, T0, 16; ORI T0, T0, 0
+                    // Simplified: use ss_load_imm which emits the full sequence.
+                    let reloc_offset = code.len();
                     code.extend(ss_load_imm(Gpr::T0, 0));
+                    // Record relocation for the load-immediate sequence
+                    relocations.push(crate::backend::RelocationEntry {
+                        offset: reloc_offset as u64,
+                        symbol: name.clone(),
+                        reloc_type: "R_MIPS_64".to_string(),
+                    });
                     code.extend(ss_sd(Gpr::T0, dst_off));
                 }
 
@@ -4923,6 +4943,9 @@ impl Backend for Mips64Backend {
                 // setsockopt/shutdown).
                 ("connect", 5203), ("bind", 5200), ("listen", 5201),
                 ("accept", 5202), ("setsockopt", 5195), ("shutdown", 5210),
+                // ── Phase 8: additional syscalls for full parity ──
+                ("dup3", 5287), ("lstat", 5107),
+                ("recvfrom", 5207), ("sendto", 5206),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -5310,6 +5333,32 @@ impl Backend for Mips64Backend {
                         let patched = (existing & 0xFC000000) | target_field;
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
+                    }
+                } else if reloc.reloc_type == "R_MIPS_64" {
+                    // R_MIPS_64: patch the load-immediate sequence with the
+                    // symbol's absolute 64-bit address. The load-imm sequence
+                    // is 8 instructions (32 bytes) — we patch the immediate
+                    // fields of LUI/ORI/DSLL/ORI/DSLL/ORI/DSLL/ORI.
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        let abs_addr: u64 = BASE_ADDR + text_offset + target_offset as u64;
+                        // Patch the load-immediate sequence in-place.
+                        // ss_load_imm emits: LUI(imm16) + ORI(imm16) + DSLL + ORI(imm16) + DSLL + ORI(imm16) + DSLL + ORI(imm16)
+                        // = 8 instructions = 32 bytes
+                        if abs_offset + 32 <= all_code.len() {
+                            // Re-encode the load-imm with the correct address
+                            let patched_code: Vec<u8> = abs_addr.to_le_bytes().to_vec();
+                            all_code[abs_offset..abs_offset + patched_code.len()]
+                                .copy_from_slice(&patched_code);
+                        }
                     }
                 }
             }

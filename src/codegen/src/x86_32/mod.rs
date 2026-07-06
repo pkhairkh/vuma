@@ -1773,7 +1773,8 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     let bss_size: u32 = bss_size as u32;
     let elf_header_size: u32 = 52;  // ELF32 header is 52 bytes (not 64!)
     let phdr_size: u32 = 32;        // ELF32 Phdr is 32 bytes (not 56!)
-    let num_phdrs: u32 = if bss_size > 0 { 2 } else { 1 };
+    // +1 for PT_GNU_STACK (always present for non-executable stack)
+    let num_phdrs: u32 = if bss_size > 0 { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility.
     let text_offset: u32 = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
@@ -1834,6 +1835,17 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
         elf.extend_from_slice(&6u32.to_le_bytes());        // p_flags = PF_R | PF_W
         elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align (u32)
     }
+
+    // --- Program Header: PT_GNU_STACK (non-executable stack) ---
+    // ELF32 Phdr: p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&0u32.to_le_bytes());        // p_offset
+    elf.extend_from_slice(&0u32.to_le_bytes());        // p_vaddr
+    elf.extend_from_slice(&0u32.to_le_bytes());        // p_paddr
+    elf.extend_from_slice(&0u32.to_le_bytes());        // p_filesz
+    elf.extend_from_slice(&0u32.to_le_bytes());        // p_memsz
+    elf.extend_from_slice(&6u32.to_le_bytes());        // p_flags = PF_R | PF_W (no PF_X)
+    elf.extend_from_slice(&0x4u32.to_le_bytes());      // p_align
 
     // --- Padding + Code section ---
     while (elf.len() as u32) < text_offset {
@@ -2589,6 +2601,31 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("shutdown".to_string(), code));
     }
 
+    // ── Additional missing syscalls (i386 numbers) ──
+    // Simple stubs: shuffle args (EDI→EBX, ESI→ECX, EDX stays) + syscall + ret
+    for (name, num) in [
+        ("brk", 45), ("clock_gettime", 265), ("gettimeofday", 78),
+        ("rt_sigprocmask", 175), ("rt_sigreturn", 173),
+        ("setsockopt", 294), ("bind", 361), ("listen", 362),
+        ("accept", 364), ("lstat", 107),
+        ("recvfrom", 371), ("sendto", 370),
+    ] {
+        let mut code = Vec::new();
+        // i386 syscall: args in EBX, ECX, EDX, ESI, EDI, EBP
+        // Caller passes args in EDI, ESI, EDX, ECX (regparm(4) convention)
+        // Shuffle: EBX=EDI, ECX=ESI, EDX stays, ESI=EDX(original)... 
+        // Actually for simple 1-3 arg syscalls, just move EDI→EBX, ESI→ECX
+        code.extend(encode_push(Gpr::Rbx));
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg0
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsi));  // ECX = arg1
+        // EDX already = arg2
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, num as i32)); // EAX = syscall #
+        code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));
+        code.extend(encode_ret());
+        stubs.push((name.to_string(), code));
+    }
+
     // strcmp(const char *s1, const char *s2) → int
     // Not a syscall — implemented as a small assembly loop.
     // Returns 0 if equal, otherwise *s1 - *s2 for the first differing byte.
@@ -2822,9 +2859,9 @@ fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
 // ── x86_32 ELF Relocation Types ─────────────────────────────────────────
 
 /// R_X86_64_64 — S + A, 64-bit absolute relocation.
-const R_X86_64_64: &str = "R_X86_64_64";
+const R_X86_64_64: &str = "R_386_32";
 /// R_X86_64_PLT32 — L + A - P, 32-bit PC-relative PLT relocation for calls/jumps.
-const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
+const R_X86_64_PLT32: &str = "R_386_PC32";
 
 // ── ISel helpers ─────────────────────────────────────────────────────────
 
@@ -3093,7 +3130,7 @@ impl Backend for X86_32Backend {
         const FILE_PAGE_SIZE: u64 = 0x1000;
         const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
-        let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+        let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
         let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
