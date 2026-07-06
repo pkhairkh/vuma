@@ -11,6 +11,7 @@ use crate::mips64::Mips64Backend;
 use crate::ppc64::PPC64Backend;
 use crate::ppc64le::PPC64LEBackend;
 use crate::riscv64::RiscV64Backend;
+use crate::s390x::S390XBackend;
 use crate::sparc64::Sparc64Backend;
 use crate::x86_64::X86_64Backend;
 use std::collections::HashMap;
@@ -509,6 +510,8 @@ pub enum BackendKind {
     X86_32,
     /// SPARC V9 64-bit (sparc64).
     Sparc64,
+    /// IBM System Z 64-bit (s390x).
+    S390X,
 }
 
 impl BackendKind {
@@ -527,6 +530,7 @@ impl BackendKind {
             BackendKind::RiscV32 => "riscv32",
             BackendKind::X86_32 => "x86_32",
             BackendKind::Sparc64 => "sparc64",
+            BackendKind::S390X => "s390x",
         }
     }
 
@@ -543,7 +547,8 @@ impl BackendKind {
             BackendKind::AArch64 | BackendKind::X86_64 | BackendKind::RiscV64 |
             BackendKind::RiscV32 | BackendKind::X86_32 | BackendKind::LoongArch64 |
             BackendKind::Arm32 | BackendKind::Mips64 | BackendKind::Wasm32 |
-            BackendKind::PowerPC64 | BackendKind::PowerPC64LE | BackendKind::Sparc64 => BackendTier::Complete,
+            BackendKind::PowerPC64 | BackendKind::PowerPC64LE | BackendKind::Sparc64 |
+            BackendKind::S390X => BackendTier::Complete,
         }
     }
 }
@@ -3105,6 +3110,7 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::RiscV32 => Ok(Box::new(crate::riscv32::RiscV32Backend::new())),
         BackendKind::X86_32 => Ok(Box::new(crate::x86_32::X86_32Backend::new())),
         BackendKind::Sparc64 => Ok(Box::new(Sparc64Backend::new())),
+        BackendKind::S390X => Ok(Box::new(S390XBackend::new())),
     }
 }
 

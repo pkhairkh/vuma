@@ -21,6 +21,7 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
         "loongarch64" | "loongarch" => Ok(BackendKind::LoongArch64),
         "wasm32" | "wasm" => Ok(BackendKind::Wasm32),
         "sparc64" | "sparc" => Ok(BackendKind::Sparc64),
+        "s390x" | "s390" => Ok(BackendKind::S390X),
         _ => Err(format!("unknown backend: {}", name)),
     }
 }

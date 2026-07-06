@@ -138,6 +138,9 @@ const EM_LOONGARCH: u16 = 258;
 /// Machine type: ARM (32-bit).
 const EM_ARM: u16 = 40;
 
+/// Machine type: IBM S/390 (s390x).
+const EM_S390: u16 = 22;
+
 /// ELF type: executable.
 const ET_EXEC: u16 = 2;
 
@@ -4087,6 +4090,7 @@ fn em_machine_for_backend(backend: BackendKind) -> Result<u16> {
         BackendKind::LoongArch64 => Ok(EM_LOONGARCH),
         BackendKind::Arm32 => Ok(EM_ARM),
         BackendKind::Sparc64 => Ok(43), // EM_SPARCV9
+        BackendKind::S390X => Ok(EM_S390),
         BackendKind::Wasm32 => Err(CodegenError::ElfError(
             "Wasm32 does not use ELF format — use emit_wasm() instead".to_string(),
         )),
@@ -4111,6 +4115,7 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
         BackendKind::LoongArch64 => Ok(R_LARCH_B26),
         BackendKind::Arm32 => Ok(R_ARM_CALL),
         BackendKind::Sparc64 => Ok(30), // R_SPARC_WDISP30
+        BackendKind::S390X => Ok(23), // R_390_PC32DBL (PC-relative 32-bit doubleword / halfword)
         BackendKind::Wasm32 => {
             Err(CodegenError::ElfError(
                 "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
@@ -4861,6 +4866,7 @@ pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
         BackendKind::LoongArch64 => 8,
         BackendKind::Wasm32 => 4, // Wasm doesn't use ELF, but provide a default
         BackendKind::Sparc64 => 8,
+        BackendKind::S390X => 8,
     }
 }
 

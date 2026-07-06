@@ -406,6 +406,7 @@ impl DwarfBuilder {
             BackendKind::LoongArch64  => (8, 4),
             BackendKind::Wasm32       => (4, 1),
             BackendKind::Sparc64      => (8, 4),
+            BackendKind::S390X        => (8, 2), // 64-bit addresses, 2-byte min inst (RR format)
         };
         Self::with_config(addr_size, min_inst)
     }
@@ -632,6 +633,22 @@ impl DwarfBuilder {
                     code_alignment_factor: 4,
                     data_alignment_factor: -8,
                     return_address_reg: 31, // %i7
+                });
+            }
+            BackendKind::S390X => {
+                // s390x: %r15 = SP (reg 15), %r14 = return address (reg 14),
+                // %r11 = frame pointer (reg 11).  Instructions are 2-byte aligned
+                // (the shortest format, RR, is 2 bytes).
+                self.cie = Some(CommonInformationEntry {
+                    cfa_reg: 15,       // %r15 (SP)
+                    cfa_offset: 0,
+                    saved_regs: vec![
+                        SavedRegister { reg: 14, cfa_offset: -8 }, // %r14 (return address)
+                        SavedRegister { reg: 11, cfa_offset: -16 }, // %r11 (FP)
+                    ],
+                    code_alignment_factor: 2,
+                    data_alignment_factor: -8,
+                    return_address_reg: 14, // %r14
                 });
             }
         }
