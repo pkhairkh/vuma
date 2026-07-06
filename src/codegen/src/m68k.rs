@@ -1865,33 +1865,36 @@ fn build_m68k_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec
     elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
+    // ELF32 Phdr field order: p_type, p_offset, p_vaddr, p_paddr,
+    //   p_filesz, p_memsz, p_flags, p_align  (note: p_flags is 7th, NOT 2nd!)
+    // (ELF64 has p_flags at position 2, but ELF32 has it at position 7.)
     elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset
     elf.extend_from_slice(&(base_addr as u32).to_be_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr as u32).to_be_bytes()); // p_paddr
     elf.extend_from_slice(&((text_offset + text_size) as u32).to_be_bytes()); // p_filesz
     elf.extend_from_slice(&((text_offset + text_size) as u32).to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&(PAGE_SIZE as u32).to_be_bytes()); // p_align
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data ---
     elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset
     elf.extend_from_slice(&(data_vaddr as u32).to_be_bytes()); // p_vaddr
     elf.extend_from_slice(&(data_vaddr as u32).to_be_bytes()); // p_paddr
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_filesz
     elf.extend_from_slice(&(data_size as u32).to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&(PAGE_SIZE as u32).to_be_bytes()); // p_align
 
     // --- Program Header 3: PT_GNU_STACK ---
     elf.extend_from_slice(&0x6474e551u32.to_be_bytes()); // p_type = PT_GNU_STACK
-    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_vaddr
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_paddr
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_filesz
     elf.extend_from_slice(&0u32.to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&0x10u32.to_be_bytes()); // p_align
 
     // --- .text section ---

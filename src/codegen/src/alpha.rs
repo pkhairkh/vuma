@@ -294,14 +294,33 @@ impl Instruction {
 
 #[inline]
 fn op_reg(op: u32, ra: Gpr, rb: Gpr, rc: Gpr, function: u32) -> u32 {
+    // Alpha Operate format (register form):
+    //   bits 31-26: opcode (6 bits)
+    //   bits 25-21: ra (5 bits)
+    //   bits 20-16: rb (5 bits)
+    //   bit 15: 0 (register form)
+    //   bits 14-12: 000 (reserved)
+    //   bits 11-5: function (7 bits)
+    //   bits 4-0: rc (5 bits)
     (op << 26) | ((ra.encoding() as u32) << 21) | ((rb.encoding() as u32) << 16)
-        | ((rc.encoding() as u32) << 6) | (function & 0x3F)
+        | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
 }
 
 #[inline]
 fn op_lit(op: u32, ra: Gpr, lit: u8, rc: Gpr, function: u32) -> u32 {
-    (op << 26) | ((ra.encoding() as u32) << 21) | ((lit as u32 & 0xFF) << 13)
-        | (1u32 << 12) | ((rc.encoding() as u32) << 6) | (function & 0x3F)
+    // Alpha Operate format (literal form):
+    //   bits 31-26: opcode (6 bits)
+    //   bits 25-21: ra (5 bits)
+    //   bits 20-16: rb (5 bits)
+    //   bit 15: 1 (literal form)
+    //   bits 14-7: literal (8 bits)
+    //   bits 6-5: 00 (reserved)
+    //   bits 4-0: rc (5 bits)
+    // NOTE: literal form uses the SAME function field as register form (bits 11-5),
+    //   but bits 14-7 hold the literal instead of being zero. The function field
+    //   is still needed to distinguish sub-operations (e.g., BIS vs AND vs OR).
+    (op << 26) | ((ra.encoding() as u32) << 21) | (1u32 << 15)
+        | ((lit as u32 & 0xFF) << 7) | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
 }
 
 #[inline]
