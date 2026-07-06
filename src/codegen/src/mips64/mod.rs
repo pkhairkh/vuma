@@ -3441,8 +3441,8 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T2, rs: Gpr::Zero, rt: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop());
                     // OR T0, T0, T2 → (diff | -diff)
                     code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
-                    // DSRL T0, T0, 31 → 0 if diff==0, 1 if diff!=0
-                    code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 31 }.encode()); code.extend_from_slice(&encode_nop());
+                    // DSRL T0, T0, 63 → 0 if diff==0, 1 if diff!=0 (64-bit: bit 63 is sign bit)
+                    code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 63 }.encode()); code.extend_from_slice(&encode_nop());
                     // XORI T0, T0, 1 → invert: 1 if equal, 0 if not
                     code.extend_from_slice(&Instruction::Xori { rt: Gpr::T0, rs: Gpr::T0, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
                     code.extend(ss_sd(Gpr::T0, dst_off));
@@ -4908,7 +4908,7 @@ impl Backend for Mips64Backend {
                 // ── Additional POSIX syscall stubs (mips64 N64) ──
                 // File ops
                 ("lseek", 5048), ("stat", 5106), ("fstat", 5108),
-                ("kill", 5037), ("getcwd", 5183), ("chdir", 5012),
+                ("kill", 5137), ("getcwd", 5183), ("chdir", 5012),
                 ("ioctl", 5054), ("fcntl", 5055),
                 // Poll / sleep
                 ("poll", 5168), ("nanosleep", 5162),
@@ -4922,7 +4922,7 @@ impl Backend for Mips64Backend {
                 // Sockets (N64 generic numbers — bind/listen/accept/connect/
                 // setsockopt/shutdown).
                 ("connect", 5203), ("bind", 5200), ("listen", 5201),
-                ("accept", 5202), ("setsockopt", 5194), ("shutdown", 5210),
+                ("accept", 5202), ("setsockopt", 5195), ("shutdown", 5210),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

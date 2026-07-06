@@ -1807,7 +1807,7 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let num_phdrs: u64 = 2;
+    let num_phdrs: u64 = 3; // 2x LOAD + 1x PT_GNU_STACK
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
     // Page-align the text segment start in the file.  The kernel's ELF
     // loader mmap()s each LOAD segment, and the file offset must be
@@ -1847,7 +1847,7 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
+    elf.extend_from_slice(&3u16.to_le_bytes()); // e_phnum = 3 (2 LOAD + GNU_STACK)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
@@ -1871,6 +1871,16 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
     elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+
+    // --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W (no PF_X)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -2535,7 +2545,7 @@ impl Backend for AArch64Backend {
         // MOV X8, #93    — offset 8 (sys_exit_group = 93 on AArch64 Linux)
         // SVC #0         — offset 12
 
-        let start_stub_size: usize = 16; // 4 × 4-byte instructions
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions (LDR X0, ADD X1, BL, MOV X8, SVC)
         let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
 
@@ -2643,6 +2653,22 @@ impl Backend for AArch64Backend {
                 ("munmap", 215), ("exit", 94), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                // ── Additional POSIX syscall stubs (AArch64 generic ABI) ──
+                ("lseek", 62), ("stat", 80), ("fstat", 80),
+                ("kill", 129), ("getcwd", 17), ("chdir", 49),
+                ("ioctl", 73), ("fcntl", 72), ("connect", 203),
+                ("poll", 168), ("nanosleep", 101), ("mprotect", 226),
+                ("dup", 23), ("exit_group", 94),
+                ("recv", 207), ("send", 206), ("shutdown", 210),
+                ("bind", 200), ("listen", 201), ("accept", 202),
+                ("setsockopt", 194),
+                ("waitpid", 260),
+                ("brk", 214),
+                ("clock_gettime", 113),
+                ("gettimeofday", 169),
+                ("rt_sigprocmask", 135),
+                ("dup3", 24), ("lstat", 82),
+                ("recvfrom", 207), ("sendto", 206),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));
@@ -2776,14 +2802,27 @@ impl Backend for AArch64Backend {
         }
 
         // ── Build _start stub bytes ──
+        // _start: LDR X0, [SP]       ; argc from stack
+        //         ADD X1, SP, #8      ; argv = SP + 8
+        //         BL <main>           ; call main(argc, argv) — result in X0
+        //         MOV X8, #93         ; sys_exit_group
+        //         SVC #0              ; syscall
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions
+        let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
+        let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
-        // BL <main> — placeholder, will be patched
+        // LDR X0, [SP] — load argc from stack pointer
+        // LDR X0, [SP] = 0xF94003E0
+        start_stub.extend_from_slice(&0xF94003E0u32.to_le_bytes());
+
+        // ADD X1, SP, #8 — argv = SP + 8
+        // ADD X1, SP, #8 = 0x910023E1
+        start_stub.extend_from_slice(&0x910023E1u32.to_le_bytes());
+
+        // BL <main> — placeholder, will be patched (at offset 8 within start_stub)
         // BL encoding: 1 0 0 1 0 1 imm26
         start_stub.extend_from_slice(&0x94000000u32.to_le_bytes()); // BL #0
-
-        // NOP (MOV X0, X0)
-        start_stub.extend_from_slice(&0xAA0003E0u32.to_le_bytes()); // MOV X0, X0
 
         // MOV X8, #93 (sys_exit_group)
         // MOVZ X8, #93 = 0xD2800BA8
@@ -2801,14 +2840,14 @@ impl Backend for AArch64Backend {
             // BL offset = (target - pc) / 4, where pc = address of BL instruction
             // BL is at offset 0 within all_code, but in the final binary it's at
             // start_stub_size_into_elf = text_offset_in_elf.
-            // For the BL encoding, imm26 = (target - bl_addr) / 4
-            // bl_addr = 0 (relative to start of all_code = _start)
-            // target = main_offset (relative to start of all_code)
-            let bl_offset = (main_offset as i64) / 4;
+            // BL is at byte offset 8 within start_stub (after LDR X0 and ADD X1).
+            // BL offset = (target - bl_addr) / 4, where bl_addr = 8.
+            let bl_offset = ((main_offset as i64) - 8) / 4;
             // Mask to 26 bits (signed)
             let imm26 = (bl_offset as u32) & 0x03FFFFFF;
             let bl_word: u32 = 0x94000000 | imm26;
-            start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
+            // BL is at byte offset 8 within start_stub (after LDR X0 and ADD X1)
+            start_stub[8..12].copy_from_slice(&bl_word.to_le_bytes());
         }
 
         // ── Add FFI return-0 stub ──
