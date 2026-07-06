@@ -826,7 +826,7 @@ fn emit_instr(
             // Encode: ANDI.L #imm32, Dn — word0 = 0x02BC | (Dn<<9), then 4-byte imm32.
             // Actually: ANDI.L #imm, Dn: word = 0x02BC | (Dn<<9), then 4-byte imm.
             {
-                let w = 0x02BCu16 | ((S0.encoding() as u16 & 0x7) << 9);
+                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
                 code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
             }
@@ -1185,7 +1185,7 @@ fn emit_instr(
             code.extend_from_slice(&w.to_be_bytes());
             // ANDI.L #1, S0: 0x02BC | (S0<<9), imm32 = 1.
             {
-                let w = 0x02BCu16 | ((S0.encoding() as u16 & 0x7) << 9);
+                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
                 code.extend_from_slice(&1u32.to_be_bytes());
             }
@@ -1289,7 +1289,7 @@ fn emit_binop(
             code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Swap { dst: S0 }.encode());
             {
-                let w = 0x02BCu16 | ((S0.encoding() as u16 & 0x7) << 9);
+                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
                 code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
             }
@@ -1301,7 +1301,7 @@ fn emit_binop(
             code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
             // Remainder is in lower 16 bits after DIVU.W.
             {
-                let w = 0x02BCu16 | ((S0.encoding() as u16 & 0x7) << 9);
+                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
                 code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
             }
@@ -1382,7 +1382,7 @@ fn emit_binop(
             code.extend_from_slice(&w.to_be_bytes());
             // Scc sets byte to 0xFF (true) or 0x00 (false).  AND.L #1 to get 1 or 0.
             {
-                let w = 0x02BCu16 | ((S0.encoding() as u16 & 0x7) << 9);
+                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
                 code.extend_from_slice(&1u32.to_be_bytes());
             }
