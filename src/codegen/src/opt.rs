@@ -1122,6 +1122,7 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
         let f = constant_fold(f);
         let f = cse(f);
+        let f = equality_saturation(f);    // Wave 2: e-graph pass
         let f = dead_code_eliminate(f);
         let f = inline_small(f, &func_refs);
         let f = licm(f);
@@ -1131,6 +1132,82 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
     }
 
     program
+}
+
+/// Equality saturation pass (Wave 2).
+///
+/// Builds an e-graph from the function's IR, applies rewrite rules to
+/// discover equivalences, then extracts the cheapest form for each
+/// expression. Currently handles BinOp instructions with constant or
+/// register operands.
+pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
+    use crate::egraph::{EGraph, ENode, RewriteRule, default_cost, standard_rules};
+
+    let rules = standard_rules();
+
+    for block in &mut func.blocks {
+        // Build e-graph for this block.
+        let mut eg = EGraph::new();
+        let mut vreg_to_eclass: HashMap<u32, crate::egraph::EClassId> = HashMap::new();
+
+        // First pass: add all nodes to the e-graph.
+        for instr in &block.instructions {
+            if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
+                let lhs_node = value_to_enode(lhs, &vreg_to_eclass);
+                let rhs_node = value_to_enode(rhs, &vreg_to_eclass);
+                let lhs_id = eg.add(lhs_node);
+                let rhs_id = eg.add(rhs_node);
+                let binop_node = ENode::BinOp(*op, lhs_id, rhs_id);
+                let binop_id = eg.add(binop_node);
+                if let Some(dst_id) = dst.as_register() {
+                    vreg_to_eclass.insert(dst_id, binop_id);
+                }
+            }
+        }
+
+        // Apply rewrite rules.
+        eg.saturate(&rules, 10);
+
+        // Second pass: extract cheapest form for each BinOp.
+        for instr in &mut block.instructions {
+            if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
+                if let Some(dst_id) = dst.as_register() {
+                    if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                        let best = eg.extract(class_id, &default_cost);
+                        match best {
+                            ENode::Lit(val) => {
+                                // Replace the BinOp with a constant: change
+                                // lhs to the literal and rhs to 0, op to Add.
+                                // The constant_fold pass will then simplify it.
+                                *lhs = IRValue::Immediate(val);
+                                *rhs = IRValue::Immediate(0);
+                                *op = BinOpKind::Add;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func
+}
+
+/// Convert an IRValue to an ENode for the e-graph.
+fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId>) -> crate::egraph::ENode {
+    use crate::egraph::ENode;
+    match val {
+        IRValue::Immediate(v) => ENode::Lit(*v),
+        IRValue::Register(id) => {
+            if let Some(&class_id) = vreg_map.get(id) {
+                ENode::VReg(class_id)
+            } else {
+                ENode::Lit(0) // Unknown register — treat as 0 for safety
+            }
+        }
+        _ => ENode::Lit(0),
+    }
 }
 
 // ===========================================================================
