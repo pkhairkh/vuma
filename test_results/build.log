@@ -189,63 +189,57 @@ warning: unused variable: `word`
     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_word`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:376:47
+   --> src/codegen/src/hppa.rs:697:36
     |
-376 | fn encode_shladd(shift: u8, r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
-    |                                               ^^^ help: if this is intentional, prefix it with an underscore: `_dst`
-
-warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:690:36
-    |
-690 |                     IRInstr::Add { dst, lhs, rhs, ty: _ } => {
+697 |                     IRInstr::Add { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:696:36
+   --> src/codegen/src/hppa.rs:703:36
     |
-696 |                     IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
+703 |                     IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:702:36
+   --> src/codegen/src/hppa.rs:709:36
     |
-702 |                     IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
+709 |                     IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:770:36
+   --> src/codegen/src/hppa.rs:750:36
     |
-770 |                     IRInstr::Div { dst, lhs, rhs, ty: _ } => {
+750 |                     IRInstr::Div { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:818:42
+   --> src/codegen/src/hppa.rs:780:42
     |
-818 |                     IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+780 |                     IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
     |                                          ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `lhs`
-    --> src/codegen/src/hppa.rs:1190:42
+    --> src/codegen/src/hppa.rs:1213:42
      |
-1190 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1213 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                          ^^^ help: try ignoring the field: `lhs: _`
 
 warning: unused variable: `rhs`
-    --> src/codegen/src/hppa.rs:1190:47
+    --> src/codegen/src/hppa.rs:1213:47
      |
-1190 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1213 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                               ^^^ help: try ignoring the field: `rhs: _`
 
 warning: unused variable: `load_instr`
-    --> src/codegen/src/hppa.rs:1197:29
+    --> src/codegen/src/hppa.rs:1220:29
      |
-1197 |                         let load_instr = IRInstr::Load {
+1220 |                         let load_instr = IRInstr::Load {
      |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_instr`
 
 warning: unused variable: `store_instr`
-    --> src/codegen/src/hppa.rs:1208:29
+    --> src/codegen/src/hppa.rs:1231:29
      |
-1208 |                         let store_instr = IRInstr::Store {
+1231 |                         let store_instr = IRInstr::Store {
      |                             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_store_instr`
 
 warning: unused variable: `data_offset`
@@ -903,27 +897,27 @@ warning: unused variable: `ty`
      |                                                                          ^^ help: try ignoring the field: `ty: _`
 
 warning: unused variable: `phi_map`
-    --> src/codegen/src/sparc64.rs:1851:9
+    --> src/codegen/src/sparc64.rs:1854:9
      |
-1851 |     let phi_map = func.build_phi_map();
+1854 |     let phi_map = func.build_phi_map();
      |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_phi_map`
 
 warning: unused variable: `blk_idx`
-    --> src/codegen/src/sparc64.rs:1925:10
+    --> src/codegen/src/sparc64.rs:1928:10
      |
-1925 |     for (blk_idx, block) in func.blocks.iter().enumerate() {
+1928 |     for (blk_idx, block) in func.blocks.iter().enumerate() {
      |          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blk_idx`
 
 warning: unused variable: `bne_off`
-    --> src/codegen/src/sparc64.rs:3384:17
+    --> src/codegen/src/sparc64.rs:3382:17
      |
-3384 |             let bne_off = code.len();
+3382 |             let bne_off = code.len();
      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bne_off`
 
 warning: value assigned to `stub_offset` is never read
-    --> src/codegen/src/sparc64.rs:4667:9
+    --> src/codegen/src/sparc64.rs:4665:9
      |
-4667 |         stub_offset += print_hex_stub.len();
+4665 |         stub_offset += print_hex_stub.len();
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -1012,16 +1006,10 @@ warning: function `swap_u64` is never used
    |    ^^^^^^^^
 
 warning: constant `SP` is never used
-   --> src/codegen/src/m68k.rs:377:7
+   --> src/codegen/src/m68k.rs:379:7
     |
-377 | const SP: Gpr = Gpr::A7;
+379 | const SP: Gpr = Gpr::A7;
     |       ^^
-
-warning: constant `R1` is never used
-  --> src/codegen/src/hppa.rs:41:7
-   |
-41 | const R1: Reg = 1;   // RP (return pointer)
-   |       ^^
 
 warning: constant `R4` is never used
   --> src/codegen/src/hppa.rs:44:7
@@ -1046,12 +1034,6 @@ warning: constant `R7` is never used
    |
 47 | const R7: Reg = 7;
    |       ^^
-
-warning: constant `R12` is never used
-  --> src/codegen/src/hppa.rs:52:7
-   |
-52 | const R12: Reg = 12;
-   |       ^^^
 
 warning: constant `R13` is never used
   --> src/codegen/src/hppa.rs:53:7
@@ -1113,12 +1095,6 @@ warning: constant `R31` is never used
 71 | const R31: Reg = 31; // Link register target for BL
    |       ^^^
 
-warning: constant `S4` is never used
-  --> src/codegen/src/hppa.rs:78:7
-   |
-78 | const S4: Reg = R12;
-   |       ^^
-
 warning: function `encode_bl` is never used
    --> src/codegen/src/hppa.rs:105:4
     |
@@ -1156,9 +1132,9 @@ warning: function `encode_addi` is never used
     |    ^^^^^^^^^^^
 
 warning: function `emit_forward_branch` is never used
-   --> src/codegen/src/hppa.rs:520:4
+   --> src/codegen/src/hppa.rs:527:4
     |
-520 | fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
+527 | fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     |    ^^^^^^^^^^^^^^^^^^^
 
 warning: constant `DW_CFA_ADVANCE_LOC` is never used
@@ -1923,15 +1899,15 @@ warning: constant `COND_BVS` is never used
     |       ^^^^^^^^
 
 warning: function `ss_ld_typed` is never used
-    --> src/codegen/src/sparc64.rs:1501:4
+    --> src/codegen/src/sparc64.rs:1504:4
      |
-1501 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+1504 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
      |    ^^^^^^^^^^^
 
 warning: function `ss_st_typed` is never used
-    --> src/codegen/src/sparc64.rs:1634:4
+    --> src/codegen/src/sparc64.rs:1637:4
      |
-1634 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+1637 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
      |    ^^^^^^^^^^^
 
 warning: function `skip_leb128` is never used
@@ -2034,6 +2010,7 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
+warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
@@ -2214,7 +2191,6 @@ warning: missing documentation for a macro
 250 | macro_rules! log_trace {
     | ^^^^^^^^^^^^^^^^^^^^^^
 
-warning: `vuma-cor` (lib) generated 1 warning
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
-warning: `vuma-codegen` (lib) generated 293 warnings (run `cargo fix --lib -p vuma-codegen` to apply 75 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 50.87s
+warning: `vuma-codegen` (lib) generated 289 warnings (run `cargo fix --lib -p vuma-codegen` to apply 74 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 38.78s
