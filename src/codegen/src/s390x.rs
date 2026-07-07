@@ -211,14 +211,18 @@ const SCRATCH_REGS: [Gpr; 8] = [
 ];
 
 /// Common scratch register aliases (mirroring sparc64's L0–L7 naming).
-const S0: Gpr = Gpr::R0;
-const S1: Gpr = Gpr::R1;
-const S2: Gpr = Gpr::R2;
-const S3: Gpr = Gpr::R3;
-const S4: Gpr = Gpr::R4;
-const S5: Gpr = Gpr::R5;
-const S6: Gpr = Gpr::R6;
-const S7: Gpr = Gpr::R7;
+/// IMPORTANT: On s390x, R0 in the base or index register field of a memory
+/// instruction means "no register" (0 contribution), NOT "use R0's value".
+/// Therefore S0 must NOT be R0 — use R6 instead so it can serve as a base
+/// register in memory operations (STG, LG, STC, etc.).
+const S0: Gpr = Gpr::R6;
+const S1: Gpr = Gpr::R7;
+const S2: Gpr = Gpr::R8;
+const S3: Gpr = Gpr::R9;
+const S4: Gpr = Gpr::R10;
+const S5: Gpr = Gpr::R12;
+const S6: Gpr = Gpr::R0;  // R0 can be used for non-base-register purposes
+const S7: Gpr = Gpr::R1;
 
 /// Frame pointer (R11).
 const FP: Gpr = Gpr::R11;
