@@ -1,23 +1,13 @@
 {
-  "timestamp": "2026-07-07 19:32:39 UTC",
+  "timestamp": "2026-07-07 20:23:55 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
-  "matches": 105641,
+  "matches": 108646,
   "skipped": 1,
-  "pass_rate": "96.78%",
+  "pass_rate": "99.53%",
   "per_backend": {
     "aarch64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "x86_64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "mips64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -27,7 +17,17 @@
       "match": 5745,
       "skipped": 0
     },
-    "ppc64": {
+    "mips64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "aarch64_be": {
+      "total": 5745,
+      "match": 5741,
+      "skipped": 0
+    },
+    "x86_64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -35,11 +35,6 @@
     "mips64be": {
       "total": 5745,
       "match": 5738,
-      "skipped": 0
-    },
-    "aarch64_be": {
-      "total": 5745,
-      "match": 5741,
       "skipped": 0
     },
     "arm32": {
@@ -52,22 +47,12 @@
       "match": 5741,
       "skipped": 0
     },
-    "ppc64le": {
+    "ppc64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
     },
-    "sparc64": {
-      "total": 5745,
-      "match": 5344,
-      "skipped": 0
-    },
-    "hppa": {
-      "total": 5745,
-      "match": 5016,
-      "skipped": 0
-    },
-    "riscv32": {
+    "ppc64le": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -77,24 +62,39 @@
       "match": 5745,
       "skipped": 0
     },
+    "m68k": {
+      "total": 5745,
+      "match": 5675,
+      "skipped": 0
+    },
+    "hppa": {
+      "total": 5745,
+      "match": 5626,
+      "skipped": 0
+    },
+    "riscv32": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
     "x86_32": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
     },
-    "m68k": {
+    "alpha": {
       "total": 5745,
-      "match": 4616,
+      "match": 5650,
+      "skipped": 0
+    },
+    "sparc64": {
+      "total": 5745,
+      "match": 5680,
       "skipped": 0
     },
     "s390x": {
       "total": 5745,
-      "match": 5128,
-      "skipped": 0
-    },
-    "alpha": {
-      "total": 5745,
-      "match": 5122,
+      "match": 5600,
       "skipped": 0
     },
     "wasm32": {
