@@ -4777,12 +4777,22 @@ pub fn emit_binary(
     data_sections: &[DataSection],
     config: &EmitConfig,
 ) -> Result<Vec<u8>> {
+    // Run IR-level optimizations before codegen.
+    // This is the production path — pipeline.rs calls emit_binary directly.
+    let mut ir_program = IRProgram {
+        functions: functions.to_vec(),
+        data_sections: data_sections.to_vec(),
+    };
+    ir_program = crate::opt::run_optimizations(ir_program);
+    let opt_functions = &ir_program.functions;
+    let opt_data = &ir_program.data_sections;
+
     match config.format {
         OutputFormat::ELF | OutputFormat::Obj => {
-            emit_elf(functions, data_sections, config)
+            emit_elf(opt_functions, opt_data, config)
         }
-        OutputFormat::Raw => emit_raw(functions, data_sections, config),
-        OutputFormat::Wasm => emit_wasm(functions, data_sections, config),
+        OutputFormat::Raw => emit_raw(opt_functions, opt_data, config),
+        OutputFormat::Wasm => emit_wasm(opt_functions, opt_data, config),
     }
 }
 
