@@ -315,6 +315,79 @@ pub fn target_cost_fn(latency_table: &crate::target_desc::LatencyTable)
     })
 }
 
+/// Profile-guided cost function factory (Wave 12).
+///
+/// Creates a cost function that combines target latency with profile
+/// weights. Hot expressions (high execution count) get lower cost,
+/// encouraging the e-graph to pick optimized forms for hot paths.
+/// Cold expressions get higher cost, allowing more expensive forms
+/// that might reduce code size.
+///
+/// When no profile data is available, falls back to target_cost_fn.
+pub fn pgo_cost_fn(
+    latency_table: &crate::target_desc::LatencyTable,
+    profile: &ProfileData,
+) -> Box<dyn Fn(&ENode) -> usize> {
+    let lt = latency_table.clone();
+    let prof = profile.clone();
+    Box::new(move |node: &ENode| -> usize {
+        let base_cost = match node {
+            ENode::Lit(_) => 1,
+            ENode::VReg(vreg_id) => {
+                // Hot vregs get lower cost (prefer keeping them)
+                let hotness = prof.vreg_hotness(*vreg_id);
+                10 / (1 + hotness as usize)
+            }
+            ENode::BinOp(op, lhs, rhs) => {
+                let category = match op {
+                    BinOpKind::Add | BinOpKind::Sub => "arithmetic",
+                    BinOpKind::Mul => "multiply",
+                    BinOpKind::UDiv | BinOpKind::SDiv => "divide",
+                    BinOpKind::SRem | BinOpKind::URem => "divide",
+                    BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => "logical",
+                    BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => "shift",
+                    _ => "arithmetic",
+                };
+                let (latency, _, _) = lt.lookup(category);
+                let op_hotness = prof.vreg_hotness(*lhs).max(prof.vreg_hotness(*rhs));
+                // Hot operations: prefer cheaper form (lower cost)
+                // Cold operations: accept expensive form (higher cost = less likely extracted)
+                let base = (latency as usize) * 100;
+                base / (1 + op_hotness as usize)
+            }
+        };
+        base_cost.max(1) // Never return 0
+    })
+}
+
+/// Profile data for PGO (Wave 12).
+///
+/// Collected from instrumented runs. Maps vreg IDs to execution counts.
+/// Used by pgo_cost_fn to bias e-graph extraction toward hot-path optimization.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileData {
+    /// Map from vreg/e-class ID to execution count.
+    pub hotness: std::collections::HashMap<EClassId, u32>,
+}
+
+impl ProfileData {
+    /// Creates empty profile data (no PGO).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates profile data from a hotness map.
+    pub fn from_hotness(hotness: std::collections::HashMap<EClassId, u32>) -> Self {
+        Self { hotness }
+    }
+
+    /// Returns the hotness (execution count) of a vreg/e-class.
+    /// 0 = cold/unknown, higher = hotter.
+    pub fn vreg_hotness(&self, id: EClassId) -> u32 {
+        self.hotness.get(&id).copied().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
