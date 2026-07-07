@@ -1142,6 +1142,11 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
     program = whole_program_dce(program);           // Wave 11/14: unreachable function elimination
     program = identical_function_merge(program);     // Wave 14: ICF via structural equality
 
+    // ── Wave 13: Autovectorization (loop unrolling for now) ──
+    for func in &mut program.functions {
+        *func = crate::vectorize::vectorize_function(std::mem::replace(func, IRFunction::new("__tmp__")));
+    }
+
     program
 }
 
