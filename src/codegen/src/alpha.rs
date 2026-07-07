@@ -381,11 +381,14 @@ impl fmt::Display for Instruction {
 // Scratch registers + frame pointer + stack pointer
 // ===========================================================================
 
-const S0: Gpr = Gpr::R1;  // T0
-const S1: Gpr = Gpr::R2;  // T1
-const S2: Gpr = Gpr::R3;  // T2
-const S3: Gpr = Gpr::R8;  // T7
-const S4: Gpr = Gpr::R9;  // T8 (extra scratch for division)
+const S0: Gpr = Gpr::R1;  // T0 (caller-saved)
+const S1: Gpr = Gpr::R2;  // T1 (caller-saved)
+const S2: Gpr = Gpr::R3;  // T2 (caller-saved)
+const S3: Gpr = Gpr::R8;  // T7 (caller-saved)
+// S4 was R9 (callee-saved per the Alpha ABI documented above) — using it as
+// scratch without saving corrupted the caller's R9. Moved to R22 (T8,
+// caller-saved / volatile).
+const S4: Gpr = Gpr::R22; // T8 (caller-saved, extra scratch for division)
 const FP: Gpr = Gpr::R15; // FP
 const SP: Gpr = Gpr::R30; // SP
 const RA: Gpr = Gpr::R26; // RA
@@ -1067,24 +1070,38 @@ fn emit_binop(
         BinOpKind::UDiv | BinOpKind::SDiv => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // Alpha has NO hardware integer divide. Emit a simple
-            // subtract-and-count loop: quotient = 0; while (S0 >= S1)
-            // { S0 -= S1; quotient++; } S0 = quotient.
-            // Uses S2=quotient, S3=temp for compare.
-            // ADDQ ZERO, ZERO, S2 (quotient = 0)
-            code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode());
-            // CMPULT S0, S1, S3 (S3 = 1 if S0 < S1, i.e., done)
-            code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes());
-            // BNE S3, +4 (skip 3 instructions: SUBQ+ADDQLI+BR)
-            code.extend_from_slice(&op_br(0x3D, S3, 3).to_le_bytes());
-            // SUBQ S0, S1, S0
-            code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
-            // ADDQ S2, 1, S2 (quotient++)
-            code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
-            // BR ZERO, -4 (back to CMPULT)
-            code.extend_from_slice(&op_br(0x30, ZERO, -5).to_le_bytes());
-            // OR S2, ZERO, S0 (S0 = quotient)
-            code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode());
+            if matches!(op, BinOpKind::SDiv) {
+                // Signed division: take absolute values, divide unsigned,
+                // then negate the quotient if operand signs differ.
+                // S4 holds the result-sign mask (0 = positive, -1 = negative).
+                code.extend(Instruction::AddqLi { ra: ZERO, lit: 63, rc: S2 }.encode()); // S2 = 63
+                code.extend(Instruction::Sra { ra: S0, rb: S2, rc: S3 }.encode()); // S3 = lhs >> 63
+                code.extend(Instruction::Sra { ra: S1, rb: S2, rc: S4 }.encode()); // S4 = rhs >> 63
+                // |x| via XOR+SUB trick: XOR x,sign,x; SUBQ x,sign,x.
+                code.extend_from_slice(&op_reg(0x11, S0, S3, S0, 0x40).to_le_bytes()); // XOR S0,S3,S0
+                code.extend(Instruction::Subq { ra: S0, rb: S3, rc: S0 }.encode()); // S0 -= S3
+                code.extend_from_slice(&op_reg(0x11, S1, S4, S1, 0x40).to_le_bytes()); // XOR S1,S4,S1
+                code.extend(Instruction::Subq { ra: S1, rb: S4, rc: S1 }.encode()); // S1 -= S4
+                // S4 = sign(lhs) ^ sign(rhs) = result sign.
+                code.extend_from_slice(&op_reg(0x11, S3, S4, S4, 0x40).to_le_bytes()); // S4 = S3 ^ S4
+            }
+            // Unsigned division loop: S0 / S1 -> S2.
+            // S2 = 0 (quotient); loop: CMPULT S0,S1,S3; BNE S3,exit;
+            //   SUBQ S0,S1,S0; ADDQLI S2,1,S2; BR loop.
+            // CMPULT writes S3 only; S0 (dividend) and S1 (divisor) survive.
+            code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode()); // S2 = 0
+            code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes()); // CMPULT S0,S1,S3
+            code.extend_from_slice(&op_br(0x3D, S3, 3).to_le_bytes()); // BNE S3, +3 (exit)
+            code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode()); // S0 -= S1
+            code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode()); // S2++
+            code.extend_from_slice(&op_br(0x30, ZERO, -5).to_le_bytes()); // BR -4 (loop)
+            // exit: S0 = quotient
+            code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode()); // S0 = S2
+            if matches!(op, BinOpKind::SDiv) {
+                // If S4 (result sign) != 0, negate S0 via XOR+SUB trick.
+                code.extend_from_slice(&op_reg(0x11, S0, S4, S0, 0x40).to_le_bytes()); // XOR S0,S4,S0
+                code.extend(Instruction::Subq { ra: S0, rb: S4, rc: S0 }.encode()); // S0 -= S4
+            }
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::SRem | BinOpKind::URem => {

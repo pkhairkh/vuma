@@ -69,7 +69,7 @@ impl PPC64LEBackend {
     /// Create a new ppc64le backend.
     pub fn new() -> Self {
         Self {
-            inner: PPC64Backend::new(),
+            inner: PPC64Backend::new_le(),
         }
     }
 }

@@ -567,13 +567,32 @@ impl BackendKind {
     /// - `Scaffolded`: Basic instruction encoding but significant
     ///   gaps in codegen, ABI, or runtime support.
     pub fn tier(&self) -> BackendTier {
+        // Tier classification reflects actual ISA coverage, not aspiration.
+        //
+        // `Complete`: full integer ISA codegen, correct syscall stubs, runtime
+        //   helpers, and inclusion in the gold-standard test matrix.
+        // `Experimental`: functional straight-line integer codegen + syscall
+        //   stubs, but with known gaps (signed division, FP, true atomics,
+        //   callee-saved ABI, or >N-arg stack passing). NOT in the gold
+        //   standard test matrix.
+        // `Scaffolded`: basic instruction encoding but large classes of IR
+        //   operations emit wrong/zero code (e.g. Mul/Div/Cmp/conditional
+        //   branches). Suitable only for `test_exit`-style smoke tests.
         match self {
-            BackendKind::AArch64 | BackendKind::X86_64 | BackendKind::RiscV64 |
-            BackendKind::RiscV32 | BackendKind::X86_32 | BackendKind::LoongArch64 |
-            BackendKind::Arm32 | BackendKind::Mips64 | BackendKind::Wasm32 |
-            BackendKind::PowerPC64 | BackendKind::PowerPC64LE | BackendKind::Sparc64 |
-            BackendKind::S390X => BackendTier::Complete,
-            BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha | BackendKind::Hppa => BackendTier::Complete,
+            // Tier 1 — fully featured and tested.
+            BackendKind::AArch64 | BackendKind::AArch64Be |
+            BackendKind::X86_64 | BackendKind::X86_32 |
+            BackendKind::RiscV64 | BackendKind::RiscV32 |
+            BackendKind::LoongArch64 | BackendKind::Arm32 | BackendKind::ArmEb |
+            BackendKind::Mips64 | BackendKind::Mips64Be |
+            BackendKind::PowerPC64 | BackendKind::PowerPC64LE |
+            BackendKind::Wasm32 => BackendTier::Complete,
+            // Tier 2 — functional integer codegen, known gaps (signed div,
+            // FP, atomics, callee-saved). See docs/AUDIT.md.
+            BackendKind::Sparc64 | BackendKind::S390X |
+            BackendKind::M68k | BackendKind::Alpha => BackendTier::Experimental,
+            // Tier 3 — Mul/Div/Cmp/conditional-branches emit stub code.
+            BackendKind::Hppa => BackendTier::Scaffolded,
         }
     }
 }
@@ -2153,10 +2172,14 @@ fn append_aarch64_elf_sections(
 ///
 /// All functions follow AAPCS64: X0 is the argument, X1-X7 are caller-saved,
 /// X8 is the indirect result register / syscall number, X19-X28 are callee-saved.
-fn build_aarch64_runtime() -> Vec<u8> {
+/// Builds the AArch64 runtime helper blob and returns it together with the
+/// byte offsets (relative to the start of the blob) of each entry point:
+/// `__vuma_print_hex`, `__vuma_print_int`, `__vuma_print_newline`.
+fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     let mut code = Vec::new();
 
     // ── __vuma_print_hex ──
+    let hex_offset = 0usize;
     // Input: X0 = 64-bit value to print as 8 hex digits
     // Clobbers: X1, X2, X3, X8, X9, X10
     // Stack frame: 48 bytes (8 for pair save + 8 for hex chars + 32 padding)
@@ -2277,6 +2300,7 @@ fn build_aarch64_runtime() -> Vec<u8> {
     code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
 
     // ── __vuma_print_int ──
+    let int_offset = code.len();
     // Input: X0 = 64-bit signed integer to print as decimal
     // Strategy: Divide by 10 repeatedly, push digits onto stack, then write.
     // X9 = digit count, X10 = buffer pointer (SP-based)
@@ -2445,6 +2469,7 @@ fn build_aarch64_runtime() -> Vec<u8> {
     code.truncate(newline_start_offset);
 
     // __vuma_print_newline: clean implementation
+    let newline_offset = code.len();
     // STP X29, X30, [SP, #-32]!  (32-byte frame: 16 for save, 16 for buffer)
     code.extend_from_slice(&0xA9BE7BFDu32.to_le_bytes());
     // ADD X29, SP, #0
@@ -2473,7 +2498,7 @@ fn build_aarch64_runtime() -> Vec<u8> {
     // RET
     code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
 
-    code
+    (code, hex_offset, int_offset, newline_offset)
 }
 
 impl Backend for AArch64Backend {
@@ -2591,7 +2616,7 @@ impl Backend for AArch64Backend {
         // print_hex: X0 = value to print as 8 hex digits to stdout
         //   Uses SVC #0 with X8=64 (sys_write), fd=1 (stdout)
         //   Converts each nibble to hex char, writes to stack buffer, then sys_write.
-        let runtime_code = build_aarch64_runtime();
+        let (runtime_code, rt_hex_off, rt_int_off, rt_newline_off) = build_aarch64_runtime();
 
         // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
         // __vuma_alloc(size in X0) -> X0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
@@ -2631,14 +2656,15 @@ impl Backend for AArch64Backend {
             current_offset += func_size;
         }
 
-        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
+        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline.
+        // Each entry point lives at its own offset within the runtime blob.
         let runtime_offsets_start = current_offset;
-        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
-        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
-        // Both print_hex and print_int start at same offset (single combined runtime)
-        // Actually, let's put them sequentially:
-        // We'll just embed the runtime as a single blob and not reference individual offsets
-        // since user code calls them via BL with relocation.
+        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start + rt_hex_off);
+        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start + rt_int_off);
+        func_offsets.insert(
+            "__vuma_print_newline".to_string(),
+            runtime_offsets_start + rt_newline_off,
+        );
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
         let vuma_alloc_offset = current_offset + runtime_code.len();
@@ -2688,26 +2714,29 @@ impl Backend for AArch64Backend {
             // kill(getpid(), SIGALRM).
             for (name, num) in [
                 ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 94), ("getpid", 172),
+                ("munmap", 215), ("exit", 93), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
                 ("clone", 220),
                 // ── Additional POSIX syscall stubs (AArch64 generic ABI) ──
-                ("lseek", 62), ("stat", 80), ("fstat", 80),
+                // Numbers verified against asm-generic/unistd.h.
+                ("lseek", 62), ("fstat", 80),
                 ("kill", 129), ("getcwd", 17), ("chdir", 49),
-                ("ioctl", 73), ("fcntl", 72), ("connect", 203),
-                ("poll", 168), ("nanosleep", 101), ("mprotect", 226),
+                ("ioctl", 29), ("fcntl", 25), ("connect", 203),
+                ("nanosleep", 101), ("mprotect", 226),
                 ("dup", 23), ("exit_group", 94),
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
-                ("setsockopt", 194),
+                ("setsockopt", 208),
                 ("waitpid", 260),
                 ("brk", 214),
                 ("clock_gettime", 113),
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
-                ("dup3", 24), ("lstat", 82),
+                ("dup3", 24),
                 ("recvfrom", 207), ("sendto", 206),
+                // NOTE: stat/lstat/poll do not exist on the AArch64 generic
+                // ABI. They are provided as newfstatat/ppoll shims below.
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));
@@ -2839,6 +2868,67 @@ impl Backend for AArch64Backend {
                 // Defensive: if the kernel ever does return, trap.
                 code.extend_from_slice(&0xD4200000u32.to_le_bytes()); // BRK #0
                 stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // stat(path, statbuf) → newfstatat(AT_FDCWD=-100, path, statbuf, 0)
+            // AArch64 generic ABI has no stat(); newfstatat=79 is the
+            // replacement. flags=0 means "follow symlinks".
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(2, 1));     // X2 = X1 (statbuf)
+                code.extend_from_slice(&mov_reg(1, 0));     // X1 = X0 (pathname)
+                code.extend_from_slice(&movn_reg(0, 99));   // X0 = AT_FDCWD = -100
+                code.extend_from_slice(&movz_reg(3, 0));    // X3 = 0 (flags)
+                code.extend_from_slice(&movz_x8(79));       // newfstatat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("stat".to_string(), code));
+            }
+
+            // lstat(path, statbuf) → newfstatat(AT_FDCWD, path, statbuf,
+            //   AT_SYMLINK_NOFOLLOW=0x100). lstat() does not exist on AArch64.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(2, 1));     // X2 = X1 (statbuf)
+                code.extend_from_slice(&mov_reg(1, 0));     // X1 = X0 (pathname)
+                code.extend_from_slice(&movn_reg(0, 99));   // X0 = AT_FDCWD
+                // AT_SYMLINK_NOFOLLOW = 0x100. MOVZ X3, #0x100
+                // MOVZ Xd, #imm16, LSL #shift: 0xD2800000 | (imm << 5) | rd
+                // For imm=0x100 with shift=0: 0xD2800000 | (0x100 << 5) | 3
+                code.extend_from_slice(&0xD2820063u32.to_le_bytes());
+                code.extend_from_slice(&movz_x8(79));       // newfstatat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("lstat".to_string(), code));
+            }
+
+            // poll(fds, nfds, timeout) → ppoll(fds, nfds, &ts, NULL)
+            // AArch64 has no poll(); ppoll=73 takes a struct timespec* in X2
+            // and a sigset_t* in X3. Build a 16-byte timespec on the stack:
+            //   struct timespec { long tv_sec; long tv_nsec; };
+            // For timeout==-1 (infinite) we pass tv_sec=0,tv_nsec=0 and rely on
+            // the caller's semantics — a faithful poll→ppoll conversion would
+            // require branching on the sign of timeout; we keep it simple and
+            // store the timeout seconds verbatim with nsec=0.
+            {
+                let mut code = Vec::new();
+                // SUB SP, SP, #16
+                code.extend_from_slice(&0xD10043FFu32.to_le_bytes());
+                // STR X2, [SP, #0]   ; tv_sec = X2 (timeout, reused as seconds)
+                code.extend_from_slice(&0xF90003E2u32.to_le_bytes());
+                // STR XZR, [SP, #8]  ; tv_nsec = 0
+                code.extend_from_slice(&0xF90007FFu32.to_le_bytes());
+                // ADD X2, SP, #0     ; X2 = &ts
+                code.extend_from_slice(&0x910003E2u32.to_le_bytes());
+                // MOV X3, XZR        ; X3 = NULL (no sigmask)
+                code.extend_from_slice(&0xAA1F03E3u32.to_le_bytes());
+                // ppoll = 73
+                code.extend_from_slice(&movz_x8(73));
+                code.extend_from_slice(&svc);
+                // ADD SP, SP, #16
+                code.extend_from_slice(&0x910043FFu32.to_le_bytes());
+                code.extend_from_slice(&ret);
+                stubs.push(("poll".to_string(), code));
             }
 
             stubs

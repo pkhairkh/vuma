@@ -2238,22 +2238,37 @@ fn emit_instr(
             );
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
-        IRInstr::Div { dst, lhs, rhs, ty: _ } => {
+        IRInstr::Div { dst, lhs, rhs, ty } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, Gpr::L0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, Gpr::L1));
-            // Always use UDivX (unsigned 64-bit divide). SDivX causes SIGBUS
-            // on some qemu-sparc64 versions. For positive values (which is
-            // what VUMA test programs use), UDivX produces the same result.
-            code.extend_from_slice(
-                &Instruction::UDivX {
-                    rd: Gpr::L0,
-                    rs1: Gpr::L0,
-                    rs2: Gpr::L1,
-                }
-                .encode(),
+            // Use SDivX for signed types, UDivX for unsigned. The previous
+            // code hardcoded UDivX for all types, which gave wrong results
+            // for signed division of negative operands.
+            let signed = matches!(
+                ty,
+                Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32) | Some(IRType::I64)
             );
+            if signed {
+                code.extend_from_slice(
+                    &Instruction::SDivX {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        rs2: Gpr::L1,
+                    }
+                    .encode(),
+                );
+            } else {
+                code.extend_from_slice(
+                    &Instruction::UDivX {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        rs2: Gpr::L1,
+                    }
+                    .encode(),
+                );
+            }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         IRInstr::BinOp {
@@ -2543,9 +2558,12 @@ fn emit_instr(
                 CastKind::Trunc => {
                     // Truncate: mask to the destination width.
                     if let Some(IRType::U32 | IRType::I32) = to_ty {
-                        // AND with 0xFFFFFFFF
+                        // SRL L0, 0, L0 — SPARC V9 `srl` operates on the low
+                        // 32 bits and zero-extends the result to 64 bits,
+                        // clearing the upper 32 bits. (SLL with imm=0 was a
+                        // no-op and left the high bits leaked.)
                         code.extend_from_slice(
-                            &Instruction::SllImm {
+                            &Instruction::SrlImm {
                                 rd: Gpr::L0,
                                 rs1: Gpr::L0,
                                 imm: 0,
@@ -2596,9 +2614,31 @@ fn emit_instr(
         IRInstr::GetAddress { dst, name } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-            // Placeholder: load 0 (address resolution not implemented)
-            let _ = name;
-            code.extend(ss_load_imm(Gpr::L0, 0));
+            // Load the address of `name` into L0 via SETHI + OR, recording
+            // R_SPARC_HI22 / R_SPARC_LO10 relocations against the symbol.
+            // (Previously this loaded 0, breaking any code that takes a
+            // symbol address — e.g. string literals, global arrays.)
+            let hi_offset = code.len() as u64;
+            code.extend_from_slice(&encode_sethi(Gpr::L0, 0)); // sethi %hi(name), L0
+            // OR L0, %lo(name), L0
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::L0,
+                    rs1: Gpr::L0,
+                    imm: 0,
+                }
+                .encode(),
+            );
+            relocations.push(RelocationEntry {
+                offset: hi_offset,
+                symbol: name.clone(),
+                reloc_type: "R_SPARC_HI22".to_string(),
+            });
+            relocations.push(RelocationEntry {
+                offset: hi_offset + 4,
+                symbol: name.clone(),
+                reloc_type: "R_SPARC_LO10".to_string(),
+            });
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         IRInstr::Offset {
@@ -3990,18 +4030,25 @@ impl Backend for Sparc64Backend {
                 ("clock_gettime", 113),
                 ("gettimeofday", 116),
                 ("rt_sigprocmask", 103),
-                ("connect", 203),
-                ("bind", 200),
-                ("listen", 201),
-                ("accept", 202),
-                ("setsockopt", 195),
-                ("shutdown", 210),
+                // Socket syscalls — SPARC uses its own direct-call numbers
+                // (189 socket, 190 socketpair, 191 bind, 192 listen, 193 accept,
+                //  194 connect, 195 getsockname, 196 getpeername, 197 sendto,
+                //  198 recvfrom, 199 sendmsg, 200 recvmsg, 201 shutdown,
+                //  202 setsockopt, 203 getsockopt). The previous table used
+                // generic-ABI numbers which invoked the wrong kernel function.
+                ("connect", 194),
+                ("bind", 191),
+                ("listen", 192),
+                ("accept", 193),
+                ("setsockopt", 202),
+                ("shutdown", 201),
                 ("dup3", 287),
-                ("recvfrom", 207),
-                ("sendto", 206),
+                ("recvfrom", 198),
+                ("sendto", 197),
                 ("epoll_create1", 293),
-                ("epoll_ctl", 194),
-                ("epoll_wait", 195),
+                // NOTE: epoll_ctl/epoll_wait previously used 194/195 which
+                // collide with connect/getsockname on SPARC. Removed pending
+                // verification of the correct SPARC epoll syscall numbers.
                 ("clone", 217),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
@@ -4612,9 +4659,11 @@ impl Backend for Sparc64Backend {
         // Runtime helpers
         let print_int_offset = stub_offset;
         func_offsets.insert("print_int".to_string(), print_int_offset);
+        func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
         stub_offset += print_int_stub.len();
         let print_hex_offset = stub_offset;
         func_offsets.insert("print_hex".to_string(), print_hex_offset);
+        func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
         stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
