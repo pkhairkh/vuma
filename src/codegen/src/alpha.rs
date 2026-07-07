@@ -1177,11 +1177,6 @@ fn emit_binop(
                 BinOpKind::Eq => code.extend(Instruction::Cmpeq { ra: S0, rb: S1, rc: S0 }.encode()),
                 BinOpKind::Ne => {
                     // NE = !EQ: CMPEQ then XOR with 1.
-                    code.extend(Instruction::Cmpeq { ra: S0, rb: S1, rc: S0 }.encode());
-                    code.extend(Instruction::Xor { ra: S0, rb: Gpr::R1, rc: S0 }.encode());
-                    // Wait, we need 1 in a register.  Use ADDQ ZERO, 1, S2 first.
-                    // Re-do properly:
-                    code.clear();
                     code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
                     code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
                     code.extend(Instruction::Cmpeq { ra: S0, rb: S1, rc: S0 }.encode());
