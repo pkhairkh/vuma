@@ -1123,29 +1123,35 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
         let f = constant_fold(f);
         let f = cse(f);
-        let f = equality_saturation(f);    // Wave 2: e-graph pass
-        let f = dead_store_eliminate(f);   // Wave 3: alias-analysis-driven DSE
-        let f = mark_ive_proven_nonaliasing(f); // Wave 8: IVE→codegen loop
+        let f = equality_saturation(f);    // e-graph pass
+        let f = dead_store_eliminate(f);   // alias-analysis-driven DSE
+        let f = mark_ive_proven_nonaliasing(f); // IVE→codegen loop
         let f = dead_code_eliminate(f);
         let f = inline_small(f, &func_refs);
         let f = licm(f);
         let f = constant_fold(f);
-        let mut f = dead_code_eliminate(f);
-        // Wave 5: instruction scheduling (list-scheduling with latency table)
-        let lt = crate::target_desc::LatencyTable::default_ooo();
-        crate::scheduler::schedule_function(&mut f.blocks, &lt);
+        let f = dead_code_eliminate(f);
+        // NOTE: Instruction scheduler disabled — it reorders instructions
+        // within blocks which can break SSA semantics for phi nodes and
+        // loop-carried dependencies. Will be re-enabled after fixing the
+        // scheduler to respect phi-node ordering and loop back-edges.
+        // let lt = crate::target_desc::LatencyTable::default_ooo();
+        // crate::scheduler::schedule_function(&mut f.blocks, &lt);
         program.functions[i] = f;
     }
 
-    // ── Wave 11: Whole-program LTO passes ──
-    // Cross-function optimizations that run after per-function passes.
-    program = whole_program_dce(program);           // Wave 11/14: unreachable function elimination
-    program = identical_function_merge(program);     // Wave 14: ICF via structural equality
+    // ── Whole-program passes ──
+    program = whole_program_dce(program);
+    // NOTE: ICF disabled — even with operand-aware hashing, structural
+    // equality on IR is not sufficient for sound merging because vreg
+    // numbering differs across functions. Would need normalization first.
+    // program = identical_function_merge(program);
 
-    // ── Wave 13: Autovectorization (loop unrolling for now) ──
-    for func in &mut program.functions {
-        *func = crate::vectorize::vectorize_function(std::mem::replace(func, IRFunction::new("__tmp__")));
-    }
+    // NOTE: Vectorizer disabled — duplicates loop body without adjusting
+    // trip count (miscompilation).
+    // for func in &mut program.functions {
+    //     *func = crate::vectorize::vectorize_function(std::mem::replace(func, IRFunction::new("__tmp__")));
+    // }
 
     program
 }
@@ -1296,68 +1302,47 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
 }
 
 /// Compute a structural hash of a function for ICF.
+/// Includes instruction types AND operands (immediates and call targets)
+/// to prevent unsound merging of semantically different functions.
 fn compute_function_hash(func: &IRFunction) -> String {
-    // Hash based on:
-    // - Number of parameters and their types
-    // - Number of blocks
-    // - Instruction count per block
-    // - Instruction types (not values — too sensitive to vreg numbering)
-    // - Terminator types
     let mut parts = Vec::new();
     parts.push(format!("p{}", func.params.len()));
     parts.push(format!("b{}", func.blocks.len()));
     for block in &func.blocks {
         parts.push(format!("i{}", block.instructions.len()));
         for instr in &block.instructions {
+            // Include instruction type AND key operands
             parts.push(match instr {
-                IRInstr::Add { .. } => "add",
-                IRInstr::Sub { .. } => "sub",
-                IRInstr::Mul { .. } => "mul",
-                IRInstr::Div { .. } => "div",
-                IRInstr::BinOp { op, .. } => match op {
-                    BinOpKind::Add => "badd",
-                    BinOpKind::Sub => "bsub",
-                    BinOpKind::Mul => "bmul",
-                    BinOpKind::UDiv | BinOpKind::SDiv => "bdiv",
-                    BinOpKind::SRem | BinOpKind::URem => "brem",
-                    BinOpKind::And => "band",
-                    BinOpKind::Or => "bor",
-                    BinOpKind::Xor => "bxor",
-                    BinOpKind::Shl => "bshl",
-                    BinOpKind::ShrL => "bshrl",
-                    BinOpKind::ShrA => "bshra",
-                    _ => "bcmp",
-                },
-                IRInstr::Cmp { kind, .. } => match kind {
-                    CmpKind::Eq => "cmpeq",
-                    CmpKind::Ne => "cmpne",
-                    CmpKind::SLt => "cmpslt",
-                    _ => "cmpother",
-                },
-                IRInstr::Load { .. } => "load",
-                IRInstr::Store { .. } => "store",
-                IRInstr::Alloc { .. } => "alloc",
-                IRInstr::Call { .. } => "call",
-                IRInstr::Cast { .. } => "cast",
-                IRInstr::Offset { .. } => "offset",
-                IRInstr::Select { .. } => "select",
-                IRInstr::Ret { .. } => "ret",
-                IRInstr::Branch { .. } => "branch",
-                IRInstr::CondBranch { .. } => "condbranch",
-                IRInstr::Free { .. } => "free",
-                IRInstr::Phi { .. } => "phi",
-                _ => "other",
-            }.to_string());
+                IRInstr::Add { dst, lhs, rhs, .. } => format!("add:{:?}:{:?}:{:?}", dst, lhs, rhs),
+                IRInstr::Sub { dst, lhs, rhs, .. } => format!("sub:{:?}:{:?}:{:?}", dst, lhs, rhs),
+                IRInstr::Mul { dst, lhs, rhs, .. } => format!("mul:{:?}:{:?}:{:?}", dst, lhs, rhs),
+                IRInstr::Div { dst, lhs, rhs, .. } => format!("div:{:?}:{:?}:{:?}", dst, lhs, rhs),
+                IRInstr::BinOp { op, dst, lhs, rhs, .. } => format!("binop:{:?}:{:?}:{:?}:{:?}", op, dst, lhs, rhs),
+                IRInstr::Cmp { kind, dst, lhs, rhs, .. } => format!("cmp:{:?}:{:?}:{:?}:{:?}", kind, dst, lhs, rhs),
+                IRInstr::Load { dst, addr, offset, ty } => format!("load:{:?}:{:?}:{:?}:{:?}", dst, addr, offset, ty),
+                IRInstr::Store { value, addr, offset, ty } => format!("store:{:?}:{:?}:{:?}:{:?}", value, addr, offset, ty),
+                IRInstr::Alloc { dst, size } => format!("alloc:{:?}:{}", dst, size),
+                // CRITICAL: include call target in hash
+                IRInstr::Call { dst, func: call_target, args, .. } => format!("call:{:?}:{}:{}", dst, call_target, args.len()),
+                IRInstr::Cast { dst, src, .. } => format!("cast:{:?}:{:?}", dst, src),
+                IRInstr::Offset { dst, base, offset } => format!("offset:{:?}:{:?}:{:?}", dst, base, offset),
+                IRInstr::Select { dst, cond, .. } => format!("select:{:?}:{:?}", dst, cond),
+                IRInstr::Ret { .. } => "ret".to_string(),
+                IRInstr::Branch { .. } => "branch".to_string(),
+                IRInstr::CondBranch { .. } => "condbranch".to_string(),
+                IRInstr::Free { .. } => "free".to_string(),
+                IRInstr::Phi { .. } => "phi".to_string(),
+                _ => "other".to_string(),
+            });
         }
-        // Terminator type
         parts.push(match &block.terminator {
-            IRTerminator::Jump(_) => "jmp",
-            IRTerminator::Branch { .. } => "br",
-            IRTerminator::Return(_) => "ret",
-            IRTerminator::TailCall { .. } => "tailcall",
-            IRTerminator::Unreachable => "unreachable",
-            _ => "otherterm",
-        }.to_string());
+            IRTerminator::Jump(_) => "jmp".to_string(),
+            IRTerminator::Branch { .. } => "br".to_string(),
+            IRTerminator::Return(_) => "ret".to_string(),
+            IRTerminator::TailCall { .. } => "tailcall".to_string(),
+            IRTerminator::Unreachable => "unreachable".to_string(),
+            _ => "otherterm".to_string(),
+        });
     }
     parts.join("|")
 }
