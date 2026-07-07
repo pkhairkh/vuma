@@ -281,8 +281,8 @@ impl Instruction {
             Instruction::Ret => (0x1A_u32 << 26) | (26u32 << 21) | (26u32 << 16), // JSR $26, ($26)
             Instruction::CallPal { palcode } => palcode & 0x03FFFFFF,
             // Conditional moves and compares (Operate format):
-            Instruction::Cmpule { ra, rb, rc } => op_reg(0x10, *ra, *rb, *rc, 0x3D), // CMPULE
-            Instruction::Cmplt { ra, rb, rc } => op_reg(0x10, *ra, *rb, *rc, 0x3B),  // CMPLT (signed)
+            Instruction::Cmpule { ra, rb, rc } => op_reg(0x10, *ra, *rb, *rc, 0x3F), // CMPULE
+            Instruction::Cmplt { ra, rb, rc } => op_reg(0x10, *ra, *rb, *rc, 0x1D),  // CMPULT (unsigned; signed CMPLT not directly available on Alpha)
             Instruction::Cmpeq { ra, rb, rc } => op_reg(0x10, *ra, *rb, *rc, 0x2D),  // CMPEQ
             Instruction::Cmovne { ra, rb, rc } => op_reg(0x11, *ra, *rb, *rc, 0x26), // CMOVNE
             Instruction::Cmoveq { ra, rb, rc } => op_reg(0x11, *ra, *rb, *rc, 0x24), // CMOVEQ
@@ -308,12 +308,17 @@ fn op_reg(op: u32, ra: Gpr, rb: Gpr, rc: Gpr, function: u32) -> u32 {
 
 #[inline]
 fn op_lit(op: u32, ra: Gpr, lit: u8, rc: Gpr, function: u32) -> u32 {
-    // Alpha Operate literal form:
-    //   op(6) | ra(5) | lit(5) | 1(1) | reserved(3) | function(7) | rc(5)
-    // The literal occupies bits 20-16 (same field as rb in register form),
-    // NOT bits 14-7. The 5-bit literal range is 0-31.
-    (op << 26) | ((ra.encoding() as u32) << 21) | ((lit as u32 & 0x1F) << 16)
-        | (1u32 << 15) | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
+    // Alpha Operate literal form (per Alpha ARM):
+    //   bits 31-26: opcode (6 bits)
+    //   bits 25-21: ra (5 bits)
+    //   bits 20-13: literal (8 bits — NOT 5 bits!)
+    //   bit 12: 1 (literal form flag)
+    //   bits 11-5: function (7 bits)
+    //   bits 4-0: rc (5 bits)
+    // The literal is 8 bits (0-255), occupying bits 20-13 (the Rb field
+    // PLUS bits 15-13 which are reserved in register form).
+    (op << 26) | ((ra.encoding() as u32) << 21) | ((lit as u32 & 0xFF) << 13)
+        | (1u32 << 12) | ((function & 0x7F) << 5) | (rc.encoding() as u32 & 0x1F)
 }
 
 #[inline]
@@ -795,10 +800,10 @@ fn emit_instr(
             // Alpha has NO hardware integer divide — use software loop.
             code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode()); // S2=0
             code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes()); // CMPULT
-            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes()); // BNE +4
+            code.extend_from_slice(&op_br(0x3D, S3, 3).to_le_bytes()); // BNE +4
             code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
             code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
-            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes()); // BR -4
+            code.extend_from_slice(&op_br(0x30, ZERO, -5).to_le_bytes()); // BR -4
             code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
         }
@@ -941,14 +946,14 @@ fn emit_instr(
             // Instruction-level branch (not terminator). Redundant with
             // the Jump terminator that follows. Emit NOP (BIS ZERO,ZERO,ZERO)
             // to avoid unpatched self-loop branch.
-            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // BIS ZERO,ZERO,ZERO (LE)
+            code.extend_from_slice(&[0x1F, 0x04, 0xFF, 0x47]); // BIS ZERO,ZERO,ZERO (LE)
         }
         IRInstr::CondBranch { cond: _, true_target: _, false_target: _ } => {
             // Instruction-level CondBranch (not terminator). Redundant with
             // the Branch terminator that follows. Emit NOPs.
-            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
-            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
-            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
+            code.extend_from_slice(&[0x1F, 0x04, 0xFF, 0x47]); // NOP
+            code.extend_from_slice(&[0x1F, 0x04, 0xFF, 0x47]); // NOP
+            code.extend_from_slice(&[0x1F, 0x04, 0xFF, 0x47]); // NOP
         }
         IRInstr::Call { dst, func, args, is_extern: _ } => {
             // Move args into R16-R21.
@@ -1071,13 +1076,13 @@ fn emit_binop(
             // CMPULT S0, S1, S3 (S3 = 1 if S0 < S1, i.e., done)
             code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes());
             // BNE S3, +4 (skip 3 instructions: SUBQ+ADDQLI+BR)
-            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes());
+            code.extend_from_slice(&op_br(0x3D, S3, 3).to_le_bytes());
             // SUBQ S0, S1, S0
             code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
             // ADDQ S2, 1, S2 (quotient++)
             code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
             // BR ZERO, -4 (back to CMPULT)
-            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes());
+            code.extend_from_slice(&op_br(0x30, ZERO, -5).to_le_bytes());
             // OR S2, ZERO, S0 (S0 = quotient)
             code.extend(Instruction::Or { ra: S2, rb: ZERO, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
@@ -1093,10 +1098,10 @@ fn emit_binop(
             // Division loop (same as UDiv above)
             code.extend(Instruction::Addq { ra: ZERO, rb: ZERO, rc: S2 }.encode()); // S2=0
             code.extend_from_slice(&op_reg(0x10, S0, S1, S3, 0x1D).to_le_bytes()); // CMPULT
-            code.extend_from_slice(&op_br(0x3D, S3, 4).to_le_bytes()); // BNE +4
+            code.extend_from_slice(&op_br(0x3D, S3, 3).to_le_bytes()); // BNE +4
             code.extend(Instruction::Subq { ra: S0, rb: S1, rc: S0 }.encode());
             code.extend(Instruction::AddqLi { ra: S2, lit: 1, rc: S2 }.encode());
-            code.extend_from_slice(&op_br(0x30, ZERO, -4).to_le_bytes()); // BR -4
+            code.extend_from_slice(&op_br(0x30, ZERO, -5).to_le_bytes()); // BR -4
             // S2 = quotient. Remainder = S4 - S2 * S1
             code.extend(Instruction::Mulq { ra: S2, rb: S1, rc: S2 }.encode());
             code.extend(Instruction::Subq { ra: S4, rb: S2, rc: S0 }.encode());
