@@ -120,7 +120,16 @@ impl Backend for ArmEbBackend {
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
-        self.inner.encode_function(func)
+        // BE32: swap instruction words from LE to BE, matching the
+        // byte-swap applied by return_stub and trampoline. The base
+        // arm32 encoder returns LE instruction bytes (each encoder uses
+        // word.to_le_bytes()); for qemu-armeb (BE32 mode) the same words
+        // must appear in big-endian byte order.
+        let mut code = self.inner.encode_function(func)?;
+        for i in (0..code.len()).step_by(4) {
+            if i + 4 <= code.len() { swap_u32(&mut code, i); }
+        }
+        Ok(code)
     }
 
     fn return_stub(&self) -> Vec<u8> {

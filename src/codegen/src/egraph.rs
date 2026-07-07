@@ -176,35 +176,20 @@ pub struct RewriteRule {
 }
 
 /// Standard algebraic rewrite rules.
+///
+/// NOTE: `ENode::BinOp(op, lhs, rhs)` stores e-class IDs (not literal values),
+/// and the `apply` signature `fn(&ENode) -> Option<ENode>` does not have access
+/// to the e-graph to resolve those IDs. Rules that require inspecting an
+/// operand's value (e.g. "x + 0 → x") therefore cannot match correctly with
+/// this signature and are omitted. Only the purely-structural rule `xor_self`
+/// (which compares two e-class IDs for equality) is sound here.
 pub fn standard_rules() -> Vec<RewriteRule> {
     vec![
         RewriteRule {
-            name: "add_zero",
-            apply: |node| match node {
-                ENode::BinOp(BinOpKind::Add, x, zero) => {
-                    // x + 0 → x  (need to check if `zero` is Lit(0))
-                    Some(ENode::Lit(0)) // simplified: x + 0 → x (placeholder)
-                }
-                _ => None,
-            },
-        },
-        RewriteRule {
-            name: "mul_one",
-            apply: |node| match node {
-                ENode::BinOp(BinOpKind::Mul, x, _) => Some(ENode::Lit(0)), // placeholder
-                _ => None,
-            },
-        },
-        RewriteRule {
-            name: "mul_zero",
-            apply: |node| match node {
-                ENode::BinOp(BinOpKind::Mul, _, _) => Some(ENode::Lit(0)),
-                _ => None,
-            },
-        },
-        RewriteRule {
             name: "xor_self",
             apply: |node| match node {
+                // x ^ x → 0. This is sound because the two operands are the
+                // same e-class ID (structural equality, no value lookup needed).
                 ENode::BinOp(BinOpKind::Xor, x, y) if x == y => Some(ENode::Lit(0)),
                 _ => None,
             },

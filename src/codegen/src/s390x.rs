@@ -430,6 +430,14 @@ fn encode_dlgr(r1: Gpr, r2: Gpr) -> [u8; 4] {
     encode_rre(0xB9, 0x87, r1, r2)
 }
 
+/// Encode DGR R1, R2 (Divide signed 64-bit). R1 must be even-numbered.
+/// Dividend pair (R1, R1+1): R1 = HIGH 64 bits (in, sign extension),
+/// remainder (out); R1+1 = LOW 64 bits (in, dividend), quotient (out).
+/// op1=0xB9, op2=0x0D.
+fn encode_dgr(r1: Gpr, r2: Gpr) -> [u8; 4] {
+    encode_rre(0xB9, 0x0D, r1, r2)
+}
+
 /// Encode LLGFR R1, R2 (Load Logical 32→64). R1 = zero_extend(R2[31:0]).
 /// op1=0xB9, op2=0x16.
 fn encode_llgfr(r1: Gpr, r2: Gpr) -> [u8; 4] {
@@ -737,6 +745,14 @@ fn is_32bit_ty(ty: Option<&IRType>) -> bool {
     )
 }
 
+/// Returns true if the type is a signed integer type (I8/I16/I32/I64).
+fn is_signed_ty(ty: Option<&IRType>) -> bool {
+    matches!(
+        ty,
+        Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32) | Some(IRType::I64)
+    )
+}
+
 // ===========================================================================
 // Stack-slot based allocate_registers
 // ===========================================================================
@@ -845,16 +861,26 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
         current_offset += size;
     }
 
-    // 16 bytes for saved LR + FP at the top of the frame.
+    // 16 bytes for saved LR + FP, plus 48 bytes for the 6 callee-saved
+    // scratch registers (R6, R7, R8, R9, R10, R12) that this backend uses as
+    // S0–S5. The s390x ABI marks R6–R13 as callee-saved, so they must be
+    // preserved across calls.
     current_offset = (current_offset + 15) & !15;
     let save_area_offset = current_offset; // offset where we save LR/FP
-    current_offset += 16;
+    let lr_save_off = save_area_offset as i32;
+    let fp_save_off = save_area_offset as i32 + 8;
+    // Callee-saved scratch register save offsets (R6, R7, R8, R9, R10, R12).
+    let s0_save_off = save_area_offset as i32 + 16; // R6
+    let s1_save_off = save_area_offset as i32 + 24; // R7
+    let s2_save_off = save_area_offset as i32 + 32; // R8
+    let s3_save_off = save_area_offset as i32 + 40; // R9
+    let s4_save_off = save_area_offset as i32 + 48; // R10
+    let s5_save_off = save_area_offset as i32 + 56; // R12
+    current_offset += 64;
 
     // Total frame size, aligned to 16 bytes.
     let frame_size = ((current_offset + 15) & !15) as usize;
-    // Offsets to saved LR and FP (within the frame).
-    let lr_save_off = save_area_offset as i32; // FP + save_area_offset + 0 = saved LR
-    let fp_save_off = save_area_offset as i32 + 8; // FP + save_area_offset + 8 = saved FP
+    // (lr_save_off and fp_save_off are defined above with the save-area layout.)
 
     // ── Phase 2: Build the phi-map (unused for stack-slot ISel, but kept for compat) ──
     let _phi_map = func.build_phi_map();
@@ -870,6 +896,14 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     code.extend_from_slice(&encode_stg(LR, SP, lr_save_off));
     // STG FP, frame_size-8(SP)   — save old FP just below LR
     code.extend_from_slice(&encode_stg(FP, SP, fp_save_off));
+    // Save callee-saved scratch registers (S0–S5 = R6, R7, R8, R9, R10, R12).
+    // The s390x ABI requires these to be preserved across calls.
+    code.extend_from_slice(&encode_stg(S0, SP, s0_save_off));
+    code.extend_from_slice(&encode_stg(S1, SP, s1_save_off));
+    code.extend_from_slice(&encode_stg(S2, SP, s2_save_off));
+    code.extend_from_slice(&encode_stg(S3, SP, s3_save_off));
+    code.extend_from_slice(&encode_stg(S4, SP, s4_save_off));
+    code.extend_from_slice(&encode_stg(S5, SP, s5_save_off));
     // LGR FP, SP — FP = SP
     code.extend_from_slice(&encode_lgr(FP, SP));
 
@@ -974,6 +1008,13 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 code.extend_from_slice(&encode_lg(LR, SP, lr_save_off));
                 // LG FP, fp_save_off(SP)  — restore old FP
                 code.extend_from_slice(&encode_lg(FP, SP, fp_save_off));
+                // Restore callee-saved scratch registers.
+                code.extend_from_slice(&encode_lg(S0, SP, s0_save_off));
+                code.extend_from_slice(&encode_lg(S1, SP, s1_save_off));
+                code.extend_from_slice(&encode_lg(S2, SP, s2_save_off));
+                code.extend_from_slice(&encode_lg(S3, SP, s3_save_off));
+                code.extend_from_slice(&encode_lg(S4, SP, s4_save_off));
+                code.extend_from_slice(&encode_lg(S5, SP, s5_save_off));
                 // Deallocate frame: SP += frame_size
                 code.extend(adjust_sp(frame_size as i32));
                 // BR LR  — return
@@ -1030,9 +1071,15 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 });
             }
             crate::ir::IRTerminator::TailCall { .. } => {
-                // Simplified: just return.
+                // Simplified: just return. Restore callee-saved scratch regs.
                 code.extend_from_slice(&encode_lg(LR, SP, lr_save_off));
                 code.extend_from_slice(&encode_lg(FP, SP, fp_save_off));
+                code.extend_from_slice(&encode_lg(S0, SP, s0_save_off));
+                code.extend_from_slice(&encode_lg(S1, SP, s1_save_off));
+                code.extend_from_slice(&encode_lg(S2, SP, s2_save_off));
+                code.extend_from_slice(&encode_lg(S3, SP, s3_save_off));
+                code.extend_from_slice(&encode_lg(S4, SP, s4_save_off));
+                code.extend_from_slice(&encode_lg(S5, SP, s5_save_off));
                 code.extend(adjust_sp(frame_size as i32));
                 code.extend_from_slice(&encode_br(LR));
             }
@@ -1169,29 +1216,42 @@ fn emit_instr(
         IRInstr::Div { dst, lhs, rhs, ty } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+            let signed = is_signed_ty(ty.as_ref());
             code.extend(ss_load_value(lhs, vreg_stack_slots, S1));
-            // For u32, zero-extend to 64 bits first.
+            // For 32-bit operands, extend to 64 bits. Signed types use
+            // sign-extension (LGFR); unsigned types use zero-extension (LLGFR).
             if is_32bit_ty(ty.as_ref()) {
-                code.extend_from_slice(&encode_llgfr(S1, S1));
+                if signed {
+                    code.extend_from_slice(&encode_lgfr(S1, S1));
+                } else {
+                    code.extend_from_slice(&encode_llgfr(S1, S1));
+                }
             }
-            // Set up dividend pair: R0 = high (0), R1 = low (dividend).
-            // Note: DLGR R0, R_b divides (R0:R1) by R_b, with R0=high(in)/remainder(out)
-            // and R1=low(in)/quotient(out).  Wait — earlier we determined:
-            //   R1 (even, the "R1" in DLGR R1, R2) = HIGH(in) → REMAINDER(out)
-            //   R1+1 (odd) = LOW(in) → QUOTIENT(out)
-            // For DLGR R0, R_b: R0 = HIGH(in) = 0, R1 = LOW(in) = dividend.
-            // After: R0 = remainder, R1 = quotient.
-            code.extend_from_slice(&encode_lghi(S0, 0)); // R0 = 0 (high part)
-            // Move dividend from S1 (=R1) — it's already in R1!
-            // But wait, we used S1 = R1 as scratch. So dividend is already in R1.
-            // Good. Now load divisor into S2 (=R2).
+            // Set up the 128-bit dividend pair (R0:R1):
+            //   For unsigned (DLGR): R0 = 0 (zero-extend low 64 bits).
+            //   For signed (DGR): R0 = sign-extension of S1 (arithmetic
+            //     shift right by 63 gives -1 if negative, 0 if positive).
+            if signed {
+                // SRAG R0, S1, 63  →  R0 = S1 >> 63 (sign mask).
+                code.extend_from_slice(&encode_srag(S0, S1, 63));
+            } else {
+                code.extend_from_slice(&encode_lghi(S0, 0)); // R0 = 0
+            }
+            // S1 (=R1) already holds the dividend. Load divisor into S2 (=R2).
             code.extend(ss_load_value(rhs, vreg_stack_slots, S2));
-            // For u32 divisor, zero-extend.
             if is_32bit_ty(ty.as_ref()) {
-                code.extend_from_slice(&encode_llgfr(S2, S2));
+                if signed {
+                    code.extend_from_slice(&encode_lgfr(S2, S2));
+                } else {
+                    code.extend_from_slice(&encode_llgfr(S2, S2));
+                }
             }
-            // DLGR R0, R2: divide (R0:R1) by R2.
-            code.extend_from_slice(&encode_dlgr(S0, S2));
+            // DGR R0, R2 (signed) or DLGR R0, R2 (unsigned).
+            if signed {
+                code.extend_from_slice(&encode_dgr(S0, S2));
+            } else {
+                code.extend_from_slice(&encode_dlgr(S0, S2));
+            }
             // Quotient is now in R1 (= S1).  Move to S0 for storing.
             code.extend_from_slice(&encode_lgr(S0, S1));
             if is_32bit_ty(ty.as_ref()) {
@@ -1477,6 +1537,12 @@ fn emit_instr(
         }
         IRInstr::Ret { values } => {
             // Move return value to R2 (if any), then epilogue.
+            // TODO: this secondary Ret path does not yet restore the callee-saved
+            // scratch registers (S0–S5). The primary IRTerminator::Return path
+            // in s390x_allocate_registers_ss does restore them. If IRInstr::Ret
+            // is emitted as a real instruction (not NOP'd), callers may see
+            // corrupted R6–R10/R12. Thread s0_save_off..s5_save_off through
+            // emit_instr to fix.
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::R2));
             }
@@ -1727,12 +1793,15 @@ fn emit_binop(
             if is_32bit {
                 code.extend_from_slice(&encode_lgfr(S1, S1));
             }
-            code.extend_from_slice(&encode_lghi(S0, 0));
+            // For signed division, R0 = sign-extension of S1 (arithmetic
+            // shift right by 63). For unsigned, R0 = 0.
+            code.extend_from_slice(&encode_srag(S0, S1, 63));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S2));
             if is_32bit {
                 code.extend_from_slice(&encode_lgfr(S2, S2));
             }
-            code.extend_from_slice(&encode_dlgr(S0, S2));
+            // DGR R0, R2 (signed 64-bit divide).
+            code.extend_from_slice(&encode_dgr(S0, S2));
             code.extend_from_slice(&encode_lgr(S0, S1));
             if is_32bit {
                 code.extend_from_slice(&encode_llgfr(S0, S0));
@@ -2249,7 +2318,7 @@ impl Backend for S390XBackend {
                 ("exit", 1),
                 ("alarm", 27),
                 ("getpid", 20),
-                ("socket", 359),
+                ("socket", 358),
                 ("execve", 11),
                 ("wait4", 114),
                 ("dup2", 63),
@@ -2271,15 +2340,22 @@ impl Backend for S390XBackend {
                 ("clock_gettime", 260),
                 ("gettimeofday", 78),
                 ("rt_sigprocmask", 175),
+                // s390x direct socket syscalls start at 358 and follow the
+                // standard 15-call ordering (socket, socketpair, bind, listen,
+                // accept, connect, getsockname, getpeername, sendto, recvfrom,
+                // sendmsg, recvmsg, shutdown, setsockopt, getsockopt). The
+                // previous numbers were off-by-one and invoked the wrong
+                // network syscall. NOTE: verify against
+                // arch/s390/include/uapi/asm/unistd.h.
                 ("connect", 363),
-                ("bind", 361),
-                ("listen", 362),
-                ("accept", 364),
-                ("setsockopt", 366),
-                ("shutdown", 373),
+                ("bind", 360),
+                ("listen", 361),
+                ("accept", 362),
+                ("setsockopt", 371),
+                ("shutdown", 370),
                 ("dup3", 326),
-                ("recvfrom", 371),
-                ("sendto", 370),
+                ("recvfrom", 367),
+                ("sendto", 366),
                 ("epoll_create1", 327),
                 ("epoll_ctl", 250),
                 ("epoll_wait", 251),

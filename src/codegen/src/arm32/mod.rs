@@ -7241,25 +7241,9 @@ impl Backend for Arm32Backend {
                 // suffices for callers that only need 4 args (addr, len,
                 // prot, flags) — the kernel will read R4/R5 for fd/offset.
                 ("mmap2", 192),
-                // ── W8: 4 more POSIX syscall stubs ──
-                // ARM EABI syscall numbers:
-                //   lstat     = 107  (like stat but doesn't follow symlinks)
-                //   dup3      = 358  (dup2 with flags; needed when dup2 is
-                //                     unavailable or for O_CLOEXEC)
-                //   recvfrom  = 371  (recv with source-address capture)
-                //   sendto    = 370  (send with destination-address)
-                // recvfrom/sendto take 6 args but the kernel reads R4/R5
-                // for args 5-6 (src_addr, addrlen) directly from the calling
-                // convention's stack-passed slots — the simple `MOV R7,#num ;
-                // SVC #0 ; BX LR` stub works for callers that pass the
-                // address-args via R4/R5 themselves. (VUMA's calling
-                // convention passes args 1-4 in R0-R3, so callers needing
-                // args 5-6 must put them on the stack per AAPCS — the same
-                // caveat applies to mmap2 above.)
-                ("lstat", 107),
-                ("dup3", 358),
-                ("recvfrom", 371),
-                ("sendto", 370),
+                // NOTE: lstat/dup3/recvfrom/sendto were previously listed
+                // again here (duplicate of the entries at lines ~7236). The
+                // duplicates emitted ~56 bytes of dead code; removed.
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

@@ -6365,7 +6365,7 @@ impl Backend for RiscV32Backend {
             // Simple stubs (args already in correct registers a0-a5):
             for (name, num) in [
                 ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
+                ("munmap", 215), ("exit", 93), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
                 ("clone", 220),
@@ -6458,35 +6458,38 @@ impl Backend for RiscV32Backend {
             // ── Additional POSIX syscall stubs (RISC-V generic syscall numbers,
             // shared between RV32 and RV64). All simple stubs — args are already
             // in a0-a5, just set a7=syscall_num and ECALL.
+            // Numbers verified against asm-generic/unistd.h.
             for (name, num) in [
                 ("lseek", 62),
-                ("stat", 80),       // RISC-V: fstat (80); stat is emulated via newfstatat
                 ("fstat", 80),
                 ("kill", 129),
                 ("getcwd", 17),
                 ("chdir", 49),
-                ("ioctl", 73),
-                ("fcntl", 72),
+                ("ioctl", 29),
+                ("fcntl", 25),
                 ("connect", 203),
-                ("poll", 168),
                 ("nanosleep", 101),
                 ("mprotect", 226),
                 ("dup", 23),
                 ("exit_group", 94),
-                ("recv", 207),      // RISC-V: recvfrom (207)
-                ("send", 206),      // RISC-V: sendto (206)
+                ("recv", 207),      // recvfrom (207)
+                ("send", 206),      // sendto (206)
                 ("shutdown", 210),
                 ("bind", 200),
                 ("listen", 201),
-                ("accept", 202),    // RISC-V: accept4 (202)
-                ("setsockopt", 194),
-                ("waitpid", 260),   // RISC-V: wait4 (260)
+                ("accept", 202),    // accept4 (202)
+                ("setsockopt", 208),
+                ("waitpid", 260),   // wait4 (260)
                 ("brk", 214),
                 ("clock_gettime", 113),
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
-                ("dup3", 24), ("lstat", 82),
+                ("dup3", 24),
                 ("recvfrom", 207), ("sendto", 206),
+                // NOTE: stat/lstat do not exist on the generic ABI; provided
+                // as newfstatat shims below. poll/alarm are omitted on RV32
+                // because the 32-bit time64 layout differs and a naive shim
+                // would invoke the wrong variant.
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6502,6 +6505,35 @@ impl Backend for RiscV32Backend {
                 // Defensive RET in case the kernel ever returns (it shouldn't).
                 code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
                 stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // stat(path, statbuf) → newfstatat(AT_FDCWD=-100, path, statbuf, 0)
+            // stat() does not exist on the generic ABI; newfstatat=79 replaces it.
+            // Caller args: a0=path, a1=statbuf
+            // Need:        a0=-100, a1=path, a2=statbuf, a3=0
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());   // a3 = 0 (flags)
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("stat".to_string(), code));
+            }
+
+            // lstat(path, statbuf) → newfstatat(AT_FDCWD, path, statbuf, AT_SYMLINK_NOFOLLOW=0x100)
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x100 }.encode()); // a3 = AT_SYMLINK_NOFOLLOW
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("lstat".to_string(), code));
             }
 
             // ── Runtime helper: strcmp(a0=s1, a1=s2) -> a0 = (s1 - s2) at first
