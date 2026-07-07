@@ -66,6 +66,7 @@ toml = "0.8"
 libc = "0.2"
 tempfile = "3"
 proptest = "1"
+rayon = "1"
 
 [workspace.metadata]
 release = "alpha"
@@ -102,6 +103,7 @@ indexmap.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
 toml.workspace = true
+rayon.workspace = true
 
 [build-dependencies]
 
