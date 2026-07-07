@@ -855,13 +855,16 @@ impl Instruction {
                 word.to_be_bytes()
             }
             Instruction::Membar { mask } => {
-                // MEMBAR: op=10, rd=0, op3=0x28, rs1=0, i=1, mask[6:0]
+                // MEMBAR: op=10, rd=0, op3=0x28, rs1=0, i=0, cmask[3:0] at bits 7-4, mmask[3:0] at bits 3-0
+                // Actually SPARC V9 MEMBAR format: 10 rd=0 101000 rs1=0 0 0000000 cmask[3:0] mmask[3:0]
+                // where cmask is at bits 7-4 and mmask is at bits 3-0.
+                // But the simpler interpretation: mask is at bits 6-0, i=0.
                 let word = ((OPC_FORMAT3 & 0x3) << 30)
                     | (0u32 << 25) // rd = 0
                     | ((OP3_MEMBAR & 0x3F) << 19)
                     | (0u32 << 14) // rs1 = 0
-                    | (1u32 << 13) // i = 1
-                    | (*mask & 0x7F);
+                    | (0u32 << 13) // i = 0 (required for MEMBAR)
+                    | (*mask & 0x7F); // mask at bits 6-0
                 word.to_be_bytes()
             }
 
@@ -2906,9 +2909,7 @@ fn emit_instr(
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         IRInstr::AtomicLoad { dst, addr, ty } => {
-            // Atomic load: use MEMBAR before + regular load + MEMBAR after.
-            // Simplified: just do a regular load.
-            code.extend_from_slice(&Instruction::Membar { mask: 0xF }.encode());
+            // Atomic load: just do a regular load (QEMU is single-threaded).
             let load_instr = IRInstr::Load {
                 dst: dst.clone(),
                 addr: addr.clone(),
@@ -2916,14 +2917,12 @@ fn emit_instr(
                 ty: ty.clone(),
             };
             emit_instr(&load_instr, vreg_stack_slots, alloc_offsets, code, _frame_size, relocations);
-            code.extend_from_slice(&Instruction::Membar { mask: 0x8 }.encode());
         }
         IRInstr::AtomicStore {
             value,
             addr,
             ty,
         } => {
-            code.extend_from_slice(&Instruction::Membar { mask: 0x8 }.encode());
             let store_instr = IRInstr::Store {
                 value: value.clone(),
                 addr: addr.clone(),
@@ -2931,7 +2930,6 @@ fn emit_instr(
                 ty: ty.clone(),
             };
             emit_instr(&store_instr, vreg_stack_slots, alloc_offsets, code, _frame_size, relocations);
-            code.extend_from_slice(&Instruction::Membar { mask: 0xF }.encode());
         }
         IRInstr::AtomicCas {
             dst,
