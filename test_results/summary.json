@@ -1,15 +1,15 @@
 {
-  "timestamp": "2026-07-07 20:23:55 UTC",
+  "timestamp": "2026-07-07 21:02:31 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
-  "matches": 108646,
+  "matches": 108703,
   "skipped": 1,
-  "pass_rate": "99.53%",
+  "pass_rate": "99.59%",
   "per_backend": {
-    "aarch64": {
+    "aarch64_be": {
       "total": 5745,
-      "match": 5745,
+      "match": 5741,
       "skipped": 0
     },
     "riscv64": {
@@ -22,22 +22,12 @@
       "match": 5745,
       "skipped": 0
     },
-    "aarch64_be": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
-    "x86_64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
     "mips64be": {
       "total": 5745,
       "match": 5738,
       "skipped": 0
     },
-    "arm32": {
+    "aarch64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -47,7 +37,17 @@
       "match": 5741,
       "skipped": 0
     },
+    "x86_64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
     "ppc64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "arm32": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -57,7 +57,12 @@
       "match": 5745,
       "skipped": 0
     },
-    "loongarch64": {
+    "s390x": {
+      "total": 5745,
+      "match": 5646,
+      "skipped": 0
+    },
+    "riscv32": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -67,16 +72,6 @@
       "match": 5675,
       "skipped": 0
     },
-    "hppa": {
-      "total": 5745,
-      "match": 5626,
-      "skipped": 0
-    },
-    "riscv32": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
     "x86_32": {
       "total": 5745,
       "match": 5745,
@@ -84,7 +79,12 @@
     },
     "alpha": {
       "total": 5745,
-      "match": 5650,
+      "match": 5661,
+      "skipped": 0
+    },
+    "loongarch64": {
+      "total": 5745,
+      "match": 5745,
       "skipped": 0
     },
     "sparc64": {
@@ -92,9 +92,9 @@
       "match": 5680,
       "skipped": 0
     },
-    "s390x": {
+    "hppa": {
       "total": 5745,
-      "match": 5600,
+      "match": 5626,
       "skipped": 0
     },
     "wasm32": {
@@ -104,8 +104,8 @@
     }
   },
   "ive_verification": {
-    "total": 109145,
-    "pass": 109145,
+    "total": 109154,
+    "pass": 109154,
     "fail": 0,
     "pass_rate": "100.00%"
   }
