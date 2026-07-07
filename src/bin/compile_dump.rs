@@ -92,6 +92,10 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
+
+    // Run IR-level optimizations (e-graph, alias analysis, scheduler, etc.)
+    let ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
 
     // Populate thread-local set of 64-bit-returning function names.
@@ -104,9 +108,7 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
     }
 
-    // Wave 9: Parallel per-function codegen using rayon.
-    // Each function's register allocation is independent, so we can
-    // parallelize across CPU cores for 4-8x speedup on multicore.
+    // Parallel per-function codegen using rayon.
     use rayon::prelude::*;
     let allocated: Vec<_> = ir_program.functions.par_iter()
         .map(|func| backend.allocate_registers(func))
