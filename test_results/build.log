@@ -915,9 +915,9 @@ warning: unused variable: `bne_off`
      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bne_off`
 
 warning: value assigned to `stub_offset` is never read
-    --> src/codegen/src/sparc64.rs:4665:9
+    --> src/codegen/src/sparc64.rs:4658:9
      |
-4665 |         stub_offset += print_hex_stub.len();
+4658 |         stub_offset += print_hex_stub.len();
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -1718,16 +1718,22 @@ warning: function `encode_sgfi` is never used
 276 | fn encode_sgfi(r1: Gpr, imm: i32) -> [u8; 6] {
     |    ^^^^^^^^^^^
 
-warning: function `ss_ld_typed` is never used
-   --> src/codegen/src/s390x.rs:660:4
+warning: function `encode_rrf_a` is never used
+   --> src/codegen/src/s390x.rs:460:4
     |
-660 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+460 | fn encode_rrf_a(op1: u8, op2: u8, r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
+    |    ^^^^^^^^^^^^
+
+warning: function `ss_ld_typed` is never used
+   --> src/codegen/src/s390x.rs:670:4
+    |
+670 | fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
     |    ^^^^^^^^^^^
 
 warning: function `ss_st_typed` is never used
-   --> src/codegen/src/s390x.rs:704:4
+   --> src/codegen/src/s390x.rs:714:4
     |
-704 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+714 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
     |    ^^^^^^^^^^^
 
 warning: constant `OP2_FBICC` is never used
@@ -2010,8 +2016,8 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
 warning: `vuma-cor` (lib) generated 1 warning
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
   --> src/pipeline.rs:74:39
@@ -2192,5 +2198,5 @@ warning: missing documentation for a macro
     | ^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
-warning: `vuma-codegen` (lib) generated 289 warnings (run `cargo fix --lib -p vuma-codegen` to apply 74 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 15.48s
+warning: `vuma-codegen` (lib) generated 290 warnings (run `cargo fix --lib -p vuma-codegen` to apply 74 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 34.76s
