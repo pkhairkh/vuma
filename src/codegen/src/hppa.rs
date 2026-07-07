@@ -1505,7 +1505,7 @@ impl Backend for HppaBackend {
             // R21 (arg5) = offset = 0
             code.extend_from_slice(&encode_copy(R0, R21));
             // R20 = __NR_mmap = 90
-            code.extend(ss_load_imm(R20, 90));
+            code.extend(ss_load_imm(R20, 89)); // __NR_mmap2 on parisc (direct register args)
             code.extend_from_slice(&encode_gate());
             // R28 (return) is already the mmap result; BV R2 returns.
             code.extend_from_slice(&encode_bv(R2, R0));
