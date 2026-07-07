@@ -955,9 +955,11 @@ fn emit_instr(
             }
             // Load value into S2.
             code.extend(ss_load_value(value, vreg_stack_slots, S2));
-            // MOVE.L S2, (A1): 0x2000 | (1<<9) | (2<<3) | S2_enc.
+            // MOVE.L S2, (A1): dst=A1 mode=010 (An indirect), src=S2 mode=000 (Dn).
+            // m68k MOVE.L format: 0010 | dst_reg(3) | dst_mode(3) | src_mode(3) | src_reg(3)
+            // = 0x2000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
             {
-                let w = 0x2000u16 | (1u16 << 9) | (2u16 << 3) | (S2.encoding() as u16 & 0x7);
+                let w = 0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
             }
         }
@@ -1118,13 +1120,12 @@ fn emit_instr(
                     code.extend(Instruction::Move { src: S0, dst: arg_reg }.encode());
                 }
             }
-            // JSR via PEA + JSR (PC-relative).  For simplicity, use BSR with 32-bit displacement
-            // patched at link time.  BSR.L disp32: word = 0x6100 0xFF + 4-byte disp32 (BSR.L form).
-            // Simpler: PEA sym(PC); JSR (SP)+.  But cleanest is BSR.L.
-            // m68k BSR.L: 0x61 0x00 0xFF 0xFF + 4-byte disp32 (the 0xFFFF extension word
-            // indicates the 32-bit displacement form).
+            // BSR.L disp32: 0x61 0xFF + 4-byte disp32 (6 bytes total).
+            // The 0xFF in the 8-bit displacement field signals BSR.L (32-bit
+            // displacement follows). The old encoding (0x61 0x00 0xFF 0xFF)
+            // was BSR.W with displacement 0xFFFF = -1, branching to PC-1.
             let call_offset = code.len() as u64;
-            code.extend_from_slice(&[0x61, 0x00, 0xFF, 0xFF]);
+            code.extend_from_slice(&[0x61, 0xFF]);
             code.extend_from_slice(&0u32.to_be_bytes());
             relocations.push(RelocationEntry {
                 offset: call_offset,
@@ -1545,15 +1546,12 @@ impl Backend for M68kBackend {
         };
 
         let vuma_free_stub: Vec<u8> = {
+            // VUMA's allocate() is lowered to stack allocation (IRInstr::Alloc),
+            // not mmap. So free() should be a no-op — calling munmap on a stack
+            // address would unmap the stack page and SIGSEGV on the next stack
+            // access (e.g., RTS which reads the return address from SP).
+            // Just return immediately.
             let mut code = Vec::new();
-            // D1 = addr (incoming).  D2 = 0 (size).
-            // D2 = 0
-            code.extend(Instruction::Moveq { dst: Gpr::D2, imm: 0 }.encode());
-            // D0 = 91 (sys_munmap)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 91 }.encode());
-            // TRAP #0
-            code.extend(Instruction::Trap0.encode());
-            // RTS
             code.extend(Instruction::Rts.encode());
             code
         };
@@ -1744,14 +1742,14 @@ impl Backend for M68kBackend {
         }
 
         // ── Patch BSR.L / CALL relocations for inter-function calls ──
-        // BSR.L: 0x61 0x00 0xFF 0xFF + 4-byte disp32.
-        // disp32 at bytes [4..8] of the 8-byte instruction.
-        // PC = address of byte 4 (extension word) = instr_addr + 4.
+        // BSR.L: 0x61 0xFF + 4-byte disp32 (6 bytes total).
+        // disp32 at bytes [2..6] of the 6-byte instruction.
+        // PC = address of the displacement field = instr_addr + 2.
         let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
-                if abs_offset + 8 > all_code.len() {
+                if abs_offset + 6 > all_code.len() {
                     continue;
                 }
                 if reloc.reloc_type == R_M68K_PC32 {
@@ -1767,12 +1765,12 @@ impl Backend for M68kBackend {
                                 .copied()
                         })
                         .unwrap_or(ffi_stub_offset);
-                    // For BSR.L: PC = abs_offset + 4 (extension word position).
-                    let pc_abs = BASE_ADDR + text_offset + abs_offset as u64 + 4;
+                    // For BSR.L: PC = abs_offset + 2 (displacement field position).
+                    let pc_abs = BASE_ADDR + text_offset + abs_offset as u64 + 2;
                     let target_abs = BASE_ADDR + text_offset + target_offset as u64;
                     let disp = (target_abs as i64 - pc_abs as i64) as i32;
                     let disp_be = disp.to_be_bytes();
-                    all_code[abs_offset + 4..abs_offset + 8].copy_from_slice(&disp_be);
+                    all_code[abs_offset + 2..abs_offset + 6].copy_from_slice(&disp_be);
                 } else if reloc.reloc_type == "R_68K_32" {
                     // Absolute 32-bit relocation for GetAddress.
                     let target_offset = func_offsets
