@@ -3378,11 +3378,11 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            // BNE skip (if not equal, skip the "l0 = 0")
+            // BE skip (if equal, skip the "l0 = 0")
             let bne_off = code.len();
-            code.extend_from_slice(&Instruction::Bne { offset: 3 }.encode());
+            code.extend_from_slice(&Instruction::Be { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // l0 = 0 (equal)
+            // l0 = 0 (not equal)
             code.extend_from_slice(
                 &Instruction::Or {
                     rd: Gpr::L0,
@@ -3391,7 +3391,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            // skip: (the BNE above jumps here, offset = +8 = 2 instructions)
+            // skip: (the BE above jumps here)
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::Ne => {
@@ -3415,8 +3415,8 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            // BE skip (if equal, skip the "l0 = 0")
-            code.extend_from_slice(&Instruction::Be { offset: 3 }.encode());
+            // BNE skip (if not equal, skip the "l0 = 0")
+            code.extend_from_slice(&Instruction::Bne { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
             // l0 = 0 (equal)
             code.extend_from_slice(
@@ -3485,7 +3485,8 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bg { offset: 3 }.encode());
+            // BLE skip (if lhs <= rhs, condition is TRUE → skip the "l0 = 0")
+            code.extend_from_slice(&Instruction::Ble { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3517,7 +3518,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Ble { offset: 3 }.encode());
+            code.extend_from_slice(&Instruction::Bg { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
