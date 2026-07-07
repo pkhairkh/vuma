@@ -2472,7 +2472,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = op
         code.extend(encode_pop(Gpr::Rsi));                   // ESI = event
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 253));    // EAX = sys_epoll_ctl (i386)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 255));    // EAX = sys_epoll_ctl (i386)
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
@@ -2690,11 +2690,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("dup".to_string(), code));
     }
 
-    // dup3(oldfd, newfd, flags) → int  [i386 syscall 327]
+    // dup3(oldfd, newfd, flags) → int  [i386 syscall 292]
     {
         let mut code = Vec::new();
         code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 327));
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 292));
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));
         code.extend(encode_ret());
@@ -2712,33 +2712,35 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("exit_group".to_string(), code));
     }
 
-    // recv(fd, buf, len, flags) → ssize_t  [i386 syscall 365]
+    // recv(fd, buf, len, flags) → ssize_t  [i386 syscall 368 = recvfrom]
+    // i386 has no direct recv(); recv = recvfrom(fd, buf, len, flags, NULL, NULL).
     {
         let mut code = Vec::new();
         code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 365));
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 368));
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));
         code.extend(encode_ret());
         stubs.push(("recv".to_string(), code));
     }
 
-    // send(fd, buf, len, flags) → ssize_t  [i386 syscall 366]
+    // send(fd, buf, len, flags) → ssize_t  [i386 syscall 367 = sendto]
+    // i386 has no direct send(); send = sendto(fd, buf, len, flags, NULL, 0).
     {
         let mut code = Vec::new();
         code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 366));
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 367));
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));
         code.extend(encode_ret());
         stubs.push(("send".to_string(), code));
     }
 
-    // shutdown(fd, how) → int  [i386 syscall 373]
+    // shutdown(fd, how) → int  [i386 syscall 371]
     {
         let mut code = Vec::new();
         code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 373));
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 371));
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));
         code.extend(encode_ret());
@@ -2750,9 +2752,9 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     for (name, num) in [
         ("brk", 45), ("clock_gettime", 265), ("gettimeofday", 78),
         ("rt_sigprocmask", 175), ("rt_sigreturn", 173),
-        ("setsockopt", 294), ("bind", 361), ("listen", 362),
+        ("setsockopt", 372), ("bind", 361), ("listen", 363),
         ("accept", 364), ("lstat", 107),
-        ("recvfrom", 371), ("sendto", 370),
+        ("recvfrom", 368), ("sendto", 367),
     ] {
         let mut code = Vec::new();
         // i386 syscall: args in EBX, ECX, EDX, ESI, EDI, EBP
@@ -3160,6 +3162,16 @@ impl Backend for X86_32Backend {
         for (name, code) in &runtime_stubs {
             func_offsets.insert(name.clone(), current_offset);
             current_offset += code.len();
+        }
+
+        // Register canonical `__vuma_print_*` aliases.
+        for (short, canonical) in [
+            ("print_int", "__vuma_print_int"),
+            ("print_hex", "__vuma_print_hex"),
+        ] {
+            if let Some(&off) = func_offsets.get(short) {
+                func_offsets.insert(canonical.to_string(), off);
+            }
         }
 
         // User functions follow the runtime stubs

@@ -1921,13 +1921,28 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 /// PowerPC64 code generation backend (ELFv2 ABI, ppc64le).
 pub struct PPC64Backend {
     target_info: PowerPC64TargetInfo,
+    /// When true, the backend emits little-endian code (ppc64le). This
+    /// affects syscall stubs that byte-swap data for the kernel: on LE the
+    /// swap is skipped because the kernel and program share the same byte
+    /// order.
+    is_le: bool,
 }
 
 impl PPC64Backend {
-    /// Create a new PPC64 backend.
+    /// Create a new PPC64 backend (big-endian ELFv2, the default).
     pub fn new() -> Self {
         Self {
             target_info: PowerPC64TargetInfo,
+            is_le: false,
+        }
+    }
+
+    /// Create a new PPC64 backend in little-endian mode (ppc64le). Used by
+    /// the PPC64LEBackend wrapper.
+    pub fn new_le() -> Self {
+        Self {
+            target_info: PowerPC64TargetInfo,
+            is_le: true,
         }
     }
 }
@@ -6055,26 +6070,17 @@ impl Backend for PPC64Backend {
                 ("getcwd", 182), ("chdir", 12), ("ioctl", 54), ("fcntl", 55),
                 ("connect", 362), ("poll", 168), ("nanosleep", 162),
                 ("mprotect", 125), ("dup", 41), ("exit_group", 234),
-                // recv → recvfrom (317), send → sendto (316): the caller is
-                // responsible for setting R7=NULL and R8=0 so the *from/*to
-                // variants behave like recv/send.
-                ("recv", 317), ("send", 316),
-                // shutdown: real __NR_shutdown on ppc64 is 373.
-                // (362 is __NR_connect — previously misused here.)
+                // recv/send alias recvfrom/sendto. The previous values
+                // (recv=317, send=316) were wrong: 316 is __NR_dup3 on ppc64
+                // (collided with the dup3 stub below) and 317 is __NR_socket.
+                // recv = recvfrom(fd,buf,len,flags,NULL,NULL); send likewise.
+                ("recv", 372), ("send", 371),
                 ("shutdown", 373),
                 ("bind", 361), ("listen", 363), ("accept", 364),
                 ("setsockopt", 366),
                 ("brk", 45), ("clock_gettime", 246), ("gettimeofday", 78),
                 ("rt_sigprocmask", 126), ("rt_sigreturn", 173),
                 ("dup3", 316), ("lstat", 107),
-                ("recvfrom", 372), ("sendto", 371),
-                // ── P7: additional missing syscalls ──
-                // dup3: __NR_dup3 on ppc64 = 316.
-                // lstat: __NR_lstat on ppc64 = 107 (separate from
-                // __NR_stat = 106).
-                // sendto/recvfrom: __NR_sendto = 371, __NR_recvfrom = 372.
-                ("dup3", 316),
-                ("lstat", 107),
                 ("recvfrom", 372), ("sendto", 371),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
@@ -6106,16 +6112,25 @@ impl Backend for PPC64Backend {
                 code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 42 }.encode());
                 // SC — perform syscall; R3 = return value
                 code.extend_from_slice(&Instruction::Sc.encode());
-                // LWZ R10, 0(R9) — load fd[0] (native BE)
-                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R9, d: 0 }.encode());
-                // STWBRX R10, 0, R9 — store byte-reversed (LE in memory)
-                code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R9));
-                // ADDI R11, R9, 4 — R11 = &fd[1]
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R9, simm: 4 }.encode());
-                // LWZ R10, 0(R11) — load fd[1]
-                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R11, d: 0 }.encode());
-                // STWBRX R10, 0, R11 — store byte-reversed
-                code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R11));
+                if self.is_le {
+                    // On ppc64le the kernel writes LE fds natively; VUMA
+                    // programs read with read_i32_le() which matches. No
+                    // byte-swap needed — the fds are already in the right
+                    // byte order.
+                } else {
+                    // On ppc64 BE the kernel writes BE fds; VUMA programs
+                    // read with read_i32_le(), so we byte-swap each fd.
+                    // LWZ R10, 0(R9) — load fd[0] (native BE)
+                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R9, d: 0 }.encode());
+                    // STWBRX R10, 0, R9 — store byte-reversed (LE in memory)
+                    code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R9));
+                    // ADDI R11, R9, 4 — R11 = &fd[1]
+                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R9, simm: 4 }.encode());
+                    // LWZ R10, 0(R11) — load fd[1]
+                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R11, d: 0 }.encode());
+                    // STWBRX R10, 0, R11 — store byte-reversed
+                    code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R11));
+                }
                 // BLR
                 code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
                 stubs.push(("pipe".to_string(), code));
@@ -6142,82 +6157,88 @@ impl Backend for PPC64Backend {
             // in 4-byte words, relative to the BC instruction.
             {
                 let mut code = Vec::new();
-                // MR R9, R3 — save pathname
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R3 }.encode());
-                // MR R10, R5 — save envp
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R10, rs: Gpr::R5 }.encode());
-                // MR R11, R4 — argv iterator
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R4 }.encode());
+                if self.is_le {
+                    // On ppc64le, argv/envp pointers are already in native LE
+                    // byte order — no byte-swap needed. Just call execve
+                    // directly with the caller's R3/R4/R5.
+                    // LI R0, 11 — sys_execve
+                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 11 }.encode());
+                    // SC
+                    code.extend_from_slice(&Instruction::Sc.encode());
+                    // BLR
+                    code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                } else {
+                    // On ppc64 BE, VUMA programs store argv/envp pointers in
+                    // LE; the kernel expects BE. Walk each array and byte-swap.
+                    // MR R9, R3 — save pathname
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R3 }.encode());
+                    // MR R10, R5 — save envp
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R10, rs: Gpr::R5 }.encode());
+                    // MR R11, R4 — argv iterator
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R4 }.encode());
 
-                // argv_loop:
-                let argv_loop_offset = code.len();
-                // LD R12, 0(R11) — load 64-bit pointer (native BE)
-                code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
-                // CMPLDI R12, 0 — compare with 0 (unsigned)
-                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
-                // BEQ argv_done (skip to end of loop)
-                //   Need to compute branch distance after emitting all loop body.
-                //   We'll emit a placeholder BC and patch it.
-                let beq_argv_pos = code.len();
-                code.extend_from_slice(&[0u8; 4]); // placeholder for BC
-                // STDBRX R12, 0, R11 — store byte-reversed (BE in memory)
-                code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
-                // ADDI R11, R11, 8 — advance to next entry
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
-                // B argv_loop
-                let b_argv_pos = code.len();
-                code.extend_from_slice(&[0u8; 4]); // placeholder for B
-                let argv_done_offset = code.len();
+                    // argv_loop:
+                    let argv_loop_offset = code.len();
+                    // LD R12, 0(R11) — load 64-bit pointer (native BE)
+                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
+                    // CMPLDI R12, 0 — compare with 0 (unsigned)
+                    code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
+                    let beq_argv_pos = code.len();
+                    code.extend_from_slice(&[0u8; 4]); // placeholder for BC
+                    // STDBRX R12, 0, R11 — store byte-reversed (BE in memory)
+                    code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
+                    // ADDI R11, R11, 8 — advance to next entry
+                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
+                    // B argv_loop
+                    let b_argv_pos = code.len();
+                    code.extend_from_slice(&[0u8; 4]); // placeholder for B
+                    let argv_done_offset = code.len();
 
-                // envp_loop:
-                let envp_loop_offset = code.len();
-                // MR R11, R10 — envp iterator
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R10 }.encode());
-                // LD R12, 0(R11)
-                code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
-                // CMPLDI R12, 0
-                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
-                // BEQ envp_done
-                let beq_envp_pos = code.len();
-                code.extend_from_slice(&[0u8; 4]); // placeholder
-                // STDBRX R12, 0, R11
-                code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
-                // ADDI R11, R11, 8
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
-                // B envp_loop
-                let b_envp_pos = code.len();
-                code.extend_from_slice(&[0u8; 4]); // placeholder
-                let envp_done_offset = code.len();
+                    // envp_loop:
+                    let envp_loop_offset = code.len();
+                    // MR R11, R10 — envp iterator
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R10 }.encode());
+                    // LD R12, 0(R11)
+                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
+                    // CMPLDI R12, 0
+                    code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
+                    let beq_envp_pos = code.len();
+                    code.extend_from_slice(&[0u8; 4]); // placeholder
+                    // STDBRX R12, 0, R11
+                    code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
+                    // ADDI R11, R11, 8
+                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
+                    // B envp_loop
+                    let b_envp_pos = code.len();
+                    code.extend_from_slice(&[0u8; 4]); // placeholder
+                    let envp_done_offset = code.len();
 
-                // Restore R3 (pathname) and R5 (envp); R4 (argv) unchanged
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R3, rs: Gpr::R9 }.encode());
-                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R5, rs: Gpr::R10 }.encode());
-                // LI R0, 11 — sys_execve
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 11 }.encode());
-                // SC
-                code.extend_from_slice(&Instruction::Sc.encode());
-                // BLR
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                    // Restore R3 (pathname) and R5 (envp); R4 (argv) unchanged
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R3, rs: Gpr::R9 }.encode());
+                    code.extend_from_slice(&Instruction::Mr { ra: Gpr::R5, rs: Gpr::R10 }.encode());
+                    // LI R0, 11 — sys_execve
+                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 11 }.encode());
+                    // SC
+                    code.extend_from_slice(&Instruction::Sc.encode());
+                    // BLR
+                    code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
 
-                // ── Patch branch targets ──
-                // Use the existing encode_b_form (B-form: BC) and
-                // encode_i_form (I-form: B) helpers for correct masks.
-                // BO=12, BI=2 → BEQ (branch if CR0.EQ set).
-                let patch_beq = |code: &mut Vec<u8>, pos: usize, target: usize| {
-                    let bd = ((target as i64) - (pos as i64)) / 4;
-                    let word = encode_b_form(16, 12, 2, bd as i32, 0, 0);
-                    code[pos..pos + 4].copy_from_slice(&word);
-                };
-                let patch_b = |code: &mut Vec<u8>, pos: usize, target: usize| {
-                    let li = ((target as i64) - (pos as i64)) / 4;
-                    let word = encode_i_form(18, li as i32, 0, 0);
-                    code[pos..pos + 4].copy_from_slice(&word);
-                };
-                patch_beq(&mut code, beq_argv_pos, argv_done_offset);
-                patch_b(&mut code, b_argv_pos, argv_loop_offset);
-                patch_beq(&mut code, beq_envp_pos, envp_done_offset);
-                patch_b(&mut code, b_envp_pos, envp_loop_offset);
-
+                    // ── Patch branch targets ──
+                    let patch_beq = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                        let bd = ((target as i64) - (pos as i64)) / 4;
+                        let word = encode_b_form(16, 12, 2, bd as i32, 0, 0);
+                        code[pos..pos + 4].copy_from_slice(&word);
+                    };
+                    let patch_b = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                        let li = ((target as i64) - (pos as i64)) / 4;
+                        let word = encode_i_form(18, li as i32, 0, 0);
+                        code[pos..pos + 4].copy_from_slice(&word);
+                    };
+                    patch_beq(&mut code, beq_argv_pos, argv_done_offset);
+                    patch_b(&mut code, b_argv_pos, argv_loop_offset);
+                    patch_beq(&mut code, beq_envp_pos, envp_done_offset);
+                    patch_b(&mut code, b_envp_pos, envp_loop_offset);
+                }
                 stubs.push(("execve".to_string(), code));
             }
 

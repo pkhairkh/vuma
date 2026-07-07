@@ -1576,7 +1576,12 @@ impl Backend for M68kBackend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                ("mmap", 90),
+                // mmap2=192 on m68k. The legacy __NR_mmap (90) expects a
+                // single struct-pointer argument in D1, which the simple_stub
+                // calling convention does not build; using mmap2 lets the
+                // caller pass (addr, len, prot, flags, fd, pgoff) in registers
+                // D1-D6 directly.
+                ("mmap", 192),
                 ("munmap", 91),
                 ("exit", 1),
                 ("exit_group", 252),

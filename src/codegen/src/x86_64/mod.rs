@@ -3203,18 +3203,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_newline".to_string(), code));
     }
 
-    // ── Additional missing syscalls (x86_64 numbers) ──
-    // Simple stubs: mov eax, #num; syscall; ret
-    for (name, num) in [
-        ("brk", 12), ("clock_gettime", 228), ("gettimeofday", 96),
-        ("rt_sigprocmask", 14), ("rt_sigreturn", 15),
-    ] {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, num as i32));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push((name.to_string(), code));
-    }
+    // NOTE: brk/clock_gettime/gettimeofday/rt_sigprocmask/rt_sigreturn were
+    // previously duplicated here. The canonical entries above (in the main
+    // stub table) are the live ones; the duplicate block has been removed to
+    // avoid emitting ~70 bytes of dead code.
 
     stubs
 }
@@ -3397,6 +3389,19 @@ impl Backend for X86_64Backend {
         for (name, code) in &runtime_stubs {
             func_offsets.insert(name.clone(), current_offset);
             current_offset += code.len();
+        }
+
+        // Register canonical `__vuma_print_*` aliases pointing at the same
+        // offsets as the short-name helpers, so user code calling the
+        // canonical names resolves correctly.
+        for (short, canonical) in [
+            ("print_int", "__vuma_print_int"),
+            ("print_hex", "__vuma_print_hex"),
+            ("print_newline", "__vuma_print_newline"),
+        ] {
+            if let Some(&off) = func_offsets.get(short) {
+                func_offsets.insert(canonical.to_string(), off);
+            }
         }
 
         // User functions follow the runtime stubs

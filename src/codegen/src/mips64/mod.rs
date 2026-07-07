@@ -5030,7 +5030,7 @@ impl Backend for Mips64Backend {
                 // File ops
                 ("lseek", 5048), ("stat", 5106), ("fstat", 5108),
                 ("kill", 5137), ("getcwd", 5183), ("chdir", 5012),
-                ("ioctl", 5054), ("fcntl", 5055),
+                ("ioctl", 5054), ("fcntl", 5070),
                 // Poll / sleep
                 ("poll", 5168), ("nanosleep", 5162),
                 // Memory
@@ -5310,6 +5310,16 @@ impl Backend for Mips64Backend {
         for (name, code) in &syscall_stubs {
             func_offsets.insert(name.clone(), stub_offset);
             stub_offset += code.len();
+        }
+
+        // Register canonical `__vuma_print_*` aliases.
+        for (short, canonical) in [
+            ("print_int", "__vuma_print_int"),
+            ("print_hex", "__vuma_print_hex"),
+        ] {
+            if let Some(&off) = func_offsets.get(short) {
+                func_offsets.insert(canonical.to_string(), off);
+            }
         }
 
         // ── Build _start stub bytes ──

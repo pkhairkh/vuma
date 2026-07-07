@@ -6188,28 +6188,31 @@ impl Backend for RiscV64Backend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
 
             // Simple stubs (args already in correct registers a0-a5):
+            // Numbers verified against asm-generic/unistd.h.
             for (name, num) in [
                 ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
+                ("munmap", 215), ("exit", 93), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
                 ("clone", 220),
                 // ── Additional POSIX syscall stubs (RISC-V generic ABI) ──
-                ("lseek", 62), ("stat", 80), ("fstat", 80),
+                ("lseek", 62), ("fstat", 80),
                 ("kill", 129), ("getcwd", 17), ("chdir", 49),
-                ("ioctl", 73), ("fcntl", 72), ("connect", 203),
-                ("poll", 168), ("nanosleep", 101), ("mprotect", 226),
+                ("ioctl", 29), ("fcntl", 25), ("connect", 203),
+                ("nanosleep", 101), ("mprotect", 226),
                 ("dup", 23), ("exit_group", 94),
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
-                ("setsockopt", 194),
+                ("setsockopt", 208),
                 ("waitpid", 260),
                 ("brk", 214),
                 ("clock_gettime", 113),
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
-                ("dup3", 24), ("lstat", 82),
+                ("dup3", 24),
                 ("recvfrom", 207), ("sendto", 206),
+                // NOTE: stat/lstat/poll/alarm do not exist on the generic ABI.
+                // They are provided as newfstatat/ppoll/setitimer shims below.
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6304,6 +6307,80 @@ impl Backend for RiscV64Backend {
                 // Defensive: if the kernel ever does return, trap.
                 code.extend(Instruction::Ebreak.encode());
                 stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // stat(path, statbuf) → newfstatat(AT_FDCWD=-100, path, statbuf, 0)
+            // stat() does not exist on the generic ABI; newfstatat=79 replaces it.
+            // Caller args: a0=path, a1=statbuf
+            // Need:        a0=-100, a1=path, a2=statbuf, a3=0
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());   // a3 = 0 (flags)
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("stat".to_string(), code));
+            }
+
+            // lstat(path, statbuf) → newfstatat(AT_FDCWD, path, statbuf, AT_SYMLINK_NOFOLLOW=0x100)
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x100 }.encode()); // a3 = AT_SYMLINK_NOFOLLOW
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("lstat".to_string(), code));
+            }
+
+            // poll(fds, nfds, timeout) → ppoll(fds, nfds, &ts, NULL)
+            // poll() does not exist on the generic ABI; ppoll=73 replaces it.
+            // Caller args: a0=fds, a1=nfds, a2=timeout
+            // Need:        a0=fds, a1=nfds, a2=&ts, a3=NULL
+            // Build a 16-byte timespec {tv_sec=timeout, tv_nsec=0} on the stack.
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode()); // sp -= 16
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::A2, imm: 0 }.encode());    // ts.tv_sec = timeout
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 8 }.encode());  // ts.tv_nsec = 0
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Sp, imm: 0 }.encode());    // a2 = &ts
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());  // a3 = NULL
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 73 }.encode()); // ppoll
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());  // sp += 16
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("poll".to_string(), code));
+            }
+
+            // alarm(seconds) → setitimer(ITIMER_REAL=0, &itimerval, NULL)
+            // alarm() does not exist on the generic ABI. Schedule SIGALRM via
+            // setitimer=103. Build a 32-byte itimerval on the stack:
+            //   struct itimerval { struct timeval it_interval; struct timeval it_value; }
+            //   struct timeval { long tv_sec; long tv_usec; }
+            // Caller args: a0=seconds
+            // Need: a0=0 (ITIMER_REAL), a1=&itimerval, a2=NULL
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode()); // sp -= 32
+                // it_interval.tv_sec = 0, it_interval.tv_usec = 0
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 0 }.encode());
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 8 }.encode());
+                // it_value.tv_sec = a0 (seconds), it_value.tv_usec = 0
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::A0, imm: 16 }.encode());
+                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 24 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());    // a1 = &itimerval
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());  // a0 = ITIMER_REAL
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());  // a2 = NULL
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 103 }.encode());// setitimer
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 32 }.encode());  // sp += 32
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("alarm".to_string(), code));
             }
 
             stubs

@@ -124,7 +124,17 @@ impl Backend for Mips64BeBackend {
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
-        self.inner.encode_function(func)
+        // Swap 4-byte instruction words from LE to BE, matching the
+        // byte-swap applied by return_stub and trampoline. The base
+        // mips64 encoder returns LE instruction bytes; for qemu-mips64
+        // (big-endian) the same words must appear in BE byte order.
+        let mut code = self.inner.encode_function(func)?;
+        for i in (0..code.len()).step_by(4) {
+            if i + 4 <= code.len() {
+                swap_u32(&mut code, i);
+            }
+        }
+        Ok(code)
     }
 
     fn return_stub(&self) -> Vec<u8> {
