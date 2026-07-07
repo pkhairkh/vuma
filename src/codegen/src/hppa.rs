@@ -727,28 +727,34 @@ impl Backend for HppaBackend {
                         code.extend_from_slice(&encode_nop());
                     }
                     IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
-                        // Move args to R26-R23
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < 4 {
-                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                        // Skip __vuma_free calls — VUMA uses stack allocation, not mmap.
+                        // __vuma_free is a no-op stub, so just emit NOPs.
+                        if call_target == "__vuma_free" {
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&encode_nop());
+                        } else {
+                            // Move args to R26-R23
+                            for (i, arg) in args.iter().enumerate() {
+                                if i < 4 {
+                                    code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                                }
                             }
-                        }
-                        // BL call_target, R2 (save return addr in R2)
-                        let call_offset = code.len() as u64;
-                        // BL,n 0, R2 — placeholder, will be patched
-                        let w = 0xE8400000u32; // BL,n with disp=0
-                        code.extend_from_slice(&w.to_be_bytes());
-                        code.extend_from_slice(&encode_nop()); // delay slot
-                        relocations.push(RelocationEntry {
-                            offset: call_offset,
-                            symbol: call_target.clone(),
-                            reloc_type: "R_PARISC_PCREL".to_string(),
-                        });
-                        // Move return value from R28 to dst
-                        if let Some(d) = dst {
-                            let d_id = d.as_register().unwrap_or(0);
-                            let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
-                            code.extend(ss_st(R28, d_off));
+                            // BL call_target, R2 (save return addr in R2)
+                            let call_offset = code.len() as u64;
+                            let w = 0xE8400000u32; // BL with disp=0
+                            code.extend_from_slice(&w.to_be_bytes());
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            relocations.push(RelocationEntry {
+                                offset: call_offset,
+                                symbol: call_target.clone(),
+                                reloc_type: "R_PARISC_PCREL".to_string(),
+                            });
+                            // Move return value from R28 to dst
+                            if let Some(d) = dst {
+                                let d_id = d.as_register().unwrap_or(0);
+                                let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                                code.extend(ss_st(R28, d_off));
+                            }
                         }
                     }
                     IRInstr::CtSelect { dst, cond, true_val, false_val, ty: _ } => {
@@ -1020,6 +1026,12 @@ impl Backend for HppaBackend {
         // ── Concatenate all code ──
         let mut all_code = start_stub;
         all_code.extend_from_slice(&ffi_stub);
+        // Pad start_stub + ffi_stub to 16-byte alignment.
+        // PA-RISC BL displacement has 16-byte granularity, so ALL code positions
+        // must be 16-byte aligned relative to the text segment start.
+        while all_code.len() % 16 != 0 {
+            all_code.extend_from_slice(&encode_nop());
+        }
 
         // Reorder functions: emit main first, then all other functions.
         // This ensures calls from main to other functions are always forward
@@ -1037,7 +1049,8 @@ impl Backend for HppaBackend {
 
         // Record function offsets for BL patching
         let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut current_code_offset = start_stub_size + ffi_stub_size;
+        let padded_header_size = (start_stub_size + ffi_stub_size + 15) & !15;
+        let mut current_code_offset = padded_header_size;
         for func in &ordered_functions {
             func_offsets.insert(func.name.clone(), current_code_offset);
             let func_size: usize = func.blocks.iter()
@@ -1056,15 +1069,29 @@ impl Backend for HppaBackend {
                 }
             }
             // Pad each function to 16-byte alignment (PA-RISC BL granularity).
-            // The BL displacement has 16-byte granularity, so function offsets
-            // must be 16-byte aligned for BL calls to work correctly.
             while all_code.len() % 16 != 0 {
                 all_code.extend_from_slice(&encode_nop());
             }
         }
+
+        // Record runtime stub offsets for BL patching
+        let vuma_alloc_offset = all_code.len();
         all_code.extend_from_slice(&vuma_alloc_stub);
-        for (_, code) in &syscall_stubs {
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        // Pad to 16-byte alignment
+        while all_code.len() % 16 != 0 {
+            all_code.extend_from_slice(&encode_nop());
+        }
+
+        let mut stub_offset = all_code.len();
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
             all_code.extend_from_slice(code);
+            // Pad to 16-byte alignment
+            while all_code.len() % 16 != 0 {
+                all_code.extend_from_slice(&encode_nop());
+            }
+            stub_offset = all_code.len();
         }
 
         // ── Patch _start BL to main ──
@@ -1081,7 +1108,7 @@ impl Backend for HppaBackend {
         }
 
         // ── Patch inter-function BL calls ──
-        let mut func_code_offset = start_stub_size + ffi_stub_size;
+        let mut func_code_offset = padded_header_size;
         for func in &ordered_functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -1113,7 +1140,7 @@ impl Backend for HppaBackend {
         }
 
         // ── Build ELF ──
-        let text_offset: u32 = 52 + 3 * 32; // ELF32 header + 3 phdrs
+        let text_offset: u32 = ((52 + 3 * 32) + 15) & !15; // ELF32 header + 3 phdrs, 16-byte aligned
         let entry = (BASE_ADDR + text_offset as u64) as u32;
         let text_filesz = text_offset + all_code.len() as u32;
 
