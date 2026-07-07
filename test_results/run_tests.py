@@ -16,14 +16,23 @@ BACKENDS = {}
 # Always use QEMU for all backends (even native aarch64)
 # This ensures consistent ELF loading behavior
 BACKENDS["aarch64"] = "qemu-aarch64"
+BACKENDS["aarch64_be"] = "qemu-aarch64_be"
 BACKENDS["x86_64"] = "qemu-x86_64"
 BACKENDS["riscv64"] = "qemu-riscv64"
 BACKENDS["arm32"] = "qemu-arm"
+BACKENDS["armeb"] = "qemu-armeb"
 BACKENDS["mips64"] = "qemu-mips64el"
+BACKENDS["mips64be"] = "qemu-mips64"
 BACKENDS["ppc64"] = "qemu-ppc64"
+BACKENDS["ppc64le"] = "qemu-ppc64le"
 BACKENDS["loongarch64"] = "qemu-loongarch64"
 BACKENDS["riscv32"] = "qemu-riscv32"
 BACKENDS["x86_32"] = "qemu-i386"
+BACKENDS["s390x"] = "qemu-s390x"
+BACKENDS["alpha"] = "qemu-alpha"
+BACKENDS["m68k"] = "qemu-m68k"
+BACKENDS["sparc64"] = "qemu-sparc64"
+BACKENDS["hppa"] = "qemu-hppa"
 
 # Check wasmtime
 WASMTIME = os.environ.get("WASMTIME_BIN", "")

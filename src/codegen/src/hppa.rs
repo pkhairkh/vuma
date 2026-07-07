@@ -120,13 +120,101 @@ fn encode_bl(target_offset: i32) -> [u8; 4] {
     word.to_be_bytes()
 }
 
-/// Encode BV (return) — `be 0(sr0,rp)` = branch to address in rp.
-/// PA-RISC BE (Branch External) with displacement=0 and base=rp.
-/// From scan: base register is at bits 25-21.
-/// BE opcode = 0x38 (111000) → 0xE0000000.
-/// For rp=R2: 0xE0000000 | (2 << 21) = 0xE0400000.
+/// Encode BV (Branch Variable) — `be 0(sr0,rp)` for return.
+/// This uses BE (Branch External) with sr=0, base=rp, disp=0, which branches
+/// to the address in rp. Working but technically a BE not BV.
 fn encode_bv(rp: Reg, _base: Reg) -> [u8; 4] {
     let word = 0xE0000000u32 | ((rp as u32 & 0x1F) << 21);
+    word.to_be_bytes()
+}
+
+/// Encode actual BV (Branch Variable) — `bv 0(base)` branches to address in base.
+/// PA-RISC BV format: 0xE800C000 | (base << 21) | (link << 16) | (disp << 5) | w
+fn encode_bv_real(base: Reg) -> [u8; 4] {
+    let word = 0xE800C000u32 | ((base as u32 & 0x1F) << 21);
+    word.to_be_bytes()
+}
+
+/// Encode cmpb (compare-and-branch) — non-linear displacement encoding.
+///
+/// Major opcode 0x20 = forward conditions (=, <, <=, <<, <<=, sv, od).
+/// Major opcode 0x22 = inverted conditions (<>, >=, >, >>=, >>, nsv, ev).
+///
+/// Displacement field (empirically determined via QEMU decode):
+///   bit 0: weight -8192 (sign bit)
+///   bit 1: f (nullify on taken) — not part of displacement
+///   bit 2: weight +4096
+///   bits 11-3: weight 4, 8, 16, ..., 1024 (9-bit, 4-byte scaling)
+///   bit 12: weight +2048
+///
+/// target = PC + 8 + offset_bytes (where offset_bytes must be a multiple of 4).
+fn encode_cmpb_disp(offset_bytes: i32) -> u32 {
+    assert!(offset_bytes % 4 == 0, "cmpb displacement must be 4-byte aligned");
+    assert!(offset_bytes >= -8192 && offset_bytes <= 8188,
+            "cmpb displacement {} out of range [-8192, 8188]", offset_bytes);
+    let mut bits: u32 = 0;
+    let mut remaining = offset_bytes;
+    if remaining < 0 {
+        bits |= 1;  // bit 0 (sign)
+        remaining += 8192;
+    }
+    if remaining >= 4096 {
+        bits |= 1 << 2;  // bit 2 (weight 4096)
+        remaining -= 4096;
+    }
+    if remaining >= 2048 {
+        bits |= 1 << 12;  // bit 12 (weight 2048)
+        remaining -= 2048;
+    }
+    let val = remaining / 4;
+    assert!(val >= 0 && val <= 511);
+    bits | (val as u32) << 3  // bits 11-3 (weight 4..1024)
+}
+
+/// Encode cmpb (compare-and-branch, register form).
+///
+/// `r1`, `r2` are the registers to compare.
+/// `cond` is the 3-bit condition code:
+///   001 (=), 010 (<), 011 (<=), 100 (<<), 101 (<<=), 110 (sv), 111 (od)
+///   For inverted conditions (<>), use `inverted=true` with cond=001.
+/// `f` is the nullify-on-taken flag (bit 1 of low byte).
+/// `disp_bytes` is the byte displacement from PC+8 (must be 4-byte aligned).
+fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes: i32) -> [u8; 4] {
+    let major = if inverted { 0x88000000u32 } else { 0x80000000u32 };
+    let mut word = major
+        | ((r2 as u32 & 0x1F) << 21)
+        | ((r1 as u32 & 0x1F) << 16)
+        | ((cond & 0x7) << 13);
+    if f { word |= 1 << 1; }  // bit 1 = f
+    word |= encode_cmpb_disp(disp_bytes);
+    word.to_be_bytes()
+}
+
+/// Encode cmpiclr (compare-immediate-and-clear, no branch) — materializes a boolean.
+///
+/// `imm5` is a 5-bit immediate.
+/// `r1` is the register to compare against.
+/// `dst` is the destination register (cleared if condition true).
+/// `cond` is the 3-bit condition code (same encoding as cmpb).
+/// `f` is the flag that inverts the condition (bit 12).
+///
+/// Effect: dst = (cond(r1, imm5) XOR f) ? 0 : dst
+/// i.e., if (cond == true && !f) || (cond == false && f), then dst = 0.
+///
+/// Format (empirically determined):
+///   bits 31-26: 100100 (major 0x24)
+///   bits 25-21: r1 (register to compare)
+///   bits 20-16: imm5 (5-bit immediate)
+///   bits 15-13: cond
+///   bit 12: f (inverts condition)
+///   bits 4-0: dst
+fn encode_cmpiclr(imm5: u8, r1: Reg, dst: Reg, cond: u32, f: bool) -> [u8; 4] {
+    let mut word = 0x90000000u32
+        | ((r1 as u32 & 0x1F) << 21)
+        | ((imm5 as u32 & 0x1F) << 16)
+        | ((cond & 0x7) << 13);
+    if f { word |= 1 << 12; }
+    word | (dst as u32 & 0x1F);
     word.to_be_bytes()
 }
 
@@ -160,14 +248,25 @@ fn encode_addil(reg: Reg, imm: u32, dst: Reg) -> [u8; 4] {
 
 /// Encode LDO (Load Offset) — `LDO offset(base), reg`.
 /// Adds a 14-bit signed offset to a register and stores in reg.
-/// Format: 0001 10ss bbb 0 0 aaaa aaa ddddd iiiiiiiiiiiiii
-/// ss=01 (LDO), condition=always (0), a=0
+/// Uses the non-linear displacement encoding (see encode_ldo_raw).
 fn encode_ldo(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
-    // PA-RISC LDO/LDI: major opcode 0x0D (001101), base at bits 25-21,
-    // dst at bits 20-16, displacement at bits 13-1 (13-bit signed, shifted left 1).
-    // For base=R0, this is LDI (load immediate).
-    // Verified by brute-force scanning qemu decode output.
-    let imm14 = ((offset as i32) << 1) as u32 & 0x3FFF;
+    encode_ldo_raw(base, offset, dst)
+}
+
+/// Encode LDO without the legacy shift — for direct use (not via ss_st/ss_ld).
+///
+/// PA-RISC LDO displacement encoding (empirically determined via QEMU decode):
+///   - bit 0: sign (1 = negative, 0 = positive)
+///   - bits 13-1: magnitude / 2 (unsigned)
+///   - For disp >= 0: imm14 = disp * 2 (bit 0 = 0)
+///   - For disp < 0:  imm14 = (disp * 2 & 0x3FFE) | 1 (bit 0 = 1)
+fn encode_ldo_raw(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
+    let disp = offset as i32;
+    let imm14 = if disp >= 0 {
+        (disp * 2) as u32 & 0x3FFE
+    } else {
+        ((disp * 2) as u32 & 0x3FFE) | 1
+    };
     let word = 0x34000000u32
         | ((base as u32 & 0x1F) << 21)
         | ((dst as u32 & 0x1F) << 16)
@@ -176,22 +275,16 @@ fn encode_ldo(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
 }
 
 /// Encode LDW (Load Word) — `LDW offset(base), reg`.
-/// Loads a 32-bit word from memory at base+offset.
-/// Format: 0001 00ss bbbbb x ff aaaa aaa ddddd ll ooooooo
-/// For LDW with short displacement: ss=00, x=0, f=0, a=condition, d=dst
-/// 0001 0000 bbbbb 0 0 0000000 ddddd iiiiiiiiiiiiii
+/// Uses the same non-linear displacement encoding as LDO:
+///   - bit 0: sign (1 = negative, 0 = positive)
+///   - bits 13-1: magnitude / 2 (unsigned)
 fn encode_ldw(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
-    let imm14 = ((offset as i32) << 1) as u32 & 0x3FFF;
-    let word = 0x48000000u32  // 0001 00 00 (LDW, short, no modify)
-        | ((base as u32 & 0x1F) << 21)
-        | ((dst as u32 & 0x1F) << 16) // wait
-        | imm14;
-    // Correct: 0001 00ss bbbbb xff aaaa aaa ddddd ll ooooooo
-    // LDW: 0001 0000 bbbbb 0 00 0000000 ddddd 0 0 iiiiiiiiiiiiii
-    // Actually the format is complex. Let me use known-good encoding.
-    // LDW offset(sr,base),dst
-    // 0001 00ss bbbbb xff aaaa aaa ddddd ll iiiiiiiiiiiiii
-    // ss=00 (word), x=0, ff=00, a=0000000 (always), l=00
+    let disp = offset as i32;
+    let imm14 = if disp >= 0 {
+        (disp * 2) as u32 & 0x3FFE
+    } else {
+        ((disp * 2) as u32 & 0x3FFE) | 1
+    };
     let word = 0x48000000u32
         | ((base as u32 & 0x1F) << 21)
         | ((dst as u32 & 0x1F) << 16)
@@ -200,11 +293,14 @@ fn encode_ldw(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
 }
 
 /// Encode STW (Store Word) — `STW reg, offset(base)`.
-/// Stores a 32-bit word to memory at base+offset.
-/// Format: 0001 10ss bbbbb xff aaaa aaa sssss ll ooooooo  
-/// STW: 0001 1010 bbbbb 0 00 0000000 sssss 0 0 iiiiiiiiiiiiii
+/// Uses the same non-linear displacement encoding as LDO.
 fn encode_stw(src: Reg, base: Reg, offset: i16) -> [u8; 4] {
-    let imm14 = ((offset as i32) << 1) as u32 & 0x3FFF;
+    let disp = offset as i32;
+    let imm14 = if disp >= 0 {
+        (disp * 2) as u32 & 0x3FFE
+    } else {
+        ((disp * 2) as u32 & 0x3FFE) | 1
+    };
     let word = 0x68000000u32  // 0001 1010 (STW)
         | ((base as u32 & 0x1F) << 21)
         | ((src as u32 & 0x1F) << 16)
@@ -214,7 +310,12 @@ fn encode_stw(src: Reg, base: Reg, offset: i16) -> [u8; 4] {
 
 /// Encode STB (Store Byte) — `STB reg, offset(base)`.
 fn encode_stb(src: Reg, base: Reg, offset: i16) -> [u8; 4] {
-    let imm14 = ((offset as i32) << 1) as u32 & 0x3FFF;
+    let disp = offset as i32;
+    let imm14 = if disp >= 0 {
+        (disp * 2) as u32 & 0x3FFE
+    } else {
+        ((disp * 2) as u32 & 0x3FFE) | 1
+    };
     let word = 0x60000000u32  // 0001 1000 (STB)
         | ((base as u32 & 0x1F) << 21)
         | ((src as u32 & 0x1F) << 16)
@@ -224,7 +325,12 @@ fn encode_stb(src: Reg, base: Reg, offset: i16) -> [u8; 4] {
 
 /// Encode LDB (Load Byte) — `LDB offset(base), reg`.
 fn encode_ldb(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
-    let imm14 = ((offset as i32) << 1) as u32 & 0x3FFF;
+    let disp = offset as i32;
+    let imm14 = if disp >= 0 {
+        (disp * 2) as u32 & 0x3FFE
+    } else {
+        ((disp * 2) as u32 & 0x3FFE) | 1
+    };
     let word = 0x40000000u32  // 0001 0000 (LDB)
         | ((base as u32 & 0x1F) << 21)
         | ((dst as u32 & 0x1F) << 16)
@@ -345,7 +451,7 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
 fn ss_st(src: Reg, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
     if (-8192..=8191).contains(&offset) {
-        code.extend_from_slice(&encode_stw(src, R3, (offset * 2) as i16));
+        code.extend_from_slice(&encode_stw(src, R3, offset as i16));
     } else {
         // Large offset: compute address
         code.extend(ss_load_imm(S3, offset as i64));
@@ -359,7 +465,7 @@ fn ss_st(src: Reg, offset: i32) -> Vec<u8> {
 fn ss_ld(dst: Reg, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
     if (-8192..=8191).contains(&offset) {
-        code.extend_from_slice(&encode_ldw(R3, (offset * 2) as i16, dst));
+        code.extend_from_slice(&encode_ldw(R3, offset as i16, dst));
     } else {
         code.extend(ss_load_imm(S3, offset as i64));
         code.extend_from_slice(&encode_add(R3, S3, S3));
@@ -378,6 +484,50 @@ fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scr
         IRValue::Immediate(v) => ss_load_imm(scratch, *v),
         _ => ss_load_imm(scratch, 0),
     }
+}
+
+/// Emit a backward unconditional branch using the BL+LDO+BV pattern.
+///
+/// PA-RISC BL only supports forward branches, so to branch backward we:
+///   1. BL +0, S3  — sets S3 = current_PC + 8, branches to PC+8 (next instr)
+///   2. NOP        — delay slot
+///   3. LDO disp(S3), S3  — S3 = (PC+8) + disp = target_address
+///   4. BV R0(S3)  — branch to address in S3
+///   5. NOP        — delay slot
+///
+/// `target_offset` is the absolute code offset of the branch target.
+/// `bl_offset` is the absolute code offset where the BL instruction will be emitted.
+/// Returns the 5-instruction (20-byte) sequence as a Vec<u8>.
+fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
+    let mut code = Vec::new();
+    // BL +0, S3 (link = R11 = S3, disp = 0)
+    code.extend_from_slice(&0xE9600000u32.to_be_bytes());
+    code.extend_from_slice(&encode_nop());  // delay slot
+    // LDO disp(S3), S3 — disp = target_offset - (bl_offset + 8)
+    let disp = (target_offset - (bl_offset + 8)) as i16;
+    code.extend_from_slice(&encode_ldo_raw(S3, disp, S3));
+    // BV R0(S3) — branch to address in S3
+    code.extend_from_slice(&encode_bv_real(S3));
+    code.extend_from_slice(&encode_nop());  // delay slot
+    code
+}
+
+/// Emit a forward unconditional branch using BL+LDO+BV (same as backward).
+///
+/// We use the same BL+LDO+BV pattern for both forward and backward branches
+/// because PA-RISC BL has 16-byte displacement granularity, which doesn't
+/// align with our code offsets. The BL+LDO+BV pattern gives byte-exact targeting.
+fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
+    // Same as backward — BL+LDO+BV works for both directions.
+    emit_backward_branch(target_offset, bl_offset)
+}
+
+/// Emit an unconditional branch (forward or backward).
+/// Uses BL+LDO+BV for both (byte-exact targeting).
+/// Returns (code_bytes, is_backward).
+fn emit_branch(target_offset: i64, bl_offset: i64) -> (Vec<u8>, bool) {
+    let is_backward = target_offset <= bl_offset;
+    (emit_backward_branch(target_offset, bl_offset), is_backward)
 }
 
 // ===========================================================================
@@ -499,8 +649,8 @@ impl Backend for HppaBackend {
         // 2. STW R3, -24(SP) — save old FP (callee-saved)
         // 3. COPY SP, R3 — FP = SP
         // 4. SUB SP, frame_size, SP — SP -= frame_size
-        code.extend_from_slice(&encode_stw(R2, R30, -40));  // save RP at SP-20
-        code.extend_from_slice(&encode_stw(R3, R30, -48));  // save old FP at SP-24
+        code.extend_from_slice(&encode_stw(R2, R30, -20));  // save RP at SP-20
+        code.extend_from_slice(&encode_stw(R3, R30, -24));  // save old FP at SP-24
         code.extend_from_slice(&encode_copy(R30, R3));      // FP = SP
         code.extend(ss_load_imm(S0, frame_size as i64));
         code.extend_from_slice(&encode_sub(R30, S0, R30));  // SP -= frame_size
@@ -511,7 +661,7 @@ impl Backend for HppaBackend {
             if let Some(id) = param.as_register() {
                 if i < arg_regs.len() {
                     let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                    code.extend_from_slice(&encode_stw(arg_regs[i], R3, (offset * 2) as i16));
+                    code.extend_from_slice(&encode_stw(arg_regs[i], R3, offset as i16));
                 }
             }
         }
@@ -554,7 +704,7 @@ impl Backend for HppaBackend {
                         // repeated-addition loop: result = 0; while (rhs > 0)
                         // { result += lhs; rhs--; }. This is O(rhs) but
                         // correct for the small operands used in VUMA test
-                        // programs. (Previously this emitted 0.)
+                        // programs.
                         //
                         // Register plan: S0 = result (acc), S1 = multiplicand,
                         // S2 = counter (rhs), S3 unused.
@@ -562,73 +712,107 @@ impl Backend for HppaBackend {
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, S2));
                         code.extend_from_slice(&encode_copy(R0, S0)); // S0 = 0
 
-                        // loop: COMB,=,n S2, R0, exit  (if counter==0, exit)
+                        // Loop layout (no delay-slot complications):
+                        //   loop_off: cmpb,= S2, R0, exit  (if counter==0, exit)
+                        //   <delay slot: NOP>
+                        //   add S1, S0, S0  (result += multiplicand)
+                        //   ldo -1(S2), S2  (counter--)
+                        //   <backward branch to loop_off via BL+LDO+BV>
+                        //   exit: store S0
                         let loop_off = code.len();
-                        let comb_word: u32 = 0x20000000u32
-                            | ((R0 as u32 & 0x1F) << 21)     // r2 = R0
-                            | ((S2 as u32 & 0x1F) << 16)     // r1 = S2
-                            | (0b001u32 << 13)               // cond = EQ (=)
-                            | (1u32 << 12);                  // f = nullify on take
-                        code.extend_from_slice(&comb_word.to_be_bytes());
-                        // Delay slot: ADD S1, S0, S0  (result += multiplicand)
+                        // cmpb,= S2, R0, exit  (forward branch to exit, disp patched below)
+                        code.extend_from_slice(&encode_cmpb(S2, R0, 0b001, false, false, 0));
+                        code.extend_from_slice(&encode_nop());  // delay slot (NOP — simpler)
+                        // Body: add + decrement
                         code.extend_from_slice(&encode_add(S1, S0, S0));
-                        // LDO -1(S2), S2  (counter--)
                         code.extend_from_slice(&encode_ldo(S2, -1, S2));
-                        // B loop  (unconditional branch back)
-                        let b_off = code.len();
-                        let w = 0xE8000000u32; // B placeholder
-                        code.extend_from_slice(&w.to_be_bytes());
-                        code.extend_from_slice(&encode_nop()); // delay slot
-                        // exit label is at the current position.
-                        // Patch the COMB to target the exit (current position).
-                        // Overwrite the target_label to point here.
-                        // We can't easily patch a label that wasn't a real block,
-                        // so instead we compute the COMB displacement inline.
+                        // Backward branch to loop_off using BL+LDO+BV pattern.
+                        // BL +0, S3 — sets S3 = current_PC + 8, branches to current_PC + 8 (next instr)
+                        // BL format: 0xE8000000 | (D << 21) | (disp17 << 5) | w
+                        // D = 11 (S3), disp = 0, w = 0
+                        code.extend_from_slice(&0xE9600000u32.to_be_bytes());  // BL +0, S3
+                        code.extend_from_slice(&encode_nop());  // delay slot
+                        // LDO -disp(S3), S3  where disp = (current_PC+8) - loop_off
+                        // S3 currently = current_PC + 8 (where current_PC = address of BL)
+                        // We want S3 = loop_off. So disp = loop_off - (BL_PC + 8).
+                        let bl_pc = (code.len() - 8) as i64;  // offset of the BL instruction
+                        let ldo_off = code.len();
+                        let backward_disp = (loop_off as i64) - (bl_pc + 8);
+                        // Patch the LDO displacement (we emit it with disp=0 placeholder, then patch)
+                        code.extend_from_slice(&encode_ldo_raw(S3, 0, S3));
+                        // Patch the LDO displacement (raw, no shift)
+                        let ldo_word = u32::from_be_bytes([
+                            code[ldo_off], code[ldo_off + 1],
+                            code[ldo_off + 2], code[ldo_off + 3],
+                        ]);
+                        let bd = backward_disp as i32;
+                        let imm14 = if bd >= 0 {
+                            (bd * 2) as u32 & 0x3FFE
+                        } else {
+                            ((bd * 2) as u32 & 0x3FFE) | 1
+                        };
+                        let ldo_patched = (ldo_word & !0x3FFF) | imm14;
+                        code[ldo_off..ldo_off + 4].copy_from_slice(&ldo_patched.to_be_bytes());
+                        // BV R0(S3) — branch to address in S3
+                        code.extend_from_slice(&encode_bv_real(S3));
+                        code.extend_from_slice(&encode_nop());  // delay slot
+                        // exit: patch the cmpb to branch here
                         let exit_off = code.len() as i64;
-                        let comb_disp = ((exit_off - loop_off as i64 - 8) / 4) as i32;
-                        let comb_word_patched: u32 = comb_word | ((comb_disp as u32 & 0x7FF) << 1);
-                        code[loop_off..loop_off + 4].copy_from_slice(&comb_word_patched.to_be_bytes());
-                        // Patch the B to target loop_off.
-                        let b_disp = ((loop_off as i64 - b_off as i64 - 8) / 16) as i32;
-                        let b_patched = (w & 0xFFFC001F) | ((b_disp as u32 & 0x1FFF) << 5);
-                        code[b_off..b_off + 4].copy_from_slice(&b_patched.to_be_bytes());
+                        let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                        let cmpb_word = u32::from_be_bytes([
+                            code[loop_off], code[loop_off + 1],
+                            code[loop_off + 2], code[loop_off + 3],
+                        ]);
+                        let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                        code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                         code.extend(ss_st(S0, dst_off));
                     }
                     IRInstr::Div { dst, lhs, rhs, ty: _ } => {
                         // PA-RISC 1.1 has no hardware DIV. Implement via a
                         // subtraction loop: quotient = 0; while (lhs >= rhs)
                         // { lhs -= rhs; quotient++; }. Unsigned only.
-                        // (Previously this emitted 0.)
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, S1));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, S2));
                         code.extend_from_slice(&encode_copy(R0, S0)); // S0 = quotient = 0
 
-                        // loop: COMB,<<,n S2, S1, exit  (if S1 < S2 unsigned, exit)
-                        // COMB,<< = unsigned less-than, cond = 100
+                        // loop: cmpb,<< S1, S2, exit  (if S1 < S2 unsigned, exit)
+                        // cmpb,<< = unsigned less-than, cond = 100
                         let loop_off = code.len();
-                        let comb_word: u32 = 0x20000000u32
-                            | ((S2 as u32 & 0x1F) << 21)     // r2 = S2 (rhs)
-                            | ((S1 as u32 & 0x1F) << 16)     // r1 = S1 (lhs)
-                            | (0b100u32 << 13)               // cond = ULT (<<)
-                            | (1u32 << 12);                  // f = nullify on take
-                        code.extend_from_slice(&comb_word.to_be_bytes());
-                        // Delay slot: SUB S1, S2, S1  (lhs -= rhs)
+                        code.extend_from_slice(&encode_cmpb(S1, S2, 0b100, false, false, 0));
+                        code.extend_from_slice(&encode_nop());  // delay slot
+                        // Body: sub + increment
                         code.extend_from_slice(&encode_sub(S1, S2, S1));
-                        // LDO 1(S0), S0  (quotient++)
                         code.extend_from_slice(&encode_ldo(S0, 1, S0));
-                        // B loop
-                        let b_off = code.len();
-                        let w = 0xE8000000u32;
-                        code.extend_from_slice(&w.to_be_bytes());
+                        // Backward branch to loop_off
+                        code.extend_from_slice(&0xE9600000u32.to_be_bytes());  // BL +0, S3
                         code.extend_from_slice(&encode_nop());
-                        // exit: patch COMB to here.
+                        let bl_pc = (code.len() - 8) as i64;
+                        let ldo_off = code.len();
+                        let backward_disp = (loop_off as i64) - (bl_pc + 8);
+                        code.extend_from_slice(&encode_ldo_raw(S3, 0, S3));
+                        let ldo_word = u32::from_be_bytes([
+                            code[ldo_off], code[ldo_off + 1],
+                            code[ldo_off + 2], code[ldo_off + 3],
+                        ]);
+                        let bd = backward_disp as i32;
+                        let imm14 = if bd >= 0 {
+                            (bd * 2) as u32 & 0x3FFE
+                        } else {
+                            ((bd * 2) as u32 & 0x3FFE) | 1
+                        };
+                        let ldo_patched = (ldo_word & !0x3FFF) | imm14;
+                        code[ldo_off..ldo_off + 4].copy_from_slice(&ldo_patched.to_be_bytes());
+                        code.extend_from_slice(&encode_bv_real(S3));
+                        code.extend_from_slice(&encode_nop());
+                        // exit: patch cmpb to branch here
                         let exit_off = code.len() as i64;
-                        let comb_disp = ((exit_off - loop_off as i64 - 8) / 4) as i32;
-                        let comb_word_patched: u32 = comb_word | ((comb_disp as u32 & 0x7FF) << 1);
-                        code[loop_off..loop_off + 4].copy_from_slice(&comb_word_patched.to_be_bytes());
-                        let b_disp = ((loop_off as i64 - b_off as i64 - 8) / 16) as i32;
-                        let b_patched = (w & 0xFFFC001F) | ((b_disp as u32 & 0x1FFF) << 5);
-                        code[b_off..b_off + 4].copy_from_slice(&b_patched.to_be_bytes());
+                        let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                        let cmpb_word = u32::from_be_bytes([
+                            code[loop_off], code[loop_off + 1],
+                            code[loop_off + 2], code[loop_off + 3],
+                        ]);
+                        let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                        code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                         code.extend(ss_st(S0, dst_off));
                     }
                     IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
@@ -783,62 +967,79 @@ impl Backend for HppaBackend {
                             | BinOpKind::SLe | BinOpKind::ULe
                             | BinOpKind::SGt | BinOpKind::UGt
                             | BinOpKind::SGe | BinOpKind::UGe => {
-                                // Comparison via COMCLR (compare-and-clear).
-                                // LDI 1, S2; COMCLR,<NOT-cond> S0, S1, S2
-                                // → S2 = 1 if cond, 0 if NOT-cond.
-                                code.extend_from_slice(&encode_ldi(1, S2));
-                                // Determine the NOT-condition code for COMCLR.
-                                let not_cond: u32 = match op {
-                                    BinOpKind::Eq => 0b111,  // NOT =  <>
-                                    BinOpKind::Ne => 0b001,  // NOT = =
-                                    BinOpKind::SLt => 0b110, // NOT = >= (signed)
-                                    BinOpKind::SLe => 0b010, // NOT = <  (signed, inverted)
-                                    BinOpKind::SGt => 0b011, // NOT = <= (signed)
-                                    BinOpKind::SGe => 0b010, // NOT = <  (signed) — approx
-                                    BinOpKind::ULt => 0b110, // NOT = >= (unsigned, approx)
-                                    BinOpKind::ULe => 0b100, // NOT = << (unsigned)
-                                    BinOpKind::UGt => 0b100, // NOT = << (unsigned, approx)
-                                    BinOpKind::UGe => 0b100, // NOT = << (unsigned, approx)
-                                    _ => 0b000, // NEVER → always clears → 0
+                                // Materialize a boolean comparison result into S0.
+                                // Approach: S0 = 1; cmpb,<cond> S0_lhs, S1_rhs, skip; LDI 0, S0; skip:
+                                // This requires S0 to hold lhs and S1 to hold rhs.
+                                // But we already loaded lhs into S0 and rhs into S1 above.
+                                // Save lhs to S3 first, then use S0 for the result.
+                                code.extend_from_slice(&encode_copy(S0, S3));  // S3 = lhs
+                                // Now S0 is free. S0 = 1 (default result).
+                                code.extend_from_slice(&encode_ldi(1, S0));
+                                // cmpb,<cond> S3, S1, skip  (if cond true, skip the LDI 0)
+                                let (cond_code, inverted) = match op {
+                                    BinOpKind::Eq => (0b001, false),  // =
+                                    BinOpKind::Ne => (0b001, true),   // <>
+                                    BinOpKind::SLt => (0b010, false), // < (signed)
+                                    BinOpKind::SLe => (0b011, false), // <= (signed)
+                                    BinOpKind::SGt => (0b011, true),  // > (signed)
+                                    BinOpKind::SGe => (0b010, true),  // >= (signed)
+                                    BinOpKind::ULt => (0b100, false), // << (unsigned)
+                                    BinOpKind::ULe => (0b101, false), // <<= (unsigned)
+                                    BinOpKind::UGt => (0b101, true),  // >> (unsigned)
+                                    BinOpKind::UGe => (0b100, true),  // >>= (unsigned)
+                                    _ => (0b000, false),
                                 };
-                                // COMCLR,<not_cond> S0, S1, S2
-                                // Format: major 0x20, r2=S1, r1=S0, cond, f=0
-                                let comclr_word: u32 = 0x20000000u32
-                                    | ((S1 as u32 & 0x1F) << 21)
-                                    | ((S0 as u32 & 0x1F) << 16)
-                                    | (not_cond << 13);
-                                code.extend_from_slice(&comclr_word.to_be_bytes());
-                                code.extend_from_slice(&encode_copy(S2, S0)); // S0 = S2 (result)
+                                let cmpb_off = code.len();
+                                code.extend_from_slice(&encode_cmpb(S3, S1, cond_code, inverted, false, 0));
+                                code.extend_from_slice(&encode_nop());  // delay slot
+                                // LDI 0, S0  (only reached if cmpb didn't take)
+                                code.extend_from_slice(&encode_ldi(0, S0));
+                                // skip: patch cmpb to branch here
+                                let skip_off = code.len() as i64;
+                                let cmpb_disp = ((skip_off - cmpb_off as i64 - 8) as i32) & !3;
+                                let cmpb_word = u32::from_be_bytes([
+                                    code[cmpb_off], code[cmpb_off + 1],
+                                    code[cmpb_off + 2], code[cmpb_off + 3],
+                                ]);
+                                let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                                code[cmpb_off..cmpb_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                             }
                             _ => { code.extend(ss_load_imm(S0, 0)); }
                         }
                         code.extend(ss_st(S0, dst_off));
                     }
                     IRInstr::Cmp { kind, dst, lhs, rhs, ty: _ } => {
-                        // Comparison via COMCLR. Load lhs into S0, rhs into S1.
+                        // Materialize a boolean comparison result into S0.
+                        // Approach: S0 = 1; cmpb,<cond> lhs, rhs, skip; LDI 0, S0; skip:
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
-                        code.extend_from_slice(&encode_ldi(1, S2)); // S2 = 1
-                        let not_cond: u32 = match kind {
-                            CmpKind::Eq => 0b111,  // NOT = <>
-                            CmpKind::Ne => 0b001,  // NOT = =
-                            CmpKind::SLt => 0b110, // NOT = >= (signed)
-                            CmpKind::SLe => 0b010, // NOT = <  (signed)
-                            CmpKind::SGt => 0b011, // NOT = <= (signed)
-                            CmpKind::SGe => 0b010, // NOT = <  (signed, approx)
-                            CmpKind::ULt => 0b110, // NOT = >= (unsigned, approx)
-                            CmpKind::ULe => 0b100, // NOT = << (unsigned)
-                            CmpKind::UGt => 0b100, // NOT = << (unsigned, approx)
-                            CmpKind::UGe => 0b100, // NOT = << (unsigned, approx)
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, S3));  // S3 = lhs
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));  // S1 = rhs
+                        code.extend_from_slice(&encode_ldi(1, S0));  // S0 = 1 (default)
+                        let (cond_code, inverted) = match kind {
+                            CmpKind::Eq => (0b001, false),
+                            CmpKind::Ne => (0b001, true),
+                            CmpKind::SLt => (0b010, false),
+                            CmpKind::SLe => (0b011, false),
+                            CmpKind::SGt => (0b011, true),
+                            CmpKind::SGe => (0b010, true),
+                            CmpKind::ULt => (0b100, false),
+                            CmpKind::ULe => (0b101, false),
+                            CmpKind::UGt => (0b101, true),
+                            CmpKind::UGe => (0b100, true),
                         };
-                        let comclr_word: u32 = 0x20000000u32
-                            | ((S1 as u32 & 0x1F) << 21)
-                            | ((S0 as u32 & 0x1F) << 16)
-                            | (not_cond << 13);
-                        code.extend_from_slice(&comclr_word.to_be_bytes());
-                        code.extend_from_slice(&encode_copy(S2, S0)); // S0 = S2 (0 or 1)
+                        let cmpb_off = code.len();
+                        code.extend_from_slice(&encode_cmpb(S3, S1, cond_code, inverted, false, 0));
+                        code.extend_from_slice(&encode_nop());  // delay slot
+                        code.extend_from_slice(&encode_ldi(0, S0));  // S0 = 0 if cond false
+                        let skip_off = code.len() as i64;
+                        let cmpb_disp = ((skip_off - cmpb_off as i64 - 8) as i32) & !3;
+                        let cmpb_word = u32::from_be_bytes([
+                            code[cmpb_off], code[cmpb_off + 1],
+                            code[cmpb_off + 2], code[cmpb_off + 3],
+                        ]);
+                        let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                        code[cmpb_off..cmpb_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                         code.extend(ss_st(S0, d_off));
                     }
                     IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
@@ -1021,66 +1222,41 @@ impl Backend for HppaBackend {
             // Emit terminator
             match &block.terminator {
                 IRTerminator::Jump(target) => {
-                    // BL,n target, R0 (branch, no link — but BL always links to R31)
-                    // Actually, use B (branch) not BL.
-                    // PA-RISC B format: 0xE8000000 | (disp << 5) with link reg = R0
-                    // B,n = 0xE8000000 | (disp << 5)
+                    // Unconditional branch. Emit a 20-byte placeholder that can
+                    // hold either a forward BL (8 bytes + 3 NOPs) or a
+                    // backward BL+LDO+BV (20 bytes).
                     let patch_off = code.len();
-                    let w = 0xE8000000u32; // B,n with disp=0
-                    code.extend_from_slice(&w.to_be_bytes());
-                    code.extend_from_slice(&encode_nop()); // delay slot
+                    // Emit 5 NOPs (20 bytes) as placeholder.
+                    for _ in 0..5 {
+                        code.extend_from_slice(&encode_nop());
+                    }
                     branch_patches.push(BranchPatch { code_offset: patch_off, target_label: target.clone() });
                 }
                 IRTerminator::Branch { cond, true_block, false_block } => {
                     // Conditional branch: if cond != 0 → true_block, else → false_block.
                     //
-                    // PA-RISC COMB,<> (compare-and-branch-if-not-equal):
-                    //   COMB,<>,n r1, r2, target  — if r1 != r2, branch to target
-                    //                                and nullify the delay slot.
+                    // cmpb,<> S0, R0, true_target  — if S0 != R0 (i.e., S0 != 0), branch to true.
+                    //   <delay slot: NOP>
+                    //   <unconditional branch to false_target>  — runs only if cmpb didn't take.
                     //
-                    // We compare S0 (cond) with R0 (hardwired zero):
-                    //   COMB,<>,n S0, R0, true_target   ; if S0 != 0 → true
-                    //   B false_target                  ; delay slot: if COMB
-                    //                                    ; does NOT take (S0==0),
-                    //                                    ; this runs → false.
-                    //                                    ; If COMB DOES take,
-                    //                                    ; the delay slot is
-                    //                                    ; nullified (n=1).
-                    //
-                    // COMB encoding (PA-RISC 1.1, major opcode 0x20):
-                    //   bits 31:26 = 100000 (0x20)
-                    //   bits 25:21 = r2 (R0 = 0)
-                    //   bits 20:16 = r1 (S0)
-                    //   bits 15:13 = cond (<> = 010)
-                    //   bit  12    = f (nullify on taken branch) = 1
-                    //   bits 11:1  = w1 (11-bit signed displacement, word-scaled)
-                    //   bit  0     = w (nullify on NOT taken) = 0
-                    //
-                    // The 11-bit displacement gives ±1024 words = ±4 KB range,
-                    // sufficient for functions that fit in the gold-standard
-                    // test suite. The comb_patches list applies this distinct
-                    // displacement format (separate from the B patch's 17-bit
-                    // field).
+                    // cmpb,<> = major 0x22, cond=001 (=), inverted=true → '<>'
                     code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
 
-                    // COMB,<>,n S0, R0, true_target
+                    // cmpb,<> S0, R0, true_target  (forward or backward)
                     let comb_off = code.len();
-                    let comb_word: u32 = 0x20000000u32   // major 0x20
-                        | ((R0 as u32 & 0x1F) << 21)     // r2 = R0
-                        | ((S0 as u32 & 0x1F) << 16)     // r1 = S0
-                        | (0b010u32 << 13)               // cond = NE (<>)
-                        | (1u32 << 12);                  // f = nullify on take
-                    code.extend_from_slice(&comb_word.to_be_bytes());
+                    code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, true, false, 0));
+                    code.extend_from_slice(&encode_nop());  // delay slot
                     comb_patches.push(CombPatch {
                         code_offset: comb_off,
                         target_label: true_block.clone(),
                     });
 
-                    // Delay slot: B false_target. Runs only when COMB does NOT
-                    // take (cond == 0). Uses the standard B patch (17-bit field).
+                    // Unconditional branch to false_block.
+                    // Emit 20-byte placeholder.
                     let false_off = code.len();
-                    let w2 = 0xE8000000u32; // B placeholder
-                    code.extend_from_slice(&w2.to_be_bytes());
+                    for _ in 0..5 {
+                        code.extend_from_slice(&encode_nop());
+                    }
                     branch_patches.push(BranchPatch {
                         code_offset: false_off,
                         target_label: false_block.clone(),
@@ -1091,8 +1267,8 @@ impl Backend for HppaBackend {
                         code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
                     }
                     code.extend_from_slice(&encode_copy(R3, R30)); // SP = FP
-                    code.extend_from_slice(&encode_ldw(R30, -40, R2)); // restore RP from SP-20
-                    code.extend_from_slice(&encode_ldw(R30, -48, R3)); // restore old FP from SP-24
+                    code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from SP-20
+                    code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from SP-24
                     code.extend_from_slice(&encode_bv(R2, R0));
                     code.extend_from_slice(&encode_nop()); // delay slot
                 }
@@ -1115,36 +1291,36 @@ impl Backend for HppaBackend {
         }
 
         // ── Phase 4: Patch branch displacements ──
+        // For each branch patch, determine if it's forward or backward, then
+        // emit the appropriate sequence (forward BL or backward BL+LDO+BV).
+        // The placeholder is 20 bytes (5 NOPs), which can hold either form.
         for patch in &branch_patches {
             if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
                 let target_offset = block_start_offsets[target_idx] as i64;
                 let pc_offset = patch.code_offset as i64;
-                // PA-RISC BL/B displacement: (target - (PC + 8)) / 4
-                let disp = ((target_offset - pc_offset - 8) / 16) as i32;
-                let w = u32::from_be_bytes([
-                    code[patch.code_offset], code[patch.code_offset + 1],
-                    code[patch.code_offset + 2], code[patch.code_offset + 3],
-                ]);
-                let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
-                code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
+                let (branch_code, _) = emit_branch(target_offset, pc_offset);
+                assert!(branch_code.len() <= 20,
+                        "branch code {} bytes exceeds 20-byte placeholder", branch_code.len());
+                for (i, byte) in branch_code.iter().enumerate() {
+                    code[patch.code_offset + i] = *byte;
+                }
+                // Remaining bytes stay as NOPs (from placeholder).
             }
         }
 
-        // Apply COMB/COMIB conditional-branch patches. These use an 11-bit
-        // signed word-scaled displacement at bits 11:1 (distinct from the B
-        // patch's 17-bit /16-scaled field at bits 17:5). PA-RISC branch
-        // displacements are relative to PC+8.
+        // Apply cmpb conditional-branch patches. cmpb uses a non-linear
+        // displacement encoding (see encode_cmpb_disp).
         for patch in &comb_patches {
             if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
                 let target_offset = block_start_offsets[target_idx] as i64;
                 let pc_offset = patch.code_offset as i64;
-                let disp = ((target_offset - pc_offset - 8) / 4) as i32;
+                let disp_bytes = ((target_offset - pc_offset - 8) as i32) & !3;
                 let w = u32::from_be_bytes([
                     code[patch.code_offset], code[patch.code_offset + 1],
                     code[patch.code_offset + 2], code[patch.code_offset + 3],
                 ]);
-                // COMB displacement field: bits 11:1 (11-bit signed).
-                let patched = (w & 0xFFFFF001) | ((disp as u32 & 0x7FF) << 1);
+                // cmpb displacement field is bits 12-0 (non-linear, see encode_cmpb_disp).
+                let patched = (w & !0x1FFF) | encode_cmpb_disp(disp_bytes);
                 code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
             }
         }
