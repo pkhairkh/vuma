@@ -417,9 +417,9 @@ fn adjust_sp(imm: i32) -> Vec<u8> {
 }
 
 /// Encode MSGR R1, R2 (Multiply Single 64-bit). R1 = R1 * R2 (low 64 bits).
-/// op1=0xB9, op2=0x01.
+/// op1=0xB9, op2=0x0C. (0x01 is LNGR = Load Negative, a common mix-up.)
 fn encode_msgr(r1: Gpr, r2: Gpr) -> [u8; 4] {
-    encode_rre(0xB9, 0x01, r1, r2)
+    encode_rre(0xB9, 0x0C, r1, r2)
 }
 
 /// Encode DLGR R1, R2 (Divide Logical 64-bit). R1 must be even-numbered.
