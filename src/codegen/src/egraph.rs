@@ -265,8 +265,54 @@ pub fn default_cost(node: &ENode) -> usize {
     match node {
         ENode::Lit(_) => 1,
         ENode::VReg(_) => 10,
-        ENode::BinOp(_, _, _) => 100,
+        ENode::BinOp(op, _, _) => {
+            // Wave 10: per-ISA cost via TargetDesc.
+            // Different operations have different costs on different ISAs.
+            // For example, multiply is cheap on x86 (3 cycles) but expensive
+            // on hppa (software loop). Division is very expensive everywhere.
+            match op {
+                BinOpKind::Add | BinOpKind::Sub => 100,
+                BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => 90,
+                BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => 95,
+                BinOpKind::Mul => 200,      // More expensive than ALU
+                BinOpKind::UDiv | BinOpKind::SDiv => 1000,  // Very expensive
+                BinOpKind::SRem | BinOpKind::URem => 1000,
+                BinOpKind::Eq | BinOpKind::Ne | BinOpKind::SLt | BinOpKind::SLe
+                | BinOpKind::SGt | BinOpKind::SGe | BinOpKind::ULt | BinOpKind::ULe
+                | BinOpKind::UGt | BinOpKind::UGe => 110,  // Comparison + set
+                _ => 100,
+            }
+        }
     }
+}
+
+/// Target-specific cost function factory (Wave 10).
+///
+/// Creates a cost function that uses the target's latency table to
+/// assign costs based on actual instruction latencies.
+pub fn target_cost_fn(latency_table: &crate::target_desc::LatencyTable)
+    -> Box<dyn Fn(&ENode) -> usize>
+{
+    let lt = latency_table.clone();
+    Box::new(move |node: &ENode| -> usize {
+        match node {
+            ENode::Lit(_) => 1,
+            ENode::VReg(_) => 10,
+            ENode::BinOp(op, _, _) => {
+                let category = match op {
+                    BinOpKind::Add | BinOpKind::Sub => "arithmetic",
+                    BinOpKind::Mul => "multiply",
+                    BinOpKind::UDiv | BinOpKind::SDiv => "divide",
+                    BinOpKind::SRem | BinOpKind::URem => "divide",
+                    BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => "logical",
+                    BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => "shift",
+                    _ => "arithmetic",
+                };
+                let (latency, _, _) = lt.lookup(category);
+                (latency as usize) * 100
+            }
+        }
+    })
 }
 
 #[cfg(test)]
