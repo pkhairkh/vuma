@@ -1541,7 +1541,7 @@ impl Backend for M68kBackend {
             // PUSH D0 onto stack: MOVE.L D0, -(SP) = 0x2F00.
             code.extend_from_slice(&[0x2F, 0x00]);
             // D0 = 90 (sys_mmap)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 90 }.encode());
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode()); // mmap2
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // Pop the offset arg off the stack: ADDQ.L #4, SP.

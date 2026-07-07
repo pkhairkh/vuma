@@ -3922,24 +3922,17 @@ impl Backend for Sparc64Backend {
             );
             // TA 0x6d
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            // JMPL %i7+8, %g0 (return)
+            // JMPL %o7+8, %g0 (leaf-style return — no SAVE/RESTORE)
             code.extend_from_slice(
                 &Instruction::Jmpl {
                     rd: Gpr::G0,
-                    rs1: Gpr::I7,
+                    rs1: Gpr::O7,
                     imm: 8,
                 }
                 .encode(),
             );
-            // RESTORE (delay slot)
-            code.extend_from_slice(
-                &Instruction::Restore {
-                    rd: Gpr::G0,
-                    rs1: Gpr::G0,
-                    imm: 0,
-                }
-                .encode(),
-            );
+            // NOP (delay slot)
+            code.extend_from_slice(&encode_nop());
             code
         };
         let vuma_free_stub: Vec<u8> = {

@@ -1345,8 +1345,8 @@ impl Backend for AlphaBackend {
             code.extend(Instruction::Lda { ra: Gpr::R20, disp: -1, rb: ZERO }.encode());
             // R21 = 0 (offset)
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R21 }.encode());
-            // R0 = 90 (sys_mmap) — doesn't fit in lit8 (lit8 is 0-255 unsigned, but we use LDA).
-            code.extend(ss_load_imm(Gpr::R0, 90));
+            // R0 = 113 (alpha __NR_mmap — alpha has its own syscall table, NOT 90)
+            code.extend(ss_load_imm(Gpr::R0, 113));
             // CALL_PAL 0x83
             code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
             // RET
@@ -1377,7 +1377,7 @@ impl Backend for AlphaBackend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
             for (name, num) in [
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
-                ("mmap", 90), ("munmap", 91), ("exit", 1), ("exit_group", 4293),
+                ("mmap", 113), ("munmap", 111), ("exit", 1), ("exit_group", 4293),
                 ("brk", 17), ("getpid", 20), ("alarm", 27), ("kill", 42),
                 ("pipe", 40), ("dup", 41), ("dup2", 63), ("execve", 59),
                 ("wait4", 84), ("unlink", 10), ("chdir", 12), ("lseek", 19),
