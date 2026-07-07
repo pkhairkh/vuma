@@ -891,7 +891,7 @@ fn emit_instr(
             dst,
             addr,
             offset,
-            ty: _,
+            ty,
         } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -918,21 +918,28 @@ fn emit_instr(
                     code.extend_from_slice(&w.to_be_bytes());
                 }
             }
-            // Load value from (A1) into S0.
-            // For .L: MOVE.L (A1), D0 → 0x2010 | 1 = 0x2011.
-            // For .B: MOVE.B (A1), D0 → 0x1010 | 1 = 0x1011, then zero-extend (default).
-            // For simplicity, we always do .L load.
+            // Load value from (A1) into S0, using correct size based on ty.
+            // MOVE.B (A1), D0 → size=01, dst=D0, dst_mode=010 (An), src_mode=000 (Dn) → 0x1010 | 1
+            // MOVE.W (A1), D0 → size=11, → 0x3010 | 1
+            // MOVE.L (A1), D0 → size=10, → 0x2010 | 1
+            let size_bits: u16 = match ty {
+                IRType::I8 | IRType::U8 => 0x1000, // byte
+                IRType::I16 | IRType::U16 => 0x3000, // word
+                _ => 0x2000, // long (default)
+            };
             {
-                let w = 0x2000u16 | (0u16 << 9) | (2u16 << 3) | 1;
+                let w = size_bits | (0u16 << 9) | (2u16 << 3) | 1;
                 code.extend_from_slice(&w.to_be_bytes());
             }
+            // For byte loads, zero-extend to 32-bit: AND.L #0xFF, D0
+            // Actually m68k MOVE.B already zero-extends to 32-bit in the register.
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Store {
             value,
             addr,
             offset,
-            ty: _,
+            ty,
         } => {
             code.extend(ss_load_value(addr, vreg_stack_slots, S0));
             // MOVE.L S0, A1
@@ -953,11 +960,20 @@ fn emit_instr(
             }
             // Load value into S2.
             code.extend(ss_load_value(value, vreg_stack_slots, S2));
-            // MOVE.L S2, (A1): dst=A1 mode=010 (An indirect), src=S2 mode=000 (Dn).
-            // m68k MOVE.L format: 0010 | dst_reg(3) | dst_mode(3) | src_mode(3) | src_reg(3)
-            // = 0x2000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
+            // Store S2 to (A1) using correct size based on ty.
+            // MOVE.B S2, (A1): size=01, dst=A1 mode=010, src=S2 mode=000
+            //   = 0x1000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
+            // MOVE.W S2, (A1): size=11
+            //   = 0x3000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
+            // MOVE.L S2, (A1): size=10 (default)
+            //   = 0x2000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
+            let size_bits: u16 = match ty {
+                IRType::I8 | IRType::U8 => 0x1000, // byte
+                IRType::I16 | IRType::U16 => 0x3000, // word
+                _ => 0x2000, // long (default)
+            };
             {
-                let w = 0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7);
+                let w = size_bits | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
             }
         }
