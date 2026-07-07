@@ -817,14 +817,10 @@ fn emit_instr(
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // DIVU.W S1, S0: S0[31:16] = S0[31:0] / S1[15:0]; S0[15:0] = remainder.
-            // For values that fit in 16 bits, quotient fits in 16 bits.
-            // Then SWAP S0 to move quotient to lower 16 bits, and AND.L #0xFFFF to clear upper.
+            // DIVU.W S1, S0: S0[15:0] = quotient, S0[31:16] = remainder.
+            // No SWAP needed — quotient is already in lower 16 bits.
+            // ANDI.L #0xFFFF clears the remainder from the upper 16 bits.
             code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Swap { dst: S0 }.encode());
-            // AND.L #0xFFFF, S0: word = 0xC0BC | (S0<<9), ext word = 0x0000_FFFF.
-            // Encode: ANDI.L #imm32, Dn — word0 = 0x02BC | (Dn<<9), then 4-byte imm32.
-            // Actually: ANDI.L #imm, Dn: word = 0x02BC | (Dn<<9), then 4-byte imm.
             {
                 let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
@@ -968,8 +964,11 @@ fn emit_instr(
             // dst = FP + alloc_offset[dst_id]
             if let Some(&off) = alloc_offsets.get(&dst_id) {
                 // S0 = A6 (FP)
-                // MOVE.L A6, D0: 0x2000 | (0<<9) | (1<<3) | 6 = 0x2016.
-                code.extend_from_slice(&[0x20, 0x16]);
+                // MOVE.L A6, D0: src=A6 mode=001(An direct), dst=D0 mode=000(Dn).
+                // Format: 00 SS DDD ddd mmm rrr
+                // SS=10(long), DDD=000(D0), ddd=000(Dn), mmm=001(An), rrr=110(A6)
+                // = 0x200E.
+                code.extend_from_slice(&[0x20, 0x0E]);
                 // ADD.L #off, D0 — ADDQ.L or ADDI.L.
                 if (-7..=-1).contains(&off) || (1..=8).contains(&off) {
                     let abs = off.unsigned_abs() as u16;
@@ -1290,8 +1289,9 @@ fn emit_binop(
         BinOpKind::UDiv | BinOpKind::SDiv => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+            // DIVU.W: quotient in S0[15:0], remainder in S0[31:16].
+            // No SWAP — quotient is already in lower bits.
             code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Swap { dst: S0 }.encode());
             {
                 let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
@@ -1302,8 +1302,10 @@ fn emit_binop(
         BinOpKind::SRem | BinOpKind::URem => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+            // DIVU.W: remainder is in S0[31:16] (upper word).
+            // SWAP to move remainder to lower 16 bits, then ANDI.L to clear upper.
             code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            // Remainder is in lower 16 bits after DIVU.W.
+            code.extend(Instruction::Swap { dst: S0 }.encode());
             {
                 let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
