@@ -331,6 +331,10 @@ pub struct LiveInterval {
     /// are tracked here so that the allocator can map them all to the same
     /// physical register.
     pub coalesced_vregs: Vec<IRValueId>,
+    /// Loop nesting depth at the interval's start position (Wave 6).
+    /// 0 = not in a loop, 1 = one level of nesting, etc.
+    /// Used to compute spill weight: deeper loops = higher spill cost.
+    pub loop_depth: u32,
 }
 
 impl LiveInterval {
@@ -345,6 +349,7 @@ impl LiveInterval {
             use_positions: Vec::new(),
             def_positions: Vec::new(),
             coalesced_vregs: vec![vreg],
+            loop_depth: 0,
         }
     }
 
@@ -389,7 +394,7 @@ impl LiveInterval {
     /// Weight is based on:
     /// - Number of use/def positions (more references = higher weight)
     /// - Whether the interval crosses a call (callee-saved is expensive to use)
-    /// - Loop nesting could be added here in the future
+    /// - Loop nesting depth (spilling in a loop is exponentially more expensive)
     pub fn spill_weight(&self) -> u32 {
         let use_count = self.use_positions.len() as u32;
         let def_count = self.def_positions.len() as u32;
@@ -400,7 +405,12 @@ impl LiveInterval {
         // callee-saved register has prologue/epilogue cost.
         let call_multiplier = if self.crosses_call { 2 } else { 1 };
 
-        base_weight * call_multiplier
+        // Loop depth: if this interval is live inside a loop, spilling it
+        // costs load/store on every iteration. Weight increases with depth.
+        // (Wave 6: loop-depth-aware spill weights)
+        let loop_multiplier = 1u32 << self.loop_depth.min(4); // 1, 2, 4, 8, 16
+
+        base_weight * call_multiplier * loop_multiplier
     }
 
     /// Returns the weight per unit of live range length — used to decide
