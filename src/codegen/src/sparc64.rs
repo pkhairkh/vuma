@@ -3342,7 +3342,7 @@ fn emit_binop(
             );
             // BNE skip (if not equal, skip the "l0 = 0")
             let bne_off = code.len();
-            code.extend_from_slice(&Instruction::Bne { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bne { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
             // l0 = 0 (equal)
             code.extend_from_slice(
@@ -3378,7 +3378,7 @@ fn emit_binop(
                 .encode(),
             );
             // BE skip (if equal, skip the "l0 = 0")
-            code.extend_from_slice(&Instruction::Be { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Be { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
             // l0 = 0 (equal)
             code.extend_from_slice(
@@ -3413,8 +3413,8 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            // BGE skip (if lhs >= rhs, skip the "l0 = 0")
-            code.extend_from_slice(&Instruction::Bge { offset: 8 }.encode());
+            // BL skip (if lhs < rhs, condition is TRUE → skip the "l0 = 0")
+            code.extend_from_slice(&Instruction::Bl { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             // l0 = 0
             code.extend_from_slice(
@@ -3447,7 +3447,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bg { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bg { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3479,7 +3479,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Ble { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Ble { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3511,7 +3511,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bl { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bge { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3544,7 +3544,7 @@ fn emit_binop(
                 .encode(),
             );
             // BCCU = BGEU for unsigned
-            code.extend_from_slice(&Instruction::Bcc { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bcs { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3575,7 +3575,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bgu { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bleu { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3606,7 +3606,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bleu { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bgu { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3637,7 +3637,7 @@ fn emit_binop(
                 }
                 .encode(),
             );
-            code.extend_from_slice(&Instruction::Bcs { offset: 8 }.encode());
+            code.extend_from_slice(&Instruction::Bcc { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(
                 &Instruction::Or {
@@ -3795,7 +3795,7 @@ impl Backend for Sparc64Backend {
 
         // ── _start stub ──
         // 5 instructions = 20 bytes
-        let start_stub_size: usize = 20;
+        let start_stub_size: usize = 24; // 6 instructions: AND align + SAVE + CALL + NOP + OR + TA
         let ffi_stub_size: usize = 12; // OR %g0, 0, %o0; JMPL %i7+8, %g0; RESTORE
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -3905,45 +3905,21 @@ impl Backend for Sparc64Backend {
             code
         };
         let vuma_free_stub: Vec<u8> = {
+            // VUMA's allocate() is lowered to stack allocation, not mmap.
+            // Calling munmap on a stack address unmaps the stack page,
+            // causing SIGSEGV. Make __vuma_free a no-op (just return).
+            // NOTE: no SAVE/RESTORE — just JMPL %o7+8, %g0 + NOP.
+            // (Using RESTORE without a matching SAVE corrupts register windows.)
             let mut code = Vec::new();
-            // OR %g0, %g0, %o1  (size = 0)
-            code.extend_from_slice(
-                &Instruction::Or {
-                    rd: Gpr::O1,
-                    rs1: Gpr::G0,
-                    rs2: Gpr::G0,
-                }
-                .encode(),
-            );
-            // OR %g0, 117, %g1  (sys_munmap)
-            code.extend_from_slice(
-                &Instruction::OrImm {
-                    rd: Gpr::G1,
-                    rs1: Gpr::G0,
-                    imm: 117,
-                }
-                .encode(),
-            );
-            // TA 0x6d
-            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            // JMPL %i7+8, %g0
             code.extend_from_slice(
                 &Instruction::Jmpl {
                     rd: Gpr::G0,
-                    rs1: Gpr::I7,
+                    rs1: Gpr::O7,
                     imm: 8,
                 }
                 .encode(),
             );
-            // RESTORE (delay slot)
-            code.extend_from_slice(
-                &Instruction::Restore {
-                    rd: Gpr::G0,
-                    rs1: Gpr::G0,
-                    imm: 0,
-                }
-                .encode(),
-            );
+            code.extend_from_slice(&encode_nop()); // delay slot
             code
         };
 
@@ -4643,6 +4619,17 @@ impl Backend for Sparc64Backend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
+        // AND %sp, -16, %sp — align SP to 16 bytes (SPARC v9 requirement).
+        // The kernel/qemu may provide a misaligned initial SP; without
+        // alignment, STX/LDX instructions will SIGBUS.
+        start_stub.extend_from_slice(
+            &Instruction::AndImm {
+                rd: Gpr::O6,
+                rs1: Gpr::O6,
+                imm: -16,
+            }
+            .encode(),
+        );
         // SAVE %sp, -192, %sp (allocate register window)
         start_stub.extend_from_slice(
             &Instruction::Save {
