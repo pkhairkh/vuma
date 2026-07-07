@@ -253,8 +253,8 @@ impl Instruction {
             Instruction::And { ra, rb, rc } => op_reg(0x11, *ra, *rb, *rc, 0x00),
             Instruction::Or { ra, rb, rc } => op_reg(0x11, *ra, *rb, *rc, 0x20),
             Instruction::Xor { ra, rb, rc } => op_reg(0x11, *ra, *rb, *rc, 0x40),
-            Instruction::Sll { ra, rb, rc } => op_reg(0x12, *ra, *rb, *rc, 0x34),
-            Instruction::Srl { ra, rb, rc } => op_reg(0x12, *ra, *rb, *rc, 0x39),
+            Instruction::Sll { ra, rb, rc } => op_reg(0x12, *ra, *rb, *rc, 0x39),
+            Instruction::Srl { ra, rb, rc } => op_reg(0x12, *ra, *rb, *rc, 0x34),
             Instruction::Sra { ra, rb, rc } => op_reg(0x12, *ra, *rb, *rc, 0x3C),
             // Memory form: (op<<26) | (ra<<21) | (rb<<16) | disp16
             Instruction::Lda { ra, disp, rb } => op_mem(0x08, *ra, *disp, *rb),
