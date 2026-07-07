@@ -371,13 +371,15 @@ fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
-/// Encode SHLADD (Shift Left and Add) — `SHLADD shift, r1, r2, dst`.
-/// Computes dst = (r1 << shift) + r2. Shift 0 = plain ADD.
+/// Encode SHLADD (Shift Left and Add) — `SHLADD sa, r1, r2, dst`.
+/// Computes dst = (r1 << sa) + r2. sa must be 1, 2, or 3.
+/// Format: same as ADD (0x08000600) with sa at bits 7-6.
 fn encode_shladd(shift: u8, r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
-    let word = 0x08000000u32
-        | ((shift as u32 & 0x3) << 5)  // shift count
-        | ((r1 as u32 & 0x1F) << 21)
-        | ((r2 as u32 & 0x1F));
+    let word = 0x08000600u32
+        | ((r2 as u32 & 0x1F) << 21)
+        | ((r1 as u32 & 0x1F) << 16)
+        | ((shift as u32 & 0x3) << 6)
+        | (dst as u32 & 0x1F);
     word.to_be_bytes()
 }
 
@@ -489,25 +491,30 @@ fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scr
 /// Emit a backward unconditional branch using the BL+LDO+BV pattern.
 ///
 /// PA-RISC BL only supports forward branches, so to branch backward we:
-///   1. BL +0, S3  — sets S3 = current_PC + 8, branches to PC+8 (next instr)
+///   1. BL +0, R1  — sets R1 = current_PC + 8, branches to PC+8 (next instr)
 ///   2. NOP        — delay slot
-///   3. LDO disp(S3), S3  — S3 = (PC+8) + disp = target_address
-///   4. BV R0(S3)  — branch to address in S3
+///   3. LDO disp(R1), R1  — R1 = (PC+8) + disp = target_address
+///   4. BV R0(R1)  — branch to address in R1
 ///   5. NOP        — delay slot
+///
+/// Uses R1 (RP) as the link register. R1 is saved in the prologue and restored
+/// in the epilogue, so it's free for use within the function body.
 ///
 /// `target_offset` is the absolute code offset of the branch target.
 /// `bl_offset` is the absolute code offset where the BL instruction will be emitted.
 /// Returns the 5-instruction (20-byte) sequence as a Vec<u8>.
 fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     let mut code = Vec::new();
-    // BL +0, S3 (link = R11 = S3, disp = 0)
-    code.extend_from_slice(&0xE9600000u32.to_be_bytes());
+    // BL +0, R1 (link = R1, disp = 0)
+    // BL format: 0xE8000000 | (D << 21) | (disp17 << 5) | w
+    // D = 1 (R1), disp = 0
+    code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop());  // delay slot
-    // LDO disp(S3), S3 — disp = target_offset - (bl_offset + 8)
+    // LDO disp(R1), R1 — disp = target_offset - (bl_offset + 8)
     let disp = (target_offset - (bl_offset + 8)) as i16;
-    code.extend_from_slice(&encode_ldo_raw(S3, disp, S3));
-    // BV R0(S3) — branch to address in S3
-    code.extend_from_slice(&encode_bv_real(S3));
+    code.extend_from_slice(&encode_ldo_raw(R1, disp, R1));
+    // BV R0(R1) — branch to address in R1
+    code.extend_from_slice(&encode_bv_real(R1));
     code.extend_from_slice(&encode_nop());  // delay slot
     code
 }
@@ -726,36 +733,9 @@ impl Backend for HppaBackend {
                         // Body: add + decrement
                         code.extend_from_slice(&encode_add(S1, S0, S0));
                         code.extend_from_slice(&encode_ldo(S2, -1, S2));
-                        // Backward branch to loop_off using BL+LDO+BV pattern.
-                        // BL +0, S3 — sets S3 = current_PC + 8, branches to current_PC + 8 (next instr)
-                        // BL format: 0xE8000000 | (D << 21) | (disp17 << 5) | w
-                        // D = 11 (S3), disp = 0, w = 0
-                        code.extend_from_slice(&0xE9600000u32.to_be_bytes());  // BL +0, S3
-                        code.extend_from_slice(&encode_nop());  // delay slot
-                        // LDO -disp(S3), S3  where disp = (current_PC+8) - loop_off
-                        // S3 currently = current_PC + 8 (where current_PC = address of BL)
-                        // We want S3 = loop_off. So disp = loop_off - (BL_PC + 8).
-                        let bl_pc = (code.len() - 8) as i64;  // offset of the BL instruction
-                        let ldo_off = code.len();
-                        let backward_disp = (loop_off as i64) - (bl_pc + 8);
-                        // Patch the LDO displacement (we emit it with disp=0 placeholder, then patch)
-                        code.extend_from_slice(&encode_ldo_raw(S3, 0, S3));
-                        // Patch the LDO displacement (raw, no shift)
-                        let ldo_word = u32::from_be_bytes([
-                            code[ldo_off], code[ldo_off + 1],
-                            code[ldo_off + 2], code[ldo_off + 3],
-                        ]);
-                        let bd = backward_disp as i32;
-                        let imm14 = if bd >= 0 {
-                            (bd * 2) as u32 & 0x3FFE
-                        } else {
-                            ((bd * 2) as u32 & 0x3FFE) | 1
-                        };
-                        let ldo_patched = (ldo_word & !0x3FFF) | imm14;
-                        code[ldo_off..ldo_off + 4].copy_from_slice(&ldo_patched.to_be_bytes());
-                        // BV R0(S3) — branch to address in S3
-                        code.extend_from_slice(&encode_bv_real(S3));
-                        code.extend_from_slice(&encode_nop());  // delay slot
+                        // Backward branch to loop_off using emit_backward_branch (uses R1 as link reg)
+                        let bl_off = code.len() as i64;
+                        code.extend(emit_backward_branch(loop_off as i64, bl_off));
                         // exit: patch the cmpb to branch here
                         let exit_off = code.len() as i64;
                         let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
@@ -784,26 +764,8 @@ impl Backend for HppaBackend {
                         code.extend_from_slice(&encode_sub(S1, S2, S1));
                         code.extend_from_slice(&encode_ldo(S0, 1, S0));
                         // Backward branch to loop_off
-                        code.extend_from_slice(&0xE9600000u32.to_be_bytes());  // BL +0, S3
-                        code.extend_from_slice(&encode_nop());
-                        let bl_pc = (code.len() - 8) as i64;
-                        let ldo_off = code.len();
-                        let backward_disp = (loop_off as i64) - (bl_pc + 8);
-                        code.extend_from_slice(&encode_ldo_raw(S3, 0, S3));
-                        let ldo_word = u32::from_be_bytes([
-                            code[ldo_off], code[ldo_off + 1],
-                            code[ldo_off + 2], code[ldo_off + 3],
-                        ]);
-                        let bd = backward_disp as i32;
-                        let imm14 = if bd >= 0 {
-                            (bd * 2) as u32 & 0x3FFE
-                        } else {
-                            ((bd * 2) as u32 & 0x3FFE) | 1
-                        };
-                        let ldo_patched = (ldo_word & !0x3FFF) | imm14;
-                        code[ldo_off..ldo_off + 4].copy_from_slice(&ldo_patched.to_be_bytes());
-                        code.extend_from_slice(&encode_bv_real(S3));
-                        code.extend_from_slice(&encode_nop());
+                        let bl_off = code.len() as i64;
+                        code.extend(emit_backward_branch(loop_off as i64, bl_off));
                         // exit: patch cmpb to branch here
                         let exit_off = code.len() as i64;
                         let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
@@ -844,123 +806,184 @@ impl Backend for HppaBackend {
                                 code.extend_from_slice(&encode_copy(S0, S0));
                             }
                             BinOpKind::Mul => {
-                                // Repeated-addition loop. S0=lhs (multiplicand),
-                                // S1=rhs (counter), S2=result.
-                                code.extend_from_slice(&encode_copy(S0, S1)); // S1 = multiplicand
-                                code.extend_from_slice(&encode_copy(R0, S0)); // S0 = 0 (will be counter)
-                                // Actually: reload lhs into S1, rhs into S2.
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, S1));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, S2));
-                                code.extend_from_slice(&encode_copy(R0, S0)); // S0 = 0 (result)
+                                // Repeated-addition loop: result = 0; while (rhs > 0)
+                                // { result += lhs; rhs--; }
+                                // S0 already has lhs, S1 has rhs.
+                                // Save lhs to S3, use S0=result, S1=counter.
+                                code.extend_from_slice(&encode_copy(S0, S3));  // S3 = lhs
+                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (result)
+                                // loop: cmpb,= S1, R0, exit  (if counter==0, exit)
                                 let loop_off = code.len();
-                                let comb_word: u32 = 0x20000000u32
-                                    | ((R0 as u32 & 0x1F) << 21)
-                                    | ((S2 as u32 & 0x1F) << 16)
-                                    | (0b001u32 << 13) | (1u32 << 12);
-                                code.extend_from_slice(&comb_word.to_be_bytes());
-                                code.extend_from_slice(&encode_add(S1, S0, S0));
-                                code.extend_from_slice(&encode_ldo(S2, -1, S2));
-                                let b_off = code.len();
-                                let w = 0xE8000000u32;
-                                code.extend_from_slice(&w.to_be_bytes());
-                                code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&encode_cmpb(S1, R0, 0b001, false, false, 0));
+                                code.extend_from_slice(&encode_nop());  // delay slot
+                                // Body: result += lhs; counter--
+                                code.extend_from_slice(&encode_add(S3, S0, S0));
+                                code.extend_from_slice(&encode_ldo(S1, -1, S1));
+                                // Backward branch to loop_off
+                                let bl_off = code.len() as i64;
+                                code.extend(emit_backward_branch(loop_off as i64, bl_off));
+                                // exit: patch cmpb
                                 let exit_off = code.len() as i64;
-                                let comb_disp = ((exit_off - loop_off as i64 - 8) / 4) as i32;
-                                let comb_patched: u32 = comb_word | ((comb_disp as u32 & 0x7FF) << 1);
-                                code[loop_off..loop_off + 4].copy_from_slice(&comb_patched.to_be_bytes());
-                                let b_disp = ((loop_off as i64 - b_off as i64 - 8) / 16) as i32;
-                                let b_patched = (w & 0xFFFC001F) | ((b_disp as u32 & 0x1FFF) << 5);
-                                code[b_off..b_off + 4].copy_from_slice(&b_patched.to_be_bytes());
+                                let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                                let cmpb_word = u32::from_be_bytes([
+                                    code[loop_off], code[loop_off + 1],
+                                    code[loop_off + 2], code[loop_off + 3],
+                                ]);
+                                let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                                code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                             }
                             BinOpKind::UDiv | BinOpKind::SDiv => {
-                                // Subtraction loop. S1=lhs, S2=rhs, S0=quotient.
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, S1));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, S2));
-                                code.extend_from_slice(&encode_copy(R0, S0));
+                                // Subtraction loop: quotient = 0; while (lhs >= rhs)
+                                // { lhs -= rhs; quotient++; }
+                                // S0 has lhs, S1 has rhs. Save to S3=lhs, S2=rhs.
+                                code.extend_from_slice(&encode_copy(S0, S3));  // S3 = lhs
+                                code.extend_from_slice(&encode_copy(S1, S2));  // S2 = rhs
+                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (quotient)
+                                // loop: cmpb,<< S3, S2, exit  (if lhs < rhs unsigned, exit)
                                 let loop_off = code.len();
-                                let comb_word: u32 = 0x20000000u32
-                                    | ((S2 as u32 & 0x1F) << 21)
-                                    | ((S1 as u32 & 0x1F) << 16)
-                                    | (0b100u32 << 13) | (1u32 << 12);
-                                code.extend_from_slice(&comb_word.to_be_bytes());
-                                code.extend_from_slice(&encode_sub(S1, S2, S1));
+                                code.extend_from_slice(&encode_cmpb(S3, S2, 0b100, false, false, 0));
+                                code.extend_from_slice(&encode_nop());  // delay slot
+                                // Body: lhs -= rhs; quotient++
+                                code.extend_from_slice(&encode_sub(S3, S2, S3));
                                 code.extend_from_slice(&encode_ldo(S0, 1, S0));
-                                let b_off = code.len();
-                                let w = 0xE8000000u32;
-                                code.extend_from_slice(&w.to_be_bytes());
-                                code.extend_from_slice(&encode_nop());
+                                // Backward branch to loop_off
+                                let bl_off = code.len() as i64;
+                                code.extend(emit_backward_branch(loop_off as i64, bl_off));
+                                // exit: patch cmpb
                                 let exit_off = code.len() as i64;
-                                let comb_disp = ((exit_off - loop_off as i64 - 8) / 4) as i32;
-                                let comb_patched: u32 = comb_word | ((comb_disp as u32 & 0x7FF) << 1);
-                                code[loop_off..loop_off + 4].copy_from_slice(&comb_patched.to_be_bytes());
-                                let b_disp = ((loop_off as i64 - b_off as i64 - 8) / 16) as i32;
-                                let b_patched = (w & 0xFFFC001F) | ((b_disp as u32 & 0x1FFF) << 5);
-                                code[b_off..b_off + 4].copy_from_slice(&b_patched.to_be_bytes());
+                                let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                                let cmpb_word = u32::from_be_bytes([
+                                    code[loop_off], code[loop_off + 1],
+                                    code[loop_off + 2], code[loop_off + 3],
+                                ]);
+                                let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                                code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                             }
                             BinOpKind::SRem | BinOpKind::URem => {
                                 // remainder = lhs - (lhs / rhs) * rhs.
-                                // Compute quotient via subtraction loop, then
-                                // S0 = original_lhs - quotient * rhs.
-                                // Save original lhs in S3.
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, S1));
-                                code.extend_from_slice(&encode_copy(S1, S3)); // S3 = original lhs
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, S2));
-                                code.extend_from_slice(&encode_copy(R0, S0)); // S0 = quotient = 0
-                                // Division loop (same as UDiv above).
-                                let loop_off = code.len();
-                                let comb_word: u32 = 0x20000000u32
-                                    | ((S2 as u32 & 0x1F) << 21)
-                                    | ((S1 as u32 & 0x1F) << 16)
-                                    | (0b100u32 << 13) | (1u32 << 12);
-                                code.extend_from_slice(&comb_word.to_be_bytes());
-                                code.extend_from_slice(&encode_sub(S1, S2, S1));
-                                code.extend_from_slice(&encode_ldo(S0, 1, S0));
-                                let b_off = code.len();
-                                let w = 0xE8000000u32;
-                                code.extend_from_slice(&w.to_be_bytes());
+                                // Save original lhs to S4, compute quotient, then multiply
+                                // back and subtract.
+                                // S0=lhs, S1=rhs.
+                                // Register plan (R1 used by backward branch):
+                                //   S4 = orig_lhs (saved)
+                                //   S3 = division loop variable (copy of lhs, decremented)
+                                //   S2 = rhs
+                                //   S1 = multiply loop counter
+                                //   S0 = quotient / accumulator
+                                code.extend_from_slice(&encode_copy(S0, S4));  // S4 = orig lhs
+                                code.extend_from_slice(&encode_copy(S1, S2));  // S2 = rhs
+                                code.extend_from_slice(&encode_copy(S0, S3));  // S3 = lhs (loop var)
+                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (quotient)
+                                // Division loop
+                                let div_loop = code.len();
+                                code.extend_from_slice(&encode_cmpb(S3, S2, 0b100, false, false, 0));
                                 code.extend_from_slice(&encode_nop());
-                                let exit_off = code.len() as i64;
-                                let comb_disp = ((exit_off - loop_off as i64 - 8) / 4) as i32;
-                                let comb_patched: u32 = comb_word | ((comb_disp as u32 & 0x7FF) << 1);
-                                code[loop_off..loop_off + 4].copy_from_slice(&comb_patched.to_be_bytes());
-                                let b_disp = ((loop_off as i64 - b_off as i64 - 8) / 16) as i32;
-                                let b_patched = (w & 0xFFFC001F) | ((b_disp as u32 & 0x1FFF) << 5);
-                                code[b_off..b_off + 4].copy_from_slice(&b_patched.to_be_bytes());
-                                // S0 = quotient. Now: S0 = S3 - S0 * S2 (remainder).
-                                // Multiply quotient * rhs via repeated add into S1.
-                                code.extend_from_slice(&encode_copy(S0, S1)); // S1 = quotient
-                                code.extend_from_slice(&encode_copy(R0, S0)); // S0 = 0 (acc)
+                                code.extend_from_slice(&encode_sub(S3, S2, S3));
+                                code.extend_from_slice(&encode_ldo(S0, 1, S0));
+                                let bl_off = code.len() as i64;
+                                code.extend(emit_backward_branch(div_loop as i64, bl_off));
+                                let div_exit = code.len() as i64;
+                                let div_disp = ((div_exit - div_loop as i64 - 8) as i32) & !3;
+                                let div_word = u32::from_be_bytes([
+                                    code[div_loop], code[div_loop + 1],
+                                    code[div_loop + 2], code[div_loop + 3],
+                                ]);
+                                let div_patched = (div_word & !0x1FFF) | encode_cmpb_disp(div_disp);
+                                code[div_loop..div_loop + 4].copy_from_slice(&div_patched.to_be_bytes());
+                                // S0 = quotient. Now compute quotient * rhs via multiply loop.
+                                code.extend_from_slice(&encode_copy(S0, S1));  // S1 = quotient
+                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (acc)
                                 let mul_loop = code.len();
-                                let mul_comb: u32 = 0x20000000u32
-                                    | ((R0 as u32 & 0x1F) << 21)
-                                    | ((S1 as u32 & 0x1F) << 16)
-                                    | (0b001u32 << 13) | (1u32 << 12);
-                                code.extend_from_slice(&mul_comb.to_be_bytes());
+                                code.extend_from_slice(&encode_cmpb(S1, R0, 0b001, false, false, 0));
+                                code.extend_from_slice(&encode_nop());
                                 code.extend_from_slice(&encode_add(S2, S0, S0));
                                 code.extend_from_slice(&encode_ldo(S1, -1, S1));
-                                let mul_b_off = code.len();
-                                code.extend_from_slice(&w.to_be_bytes());
-                                code.extend_from_slice(&encode_nop());
+                                let mul_bl = code.len() as i64;
+                                code.extend(emit_backward_branch(mul_loop as i64, mul_bl));
                                 let mul_exit = code.len() as i64;
-                                let mul_disp = ((mul_exit - mul_loop as i64 - 8) / 4) as i32;
-                                let mul_patched: u32 = mul_comb | ((mul_disp as u32 & 0x7FF) << 1);
+                                let mul_disp = ((mul_exit - mul_loop as i64 - 8) as i32) & !3;
+                                let mul_word = u32::from_be_bytes([
+                                    code[mul_loop], code[mul_loop + 1],
+                                    code[mul_loop + 2], code[mul_loop + 3],
+                                ]);
+                                let mul_patched = (mul_word & !0x1FFF) | encode_cmpb_disp(mul_disp);
                                 code[mul_loop..mul_loop + 4].copy_from_slice(&mul_patched.to_be_bytes());
-                                let mul_b_disp = ((mul_loop as i64 - mul_b_off as i64 - 8) / 16) as i32;
-                                let mul_b_patched = (w & 0xFFFC001F) | ((mul_b_disp as u32 & 0x1FFF) << 5);
-                                code[mul_b_off..mul_b_off + 4].copy_from_slice(&mul_b_patched.to_be_bytes());
-                                // S0 = quotient * rhs. S0 = S3 - S0 = remainder.
-                                code.extend_from_slice(&encode_sub(S0, S3, S0));
+                                // S0 = quotient * rhs. remainder = orig_lhs - S0.
+                                code.extend_from_slice(&encode_sub(S4, S0, S0));
                             }
                             BinOpKind::Shl => {
-                                // SHLADD S0, 1, R0, S0 — shift left by 1.
-                                // (General shift amounts not implemented; this
-                                // handles the common *2 case.)
+                                // Variable left shift via loop: result = lhs;
+                                // while (shift > 0) { result <<= 1; shift--; }
+                                // S0 has lhs, S1 has shift. Use S4 as counter
+                                // (S3 is used by emit_backward_branch as link reg).
+                                code.extend_from_slice(&encode_copy(S1, S4));  // S4 = shift counter
+                                // S0 = lhs (already loaded)
+                                // loop: cmpb,= S4, R0, exit
+                                let loop_off = code.len();
+                                code.extend_from_slice(&encode_cmpb(S4, R0, 0b001, false, false, 0));
+                                code.extend_from_slice(&encode_nop());
+                                // Body: result = result + result (shift left 1); counter--
                                 code.extend_from_slice(&encode_shladd(1, S0, R0, S0));
+                                code.extend_from_slice(&encode_ldo(S4, -1, S4));
+                                let bl_off = code.len() as i64;
+                                code.extend(emit_backward_branch(loop_off as i64, bl_off));
+                                let exit_off = code.len() as i64;
+                                let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                                let cmpb_word = u32::from_be_bytes([
+                                    code[loop_off], code[loop_off + 1],
+                                    code[loop_off + 2], code[loop_off + 3],
+                                ]);
+                                let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                                code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                             }
                             BinOpKind::ShrL | BinOpKind::ShrA => {
-                                // Shift right not implemented (no SHD/EXTRS
-                                // encoder). Leave S0 unchanged for now.
-                                // TODO: add SHD/EXTRS encoder for general shifts.
+                                // Variable right shift via loop: result = lhs;
+                                // while (shift > 0) { result >>= 1; shift--; }
+                                // S0 has lhs, S1 has shift.
+                                // Register plan (S3 is used by backward branch):
+                                //   S0 = result (also quotient in inner loop)
+                                //   S1 = value being divided (inner loop)
+                                //   S2 = shift counter (outer loop)
+                                //   S4 = 2 (constant)
+                                code.extend_from_slice(&encode_copy(S1, S2));  // S2 = shift counter
+                                // S0 = lhs (already loaded)
+                                code.extend_from_slice(&encode_ldi(2, S4));   // S4 = 2
+                                // Outer loop: while (shift > 0)
+                                let outer_loop = code.len();
+                                code.extend_from_slice(&encode_cmpb(S2, R0, 0b001, false, false, 0));
+                                code.extend_from_slice(&encode_nop());
+                                // Inner: S0 = S0 / 2 (via subtraction loop)
+                                // S1 = S0 (copy of current value), S0 = 0 (quotient)
+                                code.extend_from_slice(&encode_copy(S0, S1));  // S1 = current value
+                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (quotient)
+                                // inner loop: while (S1 >= 2) { S1 -= 2; S0++; }
+                                let inner_loop = code.len();
+                                code.extend_from_slice(&encode_cmpb(S1, S4, 0b100, false, false, 0));
+                                code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&encode_sub(S1, S4, S1));
+                                code.extend_from_slice(&encode_ldo(S0, 1, S0));
+                                let inner_bl = code.len() as i64;
+                                code.extend(emit_backward_branch(inner_loop as i64, inner_bl));
+                                let inner_exit = code.len() as i64;
+                                let inner_disp = ((inner_exit - inner_loop as i64 - 8) as i32) & !3;
+                                let inner_word = u32::from_be_bytes([
+                                    code[inner_loop], code[inner_loop + 1],
+                                    code[inner_loop + 2], code[inner_loop + 3],
+                                ]);
+                                let inner_patched = (inner_word & !0x1FFF) | encode_cmpb_disp(inner_disp);
+                                code[inner_loop..inner_loop + 4].copy_from_slice(&inner_patched.to_be_bytes());
+                                // S0 = value / 2. Decrement shift counter.
+                                code.extend_from_slice(&encode_ldo(S2, -1, S2));
+                                let outer_bl = code.len() as i64;
+                                code.extend(emit_backward_branch(outer_loop as i64, outer_bl));
+                                let outer_exit = code.len() as i64;
+                                let outer_disp = ((outer_exit - outer_loop as i64 - 8) as i32) & !3;
+                                let outer_word = u32::from_be_bytes([
+                                    code[outer_loop], code[outer_loop + 1],
+                                    code[outer_loop + 2], code[outer_loop + 3],
+                                ]);
+                                let outer_patched = (outer_word & !0x1FFF) | encode_cmpb_disp(outer_disp);
+                                code[outer_loop..outer_loop + 4].copy_from_slice(&outer_patched.to_be_bytes());
                             }
                             BinOpKind::Eq | BinOpKind::Ne
                             | BinOpKind::SLt | BinOpKind::ULt
