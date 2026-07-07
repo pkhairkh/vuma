@@ -58,6 +58,7 @@ pub mod riscv64;
 pub mod riscv32;
 pub mod s390x;
 pub mod scg_to_ir;
+pub mod scheduler;
 pub mod sparc64;
 pub mod target_desc;
 pub mod wasm32;

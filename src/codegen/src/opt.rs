@@ -1128,7 +1128,10 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
         let f = inline_small(f, &func_refs);
         let f = licm(f);
         let f = constant_fold(f);
-        let f = dead_code_eliminate(f);
+        let mut f = dead_code_eliminate(f);
+        // Wave 5: instruction scheduling (list-scheduling with latency table)
+        let lt = crate::target_desc::LatencyTable::default_ooo();
+        crate::scheduler::schedule_function(&mut f.blocks, &lt);
         program.functions[i] = f;
     }
 
