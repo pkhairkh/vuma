@@ -1830,13 +1830,14 @@ fn emit_binop(
             if is_32bit {
                 code.extend_from_slice(&encode_lgfr(S1, S1));
             }
-            code.extend_from_slice(&encode_lghi(S0, 0));
+            // For signed division, R0 = sign-extension of S1.
+            code.extend_from_slice(&encode_srag(S0, S1, 63));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S2));
             if is_32bit {
                 code.extend_from_slice(&encode_lgfr(S2, S2));
             }
-            code.extend_from_slice(&encode_dlgr(S0, S2));
-            // Remainder is in S0 (= R0).
+            // DGR R0, R2 (signed 64-bit divide). Remainder in S0 (= R0).
+            code.extend_from_slice(&encode_dgr(S0, S2));
             if is_32bit {
                 code.extend_from_slice(&encode_llgfr(S0, S0));
             }
@@ -1933,13 +1934,13 @@ fn emit_binop(
             // dst = (lhs == rhs) ? 1 : 0
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // CGR S0, S1: sets CC.
+            // CGR S0, S1: sets CC. CC=0 means equal.
             code.extend_from_slice(&encode_rre(0xB9, 0x20, S0, S1));
             // S0 = 1 (default: assume equal)
             code.extend_from_slice(&encode_lghi(S0, 1));
-            // BRC 0x6, skip (if CC != 0, i.e., not equal, skip the "S0 = 0")
+            // BRC 0x8, skip (if CC=0, i.e., equal, skip the "S0 = 0")
             let skip_patch = code.len();
-            code.extend_from_slice(&encode_brc(0x6, 0));
+            code.extend_from_slice(&encode_brc(0x8, 0));
             // S0 = 0 (not equal)
             code.extend_from_slice(&encode_lghi(S0, 0));
             // skip: (patch the BRC to jump here)
@@ -1955,9 +1956,9 @@ fn emit_binop(
             code.extend_from_slice(&encode_rre(0xB9, 0x20, S0, S1));
             // S0 = 1 (default: assume not equal)
             code.extend_from_slice(&encode_lghi(S0, 1));
-            // BRC 0x8, skip (if CC == 0, i.e., equal, skip the "S0 = 0")
+            // BRC 0x6, skip (if CC!=0, i.e., not equal, skip the "S0 = 0")
             let skip_patch = code.len();
-            code.extend_from_slice(&encode_brc(0x8, 0));
+            code.extend_from_slice(&encode_brc(0x6, 0));
             code.extend_from_slice(&encode_lghi(S0, 0));
             let skip_target = code.len() as i64;
             let disp = (skip_target - skip_patch as i64) / 2;
