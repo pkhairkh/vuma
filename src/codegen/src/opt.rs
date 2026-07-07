@@ -1123,6 +1123,7 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
         let f = constant_fold(f);
         let f = cse(f);
         let f = equality_saturation(f);    // Wave 2: e-graph pass
+        let f = dead_store_eliminate(f);   // Wave 3: alias-analysis-driven DSE
         let f = dead_code_eliminate(f);
         let f = inline_small(f, &func_refs);
         let f = licm(f);
@@ -1188,6 +1189,96 @@ pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
                     }
                 }
             }
+        }
+    }
+
+    func
+}
+
+/// Dead store elimination pass (Wave 3).
+///
+/// Uses type-based alias analysis to identify stores that are overwritten
+/// before any load reads them, and removes them. This is safe when:
+/// 1. The two stores write to the same address (or non-aliasing addresses)
+/// 2. No load or call occurs between them that could read the first store
+/// 3. The address doesn't escape (no pointer to it is used in a call)
+pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
+    use crate::alias_analysis::AliasAnalysis;
+
+    let aa = AliasAnalysis::analyze(&func);
+
+    for block in &mut func.blocks {
+        // Collect indices of stores that can be eliminated.
+        let mut to_remove: HashSet<usize> = HashSet::new();
+
+        // For each store, check if a later store to the same address
+        // (or a non-aliasing address) overwrites it before any load.
+        for i in 0..block.instructions.len() {
+            if to_remove.contains(&i) {
+                continue;
+            }
+
+            let (store_addr_i, store_val_i) = match &block.instructions[i] {
+                IRInstr::Store { addr, value, .. } => (addr, value),
+                _ => continue,
+            };
+
+            // Check if this store's value is ever read before being overwritten.
+            let mut is_dead = false;
+            for j in (i + 1)..block.instructions.len() {
+                match &block.instructions[j] {
+                    IRInstr::Load { addr: load_addr, .. } => {
+                        // If a load may alias with our store, the store is not dead.
+                        if aa.values_may_alias(store_addr_i, load_addr) {
+                            break;
+                        }
+                    }
+                    IRInstr::Store { addr: store_addr_j, .. } => {
+                        // If a later store writes to the same address (or an
+                        // aliasing address), and our store's value is not used
+                        // between them, our store is dead.
+                        if !aa.values_may_alias(store_addr_i, store_addr_j) {
+                            // Non-aliasing: this store doesn't affect ours.
+                            // But also check if the addresses are exactly equal.
+                            if store_addr_i == store_addr_j {
+                                // Same address: our store is overwritten.
+                                is_dead = true;
+                                break;
+                            }
+                        } else {
+                            // Aliasing: can't prove safety.
+                            break;
+                        }
+                    }
+                    IRInstr::Call { .. } => {
+                        // Function calls may read or write any memory.
+                        break;
+                    }
+                    IRInstr::Free { .. } => {
+                        // Free may invalidate the memory.
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            if is_dead {
+                // Check that the store value is not used elsewhere (e.g., as
+                // a call argument or return value). The store address being
+                // overwritten doesn't affect the value register.
+                // The value register is separate from the store operation.
+                to_remove.insert(i);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            let mut new_instrs = Vec::with_capacity(block.instructions.len() - to_remove.len());
+            for (i, instr) in block.instructions.drain(..).enumerate() {
+                if !to_remove.contains(&i) {
+                    new_instrs.push(instr);
+                }
+            }
+            block.instructions = new_instrs;
         }
     }
 
