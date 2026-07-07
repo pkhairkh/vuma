@@ -58,14 +58,28 @@ fi
 echo "  ✓ Rust: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
 
 # Check/install QEMU
-if ! command -v qemu-aarch64 &>/dev/null; then
+# First, look for the bundled QEMU user-mode binaries extracted at
+# /tmp/my-project/bin/ (this is the standard location in the dev image).
+# If found, prepend that directory to PATH so all 19 QEMU binaries
+# (aarch64, x86_64, hppa, alpha, m68k, s390x, sparc64, etc.) are
+# discoverable. Otherwise fall back to system QEMU.
+QEMU_DIR=""
+for d in /tmp/my-project/bin /tmp/my-project/qemu-user-extract/usr/bin; do
+    if [ -x "$d/qemu-aarch64" ]; then QEMU_DIR="$d"; break; fi
+done
+if [ -n "$QEMU_DIR" ]; then
+    export PATH="$QEMU_DIR:$PATH"
+    echo "  ✓ QEMU (bundled): $QEMU_DIR"
+elif ! command -v qemu-aarch64 &>/dev/null; then
     echo "  Installing QEMU..."
     sudo apt update -qq && sudo apt install -y qemu-user qemu-user-static 2>/dev/null || {
         echo "  ✗ Failed to install qemu-user. Run: sudo apt install qemu-user qemu-user-static"
         exit 1
     }
+    echo "  ✓ QEMU: $(qemu-aarch64 --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
+else
+    echo "  ✓ QEMU: $(qemu-aarch64 --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
 fi
-echo "  ✓ QEMU: $(qemu-aarch64 --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
 
 # Check/install wasmtime
 WASMTIME_BIN=""
@@ -190,14 +204,23 @@ BACKENDS = {}
 # Always use QEMU for all backends (even native aarch64)
 # This ensures consistent ELF loading behavior
 BACKENDS["aarch64"] = "qemu-aarch64"
+BACKENDS["aarch64_be"] = "qemu-aarch64_be"
 BACKENDS["x86_64"] = "qemu-x86_64"
 BACKENDS["riscv64"] = "qemu-riscv64"
 BACKENDS["arm32"] = "qemu-arm"
+BACKENDS["armeb"] = "qemu-armeb"
 BACKENDS["mips64"] = "qemu-mips64el"
+BACKENDS["mips64be"] = "qemu-mips64"
 BACKENDS["ppc64"] = "qemu-ppc64"
+BACKENDS["ppc64le"] = "qemu-ppc64le"
 BACKENDS["loongarch64"] = "qemu-loongarch64"
 BACKENDS["riscv32"] = "qemu-riscv32"
 BACKENDS["x86_32"] = "qemu-i386"
+BACKENDS["s390x"] = "qemu-s390x"
+BACKENDS["alpha"] = "qemu-alpha"
+BACKENDS["m68k"] = "qemu-m68k"
+BACKENDS["sparc64"] = "qemu-sparc64"
+BACKENDS["hppa"] = "qemu-hppa"
 
 # Check wasmtime
 WASMTIME = os.environ.get("WASMTIME_BIN", "")
