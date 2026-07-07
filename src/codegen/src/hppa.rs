@@ -1598,6 +1598,51 @@ impl Backend for HppaBackend {
         }
 
         // ── Patch inter-function BL calls ──
+        // PA-RISC BL only supports forward (positive) displacements.
+        // For backward calls (recursive functions), we use the BL+LDO+BV
+        // pattern: BL +0 to a trampoline that computes the target address
+        // and branches via BV.
+        //
+        // However, the BL instruction emitted in allocate_registers is
+        // already a placeholder (0xE8400000 = BL disp=0, link=R2).
+        // For forward calls, we patch the displacement directly.
+        // For backward calls, we need to replace the BL+NOP with a
+        // BL+LDO+BV sequence. But the placeholder is only 8 bytes
+        // (BL + NOP), and BL+LDO+BV+NOP is 16 bytes.
+        //
+        // Solution: emit the call as a 20-byte placeholder (BL + NOP + 3 NOPs)
+        // so we have room for either BL+NOP (forward) or BL+LDO+BV+NOP (backward).
+        //
+        // Actually, since we already emit 8 bytes (BL + NOP), and backward
+        // calls need 20 bytes (BL +0, R2 + NOP + LDO disp(R2), R2 + BV R0(R2) + NOP),
+        // we can't expand in-place. Instead, for backward calls, we redirect
+        // to a trampoline at the end of the function that does the backward branch.
+        //
+        // Simpler approach: use the same emit_backward_branch pattern for calls.
+        // But calls need to save the return address in R2.
+        //
+        // For now, the simplest fix: check if the call is backward, and if so,
+        // patch the BL to branch to a trampoline. But this is complex.
+        //
+        // Actually, let's just check: does the BL encoding actually support
+        // negative displacements? The BL format has a 17-bit signed displacement
+        // (bits 17-5, scaled by 16). Let's check if QEMU accepts negative BL.
+        //
+        // From our earlier testing: BL with negative disp produces <unknown>.
+        // So we need the trampoline approach.
+        //
+        // For now: emit calls as 20-byte placeholders so we can expand
+        // backward calls. This requires changing the allocate_registers code
+        // to emit 5 instructions (20 bytes) instead of 2 (8 bytes).
+        //
+        // But that would shift all code offsets. Instead, let's use a simpler
+        // approach: for backward calls, patch the BL to branch FORWARD to a
+        // trampoline at the end of the code, and the trampoline does the
+        // backward branch via BL+LDO+BV.
+
+        // Collect trampolines for backward calls.
+        let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
+
         let mut func_code_offset = padded_header_size;
         for func in &ordered_functions {
             for reloc in &func.relocations {
@@ -1613,13 +1658,23 @@ impl Backend for HppaBackend {
                             .copied()
                     })
                     .unwrap_or(ffi_stub_offset);
-                let disp = ((target_offset as i64 - abs_offset as i64 - 8) / 16) as i32;
-                let w = u32::from_be_bytes([
-                    all_code[abs_offset], all_code[abs_offset + 1],
-                    all_code[abs_offset + 2], all_code[abs_offset + 3],
-                ]);
-                let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
-                all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
+
+                let raw_disp = target_offset as i64 - abs_offset as i64 - 8;
+
+                if raw_disp >= 0 {
+                    // Forward call: patch BL displacement directly.
+                    let disp = (raw_disp / 16) as i32;
+                    let w = u32::from_be_bytes([
+                        all_code[abs_offset], all_code[abs_offset + 1],
+                        all_code[abs_offset + 2], all_code[abs_offset + 3],
+                    ]);
+                    let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+                    all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
+                } else {
+                    // Backward call: need trampoline.
+                    // We'll collect these and append trampolines after all code.
+                    trampolines.push((abs_offset, target_offset));
+                }
             }
             let func_size: usize = func.blocks.iter()
                 .flat_map(|b| b.instructions.iter())
@@ -1627,6 +1682,52 @@ impl Backend for HppaBackend {
                 .sum();
             let padded_size = (func_size + 15) & !15;
             func_code_offset += padded_size;
+        }
+
+        // ── Emit trampolines for backward calls ──
+        // Each trampoline: BL +0, R2 (save return addr) + NOP + LDO disp(R2), R2 + BV R0(R2) + NOP
+        // The BL patches to forward-branch to the trampoline.
+        // The trampoline uses BL+LDO+BV to reach the backward target.
+        let mut trampoline_offsets: Vec<usize> = Vec::new();
+        for (call_offset, target_offset) in &trampolines {
+            // Align trampoline to 16 bytes (BL displacement granularity)
+            while all_code.len() % 16 != 0 {
+                all_code.extend_from_slice(&encode_nop());
+            }
+            let trampoline_start = all_code.len();
+
+            // BL +0, R2 (save return address — this will be the call site's return addr)
+            // Actually, we need to save the ORIGINAL call site's return address.
+            // The BL at the call site already saved the return addr in R2.
+            // The trampoline just needs to branch to the target.
+            // So: emit BL+LDO+BV (same as backward branch) but using R2 (which has return addr).
+            // Wait — R2 has the return address from the original BL. We don't want to clobber it.
+            // Use R1 instead (which is saved/restored in prologue/epilogue).
+
+            // Emit backward branch from trampoline to target
+            let backward_disp = (*target_offset as i64) - (trampoline_start as i64 + 8);
+            // BL +0, R1 (get trampoline address)
+            all_code.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL +0, R1
+            all_code.extend_from_slice(&encode_nop()); // delay slot
+            // LDO disp(R1), R1
+            all_code.extend_from_slice(&encode_ldo_raw(R1, backward_disp as i16, R1));
+            // BV R0(R1) — branch to target
+            all_code.extend_from_slice(&encode_bv_real(R1));
+            all_code.extend_from_slice(&encode_nop()); // delay slot
+
+            trampoline_offsets.push(trampoline_start);
+        }
+
+        // Now patch the original BL calls to forward-branch to their trampolines.
+        for ((call_offset, _target_offset), trampoline_start) in trampolines.iter().zip(trampoline_offsets.iter()) {
+            let raw_disp = (*trampoline_start as i64) - (*call_offset as i64) - 8;
+            let disp = (raw_disp / 16) as i32;
+            let w = u32::from_be_bytes([
+                all_code[*call_offset], all_code[*call_offset + 1],
+                all_code[*call_offset + 2], all_code[*call_offset + 3],
+            ]);
+            let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+            all_code[*call_offset..*call_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
 
         // ── Build ELF ──
