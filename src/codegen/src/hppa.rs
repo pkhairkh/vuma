@@ -465,8 +465,11 @@ impl Backend for HppaBackend {
 
         // PA-RISC stack grows UP. FP=R3 points to the base of the frame.
         // Locals are at NEGATIVE offsets from FP (below FP).
+        // vreg stack slots start at -28 (below RP at -20 and FP at -24).
+        // The prologue saves RP at SP-20 and old FP at SP-24, so vregs
+        // must not overlap with those save areas.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = -4;
+        let mut current_offset: i32 = -28;
         let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
         vreg_ids.sort();
         for &id in &vreg_ids {
