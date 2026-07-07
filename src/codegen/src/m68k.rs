@@ -247,7 +247,9 @@ impl Instruction {
                 w.to_be_bytes().to_vec()
             }
             Instruction::Xor { src, dst } => {
-                let w = 0xB180u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                // EOR.L Dn, Dm: Dm = Dm ^ Dn. Dn is at bits 11-9, Dm at bits 2-0.
+                // We want dst = dst ^ src, so Dn=src, Dm=dst.
+                let w = 0xB180u16 | ((src.encoding() as u16 & 0x7) << 9) | (dst.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Lsl { dst, imm } => {
@@ -1334,27 +1336,30 @@ fn emit_binop(
         BinOpKind::Shl => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // LSL.L D1, D0: word = 0xE1A0 | (D0<<9) | (0<<5) | (1<<4) | (0<<0) | D1
-            // Actually: LSL.L Dn, Dm: word = 0xE1A0 | (Dm<<9) | (0<<5) | (1<<4) | Dn
-            // Hmm, let me use the immediate form for shift counts that fit.
-            // For variable shift: LSL.L D1, D0 = 0xE1A0 | (0<<9) | (1<<5)... actually
-            // shift-by-Dn: 1110 | count_or_0 | 1 | Dm | size | direction | i/r | Dn_or_count
-            // i/r=1 means register count (in Dn).
-            let w = 0xE1ACu16 | ((S0.encoding() as u16 & 0x7) << 9) | (S1.encoding() as u16 & 0x7);
+            // LSL.L Dn, Dm: shift Dm left (logical) by Dn.
+            // Format: 1110 Dn 1 10 1 01 Dm (bit 8=left, bits 4-3=01=LS, bit 5=1=reg)
+            // Base: 0xE1A8 | (Dn<<9) | Dm
+            let w = 0xE1A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::ShrL => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            let w = 0xE2ACu16 | ((S0.encoding() as u16 & 0x7) << 9) | (S1.encoding() as u16 & 0x7);
+            // LSR.L Dn, Dm: shift Dm right (logical) by Dn.
+            // Format: 1110 Dn 0 10 1 01 Dm (bit 8=right, bits 4-3=01=LS, bit 5=1=reg)
+            // Base: 0xE0A8 | (Dn<<9) | Dm
+            let w = 0xE0A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::ShrA => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            let w = 0xE0ACu16 | ((S0.encoding() as u16 & 0x7) << 9) | (S1.encoding() as u16 & 0x7);
+            // ASR.L Dn, Dm: shift Dm right (arithmetic) by Dn.
+            // Format: 1110 Dn 0 10 1 00 Dm (bit 8=right, bits 4-3=00=AS, bit 5=1=reg)
+            // Base: 0xE0A0 | (Dn<<9) | Dm
+            let w = 0xE0A0u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
         }
