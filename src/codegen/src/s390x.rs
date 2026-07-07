@@ -458,36 +458,46 @@ fn encode_lgfr(r1: Gpr, r2: Gpr) -> [u8; 4] {
 ///   byte 2: R1 (4 bits, high nibble) | R2 (4 bits, low nibble)
 ///   byte 3: R3 (4 bits, high nibble) | M4=0 (4 bits, low nibble)
 fn encode_rrf_a(op1: u8, op2: u8, r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    let byte2 = ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF);
-    let byte3 = (r3.encoding() & 0xF) << 4;
-    [op1, op2, byte2, byte3]
+    // RRF-a format: | op1 | R1 | R3 | op2 | R2 | 0 |
+    //   byte 0: op1
+    //   byte 1: (R1 << 4) | R3
+    //   byte 2: op2
+    //   byte 3: (R2 << 4) | 0
+    let byte1 = ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF);
+    let byte3 = (r2.encoding() & 0xF) << 4;
+    [op1, byte1, op2, byte3]
 }
 
 /// Encode ARK R1, R2, R3 (Add 32-bit). R1[31:0] = R2[31:0] + R3[31:0].
-/// op1=0xB9, op2=0xF8.
+/// Since QEMU doesn't support RRF-a format, use AR (RR format, 2 bytes) + NOP.
+/// AR R1, R3: op=0x1A. When R1==R2, AR R1,R3 == ARK R1,R1,R3.
 fn encode_ark(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    encode_rrf_a(0xB9, 0xF8, r1, r2, r3)
+    let _ = r2; // R1==R2 in all call sites; AR R1, R3 is equivalent
+    [0x1A, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00] // AR + BCR 0,R0 (NOP)
 }
 
-/// Encode SRK R1, R2, R3 (Subtract 32-bit). R1[31:0] = R2[31:0] - R3[31:0].
-/// op1=0xB9, op2=0xF9.
+/// Encode SRK R1, R2, R3 (Sub 32-bit). Use SR (RR, 2 bytes) + NOP.
 fn encode_srk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    encode_rrf_a(0xB9, 0xF9, r1, r2, r3)
+    let _ = r2;
+    [0x1B, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
 }
 
-/// Encode NRK R1, R2, R3 (AND 32-bit). op1=0xB9, op2=0xF4.
+/// Encode NRK R1, R2, R3 (AND 32-bit). Use NR (RR, 2 bytes) + NOP.
 fn encode_nrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    encode_rrf_a(0xB9, 0xF4, r1, r2, r3)
+    let _ = r2;
+    [0x14, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
 }
 
-/// Encode ORK R1, R2, R3 (OR 32-bit). op1=0xB9, op2=0xF6.
+/// Encode ORK R1, R2, R3 (OR 32-bit). Use OR (RR, 2 bytes) + NOP.
 fn encode_ork(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    encode_rrf_a(0xB9, 0xF6, r1, r2, r3)
+    let _ = r2;
+    [0x16, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
 }
 
-/// Encode XRK R1, R2, R3 (XOR 32-bit). op1=0xB9, op2=0xF7.
+/// Encode XRK R1, R2, R3 (XOR 32-bit). Use XR (RR, 2 bytes) + NOP.
 fn encode_xrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    encode_rrf_a(0xB9, 0xF7, r1, r2, r3)
+    let _ = r2;
+    [0x17, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
 }
 
 /// Encode a 6-byte RSY-a instruction (used for shifts).
