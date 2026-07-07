@@ -29,6 +29,90 @@ pub struct TargetDesc {
     pub calling_convention: CallingConventionDesc,
     /// Instruction category metadata.
     pub instruction_categories: Vec<InstCategoryDesc>,
+    /// Instruction latency table for the scheduler (Wave 5).
+    /// Maps instruction category → (latency_cycles, throughput_per_cycle).
+    /// If empty, the scheduler assumes uniform latency 1.
+    #[serde(default)]
+    pub latency_table: LatencyTable,
+}
+
+/// Latency table for instruction scheduling (Wave 5).
+///
+/// Models pipeline hazards for list-scheduling. Each entry maps an
+/// instruction category to its latency (cycles until result is available)
+/// and throughput (instructions per cycle on that functional unit).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LatencyTable {
+    /// Map from instruction category name to latency info.
+    pub entries: Vec<LatencyEntry>,
+}
+
+/// A single latency entry for one instruction category.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LatencyEntry {
+    /// Category name (matches `InstCategoryDesc::name`).
+    pub category: String,
+    /// Latency in cycles (time from issue to result availability).
+    pub latency: u8,
+    /// Throughput: 1/throughput = cycles between consecutive issues.
+    /// 1 = fully pipelined, 2 = half-throughput, etc.
+    pub throughput: u8,
+    /// Functional unit this instruction uses (for hazard detection).
+    pub functional_unit: FunctionalUnit,
+}
+
+/// Functional units for scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FunctionalUnit {
+    /// Integer ALU.
+    Alu,
+    /// Load/store unit.
+    Memory,
+    /// Branch unit.
+    Branch,
+    /// Floating-point / SIMD.
+    FpSimd,
+    /// Multiply unit (may have higher latency than ALU).
+    Multiply,
+    /// Divide unit (typically very high latency, not pipelined).
+    Divide,
+}
+
+impl LatencyTable {
+    /// Creates a new empty latency table.
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Creates a latency table with default modern OoO core values.
+    /// These are conservative estimates suitable for list-scheduling.
+    pub fn default_ooo() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// Looks up the latency for a given instruction category.
+    /// Returns (latency, throughput, functional_unit).
+    /// Defaults to (1, 1, Alu) if not found.
+    pub fn lookup(&self, category: &str) -> (u8, u8, FunctionalUnit) {
+        for entry in &self.entries {
+            if entry.category == category {
+                return (entry.latency, entry.throughput, entry.functional_unit);
+            }
+        }
+        (1, 1, FunctionalUnit::Alu)
+    }
 }
 
 /// Description of a single register.
@@ -403,6 +487,7 @@ fn aarch64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -546,6 +631,7 @@ fn riscv64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -627,6 +713,7 @@ fn wasm32_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -770,6 +857,7 @@ fn loongarch64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -883,6 +971,7 @@ fn x86_64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -1006,6 +1095,7 @@ fn arm32_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -1155,6 +1245,7 @@ fn mips64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
@@ -1348,6 +1439,7 @@ fn ppc64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
+        latency_table: LatencyTable::default_ooo(),
     }
 }
 
