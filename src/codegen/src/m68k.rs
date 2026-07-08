@@ -919,9 +919,6 @@ fn emit_instr(
                 }
             }
             // Load value from (A1) into S0, using correct size based on ty.
-            // MOVE.B (A1), D0 → size=01, dst=D0, dst_mode=010 (An), src_mode=000 (Dn) → 0x1010 | 1
-            // MOVE.W (A1), D0 → size=11, → 0x3010 | 1
-            // MOVE.L (A1), D0 → size=10, → 0x2010 | 1
             let size_bits: u16 = match ty {
                 IRType::I8 | IRType::U8 => 0x1000, // byte
                 IRType::I16 | IRType::U16 => 0x3000, // word
@@ -931,8 +928,25 @@ fn emit_instr(
                 let w = size_bits | (0u16 << 9) | (2u16 << 3) | 1;
                 code.extend_from_slice(&w.to_be_bytes());
             }
-            // For byte loads, zero-extend to 32-bit: AND.L #0xFF, D0
-            // Actually m68k MOVE.B already zero-extends to 32-bit in the register.
+            // CRITICAL: m68k MOVE.B to a data register only modifies the
+            // low byte — the upper 24 bits are UNCHANGED.  This means a
+            // byte load of 0x00 into D0 (which had 0x12345678) gives
+            // D0 = 0x12345600, NOT 0x00000000.  This breaks comparisons
+            // (CMP.L sees a non-zero value) and arithmetic.
+            //
+            // Fix: zero-extend after byte/word loads by clearing the
+            // upper bits with AND.L.
+            match ty {
+                IRType::I8 | IRType::U8 => {
+                    // AND.L #0xFF, D0 — 0x0280 0x000000FF
+                    code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x00, 0xFF]);
+                }
+                IRType::I16 | IRType::U16 => {
+                    // AND.L #0xFFFF, D0 — 0x0280 0x0000FFFF
+                    code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0xFF, 0xFF]);
+                }
+                _ => {} // long: no masking needed
+            }
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Store {
