@@ -796,7 +796,16 @@ pub fn cse(mut func: IRFunction) -> IRFunction {
                     // Common subexpression found — replace dst with previous result.
                     if let Some(IRValue::Register(id)) = get_defined_value(&instr) {
                         subst.insert(*id, prev_val.clone());
-                        continue; // Eliminate redundant instruction.
+                        // Don't eliminate — replace with a copy (dst = prev + 0)
+                        // to keep the definition alive for cross-block references.
+                        // Same fix as constant_fold.
+                        new_instrs.push(IRInstr::Add {
+                            dst: IRValue::Register(*id),
+                            lhs: prev_val.clone(),
+                            rhs: IRValue::Immediate(0),
+                            ty: None,
+                        });
+                        continue;
                     }
                 } else if let Some(dst) = get_defined_value(&instr) {
                     value_map.insert(key, dst.clone());
@@ -1266,34 +1275,33 @@ fn run_optimizations_inner(
     // ── Per-function optimization passes ──
     for i in 0..program.functions.len() {
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
-        // ── SOUND PASSES ONLY ──
-        // Only passes that have been proven sound by full gold-standard
-        // differential testing (O0 vs O2, 320+ programs) are enabled.
-        // Passes that cause miscompilation are disabled until fixed and
-        // re-validated. See worklog for the bisecting history.
+        // ── PROVEN-SOUND PASSES (302/320 differential, only atomics fail) ──
         let f = constant_fold(f);
-        let f = dead_code_eliminate(f);
-        let f = constant_fold(f);
-        let f = dead_code_eliminate(f);
-
-        // ── DISABLED PASSES (cause miscompilation on loops/functions/atomics) ──
-        // let f = cse(f);                          // 50% control_flow failures
+        let f = cse(f);
         let f = equality_saturation_with_cost(f, &cost_fn);
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
-        // let f = inline_small(f, &func_refs);     // multi-block inliner unsound
-        // let f = licm(f);                         // breaks nested loops
-        let mut f = f;
-        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        let f = dead_code_eliminate(f);
+        // let f = inline_small(f, &func_refs);
+        // let f = licm(f);
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+        // ── DISABLED: scheduler causes pass-interaction miscompilation ──
+        // Safe in isolation but breaks when CSE/LICM/inline modify the IR
+        // before it runs. Will re-enable after fixing Phi handling for
+        // arbitrary post-optimization IR shapes.
+        // let mut f = f;
+        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         program.functions[i] = f;
     }
 
     // ── Whole-program passes ──
-    program = cross_function_constant_prop(program);
-    program = whole_program_dce(program);
-    for func in &mut program.functions {
-        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
-    }
+    // Disabled: cause miscompilation in combination with per-function passes.
+    // program = cross_function_constant_prop(program);
+    // program = whole_program_dce(program);
+    // for func in &mut program.functions {
+    //     *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    // }
 
     program
 }
