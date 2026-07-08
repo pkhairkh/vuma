@@ -47,6 +47,8 @@ pub mod opt;
 /// Bitvector verification framework (Wave 7).
 /// Verifies e-graph rewrite rules by exhaustive enumeration.
 pub mod bv_verify;
+/// Correct loop unrolling (Wave 13b). Replaces the miscompiling vectorizer.
+pub mod loop_unroll;
 pub mod egraph;
 pub mod closures;
 pub mod monomorphize;

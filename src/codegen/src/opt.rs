@@ -1166,11 +1166,14 @@ pub fn run_optimizations_with_target(
     // numbering differs across functions. Would need normalization first.
     // program = identical_function_merge(program);
 
-    // NOTE: Vectorizer disabled — duplicates loop body without adjusting
-    // trip count (miscompilation).
-    // for func in &mut program.functions {
-    //     *func = crate::vectorize::vectorize_function(std::mem::replace(func, IRFunction::new("__tmp__")));
-    // }
+    // Wave 13b: Correct loop unrolling. Replaces the miscompiling vectorizer
+    // (Wave 13) which duplicated the body 4x without adjusting the trip count.
+    // This unroller changes the IV step from +1 to +F and duplicates the body
+    // with IV substitution, so the total work stays N (not N*F).
+    // It bails out for any loop it cannot fully analyze (no miscompilation).
+    for func in &mut program.functions {
+        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    }
 
     program
 }
