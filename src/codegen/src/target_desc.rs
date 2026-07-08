@@ -245,6 +245,132 @@ impl LatencyTable {
         }
     }
 
+    // ============================================================
+    // Remaining ISAs (11) — covers all 19 BackendKind variants.
+    // The big-endian / little-endian variants reuse their parent
+    // ISA's table (endianness doesn't change instruction latency).
+    // ============================================================
+
+    /// RISC-V 32 (RV32IMAC/RV32GC). Same pipeline as RV64; 32-bit regs.
+    pub fn riscv32() -> Self {
+        // RV32 has the same M-extension latencies as RV64 on SiFive U-class.
+        Self::riscv64()
+    }
+
+    /// x86-32 (i386/i686). Same integer pipeline as x86-64; 32-bit regs.
+    pub fn x86_32() -> Self {
+        Self::x86_64()
+    }
+
+    /// PowerPC 64 little-endian (ppc64le, ELFv2). Same pipeline as ppc64 BE.
+    pub fn ppc64le() -> Self {
+        Self::ppc64()
+    }
+
+    /// MIPS64 big-endian. Same pipeline as mips64 LE; only data endianness differs.
+    pub fn mips64be() -> Self {
+        Self::mips64()
+    }
+
+    /// ARM32 big-endian (armeb). Same pipeline as arm32 LE.
+    pub fn armeb() -> Self {
+        Self::arm32()
+    }
+
+    /// AArch64 big-endian (aarch64_be). Instructions are always LE-fetched
+    /// per ARM ARM D6.1.3; only data endianness differs. Same latencies.
+    pub fn aarch64_be() -> Self {
+        Self::aarch64()
+    }
+
+    /// SPARC V9 (UltraSPARC T1-class). In-order core, 1-cycle ALU,
+    /// 4-cycle load, non-pipelined divide.
+    pub fn sparc64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// IBM System Z (z14/z15-class). CISC, 1-cycle ALU, 6-cycle load,
+    /// variable-latency divide.
+    pub fn s390x() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// Motorola 68000 (68040-class). CISC, 1-cycle ALU, 3-cycle load,
+    /// 40-cycle divide (not pipelined).
+    pub fn m68k() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// DEC Alpha 21264. In-order, 1-cycle ALU, 3-cycle load, 12-cycle divide.
+    pub fn alpha() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 7, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 12, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// HP PA-RISC (PA-8900-class). 1-cycle ALU, 3-cycle load, 20-cycle divide.
+    pub fn hppa() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
     /// Looks up the latency for a given instruction category.
     /// Returns (latency, throughput, functional_unit).
     /// Defaults to (1, 1, Alu) if not found.
