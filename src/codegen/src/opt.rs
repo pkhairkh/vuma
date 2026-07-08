@@ -1108,6 +1108,22 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
 ///
 /// `constant_fold → cse → dce → inline_small → licm → constant_fold → dce`
 pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
+    run_optimizations_with_target(program, &crate::target_desc::LatencyTable::default_ooo())
+}
+
+/// Run optimizations with a target-specific latency table.
+///
+/// The latency table is used by the e-graph cost function (Wave 10) to
+/// make per-ISA extraction decisions — e.g., `x*2 → x+x` is beneficial
+/// on ISAs where multiply is expensive (hppa: 4-cycle) but may be kept
+/// as `x*2` on ISAs where LEA makes it 1-cycle (x86).
+///
+/// Callers should pass `backend.target_info().latency_table()` so the
+/// e-graph picks the cheapest form for the actual target.
+pub fn run_optimizations_with_target(
+    mut program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+) -> IRProgram {
     // Build a function lookup table (cloned to avoid borrow conflicts when
     // mutating program.functions).
     let func_map: HashMap<String, IRFunction> = program
@@ -1118,12 +1134,15 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
     let func_refs: HashMap<String, &IRFunction> =
         func_map.iter().map(|(k, v)| (k.clone(), v)).collect();
 
+    // Build the per-ISA cost function for e-graph extraction (Wave 10).
+    let cost_fn = crate::egraph::target_cost_fn(latency_table);
+
     // ── Per-function optimization passes ──
     for i in 0..program.functions.len() {
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
         let f = constant_fold(f);
         let f = cse(f);
-        let f = equality_saturation(f);    // e-graph pass
+        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)
         let f = dead_store_eliminate(f);   // alias-analysis-driven DSE
         let f = mark_ive_proven_nonaliasing(f); // IVE→codegen loop
         let f = dead_code_eliminate(f);
@@ -1354,7 +1373,19 @@ fn compute_function_hash(func: &IRFunction) -> String {
 /// expression. Currently handles BinOp instructions with constant or
 /// register operands.
 pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
-    use crate::egraph::{EGraph, ENode, RewriteRule, default_cost, standard_rules};
+    equality_saturation_with_cost(func, &crate::egraph::default_cost)
+}
+
+/// Equality saturation with a caller-supplied cost function (Wave 10).
+///
+/// This variant allows the e-graph extraction to use a per-ISA cost
+/// function (from `target_cost_fn`) so that rewrites like `x*2 → x+x`
+/// are only applied when they're actually cheaper on the target.
+pub fn equality_saturation_with_cost(
+    mut func: IRFunction,
+    cost_fn: &dyn Fn(&crate::egraph::ENode) -> usize,
+) -> IRFunction {
+    use crate::egraph::{EGraph, ENode, RewriteRule, standard_rules};
 
     let rules = standard_rules();
 
@@ -1426,7 +1457,7 @@ pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
             if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
                 if let Some(dst_id) = dst.as_register() {
                     if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
-                        let best = eg.extract(class_id, &default_cost);
+                        let best = eg.extract(class_id, cost_fn);
                         match best {
                             ENode::Lit(val) => {
                                 // Fold to constant: lhs=val, rhs=0, op=Add.
