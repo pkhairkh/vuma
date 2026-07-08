@@ -441,6 +441,7 @@ fn default_output_path(input: &Path) -> PathBuf {
 fn compile_to_binary_direct(
     source: &str,
     isa: IsaArg,
+    opt_level: OptLevel,
 ) -> Result<Vec<u8>, String> {
     let backend_kind = BackendKind::from(isa);
 
@@ -466,9 +467,20 @@ fn compile_to_binary_direct(
 
     // Step 3: Lower codegen SCG → IR.
     let mut ir_builder = ScgToIr::new();
-    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+    let mut ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
         format!("IR conversion error: {}", e)
     })?;
+
+    // Step 3b: Run codegen-level IR optimization (Wave 10 proper).
+    // Use the actual backend's latency table for per-ISA optimization.
+    // Gated by opt level: O0 skips (matches pipeline.rs behavior).
+    if !matches!(opt_level, OptLevel::O0) {
+        let backend_for_table = create_backend(backend_kind).map_err(|e| {
+            format!("error: cannot create {} backend for latency table: {}", backend_kind.isa_name(), e)
+        })?;
+        let latency_table = backend_for_table.target_info().latency_table();
+        ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
+    }
 
     // Step 4: Create backend and allocate registers.
     let backend = create_backend(backend_kind).map_err(|e| {
@@ -653,7 +665,7 @@ fn cmd_build_direct(
         backend_kind.isa_name(),
     );
 
-    let binary = compile_to_binary_direct(source, isa)?;
+    let binary = compile_to_binary_direct(source, isa, OptLevel::from(cli.opt_level))?;;
 
     let out_path = output
         .as_ref()
@@ -722,7 +734,7 @@ fn cmd_run(
 
     // Build via the direct path so the binary targets `resolved_isa`
     // (NOT the canonical pipeline's hardcoded AArch64).
-    let binary = compile_to_binary_direct(&source, resolved_isa).map_err(|err| {
+    let binary = compile_to_binary_direct(&source, resolved_isa, OptLevel::from(_cli.opt_level)).map_err(|err| {
         global_logger().error(
             "run",
             &format!("compilation failed: {}", err),
