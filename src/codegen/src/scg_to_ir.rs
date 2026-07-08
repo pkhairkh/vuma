@@ -771,6 +771,18 @@ impl IRBuilder {
             ir_func.register_vreg(vreg);
         }
 
+        // Set current_return_type from the SCG function's results field.
+        // This is used by lower_access to infer load width for single-load
+        // functions — critical for big-endian backends where U8 store + U32
+        // load reads the wrong byte.  The old code parsed the return type
+        // from the function name (e.g. "fn_main(u64)"), but the direct
+        // bridge uses plain names like "mat_read" without the type suffix.
+        if func.results.len() == 1 {
+            self.current_return_type = Some(func.results[0].to_ir_type());
+        } else {
+            self.current_return_type = None;
+        }
+
         // Parse the return type from the function name (e.g.
         // "fn_main_entry(u64)" → U64) and store it in self.current_return_type.
         // This is used by lower_access to infer load width for single-load
@@ -782,7 +794,10 @@ impl IRBuilder {
         // and wasm32 stores return values in memory (not on the wasm stack).
         // Adding result_types would cause "type mismatch: expected i32 but
         // nothing on stack" errors.
-        self.current_return_type = None;
+        // Try to parse the return type from the function name (e.g.
+        // "fn_main_entry(u64)" → U64).  If the name has no type suffix
+        // (direct bridge uses plain names like "do_store"), keep the
+        // current_return_type we already set from func.results above.
         if let Some(open) = func.name.rfind('(') {
             if let Some(close) = func.name.rfind(')') {
                 if close > open {
@@ -2596,11 +2611,16 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 {
-                        // For read-only functions with exactly ONE load, no
-                        // stores, and no comparisons, the load result flows
-                        // directly to the return value. Use the function's
-                        // return type for the load width.
+                    } else if self.load_count == 1 && self.cmp_count == 0 {
+                        // For functions with exactly ONE load (regardless of
+                        // store_count), the load result likely flows to the
+                        // return value.  Use the function's return type for
+                        // the load width.  This is critical for big-endian
+                        // backends where a U8 load of a U32-stored value
+                        // reads the wrong byte position.
+                        //
+                        // We still skip this when there are MULTIPLE loads
+                        // (byte-level access: b0 = *p; b1 = *(p+1); ...).
                         //
                         // BUT: only do this when the pointer expression has an
                         // offset (base + N or base + idx * stride). Skip simple
@@ -2608,23 +2628,17 @@ impl IRBuilder {
                         // store at the call site may use U8 (byte store) while
                         // the return type is U32, causing a type mismatch on
                         // big-endian (ppc64).
-                        let ptr_has_offset = match ptr {
-                            ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } => {
-                                // Only count as "has offset" if the offset is
-                                // non-zero. *(p + 0) is equivalent to *p.
-                                match rhs.as_ref() {
-                                    ScgExpr::Int(n) => *n != 0,
-                                    ScgExpr::BinOp { .. } => true, // idx * stride
-                                    _ => true, // variable offset
-                                }
-                            }
-                            _ => false,
-                        };
-                        if ptr_has_offset {
-                            if let Some(ret_ty) = &self.current_return_type {
-                                if !matches!(ret_ty, IRType::Ptr) {
-                                    return ret_ty.clone();
-                                }
+                        // For single-load functions, use the return type
+                        // regardless of the ptr pattern.  The ptr may have
+                        // been flattened to a temp Var by the bridge, so we
+                        // can't check if it has an offset.  Using the return
+                        // type is correct for the common pattern:
+                        //   fn read_u32() -> u32 { return *(mat + offset); }
+                        // and is safe because byte-level access functions
+                        // have MULTIPLE loads (not single-load).
+                        if let Some(ret_ty) = &self.current_return_type {
+                            if !matches!(ret_ty, IRType::Ptr) {
+                                return ret_ty.clone();
                             }
                         }
                         IRType::U8
