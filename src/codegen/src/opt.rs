@@ -891,7 +891,17 @@ pub fn inline_small(
                 let mut new_block = IRBlock::new(&new_label);
 
                 for instr in &cblock.instructions {
-                    new_block.push(substitute_instr(instr, &vreg_map));
+                    let mut new_instr = substitute_instr(instr, &vreg_map);
+                    // Fix Phi incoming labels: substitute_instr doesn't know
+                    // about block renaming, so we fix up the labels here.
+                    // The inliner prefixes all block labels with `prefix`,
+                    // so Phi incoming labels must be prefixed too.
+                    if let IRInstr::Phi { incoming, .. } = &mut new_instr {
+                        for (val, label) in incoming.iter_mut() {
+                            *label = format!("{}_{}", prefix, label);
+                        }
+                    }
+                    new_block.push(new_instr);
                 }
 
                 // Remap the terminator.
@@ -1618,79 +1628,143 @@ pub fn equality_saturation_with_cost(
             }
         }
 
-        // First pass: add all BinOp nodes to the e-graph.
+        // First pass: add all binary-op nodes to the e-graph.
+        // Handles both IRInstr::BinOp (And/Or/Xor/Shl/Shr/Cmp) and the
+        // standalone IRInstr::Add/Sub/Mul/Div variants that scg_to_ir emits
+        // for arithmetic. Both map to the same ENode::BinOp representation.
         for instr in &block.instructions {
-            if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
-                let lhs_node = value_to_enode(lhs, &vreg_to_eclass);
-                let rhs_node = value_to_enode(rhs, &vreg_to_eclass);
-                let lhs_id = eg.add(lhs_node);
-                let rhs_id = eg.add(rhs_node);
-                // Record the concrete IRValue for each child e-class so we
-                // can rebuild after extraction.
-                eclass_to_value.entry(lhs_id).or_insert_with(|| lhs.clone());
-                eclass_to_value.entry(rhs_id).or_insert_with(|| rhs.clone());
-                let binop_node = ENode::BinOp(*op, lhs_id, rhs_id);
-                let binop_id = eg.add(binop_node);
-                if let Some(dst_id) = dst.as_register() {
-                    vreg_to_eclass.insert(dst_id, binop_id);
-                    eclass_to_value.insert(binop_id, dst.clone());
-                }
+            // Extract (op, dst, lhs, rhs) from either BinOp or Add/Sub/Mul/Div.
+            let (op, dst, lhs, rhs) = match instr {
+                IRInstr::BinOp { op, dst, lhs, rhs, .. } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::Add { dst, lhs, rhs, .. } => (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::Sub { dst, lhs, rhs, .. } => (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::Mul { dst, lhs, rhs, .. } => (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::Div { dst, lhs, rhs, .. } => (BinOpKind::UDiv, dst.clone(), lhs.clone(), rhs.clone()),
+                _ => continue,
+            };
+            let lhs_node = value_to_enode(&lhs, &vreg_to_eclass);
+            let rhs_node = value_to_enode(&rhs, &vreg_to_eclass);
+            let lhs_id = eg.add(lhs_node);
+            let rhs_id = eg.add(rhs_node);
+            // Record the concrete IRValue for each child e-class so we
+            // can rebuild after extraction.
+            eclass_to_value.entry(lhs_id).or_insert_with(|| lhs.clone());
+            eclass_to_value.entry(rhs_id).or_insert_with(|| rhs.clone());
+            let binop_node = ENode::BinOp(op, lhs_id, rhs_id);
+            let binop_id = eg.add(binop_node);
+            if let Some(dst_id) = dst.as_register() {
+                vreg_to_eclass.insert(dst_id, binop_id);
+                eclass_to_value.insert(binop_id, dst.clone());
             }
         }
 
         // Apply rewrite rules.
         eg.saturate(&rules, 10);
 
-        // Second pass: extract cheapest form for each BinOp and rewrite
-        // the instruction in place. We handle three extraction outcomes:
-        //   1. ENode::Lit(v)        — fold to a constant (lhs=v, rhs=0, op=Add)
-        //   2. ENode::VReg(class)   — replace with the value that defined class
-        //   3. ENode::BinOp(op,l,r) — rewrite op/lhs/rhs using extracted children
+        // Second pass: extract cheapest form for each binary op and rewrite
+        // the instruction in place. Handles BinOp AND Add/Sub/Mul/Div variants.
         for instr in &mut block.instructions {
-            if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
-                if let Some(dst_id) = dst.as_register() {
-                    if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
-                        let best = eg.extract(class_id, cost_fn);
-                        match best {
-                            ENode::Lit(val) => {
-                                // Fold to constant: lhs=val, rhs=0, op=Add.
-                                // constant_fold (which runs after) will turn
-                                // this into a Load Immediate.
-                                *lhs = IRValue::Immediate(val);
-                                *rhs = IRValue::Immediate(0);
-                                *op = BinOpKind::Add;
-                            }
-                            ENode::VReg(src_class) => {
-                                // The cheapest form of this expression is just
-                                // another value (e.g. x+0 → x extracts to VReg).
-                                // Replace the whole BinOp with a copy of that
-                                // value. Use Add with zero so constant_fold/DCE
-                                // can eliminate it as a copy.
-                                if let Some(src_val) = eclass_to_value.get(&src_class) {
-                                    *lhs = src_val.clone();
+            match instr {
+                IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    if let Some(dst_id) = dst.as_register() {
+                        if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                            let best = eg.extract(class_id, cost_fn);
+                            match best {
+                                ENode::Lit(val) => {
+                                    *lhs = IRValue::Immediate(val);
                                     *rhs = IRValue::Immediate(0);
                                     *op = BinOpKind::Add;
                                 }
-                            }
-                            ENode::BinOp(new_op, lhs_class, rhs_class) => {
-                                // The cheapest form is a different BinOp (e.g.
-                                // x*2 → x+x). Rewrite the instruction's op and
-                                // operands using the concrete values that
-                                // populated the child e-classes.
-                                let new_lhs = eclass_to_value.get(&lhs_class).cloned();
-                                let new_rhs = eclass_to_value.get(&rhs_class).cloned();
-                                if let (Some(new_lhs), Some(new_rhs)) = (new_lhs, new_rhs) {
-                                    *op = new_op;
-                                    *lhs = new_lhs;
-                                    *rhs = new_rhs;
+                                ENode::VReg(src_class) => {
+                                    if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                        *lhs = src_val.clone();
+                                        *rhs = IRValue::Immediate(0);
+                                        *op = BinOpKind::Add;
+                                    }
                                 }
-                                // If we couldn't recover concrete values for
-                                // the child e-classes, leave the instruction
-                                // unchanged rather than risk miscompilation.
+                                ENode::BinOp(new_op, lhs_class, rhs_class) => {
+                                    let new_lhs = eclass_to_value.get(&lhs_class).cloned();
+                                    let new_rhs = eclass_to_value.get(&rhs_class).cloned();
+                                    if let (Some(new_lhs), Some(new_rhs)) = (new_lhs, new_rhs) {
+                                        *op = new_op;
+                                        *lhs = new_lhs;
+                                        *rhs = new_rhs;
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                // For Add/Sub/Mul/Div: apply Lit and VReg extractions (operand
+                // substitution). BinOp extractions that change the op can't be
+                // applied (the variant IS the op). This still catches x-x->0,
+                // x^x->0, x+0->x, x*0->0, x*1->x etc. when the instruction variant
+                // matches the rule's op.
+                IRInstr::Add { dst, lhs, rhs, .. } => {
+                    if let Some(dst_id) = dst.as_register() {
+                        if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                            let best = eg.extract(class_id, cost_fn);
+                            if let ENode::Lit(val) = best {
+                                *lhs = IRValue::Immediate(val);
+                                *rhs = IRValue::Immediate(0);
+                            } else if let ENode::VReg(src_class) = best {
+                                if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                    *lhs = src_val.clone();
+                                    *rhs = IRValue::Immediate(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                IRInstr::Sub { dst, lhs, rhs, .. } => {
+                    if let Some(dst_id) = dst.as_register() {
+                        if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                            let best = eg.extract(class_id, cost_fn);
+                            if let ENode::Lit(val) = best {
+                                *lhs = IRValue::Immediate(val);
+                                *rhs = IRValue::Immediate(0);
+                            } else if let ENode::VReg(src_class) = best {
+                                if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                    *lhs = src_val.clone();
+                                    *rhs = IRValue::Immediate(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                IRInstr::Mul { dst, lhs, rhs, .. } => {
+                    if let Some(dst_id) = dst.as_register() {
+                        if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                            let best = eg.extract(class_id, cost_fn);
+                            if let ENode::Lit(val) = best {
+                                *lhs = IRValue::Immediate(val);
+                                *rhs = IRValue::Immediate(0);
+                            } else if let ENode::VReg(src_class) = best {
+                                if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                    *lhs = src_val.clone();
+                                    *rhs = IRValue::Immediate(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                IRInstr::Div { dst, lhs, rhs, .. } => {
+                    if let Some(dst_id) = dst.as_register() {
+                        if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
+                            let best = eg.extract(class_id, cost_fn);
+                            if let ENode::Lit(val) = best {
+                                *lhs = IRValue::Immediate(val);
+                                *rhs = IRValue::Immediate(0);
+                            } else if let ENode::VReg(src_class) = best {
+                                if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                    *lhs = src_val.clone();
+                                    *rhs = IRValue::Immediate(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

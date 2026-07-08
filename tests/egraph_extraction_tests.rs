@@ -269,3 +269,75 @@ fn egraph_folds_mul_zero_to_zero() {
         other => panic!("expected zero-folded Add, got {:?}", other),
     }
 }
+
+// ---- Add/Sub/Mul/Div variant tests (the audit found scg_to_ir emits these,
+//        not BinOp, so the e-graph never fired on production IR) ----
+
+#[test]
+fn egraph_folds_sub_self_variant_to_zero() {
+    // IRInstr::Sub (standalone variant, what scg_to_ir emits)
+    let func = make_func(
+        "sub_self_variant",
+        vec![IRInstr::Sub {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(0),
+            ty: None,
+        }],
+        IRValue::Register(1),
+    );
+    let result = equality_saturation(func);
+    match &result.blocks[0].instructions[0] {
+        IRInstr::Sub { lhs, rhs, .. } => {
+            assert!(matches!(lhs, IRValue::Immediate(0)), "lhs should be 0, got {:?}", lhs);
+            assert!(matches!(rhs, IRValue::Immediate(0)), "rhs should be 0, got {:?}", rhs);
+        }
+        other => panic!("expected Sub after saturation, got {:?}", other),
+    }
+}
+
+#[test]
+fn egraph_folds_mul_zero_variant_to_zero() {
+    // IRInstr::Mul with rhs = 0 → should fold to 0
+    let func = make_func(
+        "mul_zero_variant",
+        vec![IRInstr::Mul {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        }],
+        IRValue::Register(1),
+    );
+    let result = equality_saturation(func);
+    match &result.blocks[0].instructions[0] {
+        IRInstr::Mul { lhs, rhs, .. } => {
+            assert!(matches!(lhs, IRValue::Immediate(0)), "x*0 should fold lhs to 0, got {:?}", lhs);
+            assert!(matches!(rhs, IRValue::Immediate(0)), "x*0 should fold rhs to 0, got {:?}", rhs);
+        }
+        other => panic!("expected Mul after saturation, got {:?}", other),
+    }
+}
+
+#[test]
+fn egraph_folds_add_zero_variant_to_identity() {
+    // IRInstr::Add with rhs = 0 → should fold to identity (x + 0 = x)
+    let func = make_func(
+        "add_zero_variant",
+        vec![IRInstr::Add {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        }],
+        IRValue::Register(1),
+    );
+    let result = equality_saturation(func);
+    match &result.blocks[0].instructions[0] {
+        IRInstr::Add { lhs, rhs, .. } => {
+            assert!(matches!(lhs, IRValue::Register(0)), "x+0 should keep lhs as v0, got {:?}", lhs);
+            assert!(matches!(rhs, IRValue::Immediate(0)), "x+0 rhs should be 0, got {:?}", rhs);
+        }
+        other => panic!("expected Add after saturation, got {:?}", other),
+    }
+}
