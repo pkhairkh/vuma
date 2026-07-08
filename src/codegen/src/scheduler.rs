@@ -108,6 +108,54 @@ pub fn schedule_block(
         return (0..n).collect();
     }
 
+    // ── Phi-node handling (Wave 5 SSA fix) ─────────────────────────────
+    //
+    // SSA semantics require:
+    //   1. All Phi nodes appear at the TOP of their block, before any
+    //      non-Phi instruction.
+    //   2. Phi nodes execute "concurrently" at block entry — their incoming
+    //      values come from predecessor blocks, not from intra-block defs.
+    //      Therefore Phis have NO intra-block data dependencies.
+    //   3. The relative order of Phi nodes among themselves doesn't matter
+    //      semantically, but we preserve it to avoid surprising debug output.
+    //
+    // Implementation: we partition instructions into Phis (prefix) and
+    // non-Phis (rest). We schedule only the non-Phis, then prepend the
+    // Phis in their original order. This guarantees Phi nodes stay at the
+    // top and non-Phis are scheduled among themselves.
+
+    // Find the Phi prefix: all leading Phi instructions.
+    let phi_count = instructions.iter().take_while(|i| matches!(i, IRInstr::Phi { .. })).count();
+    if phi_count == n {
+        // All instructions are Phis — nothing to schedule.
+        return (0..n).collect();
+    }
+
+    // The non-Phi instructions are instructions[phi_count..].
+    // We schedule only these, then prepend the Phi indices.
+    let non_phi_instrs = &instructions[phi_count..];
+    let non_phi_order = schedule_block_inner(non_phi_instrs, latency_table);
+
+    // Build the full order: Phi indices (0..phi_count) in original order,
+    // then scheduled non-Phi indices (offset by phi_count).
+    let mut full_order: Vec<usize> = (0..phi_count).collect();
+    for &idx in &non_phi_order {
+        full_order.push(idx + phi_count);
+    }
+    full_order
+}
+
+/// Inner scheduler: schedules a slice of instructions that contains NO Phi
+/// nodes. This is the original list-scheduling algorithm.
+fn schedule_block_inner(
+    instructions: &[IRInstr],
+    latency_table: &LatencyTable,
+) -> Vec<usize> {
+    let n = instructions.len();
+    if n <= 2 {
+        return (0..n).collect();
+    }
+
     // Build the data-dependence graph.
     let mut nodes: Vec<DDGNode> = Vec::with_capacity(n);
     let mut last_def: HashMap<u32, usize> = HashMap::new();
@@ -175,7 +223,6 @@ pub fn schedule_block(
     }
 
     // Compute critical-path lengths (longest path from each node to a leaf).
-    // Process in reverse topological order (leaves first).
     let mut visited = vec![false; n];
     fn compute_critical_path(
         nodes: &mut Vec<DDGNode>,

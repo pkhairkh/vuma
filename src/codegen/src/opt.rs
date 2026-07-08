@@ -1150,12 +1150,12 @@ pub fn run_optimizations_with_target(
         let f = licm(f);
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
-        // NOTE: Instruction scheduler disabled — it reorders instructions
-        // within blocks which can break SSA semantics for phi nodes and
-        // loop-carried dependencies. Will be re-enabled after fixing the
-        // scheduler to respect phi-node ordering and loop back-edges.
-        // let lt = crate::target_desc::LatencyTable::default_ooo();
-        // crate::scheduler::schedule_function(&mut f.blocks, &lt);
+        // Wave 5: Instruction scheduler (re-enabled, now SSA-safe).
+        // The scheduler respects Phi nodes (keeps them at block top in
+        // original order) and schedules only non-Phi instructions. Uses
+        // the per-ISA latency table (Wave 10) for critical-path computation.
+        let mut f = f;
+        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         program.functions[i] = f;
     }
 
