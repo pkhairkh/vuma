@@ -257,3 +257,90 @@ fn wave13b_production_compile_with_unroller() {
     let output = result.unwrap();
     assert!(!output.binary.is_empty(), "should produce a binary");
 }
+
+// ── Wave 13c: General (multi-block) loop unrolling tests ──
+
+/// Build a 2-block loop (header + latch, no body blocks):
+///   entry → header → latch → (header | exit)
+///   header: i = phi(0, entry), (i_new, latch); jump latch
+///   latch:  acc = i * 2; i_new = i + 1; cond = i_new < N; branch cond, header, exit
+fn make_2block_loop() -> IRFunction {
+    use vuma_codegen::ir::{IRBlock, IRTerminator, IRType, CmpKind};
+    let mut func = IRFunction::new("two_block_loop");
+    func.params = vec![IRValue::Register(10)];
+    func.param_types = vec![IRType::I64];
+
+    let mut entry = IRBlock::new("entry");
+    entry.terminator = IRTerminator::Jump("header".to_string());
+
+    let mut header = IRBlock::new("header");
+    header.instructions = vec![IRInstr::Phi {
+        dst: IRValue::Register(0),
+        incoming: vec![
+            (IRValue::Immediate(0), "entry".to_string()),
+            (IRValue::Register(1), "latch".to_string()),
+        ],
+    }];
+    header.terminator = IRTerminator::Jump("latch".to_string());
+
+    let mut latch = IRBlock::new("latch");
+    latch.instructions = vec![
+        IRInstr::BinOp { op: BinOpKind::Mul, dst: IRValue::Register(2), lhs: IRValue::Register(0), rhs: IRValue::Immediate(2), ty: None },
+        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Register(0), rhs: IRValue::Immediate(1), ty: None },
+        IRInstr::Cmp { kind: CmpKind::SLt, dst: IRValue::Register(3), lhs: IRValue::Register(1), rhs: IRValue::Register(10), ty: None },
+    ];
+    latch.terminator = IRTerminator::Branch {
+        cond: IRValue::Register(3), true_block: "header".to_string(), false_block: "exit".to_string(),
+    };
+
+    let mut exit = IRBlock::new("exit");
+    exit.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+    func.blocks = vec![entry, header, latch, exit];
+    func
+}
+
+#[test]
+fn wave13c_general_loop_unroller_changes_iv_step() {
+    let func = make_2block_loop();
+    let result = unroll_loops(func);
+    let latch = result.blocks.iter().find(|b| b.label == "latch").unwrap();
+    let mut found = false;
+    for instr in &latch.instructions {
+        if let IRInstr::BinOp { op: BinOpKind::Add, dst, rhs, .. } = instr {
+            if *dst == IRValue::Register(1) {
+                assert_eq!(*rhs, IRValue::Immediate(2), "after unroll-by-2, increment should be +2");
+                found = true;
+            }
+        }
+    }
+    assert!(found, "increment must exist");
+}
+
+#[test]
+fn wave13c_general_loop_unroller_duplicates_body() {
+    let func = make_2block_loop();
+    let result = unroll_loops(func);
+    let latch = result.blocks.iter().find(|b| b.label == "latch").unwrap();
+    let muls: Vec<_> = latch.instructions.iter()
+        .filter(|i| matches!(i, IRInstr::BinOp { op: BinOpKind::Mul, .. }))
+        .collect();
+    assert_eq!(muls.len(), 2, "body should be duplicated, got {}", muls.len());
+}
+
+#[test]
+fn wave13c_general_loop_bails_on_calls() {
+    let mut func = make_2block_loop();
+    let latch_idx = func.blocks.iter().position(|b| b.label == "latch").unwrap();
+    func.blocks[latch_idx].instructions.insert(0, IRInstr::Call {
+        dst: None, func: "side_effect".to_string(), args: vec![], is_extern: false,
+    });
+    let result = unroll_loops(func);
+    let latch = result.blocks.iter().find(|b| b.label == "latch").unwrap();
+    let increment = latch.instructions.iter()
+        .filter_map(|i| {
+            if let IRInstr::BinOp { op: BinOpKind::Add, dst, rhs, .. } = i {
+                if *dst == IRValue::Register(1) { Some(rhs.clone()) } else { None }
+            } else { None }
+        }).last();
+    assert_eq!(increment, Some(IRValue::Immediate(1)), "loop with call should not be unrolled");
+}

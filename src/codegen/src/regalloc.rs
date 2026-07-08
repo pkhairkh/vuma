@@ -2847,10 +2847,13 @@ impl LoopDetector {
             // Process blocks in reverse postorder (skip entry).
             for b_idx in 1..n {
                 // Find first predecessor with a dominator.
+                // The immediate dominator of B is the LCA of B's predecessors
+                // in the dominator tree. We start with the first processed
+                // predecessor and intersect with the rest.
                 let mut new_idom: Option<usize> = None;
                 for &pred in &pred_map[b_idx] {
                     if doms[pred].is_some() {
-                        new_idom = Some(doms[pred].unwrap());
+                        new_idom = Some(pred);
                         break;
                     }
                 }
@@ -2858,7 +2861,7 @@ impl LoopDetector {
                     continue;
                 };
 
-                // Intersect with other predecessors.
+                // Intersect with other predecessors (LCA in dominator tree).
                 for &pred in &pred_map[b_idx] {
                     if doms[pred].is_none() {
                         continue;
