@@ -1177,8 +1177,12 @@ fn run_optimizations_inner(
         let f = constant_fold(f);
         let f = cse(f);
         let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)
-        let f = dead_store_eliminate(f);   // alias-analysis-driven DSE
-        let f = mark_ive_proven_nonaliasing(f); // IVE→codegen loop
+        // Wave 8: Compute IVE provenance FIRST, then pass it to DSE.
+        // The old code ran DSE before mark_ive, so the provenance was never
+        // consumed. Now mark_ive returns the provenance map explicitly
+        // (no thread-local), and DSE receives it as a parameter.
+        let (f, provenance) = mark_ive_proven_nonaliasing(f);
+        let f = dead_store_eliminate(f, &provenance);   // alias-analysis-driven DSE (uses IVE provenance)
         let f = dead_code_eliminate(f);
         let f = inline_small(f, &func_refs);
         let f = licm(f);
@@ -1726,7 +1730,7 @@ pub fn equality_saturation_with_cost(
 /// map (returned via the function's metadata). A future refactor will
 /// thread it directly into `AliasAnalysis` so DSE consumes it
 /// automatically.
-pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> IRFunction {
+pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> (IRFunction, HashMap<u32, u32>) {
     // Phase 1: Build the Alloc-region provenance map.
     //
     // For each vreg, record which Alloc region it derives from (if any).
@@ -1834,17 +1838,6 @@ pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> IRFunction {
         }
     }
 
-    // Store the provenance map in the function's metadata so downstream
-    // passes can query it. We use a thread-local to avoid changing the
-    // IRFunction struct (which would be a larger refactor).
-    //
-    // NOTE: This is a pragmatic choice. A cleaner design would add an
-    // `ive_provenance: Option<HashMap<u32, u32>>` field to IRFunction.
-    // That refactor is tracked as future work.
-    IVE_PROVENANCE.with(|cell| {
-        *cell.borrow_mut() = Some(provenance);
-    });
-
     // Log the closure (visible in -v verbose mode via the timing stage).
     if tagged_loads + tagged_stores > 0 {
         log::debug!(
@@ -1854,51 +1847,31 @@ pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> IRFunction {
         );
     }
 
-    func
+    (func, provenance)
 }
 
-// ---------------------------------------------------------------------------
-// IVE provenance side-channel (Wave 8)
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Side-channel for the Alloc-region provenance map produced by
-    /// `mark_ive_proven_nonaliasing`. Downstream passes query this via
-    /// `get_ive_provenance()` to determine that two pointers from
-    /// different Alloc regions are provably non-aliasing.
-    ///
-    /// This is a thread-local because the optimizer is single-threaded
-    /// per function (parallelism is across functions, not within).
-    static IVE_PROVENANCE: std::cell::RefCell<Option<HashMap<u32, u32>>>
-        = std::cell::RefCell::new(None);
-}
-
-/// Query whether a vreg has IVE-proven Alloc-region provenance.
-/// Returns `Some(region_id)` if the vreg derives from a unique Alloc,
-/// or `None` if its provenance is unknown (may alias with anything).
-pub fn get_ive_provenance(vreg: u32) -> Option<u32> {
-    IVE_PROVENANCE.with(|cell| {
-        cell.borrow().as_ref().and_then(|p| p.get(&vreg).copied())
-    })
-}
-
-/// Query whether two vregs are IVE-proven non-aliasing.
+/// Check whether two vregs are IVE-proven non-aliasing, given a provenance map.
 ///
 /// Returns `true` if BOTH vregs have provenance AND they derive from
 /// DIFFERENT Alloc regions. This is the strong non-aliasing proof that
-/// TBAA cannot provide (TBAA only proves non-aliasing when types differ;
-/// IVE proves it across same-type pointers from different allocations).
-pub fn ive_proven_non_aliasing(a: u32, b: u32) -> bool {
-    match (get_ive_provenance(a), get_ive_provenance(b)) {
+/// TBAA cannot provide.
+pub fn ive_proven_non_aliasing_with(provenance: &HashMap<u32, u32>, a: u32, b: u32) -> bool {
+    match (provenance.get(&a), provenance.get(&b)) {
         (Some(ra), Some(rb)) => ra != rb,
         _ => false,
     }
 }
 
-/// Query whether two IRValues are IVE-proven non-aliasing.
-pub fn ive_values_proven_non_aliasing(a: &IRValue, b: &IRValue) -> bool {
+/// Check whether two IRValues are IVE-proven non-aliasing, given a provenance map.
+pub fn ive_values_proven_non_aliasing_with(
+    provenance: &HashMap<u32, u32>,
+    a: &IRValue,
+    b: &IRValue,
+) -> bool {
     match (a, b) {
-        (IRValue::Register(va), IRValue::Register(vb)) => ive_proven_non_aliasing(*va, *vb),
+        (IRValue::Register(va), IRValue::Register(vb)) => {
+            ive_proven_non_aliasing_with(provenance, *va, *vb)
+        }
         _ => false,
     }
 }
@@ -1910,7 +1883,13 @@ pub fn ive_values_proven_non_aliasing(a: &IRValue, b: &IRValue) -> bool {
 /// reads them. The IVE enhancement (Wave 8) allows DSE to prove
 /// non-aliasing across same-type pointers from different allocations —
 /// a case TBAA cannot handle.
-pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
+///
+/// The provenance map is passed explicitly (no thread-local) from
+/// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
+pub fn dead_store_eliminate(
+    mut func: IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> IRFunction {
     use crate::alias_analysis::AliasAnalysis;
 
     let aa = AliasAnalysis::analyze(&func);
@@ -1920,8 +1899,13 @@ pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
     /// strictly stronger than TBAA (it reasons about allocation identity,
     /// not just type), so an IVE "proven non-aliasing" verdict overrides
     /// a TBAA "may alias" verdict.
-    fn may_alias_combined(aa: &AliasAnalysis, a: &IRValue, b: &IRValue) -> bool {
-        if ive_values_proven_non_aliasing(a, b) {
+    fn may_alias_combined(
+        aa: &AliasAnalysis,
+        provenance: &HashMap<u32, u32>,
+        a: &IRValue,
+        b: &IRValue,
+    ) -> bool {
+        if ive_values_proven_non_aliasing_with(provenance, a, b) {
             // IVE proved they're from different Alloc regions → non-aliasing.
             return false;
         }
@@ -1952,7 +1936,7 @@ pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
                     IRInstr::Load { addr: load_addr, .. } => {
                         // If a load may alias with our store, the store is not dead.
                         // (Wave 8: IVE proof can override TBAA here.)
-                        if may_alias_combined(&aa, store_addr_i, load_addr) {
+                        if may_alias_combined(&aa, provenance, store_addr_i, load_addr) {
                             break;
                         }
                     }
@@ -1971,7 +1955,7 @@ pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
                         // overwrite the same bytes). If they're provably
                         // non-aliasing, the later store doesn't affect ours,
                         // so we keep scanning.
-                        if may_alias_combined(&aa, store_addr_i, store_addr_j) {
+                        if may_alias_combined(&aa, provenance, store_addr_i, store_addr_j) {
                             // Aliasing: can't prove safety. Stop scanning.
                             break;
                         }
