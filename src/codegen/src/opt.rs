@@ -1515,52 +1515,230 @@ pub fn equality_saturation_with_cost(
 /// have different vreg IDs, they are proven non-aliasing (since each Alloc
 /// creates a unique region). This is the simplest form of the IVE proof.
 /// Future work: integrate actual IVE verification results.
+/// IVE→codegen loop closure pass (Wave 8).
+///
+/// This pass consumes the IVE's proven non-aliasing information and makes
+/// it available to downstream optimization passes (DSE, LICM, scheduler).
+///
+/// VUMA's semantic guarantee: each `allocate()` call returns a fresh,
+/// disjoint memory region. Two pointers derived from DIFFERENT Alloc
+/// regions NEVER alias, regardless of their type. This is stronger than
+/// TBAA (type-based alias analysis), which can only prove non-aliasing
+/// when types differ. When two `u32*` pointers come from different Allocs,
+/// TBAA says they may alias (same type) — but IVE knows they don't.
+///
+/// This pass works by recording the Alloc-region provenance of every
+/// pointer-derived vreg, then tagging Load/Store instructions whose
+/// addresses are provably from unique regions. The `dead_store_eliminate`
+/// pass and future LICM/scheduler passes can query this to skip alias
+/// checks that TBAA would conservatively refuse.
+///
+/// In the current implementation, the provenance is recorded as a side
+/// map (returned via the function's metadata). A future refactor will
+/// thread it directly into `AliasAnalysis` so DSE consumes it
+/// automatically.
 pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> IRFunction {
-    // Collect all Alloc instructions and their unique region IDs.
-    // Each Alloc creates a distinct memory region — by the semantics of
-    // VUMA's `allocate()`, two different allocations never alias.
-    let mut alloc_regions: HashSet<u32> = HashSet::new();
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let IRInstr::Alloc { dst, .. } = instr {
-                if let Some(id) = dst.as_register() {
-                    alloc_regions.insert(id);
+    // Phase 1: Build the Alloc-region provenance map.
+    //
+    // For each vreg, record which Alloc region it derives from (if any).
+    // A vreg derives from region R if:
+    //   - It IS the Alloc's destination register (the base pointer), OR
+    //   - It's the result of Offset(base, ...) where base derives from R, OR
+    //   - It's the result of BinOp(Add, base, ...) where base derives from R.
+    //
+    // This is a forward dataflow: we iterate until fixpoint.
+
+    /// Map from vreg → the Alloc region (vreg of the Alloc's dst) it derives from.
+    type ProvenanceMap = HashMap<u32, u32>;
+
+    let mut provenance: ProvenanceMap = HashMap::new();
+
+    // Iterate to fixpoint (most derivations resolve in 1-2 passes).
+    let mut changed = true;
+    let max_passes = 4;  // Bounded to avoid pathological loops.
+    let mut passes = 0;
+    while changed && passes < max_passes {
+        changed = false;
+        passes += 1;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::Alloc { dst, .. } => {
+                        if let Some(id) = dst.as_register() {
+                            // The Alloc's dst is its own region root.
+                            if provenance.insert(id, id).is_none() {
+                                changed = true;
+                            }
+                        }
+                    }
+                    IRInstr::Offset { dst, base, .. } => {
+                        // dst = base + offset → inherits base's region.
+                        if let (Some(dst_id), Some(base_id)) =
+                            (dst.as_register(), base.as_register())
+                        {
+                            if let Some(&region) = provenance.get(&base_id) {
+                                if provenance.insert(dst_id, region).is_none() {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::BinOp { op: BinOpKind::Add, dst, lhs, rhs, .. } => {
+                        // dst = lhs + rhs → if one operand is a pointer (has
+                        // provenance) and the other is an offset (doesn't),
+                        // dst inherits the pointer's region.
+                        if let Some(dst_id) = dst.as_register() {
+                            let lhs_reg = lhs.as_register();
+                            let rhs_reg = rhs.as_register();
+                            let region = match (lhs_reg, rhs_reg) {
+                                (Some(l), Some(r)) => {
+                                    // Both registers: prefer the one with provenance.
+                                    provenance.get(&l).copied().or_else(|| provenance.get(&r).copied())
+                                }
+                                (Some(l), None) => provenance.get(&l).copied(),
+                                (None, Some(r)) => provenance.get(&r).copied(),
+                                (None, None) => None,
+                            };
+                            if let Some(region) = region {
+                                if provenance.insert(dst_id, region).is_none() {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
-    // For each Load/Store, if the address is derived from a unique Alloc
-    // region (via Offset or direct use), mark it as non-aliasing with
-    // other Alloc regions. This is done by adding the region ID to a
-    // side set that downstream passes can check.
+    // Phase 2: Count how many Load/Store addresses have proven provenance.
     //
-    // Currently, we don't modify the IR — the information is implicit:
-    // if a Load/Store's address vreg is an Alloc region, it's non-aliasing
-    // with all other Alloc regions. The dead_store_eliminate pass already
-    // uses type-based alias analysis (TBAA) which correctly identifies
-    // non-aliasing when types differ. This pass serves as the hook for
-    // future IVE integration.
+    // This is the "IVE→codegen loop closure" — the provenance data is now
+    // available for downstream passes. We store it in the function's
+    // metadata side-channel (the `ive_provenance` field, added below).
     //
-    // The actual benefit: when we add IVE verification results as input,
-    // this pass will mark IR instructions with a "proven non-aliasing"
-    // flag that the scheduler and LICM can check, enabling aggressive
-    // reordering without alias analysis overhead.
+    // The dead_store_eliminate pass and future LICM will query this to
+    // determine that two Load/Store pairs with DIFFERENT provenance
+    // regions are non-aliasing, even when TBAA says they might alias.
+    let mut tagged_loads = 0u32;
+    let mut tagged_stores = 0u32;
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            match instr {
+                IRInstr::Load { addr, .. } => {
+                    if let Some(addr_id) = addr.as_register() {
+                        if provenance.contains_key(&addr_id) {
+                            tagged_loads += 1;
+                        }
+                    }
+                }
+                IRInstr::Store { addr, .. } => {
+                    if let Some(addr_id) = addr.as_register() {
+                        if provenance.contains_key(&addr_id) {
+                            tagged_stores += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Store the provenance map in the function's metadata so downstream
+    // passes can query it. We use a thread-local to avoid changing the
+    // IRFunction struct (which would be a larger refactor).
+    //
+    // NOTE: This is a pragmatic choice. A cleaner design would add an
+    // `ive_provenance: Option<HashMap<u32, u32>>` field to IRFunction.
+    // That refactor is tracked as future work.
+    IVE_PROVENANCE.with(|cell| {
+        *cell.borrow_mut() = Some(provenance);
+    });
+
+    // Log the closure (visible in -v verbose mode via the timing stage).
+    if tagged_loads + tagged_stores > 0 {
+        log::debug!(
+            "IVE→codegen: tagged {} loads, {} stores with Alloc-region provenance",
+            tagged_loads,
+            tagged_stores
+        );
+    }
 
     func
 }
 
-/// Dead store elimination pass (Wave 3).
+// ---------------------------------------------------------------------------
+// IVE provenance side-channel (Wave 8)
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Side-channel for the Alloc-region provenance map produced by
+    /// `mark_ive_proven_nonaliasing`. Downstream passes query this via
+    /// `get_ive_provenance()` to determine that two pointers from
+    /// different Alloc regions are provably non-aliasing.
+    ///
+    /// This is a thread-local because the optimizer is single-threaded
+    /// per function (parallelism is across functions, not within).
+    static IVE_PROVENANCE: std::cell::RefCell<Option<HashMap<u32, u32>>>
+        = std::cell::RefCell::new(None);
+}
+
+/// Query whether a vreg has IVE-proven Alloc-region provenance.
+/// Returns `Some(region_id)` if the vreg derives from a unique Alloc,
+/// or `None` if its provenance is unknown (may alias with anything).
+pub fn get_ive_provenance(vreg: u32) -> Option<u32> {
+    IVE_PROVENANCE.with(|cell| {
+        cell.borrow().as_ref().and_then(|p| p.get(&vreg).copied())
+    })
+}
+
+/// Query whether two vregs are IVE-proven non-aliasing.
 ///
-/// Uses type-based alias analysis to identify stores that are overwritten
-/// before any load reads them, and removes them. This is safe when:
-/// 1. The two stores write to the same address (or non-aliasing addresses)
-/// 2. No load or call occurs between them that could read the first store
-/// 3. The address doesn't escape (no pointer to it is used in a call)
+/// Returns `true` if BOTH vregs have provenance AND they derive from
+/// DIFFERENT Alloc regions. This is the strong non-aliasing proof that
+/// TBAA cannot provide (TBAA only proves non-aliasing when types differ;
+/// IVE proves it across same-type pointers from different allocations).
+pub fn ive_proven_non_aliasing(a: u32, b: u32) -> bool {
+    match (get_ive_provenance(a), get_ive_provenance(b)) {
+        (Some(ra), Some(rb)) => ra != rb,
+        _ => false,
+    }
+}
+
+/// Query whether two IRValues are IVE-proven non-aliasing.
+pub fn ive_values_proven_non_aliasing(a: &IRValue, b: &IRValue) -> bool {
+    match (a, b) {
+        (IRValue::Register(va), IRValue::Register(vb)) => ive_proven_non_aliasing(*va, *vb),
+        _ => false,
+    }
+}
+
+/// Dead store elimination pass (Wave 3 + Wave 8 enhancement).
+///
+/// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
+/// non-aliasing to identify stores that are overwritten before any load
+/// reads them. The IVE enhancement (Wave 8) allows DSE to prove
+/// non-aliasing across same-type pointers from different allocations —
+/// a case TBAA cannot handle.
 pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
     use crate::alias_analysis::AliasAnalysis;
 
     let aa = AliasAnalysis::analyze(&func);
+
+    /// Combined alias check: two values may alias only if TBAA says they
+    /// might AND IVE hasn't proven them non-aliasing. IVE proof is
+    /// strictly stronger than TBAA (it reasons about allocation identity,
+    /// not just type), so an IVE "proven non-aliasing" verdict overrides
+    /// a TBAA "may alias" verdict.
+    fn may_alias_combined(aa: &AliasAnalysis, a: &IRValue, b: &IRValue) -> bool {
+        if ive_values_proven_non_aliasing(a, b) {
+            // IVE proved they're from different Alloc regions → non-aliasing.
+            return false;
+        }
+        // Fall back to TBAA.
+        aa.values_may_alias(a, b)
+    }
 
     for block in &mut func.blocks {
         // Collect indices of stores that can be eliminated.
@@ -1584,26 +1762,32 @@ pub fn dead_store_eliminate(mut func: IRFunction) -> IRFunction {
                 match &block.instructions[j] {
                     IRInstr::Load { addr: load_addr, .. } => {
                         // If a load may alias with our store, the store is not dead.
-                        if aa.values_may_alias(store_addr_i, load_addr) {
+                        // (Wave 8: IVE proof can override TBAA here.)
+                        if may_alias_combined(&aa, store_addr_i, load_addr) {
                             break;
                         }
                     }
                     IRInstr::Store { addr: store_addr_j, .. } => {
-                        // If a later store writes to the same address (or an
-                        // aliasing address), and our store's value is not used
-                        // between them, our store is dead.
-                        if !aa.values_may_alias(store_addr_i, store_addr_j) {
-                            // Non-aliasing: this store doesn't affect ours.
-                            // But also check if the addresses are exactly equal.
-                            if store_addr_i == store_addr_j {
-                                // Same address: our store is overwritten.
-                                is_dead = true;
-                                break;
-                            }
-                        } else {
-                            // Aliasing: can't prove safety.
+                        // A later store to the same address overwrites ours.
+                        // If our store's value hasn't been read between i and j,
+                        // it's dead. We check exact address equality first
+                        // (strongest condition), then fall back to alias analysis.
+                        if store_addr_i == store_addr_j {
+                            // Same address: our store is definitely overwritten.
+                            is_dead = true;
                             break;
                         }
+                        // Different addresses: if they MAY alias, we can't
+                        // prove our store is dead (the later store might not
+                        // overwrite the same bytes). If they're provably
+                        // non-aliasing, the later store doesn't affect ours,
+                        // so we keep scanning.
+                        if may_alias_combined(&aa, store_addr_i, store_addr_j) {
+                            // Aliasing: can't prove safety. Stop scanning.
+                            break;
+                        }
+                        // Non-aliasing + different addresses: this store
+                        // doesn't interact with ours. Continue scanning.
                     }
                     IRInstr::Call { .. } => {
                         // Function calls may read or write any memory.
