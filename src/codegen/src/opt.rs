@@ -1130,8 +1130,16 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
             None => continue,
         };
 
-        // Collect vregs defined outside the loop.
+        // Collect vregs defined outside the loop AND vregs modified inside
+        // the loop. An instruction is loop-invariant only if ALL its used
+        // registers are defined outside the loop AND NOT modified inside it.
+        // The old code only checked "defined outside" — but a register can
+        // be defined both outside (initial value) AND inside (loop update),
+        // like `c = c + 1` where c is initialized before the loop and
+        // updated inside it. The old code would hoist `c = c + 1` out of
+        // the loop, which is wrong because c changes each iteration.
         let mut outside_defs: HashSet<u32> = HashSet::new();
+        let mut loop_modified: HashSet<u32> = HashSet::new();
         for param in &func.params {
             if let IRValue::Register(id) = param {
                 outside_defs.insert(*id);
@@ -1140,11 +1148,18 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
         for block in &func.blocks {
             let block_label = &block.label;
             if loop_body_labels.contains(block_label) {
-                continue;
-            }
-            for instr in &block.instructions {
-                for id in instr.defined_regs() {
-                    outside_defs.insert(id);
+                // This block is inside the loop — collect all vregs it defines.
+                for instr in &block.instructions {
+                    for id in instr.defined_regs() {
+                        loop_modified.insert(id);
+                    }
+                }
+            } else {
+                // This block is outside the loop — collect all vregs it defines.
+                for instr in &block.instructions {
+                    for id in instr.defined_regs() {
+                        outside_defs.insert(id);
+                    }
                 }
             }
         }
@@ -1164,10 +1179,15 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
             if has_side_effects(instr) || !is_safe_to_speculate(instr) {
                 continue;
             }
-            // Check that all used registers are defined outside the loop.
+            // Check that all used registers are defined outside the loop
+            // AND NOT modified inside the loop. A register that's defined
+            // outside but also modified inside (like a loop counter) is
+            // NOT loop-invariant.
             let used = instr.used_regs();
-            let all_outside = used.iter().all(|id| outside_defs.contains(id));
-            if all_outside {
+            let all_invariant = used.iter().all(|id| {
+                outside_defs.contains(id) && !loop_modified.contains(id)
+            });
+            if all_invariant {
                 invariant_instrs.push(instr.clone());
                 remove_indices.push(i);
                 // This instruction's result is now available "outside" the
@@ -1339,7 +1359,7 @@ fn run_optimizations_inner(
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
         // let f = inline_small(f, let f = inline_small(f, &func_refs);func_refs);
-        // let f = licm(f);  // breaks control_flow/nested_loops
+        let f = licm(f);
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
         // ── DISABLED: scheduler causes pass-interaction miscompilation ──
