@@ -2611,7 +2611,7 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && self.cmp_count == 0 {
+                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 {
                         // For functions with exactly ONE load (regardless of
                         // store_count), the load result likely flows to the
                         // return value.  Use the function's return type for
