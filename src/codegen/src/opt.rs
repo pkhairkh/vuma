@@ -926,10 +926,14 @@ pub fn inline_with_threshold(
                     continue;
                 }
                 if let Some(callee) = program_funcs.get(callee_name) {
-                    // Conservative: match old safe behavior exactly.
-                    // The cost model infrastructure exists for future use
-                    // once the inliner's multi-block soundness is fixed.
-                    if callee.instruction_count() <= 5 {
+                    // Only inline single-block callees (no branches/loops).
+                    // Multi-block inlining requires block-graph rewiring that
+                    // has soundness issues when other passes (CSE, e-graph,
+                    // DSE) have modified the caller's IR. Single-block
+                    // inlining is provably correct: the callee's instructions
+                    // are inserted inline, the Return is replaced with a Jump
+                    // to the continuation, and no Phi nodes are involved.
+                    if callee.instruction_count() <= 5 && callee.blocks.len() == 1 {
                         call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
                         break;
                     }
@@ -1320,7 +1324,7 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // let f = inline_small(f, &func_refs);  // multi-block rewiring still unsound
+        // let f = inline_small(f, &func_refs);  // fundamentally unsound, needs rewrite
         // let f = licm(f);  // still breaks control_flow/nested_loops
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
