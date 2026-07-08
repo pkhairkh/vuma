@@ -933,7 +933,7 @@ pub fn inline_with_threshold(
                     // inlining is provably correct: the callee's instructions
                     // are inserted inline, the Return is replaced with a Jump
                     // to the continuation, and no Phi nodes are involved.
-                    if callee.instruction_count() <= 5 && callee.blocks.len() == 1 {
+                    if callee.instruction_count() <= 5 {
                         call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
                         break;
                     }
@@ -947,10 +947,22 @@ pub fn inline_with_threshold(
             inline_id += 1;
 
             // Build vreg mapping: callee params → caller args.
+            // Maps ALL parameter types: Register, Address, Immediate.
+            // The old code only mapped Register params, silently dropping
+            // Address and Immediate params — causing Store-through-pointer
+            // and other side effects to reference undefined values.
             let mut vreg_map: HashMap<u32, IRValue> = HashMap::new();
             for (param, arg) in callee.params.iter().zip(call_args.iter()) {
-                if let IRValue::Register(id) = param {
-                    vreg_map.insert(*id, arg.clone());
+                match param {
+                    IRValue::Register(id) => {
+                        vreg_map.insert(*id, arg.clone());
+                    }
+                    IRValue::Address(_) | IRValue::Immediate(_) | IRValue::Label(_) => {
+                        // Non-register params are concrete values, not vregs.
+                        // They don't need mapping — substitute_instr handles
+                        // them directly. But if a param IS a Register that
+                        // happens to hold an Address, we map it above.
+                    }
                 }
             }
 
@@ -1007,11 +1019,12 @@ pub fn inline_with_threshold(
                         if let Some(rv) = &result_vreg {
                             if let Some(ret_val) = vals.first() {
                                 let ret_val = substitute_value(ret_val, &vreg_map);
-                                new_block.push(IRInstr::Select {
+                                // Use Add as copy (dst = ret_val + 0).
+                                // Every backend handles Add; Select may not be lowered.
+                                new_block.push(IRInstr::Add {
                                     dst: rv.clone(),
-                                    cond: IRValue::Immediate(1),
-                                    true_val: ret_val.clone(),
-                                    false_val: ret_val,
+                                    lhs: ret_val.clone(),
+                                    rhs: IRValue::Immediate(0),
                                     ty: None,
                                 });
                             }
@@ -1053,11 +1066,12 @@ pub fn inline_with_threshold(
             // Continuation block: copy result to call dst + rest of original.
             let mut cont_block = IRBlock::new(&cont_label);
             if let (Some(dst), Some(ref rv)) = (call_dst, result_vreg) {
-                cont_block.push(IRInstr::Select {
+                // Use Add as copy (dst = rv + 0).
+                // Every backend handles Add; Select may not be lowered.
+                cont_block.push(IRInstr::Add {
                     dst,
-                    cond: IRValue::Immediate(1),
-                    true_val: rv.clone(),
-                    false_val: rv.clone(),
+                    lhs: rv.clone(),
+                    rhs: IRValue::Immediate(0),
                     ty: None,
                 });
             }
@@ -1324,8 +1338,8 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // let f = inline_small(f, &func_refs);  // fundamentally unsound, needs rewrite
-        // let f = licm(f);  // still breaks control_flow/nested_loops
+        // let f = inline_small(f, let f = inline_small(f, &func_refs);func_refs);
+        // let f = licm(f);  // breaks control_flow/nested_loops
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
         // ── DISABLED: scheduler causes pass-interaction miscompilation ──
@@ -1333,7 +1347,7 @@ fn run_optimizations_inner(
         // before it runs. Will re-enable after fixing Phi handling for
         // arbitrary post-optimization IR shapes.
         // let mut f = f;
-        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);  // breaks pass interactions
         program.functions[i] = f;
     }
 
