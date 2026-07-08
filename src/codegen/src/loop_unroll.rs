@@ -370,7 +370,7 @@ mod tests {
             rhs: IRValue::Immediate(1),
             ty: None,
         }];
-        block.terminator = IRTerminator::CondBranch {
+        block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(2),
             true_block: "loop".to_string(),
             false_block: "exit".to_string(),

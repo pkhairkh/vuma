@@ -148,7 +148,7 @@ pub fn check_proof_log(log: &ProofLog) -> Result<ProofSummary, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egraph::BinOpKind;
+    use crate::ir::BinOpKind;
 
     #[test]
     fn test_proof_log() {
@@ -156,7 +156,7 @@ mod tests {
         let rule = crate::egraph::RewriteRule {
             name: "xor_self",
             verified: true,
-            apply: |_| None,
+            apply: |_, _| None,
         };
         log.record(
             &rule,

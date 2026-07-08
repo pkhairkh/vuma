@@ -3228,6 +3228,8 @@ impl Backend for LoongArch64Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram};
+    use crate::ir::{IRValue, IRInstr, IRFunction, IRType, BinOpKind, CmpKind, CastKind, UnaryOpKind};
 
     // ── Gpr tests ──────────────────────────────────────────────────────
 
