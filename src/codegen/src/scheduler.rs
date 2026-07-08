@@ -108,6 +108,29 @@ pub fn schedule_block(
         return (0..n).collect();
     }
 
+    // If the block contains ANY memory operations (Load, Store, Alloc, Free,
+    // AtomicLoad, AtomicStore), skip scheduling entirely and return the
+    // identity permutation. This is extremely conservative but provably
+    // sound — the scheduler's memory dependency tracking is incomplete
+    // (it doesn't model address aliasing, and it misses some cross-block
+    // memory effects after inlining/CSE/LICM). Rather than risk
+    // miscompilation, we preserve the original instruction order for any
+    // block that touches memory.
+    //
+    // The scheduler still runs on pure-computation blocks (no memory ops),
+    // where it can safely reorder independent ALU operations.
+    let has_memory_ops = instructions.iter().any(|i| {
+        matches!(i,
+            IRInstr::Load { .. } | IRInstr::Store { .. }
+            | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
+            | IRInstr::Alloc { .. } | IRInstr::Free { .. }
+            | IRInstr::Call { .. }
+        )
+    });
+    if has_memory_ops {
+        return (0..n).collect();
+    }
+
     // ── Phi-node handling (Wave 5 SSA fix) ─────────────────────────────
     //
     // SSA semantics require:
@@ -174,14 +197,22 @@ fn schedule_block_inner(
             }
         }
 
-        // Memory dependencies: stores depend on previous stores/loads to
-        // the same address. Conservatively, all memory ops depend on
-        // previous memory ops (no alias analysis here — that's Wave 3's job).
+        // Memory dependencies: all memory ops (Load, Store, AtomicLoad,
+        // AtomicStore, Alloc, Free) depend on all previous memory ops.
+        // This is conservative but SOUND — it prevents the scheduler from
+        // reordering a Free before a Load/Store (use-after-free) or
+        // reordering an Alloc after a Load that depends on it.
+        // Free is also a barrier: it depends on ALL previous instructions
+        // (not just memory ops), because freeing memory invalidates
+        // everything that references it.
         if matches!(instr, IRInstr::Store { .. } | IRInstr::Load { .. }
-                    | IRInstr::AtomicStore { .. } | IRInstr::AtomicLoad { .. }) {
+                    | IRInstr::AtomicStore { .. } | IRInstr::AtomicLoad { .. }
+                    | IRInstr::Alloc { .. } | IRInstr::Free { .. }) {
             for j in 0..i {
                 if matches!(instructions[j], IRInstr::Store { .. } | IRInstr::Load { .. }
-                            | IRInstr::AtomicStore { .. } | IRInstr::AtomicLoad { .. }) {
+                            | IRInstr::AtomicStore { .. } | IRInstr::AtomicLoad { .. }
+                            | IRInstr::Alloc { .. } | IRInstr::Free { .. }
+                            | IRInstr::Call { .. }) {
                     if !preds.contains(&j) {
                         preds.push(j);
                     }
@@ -189,8 +220,11 @@ fn schedule_block_inner(
             }
         }
 
-        // Calls depend on all previous instructions (conservative).
-        if matches!(instr, IRInstr::Call { .. }) {
+        // Free depends on ALL previous instructions (it's a barrier —
+        // nothing after it can use the freed memory, and everything
+        // before it must have completed).
+        // Calls also depend on all previous instructions (conservative).
+        if matches!(instr, IRInstr::Free { .. } | IRInstr::Call { .. }) {
             for j in 0..i {
                 if !preds.contains(&j) {
                     preds.push(j);
@@ -299,6 +333,24 @@ pub fn schedule_function(
 ) {
     for block in blocks.iter_mut() {
         if block.instructions.len() <= 2 {
+            continue;
+        }
+
+        // Skip scheduling for blocks that contain ANY memory operations.
+        // The scheduler's memory dependency tracking is not sound when
+        // combined with CSE/inliner/LICM — it misses some aliasing cases
+        // that cause miscompilation. Rather than risk incorrect reordering,
+        // preserve the original instruction order for memory-touching blocks.
+        // The scheduler still runs on pure-computation blocks.
+        let has_memory_ops = block.instructions.iter().any(|i| {
+            matches!(i,
+                IRInstr::Load { .. } | IRInstr::Store { .. }
+                | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
+                | IRInstr::Alloc { .. } | IRInstr::Free { .. }
+                | IRInstr::Call { .. }
+            )
+        });
+        if has_memory_ops {
             continue;
         }
 
