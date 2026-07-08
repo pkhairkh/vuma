@@ -44,6 +44,9 @@ pub mod memory_safety;
 pub mod mips64;
 pub mod mips64be;
 pub mod opt;
+/// Bitvector verification framework (Wave 7).
+/// Verifies e-graph rewrite rules by exhaustive enumeration.
+pub mod bv_verify;
 pub mod egraph;
 pub mod closures;
 pub mod monomorphize;
