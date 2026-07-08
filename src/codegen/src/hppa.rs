@@ -1086,27 +1086,47 @@ impl Backend for HppaBackend {
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         code.extend(ss_st(S0, d_off));
                     }
-                    IRInstr::Load { dst, addr, offset, ty: _ } => {
+                    IRInstr::Load { dst, addr, offset, ty } => {
                         code.extend(ss_load_value(addr, &vreg_stack_slots, S0));
                         if *offset != 0 {
                             code.extend(ss_load_imm(S1, *offset as i64));
                             code.extend_from_slice(&encode_add(S0, S1, S0));
                         }
-                        // LDW 0(S0), S1
-                        code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                        // Use typed load based on the IR type.
+                        match ty {
+                            crate::ir::IRType::U8 | crate::ir::IRType::I8 => {
+                                code.extend_from_slice(&encode_ldb(S0, 0, S1));
+                            }
+                            crate::ir::IRType::U16 | crate::ir::IRType::I16 => {
+                                code.extend_from_slice(&encode_ldh(S0, 0, S1));
+                            }
+                            _ => {
+                                code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                            }
+                        }
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         code.extend(ss_st(S1, d_off));
                     }
-                    IRInstr::Store { value, addr, offset, ty: _ } => {
+                    IRInstr::Store { value, addr, offset, ty } => {
                         code.extend(ss_load_value(addr, &vreg_stack_slots, S0));
                         if *offset != 0 {
                             code.extend(ss_load_imm(S1, *offset as i64));
                             code.extend_from_slice(&encode_add(S0, S1, S0));
                         }
                         code.extend(ss_load_value(value, &vreg_stack_slots, S1));
-                        // STW S1, 0(S0)
-                        code.extend_from_slice(&encode_stw(S1, S0, 0));
+                        // Use typed store based on the IR type.
+                        match ty {
+                            crate::ir::IRType::U8 | crate::ir::IRType::I8 => {
+                                code.extend_from_slice(&encode_stb(S1, S0, 0));
+                            }
+                            crate::ir::IRType::U16 | crate::ir::IRType::I16 => {
+                                code.extend_from_slice(&encode_sth(S1, S0, 0));
+                            }
+                            _ => {
+                                code.extend_from_slice(&encode_stw(S1, S0, 0));
+                            }
+                        }
                     }
                     IRInstr::Alloc { dst, size: _ } => {
                         let d_id = dst.as_register().unwrap_or(0);
@@ -1807,4 +1827,26 @@ impl Backend for HppaBackend {
             }
         }).collect()
     }
+}
+
+/// Encode STH (Store Halfword) — `STH reg, offset(base)`.
+/// Format: 0001 1001 bbb x ff aaaa aaa ddddd ll oooo ooo
+/// Opcode: 0x64000000
+fn encode_sth(src: Reg, base: Reg, offset: i16) -> [u8; 4] {
+    let word = 0x64000000u32  // 0001 1001 (STH)
+        | ((base as u32 & 0x1f) << 21)
+        | ((src as u32 & 0x1f) << 16)
+        | ((offset as u32) & 0x3fff);
+    word.to_be_bytes()
+}
+
+/// Encode LDH (Load Halfword) — `LDH offset(base), reg`.
+/// Format: 0001 0100 bbb x ff aaaa aaa ddddd ll oooo ooo
+/// Opcode: 0x44000000
+fn encode_ldh(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
+    let word = 0x44000000u32  // 0001 0100 (LDH)
+        | ((base as u32 & 0x1f) << 21)
+        | ((dst as u32 & 0x1f) << 16)
+        | ((offset as u32) & 0x3fff);
+    word.to_be_bytes()
 }

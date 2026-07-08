@@ -853,7 +853,7 @@ fn emit_instr(
             }
             code.extend(ss_st(S0, dst_off));
         }
-        IRInstr::Load { dst, addr, offset, ty: _ } => {
+        IRInstr::Load { dst, addr, offset, ty } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             // S2 = addr + offset.
@@ -866,7 +866,7 @@ fn emit_instr(
             code.extend(Instruction::Ldq { ra: S0, disp: 0, rb: S2 }.encode());
             code.extend(ss_st(S0, dst_off));
         }
-        IRInstr::Store { value, addr, offset, ty: _ } => {
+        IRInstr::Store { value, addr, offset, ty } => {
             code.extend(ss_load_value(addr, vreg_stack_slots, S2));
             if *offset != 0 {
                 code.extend(ss_load_imm(S3, *offset as i64));
