@@ -109,40 +109,98 @@ pub struct ProofSummary {
 /// Returns Ok(()) if all proofs are valid, Err with details otherwise.
 /// Currently performs a structural check: verifies that each rewrite
 /// is one of the known-sound rules. Future work: pipe to Z3/SMT solver.
+/// Check a proof log against the bitvector verifier (Wave 15).
+///
+/// Replaces the old string-whitelist approach with a real check: each
+/// artifact's rule_name must correspond to a rule that has been verified
+/// sound by the Wave 7 bitvector verification framework
+/// (`bv_verify::verify_all_rules()`). If a rule isn't in the verified set,
+/// the check FAILS (the old code silently passed).
+///
+/// Additionally, for rules where structural verification is possible
+/// (e.g., `xor_self` requires both operands to be the same e-class), the
+/// checker validates the artifact's source node matches the expected pattern.
 pub fn check_proof_log(log: &ProofLog) -> Result<ProofSummary, String> {
     let summary = log.summary();
 
-    // Verify each artifact's rule is known.
-    let known_rules: &[&'static str] = &[
-        "xor_self", "sub_self", "add_zero_left", "mul_zero_left",
-        "and_zero_left", "or_zero_left", "xor_zero_left",
-    ];
+    // Build the set of verified rule names from the Wave 7 verifier.
+    let verified_rules: std::collections::HashSet<&'static str> = crate::bv_verify::verify_all_rules()
+        .into_iter()
+        .filter(|r| r.sound)
+        .map(|r| r.rule_name)
+        .collect();
 
     for artifact in &log.artifacts {
-        if !known_rules.contains(&artifact.rule_name) {
+        // Check 1: The rule must be in the verified set.
+        if !verified_rules.contains(artifact.rule_name) {
             return Err(format!(
-                "Unknown rewrite rule: {} (not in known-sound set)",
+                "Rule '{}' is NOT verified by the bitvector verifier (not in the sound rule set)",
                 artifact.rule_name
             ));
         }
 
-        // Structural soundness check: verify the rewrite makes sense.
-        match (artifact.rule_name, &artifact.source, &artifact.replacement) {
-            ("xor_self", ENode::BinOp(_, x, y), ENode::Lit(0)) if x == y => {}
-            ("sub_self", ENode::BinOp(_, x, y), ENode::Lit(0)) if x == y => {}
-            ("mul_zero_left", ENode::BinOp(_, lhs, _), ENode::Lit(0)) if *lhs == 0 => {}
-            ("and_zero_left", ENode::BinOp(_, lhs, _), ENode::Lit(0)) if *lhs == 0 => {}
-            _ => {
-                // For rules that return None (handled by constant_fold), skip.
-                if artifact.replacement != ENode::Lit(0) || artifact.source != ENode::Lit(0) {
-                    // Not a known pattern — flag as unverified but don't fail.
-                    // Future: pipe to SMT solver for actual verification.
-                }
-            }
+        // Check 2: Structural validation — the source node must match the
+        // pattern the rule is supposed to match. This catches bugs where a
+        // rule is misapplied (e.g., xor_self applied to x^y where x != y).
+        if let Some(err) = structurally_validate_artifact(artifact) {
+            return Err(format!(
+                "Rule '{}' structurally invalid: {}",
+                artifact.rule_name, err
+            ));
         }
     }
 
     Ok(summary)
+}
+
+/// Structurally validate a proof artifact against its rule's expected pattern.
+///
+/// Returns `None` if valid, or `Some(error_message)` if the artifact's source
+/// node doesn't match what the rule should have matched.
+fn structurally_validate_artifact(artifact: &ProofArtifact) -> Option<String> {
+    match artifact.rule_name {
+        "xor_self" => {
+            // Source must be BinOp(Xor, x, x) where both operands are the same.
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Xor, x, y) if x == y => None,
+                _ => Some(format!("xor_self source must be Xor(x, x), got {:?}", artifact.source)),
+            }
+        }
+        "sub_self" => {
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Sub, x, y) if x == y => None,
+                _ => Some(format!("sub_self source must be Sub(x, x), got {:?}", artifact.source)),
+            }
+        }
+        "mul_zero_left" => {
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 0 => None,
+                _ => Some(format!("mul_zero_left source must be Mul(0, _), got {:?}", artifact.source)),
+            }
+        }
+        "mul_zero_right" => {
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 0 => None,
+                _ => Some(format!("mul_zero_right source must be Mul(_, 0), got {:?}", artifact.source)),
+            }
+        }
+        "mul_one_left" => {
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 1 => None,
+                _ => Some(format!("mul_one_left source must be Mul(1, _), got {:?}", artifact.source)),
+            }
+        }
+        "mul_one_right" => {
+            match &artifact.source {
+                ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 1 => None,
+                _ => Some(format!("mul_one_right source must be Mul(_, 1), got {:?}", artifact.source)),
+            }
+        }
+        // For rules that match on e-class contents (not directly on the ENode),
+        // we can't structurally validate without the full e-graph. These pass
+        // structural validation (the bv_verify check above is the real gate).
+        _ => None,
+    }
 }
 
 #[cfg(test)]
