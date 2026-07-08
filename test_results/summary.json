@@ -1,13 +1,23 @@
 {
-  "timestamp": "2026-07-08 20:53:43 UTC",
+  "timestamp": "2026-07-08 22:37:42 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
-  "matches": 109027,
+  "matches": 109028,
   "skipped": 1,
   "pass_rate": "99.88%",
   "per_backend": {
     "aarch64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "mips64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "x86_64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -17,17 +27,17 @@
       "match": 5742,
       "skipped": 0
     },
-    "riscv64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
     "armeb": {
       "total": 5745,
       "match": 5739,
       "skipped": 0
     },
-    "x86_64": {
+    "mips64be": {
+      "total": 5745,
+      "match": 5738,
+      "skipped": 0
+    },
+    "riscv64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -37,14 +47,9 @@
       "match": 5742,
       "skipped": 0
     },
-    "mips64be": {
+    "ppc64": {
       "total": 5745,
-      "match": 5738,
-      "skipped": 0
-    },
-    "mips64": {
-      "total": 5745,
-      "match": 5745,
+      "match": 5742,
       "skipped": 0
     },
     "ppc64le": {
@@ -52,14 +57,9 @@
       "match": 5743,
       "skipped": 0
     },
-    "ppc64": {
+    "sparc64": {
       "total": 5745,
-      "match": 5742,
-      "skipped": 0
-    },
-    "riscv32": {
-      "total": 5745,
-      "match": 5745,
+      "match": 5741,
       "skipped": 0
     },
     "s390x": {
@@ -67,22 +67,22 @@
       "match": 5739,
       "skipped": 0
     },
-    "x86_32": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
     "m68k": {
       "total": 5745,
       "match": 5699,
       "skipped": 0
     },
-    "sparc64": {
+    "riscv32": {
       "total": 5745,
-      "match": 5741,
+      "match": 5745,
       "skipped": 0
     },
     "loongarch64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "x86_32": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -94,7 +94,7 @@
     },
     "hppa": {
       "total": 5745,
-      "match": 5705,
+      "match": 5706,
       "skipped": 0
     },
     "wasm32": {
