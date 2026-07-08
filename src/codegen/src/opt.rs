@@ -1179,15 +1179,53 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
         }
 
         // Redirect non-loop predecessors of the header to the preheader.
+        // Track which predecessor labels were redirected so we can update
+        // the Phi nodes in the header.
+        let mut redirected_preds: Vec<String> = Vec::new();
         for (block_idx, block) in func.blocks.iter_mut().enumerate() {
             let block_label = block.label.clone();
             if loop_body_labels.contains(&block_label) || block_idx == header_idx {
-                // Don't redirect loop-internal edges or the preheader itself.
-                // However, we haven't inserted the preheader yet, so this
-                // check is for the existing blocks.
                 continue;
             }
-            redirect_terminator(&mut block.terminator, &header_label, &preheader_label);
+            // Check if this block's terminator jumps to the header.
+            let jumps_to_header = block.terminator.successor_labels()
+                .iter().any(|s| *s == header_label);
+            if jumps_to_header {
+                redirect_terminator(&mut block.terminator, &header_label, &preheader_label);
+                redirected_preds.push(block_label);
+            }
+        }
+
+        // Update Phi nodes in the header: replace redirected predecessor
+        // labels with the preheader label. If multiple predecessors were
+        // redirected, merge their incoming values into a single preheader
+        // incoming (using the last one, since they all reach the header
+        // through the preheader now — the preheader has no Phi, so all
+        // redirected predecessors' values are already available).
+        let header_idx = func.find_block_by_label(&header_label).unwrap_or(0);
+        for instr in &mut func.blocks[header_idx].instructions {
+            if let IRInstr::Phi { incoming, .. } = instr {
+                let mut new_incoming: Vec<(IRValue, String)> = Vec::new();
+                let mut preheader_val: Option<IRValue> = None;
+                for (val, pred_label) in incoming.drain(..) {
+                    if redirected_preds.contains(&pred_label) {
+                        // This incoming came from a redirected predecessor.
+                        // The value now comes from the preheader.
+                        preheader_val = Some(val);
+                    } else {
+                        new_incoming.push((val, pred_label));
+                    }
+                }
+                // Add the preheader incoming (if any predecessor was redirected).
+                if let Some(val) = preheader_val {
+                    new_incoming.push((val, preheader_label.clone()));
+                }
+                *incoming = new_incoming;
+            }
+            // Only process the leading Phi nodes.
+            if !matches!(instr, IRInstr::Phi { .. }) {
+                break;
+            }
         }
 
         // Insert the preheader before the header block.
@@ -1282,8 +1320,8 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // let f = inline_small(f, &func_refs);
-        // let f = licm(f);
+        // let f = inline_small(f, &func_refs);  // multi-block rewiring still unsound
+        // let f = licm(f);  // still breaks control_flow/nested_loops
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
         // ── DISABLED: scheduler causes pass-interaction miscompilation ──
