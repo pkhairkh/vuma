@@ -1268,7 +1268,7 @@ fn run_optimizations_inner(
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
         let f = constant_fold(f);
         let f = cse(f);
-        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)  // e-graph pass (per-ISA cost)
+        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)
         // Wave 8: Compute IVE provenance FIRST, then pass it to DSE.
         // The old code ran DSE before mark_ive, so the provenance was never
         // consumed. Now mark_ive returns the provenance map explicitly
