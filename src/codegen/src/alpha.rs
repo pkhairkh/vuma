@@ -464,6 +464,45 @@ fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
     }
 }
 
+/// STQ src, off(SP) — SP-relative store with large-offset handling.
+/// Used in the prologue where FP is not yet established.
+fn sp_stq(src: Gpr, off: i64) -> Vec<u8> {
+    if (-32768..=32767).contains(&off) {
+        Instruction::Stq { ra: src, disp: off as i16, rb: SP }.encode()
+    } else {
+        let mut code = ss_load_imm(S2, off);
+        code.extend(Instruction::Addq { ra: SP, rb: S2, rc: S2 }.encode());
+        code.extend(Instruction::Stq { ra: src, disp: 0, rb: S2 }.encode());
+        code
+    }
+}
+
+/// LDQ dst, off(SP) — SP-relative load with large-offset handling.
+/// Used in the epilogue to restore RA/FP.
+fn sp_ldq(dst: Gpr, off: i64) -> Vec<u8> {
+    if (-32768..=32767).contains(&off) {
+        Instruction::Ldq { ra: dst, disp: off as i16, rb: SP }.encode()
+    } else {
+        let mut code = ss_load_imm(S2, off);
+        code.extend(Instruction::Addq { ra: SP, rb: S2, rc: S2 }.encode());
+        code.extend(Instruction::Ldq { ra: dst, disp: 0, rb: S2 }.encode());
+        code
+    }
+}
+
+/// SP += delta (signed) with large-delta handling.  LDA SP, delta(SP) only
+/// encodes a 16-bit signed displacement; for |delta| > 32767 we materialize
+/// delta in S2 and ADDQ.
+fn sp_adjust(delta: i64) -> Vec<u8> {
+    if (-32768..=32767).contains(&delta) {
+        Instruction::Lda { ra: SP, disp: delta as i16, rb: SP }.encode()
+    } else {
+        let mut code = ss_load_imm(S2, delta);
+        code.extend(Instruction::Addq { ra: SP, rb: S2, rc: SP }.encode());
+        code
+    }
+}
+
 /// Load an IRValue into a scratch register.
 fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
     match val {
@@ -528,27 +567,30 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     }
 
     // ── Stack Layout ──
-    // Alpha SP grows down.  Frame layout:
-    //   [high addr]   caller's frame
-    //                 saved RA (at SP+0 after prologue)
-    //                 saved FP (at SP+8 after prologue)
-    //                 vreg slot M (at SP+16+8*(M-1))
-    //                 ...
-    //                 Alloc data
-    //   [low addr]    SP
+    // Alpha SP grows down.  Frame layout (ALL slots at POSITIVE offsets from
+    // SP/FP, i.e. INSIDE the allocated frame [SP, SP+frame_size)):
+    //   [SP + frame_size - 8 ]   saved FP          (top of frame)
+    //   [SP + frame_size - 16]   saved RA
+    //   ...                      alloc data
+    //   ...                      vreg slots
+    //   [SP + 0 ]                first vreg slot   (bottom of frame)
     //
-    // We use NEGATIVE offsets from FP (= SP after prologue).
+    // After prologue: SP = old_SP - frame_size, FP = SP.
+    // Every spill (vregs, allocs) and the RA/FP save area lives INSIDE the
+    // frame.  This is critical: a callee's RA/FP save at the TOP of its own
+    // frame must NOT land in the caller's spill region.  The previous layout
+    // placed vregs at NEGATIVE offsets from FP (i.e. BELOW SP, outside the
+    // frame); when RA/FP were also moved to the top of the frame, a callee's
+    // RA save (at callee_SP + frame - 16 = caller_SP - 16) clobbered the
+    // caller's vreg spilled at caller_SP - 16.  Keeping everything at positive
+    // offsets inside the frame eliminates all such clobbering.
     let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-    let mut current_offset: i32 = -8; // -8 is first vreg slot (above saved RA/FP at 0/8? no, below)
-    // Actually: after prologue, FP = SP = old SP - frame_size.
-    // saved RA at FP+0, saved FP at FP+8 (just below caller's frame).
-    // Vreg slots at FP-8, FP-16, etc. (going down).
-    current_offset = -8;
+    let mut current_offset: i32 = 0; // vregs start at FP+0, grow UP (positive)
     let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
     all_vreg_ids_sorted.sort();
     for &id in &all_vreg_ids_sorted {
         vreg_stack_slots.insert(id, current_offset);
-        current_offset -= 8;
+        current_offset += 8;
     }
 
     let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
@@ -556,17 +598,18 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     alloc_vreg_ids.sort();
     for &id in &alloc_vreg_ids {
         let size = alloc_sizes[&id];
-        current_offset -= size;
-        current_offset = current_offset & !15;
+        // Align the alloc slot up to 16 bytes.
+        current_offset = (current_offset + 15) & !15;
         alloc_offsets.insert(id, current_offset);
+        current_offset += size;
     }
 
     // Reserve 16 bytes for saved RA + FP at the TOP of the frame
-    // (just below the caller's SP). These are at POSITIVE offsets from
-    // SP after the prologue: RA at SP + (frame_size - 16), FP at SP + (frame_size - 8).
-    // The old code used negative offsets (save_area_offset), which placed
-    // RA/FP BELOW the stack frame — writing to unallocated memory.
-    let vreg_area_size = (-current_offset) as usize;
+    // (just below the caller's SP).  RA at SP + (frame_size - 16),
+    // FP at SP + (frame_size - 8).  Because frame_size >= vreg_area + 16,
+    // lr_save_off >= vreg_area, so the save area never overlaps any vreg or
+    // alloc slot (which all live in [0, vreg_area)).
+    let vreg_area_size = current_offset as usize;
     let frame_size = ((vreg_area_size + 16 + 15) & !15) as usize;
     let lr_save_off = (frame_size - 16) as i16;  // RA at top of frame
     let fp_save_off = (frame_size - 8) as i16;   // FP at top of frame
@@ -579,11 +622,11 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     let mut relocations: Vec<RelocationEntry> = Vec::new();
 
     // LDA SP, -frame_size(SP)
-    code.extend(Instruction::Lda { ra: SP, disp: -(frame_size as i16), rb: SP }.encode());
+    code.extend(sp_adjust(-(frame_size as i64)));
     // STQ RA, lr_save_off(SP)
-    code.extend(Instruction::Stq { ra: RA, disp: lr_save_off, rb: SP }.encode());
+    code.extend(sp_stq(RA, lr_save_off as i64));
     // STQ FP, fp_save_off(SP)
-    code.extend(Instruction::Stq { ra: FP, disp: fp_save_off, rb: SP }.encode());
+    code.extend(sp_stq(FP, fp_save_off as i64));
     // BIS ZERO, SP, FP (FP = SP)
     code.extend(Instruction::Or { ra: ZERO, rb: SP, rc: FP }.encode());
 
@@ -654,9 +697,9 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                     code.extend(ss_load_value(first_val, &vreg_stack_slots, Gpr::R0));
                 }
                 // Epilogue:
-                code.extend(Instruction::Ldq { ra: RA, disp: lr_save_off, rb: SP }.encode());
-                code.extend(Instruction::Ldq { ra: FP, disp: fp_save_off, rb: SP }.encode());
-                code.extend(Instruction::Lda { ra: SP, disp: frame_size as i16, rb: SP }.encode());
+                code.extend(sp_ldq(RA, lr_save_off as i64));
+                code.extend(sp_ldq(FP, fp_save_off as i64));
+                code.extend(sp_adjust(frame_size as i64));
                 code.extend(Instruction::Ret.encode());
             }
             crate::ir::IRTerminator::Unreachable => {
@@ -690,9 +733,9 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 });
             }
             crate::ir::IRTerminator::TailCall { .. } => {
-                code.extend(Instruction::Ldq { ra: RA, disp: lr_save_off, rb: SP }.encode());
-                code.extend(Instruction::Ldq { ra: FP, disp: fp_save_off, rb: SP }.encode());
-                code.extend(Instruction::Lda { ra: SP, disp: frame_size as i16, rb: SP }.encode());
+                code.extend(sp_ldq(RA, lr_save_off as i64));
+                code.extend(sp_ldq(FP, fp_save_off as i64));
+                code.extend(sp_adjust(frame_size as i64));
                 code.extend(Instruction::Ret.encode());
             }
             crate::ir::IRTerminator::Resume { .. } => {
@@ -865,8 +908,55 @@ fn emit_instr(
                 code.extend(ss_load_imm(S3, *offset as i64));
                 code.extend(Instruction::Addq { ra: S2, rb: S3, rc: S2 }.encode());
             }
-            // LDQ S0, 0(S2).
-            code.extend(Instruction::Ldq { ra: S0, disp: 0, rb: S2 }.encode());
+            // Typed load based on IR type.  Alpha is little-endian.
+            //   U8/I8  → LDBU (zero-extend byte; sign-extend if signed)
+            //   U16/I16→ LDWU (zero-extend halfword; sign-extend if signed)
+            //   U32/I32→ LDL  (sign-extends 32→64; mask to zero-extend for U32)
+            //   U64/I64→ LDQ  (full 64-bit load)
+            //   Ptr    → LDQ  (pointer-sized, 64-bit on alpha)
+            use crate::ir::IRType;
+            match ty {
+                IRType::U8 => {
+                    code.extend(Instruction::Ldbu { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                IRType::I8 => {
+                    // LDBU (zero-extend byte), then sign-extend: SLL 56, SRA 56.
+                    // SLL = opcode 0x12 function 0x34; SRA = opcode 0x13 function 0x3C.
+                    // Use register form with S3 holding the shift count.
+                    code.extend(Instruction::Ldbu { ra: S0, disp: 0, rb: S2 }.encode());
+                    code.extend(ss_load_imm(S3, 56));
+                    code.extend_from_slice(&op_reg(0x12, S0, S3, S0, 0x34).to_le_bytes()); // SLL S0,S3,S0
+                    code.extend_from_slice(&op_reg(0x13, S0, S3, S0, 0x3C).to_le_bytes()); // SRA S0,S3,S0
+                }
+                IRType::U16 => {
+                    code.extend(Instruction::Ldwu { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                IRType::I16 => {
+                    // LDWU (zero-extend halfword), then sign-extend: SLL 48, SRA 48.
+                    code.extend(Instruction::Ldwu { ra: S0, disp: 0, rb: S2 }.encode());
+                    code.extend(ss_load_imm(S3, 48));
+                    code.extend_from_slice(&op_reg(0x12, S0, S3, S0, 0x34).to_le_bytes()); // SLL 48
+                    code.extend_from_slice(&op_reg(0x13, S0, S3, S0, 0x3C).to_le_bytes()); // SRA 48
+                }
+                IRType::U32 => {
+                    // LDL sign-extends 32→64.  Zero-extend by masking high 32
+                    // bits: S0 = S0 & 0x00000000FFFFFFFF.
+                    // ZAPNOT (opcode 0x12, function 0x31) keeps bytes of ra
+                    // where rb's corresponding bit is 1.  rb = 0x0F keeps
+                    // bytes 0-3, zeros bytes 4-7.
+                    code.extend(Instruction::Ldl { ra: S0, disp: 0, rb: S2 }.encode());
+                    code.extend(ss_load_imm(S3, 0x0F));
+                    code.extend_from_slice(&op_reg(0x12, S0, S3, S0, 0x31).to_le_bytes());
+                }
+                IRType::I32 => {
+                    // LDL sign-extends 32→64.  Correct for signed.
+                    code.extend(Instruction::Ldl { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                _ => {
+                    // U64, I64, Ptr, Func, etc. → full 64-bit load.
+                    code.extend(Instruction::Ldq { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+            }
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Store { value, addr, offset, ty } => {
@@ -876,7 +966,22 @@ fn emit_instr(
                 code.extend(Instruction::Addq { ra: S2, rb: S3, rc: S2 }.encode());
             }
             code.extend(ss_load_value(value, vreg_stack_slots, S0));
-            code.extend(Instruction::Stq { ra: S0, disp: 0, rb: S2 }.encode());
+            // Typed store based on IR type.
+            use crate::ir::IRType;
+            match ty {
+                IRType::U8 | IRType::I8 => {
+                    code.extend(Instruction::Stb { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                IRType::U16 | IRType::I16 => {
+                    code.extend(Instruction::Stw { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                IRType::U32 | IRType::I32 => {
+                    code.extend(Instruction::Stl { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+                _ => {
+                    code.extend(Instruction::Stq { ra: S0, disp: 0, rb: S2 }.encode());
+                }
+            }
         }
         IRInstr::Alloc { dst, size: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
@@ -943,9 +1048,9 @@ fn emit_instr(
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::R0));
             }
-            code.extend(Instruction::Ldq { ra: RA, disp: lr_save_off, rb: SP }.encode());
-            code.extend(Instruction::Ldq { ra: FP, disp: fp_save_off, rb: SP }.encode());
-            code.extend(Instruction::Lda { ra: SP, disp: frame_size as i16, rb: SP }.encode());
+            code.extend(sp_ldq(RA, lr_save_off as i64));
+            code.extend(sp_ldq(FP, fp_save_off as i64));
+            code.extend(sp_adjust(frame_size as i64));
             code.extend(Instruction::Ret.encode());
         }
         IRInstr::Branch { target: _ } => {
