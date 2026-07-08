@@ -4777,15 +4777,14 @@ pub fn emit_binary(
     data_sections: &[DataSection],
     config: &EmitConfig,
 ) -> Result<Vec<u8>> {
-    // Run IR-level optimizations before codegen.
-    // This is the production path — pipeline.rs calls emit_binary directly.
-    let mut ir_program = IRProgram {
-        functions: functions.to_vec(),
-        data_sections: data_sections.to_vec(),
-    };
-    ir_program = crate::opt::run_optimizations(ir_program);
-    let opt_functions = &ir_program.functions;
-    let opt_data = &ir_program.data_sections;
+    // The IR has already been optimized by the pipeline (Stage 8b) before
+    // being passed to emit_binary. Previously emit_binary re-ran
+    // run_optimizations here (a double-optimization that used default_ooo()
+    // instead of the target's latency table). That redundant call is removed
+    // — the pipeline now uses run_optimizations_with_target with the actual
+    // backend's latency table.
+    let opt_functions = functions;
+    let opt_data = data_sections;
 
     match config.format {
         OutputFormat::ELF | OutputFormat::Obj => {

@@ -574,6 +574,10 @@ impl TargetInfo for HppaTargetInfo {
     fn instruction_alignment(&self) -> usize { 4 }
     fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
     fn output_format(&self) -> crate::backend::OutputFormat { crate::backend::OutputFormat::Elf32 }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::hppa()
+    }
 }
 
 impl Backend for HppaBackend {

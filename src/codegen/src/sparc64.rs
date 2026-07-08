@@ -3788,6 +3788,10 @@ impl TargetInfo for Sparc64TargetInfo {
     fn output_format(&self) -> crate::backend::OutputFormat {
         crate::backend::OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::sparc64()
+    }
 }
 
 impl Backend for Sparc64Backend {
