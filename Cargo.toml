@@ -46,7 +46,6 @@ vuma-codegen = { path = "src/codegen" }
 vuma-parser = { path = "src/parser" }
 vuma-cor = { path = "src/cor" }
 vuma-proof = { path = "src/proof" }
-vuma-std = { path = "src/std" }
 vuma-package = { path = "src/package" }
 # External crates — pinned
 serde = { version = "1", features = ["derive"] }
