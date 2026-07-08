@@ -562,6 +562,34 @@ fn find_natural_loops(func: &IRFunction) -> Vec<(String, HashSet<String>)> {
         }
     }
 
+    // Merge inner loop bodies into their containing outer loops.
+    // An outer loop's body should include all blocks from inner loops
+    // whose headers are in the outer loop's body. Without this, LICM
+    // won't see inner-loop-modified registers when checking the outer
+    // loop's invariants, causing it to hoist instructions that depend
+    // on inner-loop-modified values.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..loops.len() {
+            for j in 0..loops.len() {
+                if i == j {
+                    continue;
+                }
+                // If loop j's header is in loop i's body, merge j's body into i.
+                let j_header = &loops[j].0;
+                if loops[i].1.contains(j_header) {
+                    let j_body: HashSet<String> = loops[j].1.clone();
+                    for b in j_body {
+                        if loops[i].1.insert(b) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     loops
 }
 
@@ -1108,6 +1136,21 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
 
     let loops = find_natural_loops(&func);
 
+    // Don't process a loop if its header is inside another loop's body.
+    // Nested loop LICM requires precise loop-body tracking that the current
+    // implementation doesn't handle correctly — inner loop blocks may not
+    // all be included in the outer loop's body, causing the outer loop's
+    // loop_modified set to be incomplete.
+    let mut nested_headers: HashSet<String> = HashSet::new();
+    for i in 0..loops.len() {
+        for j in 0..loops.len() {
+            if i != j && loops[i].1.contains(&loops[j].0) {
+                // loop j's header is inside loop i's body → j is nested in i
+                nested_headers.insert(loops[j].0.clone());
+            }
+        }
+    }
+
     // Process loops in reverse order of header block index so that inserting
     // preheader blocks doesn't shift indices of other loops.
     let label_to_idx: HashMap<String, usize> = func
@@ -1125,6 +1168,11 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
     });
 
     for (header_label, loop_body_labels) in sorted_loops {
+        // Skip nested loops — their LICM is unsound with the current
+        // loop-body tracking. Only process outermost loops.
+        if nested_headers.contains(&header_label) {
+            continue;
+        }
         let header_idx = match func.find_block_by_label(&header_label) {
             Some(i) => i,
             None => continue,
