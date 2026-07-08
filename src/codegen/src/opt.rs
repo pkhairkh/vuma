@@ -1278,21 +1278,22 @@ fn run_optimizations_inner(
 
         // ── DISABLED PASSES (cause miscompilation on loops/functions/atomics) ──
         // let f = cse(f);                          // 50% control_flow failures
-        // let f = equality_saturation_with_cost(f, &cost_fn);  // needs Add/Sub/Mul/Div validation
-        // let (f, provenance) = mark_ive_proven_nonaliasing(f);
-        // let f = dead_store_eliminate(f, &provenance);  // breaks atomics
+        let f = equality_saturation_with_cost(f, &cost_fn);
+        let (f, provenance) = mark_ive_proven_nonaliasing(f);
+        let f = dead_store_eliminate(f, &provenance);
         // let f = inline_small(f, &func_refs);     // multi-block inliner unsound
         // let f = licm(f);                         // breaks nested loops
-        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);  // breaks loop-carried deps
+        let mut f = f;
+        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         program.functions[i] = f;
     }
 
-    // ── DISABLED whole-program passes ──
-    // program = cross_function_constant_prop(program);  // needs validation
-    // program = whole_program_dce(program);             // needs validation
-    // for func in &mut program.functions {
-    //     *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
-    // }
+    // ── Whole-program passes ──
+    program = cross_function_constant_prop(program);
+    program = whole_program_dce(program);
+    for func in &mut program.functions {
+        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    }
 
     program
 }
@@ -2772,8 +2773,8 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         );
 //     }
 // }
-// 
-// #[cfg(test)]
+
+#[cfg(test)]
 mod working_tests {
     use super::*;
     use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind};
