@@ -162,10 +162,20 @@ fn try_unroll_general_loop(
     for block_label in &loop_info.blocks {
         let block = func.blocks.iter().find(|b| &b.label == block_label)?;
         for instr in &block.instructions {
-            match instr {
-                IRInstr::Call { .. } | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
-                | IRInstr::Free { .. } => return None,
-                _ => {}
+            // Bail on any instruction that substitute_vreg doesn't handle.
+            // This is conservative — we only unroll loops whose body we can
+            // fully and correctly substitute the IV in.
+            let is_safe = matches!(
+                instr,
+                IRInstr::BinOp { .. } | IRInstr::Add { .. } | IRInstr::Sub { .. }
+                | IRInstr::Mul { .. } | IRInstr::Div { .. } | IRInstr::Cmp { .. }
+                | IRInstr::Load { .. } | IRInstr::Store { .. }
+                | IRInstr::Offset { .. } | IRInstr::Cast { .. }
+                | IRInstr::Select { .. } | IRInstr::Phi { .. }
+                | IRInstr::Alloc { .. }
+            );
+            if !is_safe {
+                return None;
             }
         }
     }
@@ -362,12 +372,20 @@ pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
         _ => return None, // No Phi = no induction variable to track.
     };
 
-    // Check 5: no calls or atomics in the body (side effects).
+    // Check 5: bail on any instruction substitute_vreg doesn't handle.
+    // Conservative: only unroll loops whose body we can fully substitute.
     for instr in instrs {
-        match instr {
-            IRInstr::Call { .. } | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
-            | IRInstr::Free { .. } => return None,
-            _ => {}
+        let is_safe = matches!(
+            instr,
+            IRInstr::BinOp { .. } | IRInstr::Add { .. } | IRInstr::Sub { .. }
+            | IRInstr::Mul { .. } | IRInstr::Div { .. } | IRInstr::Cmp { .. }
+            | IRInstr::Load { .. } | IRInstr::Store { .. }
+            | IRInstr::Offset { .. } | IRInstr::Cast { .. }
+            | IRInstr::Select { .. } | IRInstr::Phi { .. }
+            | IRInstr::Alloc { .. }
+        );
+        if !is_safe {
+            return None;
         }
     }
 
