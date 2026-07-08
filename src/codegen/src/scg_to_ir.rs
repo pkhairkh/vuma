@@ -2627,22 +2627,9 @@ impl IRBuilder {
                                 }
                             }
                         }
-                        IRType::U64
+                        IRType::U8
                     } else {
-                        // Use U8 for byte-level access (small constant offsets
-                        // 0-3), U64 for word-level access.  This must match
-                        // the store type inference to ensure consistency.
-                        let small_const_offset = match ptr {
-                            ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } => {
-                                match rhs.as_ref() {
-                                    ScgExpr::Int(n) => *n >= 0 && *n <= 3,
-                                    _ => false,
-                                }
-                            }
-                            ScgExpr::Var(_) => false,
-                            _ => false,
-                        };
-                        if small_const_offset { IRType::U8 } else { IRType::U64 }
+                        IRType::U8
                     }
                 });
                 ir_func.current_block().push(IRInstruction::Load {
@@ -2727,56 +2714,33 @@ impl IRBuilder {
                                         found_ty = Some(match *stride {
                                             8 => IRType::U64,
                                             4 => IRType::U32,
-                                            _ => IRType::U64,
+                                            _ => IRType::U8,
                                         });
                                     }
                                 }
                             }
                         }
-                        found_ty.unwrap_or(IRType::U64)
+                        found_ty.unwrap_or(IRType::U8)
                     }
                 } else {
-                    // Immediate value store.  Use U8 for byte-level access
-                    // (small constant offsets 0-3 with small values) and U64
-                    // for word-level access (larger offsets, variable offsets,
-                    // or large values).  This handles both:
-                    //   *(buf + 0) = 0x12  → U8 (byte array access)
-                    //   *(block + 8) = 16  → U64 (word array access)
-                    let imm_fits_byte = match &val {
-                        IRValue::Immediate(v) => *v >= 0 && *v <= 255,
-                        IRValue::Address(a) => *a <= 255,
+                    let imm_too_large_for_byte = match &val {
+                        IRValue::Immediate(v) => *v > 255 || *v < 0,
+                        IRValue::Address(a) => *a > 255,
                         _ => false,
                     };
-                    // Check if the offset is a small constant (0-3),
-                    // indicating byte-level access.
-                    let small_const_offset = match ptr {
-                        ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } => {
-                            match rhs.as_ref() {
-                                ScgExpr::Int(n) => *n >= 0 && *n <= 3,
-                                _ => false,  // variable offset → not byte-level
-                            }
-                        }
-                        ScgExpr::Var(_) => false, // variable address — unknown, default to U64
-                        _ => false,
-                    };
-                    if imm_fits_byte && small_const_offset {
-                        IRType::U8
-                    } else if !imm_fits_byte {
-                        // Value too large for byte — use stride pattern if available
+                    if imm_too_large_for_byte {
                         if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                                 if let ScgExpr::Int(stride) = rhs.as_ref() {
                                     match *stride {
                                         8 => IRType::U64,
                                         4 => IRType::U32,
-                                        _ => IRType::U64,
+                                        _ => IRType::U8,
                                     }
-                                } else { IRType::U64 }
-                            } else { IRType::U64 }
-                        } else { IRType::U64 }
-                    } else {
-                        IRType::U64
-                    }
+                                } else { IRType::U8 }
+                            } else { IRType::U8 }
+                        } else { IRType::U8 }
+                    } else { IRType::U8 }
                 };
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
@@ -3594,7 +3558,7 @@ impl IRBuilder {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: 0,
-                    ty: IRType::U64,
+                    ty: IRType::U8,
                 });
                 Ok(IRValue::Register(dst_vreg))
             }
