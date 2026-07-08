@@ -1415,7 +1415,7 @@ fn run_optimizations_inner(
         // before it runs. Will re-enable after fixing Phi handling for
         // arbitrary post-optimization IR shapes.
         // let mut f = f;
-        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);  // breaks pass interactions
+        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         program.functions[i] = f;
     }
 
