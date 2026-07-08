@@ -1421,11 +1421,11 @@ fn run_optimizations_inner(
 
     // ── Whole-program passes ──
     // Disabled: cause miscompilation in combination with per-function passes.
-    // program = cross_function_constant_prop(program);
-    // program = whole_program_dce(program);
-    // for func in &mut program.functions {
-    //     *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
-    // }
+    program = cross_function_constant_prop(program);
+    program = whole_program_dce(program);
+    for func in &mut program.functions {
+        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    }
 
     program
 }
