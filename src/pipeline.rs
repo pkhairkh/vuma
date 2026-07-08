@@ -4917,7 +4917,7 @@ pub fn compile_with_path(
     // path produced (Task 4-A).
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut ir_builder = IRBuilder::new();
-    let ir_program = match ir_builder.build(&codegen_scg) {
+    let mut ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
         Err(e) => {
             errors.push(VumaError::Codegen { error: e });
@@ -4927,6 +4927,16 @@ pub fn compile_with_path(
             return Err(errors); // Cannot continue without IR.
         }
     };
+
+    // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
+    // Runs vuma_codegen::opt::run_optimizations on the lowered IRProgram
+    // before register allocation. Gated by opt level: O0 skips.
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let topt = Instant::now();
+        ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
+    }
+
     let ir_function_count = ir_program.functions.len();
     let ir_instruction_count: usize = ir_program
         .functions
@@ -5293,7 +5303,7 @@ pub fn compile_with_recovery(
     // path produced (Task 4-A).
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut ir_builder = IRBuilder::new();
-    let ir_program = match ir_builder.build(&codegen_scg) {
+    let mut ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
         Err(e) => {
             errors.push(VumaError::Codegen { error: e });
@@ -5311,6 +5321,14 @@ pub fn compile_with_recovery(
             });
         }
     };
+
+    // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let topt = Instant::now();
+        ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
+    }
+
     let ir_function_count = ir_program.functions.len();
     let ir_instruction_count: usize = ir_program
         .functions
@@ -5660,10 +5678,13 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // `bridge_scg_to_codegen*` path produced (Task 4-A).
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut ir_builder = IRBuilder::new();
-    let ir_program = match ir_builder.build(&codegen_scg) {
+    let mut ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
         Err(e) => return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]),
     };
+
+    // ── Codegen-Level IR Optimization (production caller) ────────
+    ir_program = vuma_codegen::opt::run_optimizations(ir_program);
 
     // ── Stage 5: Compile IR → Wasm ──────────────────────────────
     let wasm_bytes = match vuma_codegen::compile_to_wasm(&ir_program.functions) {

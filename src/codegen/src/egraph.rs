@@ -122,6 +122,15 @@ impl EGraph {
         }
     }
 
+    /// Check whether an e-class contains a specific literal value.
+    /// Used by value-aware rewrite rules (e.g. `x*2 → x+x`).
+    pub fn class_contains_lit(&self, class_id: EClassId, val: i64) -> bool {
+        let canonical = self.find(class_id);
+        self.classes.get(&canonical)
+            .map(|s| s.iter().any(|n| matches!(n, ENode::Lit(v) if *v == val)))
+            .unwrap_or(false)
+    }
+
     /// Apply all rewrite rules until saturation or budget exhausted.
     pub fn saturate(&mut self, rules: &[RewriteRule], budget: usize) {
         for _ in 0..budget {
@@ -135,7 +144,7 @@ impl EGraph {
                     .unwrap_or_default();
                 for node in &nodes {
                     for rule in rules {
-                        if let Some(replacement) = (rule.apply)(node) {
+                        if let Some(replacement) = (rule.apply)(node, self) {
                             let repl_id = self.add(replacement);
                             let old_id = self.find(class_id);
                             if repl_id != old_id {
@@ -170,14 +179,16 @@ impl EGraph {
 }
 
 /// A rewrite rule: pattern matcher + replacement generator.
+///
+/// The `apply` function receives the matched e-node AND a reference to the
+/// e-graph, so it can inspect the contents of child e-classes. This is
+/// required for value-aware rules like `x*2 → x+x` (which must detect that
+/// one operand's e-class contains the literal 2).
 pub struct RewriteRule {
     pub name: &'static str,
     /// Whether this rule has been SMT-verified (Wave 7).
-    /// If true, the rule's soundness has been proven and can be checked
-    /// by a proof checker. If false, the rule is still sound by
-    /// construction but lacks a machine-checkable proof.
     pub verified: bool,
-    pub apply: fn(&ENode) -> Option<ENode>,
+    pub apply: fn(&ENode, &EGraph) -> Option<ENode>,
 }
 
 /// Standard algebraic rewrite rules.
@@ -194,11 +205,13 @@ pub struct RewriteRule {
 /// future integration with a proof checker.
 pub fn standard_rules() -> Vec<RewriteRule> {
     vec![
-        // ---- Structural rules (sound by e-class ID equality) ----
+        // ============================================================
+        // Structural rules — match on e-class ID equality. Always sound.
+        // ============================================================
         RewriteRule {
             name: "xor_self",
             verified: true,
-            apply: |node| match node {
+            apply: |node, _eg| match node {
                 // x ^ x → 0
                 ENode::BinOp(BinOpKind::Xor, x, y) if x == y => Some(ENode::Lit(0)),
                 _ => None,
@@ -207,55 +220,172 @@ pub fn standard_rules() -> Vec<RewriteRule> {
         RewriteRule {
             name: "sub_self",
             verified: true,
-            apply: |node| match node {
+            apply: |node, _eg| match node {
                 // x - x → 0
                 ENode::BinOp(BinOpKind::Sub, x, y) if x == y => Some(ENode::Lit(0)),
                 _ => None,
             },
         },
-        // ---- Value-aware rules (sound by constant evaluation) ----
+
+        // ============================================================
+        // Value-aware rules — inspect child e-class contents via eg.
+        // These are the rules the old `apply(&ENode)` signature could
+        // not express. They are sound by constant evaluation.
+        // ============================================================
+
+        // 0 + x → x  (identity)
         RewriteRule {
             name: "add_zero_left",
             verified: true,
-            apply: |node| match node {
-                // 0 + x → x (when left operand is literal 0)
-                ENode::BinOp(BinOpKind::Add, lhs, _) if *lhs == 0 => {
-                    // Can't return the rhs e-class directly (it's an ID, not an ENode).
-                    // Instead, mark this as foldable to 0 + x = x.
-                    // The equality_saturation pass handles this by checking
-                    // if the lhs is Lit(0) and replacing with rhs.
-                    None // Handled in equality_saturation pass via constant_fold
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Add, lhs, rhs) if eg.class_contains_lit(*lhs, 0) => {
+                    // Replace with the rhs e-class (a VReg node pointing to rhs).
+                    Some(ENode::VReg(*rhs))
                 }
                 _ => None,
             },
         },
         RewriteRule {
-            name: "mul_zero_left",
+            name: "add_zero_right",
             verified: true,
-            apply: |node| match node {
-                // 0 * x → 0 (when left operand is literal 0)
-                ENode::BinOp(BinOpKind::Mul, lhs, _) if *lhs == 0 => Some(ENode::Lit(0)),
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Add, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::VReg(*lhs))
+                }
                 _ => None,
             },
         },
+        // 0 * x → 0
+        RewriteRule {
+            name: "mul_zero_left",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, lhs, _) if eg.class_contains_lit(*lhs, 0) => {
+                    Some(ENode::Lit(0))
+                }
+                _ => None,
+            },
+        },
+        RewriteRule {
+            name: "mul_zero_right",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, _, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::Lit(0))
+                }
+                _ => None,
+            },
+        },
+        // x * 1 → x
+        RewriteRule {
+            name: "mul_one_right",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*rhs, 1) => {
+                    Some(ENode::VReg(*lhs))
+                }
+                _ => None,
+            },
+        },
+        RewriteRule {
+            name: "mul_one_left",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*lhs, 1) => {
+                    Some(ENode::VReg(*rhs))
+                }
+                _ => None,
+            },
+        },
+        // x * 2 → x + x  (strength reduction: add is cheaper than mul)
+        // default_cost: Add=100, Mul=200, so extraction picks x+x.
+        RewriteRule {
+            name: "mul_two_to_add",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*rhs, 2) => {
+                    Some(ENode::BinOp(BinOpKind::Add, *lhs, *lhs))
+                }
+                _ => None,
+            },
+        },
+        RewriteRule {
+            name: "mul_two_left_to_add",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*lhs, 2) => {
+                    Some(ENode::BinOp(BinOpKind::Add, *rhs, *rhs))
+                }
+                _ => None,
+            },
+        },
+        // 0 & x → 0
         RewriteRule {
             name: "and_zero_left",
             verified: true,
-            apply: |node| match node {
-                // 0 & x → 0
-                ENode::BinOp(BinOpKind::And, lhs, _) if *lhs == 0 => Some(ENode::Lit(0)),
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::And, lhs, _) if eg.class_contains_lit(*lhs, 0) => {
+                    Some(ENode::Lit(0))
+                }
                 _ => None,
             },
         },
         RewriteRule {
-            name: "or_zero_left",
+            name: "and_zero_right",
             verified: true,
-            apply: |_node| None, // Handled by constant_fold
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::And, _, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::Lit(0))
+                }
+                _ => None,
+            },
         },
+        // x | 0 → x
         RewriteRule {
-            name: "xor_zero_left",
+            name: "or_zero_right",
             verified: true,
-            apply: |_node| None, // Handled by constant_fold
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Or, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::VReg(*lhs))
+                }
+                _ => None,
+            },
+        },
+        // x ^ 0 → x
+        RewriteRule {
+            name: "xor_zero_right",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Xor, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::VReg(*lhs))
+                }
+                _ => None,
+            },
+        },
+        // x >> 0 → x
+        RewriteRule {
+            name: "shr_zero_right",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::ShrL, lhs, rhs)
+                | ENode::BinOp(BinOpKind::ShrA, lhs, rhs)
+                    if eg.class_contains_lit(*rhs, 0) =>
+                {
+                    Some(ENode::VReg(*lhs))
+                }
+                _ => None,
+            },
+        },
+        // x << 0 → x
+        RewriteRule {
+            name: "shl_zero_right",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::BinOp(BinOpKind::Shl, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
+                    Some(ENode::VReg(*lhs))
+                }
+                _ => None,
+            },
         },
     ]
 }

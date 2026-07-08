@@ -102,6 +102,149 @@ impl LatencyTable {
         }
     }
 
+    /// AArch64 (Cortex-A78 / Neoverse-class) latency table.
+    /// Sources: ARM Cortex-A78 Software Optimization Guide, ARM ARM.
+    /// Integer ALU 1-cycle, mul 3-cycle, divide 20-35 cycle non-pipelined.
+    pub fn aarch64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// x86-64 (Intel Golden Cove / AMD Zen 4-class) latency table.
+    /// Sources: Intel SDM Vol 1, AMD PPR for Zen 4. LEA is 1-cycle, MUL 3-cycle,
+    /// IDIV 20-40 cycle non-pipelined. Loads ~5-cycle to L1.
+    pub fn x86_64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 30, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// RISC-V 64 (SiFive U74 / generic RV64GC) latency table.
+    /// Sources: SiFive U74 Manual. MUL 3-cycle, DIV 20-40 cycle.
+    pub fn riscv64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// ARM32 (Cortex-A55 / ARMv7-A class) latency table.
+    pub fn arm32() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 25, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// MIPS64 (MIPS64r6 / I6400-class) latency table.
+    pub fn mips64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 30, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// PowerPC 64 (POWER9-class) latency table.
+    /// Sources: POWER9 User Manual. MUL 4-5 cycle, DIV 24-40 cycle.
+    pub fn ppc64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// LoongArch 64 (LA464 / 3A5000-class) latency table.
+    pub fn loongarch64() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 35, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
+    /// Wasm32 latency table. Wasm is a virtual ISA; these values model a
+    /// typical JIT-compiled execution on a modern host (V8/SpiderMonkey).
+    pub fn wasm32() -> Self {
+        Self {
+            entries: vec![
+                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
+                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
+                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
+                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
+                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
+                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+            ],
+        }
+    }
+
     /// Looks up the latency for a given instruction category.
     /// Returns (latency, throughput, functional_unit).
     /// Defaults to (1, 1, Alu) if not found.
@@ -487,7 +630,7 @@ fn aarch64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::aarch64(),
     }
 }
 
@@ -631,7 +774,7 @@ fn riscv64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::riscv64(),
     }
 }
 
@@ -713,7 +856,7 @@ fn wasm32_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::wasm32(),
     }
 }
 
@@ -857,7 +1000,7 @@ fn loongarch64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::loongarch64(),
     }
 }
 
@@ -971,7 +1114,7 @@ fn x86_64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::x86_64(),
     }
 }
 
@@ -1095,7 +1238,7 @@ fn arm32_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::arm32(),
     }
 }
 
@@ -1245,7 +1388,7 @@ fn mips64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::mips64(),
     }
 }
 
@@ -1439,7 +1582,7 @@ fn ppc64_target_desc() -> TargetDesc {
         registers,
         calling_convention,
         instruction_categories,
-        latency_table: LatencyTable::default_ooo(),
+        latency_table: LatencyTable::ppc64(),
     }
 }
 

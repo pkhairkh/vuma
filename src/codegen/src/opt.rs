@@ -1362,18 +1362,54 @@ pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
         // Build e-graph for this block.
         let mut eg = EGraph::new();
         let mut vreg_to_eclass: HashMap<u32, crate::egraph::EClassId> = HashMap::new();
+        // Reverse map: e-class ID -> the concrete IRValue that originally
+        // populated this e-class. Needed to rebuild concrete instructions
+        // after extraction (extraction returns ENode trees whose leaves are
+        // e-class IDs, not IRValues).
+        let mut eclass_to_value: HashMap<crate::egraph::EClassId, IRValue> = HashMap::new();
 
-        // First pass: add all nodes to the e-graph.
+        // Pre-register all register operands that appear in this block as
+        // their own e-classes, so that unknown registers (parameters, values
+        // from other blocks) get a unique VReg e-class instead of falling
+        // back to Lit(0). The old fallback caused spurious mul_zero/xor_zero
+        // firings on live registers.
+        let mut all_regs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for instr in &block.instructions {
+            for r in instr.used_regs() {
+                all_regs.insert(r);
+            }
+            if let Some(d) = instr.defined_regs().first() {
+                all_regs.insert(*d);
+            }
+        }
+        for r in &all_regs {
+            if !vreg_to_eclass.contains_key(r) {
+                // Assign a unique e-class for this register. We use a synthetic
+                // high VReg id (1_000_000 + register) to avoid collisions with
+                // real BinOp e-class IDs (which are small integers).
+                let synthetic_id = 1_000_000u32 + r;
+                let class = eg.add(ENode::VReg(synthetic_id));
+                vreg_to_eclass.insert(*r, class);
+                eclass_to_value.insert(class, IRValue::Register(*r));
+            }
+        }
+
+        // First pass: add all BinOp nodes to the e-graph.
         for instr in &block.instructions {
             if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
                 let lhs_node = value_to_enode(lhs, &vreg_to_eclass);
                 let rhs_node = value_to_enode(rhs, &vreg_to_eclass);
                 let lhs_id = eg.add(lhs_node);
                 let rhs_id = eg.add(rhs_node);
+                // Record the concrete IRValue for each child e-class so we
+                // can rebuild after extraction.
+                eclass_to_value.entry(lhs_id).or_insert_with(|| lhs.clone());
+                eclass_to_value.entry(rhs_id).or_insert_with(|| rhs.clone());
                 let binop_node = ENode::BinOp(*op, lhs_id, rhs_id);
                 let binop_id = eg.add(binop_node);
                 if let Some(dst_id) = dst.as_register() {
                     vreg_to_eclass.insert(dst_id, binop_id);
+                    eclass_to_value.insert(binop_id, dst.clone());
                 }
             }
         }
@@ -1381,7 +1417,11 @@ pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
         // Apply rewrite rules.
         eg.saturate(&rules, 10);
 
-        // Second pass: extract cheapest form for each BinOp.
+        // Second pass: extract cheapest form for each BinOp and rewrite
+        // the instruction in place. We handle three extraction outcomes:
+        //   1. ENode::Lit(v)        — fold to a constant (lhs=v, rhs=0, op=Add)
+        //   2. ENode::VReg(class)   — replace with the value that defined class
+        //   3. ENode::BinOp(op,l,r) — rewrite op/lhs/rhs using extracted children
         for instr in &mut block.instructions {
             if let IRInstr::BinOp { op, dst, lhs, rhs, .. } = instr {
                 if let Some(dst_id) = dst.as_register() {
@@ -1389,14 +1429,41 @@ pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
                         let best = eg.extract(class_id, &default_cost);
                         match best {
                             ENode::Lit(val) => {
-                                // Replace the BinOp with a constant: change
-                                // lhs to the literal and rhs to 0, op to Add.
-                                // The constant_fold pass will then simplify it.
+                                // Fold to constant: lhs=val, rhs=0, op=Add.
+                                // constant_fold (which runs after) will turn
+                                // this into a Load Immediate.
                                 *lhs = IRValue::Immediate(val);
                                 *rhs = IRValue::Immediate(0);
                                 *op = BinOpKind::Add;
                             }
-                            _ => {}
+                            ENode::VReg(src_class) => {
+                                // The cheapest form of this expression is just
+                                // another value (e.g. x+0 → x extracts to VReg).
+                                // Replace the whole BinOp with a copy of that
+                                // value. Use Add with zero so constant_fold/DCE
+                                // can eliminate it as a copy.
+                                if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                    *lhs = src_val.clone();
+                                    *rhs = IRValue::Immediate(0);
+                                    *op = BinOpKind::Add;
+                                }
+                            }
+                            ENode::BinOp(new_op, lhs_class, rhs_class) => {
+                                // The cheapest form is a different BinOp (e.g.
+                                // x*2 → x+x). Rewrite the instruction's op and
+                                // operands using the concrete values that
+                                // populated the child e-classes.
+                                let new_lhs = eclass_to_value.get(&lhs_class).cloned();
+                                let new_rhs = eclass_to_value.get(&rhs_class).cloned();
+                                if let (Some(new_lhs), Some(new_rhs)) = (new_lhs, new_rhs) {
+                                    *op = new_op;
+                                    *lhs = new_lhs;
+                                    *rhs = new_rhs;
+                                }
+                                // If we couldn't recover concrete values for
+                                // the child e-classes, leave the instruction
+                                // unchanged rather than risk miscompilation.
+                            }
                         }
                     }
                 }
@@ -2300,5 +2367,113 @@ mod working_tests {
             !has_dead_add,
             "dead constant add should have been eliminated"
         );
+    }
+
+    // ---- E-Graph Equality Saturation Tests ----
+    // These prove the equality_saturation pass actually fires and rewrites
+    // instructions (not a no-op). Each test constructs a function with a
+    // known pattern, runs equality_saturation, and asserts the IR changed.
+
+    #[test]
+    fn equality_saturation_folds_xor_self_to_zero() {
+        // v1 = v0 ^ v0  →  should rewrite to  v1 = 0 + 0 (Lit(0) extraction)
+        // The xor_self rule matches because both operands are the same e-class.
+        let mut func = IRFunction::new("test_xor_self");
+        func.params = vec![IRValue::Register(0)];
+        func.param_types = vec![IRType::I64];
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].instructions = vec![IRInstr::BinOp {
+            op: BinOpKind::Xor,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(0),
+            ty: None,
+        }];
+        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        func.results = vec![IRValue::Register(1)];
+        func.result_types = vec![IRType::I64];
+
+        let result = equality_saturation(func);
+
+        // After extraction, the BinOp should have been rewritten to use
+        // Immediate(0) for both operands with op=Add (the Lit extraction arm).
+        let instr = &result.blocks[0].instructions[0];
+        match instr {
+            IRInstr::BinOp { op, lhs, rhs, .. } => {
+                assert_eq!(*op, BinOpKind::Add, "op should be rewritten to Add");
+                assert!(
+                    matches!(lhs, IRValue::Immediate(0)),
+                    "lhs should be Immediate(0), got {:?}",
+                    lhs
+                );
+                assert!(
+                    matches!(rhs, IRValue::Immediate(0)),
+                    "rhs should be Immediate(0), got {:?}",
+                    rhs
+                );
+            }
+            other => panic!("expected BinOp after saturation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn equality_saturation_folds_sub_self_to_zero() {
+        // v1 = v0 - v0  →  0
+        let mut func = IRFunction::new("test_sub_self");
+        func.params = vec![IRValue::Register(0)];
+        func.param_types = vec![IRType::I64];
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].instructions = vec![IRInstr::BinOp {
+            op: BinOpKind::Sub,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(0),
+            ty: None,
+        }];
+        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        func.results = vec![IRValue::Register(1)];
+        func.result_types = vec![IRType::I64];
+
+        let result = equality_saturation(func);
+        let instr = &result.blocks[0].instructions[0];
+        match instr {
+            IRInstr::BinOp { op, lhs, rhs, .. } => {
+                assert_eq!(*op, BinOpKind::Add);
+                assert!(matches!(lhs, IRValue::Immediate(0)));
+                assert!(matches!(rhs, IRValue::Immediate(0)));
+            }
+            other => panic!("expected rewritten BinOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn equality_saturation_leaves_unrelated_binop_unchanged() {
+        // v1 = v0 + 5  →  no rule matches, instruction unchanged
+        // (proves the pass doesn't corrupt non-rewritable code)
+        let mut func = IRFunction::new("test_no_rewrite");
+        func.params = vec![IRValue::Register(0)];
+        func.param_types = vec![IRType::I64];
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].instructions = vec![IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(5),
+            ty: None,
+        }];
+        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        func.results = vec![IRValue::Register(1)];
+        func.result_types = vec![IRType::I64];
+
+        let result = equality_saturation(func);
+        let instr = &result.blocks[0].instructions[0];
+        match instr {
+            IRInstr::BinOp { op, lhs, rhs, .. } => {
+                assert_eq!(*op, BinOpKind::Add, "op should be unchanged");
+                assert!(matches!(lhs, IRValue::Register(0)), "lhs unchanged");
+                assert!(matches!(rhs, IRValue::Immediate(5)), "rhs unchanged");
+            }
+            other => panic!("expected unchanged BinOp, got {:?}", other),
+        }
     }
 }
