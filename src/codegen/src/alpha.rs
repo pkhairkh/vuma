@@ -561,12 +561,15 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
         alloc_offsets.insert(id, current_offset);
     }
 
-    // Reserve 16 bytes for saved RA + FP at the top of the frame.
-    current_offset -= 16;
-    let save_area_offset = current_offset; // saved RA at FP + save_area_offset
-    let frame_size = ((-current_offset as i64 + 15) & !15) as usize;
-    let lr_save_off = save_area_offset as i16;
-    let fp_save_off = (save_area_offset + 8) as i16;
+    // Reserve 16 bytes for saved RA + FP at the TOP of the frame
+    // (just below the caller's SP). These are at POSITIVE offsets from
+    // SP after the prologue: RA at SP + (frame_size - 16), FP at SP + (frame_size - 8).
+    // The old code used negative offsets (save_area_offset), which placed
+    // RA/FP BELOW the stack frame — writing to unallocated memory.
+    let vreg_area_size = (-current_offset) as usize;
+    let frame_size = ((vreg_area_size + 16 + 15) & !15) as usize;
+    let lr_save_off = (frame_size - 16) as i16;  // RA at top of frame
+    let fp_save_off = (frame_size - 8) as i16;   // FP at top of frame
 
     // ── Phase 2: Build the phi-map ──
     let _phi_map = func.build_phi_map();
