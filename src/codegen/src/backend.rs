@@ -435,6 +435,21 @@ pub trait TargetInfo: Send + Sync + 'static {
 
     /// Binary format produced by this backend.
     fn output_format(&self) -> OutputFormat;
+
+    // === Scheduling (Wave 10) ===
+
+    /// Returns the instruction latency table for this target.
+    ///
+    /// Used by the instruction scheduler (Wave 5) and the e-graph cost
+    /// function (Wave 10) to make per-ISA optimization decisions.
+    ///
+    /// Default implementation returns `LatencyTable::default_ooo()` (a
+    /// conservative modern OoO profile). Each backend should override
+    /// this to return its ISA-specific table from
+    /// `vuma_codegen::target_desc::LatencyTable::<isa>()`.
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::default_ooo()
+    }
 }
 
 // ---------------------------------------------------------------------------
