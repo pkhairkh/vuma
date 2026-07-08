@@ -34,6 +34,8 @@
 //! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
+// Wave 9: parallel register allocation across functions.
+use rayon::prelude::*;
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
@@ -4945,17 +4947,29 @@ pub fn compile_with_path(
         .sum();
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 9: Register Allocation ──────────────────────────────────
+    // ── Stage 9: Register Allocation (parallel across functions) ──────
+    // Wave 9: Each function's register allocation is independent, so we
+    // parallelize across CPU cores using rayon. This gives a speedup
+    // proportional to core count for programs with multiple functions.
     let t = Instant::now();
     let allocator = LinearScanAllocator::new();
+    // Parallel: map each function to its allocation result, then collect.
+    // Errors are collected alongside successes so we can report all of them.
+    let par_results: Vec<(String, Result<AllocationResult, String>)> = ir_program
+        .functions
+        .par_iter()
+        .map(|func| {
+            let r = allocator.allocate_function(func);
+            let r = r.map_err(|e| format!("{}: {}", func.name, e));
+            (func.name.clone(), r)
+        })
+        .collect();
     let mut regalloc_results = Vec::new();
-    for func in &ir_program.functions {
-        match allocator.allocate_function(func) {
-            Ok(result) => regalloc_results.push(result),
+    for (name, result) in par_results {
+        match result {
+            Ok(r) => regalloc_results.push(r),
             Err(e) => {
-                errors.push(VumaError::RegisterAlloc {
-                    message: format!("{}: {}", func.name, e),
-                });
+                errors.push(VumaError::RegisterAlloc { message: e });
                 if config.stop_on_first_error {
                     return Err(errors);
                 }
@@ -5338,18 +5352,26 @@ pub fn compile_with_recovery(
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
     last_completed = Some(PipelineStage::IrLowering);
 
-    // ── Stage 9: Register Allocation ──────────────────────────────────
+    // ── Stage 9: Register Allocation (parallel across functions) ──────
+    // Wave 9: parallelize per-function register allocation with rayon.
     let t = Instant::now();
     let allocator = LinearScanAllocator::new();
+    let par_results: Vec<(String, Result<AllocationResult, String>)> = ir_program
+        .functions
+        .par_iter()
+        .map(|func| {
+            let r = allocator.allocate_function(func);
+            let r = r.map_err(|e| format!("{}: {}", func.name, e));
+            (func.name.clone(), r)
+        })
+        .collect();
     let mut regalloc_results = Vec::new();
     let mut regalloc_failed = false;
-    for func in &ir_program.functions {
-        match allocator.allocate_function(func) {
-            Ok(result) => regalloc_results.push(result),
+    for (_name, result) in par_results {
+        match result {
+            Ok(r) => regalloc_results.push(r),
             Err(e) => {
-                errors.push(VumaError::RegisterAlloc {
-                    message: format!("{}: {}", func.name, e),
-                });
+                errors.push(VumaError::RegisterAlloc { message: e });
                 regalloc_failed = true;
             }
         }
