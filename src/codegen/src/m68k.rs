@@ -1468,6 +1468,10 @@ impl TargetInfo for M68kTargetInfo {
     fn instruction_alignment(&self) -> usize { 2 }
     fn instruction_width_range(&self) -> (usize, usize) { (2, 11) }
     fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::m68k()
+    }
 }
 
 impl Backend for M68kBackend {

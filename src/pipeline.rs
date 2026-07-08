@@ -4931,11 +4931,20 @@ pub fn compile_with_path(
     };
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
-    // Runs vuma_codegen::opt::run_optimizations on the lowered IRProgram
-    // before register allocation. Gated by opt level: O0 skips.
+    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
+    // The backend is determined from the emit config (which derives from
+    // CompileConfig). This means the e-graph cost function and scheduler
+    // make decisions based on the real target's instruction latencies, not
+    // a generic default.
     if !matches!(config.opt_level, OptLevel::O0) {
         let topt = Instant::now();
-        ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+        let emit_config = config.emit_config();
+        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
+            backend.target_info().latency_table()
+        } else {
+            vuma_codegen::target_desc::LatencyTable::default_ooo()
+        };
+        ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
@@ -5337,9 +5346,16 @@ pub fn compile_with_recovery(
     };
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
+    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
     if !matches!(config.opt_level, OptLevel::O0) {
         let topt = Instant::now();
-        ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+        let emit_config = config.emit_config();
+        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
+            backend.target_info().latency_table()
+        } else {
+            vuma_codegen::target_desc::LatencyTable::default_ooo()
+        };
+        ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 

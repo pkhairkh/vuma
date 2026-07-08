@@ -722,6 +722,10 @@ impl TargetInfo for AArch64TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::aarch64()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +804,10 @@ impl TargetInfo for RiscV64TargetInfo {
     } // RVC + 32-bit
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
+    }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::riscv64()
     }
 }
 
@@ -880,6 +888,10 @@ impl TargetInfo for RiscV32TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf32
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::riscv32()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +970,10 @@ impl TargetInfo for Wasm32TargetInfo {
     }
     fn output_format(&self) -> OutputFormat {
         OutputFormat::WasmBinary
+    }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::wasm32()
     }
 }
 
@@ -1038,6 +1054,10 @@ impl TargetInfo for LoongArch64TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::loongarch64()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,6 +1137,10 @@ impl TargetInfo for X86_64TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::x86_64()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1174,10 @@ impl TargetInfo for X86_32TargetInfo {
     fn instruction_alignment(&self) -> usize { 1 }
     fn instruction_width_range(&self) -> (usize, usize) { (1, 15) }
     fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::x86_32()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,6 +1263,10 @@ impl TargetInfo for Arm32TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf32
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::arm32()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1314,6 +1346,10 @@ impl TargetInfo for Mips64TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::mips64()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,6 +1428,10 @@ impl TargetInfo for PowerPC64TargetInfo {
     }
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
+    }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::ppc64()
     }
 }
 
