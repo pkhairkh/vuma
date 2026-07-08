@@ -2200,6 +2200,10 @@ impl TargetInfo for S390XTargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+
+    fn latency_table(&self) -> crate::target_desc::LatencyTable {
+        crate::target_desc::LatencyTable::s390x()
+    }
 }
 
 impl Backend for S390XBackend {
