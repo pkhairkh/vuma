@@ -624,46 +624,18 @@ impl Backend for HppaBackend {
             }
         }
 
-        // PA-RISC stack grows DOWN (SP decreases).  Frame layout (ALL slots
-        // at POSITIVE offsets from FP, inside the allocated frame):
-        //   [FP + 0        ]   first vreg slot   (bottom of frame)
-        //   [FP + 4        ]   vreg slot 1
-        //   ...
-        //   [FP + vreg_area]   alloc data
-        //   ...
-        //   [FP + frame - 24]  saved old FP
-        //   [FP + frame - 20]  saved RP          (top of frame)
-        //
-        // The prologue saves RP/FP at SP-20/SP-24 BEFORE allocating the frame
-        // (i.e., at caller_SP - 20/24).  After SUB SP, frame_size, SP, the new
-        // SP = caller_SP - frame_size.  RP/FP are at new_SP + frame_size - 20
-        // and new_SP + frame_size - 24 (positive offsets from new SP).
-        // Vregs are at positive offsets from FP (= new SP + frame_size, since
-        // FP = old SP = new SP + frame_size... wait, FP = SP before SUB, so
-        // FP = caller_SP = new_SP + frame_size).
-        //
-        // After prologue: FP = caller_SP, SP = caller_SP - frame_size.
-        // Vregs at FP + 0, +4, ... are in [FP, FP + vreg_area) which is
-        // [caller_SP, caller_SP + vreg_area) — ABOVE the old SP, in the
-        // CALLER's frame!  That's wrong.
-        //
-        // Correct layout: FP should = new SP (after SUB), and vregs at
-        // positive offsets from new SP.  RP/FP saves at the top of the frame
-        // (new_SP + frame_size - 20/24).
-        //
-        // Revised prologue:
-        //   1. SUB SP, frame_size, SP      (allocate frame)
-        //   2. STW R2, frame-20(SP)        (save RP at top of new frame)
-        //   3. STW R3, frame-24(SP)        (save old FP)
-        //   4. COPY SP, R3                 (FP = new SP)
-        // Vregs at FP + 0, +4, ... (inside [new_SP, new_SP + frame_size)).
+        // PA-RISC stack grows UP. FP=R3 points to the base of the frame.
+        // Locals are at NEGATIVE offsets from FP (below FP).
+        // vreg stack slots start at -28 (below RP at -20 and FP at -24).
+        // The prologue saves RP at SP-20 and old FP at SP-24, so vregs
+        // must not overlap with those save areas.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = 0; // vregs at FP+0, growing UP
+        let mut current_offset: i32 = -28;
         let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
         vreg_ids.sort();
         for &id in &vreg_ids {
             vreg_stack_slots.insert(id, current_offset);
-            current_offset += 4;
+            current_offset -= 4;
         }
 
         // Alloc regions after vreg slots
@@ -672,32 +644,27 @@ impl Backend for HppaBackend {
         alloc_vreg_ids.sort();
         for &id in &alloc_vreg_ids {
             let size = alloc_sizes[&id];
-            current_offset = (current_offset + 15) & !15;
+            current_offset -= size;
+            current_offset &= !15;
             alloc_offsets.insert(id, current_offset);
-            current_offset += size;
         }
 
-        // Reserve 32 bytes at the top of the frame for RP/FP save area
-        // (PA-RISC ABI uses -20/-24 from old SP, we use frame-20/frame-24).
-        let vreg_area_size = current_offset as usize;
-        let frame_size = ((vreg_area_size + 32 + 63) & !63) as usize;
-        let rp_save_off = (frame_size - 20) as i32;
-        let fp_save_off = (frame_size - 24) as i32;
+        let frame_size = (((-current_offset) as usize + 63) & !63) as usize;
 
         // ── Phase 2: Emit prologue ──
         let mut code: Vec<u8> = Vec::new();
         let mut relocations: Vec<RelocationEntry> = Vec::new();
 
-        // PA-RISC prologue (revised — allocate frame first, then save):
-        // 1. SUB SP, frame_size, SP — allocate frame
-        // 2. STW R2, rp_save_off(SP) — save RP at top of frame
-        // 3. STW R3, fp_save_off(SP) — save old FP
-        // 4. COPY SP, R3 — FP = new SP
+        // PA-RISC prologue:
+        // 1. STW R2, -20(SP) — save RP
+        // 2. STW R3, -24(SP) — save old FP (callee-saved)
+        // 3. COPY SP, R3 — FP = SP
+        // 4. SUB SP, frame_size, SP — SP -= frame_size
+        code.extend_from_slice(&encode_stw(R2, R30, -20));  // save RP at SP-20
+        code.extend_from_slice(&encode_stw(R3, R30, -24));  // save old FP at SP-24
+        code.extend_from_slice(&encode_copy(R30, R3));      // FP = SP
         code.extend(ss_load_imm(S0, frame_size as i64));
         code.extend_from_slice(&encode_sub(R30, S0, R30));  // SP -= frame_size
-        code.extend_from_slice(&encode_stw(R2, R30, rp_save_off as i16));  // save RP
-        code.extend_from_slice(&encode_stw(R3, R30, fp_save_off as i16));  // save old FP
-        code.extend_from_slice(&encode_copy(R30, R3));      // FP = SP
 
         // Save incoming args. PA-RISC arg regs: R26, R25, R24, R23
         let arg_regs = [R26, R25, R24, R23];
@@ -1346,12 +1313,9 @@ impl Backend for HppaBackend {
                     if let Some(first_val) = vals.first() {
                         code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
                     }
-                    // Epilogue: deallocate frame, restore RP/FP, return.
-                    // SP += frame_size; then RP at SP-20, FP at SP-24.
-                    code.extend(ss_load_imm(S0, frame_size as i64));
-                    code.extend_from_slice(&encode_add(R30, S0, R30));  // SP += frame_size
-                    code.extend_from_slice(&encode_ldw(R30, -20, R2));  // restore RP
-                    code.extend_from_slice(&encode_ldw(R30, -24, R3));  // restore old FP
+                    code.extend_from_slice(&encode_copy(R3, R30)); // SP = FP
+                    code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from SP-20
+                    code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from SP-24
                     code.extend_from_slice(&encode_bv(R2, R0));
                     code.extend_from_slice(&encode_nop()); // delay slot
                 }
