@@ -45,6 +45,17 @@ pub enum ENode {
 /// An e-class ID.
 pub type EClassId = u32;
 
+/// A single rewrite step in the provenance history of an e-class.
+#[derive(Debug, Clone)]
+pub struct RewriteStep {
+    /// Name of the rule that was applied.
+    pub rule_name: String,
+    /// The e-node that was matched (the pattern).
+    pub source: ENode,
+    /// The e-node that replaced it (the replacement).
+    pub replacement: ENode,
+}
+
 /// An e-graph.
 pub struct EGraph {
     /// Map from e-node to its e-class ID.
@@ -55,6 +66,12 @@ pub struct EGraph {
     pub parents: HashMap<EClassId, EClassId>,
     /// Next e-class ID.
     next_id: EClassId,
+    /// Provenance map (Wave 16): for each e-class, the sequence of rewrite
+    /// steps that were applied to it. This enables mapping an optimized
+    /// instruction back to its original source form — the e-graph's
+    /// union-find structure IS the provenance graph, and this map records
+    /// the rewrite history that produced each equivalence.
+    pub provenance: HashMap<EClassId, Vec<RewriteStep>>,
 }
 
 impl EGraph {
@@ -64,6 +81,7 @@ impl EGraph {
             classes: HashMap::new(),
             parents: HashMap::new(),
             next_id: 0,
+            provenance: HashMap::new(),
         }
     }
 
@@ -145,9 +163,12 @@ impl EGraph {
                 for node in &nodes {
                     for rule in rules {
                         if let Some(replacement) = (rule.apply)(node, self) {
-                            let repl_id = self.add(replacement);
+                            let repl_id = self.add(replacement.clone());
                             let old_id = self.find(class_id);
                             if repl_id != old_id {
+                                // Wave 16: Record provenance — track that
+                                // `rule.name` transformed `node` into `replacement`.
+                                self.record_provenance(canonical, rule.name, node.clone(), replacement);
                                 self.merge(old_id, repl_id);
                                 changed = true;
                             }
@@ -159,6 +180,42 @@ impl EGraph {
                 break;
             }
         }
+    }
+
+    /// Record a provenance step for an e-class (Wave 16).
+    fn record_provenance(
+        &mut self,
+        class_id: EClassId,
+        rule_name: &str,
+        source: ENode,
+        replacement: ENode,
+    ) {
+        self.provenance
+            .entry(self.find(class_id))
+            .or_default()
+            .push(RewriteStep {
+                rule_name: rule_name.to_string(),
+                source,
+                replacement,
+            });
+    }
+
+    /// Get the provenance (rewrite history) for an e-class (Wave 16).
+    ///
+    /// Returns the sequence of rewrite steps that were applied to produce
+    /// the equivalences in this e-class. This enables mapping an optimized
+    /// instruction back to its original source form for debug-info fidelity.
+    pub fn get_provenance(&self, class_id: EClassId) -> &[RewriteStep] {
+        let canonical = self.find(class_id);
+        self.provenance
+            .get(&canonical)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Returns true if any rewrites were applied to this e-class.
+    pub fn has_provenance(&self, class_id: EClassId) -> bool {
+        !self.get_provenance(class_id).is_empty()
     }
 
     /// Extract the cheapest expression from an e-class.
@@ -515,6 +572,51 @@ impl ProfileData {
     /// 0 = cold/unknown, higher = hotter.
     pub fn vreg_hotness(&self, id: EClassId) -> u32 {
         self.hotness.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Load profile data from a JSON string.
+    ///
+    /// Format: `{"hotness": {"0": 100, "1": 50, ...}}` where keys are
+    /// e-class/vreg IDs (as strings, since JSON object keys are strings)
+    /// and values are execution counts.
+    ///
+    /// This is the Wave 12 PGO loading mechanism. Profile files are
+    /// produced by instrumented runs and consumed by the optimizer to
+    /// bias e-graph extraction toward hot-path optimization.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let v: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| format!("invalid profile JSON: {}", e))?;
+        let hotness_map = v.get("hotness")
+            .and_then(|h| h.as_object())
+            .ok_or("missing 'hotness' object")?;
+        let mut hotness = std::collections::HashMap::new();
+        for (key, val) in hotness_map {
+            let id: EClassId = key.parse()
+                .map_err(|e| format!("invalid vreg id '{}': {}", key, e))?;
+            let count = val.as_u64()
+                .ok_or(format!("hotness for {} is not a number", key))?;
+            hotness.insert(id, count as u32);
+        }
+        Ok(Self { hotness })
+    }
+
+    /// Serialize profile data to a JSON string.
+    pub fn to_json(&self) -> String {
+        let mut entries: Vec<String> = self.hotness.iter()
+            .map(|(k, v)| format!("\"{}\": {}", k, v))
+            .collect();
+        entries.sort();
+        format!("{{\"hotness\": {{{}}}}}", entries.join(", "))
+    }
+
+    /// Record a vreg as hot (increment its execution count).
+    pub fn record_hot(&mut self, vreg: EClassId) {
+        *self.hotness.entry(vreg).or_insert(0) += 1;
+    }
+
+    /// Returns true if any profile data is present.
+    pub fn has_data(&self) -> bool {
+        !self.hotness.is_empty()
     }
 }
 

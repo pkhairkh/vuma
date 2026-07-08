@@ -1111,6 +1111,25 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
     run_optimizations_with_target(program, &crate::target_desc::LatencyTable::default_ooo())
 }
 
+/// Run optimizations with PGO (profile-guided optimization) data.
+///
+/// When profile data is available (from an instrumented run), the e-graph
+/// cost function biases extraction toward hot-path optimization: hot
+/// expressions get lower cost (prefer optimized form), cold expressions
+/// get higher cost (accept code-size reduction). This is Wave 12.
+///
+/// If the profile is empty, falls back to `run_optimizations_with_target`.
+pub fn run_optimizations_with_profile(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    profile: &crate::egraph::ProfileData,
+) -> IRProgram {
+    if !profile.has_data() {
+        return run_optimizations_with_target(program, latency_table);
+    }
+    run_optimizations_inner(program, latency_table, Some(profile))
+}
+
 /// Run optimizations with a target-specific latency table.
 ///
 /// The latency table is used by the e-graph cost function (Wave 10) to
@@ -1121,8 +1140,19 @@ pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
 /// Callers should pass `backend.target_info().latency_table()` so the
 /// e-graph picks the cheapest form for the actual target.
 pub fn run_optimizations_with_target(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+) -> IRProgram {
+    run_optimizations_inner(program, latency_table, None)
+}
+
+/// Inner optimization driver shared by `run_optimizations_with_target` and
+/// `run_optimizations_with_profile`. The optional profile (Wave 12) switches
+/// the e-graph cost function from `target_cost_fn` to `pgo_cost_fn`.
+fn run_optimizations_inner(
     mut program: IRProgram,
     latency_table: &crate::target_desc::LatencyTable,
+    profile: Option<&crate::egraph::ProfileData>,
 ) -> IRProgram {
     // Build a function lookup table (cloned to avoid borrow conflicts when
     // mutating program.functions).
@@ -1134,8 +1164,12 @@ pub fn run_optimizations_with_target(
     let func_refs: HashMap<String, &IRFunction> =
         func_map.iter().map(|(k, v)| (k.clone(), v)).collect();
 
-    // Build the per-ISA cost function for e-graph extraction (Wave 10).
-    let cost_fn = crate::egraph::target_cost_fn(latency_table);
+    // Build the cost function for e-graph extraction.
+    // Wave 10: per-ISA target cost. Wave 12: PGO-augmented cost if profile available.
+    let cost_fn: Box<dyn Fn(&crate::egraph::ENode) -> usize> = match profile {
+        Some(prof) => crate::egraph::pgo_cost_fn(latency_table, prof),
+        None => crate::egraph::target_cost_fn(latency_table),
+    };
 
     // ── Per-function optimization passes ──
     for i in 0..program.functions.len() {
