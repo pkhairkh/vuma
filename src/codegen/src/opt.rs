@@ -590,7 +590,17 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
             let folded = try_fold_instruction(&instr);
             if let Some((dst_id, result)) = folded {
                 subst.insert(dst_id, IRValue::Immediate(result));
-                // Instruction is eliminated; its dst is now a known constant.
+                // Don't eliminate the instruction — replace it with a trivial
+                // constant-defining instruction (dst = result + 0). This keeps
+                // the definition alive for cross-block references. The old code
+                // eliminated the instruction, which left register dst undefined
+                // in other blocks that referenced it.
+                new_instrs.push(IRInstr::Add {
+                    dst: IRValue::Register(dst_id),
+                    lhs: IRValue::Immediate(result),
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
                 continue;
             }
 
@@ -813,9 +823,78 @@ pub fn cse(mut func: IRFunction) -> IRFunction {
 /// caller block is split at the call site, the callee's blocks (with
 /// remapped vregs and labels) are inserted in between, and `Return`
 /// terminators are redirected to the continuation block.
+/// Per-instruction inlining cost. Models the real cost of executing an
+/// instruction after inlining, so the inliner can make informed decisions.
+///
+/// LLVM's inliner uses a similar per-instruction cost model with negative
+/// costs for instructions that disappear after inlining (constant-folded
+/// arguments, dead returns).
+fn inline_cost(instr: &IRInstr) -> u32 {
+    match instr {
+        // Cheap: 1-cycle ALU ops
+        IRInstr::Add { .. } | IRInstr::Sub { .. } | IRInstr::BinOp { .. } => 1,
+        IRInstr::Cmp { .. } => 1,
+        IRInstr::Cast { .. } | IRInstr::Offset { .. } => 1,
+        IRInstr::Phi { .. } => 0, // Phi is free (resolved by regalloc)
+        IRInstr::Select { .. } => 2,
+        // Medium: memory ops (may stall)
+        IRInstr::Load { .. } => 3,
+        IRInstr::Store { .. } => 3,
+        IRInstr::Alloc { .. } => 5,
+        IRInstr::Free { .. } => 5,
+        // Expensive: multiply
+        IRInstr::Mul { .. } => 5,
+        // Very expensive: divide (20-40 cycles on most ISAs)
+        IRInstr::Div { .. } => 20,
+        // Calls: don't inline functions that contain calls (unless very small)
+        IRInstr::Call { .. } => 40,
+        // Atomics: expensive and side-effecting
+        IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } => 30,
+        // Control flow: moderate cost
+        IRInstr::Branch { .. } | IRInstr::CondBranch { .. } => 2,
+        IRInstr::Ret { .. } => 1,
+        IRInstr::GetAddress { .. } => 1,
+        _ => 3, // Unknown: moderate cost
+    }
+}
+
+/// Compute the total inlining cost of a function, with savings for
+/// constant arguments that will be folded after inlining.
+fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
+    let mut cost: u32 = 0;
+    for block in &callee.blocks {
+        for instr in &block.instructions {
+            cost = cost.saturating_add(inline_cost(instr));
+        }
+    }
+    // Savings: each constant argument reduces cost (will be constant-folded).
+    // This models the fact that `fn add(x, y) { x + y }` called with
+    // `add(3, 4)` becomes `3 + 4` which folds to `7` — the entire function
+    // disappears. We subtract 3 per constant arg (the cost of the Add that
+    // would have used it).
+    let const_args = args.iter().filter(|a| matches!(a, IRValue::Immediate(_))).count();
+    cost.saturating_sub(const_args as u32 * 3)
+}
+
+/// Inline threshold by optimization level.
+/// O2: 8 (conservative — matches old instruction_count<=5 safety level,
+/// but with real per-instruction costs so Div/Call are weighted higher).
+/// O3: 20 (more aggressive, but still safe).
+const INLINE_THRESHOLD_O2: u32 = 8;
+const INLINE_THRESHOLD_O3: u32 = 20;
+
 pub fn inline_small(
     mut func: IRFunction,
     program_funcs: &HashMap<String, &IRFunction>,
+) -> IRFunction {
+    inline_with_threshold(func, program_funcs, INLINE_THRESHOLD_O2)
+}
+
+/// Inlining with a caller-specified cost threshold.
+pub fn inline_with_threshold(
+    mut func: IRFunction,
+    program_funcs: &HashMap<String, &IRFunction>,
+    threshold: u32,
 ) -> IRFunction {
     let mut vreg_counter = max_vreg_id(&func) + 1;
     let mut inline_id: u32 = 0;
@@ -838,6 +917,9 @@ pub fn inline_small(
                     continue;
                 }
                 if let Some(callee) = program_funcs.get(callee_name) {
+                    // Conservative: match old safe behavior exactly.
+                    // The cost model infrastructure exists for future use
+                    // once the inliner's multi-block soundness is fixed.
                     if callee.instruction_count() <= 5 {
                         call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
                         break;
@@ -1186,7 +1268,7 @@ fn run_optimizations_inner(
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
         let f = constant_fold(f);
         let f = cse(f);
-        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)
+        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)  // e-graph pass (per-ISA cost)
         // Wave 8: Compute IVE provenance FIRST, then pass it to DSE.
         // The old code ran DSE before mark_ive, so the provenance was never
         // consumed. Now mark_ive returns the provenance map explicitly
@@ -1695,23 +1777,25 @@ pub fn equality_saturation_with_cost(
                         }
                     }
                 }
-                // For Add/Sub/Mul/Div: apply Lit and VReg extractions (operand
-                // substitution). BinOp extractions that change the op can't be
-                // applied (the variant IS the op). This still catches x-x->0,
-                // x^x->0, x+0->x, x*0->0, x*1->x etc. when the instruction variant
-                // matches the rule's op.
+                // For Add/Sub: apply Lit AND VReg extractions.
+                // VReg extraction sets rhs=0, which is sound for Add (x+0=x)
+                // and Sub (x-0=x).
                 IRInstr::Add { dst, lhs, rhs, .. } => {
                     if let Some(dst_id) = dst.as_register() {
                         if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
                             let best = eg.extract(class_id, cost_fn);
-                            if let ENode::Lit(val) = best {
-                                *lhs = IRValue::Immediate(val);
-                                *rhs = IRValue::Immediate(0);
-                            } else if let ENode::VReg(src_class) = best {
-                                if let Some(src_val) = eclass_to_value.get(&src_class) {
-                                    *lhs = src_val.clone();
+                            match best {
+                                ENode::Lit(val) => {
+                                    *lhs = IRValue::Immediate(val);
                                     *rhs = IRValue::Immediate(0);
                                 }
+                                ENode::VReg(src_class) => {
+                                    if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                        *lhs = src_val.clone();
+                                        *rhs = IRValue::Immediate(0);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1720,30 +1804,33 @@ pub fn equality_saturation_with_cost(
                     if let Some(dst_id) = dst.as_register() {
                         if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
                             let best = eg.extract(class_id, cost_fn);
-                            if let ENode::Lit(val) = best {
-                                *lhs = IRValue::Immediate(val);
-                                *rhs = IRValue::Immediate(0);
-                            } else if let ENode::VReg(src_class) = best {
-                                if let Some(src_val) = eclass_to_value.get(&src_class) {
-                                    *lhs = src_val.clone();
+                            match best {
+                                ENode::Lit(val) => {
+                                    *lhs = IRValue::Immediate(val);
                                     *rhs = IRValue::Immediate(0);
                                 }
+                                ENode::VReg(src_class) => {
+                                    if let Some(src_val) = eclass_to_value.get(&src_class) {
+                                        *lhs = src_val.clone();
+                                        *rhs = IRValue::Immediate(0);
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
+                // For Mul/Div: apply ONLY Lit extraction.
+                // VReg extraction sets rhs=0, which is UNSOUND for Mul (x*0=0,
+                // not x) and Div (x/0 traps). BinOp extraction that changes
+                // the op can't be applied (the variant IS the op).
                 IRInstr::Mul { dst, lhs, rhs, .. } => {
                     if let Some(dst_id) = dst.as_register() {
                         if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
                             let best = eg.extract(class_id, cost_fn);
                             if let ENode::Lit(val) = best {
                                 *lhs = IRValue::Immediate(val);
-                                *rhs = IRValue::Immediate(0);
-                            } else if let ENode::VReg(src_class) = best {
-                                if let Some(src_val) = eclass_to_value.get(&src_class) {
-                                    *lhs = src_val.clone();
-                                    *rhs = IRValue::Immediate(0);
-                                }
+                                *rhs = IRValue::Immediate(1); // val*1=val (NOT 0!)
                             }
                         }
                     }
@@ -1754,12 +1841,7 @@ pub fn equality_saturation_with_cost(
                             let best = eg.extract(class_id, cost_fn);
                             if let ENode::Lit(val) = best {
                                 *lhs = IRValue::Immediate(val);
-                                *rhs = IRValue::Immediate(0);
-                            } else if let ENode::VReg(src_class) = best {
-                                if let Some(src_val) = eclass_to_value.get(&src_class) {
-                                    *lhs = src_val.clone();
-                                    *rhs = IRValue::Immediate(0);
-                                }
+                                *rhs = IRValue::Immediate(1); // val/1=val (NOT 0!)
                             }
                         }
                     }
