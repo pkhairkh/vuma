@@ -7130,15 +7130,13 @@ pub fn flatten_expr(
             }
             // `cur` is now the innermost non-Deref expression (typically a
             // Var holding a pointer, or an Offset/Index computing an address).
+            // Check the AST expression for stride pattern BEFORE flattening.
+            let outer_load_ty = infer_load_type_from_ast_expr(cur);
             let mut current_addr = flatten_expr(cur, stmts, ctx);
-            // Emit `chain_depth` Load statements from innermost to outermost.
-            // The OUTERMOST load (i == 0, emitted last) reads the final byte
-            // value (ty: None → defaults to U8). All INNER loads (i > 0) read
-            // pointer-width (U64) so intermediate addresses aren't truncated.
             for i in (0..chain_depth).rev() {
                 let dst = ctx.alloc_temp();
                 let ty = if i == 0 {
-                    None
+                    outer_load_ty.clone()
                 } else {
                     Some(vuma_codegen::ir::IRType::U64)
                 };
@@ -7293,6 +7291,43 @@ pub fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
 
 /// Convert a single parser statement into zero or more codegen SCG statements.
 /// Uses `flatten_expr` to decompose nested expressions into three-address code.
+/// Infer the load type from an AST expression (before flattening).
+///
+/// Checks for the pattern `base + idx * stride` in the AST and infers:
+/// - stride 4 → U32
+/// - stride 8 → U64
+fn infer_load_type_from_ast_expr(expr: &vuma_parser::ast::Expr) -> Option<vuma_codegen::ir::IRType> {
+    use vuma_parser::ast::{Expr, BinOp, Lit};
+    if let Expr::BinOp { op: BinOp::Add, lhs: _, rhs, .. } = expr {
+        if let Expr::BinOp { op: BinOp::Mul, lhs: _, rhs: mul_rhs, .. } = rhs.as_ref() {
+            if let Expr::Lit { value: Lit::Int(stride), .. } = mul_rhs.as_ref() {
+                return match *stride {
+                    8 => Some(vuma_codegen::ir::IRType::U64),
+                    4 => Some(vuma_codegen::ir::IRType::U32),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Infer the load type from a codegen SCG expression (after flattening).
+fn infer_load_type_from_ptr(ptr: &ScgExpr) -> Option<vuma_codegen::ir::IRType> {
+    if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+            if let ScgExpr::Int(stride) = rhs.as_ref() {
+                return match *stride {
+                    8 => Some(vuma_codegen::ir::IRType::U64),
+                    4 => Some(vuma_codegen::ir::IRType::U32),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
 pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
     use vuma_parser::ast::Stmt as PStmt;
 
@@ -7446,11 +7481,20 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     flatten_expr(expr, &mut stmts, ctx)
                 };
                 let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+                // Infer store type from the address expression.
+                // For single deref (*ptr = val), check the inner expr for stride.
+                let store_ty = if !matches!(expr.as_ref(), vuma_parser::ast::Expr::Deref { .. }) {
+                    // Single deref: *expr = val. Check expr for stride pattern.
+                    infer_load_type_from_ast_expr(expr.as_ref())
+                } else {
+                    // Chained deref: inner loads are pointer-width (U64).
+                    Some(vuma_codegen::ir::IRType::U64)
+                };
                 stmts.push(ScgStatement::Access(AccessNode::Store {
                     ptr,
                     offset: None,
                     value,
-                    ty: None,
+                    ty: store_ty,
                 }));
                 return stmts;
             }
@@ -7785,11 +7829,16 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             let mut stmts = Vec::new();
             let ptr_expr = flatten_expr(&access_stmt.expr, &mut stmts, ctx);
             let temp = ctx.alloc_temp();
+            // Infer load type from pointer expression: if ptr = base + idx * stride,
+            // infer U32 for stride=4, U64 for stride=8. This is critical for
+            // big-endian backends where a U8 load of a multi-byte value reads
+            // the wrong byte (MSB instead of LSB).
+            let load_ty = infer_load_type_from_ptr(&ptr_expr);
             stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: temp,
                 ptr: ptr_expr,
                 offset: None,
-                ty: None,
+                ty: load_ty,
             }));
             stmts
         }
