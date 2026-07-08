@@ -154,6 +154,16 @@ enum IsaArg {
     Sparc64,
     #[value(name = "s390x")]
     S390x,
+    #[value(name = "alpha")]
+    Alpha,
+    #[value(name = "hppa")]
+    Hppa,
+    #[value(name = "m68k")]
+    M68k,
+    #[value(name = "riscv32")]
+    Riscv32,
+    #[value(name = "x86_32")]
+    X86_32,
 }
 
 impl From<IsaArg> for BackendKind {
@@ -170,6 +180,11 @@ impl From<IsaArg> for BackendKind {
             IsaArg::Ppc64le => BackendKind::PowerPC64LE,
             IsaArg::Sparc64 => BackendKind::Sparc64,
             IsaArg::S390x => BackendKind::S390X,
+            IsaArg::Alpha => BackendKind::Alpha,
+            IsaArg::Hppa => BackendKind::Hppa,
+            IsaArg::M68k => BackendKind::M68k,
+            IsaArg::Riscv32 => BackendKind::RiscV32,
+            IsaArg::X86_32 => BackendKind::X86_32,
         }
     }
 }
