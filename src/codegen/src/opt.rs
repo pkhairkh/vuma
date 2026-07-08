@@ -2486,6 +2486,7 @@ mod working_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(2),
+            ty: None,
         }];
         loop_header.terminator = IRTerminator::Branch {
             cond: IRValue::Immediate(1),
@@ -2535,6 +2536,7 @@ mod working_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(0),
+            ty: None,
         }];
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         callee.results = vec![IRValue::Register(1)];
@@ -2548,6 +2550,7 @@ mod working_tests {
                 dst: IRValue::Register(0),
                 lhs: IRValue::Immediate(1),
                 rhs: IRValue::Immediate(2),
+                ty: None,
             },
             IRInstr::Call {
                 dst: Some(IRValue::Register(1)),
