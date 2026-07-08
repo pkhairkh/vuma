@@ -1116,9 +1116,28 @@ impl LinearScanAllocator {
         let computer = LiveRangeComputer::new();
         let (mut intervals, call_positions) = computer.compute(func);
 
+        // Wave 6: Compute loop-nesting depth for each vreg and set it on
+        // the intervals. This makes the spill_weight() loop_multiplier
+        // (1 << loop_depth.min(4)) actually take effect — intervals inside
+        // loops get exponentially higher spill weight, so the allocator
+        // prefers to spill non-loop intervals first.
+        let vreg_loop_depths = compute_vreg_loop_depths(func);
+        for interval in &mut intervals {
+            if let Some(&depth) = vreg_loop_depths.get(&interval.vreg) {
+                interval.loop_depth = depth;
+            }
+        }
+
         // Sort intervals by start position, then by end position (longer
         // intervals first at the same start — they're harder to allocate).
-        intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+        // Wave 6: also sort by loop depth (deeper loops first) so that
+        // loop-carried intervals get register priority.
+        intervals.sort_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then_with(|| b.loop_depth.cmp(&a.loop_depth))
+                .then_with(|| b.end.cmp(&a.end))
+        });
 
         self.allocate_intervals(&intervals, &call_positions)
     }
