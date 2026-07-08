@@ -1159,7 +1159,14 @@ pub fn run_optimizations_with_target(
         program.functions[i] = f;
     }
 
-    // ── Whole-program passes ──
+    // ── Whole-program passes (LTO) ──
+    // Wave 11: Cross-function constant propagation. Propagate constants
+    // from call sites into function bodies (requires seeing all call sites,
+    // which is only possible at link time). Runs before DCE so the
+    // propagated constants can make functions trivially dead.
+    program = cross_function_constant_prop(program);
+
+    // Wave 11: Whole-program DCE — remove functions unreachable from entry.
     program = whole_program_dce(program);
     // NOTE: ICF disabled — even with operand-aware hashing, structural
     // equality on IR is not sufficient for sound merging because vreg
@@ -1264,13 +1271,158 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
 }
 
 /// Check if a function name is a runtime stub (always kept).
+/// These are extern functions referenced by name but not defined in the IR.
 fn f_name_is_runtime(name: &str) -> bool {
     name.starts_with("__vuma") || name.starts_with("_vuma") ||
     name == "write" || name == "read" || name == "exit" || name == "exit_group" ||
-    name == "mmap" || name == "munmap" || name == "brk" || name == "sigaction" ||
-    // Keep all functions — be conservative for now. DCE of user functions
-    // requires careful call-graph analysis that we'll enable later.
-    true
+    name == "mmap" || name == "munmap" || name == "brk" || name == "sigaction"
+}
+
+/// Cross-function constant propagation (Wave 11 LTO).
+///
+/// If a function is always called with the same constant argument in a
+/// parameter position, propagate that constant into the function body and
+/// remove the parameter. This is a whole-program (LTO) optimization — it
+/// requires seeing all call sites, which is only possible at link time
+/// (after all TUs are merged).
+///
+/// Example:
+///   fn square(x) { return x * x; }
+///   fn main() { return square(5); }  // always called with 5
+///
+/// After constant propagation:
+///   fn square() { return 5 * 5; }    // x replaced with 5, param removed
+///   fn main() { return square(); }
+///
+/// Then constant_fold folds 5*5 → 25, and DCE removes the now-trivial function.
+pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
+    // For each function, collect all call sites and check if any parameter
+    // is always the same constant across all call sites.
+    let func_names: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
+
+    for fname in &func_names {
+        // Collect all (param_index, constant_value) pairs from call sites.
+        // We're looking for params that are ALWAYS the same constant.
+        let mut call_args: Vec<Vec<IRValue>> = Vec::new();
+        for caller in &program.functions {
+            for block in &caller.blocks {
+                for instr in &block.instructions {
+                    if let IRInstr::Call { func: target, args, .. } = instr {
+                        if target == fname {
+                            call_args.push(args.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Need at least one call site to propagate.
+        if call_args.is_empty() {
+            continue;
+        }
+
+        // Find the function.
+        let func_idx = match program.functions.iter().position(|f| &f.name == fname) {
+            Some(i) => i,
+            None => continue,
+        };
+
+        // Check each parameter position for constant-ness.
+        let n_params = program.functions[func_idx].params.len();
+        let mut const_params: Vec<(usize, IRValue)> = Vec::new(); // (param_idx, value)
+
+        for p in 0..n_params {
+            // Get the argument at position p from each call site.
+            let args_at_p: Vec<&IRValue> = call_args.iter()
+                .filter_map(|args| args.get(p))
+                .collect();
+            if args_at_p.is_empty() {
+                continue;
+            }
+            // Check if all args at position p are the same Immediate.
+            if let IRValue::Immediate(first) = args_at_p[0] {
+                let first = *first;
+                if args_at_p.iter().all(|a| matches!(a, IRValue::Immediate(v) if *v == first)) {
+                    // All call sites pass the same constant for this param.
+                    const_params.push((p, IRValue::Immediate(first)));
+                }
+            }
+        }
+
+        if const_params.is_empty() {
+            continue; // No constant params to propagate.
+        }
+
+        // Propagate the constants into the function body.
+        let func = &mut program.functions[func_idx];
+        for block in &mut func.blocks {
+            for instr in &mut block.instructions {
+                // Replace uses of the constant params with the constants.
+                for (p_idx, const_val) in &const_params {
+                    if p_idx < &n_params {
+                        let param_vreg = match func.params.get(*p_idx) {
+                            Some(IRValue::Register(r)) => *r,
+                            _ => continue,
+                        };
+                        // Substitute in this instruction's operands.
+                        substitute_vreg_in_instr(instr, param_vreg, const_val.clone());
+                    }
+                }
+            }
+        }
+        // Note: we don't remove the param from the function signature (that
+        // would require updating all call sites and the ABI). The constant
+        // is propagated into the body; constant_fold + DCE will clean up.
+    }
+
+    program
+}
+
+/// Substitute all uses of `old_vreg` with `new_val` in an instruction.
+fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue) {
+    fn sub(val: &mut IRValue, old: u32, new: &IRValue) {
+        if let IRValue::Register(r) = val {
+            if *r == old {
+                *val = new.clone();
+            }
+        }
+    }
+    match instr {
+        IRInstr::BinOp { lhs, rhs, .. } => {
+            sub(lhs, old_vreg, &new_val);
+            sub(rhs, old_vreg, &new_val);
+        }
+        IRInstr::Add { lhs, rhs, .. } | IRInstr::Sub { lhs, rhs, .. }
+        | IRInstr::Mul { lhs, rhs, .. } | IRInstr::Div { lhs, rhs, .. } => {
+            sub(lhs, old_vreg, &new_val);
+            sub(rhs, old_vreg, &new_val);
+        }
+        IRInstr::Cmp { lhs, rhs, .. } => {
+            sub(lhs, old_vreg, &new_val);
+            sub(rhs, old_vreg, &new_val);
+        }
+        IRInstr::Load { addr, .. } => sub(addr, old_vreg, &new_val),
+        IRInstr::Store { value, addr, .. } => {
+            sub(value, old_vreg, &new_val);
+            sub(addr, old_vreg, &new_val);
+        }
+        IRInstr::Offset { base, offset, .. } => {
+            sub(base, old_vreg, &new_val);
+            sub(offset, old_vreg, &new_val);
+        }
+        IRInstr::Cast { src, .. } => sub(src, old_vreg, &new_val),
+        IRInstr::Select { cond, true_val, false_val, .. } => {
+            sub(cond, old_vreg, &new_val);
+            sub(true_val, old_vreg, &new_val);
+            sub(false_val, old_vreg, &new_val);
+        }
+        IRInstr::Call { args, .. } => {
+            for a in args.iter_mut() {
+                sub(a, old_vreg, &new_val);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Identical function merging (Wave 14).
