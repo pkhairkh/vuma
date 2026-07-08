@@ -652,6 +652,11 @@ pub struct IRBuilder {
     /// from those that use the load in a comparison (verify_buf: has Cmp).
     /// Only the former should use the return type for load width.
     cmp_count: usize,
+    /// Number of parameters in the current function. Used to distinguish
+    /// accessor functions like mat_read(mat, row, col) — 3 params — from
+    /// generic pointer-access functions like load_val(p) — 1 param. Only
+    /// the former should use the return type for load width inference.
+    param_count: usize,
     /// The return type of the current function, parsed from the function
     /// name (e.g. "fn_main_entry(u64)" → U64). Used by lower_access for
     /// load type inference (see load_count). Stored separately from
@@ -685,6 +690,7 @@ impl IRBuilder {
             load_count: 0,
             store_count: 0,
             cmp_count: 0,
+            param_count: 0,
             current_return_type: None,
             vreg_types: std::collections::HashMap::new(),
         }
@@ -741,6 +747,7 @@ impl IRBuilder {
         self.load_count = Self::count_loads(&func.body);
         self.store_count = Self::count_stores(&func.body);
         self.cmp_count = Self::count_cmps(&func.body);
+        self.param_count = func.params.len();
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -2611,7 +2618,7 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 {
+                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 && self.param_count > 1 {
                         // For functions with exactly ONE load (regardless of
                         // store_count), the load result likely flows to the
                         // return value.  Use the function's return type for
