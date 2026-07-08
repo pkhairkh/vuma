@@ -329,6 +329,9 @@ fn try_fold_cmp(kind: CmpKind, lhs: i64, rhs: i64) -> Option<i64> {
 fn has_side_effects(instr: &IRInstr) -> bool {
     match instr {
         IRInstr::Store { .. }
+        | IRInstr::AtomicStore { .. }
+        | IRInstr::AtomicLoad { .. }
+        | IRInstr::AtomicCas { .. }
         | IRInstr::Call { .. }
         | IRInstr::Free { .. }
         | IRInstr::Ret { .. }
@@ -354,6 +357,9 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
         IRInstr::Div { .. } => false,
         IRInstr::Load { .. } => false,
         IRInstr::Store { .. } => false,
+        IRInstr::AtomicLoad { .. } => false,
+        IRInstr::AtomicStore { .. } => false,
+        IRInstr::AtomicCas { .. } => false,
         IRInstr::Call { .. } => false,
         IRInstr::Free { .. } => false,
         IRInstr::Alloc { .. } => false,
