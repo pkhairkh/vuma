@@ -1266,51 +1266,33 @@ fn run_optimizations_inner(
     // ── Per-function optimization passes ──
     for i in 0..program.functions.len() {
         let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
-        let f = constant_fold(f);
-        let f = cse(f);
-        let f = equality_saturation_with_cost(f, &cost_fn);  // e-graph pass (per-ISA cost)
-        // Wave 8: Compute IVE provenance FIRST, then pass it to DSE.
-        // The old code ran DSE before mark_ive, so the provenance was never
-        // consumed. Now mark_ive returns the provenance map explicitly
-        // (no thread-local), and DSE receives it as a parameter.
-        let (f, provenance) = mark_ive_proven_nonaliasing(f);
-        let f = dead_store_eliminate(f, &provenance);   // alias-analysis-driven DSE (uses IVE provenance)
-        let f = dead_code_eliminate(f);
-        let f = inline_small(f, &func_refs);
-        let f = licm(f);
+        // ── SOUND PASSES ONLY ──
+        // Only passes that have been proven sound by full gold-standard
+        // differential testing (O0 vs O2, 320+ programs) are enabled.
+        // Passes that cause miscompilation are disabled until fixed and
+        // re-validated. See worklog for the bisecting history.
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
-        // Wave 5: Instruction scheduler (re-enabled, now SSA-safe).
-        // The scheduler respects Phi nodes (keeps them at block top in
-        // original order) and schedules only non-Phi instructions. Uses
-        // the per-ISA latency table (Wave 10) for critical-path computation.
-        let mut f = f;
-        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+
+        // ── DISABLED PASSES (cause miscompilation on loops/functions/atomics) ──
+        // let f = cse(f);                          // 50% control_flow failures
+        // let f = equality_saturation_with_cost(f, &cost_fn);  // needs Add/Sub/Mul/Div validation
+        // let (f, provenance) = mark_ive_proven_nonaliasing(f);
+        // let f = dead_store_eliminate(f, &provenance);  // breaks atomics
+        // let f = inline_small(f, &func_refs);     // multi-block inliner unsound
+        // let f = licm(f);                         // breaks nested loops
+        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);  // breaks loop-carried deps
         program.functions[i] = f;
     }
 
-    // ── Whole-program passes (LTO) ──
-    // Wave 11: Cross-function constant propagation. Propagate constants
-    // from call sites into function bodies (requires seeing all call sites,
-    // which is only possible at link time). Runs before DCE so the
-    // propagated constants can make functions trivially dead.
-    program = cross_function_constant_prop(program);
-
-    // Wave 11: Whole-program DCE — remove functions unreachable from entry.
-    program = whole_program_dce(program);
-    // NOTE: ICF disabled — even with operand-aware hashing, structural
-    // equality on IR is not sufficient for sound merging because vreg
-    // numbering differs across functions. Would need normalization first.
-    // program = identical_function_merge(program);
-
-    // Wave 13b: Correct loop unrolling. Replaces the miscompiling vectorizer
-    // (Wave 13) which duplicated the body 4x without adjusting the trip count.
-    // This unroller changes the IV step from +1 to +F and duplicates the body
-    // with IV substitution, so the total work stays N (not N*F).
-    // It bails out for any loop it cannot fully analyze (no miscompilation).
-    for func in &mut program.functions {
-        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
-    }
+    // ── DISABLED whole-program passes ──
+    // program = cross_function_constant_prop(program);  // needs validation
+    // program = whole_program_dce(program);             // needs validation
+    // for func in &mut program.functions {
+    //     *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    // }
 
     program
 }
