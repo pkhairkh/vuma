@@ -7482,14 +7482,15 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 };
                 let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
                 // Infer store type from the address expression.
-                // For single deref (*ptr = val), check the inner expr for stride.
-                let store_ty = if !matches!(expr.as_ref(), vuma_parser::ast::Expr::Deref { .. }) {
-                    // Single deref: *expr = val. Check expr for stride pattern.
-                    infer_load_type_from_ast_expr(expr.as_ref())
-                } else {
-                    // Chained deref: inner loads are pointer-width (U64).
-                    Some(vuma_codegen::ir::IRType::U64)
-                };
+                // For both single and chained deref, use stride-based inference.
+                // Do NOT force U64 for chained deref stores — the store type
+                // should match the value being stored (e.g. 42 → U8), not the
+                // address expression.  The intermediate LOADS in a chained
+                // deref already use U64 (set above), so pointers are handled
+                // correctly.  Forcing U64 here would cause a store/load type
+                // mismatch: **ptr = 42 would store as U64, but **ptr (load)
+                // would default to U8, reading the wrong byte on big-endian.
+                let store_ty = infer_load_type_from_ast_expr(expr.as_ref());
                 stmts.push(ScgStatement::Access(AccessNode::Store {
                     ptr,
                     offset: None,
