@@ -48,18 +48,23 @@ use crate::backend::{
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, UnaryOpKind};
 use std::collections::HashMap;
 
-// Thread-local set of function names that return 64-bit values (I64/U64).
-// Populated by encode_program, used by allocate_registers to determine
-// whether to store R1 (high word) for non-extern call returns.
-thread_local! {
-    static FUNC_64BIT_RETURNS: std::cell::RefCell<Option<std::collections::HashSet<String>>> = std::cell::RefCell::new(None);
+// Global set of function names that return 64-bit values (I64/U64).
+// Populated by compile_dump/compile_to_binary_direct before allocation,
+// used by allocate_registers to determine whether to store R1 (high word)
+// for non-extern call returns.
+// Uses RwLock instead of thread_local! because compile_dump uses rayon
+// par_iter for parallel allocation — thread_local values set on the main
+// thread are NOT visible in rayon worker threads.
+static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
+
+fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {
+    FUNC_64BIT_RETURNS.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-/// Set the thread-local set of 64-bit-returning function names.
+/// Set the global set of 64-bit-returning function names.
 pub fn set_64bit_returns(names: &std::collections::HashSet<String>) {
-    FUNC_64BIT_RETURNS.with(|s| {
-        *s.borrow_mut() = Some(names.clone());
-    });
+    let lock = func_64bit_returns();
+    *lock.write().unwrap() = Some(names.clone());
 }
 use std::fmt;
 
@@ -5784,11 +5789,13 @@ impl Backend for Arm32Backend {
                             if !is_extern {
                                 // Check if the callee returns 64-bit (I64/U64).
                                 // If so, store R1 (high word). Otherwise, leave high word zeroed.
-                                let is_64bit_ret = FUNC_64BIT_RETURNS.with(|s| {
-                                    s.borrow().as_ref()
+                                let is_64bit_ret = {
+                                    let lock = func_64bit_returns();
+                                    let guard = lock.read().unwrap();
+                                    guard.as_ref()
                                         .map(|set| set.contains(target_func))
                                         .unwrap_or(false)
-                                });
+                                };
                                 if is_64bit_ret {
                                     code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                                 }
