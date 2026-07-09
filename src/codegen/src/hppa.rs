@@ -485,62 +485,12 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     // (val >= 0x80000000), the upper 32 bits are all 1s. Zero-extend
     // by storing to a stack slot (STW = 32-bit) and loading back
     // (LDW = 32-bit zero-extended to 64).
-    // CRITICAL: Use FP (R3) as the base, NOT SP (R30). After the prologue,
-    // SP is below FP, and SP-4 is in the CALLER's frame. Using FP+0 as
-    // a scratch slot would clobber vreg 0. Instead, use a high offset
-    // from FP that's guaranteed to be in the current frame but beyond
-    // all vregs. Use FP + 32760 (near the top of a 32K frame, unlikely
-    // to be used by vregs).
-    // Actually, the simplest safe approach: use a register-register
-    // operation. PA-RISC doesn't have a zero-extend instruction that
-    // works on QEMU (EXTRU doesn't decode correctly). But we can use:
-    //   SHRPW R0, dst, 0, dst — this is (0:dst) >> 0 = dst, but does
-    //   it zero-extend? On real PA-RISC, SHRPW always produces a 32-bit
-    //   result zero-extended to 64 bits. Let's try it.
-    // Actually from the earlier test, SHRPW with sa=0 gives "shrpw r0,r8,sar,r8"
-    // (variable shift). With cl=1, pos=15: sa = 31 - 2*15 = 1, not 0.
-    // For sa=0: pos = (31-0)/2 = 15, but 15*2 = 30 ≠ 31. So sa=0 is
-    // impossible with cl=1 encoding.
-    //
-    // Alternative: just DON'T zero-extend. The sign-extension only
-    // matters for 64-bit operations (ADD, SUB, etc.) which the hppa
-    // backend does in 32-bit (STW/LDW are 32-bit). The issue is only
-    // with comparisons and shifts. For the test suite, most operations
-    // mask with & 4294967295 which clears the upper bits via AND.
-    // The AND operation: 0xFFFFFFFFFFFFFFFF AND 0x00000000FFFFFFFF
-    // = 0x00000000FFFFFFFF (correct on 32-bit AND).
-    // But wait, hppa AND is 64-bit. 0xFFFFFFFFFFFFFFFF AND 0xFFFFFFFF
-    // (loaded via LDIL+LDO = also sign-extended!) = 0xFFFFFFFFFFFFFFFF.
-    // So the AND mask doesn't work either!
-    //
-    // The real fix: DON'T use the SP-4 scratch slot. Instead, zero-extend
-    // by using the SHRPW instruction with sa=31 (shift right by 31, then
-    // shift left by 31 — this clears the low 31 bits, then restores them,
-    // effectively zero-extending the upper 32 bits if they were 1s).
-    // No, that doesn't work either.
-    //
-    // OK, simplest correct approach: just don't load values >= 0x80000000
-    // with LDIL+LDO at all. Instead, load them as two 16-bit halves:
-    //   LDI hi16, dst        (loads bits 31:16, zero-extended since |hi16| < 8192)
-    //   SHLADD 16, dst, R0, dst  (shift left by 16, giving bits 31:16 in correct position)
-    //   LDO lo16(dst), dst   (add bits 15:0)
-    // Wait, LDI uses LDO which sign-extends. And SHLADD is 64-bit.
-    //
-    // Actually the REAL fix: use DEPI (Deposit Immediate) to clear bits 63:32.
-    // DEPI 0, 31, 32, dst: deposits 32 zeros starting at bit 31.
-    // But DEPI encoding is complex.
-    //
-    // Simplest that works: load the complement and negate.
-    // For 0xFFFFFFFF: load 0 (via LDI 0), then SUBI R0, 0, dst = 0 - 0 = 0.
-    // That doesn't help.
-    //
-    // OK, let's just NOT zero-extend and see if the tests pass. The AND
-    // mask issue means values >= 0x80000000 won't be correctly masked,
-    // but many tests use values < 0x80000000.
-    // For the specific tests that fail (crc32, matrix), the issue is
-    // the SP-4 clobbering, not the sign extension itself.
-    // Let me remove the zero-extension entirely and see if the crashes stop.
-    // (The sign extension issue will be handled separately.)
+    // Use FP-8 as scratch (between RP save at FP-20 and vreg0 at FP-28).
+    // FP-8 is NOT used by any vreg or save area, so it's safe.
+    if v >= 0x80000000 {
+        code.extend_from_slice(&encode_stw(dst, R3, -8));
+        code.extend_from_slice(&encode_ldw(R3, -8, dst));
+    }
     code
 }
 
