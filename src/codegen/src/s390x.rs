@@ -259,6 +259,20 @@ fn encode_lgfi(r1: Gpr, imm: i32) -> [u8; 6] {
     [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
 }
 
+/// Encode LLILF R1, imm32 (Load Logical 32-bit Immediate, zero-extended to 64-bit).
+/// Format: RIL-a, 6 bytes. op1=0xC0, op2=0xF.
+/// Unlike LGFI (which sign-extends), LLILF zero-extends.  This is critical
+/// for values like 0xFFFFFFFF (4294967295) which LGFI would load as
+/// 0xFFFFFFFFFFFFFFFF (sign-extended -1), but LLILF loads as
+/// 0x00000000FFFFFFFF (zero-extended).
+fn encode_llilf(r1: Gpr, imm: u32) -> [u8; 6] {
+    let op1: u8 = 0xC0;
+    let op2: u8 = 0xF;
+    let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
+    let imm_be = imm.to_be_bytes();
+    [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
+}
+
 /// Encode AGFI R1, imm32 (Add Fullword Immediate to 64-bit register).
 /// Format: RIL-b, 6 bytes. op1=0xC0, op2=0x9.
 /// (RIL format uses op1=0xC0 for all variants — LGFI/AGFI/SGFI/BRASL/BRCL/LARL.
@@ -614,7 +628,12 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     if (-32768..=32767).contains(&val) {
         code.extend_from_slice(&encode_lghi(dst, val as i16));
-    } else if (-2147483648..=2147483647).contains(&val) {
+    } else if (0..=0xFFFFFFFF).contains(&(val as u64)) {
+        // Unsigned 32-bit value: use LLILF (zero-extended) to avoid
+        // sign-extension bugs.  LGFI would load 0xFFFFFFFF as
+        // 0xFFFFFFFFFFFFFFFF (sign-extended -1), breaking AND masks.
+        code.extend_from_slice(&encode_llilf(dst, val as u32));
+    } else if (-2147483648..=-1).contains(&val) {
         code.extend_from_slice(&encode_lgfi(dst, val as i32));
     } else {
         // Full 64-bit value: load high 32 bits, shift left 32, OR low 32 bits.
