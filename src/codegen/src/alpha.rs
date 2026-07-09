@@ -411,29 +411,30 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         // LDA dst, lo16(ZERO): dst = sign_extend(lo16).
         Instruction::Lda { ra: dst, disp: v as i16, rb: ZERO }.encode()
     } else {
-        // Full 32-bit (or 64-bit) value: LDA + LDAH.
-        // lo16 = low 16 bits (sign-extended on LDA).
-        // hi16 = bits 16-31 (LDAH adds hi16 << 16, but with sign-adjustment for lo16).
+        // Full 32-bit value: LDA + LDAH + ZAPNOT.
+        // LDA sign-extends lo16 to 64 bits, and LDAH adds hi16 << 16.
+        // The result has the correct low 32 bits, but the upper 32 bits
+        // may be wrong (sign-extended from lo16).  ZAPNOT zero-extends
+        // the 32-bit result to 64 bits by keeping only bytes 0-3.
         let v32 = v as u32;
-        let lo16 = (v32 & 0xFFFF) as i16 as i32; // sign-extended low 16 bits
+        let lo16 = (v32 & 0xFFFF) as i16 as i32;
         let mut hi16 = ((v32 >> 16) & 0xFFFF) as i32;
-        // LDAH adds hi16 << 16 to the existing value, but hi16 is also sign-extended.
-        // We need: result = (hi16 << 16) + lo16.
-        // If lo16 < 0 (high bit set), the sign-extension adds 0xFFFF0000, so we
-        // need to add 1 to hi16 to compensate.
         if lo16 < 0 {
             hi16 += 1;
         }
         let mut code = Vec::new();
         // LDA dst, lo16(ZERO)
         code.extend(Instruction::Lda { ra: dst, disp: lo16 as i16, rb: ZERO }.encode());
-        // LDAH dst, hi16(dst): LDAH is opcode 0x09, same memory format.
-        // word = (0x09 << 26) | (dst << 21) | (dst << 16) | (hi16 as u16).
+        // LDAH dst, hi16(dst)
         let word: u32 = (0x09u32 << 26)
             | ((dst.encoding() as u32) << 21)
             | ((dst.encoding() as u32) << 16)
-            | (hi16 as u16 as u32);
+            | (hi16 as u32 & 0xFFFF);
         code.extend_from_slice(&word.to_le_bytes());
+        // ZAPNOT dst, 0x0F, dst — keep bytes 0-3, zero bytes 4-7.
+        // This zero-extends the 32-bit result to 64 bits.
+        // ZAPNOT = opcode 0x12, function 0x31, literal form.
+        code.extend_from_slice(&op_lit(0x12, dst, 0x0F, dst, 0x31).to_le_bytes());
         code
     }
 }
