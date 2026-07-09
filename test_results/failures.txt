@@ -1,20 +1,20 @@
-VUMA Test Failures — 2026-07-09 12:29:30 UTC
-Total: 77 failures across 31 tests
+VUMA Test Failures — 2026-07-09 13:09:10 UTC
+Total: 63 failures across 31 tests
 Skipped: 1 (architecturally unavailable on target)
 
   arithmetic           arith_ackermann.vuma                          exp=   9 [('hppa', -11, 'CR')]
   arithmetic           arith_palindrome.vuma                         exp=   1 [('hppa', 0, 'MM')]
-  atomics              atomics_demo.vuma                             exp=1264 [('m68k', -11, 'CR'), ('alpha', 228, 'MM'), ('hppa', 124, 'TO')]
-  complex_stores       base64_encode.vuma                            exp=  20 [('armeb', 0, 'MM'), ('arm32', 0, 'MM'), ('m68k', 0, 'MM'), ('wasm32', 0, 'MM'), ('hppa', 124, 'TO')]
+  atomics              atomics_demo.vuma                             exp=1264 [('alpha', 228, 'MM'), ('m68k', -11, 'CR'), ('hppa', 124, 'TO')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM'), ('armeb', 0, 'MM'), ('m68k', 0, 'MM'), ('wasm32', 0, 'MM'), ('hppa', 124, 'TO')]
   concurrency          channel_demo.vuma                             exp=   0 [('hppa', -4, 'CR')]
   concurrency          epoll_echo.vuma                               exp=   0 [('hppa', -4, 'CR')]
   concurrency          lock_free_queue.vuma                          exp=   0 [('hppa', 1, 'MM')]
-  concurrency          self_exec.vuma                                exp=   0 [('armeb', 6, 'MM'), ('mips64be', 6, 'MM'), ('aarch64_be', 6, 'MM'), ('s390x', 6, 'MM'), ('alpha', 6, 'MM'), ('m68k', 6, 'MM'), ('hppa', -11, 'CR')]
-  concurrency          signal_hash.vuma                              exp=   0 [('arm32', -11, 'CR'), ('armeb', -11, 'CR'), ('ppc64', -11, 'CR'), ('ppc64le', -11, 'CR'), ('hppa', -4, 'CR')]
+  concurrency          self_exec.vuma                                exp=   0 [('aarch64_be', 6, 'MM'), ('mips64be', 6, 'MM'), ('armeb', 6, 'MM'), ('s390x', 6, 'MM'), ('m68k', 6, 'MM'), ('alpha', 6, 'MM'), ('hppa', -11, 'CR')]
+  concurrency          signal_hash.vuma                              exp=   0 [('armeb', -11, 'CR'), ('arm32', -11, 'CR'), ('ppc64le', -11, 'CR'), ('ppc64', -11, 'CR'), ('hppa', -4, 'CR')]
   concurrency          thread_pool.vuma                              exp=   0 [('hppa', -11, 'CR')]
   control_flow         bsearch.vuma                                  exp=   7 [('mips64be', 255, 'MM')]
   crypto_patterns      crc32.vuma                                    exp=  38 [('alpha', 150, 'MM'), ('s390x', 150, 'MM'), ('sparc64', 150, 'MM'), ('hppa', -11, 'CR')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('arm32', -11, 'CR'), ('armeb', -11, 'CR'), ('ppc64le', -4, 'CR'), ('ppc64', -11, 'CR'), ('alpha', 233, 'MM'), ('s390x', 35, 'MM'), ('hppa', -4, 'CR')]
+  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('arm32', -11, 'CR'), ('ppc64le', 88, 'MM'), ('armeb', -11, 'CR'), ('ppc64', -11, 'CR'), ('s390x', 35, 'MM'), ('alpha', 233, 'MM'), ('hppa', -4, 'CR')]
   crypto_patterns      test_sha_round.vuma                           exp=  77 [('hppa', 124, 'TO')]
   edge_cases           float_math.vuma                               exp= 100 [('hppa', 124, 'TO')]
   functions            fibonacci.vuma                                exp=  40 [('hppa', -11, 'CR')]
@@ -25,11 +25,11 @@ Skipped: 1 (architecturally unavailable on target)
   memory               arena_allocator.vuma                          exp=   0 [('m68k', 1, 'MM'), ('alpha', 124, 'TO'), ('hppa', 124, 'TO')]
   memory               mem_be_load.vuma                              exp=  18 [('hppa', 124, 'TO')]
   memory               mem_buffer_to_u32.vuma                        exp=  18 [('hppa', 124, 'TO')]
-  memory               memory_arena.vuma                             exp=   0 [('hppa', -11, 'CR'), ('m68k', 11, 'MM'), ('alpha', 124, 'TO')]
+  memory               memory_arena.vuma                             exp=   0 [('m68k', 11, 'MM'), ('hppa', -11, 'CR'), ('alpha', 124, 'TO')]
   multi_function       debug_info.vuma                               exp=  49 [('alpha', 35, 'MM')]
   nested_loops         matrix.vuma                                   exp=  16 [('mips64be', 0, 'MM'), ('hppa', 0, 'MM')]
-  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64_be', 0, 'MM'), ('armeb', 0, 'MM'), ('mips64be', -11, 'CR'), ('ppc64', 0, 'MM'), ('s390x', 0, 'MM'), ('hppa', 232, 'MM'), ('m68k', 0, 'MM'), ('sparc64', 0, 'MM')]
-  pointers             ptr_multi_level.vuma                          exp=   3 [('mips64be', -11, 'CR'), ('aarch64_be', 0, 'MM'), ('armeb', 0, 'MM'), ('ppc64', 0, 'MM'), ('s390x', 0, 'MM'), ('m68k', 0, 'MM'), ('hppa', 0, 'MM'), ('sparc64', 0, 'MM')]
-  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('mips64be', -7, 'CR')]
+  pointers             ptr_double_deref.vuma                         exp=  42 [('mips64be', -11, 'CR')]
+  pointers             ptr_multi_level.vuma                          exp=   3 [('mips64be', -11, 'CR')]
+  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('mips64be', -11, 'CR')]
   pointers             test_hex.vuma                                 exp=   0 [('hppa', -11, 'CR')]
   u32_arith            test_u32_arith.vuma                           exp=  79 [('hppa', 0, 'MM')]
