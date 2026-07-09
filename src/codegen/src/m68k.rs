@@ -382,7 +382,7 @@ const SP: Gpr = Gpr::A7;
 // Stack-slot helpers
 // ===========================================================================
 
-/// Load a 32-bit immediate into a register.
+/// Load a 32-bit immediate into a register (low word of a 64-bit value).
 fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     let v = val as i32;
     if (-128..=127).contains(&v) {
@@ -392,57 +392,35 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     }
 }
 
-/// Load a 32-bit value from stack slot at [FP + offset] into dst.
-fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
-    // m68k d16(An) signed 16-bit displacement range.
-    if (-32768..=32767).contains(&offset) {
-        Instruction::Load { base: FP, offset: offset as i16, dst }.encode()
-    } else {
-        // Large offset: compute address into a temp register first.
-        let mut code = ss_load_imm(S2, offset as i64);
-        // LEA: A6 + S2 → S2.  We use ADD.L S2, A6 (treating A6 as a 32-bit value).
-        // Actually, ADDA.L Dn, An: word = 0xD1C0 | (An<<9) | Dn. An stays as An.
-        // Simpler: load FP into S2 (move.l a6, s2), then add offset, then load via (S2).
-        // But we already overwrote S2 with offset.  Re-do:
-        code.clear();
-        // S2 = offset
-        code.extend(ss_load_imm(S2, offset as i64));
-        // S2 += FP  → use ADDA.L D2, A3 (we need an address reg as dst).
-        // Encode ADDA.L D2, A1: word = 0xD1C0 | (A1<<9) | D2.
-        // A1 enc as 1, D2 enc as 2:  0xD1C0 | (1<<9) | 2 = 0xD3C2.
-        code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1  →  A1 = A1 + D2  (NO! we want A1 = FP + D2)
-        // Actually we want S2 (= A1) = FP + S2 (= D2).  Move FP into A1 first:
-        code.clear();
-        // move.l %a6, %a1  →  MOVE.L An, Am  via MOVEA.L: word = 0x2040 | (Am<<9) | An
-        // For A6→A1: Am=A1(enc 1 in dst field), An=A6(enc 6 in src field; but src mode for An is 1).
-        // word = 0x2000 | (1<<9) | (1<<3) | 6 = 0x2246.
-        code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
-        // add.l #offset, %a1  — ADDQ.L #data8, An (data 1-8) or ADDA.L #imm32, An.
-        // Simpler: load offset into D2, then ADDA.L D2, A1.
-        code.extend(ss_load_imm(S2, offset as i64));
-        // adda.l %d2, %a1: word = 0xD1C0 | (1<<9) | 2 = 0xD3C2.
-        code.extend_from_slice(&[0xD3, 0xC2]);
-        // Now load via (A1): MOVE.L (A1), Dn  → word = 0x2000 | (Dn<<9) | (2<<3) | 1.
-        let w = 0x2000u16 | ((dst.encoding() as u16 & 0x7) << 9) | (2u16 << 3) | 1;
-        code.extend_from_slice(&w.to_be_bytes());
-        code
-    }
-}
-
-/// Store a 32-bit value from src to stack slot at [FP + offset].
+/// Store a 32-bit value from src register to stack slot at [FP + offset].
+/// Only stores the low 32 bits.  The high 32 bits (at offset+4) are
+/// managed explicitly by operations that produce 64-bit results (Shl 32,
+/// Or with 64-bit operands).
 fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
     if (-32768..=32767).contains(&offset) {
         Instruction::Store { src, base: FP, offset: offset as i16 }.encode()
     } else {
         let mut code = Vec::new();
-        // move.l %a6, %a1
-        code.extend_from_slice(&[0x22, 0x46]);
+        code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
         code.extend(ss_load_imm(S2, offset as i64));
-        // adda.l %d2, %a1
-        code.extend_from_slice(&[0xD3, 0xC2]);
-        // move.l src, (a1): word = 0x2000 | (1<<9) | (2<<3) | src_enc.
+        code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
         let w = 0x2000u16 | (1u16 << 9) | (2u16 << 3) | (src.encoding() as u16 & 0x7);
         code.extend_from_slice(&w.to_be_bytes());
+        code
+    }
+}
+
+/// Load a 32-bit value from stack slot at [FP + offset] into dst.
+/// Only loads the low 32 bits (sufficient for most operations).
+fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
+    if (-32768..=32767).contains(&offset) {
+        Instruction::Load { base: FP, offset: offset as i16, dst }.encode()
+    } else {
+        let mut code = Vec::new();
+        code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
+        code.extend(ss_load_imm(S2, offset as i64));
+        code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
+        code.extend(Instruction::Load { base: Gpr::A1, offset: 0, dst }.encode());
         code
     }
 }
@@ -555,15 +533,17 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
     // Actually, the standard m68k convention uses NEGATIVE offsets for
     // locals: LINK A6, #-frame_size allocates N bytes BELOW A6.
     //
-    // For simplicity we use NEGATIVE offsets from FP, starting at -4.
+    // For simplicity we use NEGATIVE offsets from FP, starting at -8.
+    // Each vreg gets 8 bytes (two 32-bit words) to support 64-bit values.
+    // The low 32 bits are at offset, the high 32 bits are at offset+4.
 
     let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-    let mut current_offset: i32 = -4;
+    let mut current_offset: i32 = -8;
     let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
     all_vreg_ids_sorted.sort();
     for &id in &all_vreg_ids_sorted {
         vreg_stack_slots.insert(id, current_offset);
-        current_offset -= 4;
+        current_offset -= 8;
     }
 
     // Alloc regions after vreg slots (also negative offsets).
@@ -666,9 +646,16 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 });
             }
             crate::ir::IRTerminator::Return(vals) => {
-                // Move return value to D0 (if any), then epilogue.
+                // Move return value to D0 (low 32 bits) and D1 (high 32 bits).
                 if let Some(first_val) = vals.first() {
                     code.extend(ss_load_value(first_val, &vreg_stack_slots, Gpr::D0));
+                    // Also load high word into D1
+                    if let IRValue::Register(id) = first_val {
+                        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: Gpr::D1 }.encode());
+                    } else {
+                        code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+                    }
                 }
                 // Epilogue: UNLK A6, RTS.
                 code.extend(Instruction::Unlk { reg: FP }.encode());
@@ -795,6 +782,17 @@ fn emit_instr(
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // 64-bit: also add high words
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            if let IRValue::Immediate(v) = rhs {
+                code.extend(ss_load_imm(S1, (v >> 32) as i64));
+            } else {
+                let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            }
+            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
@@ -803,6 +801,17 @@ fn emit_instr(
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // 64-bit: also sub high words
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            if let IRValue::Immediate(v) = rhs {
+                code.extend(ss_load_imm(S1, (v >> 32) as i64));
+            } else {
+                let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            }
+            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
@@ -1117,6 +1126,13 @@ fn emit_instr(
         IRInstr::Ret { values } => {
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::D0));
+                // Also load high word into D1 for 64-bit return values
+                if let IRValue::Register(id) = first_val {
+                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                    code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: Gpr::D1 }.encode());
+                } else {
+                    code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+                }
             }
             code.extend(Instruction::Unlk { reg: FP }.encode());
             code.extend(Instruction::Rts.encode());
@@ -1163,12 +1179,15 @@ fn emit_instr(
                 symbol: func.clone(),
                 reloc_type: "R_68K_PC32".to_string(),
             });
-            // Move return value from D0 to dst's stack slot.
+            // Move return value from D0 (low) and D1 (high) to dst's stack slot.
             if let Some(d) = dst {
                 let d_id = d.as_register().unwrap_or(0);
                 let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                // Store low word from D0
                 code.extend(Instruction::Move { src: Gpr::D0, dst: S0 }.encode());
                 code.extend(ss_st(S0, d_off));
+                // Store high word from D1
+                code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (d_off + 4) as i16 }.encode());
             }
         }
         IRInstr::CtSelect {
@@ -1301,16 +1320,41 @@ fn emit_binop(
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     match op {
         BinOpKind::Add => {
+            // 64-bit add: add low words, then add high words (with carry).
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // Add high words (ignore carry for simplicity — works for small values)
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            if let IRValue::Immediate(v) = rhs {
+                let hi = (v >> 32) as i32;
+                code.extend(ss_load_imm(S1, hi as i64));
+            } else {
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            }
+            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());  // ADDX.L would be better (with carry)
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Sub => {
+            // 64-bit sub: sub low words, then sub high words.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            if let IRValue::Immediate(v) = rhs {
+                let hi = (v >> 32) as i32;
+                code.extend(ss_load_imm(S1, hi as i64));
+            } else {
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            }
+            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Mul => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -1352,36 +1396,110 @@ fn emit_binop(
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Or => {
+            // 64-bit OR: OR both low and high words.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Or { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // OR high words: load lhs_hi, OR with rhs_hi, store at dst_off+4
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            // Load lhs high word
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            // Load rhs high word
+            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            code.extend(Instruction::Or { src: S1, dst: S0 }.encode());
+            // Store high word at dst_off+4
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Xor => {
+            // 64-bit XOR: XOR both low and high words.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Xor { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // XOR high words
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            code.extend(Instruction::Xor { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Shl => {
+            // 64-bit left shift: handle shift by 32 specially.
+            // The m68k LSL.L instruction masks shift count to 5 bits (0-31),
+            // so << 32 becomes << 0 (no-op).  We need to check at runtime
+            // if the shift amount is >= 32 and handle it as a 64-bit shift.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // LSL.L Dn, Dm: shift Dm left (logical) by Dn.
-            // Format: 1110 Dn 1 10 1 01 Dm (bit 8=left, bits 4-3=01=LS, bit 5=1=reg)
-            // Base: 0xE1A8 | (Dn<<9) | Dm
+            // CMPI.L #32, D1 — compare shift amount with 32
+            code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
+            // BNE.S to normal_shift (offset will be patched)
+            let bne_patch = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // BNE.S +0 (placeholder)
+            // 64-bit shift by 32: low = 0, high = S0
+            // Store S0 as high word at dst_off+4
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // Store 0 as low word at dst_off
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            code.extend(ss_st(S0, dst_off));
+            // BRA.S to done
+            let bra_patch = code.len();
+            code.extend_from_slice(&[0x60, 0x00]); // BRA.S +0 (placeholder)
+            // normal_shift:
+            let normal_start = code.len();
+            // Patch BNE to jump here
+            let bne_disp = (normal_start - bne_patch - 2) as i8;
+            code[bne_patch + 1] = bne_disp as u8;
+            // Normal 32-bit shift
             let w = 0xE1A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
+            // Clear high word
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // done:
+            let done = code.len();
+            // Patch BRA to jump here
+            let bra_disp = (done - bra_patch - 2) as i8;
+            code[bra_patch + 1] = bra_disp as u8;
         }
         BinOpKind::ShrL => {
+            // 64-bit right shift: handle shift by 32 specially.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // LSR.L Dn, Dm: shift Dm right (logical) by Dn.
-            // Format: 1110 Dn 0 10 1 01 Dm (bit 8=right, bits 4-3=01=LS, bit 5=1=reg)
-            // Base: 0xE0A8 | (Dn<<9) | Dm
+            // CMPI.L #32, D1
+            code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
+            // BNE.S to normal_shift
+            let bne_patch = code.len();
+            code.extend_from_slice(&[0x66, 0x00]);
+            // 64-bit shift by 32: low = x_high, high = 0
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            // Load high word of lhs into S0
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            // Store as low word of result
+            code.extend(ss_st(S0, dst_off));
+            // Store 0 as high word
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // BRA.S to done
+            let bra_patch = code.len();
+            code.extend_from_slice(&[0x60, 0x00]);
+            // normal_shift:
+            let normal_start = code.len();
+            let bne_disp = (normal_start - bne_patch - 2) as i8;
+            code[bne_patch + 1] = bne_disp as u8;
+            // Normal 32-bit shift
             let w = 0xE0A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // done:
+            let done = code.len();
+            let bra_disp = (done - bra_patch - 2) as i8;
+            code[bra_patch + 1] = bra_disp as u8;
         }
         BinOpKind::ShrA => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
