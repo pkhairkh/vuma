@@ -470,18 +470,25 @@ fn encode_ldi(imm: i32, dst: Reg) -> [u8; 4] {
 fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     // For small values (-8192 to 8191), use a single LDI (LDO with base=R0).
-    // This produces a single 4-byte instruction instead of LDIL+LDO.
     if (-8192..=8191).contains(&val) {
         code.extend_from_slice(&encode_ldo(R0, val as i16, dst));
         return code;
     }
-    // For larger values, use LDIL + LDO.
+    // For 32-bit values, use LDIL + LDO.
     let v = val as u32;
     let upper = v & 0xFFFFF800;  // bits 31:11
     let lower = (v & 0x7FF) as i16;  // bits 10:0
     let upper_shifted = upper >> 11;
     code.extend_from_slice(&encode_ldil(dst, upper_shifted));
     code.extend_from_slice(&encode_ldo(dst, lower, dst));
+    // LDIL sign-extends to 64 bits. If bit 31 of the value is set
+    // (val >= 0x80000000), the upper 32 bits are all 1s. Zero-extend
+    // by storing to a stack slot (STW = 32-bit) and loading back
+    // (LDW = 32-bit zero-extended to 64). Use SP-4 as a scratch slot.
+    if v >= 0x80000000 {
+        code.extend_from_slice(&encode_stw(dst, R30, -4));
+        code.extend_from_slice(&encode_ldw(R30, -4, dst));
+    }
     code
 }
 
