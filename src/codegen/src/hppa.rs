@@ -1561,22 +1561,15 @@ impl Backend for HppaBackend {
         }
         ordered_functions.extend(other_functions);
 
-        // Record function offsets for BL patching
+        // Record function offsets for BL patching — computed from the ACTUAL
+        // all_code length as we append each function, not from a separate
+        // func_size calculation that may disagree with the actual padding.
         let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let padded_header_size = (start_stub_size + ffi_stub_size + 15) & !15;
-        let mut current_code_offset = padded_header_size;
-        for func in &ordered_functions {
-            func_offsets.insert(func.name.clone(), current_code_offset);
-            let func_size: usize = func.blocks.iter()
-                .flat_map(|b| b.instructions.iter())
-                .map(|i| i.encoded.len())
-                .sum();
-            // Pad to 16-byte alignment (matches the padding in the code emission below)
-            let padded_size = (func_size + 15) & !15;
-            current_code_offset += padded_size;
-        }
+        let padded_header_size = all_code.len();  // already padded to 16 above
 
         for func in &ordered_functions {
+            // Record the offset of this function BEFORE appending its code.
+            func_offsets.insert(func.name.clone(), all_code.len());
             for block in &func.blocks {
                 for instr in &block.instructions {
                     all_code.extend_from_slice(&instr.encoded);
@@ -1667,10 +1660,13 @@ impl Backend for HppaBackend {
         // Collect trampolines for backward calls.
         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
-        let mut func_code_offset = padded_header_size;
+        // Use the ACTUAL function offsets from func_offsets (computed during
+        // code emission) instead of a separate func_code_offset that may
+        // disagree due to padding mismatches.
         for func in &ordered_functions {
+            let func_base = *func_offsets.get(&func.name).unwrap_or(&padded_header_size);
             for reloc in &func.relocations {
-                let abs_offset = func_code_offset + reloc.offset as usize;
+                let abs_offset = func_base + reloc.offset as usize;
                 if abs_offset + 4 > all_code.len() { continue; }
                 let target_offset = func_offsets.get(&reloc.symbol)
                     .copied()
@@ -1685,8 +1681,13 @@ impl Backend for HppaBackend {
 
                 let raw_disp = target_offset as i64 - abs_offset as i64 - 8;
 
-                if raw_disp >= 0 {
-                    // Forward call: patch BL displacement directly.
+                // PA-RISC BL: target = PC + 8 + disp * 16.  The hardware
+                // multiplies disp by 16, so disp must be raw_disp / 16.
+                // When raw_disp is NOT a multiple of 16, integer division
+                // loses precision and the BL targets the wrong address.
+                // Use a trampoline for non-aligned displacements.
+                if raw_disp >= 0 && raw_disp % 16 == 0 {
+                    // Forward call with 16-byte-aligned displacement: patch BL directly.
                     let disp = (raw_disp / 16) as i32;
                     let w = u32::from_be_bytes([
                         all_code[abs_offset], all_code[abs_offset + 1],
@@ -1695,17 +1696,10 @@ impl Backend for HppaBackend {
                     let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
                     all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
                 } else {
-                    // Backward call: need trampoline.
-                    // We'll collect these and append trampolines after all code.
+                    // Backward call OR non-aligned displacement: need trampoline.
                     trampolines.push((abs_offset, target_offset));
                 }
             }
-            let func_size: usize = func.blocks.iter()
-                .flat_map(|b| b.instructions.iter())
-                .map(|i| i.encoded.len())
-                .sum();
-            let padded_size = (func_size + 15) & !15;
-            func_code_offset += padded_size;
         }
 
         // ── Emit trampolines for backward calls ──
