@@ -407,6 +407,42 @@ fn encode_copy(src: Reg, dst: Reg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
+/// Encode SHRPW (Shift Right Pair Word) — `SHRPW r1, r2, sa, t`.
+/// Shifts the 64-bit concatenation (r1:r2) right by sa bits, result in t.
+/// With r1=R0 (zero), this gives: t = r2 >> sa (zero-filled).
+///
+/// QEMU PA-RISC format 14 (empirically verified via QEMU disassembly):
+///   bits 31-26: 110100 (opcode 0x34)
+///   bits 25-21: r2 (source, low 32 bits of pair)
+///   bits 20-16: r1 (source, high 32 bits of pair — use R0 for zero)
+///   bits 15-11: cl
+///   bit  10:    0 (fixed shift; 1 = variable)
+///   bits 9-6:   pos
+///   bits 4-0:   t (target)
+/// Shift amount: sa = 31 - cl - pos
+fn encode_shrpw(r1: Reg, r2: Reg, sa: u8, t: Reg) -> [u8; 4] {
+    // QEMU PA-RISC SHRPW encoding (empirically determined):
+    //   bits 31-26: 110100 (opcode 0x34)
+    //   bits 25-21: r2 (source, low 32 bits of pair)
+    //   bits 20-16: r1 (source, high 32 bits — use R0 for zero)
+    //   bits 15-11: cl = 1 (MUST be 1 for unconditional SHRPW)
+    //   bit  10:    0 (fixed shift)
+    //   bits 9-6:   pos (shift amount encoded as (31 - sa) / 2)
+    //   bits 4-0:   t (target)
+    // Formula: sa = 31 - 2 * pos, so pos = (31 - sa) / 2.
+    // Only works for ODD sa values (sa = 31, 29, 27, ..., 3, 1).
+    // For even sa values, use two shifts: sa-1 then shift by 1.
+    let pos = (31u8 - sa) / 2;
+    let cl: u32 = 1;
+    let word = 0xD0000000u32
+        | ((r2 as u32 & 0x1F) << 21)
+        | ((r1 as u32 & 0x1F) << 16)
+        | (cl << 11)
+        | ((pos as u32 & 0xF) << 6)
+        | (t as u32 & 0x1F);
+    word.to_be_bytes()
+}
+
 /// Encode LDI (Load Immediate) — `LDI imm, reg`.
 /// Loads a small (5-bit or 11-bit) immediate into a register.
 /// For 5-bit: 0001 10ss 00000 0 0 aaaa aaa ddddd iiii iiii iiiii
@@ -941,53 +977,33 @@ impl Backend for HppaBackend {
                                 code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                             }
                             BinOpKind::ShrL | BinOpKind::ShrA => {
-                                // Variable right shift via loop: result = lhs;
-                                // while (shift > 0) { result >>= 1; shift--; }
-                                // S0 has lhs, S1 has shift.
-                                // Register plan (S3 is used by backward branch):
-                                //   S0 = result (also quotient in inner loop)
-                                //   S1 = value being divided (inner loop)
-                                //   S2 = shift counter (outer loop)
-                                //   S4 = 2 (constant)
+                                // Variable right shift via 1-bit SHRPW loop:
+                                //   while (shift > 0) { result = SHRPW(R0, result, 1); shift--; }
+                                //
+                                // SHRPW r0, r2, 1, t = (0:r2) >> 1 = r2 >> 1 (zero-fill).
+                                // This is O(n) where n is the shift amount (max 32),
+                                // vs the old division loop which was O(x * n).
                                 code.extend_from_slice(&encode_copy(S1, S2));  // S2 = shift counter
                                 // S0 = lhs (already loaded)
-                                code.extend_from_slice(&encode_ldi(2, S4));   // S4 = 2
-                                // Outer loop: while (shift > 0)
-                                let outer_loop = code.len();
+                                // Loop: while (S2 != 0) { S0 = SHRPW(R0, S0, 1, S0); S2--; }
+                                let loop_start = code.len();
                                 code.extend_from_slice(&encode_cmpb(S2, R0, 0b001, false, false, 0));
                                 code.extend_from_slice(&encode_nop());
-                                // Inner: S0 = S0 / 2 (via subtraction loop)
-                                // S1 = S0 (copy of current value), S0 = 0 (quotient)
-                                code.extend_from_slice(&encode_copy(S0, S1));  // S1 = current value
-                                code.extend_from_slice(&encode_copy(R0, S0));  // S0 = 0 (quotient)
-                                // inner loop: while (S1 >= 2) { S1 -= 2; S0++; }
-                                let inner_loop = code.len();
-                                code.extend_from_slice(&encode_cmpb(S1, S4, 0b100, false, false, 0));
-                                code.extend_from_slice(&encode_nop());
-                                code.extend_from_slice(&encode_sub(S1, S4, S1));
-                                code.extend_from_slice(&encode_ldo(S0, 1, S0));
-                                let inner_bl = code.len() as i64;
-                                code.extend(emit_backward_branch(inner_loop as i64, inner_bl));
-                                let inner_exit = code.len() as i64;
-                                let inner_disp = ((inner_exit - inner_loop as i64 - 8) as i32) & !3;
-                                let inner_word = u32::from_be_bytes([
-                                    code[inner_loop], code[inner_loop + 1],
-                                    code[inner_loop + 2], code[inner_loop + 3],
-                                ]);
-                                let inner_patched = (inner_word & !0x1FFF) | encode_cmpb_disp(inner_disp);
-                                code[inner_loop..inner_loop + 4].copy_from_slice(&inner_patched.to_be_bytes());
-                                // S0 = value / 2. Decrement shift counter.
+                                // S0 = S0 >> 1 (via SHRPW R0, S0, 1, S0)
+                                code.extend_from_slice(&encode_shrpw(R0, S0, 1, S0));
+                                // S2--
                                 code.extend_from_slice(&encode_ldo(S2, -1, S2));
-                                let outer_bl = code.len() as i64;
-                                code.extend(emit_backward_branch(outer_loop as i64, outer_bl));
-                                let outer_exit = code.len() as i64;
-                                let outer_disp = ((outer_exit - outer_loop as i64 - 8) as i32) & !3;
-                                let outer_word = u32::from_be_bytes([
-                                    code[outer_loop], code[outer_loop + 1],
-                                    code[outer_loop + 2], code[outer_loop + 3],
+                                // Branch back to loop_start
+                                let bl_off = code.len() as i64;
+                                code.extend(emit_backward_branch(loop_start as i64, bl_off));
+                                let loop_exit = code.len() as i64;
+                                let disp = ((loop_exit - loop_start as i64 - 8) as i32) & !3;
+                                let w = u32::from_be_bytes([
+                                    code[loop_start], code[loop_start + 1],
+                                    code[loop_start + 2], code[loop_start + 3],
                                 ]);
-                                let outer_patched = (outer_word & !0x1FFF) | encode_cmpb_disp(outer_disp);
-                                code[outer_loop..outer_loop + 4].copy_from_slice(&outer_patched.to_be_bytes());
+                                let patched = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                code[loop_start..loop_start + 4].copy_from_slice(&patched.to_be_bytes());
                             }
                             BinOpKind::Eq | BinOpKind::Ne
                             | BinOpKind::SLt | BinOpKind::ULt
