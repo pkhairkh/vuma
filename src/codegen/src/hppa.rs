@@ -1432,11 +1432,20 @@ impl Backend for HppaBackend {
         start_stub.extend_from_slice(&encode_gate());
 
         let start_stub_size = start_stub.len();
-        let ffi_stub_size = 4; // Just a NOP
-        let ffi_stub_offset = start_stub_size;
 
         // ── FFI return-0 stub ──
-        let ffi_stub = encode_nop().to_vec();
+        // Returns 0 in R28 and branches back to R2 (return address).
+        // This is used for extern functions like print_int that don't
+        // have a real implementation.
+        let ffi_stub = {
+            let mut code = Vec::new();
+            // R28 = 0 (return value)
+            code.extend_from_slice(&encode_copy(R0, R28));
+            // BV R0(R2) — return to caller
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop()); // delay slot
+            code
+        };
 
         // ── Syscall stubs ──
         let simple_stub = |num: i32| -> Vec<u8> {
@@ -1539,6 +1548,9 @@ impl Backend for HppaBackend {
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        // Record the FFI stub offset BEFORE appending it (it comes right
+        // after the start stub, at the current all_code length).
+        let ffi_stub_offset = all_code.len();
         all_code.extend_from_slice(&ffi_stub);
         // Pad start_stub + ffi_stub to 16-byte alignment.
         // PA-RISC BL displacement has 16-byte granularity, so ALL code positions
@@ -1601,6 +1613,9 @@ impl Backend for HppaBackend {
             stub_offset = all_code.len();
         }
 
+        // Collect trampolines for backward/non-aligned calls.
+        let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
+
         // ── Patch _start BL to main ──
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
@@ -1608,10 +1623,16 @@ impl Backend for HppaBackend {
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
             let bl_pc = 0i64; // BL is at offset 0 in all_code
-            let disp = ((main_offset - bl_pc - 8) / 16) as i32;
-            let w = u32::from_be_bytes([all_code[0], all_code[1], all_code[2], all_code[3]]);
-            let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
-            all_code[0..4].copy_from_slice(&patched.to_be_bytes());
+            let raw_disp = main_offset - bl_pc - 8;
+            if raw_disp >= 0 && raw_disp % 16 == 0 {
+                let disp = (raw_disp / 16) as i32;
+                let w = u32::from_be_bytes([all_code[0], all_code[1], all_code[2], all_code[3]]);
+                let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+                all_code[0..4].copy_from_slice(&patched.to_be_bytes());
+            } else {
+                // Non-aligned displacement: use trampoline (same as inter-function calls)
+                trampolines.push((0usize, main_offset as usize));
+            }
         }
 
         // ── Patch inter-function BL calls ──
@@ -1656,9 +1677,6 @@ impl Backend for HppaBackend {
         // approach: for backward calls, patch the BL to branch FORWARD to a
         // trampoline at the end of the code, and the trampoline does the
         // backward branch via BL+LDO+BV.
-
-        // Collect trampolines for backward calls.
-        let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
         // Use the ACTUAL function offsets from func_offsets (computed during
         // code emission) instead of a separate func_code_offset that may
