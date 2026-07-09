@@ -1368,16 +1368,19 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
             }
             .encode());
         }
-        // Sign-extend the 32-bit value to 64 bits using SRA
-        // (SETHI+OR gives us the 32-bit value in the low 32 bits, but upper
-        // 32 bits may be garbage. Use SLLX 32 then SRAX 32 to sign-extend.)
+        // Zero-extend the 32-bit value to 64 bits using SLLX + SRLX.
+        // SETHI+OR gives the 32-bit value in the low 32 bits, but upper
+        // 32 bits may be garbage.  SLLX 32 shifts the value to the upper
+        // 32 bits, then SRLX 32 shifts it back, zero-filling the upper bits.
+        // Using SRAX (arithmetic shift) would sign-extend, which is wrong
+        // for unsigned values like 0xFFFFFFFF (would give 0xFFFFFFFFFFFFFFFF).
         code.extend_from_slice(&Instruction::SllxImm {
             rd: dst,
             rs1: dst,
             imm: 32,
         }
         .encode());
-        code.extend_from_slice(&Instruction::SraxImm {
+        code.extend_from_slice(&Instruction::SrlxImm {
             rd: dst,
             rs1: dst,
             imm: 32,
