@@ -7136,16 +7136,7 @@ pub fn flatten_expr(
             for i in (0..chain_depth).rev() {
                 let dst = ctx.alloc_temp();
                 let ty = if i == 0 {
-                    if chain_depth > 1 {
-                        // Chained deref (e.g. **buf1): the final load reads
-                        // a value that was stored through a chained deref,
-                        // which always uses U64.  Default to U64 when no
-                        // stride pattern is detected, to avoid reading the
-                        // wrong byte on big-endian backends.
-                        outer_load_ty.clone().or(Some(vuma_codegen::ir::IRType::U64))
-                    } else {
-                        outer_load_ty.clone()
-                    }
+                    outer_load_ty.clone()
                 } else {
                     Some(vuma_codegen::ir::IRType::U64)
                 };
