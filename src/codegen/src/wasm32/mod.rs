@@ -20,15 +20,19 @@ use crate::ir::{
 use std::collections::HashMap;
 
 // Thread-local set of function names that return 64-bit values (I64/U64).
-thread_local! {
-    static FUNC_64BIT_RETURNS: std::cell::RefCell<Option<std::collections::HashSet<String>>> = std::cell::RefCell::new(None);
+// Global set of function names that return 64-bit values (I64/U64).
+// Uses RwLock instead of thread_local! because compile_dump uses rayon
+// par_iter for parallel allocation.
+static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
+
+fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {
+    FUNC_64BIT_RETURNS.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-/// Set the thread-local set of 64-bit-returning function names.
+/// Set the global set of 64-bit-returning function names.
 pub fn set_64bit_returns(names: &std::collections::HashSet<String>) {
-    FUNC_64BIT_RETURNS.with(|s| {
-        *s.borrow_mut() = Some(names.clone());
-    });
+    let lock = func_64bit_returns();
+    *lock.write().unwrap() = Some(names.clone());
 }
 
 pub mod disasm;
@@ -2728,11 +2732,13 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 // (low word at slot, high word at slot+1... but wasm32
                 // doesn't have multi-word locals). Instead, store the I64
                 // in a local and use I32WrapI64 when needed.
-                let is_64bit_ret = FUNC_64BIT_RETURNS.with(|s| {
-                    s.borrow().as_ref()
+                let is_64bit_ret = {
+                    let lock = func_64bit_returns();
+                    let guard = lock.read().unwrap();
+                    guard.as_ref()
                         .map(|set| set.contains(func))
                         .unwrap_or(false)
-                });
+                };
                 if let Some(IRValue::Register(id)) = dst {
                     if is_64bit_ret {
                         // Load 64-bit value from mem[0] and store in an I64 local.
