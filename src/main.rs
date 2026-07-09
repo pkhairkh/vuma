@@ -506,6 +506,18 @@ fn compile_to_binary_direct(
         )
     })?;
 
+    // Populate thread-local set of 64-bit-returning function names.
+    // This is needed by arm32 (and potentially other 32-bit backends) to
+    // know whether to store R1 (high word) after a function call returns.
+    {
+        use std::collections::HashSet;
+        let func_64bit: HashSet<String> = ir_program.functions.iter()
+            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64)))
+            .map(|f| f.name.clone())
+            .collect();
+        vuma_codegen::backend::set_64bit_returns(&func_64bit);
+    }
+
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
         match backend.allocate_registers(func) {
