@@ -1423,9 +1423,50 @@ impl Backend for HppaBackend {
                         code.extend(ss_load_value(value, &vreg_stack_slots, S1));
                         code.extend_from_slice(&encode_stw(S1, S0, 0));
                     }
-                    IRInstr::AtomicCas { .. } => {
-                        // Not implemented — NOP
-                        code.extend_from_slice(&encode_nop());
+                    IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
+                        // Simple non-atomic CAS (VUMA is single-threaded in QEMU):
+                        // Load *addr into S1
+                        // If S1 == expected: store desired to *addr, dst = expected (success)
+                        // Else: dst = S1 (failure, return current value)
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, S0));
+                        code.extend_from_slice(&encode_ldw(S0, 0, S1));  // S1 = *addr
+                        code.extend(ss_load_value(expected, &vreg_stack_slots, S2));  // S2 = expected
+                        // Compare S1 and S2
+                        // cmpb,<> S1, S2, fail  (if *addr != expected, goto fail)
+                        let cmp_off = code.len();
+                        code.extend_from_slice(&encode_cmpb(S1, S2, 0b001, true, false, 0));
+                        code.extend_from_slice(&encode_nop());  // delay slot
+                        // Success: store desired to *addr
+                        code.extend(ss_load_value(desired, &vreg_stack_slots, S3));  // S3 = desired
+                        code.extend_from_slice(&encode_stw(S3, S0, 0));  // *addr = desired
+                        // dst = expected (S2)
+                        let d_id = dst.as_register().unwrap_or(0);
+                        let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                        code.extend(ss_st(S2, d_off));
+                        // Branch to end (skip fail block)
+                        let skip_off = code.len();
+                        // Emit 20-byte placeholder for branch to end
+                        for _ in 0..5 { code.extend_from_slice(&encode_nop()); }
+                        // fail: dst = *addr (S1)
+                        let fail_off = code.len();
+                        code.extend(ss_st(S1, d_off));
+                        let end_off = code.len() as i64;
+                        // Patch cmpb to branch to fail_off
+                        let cmp_disp = ((fail_off as i64 - cmp_off as i64 - 8) as i32) & !3;
+                        let cmp_word = u32::from_be_bytes([
+                            code[cmp_off], code[cmp_off + 1],
+                            code[cmp_off + 2], code[cmp_off + 3],
+                        ]);
+                        let cmp_patched = (cmp_word & !0x1FFF) | encode_cmpb_disp(cmp_disp);
+                        code[cmp_off..cmp_off + 4].copy_from_slice(&cmp_patched.to_be_bytes());
+                        // Patch skip branch to branch to end_off
+                        let skip_disp = ((end_off - skip_off as i64 - 8) as i32) & !3;
+                        let skip_word = u32::from_be_bytes([
+                            code[skip_off], code[skip_off + 1],
+                            code[skip_off + 2], code[skip_off + 3],
+                        ]);
+                        let skip_patched = (skip_word & !0x1FFF) | encode_cmpb_disp(skip_disp);
+                        code[skip_off..skip_off + 4].copy_from_slice(&skip_patched.to_be_bytes());
                     }
                 }
             }
