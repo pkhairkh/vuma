@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-09 22:20:38 UTC",
+  "timestamp": "2026-07-10 15:01:44 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
@@ -7,6 +7,11 @@
   "skipped": 0,
   "pass_rate": "99.96%",
   "per_backend": {
+    "armeb": {
+      "total": 5745,
+      "match": 5742,
+      "skipped": 0
+    },
     "aarch64": {
       "total": 5745,
       "match": 5745,
@@ -15,11 +20,6 @@
     "riscv64": {
       "total": 5745,
       "match": 5745,
-      "skipped": 0
-    },
-    "aarch64_be": {
-      "total": 5745,
-      "match": 5744,
       "skipped": 0
     },
     "x86_64": {
@@ -32,14 +32,9 @@
       "match": 5743,
       "skipped": 0
     },
-    "armeb": {
+    "aarch64_be": {
       "total": 5745,
-      "match": 5742,
-      "skipped": 0
-    },
-    "mips64": {
-      "total": 5745,
-      "match": 5745,
+      "match": 5744,
       "skipped": 0
     },
     "mips64be": {
@@ -47,22 +42,7 @@
       "match": 5738,
       "skipped": 0
     },
-    "ppc64": {
-      "total": 5745,
-      "match": 5743,
-      "skipped": 0
-    },
-    "x86_32": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "m68k": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
-    "riscv32": {
+    "mips64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -72,19 +52,14 @@
       "match": 5743,
       "skipped": 0
     },
-    "loongarch64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "s390x": {
+    "ppc64": {
       "total": 5745,
       "match": 5743,
       "skipped": 0
     },
-    "alpha": {
+    "loongarch64": {
       "total": 5745,
-      "match": 5740,
+      "match": 5745,
       "skipped": 0
     },
     "sparc64": {
@@ -92,9 +67,34 @@
       "match": 5744,
       "skipped": 0
     },
+    "alpha": {
+      "total": 5745,
+      "match": 5740,
+      "skipped": 0
+    },
+    "x86_32": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
     "hppa": {
       "total": 5745,
       "match": 5727,
+      "skipped": 0
+    },
+    "s390x": {
+      "total": 5745,
+      "match": 5743,
+      "skipped": 0
+    },
+    "riscv32": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "m68k": {
+      "total": 5745,
+      "match": 5741,
       "skipped": 0
     },
     "wasm32": {
