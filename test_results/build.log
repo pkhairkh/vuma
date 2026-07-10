@@ -17,6 +17,62 @@ help: remove these parentheses
      |
 
 warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
+   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
+  --> src/ive/src/modular.rs:16:43
+   |
+16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
+   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NodeType`
+  --> src/ive/src/query.rs:17:43
+   |
+17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
+   |                                           ^^^^^^^^
+
+warning: unused variable: `summaries`
+   --> src/ive/src/modular.rs:336:5
+    |
+336 |     summaries: &HashMap<String, FunctionSummary>,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `consistent` is never read
+  --> src/ive/src/query.rs:37:5
+   |
+31 | pub struct QuerySystem {
+   |            ----------- field in this struct
+...
+37 |     consistent: bool,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
+warning: unused variable: `deref_inner`
+    --> src/parser/src/to_scg.rs:2959:40
+     |
+2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2961:22
+     |
+2961 |                 for (struct_name, layout) in &self.struct_table {
+     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2971:18
+     |
+2971 |             for (struct_name, layout) in &self.struct_table {
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
 warning: unused import: `CastKind`
   --> src/codegen/src/alpha.rs:46:28
    |
@@ -136,81 +192,97 @@ warning: unused variable: `data_offset`
      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `word`
-   --> src/codegen/src/hppa.rs:111:9
+   --> src/codegen/src/hppa.rs:112:9
     |
-111 |     let word = 0xE8000000u32
+112 |     let word = 0xE8000000u32
     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_word`
 
 warning: unused variable: `word`
-   --> src/codegen/src/hppa.rs:358:9
+   --> src/codegen/src/hppa.rs:359:9
     |
-358 |     let word = 0x08000000u32
+359 |     let word = 0x08000000u32
     |         ^^^^ help: if this is intentional, prefix it with an underscore: `_word`
 
-warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:746:36
+warning: unused variable: `alloc_offsets`
+   --> src/codegen/src/hppa.rs:735:13
     |
-746 |                     IRInstr::Add { dst, lhs, rhs, ty: _ } => {
+735 |         let alloc_offsets: HashMap<u32, i32> = HashMap::new();
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_alloc_offsets`
+
+warning: unused variable: `dst`
+   --> src/codegen/src/hppa.rs:786:36
+    |
+786 |                     IRInstr::Add { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:752:36
+   --> src/codegen/src/hppa.rs:792:36
     |
-752 |                     IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
+792 |                     IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:758:36
+   --> src/codegen/src/hppa.rs:798:36
     |
-758 |                     IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
+798 |                     IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:799:36
+   --> src/codegen/src/hppa.rs:839:36
     |
-799 |                     IRInstr::Div { dst, lhs, rhs, ty: _ } => {
+839 |                     IRInstr::Div { dst, lhs, rhs, ty: _ } => {
     |                                    ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `dst`
-   --> src/codegen/src/hppa.rs:829:42
+   --> src/codegen/src/hppa.rs:869:42
     |
-829 |                     IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+869 |                     IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
     |                                          ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `lhs`
-    --> src/codegen/src/hppa.rs:1262:42
+    --> src/codegen/src/hppa.rs:1380:42
      |
-1262 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1380 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                          ^^^ help: try ignoring the field: `lhs: _`
 
 warning: unused variable: `rhs`
-    --> src/codegen/src/hppa.rs:1262:47
+    --> src/codegen/src/hppa.rs:1380:47
      |
-1262 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1380 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                               ^^^ help: try ignoring the field: `rhs: _`
 
 warning: unused variable: `load_instr`
-    --> src/codegen/src/hppa.rs:1269:29
+    --> src/codegen/src/hppa.rs:1387:29
      |
-1269 |                         let load_instr = IRInstr::Load {
+1387 |                         let load_instr = IRInstr::Load {
      |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_instr`
 
 warning: unused variable: `store_instr`
-    --> src/codegen/src/hppa.rs:1280:29
+    --> src/codegen/src/hppa.rs:1398:29
      |
-1280 |                         let store_instr = IRInstr::Store {
+1398 |                         let store_instr = IRInstr::Store {
      |                             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_store_instr`
 
-warning: unused variable: `start_stub_size`
-    --> src/codegen/src/hppa.rs:1459:13
+warning: variable does not need to be mutable
+    --> src/codegen/src/hppa.rs:1766:13
      |
-1459 |         let start_stub_size = start_stub.len();
+1766 |         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `start_stub_size`
+    --> src/codegen/src/hppa.rs:1584:13
+     |
+1584 |         let start_stub_size = start_stub.len();
      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_start_stub_size`
 
 warning: unused variable: `call_offset`
-    --> src/codegen/src/hppa.rs:1753:14
+    --> src/codegen/src/hppa.rs:1907:14
      |
-1753 |         for (call_offset, target_offset) in &trampolines {
+1907 |         for (call_offset, target_offset) in &trampolines {
      |              ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_call_offset`
 
 warning: unused variable: `data_offset`
@@ -226,8 +298,6 @@ warning: variable does not need to be mutable
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
-     |
-     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `ffi_stub_offset`
     --> src/codegen/src/backend.rs:2668:13
@@ -1069,12 +1139,6 @@ warning: constant `R7` is never used
 47 | const R7: Reg = 7;
    |       ^^
 
-warning: constant `R13` is never used
-  --> src/codegen/src/hppa.rs:53:7
-   |
-53 | const R13: Reg = 13;
-   |       ^^^
-
 warning: constant `R14` is never used
   --> src/codegen/src/hppa.rs:54:7
    |
@@ -1111,6 +1175,18 @@ warning: constant `R19` is never used
 59 | const R19: Reg = 19;
    |       ^^^
 
+warning: constant `R21` is never used
+  --> src/codegen/src/hppa.rs:61:7
+   |
+61 | const R21: Reg = 21;
+   |       ^^^
+
+warning: constant `R22` is never used
+  --> src/codegen/src/hppa.rs:62:7
+   |
+62 | const R22: Reg = 22;
+   |       ^^^
+
 warning: constant `R27` is never used
   --> src/codegen/src/hppa.rs:67:7
    |
@@ -1130,33 +1206,33 @@ warning: constant `R31` is never used
    |       ^^^
 
 warning: function `encode_bl` is never used
-   --> src/codegen/src/hppa.rs:105:4
+   --> src/codegen/src/hppa.rs:106:4
     |
-105 | fn encode_bl(target_offset: i32) -> [u8; 4] {
+106 | fn encode_bl(target_offset: i32) -> [u8; 4] {
     |    ^^^^^^^^^
 
 warning: function `encode_cmpiclr` is never used
-   --> src/codegen/src/hppa.rs:211:4
+   --> src/codegen/src/hppa.rs:212:4
     |
-211 | fn encode_cmpiclr(imm5: u8, r1: Reg, dst: Reg, cond: u32, f: bool) -> [u8; 4] {
+212 | fn encode_cmpiclr(imm5: u8, r1: Reg, dst: Reg, cond: u32, f: bool) -> [u8; 4] {
     |    ^^^^^^^^^^^^^^
 
 warning: function `encode_addil` is never used
-   --> src/codegen/src/hppa.rs:238:4
+   --> src/codegen/src/hppa.rs:239:4
     |
-238 | fn encode_addil(reg: Reg, imm: u32, dst: Reg) -> [u8; 4] {
+239 | fn encode_addil(reg: Reg, imm: u32, dst: Reg) -> [u8; 4] {
     |    ^^^^^^^^^^^^
 
 warning: function `encode_addi` is never used
-   --> src/codegen/src/hppa.rs:354:4
+   --> src/codegen/src/hppa.rs:355:4
     |
-354 | fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
+355 | fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
     |    ^^^^^^^^^^^
 
 warning: function `emit_forward_branch` is never used
-   --> src/codegen/src/hppa.rs:572:4
+   --> src/codegen/src/hppa.rs:613:4
     |
-572 | fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
+613 | fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     |    ^^^^^^^^^^^^^^^^^^^
 
 warning: constant `DW_CFA_ADVANCE_LOC` is never used
@@ -2049,52 +2125,18 @@ warning: function `emit_cmp_setcc` is never used
      |    ^^^^^^^^^^^^^^
 
 warning: unused bitwise operation that must be used
-   --> src/codegen/src/hppa.rs:217:5
+   --> src/codegen/src/hppa.rs:218:5
     |
-217 |     word | (dst as u32 & 0x1F);
+218 |     word | (dst as u32 & 0x1F);
     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the bitwise operation produces a value
     |
     = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
 help: use `let _ = ...` to ignore the resulting value
     |
-217 |     let _ = word | (dst as u32 & 0x1F);
+218 |     let _ = word | (dst as u32 & 0x1F);
     |     +++++++
 
-warning: `vuma-codegen` (lib) generated 306 warnings (run `cargo fix --lib -p vuma-codegen` to apply 89 suggestions)
-warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
-  --> src/ive/src/modular.rs:16:43
-   |
-16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
-   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused import: `NodeType`
-  --> src/ive/src/query.rs:17:43
-   |
-17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
-   |                                           ^^^^^^^^
-
-warning: unused variable: `summaries`
-   --> src/ive/src/modular.rs:336:5
-    |
-336 |     summaries: &HashMap<String, FunctionSummary>,
-    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `consistent` is never read
-  --> src/ive/src/query.rs:37:5
-   |
-31 | pub struct QuerySystem {
-   |            ----------- field in this struct
-...
-37 |     consistent: bool,
-   |     ^^^^^^^^^^
-   |
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
+   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
 warning: field `config` is never read
    --> src/cor/src/deployment.rs:517:5
     |
@@ -2107,28 +2149,9 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
 warning: `vuma-cor` (lib) generated 1 warning
-warning: unused variable: `deref_inner`
-    --> src/parser/src/to_scg.rs:2959:40
-     |
-2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
-     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
-     |
-     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2961:22
-     |
-2961 |                 for (struct_name, layout) in &self.struct_table {
-     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2971:18
-     |
-2971 |             for (struct_name, layout) in &self.struct_table {
-     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
   --> src/pipeline.rs:76:39
    |
@@ -2320,4 +2343,5 @@ warning: missing documentation for a function
      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 0.09s
+warning: `vuma-codegen` (lib) generated 309 warnings (run `cargo fix --lib -p vuma-codegen` to apply 91 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 33.47s
