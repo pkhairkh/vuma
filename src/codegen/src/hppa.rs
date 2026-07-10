@@ -496,7 +496,15 @@ fn encode_ldi(imm: i32, dst: Reg) -> [u8; 4] {
 // Stack-based codegen helpers
 // ===========================================================================
 
-/// Load an immediate value into a register using LDIL + LDO.
+/// Load an immediate value into a register.
+///
+/// Uses a multi-level decomposition to handle arbitrary 32-bit values:
+/// 1. Small values (-8192 to 8191): single LDI
+/// 2. Values where upper_shifted fits in 14 bits: LDI + 11×ADD + LDO
+/// 3. Larger values: two-level decomposition (LDI + 11×ADD + LDO + 11×ADD + LDO)
+///
+/// QEMU's LDIL shifts left by 19 instead of 11, making LDIL unusable.
+/// The 11×ADD sequence implements a left shift by 11 (dst = dst << 11).
 fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     // For small values (-8192 to 8191), use a single LDI (LDO with base=R0).
@@ -504,30 +512,40 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
         code.extend_from_slice(&encode_ldo(R0, val as i16, dst));
         return code;
     }
-    // For larger values, use LDI + SHLADD(11) + LDO.
-    // QEMU's LDIL shifts left by 19 instead of 11, making LDIL unusable.
-    // SHLADD(shift, r1, r2, dst) computes dst = (r1 << shift) + r2.
-    // SHLADD(11, dst, R0, dst) = dst << 11.
-    // So: LDI upper_shifted, dst; SHLADD 11, dst, R0, dst; LDO lower, dst
     let v = val as u32;
     let upper = v & 0xFFFFF800;  // bits 31:11
     let lower = (v & 0x7FF) as i16;  // bits 10:0
-    let upper_shifted = upper >> 11;
-    // LDI upper_shifted, dst (uses LDO with base=R0)
-    code.extend_from_slice(&encode_ldo(R0, upper_shifted as i16, dst));
-    // Shift left by 11 using repeated ADD (dst = dst + dst = dst << 1).
-    // QEMU doesn't support SH2ADD/SH3ADD, so we use 11 ADDs.
+    let upper_shifted = upper >> 11;  // bits 20:0 (max 0x1FFFFF = 2097151)
+
+    if upper_shifted <= 8191 {
+        // Level 1: upper_shifted fits in LDO's 14-bit displacement
+        code.extend_from_slice(&encode_ldo(R0, upper_shifted as i16, dst));
+    } else {
+        // Level 2: upper_shifted > 8191, decompose further
+        // upper_shifted = (upper_shifted >> 11) << 11 + (upper_shifted & 0x7FF)
+        let upper_high = (upper_shifted >> 11) as i16;  // bits 20:11 (max 1023)
+        let upper_low = (upper_shifted & 0x7FF) as i16;  // bits 10:0 (max 2047)
+        // LDI upper_high, dst
+        code.extend_from_slice(&encode_ldo(R0, upper_high, dst));
+        // Shift left by 11: dst = upper_high << 11
+        for _ in 0..11 {
+            code.extend_from_slice(&encode_add(dst, dst, dst));
+        }
+        // LDO upper_low, dst: dst = (upper_high << 11) + upper_low = upper_shifted
+        if upper_low != 0 {
+            code.extend_from_slice(&encode_ldo(dst, upper_low, dst));
+        }
+    }
+    // Shift left by 11: dst = upper_shifted << 11 = upper
     for _ in 0..11 {
         code.extend_from_slice(&encode_add(dst, dst, dst));
     }
-    // LDO lower(dst), dst
-    code.extend_from_slice(&encode_ldo(dst, lower, dst));
-    // Zero-extend: STW (32-bit store) to FP-28 (dedicated scratch slot,
-    // reserved below the saved RP at FP-20 and saved old FP at FP-24),
-    // then LDW (32-bit load, zero-extended to 64). This fixes the
-    // sign-extension that results from 64-bit ADD during constant
-    // construction. Vreg slots start at FP-32, so FP-28 is never used
-    // by vreg spill/load and is safe as scratch within the function body.
+    // LDO lower, dst: dst = upper + lower = v
+    if lower != 0 {
+        code.extend_from_slice(&encode_ldo(dst, lower, dst));
+    }
+    // Zero-extend: STW (32-bit store) to FP-28, then LDW (32-bit load,
+    // zero-extended to 64). Fixes sign-extension from 64-bit ADD.
     if v >= 0x80000000 {
         code.extend_from_slice(&encode_stw(dst, R3, -28));
         code.extend_from_slice(&encode_ldw(R3, -28, dst));
