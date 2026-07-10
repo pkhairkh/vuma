@@ -726,16 +726,13 @@ impl Backend for HppaBackend {
             current_offset -= 4;
         }
 
-        // Alloc regions after vreg slots
-        let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
-        let mut alloc_vreg_ids: Vec<u32> = alloc_sizes.keys().copied().collect();
-        alloc_vreg_ids.sort();
-        for &id in &alloc_vreg_ids {
-            let size = alloc_sizes[&id];
-            current_offset -= size;
-            current_offset &= !15;
-            alloc_offsets.insert(id, current_offset);
-        }
+        // Alloc regions: use mmap (__vuma_alloc) instead of stack space.
+        // QEMU's PA-RISC stack is small (~1.6KB below initial SP), so large
+        // allocations on the stack would overflow. All allocate() calls
+        // are routed to __vuma_alloc (mmap) at runtime.
+        // alloc_offsets is kept empty — the Alloc instruction generates a
+        // function call instead of computing a stack pointer.
+        let alloc_offsets: HashMap<u32, i32> = HashMap::new();
 
         let frame_size = (((-current_offset) as usize + 63) & !63) as usize;
 
@@ -1233,16 +1230,32 @@ impl Backend for HppaBackend {
                             }
                         }
                     }
-                    IRInstr::Alloc { dst, size: _ } => {
+                    IRInstr::Alloc { dst, size } => {
+                        // Call __vuma_alloc(size) → returns ptr in R28.
+                        // Load size into R26 (arg0), then use 24-byte call pattern.
+                        code.extend(ss_load_imm(R26, *size as i64));
+                        let call_offset = code.len() as u64;
+                        // Instr 1: BL,n +0, R1
+                        code.extend_from_slice(&0xE8200000u32.to_be_bytes());
+                        // Instr 2: NOP (delay slot)
+                        code.extend_from_slice(&encode_nop());
+                        // Instr 3: LDO 16(R1), R2 (return address = PC + 24)
+                        code.extend_from_slice(&encode_ldo_raw(R1, 16, R2));
+                        // Instr 4: LDO 0(R1), R1 (placeholder, patched with target disp)
+                        code.extend_from_slice(&encode_ldo_raw(R1, 0, R1));
+                        // Instr 5: BV R0(R1)
+                        code.extend_from_slice(&encode_bv_real(R1));
+                        // Instr 6: NOP (delay slot)
+                        code.extend_from_slice(&encode_nop());
+                        relocations.push(RelocationEntry {
+                            offset: call_offset,
+                            symbol: "__vuma_alloc".to_string(),
+                            reloc_type: "R_PARISC_PCREL".to_string(),
+                        });
+                        // Store return value (R28) to dst vreg
                         let d_id = dst.as_register().unwrap_or(0);
-                        if let Some(&off) = alloc_offsets.get(&d_id) {
-                            // dst = FP + off
-                            code.extend_from_slice(&encode_copy(R3, S0));
-                            code.extend(ss_load_imm(S1, off as i64));
-                            code.extend_from_slice(&encode_add(S0, S1, S0));
-                            let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
-                            code.extend(ss_st(S0, d_off));
-                        }
+                        let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                        code.extend(ss_st(R28, d_off));
                     }
                     IRInstr::Free { ptr: _ } => { /* no-op */ }
                     IRInstr::Cast { dst, src, kind: _, from_ty: _, to_ty: _ } => {
@@ -1589,6 +1602,8 @@ impl Backend for HppaBackend {
             let mut code = Vec::new();
             code.extend(ss_load_imm(R20, num as i64));
             code.extend_from_slice(&encode_gate());
+            // GATE delay slot: MUST be NOP, not BV (BV would skip the syscall)
+            code.extend_from_slice(&encode_nop());
             // BV %r0(%r2),n (return to R2)
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop()); // delay slot
@@ -1622,6 +1637,7 @@ impl Backend for HppaBackend {
             code.extend(ss_load_imm(R23, 8)); // sigsetsize = 8
             code.extend(ss_load_imm(R20, 174)); // rt_sigaction
             code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("sigaction".to_string(), code));
@@ -1643,41 +1659,37 @@ impl Backend for HppaBackend {
             // R20 = __NR_munmap = 91.
             code.extend(ss_load_imm(R20, 91));
             code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             code
         }));
 
         // ── Build __vuma_alloc stub ──
-        // __vuma_alloc(size in R26) → R28 = mmap(NULL, size,
-        //   PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0).
-        // parisc syscall ABI: args in R26 (arg0), R25 (arg1), R24 (arg2),
-        // R23 (arg3), R22 (arg4), R21 (arg5); syscall# in R20; return in R28.
-        //   arg0 = addr = NULL = 0       → R26
-        //   arg1 = length = size (caller's R26)  → R25 (shuffle first!)
-        //   arg2 = prot = PROT_READ|PROT_WRITE = 3 → R24
-        //   arg3 = flags = MAP_PRIVATE|MAP_ANONYMOUS = 0x22 → R23
-        //   arg4 = fd = -1               → R22
-        //   arg5 = offset = 0            → R21
-        // __NR_mmap on parisc = 90.
+        // __vuma_alloc(size in R26) → R28 = allocated pointer.
+        // Uses brk() syscall to extend the heap:
+        //   1. brk(0) → R28 = current_brk
+        //   2. Save current_brk to R24
+        //   3. brk(current_brk + size) → extend heap
+        //   4. R28 = R24 (return current_brk = start of new region)
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // Move caller's R26 (size) into R25 (arg1) before clobbering R26.
+            // Save size (R26) to R25
             code.extend_from_slice(&encode_copy(R26, R25));
-            // R26 (arg0) = NULL = 0
+            // Step 1: brk(0) → R28 = current_brk
             code.extend_from_slice(&encode_copy(R0, R26));
-            // R24 (arg2) = PROT_READ|PROT_WRITE = 3
-            code.extend(ss_load_imm(R24, 3));
-            // R23 (arg3) = MAP_PRIVATE|MAP_ANONYMOUS = 0x22
-            code.extend(ss_load_imm(R23, 0x22));
-            // R22 (arg4) = fd = -1 (LDO with R0 base and offset -1)
-            code.extend_from_slice(&encode_ldo(R0, -1, R22));
-            // R21 (arg5) = offset = 0
-            code.extend_from_slice(&encode_copy(R0, R21));
-            // R20 = __NR_mmap = 90 (parisc Linux: sys_mmap with direct register args)
-            code.extend(ss_load_imm(R20, 90));
+            code.extend(ss_load_imm(R20, 45));  // __NR_brk
             code.extend_from_slice(&encode_gate());
-            // R28 (return) is already the mmap result; BV R2 returns.
+            code.extend_from_slice(&encode_nop());  // GATE delay slot
+            // Save current_brk (R28) to R24
+            code.extend_from_slice(&encode_copy(R28, R24));
+            // Step 2: brk(current_brk + size)
+            code.extend_from_slice(&encode_add(R28, R25, R26));  // R26 = brk + size
+            code.extend(ss_load_imm(R20, 45));  // __NR_brk
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());  // GATE delay slot
+            // Return current_brk (R24) in R28
+            code.extend_from_slice(&encode_copy(R24, R28));
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             code
