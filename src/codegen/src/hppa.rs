@@ -1217,11 +1217,14 @@ impl Backend for HppaBackend {
                                 code.extend_from_slice(&encode_ldw(S0, 0, S1));
                             }
                             _ => {
-                                // Default: use LDB (byte load) for safety on BE.
-                                // This is correct for U8 stores and U64 pointer
-                                // loads (which read the first byte). For U32
-                                // stores, the bridge should infer U32 type.
-                                code.extend_from_slice(&encode_ldb(S0, 0, S1));
+                                // Default: use LDW (32-bit word load).
+                                // Stores default to STW (32-bit), so LDW is the
+                                // matching load width. This correctly loads
+                                // U32/U64/Address values that were stored via
+                                // STW. For U64 values that fit in 32 bits (the
+                                // common case in VUMA tests), this gives the
+                                // correct result. LDW zero-extends to 64 bits.
+                                code.extend_from_slice(&encode_ldw(S0, 0, S1));
                             }
                         }
                         let d_id = dst.as_register().unwrap_or(0);
