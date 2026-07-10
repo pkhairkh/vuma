@@ -407,6 +407,25 @@ fn encode_copy(src: Reg, dst: Reg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
+/// Patch a BL instruction's displacement field.
+///
+/// PA-RISC BL has an 8-bit displacement field at bits 12-5 (QEMU empirically
+/// verified). The displacement is in units of 16 bytes, giving a maximum
+/// reach of 255 * 16 = 4080 bytes forward.
+///
+/// Bits 17-13 are NOT part of the displacement:
+///   - Bit 13 is the GATE flag (1 = GATE instruction, not BL)
+///   - Bits 17-14 change the instruction type (e.g., BLR)
+///
+/// If `disp > 255`, the caller MUST use a trampoline-based call pattern
+/// (BL +0, R1 + LDO + BV) instead of a direct BL.
+fn patch_bl_disp(word: u32, disp: i32) -> u32 {
+    debug_assert!(disp >= 0 && disp <= 255,
+                 "BL displacement {} out of range [0, 255]", disp);
+    let base = word & 0xFFFFC01F; // clear bits 17-5 (disp + flags)
+    base | ((disp as u32 & 0xFF) << 5)
+}
+
 /// Encode SHRPW (Shift Right Pair Word) — `SHRPW r1, r2, sa, t`.
 /// Shifts the 64-bit concatenation (r1:r2) right by sa bits, result in t.
 /// With r1=R0 (zero), this gives: t = r2 >> sa (zero-filled).
@@ -492,6 +511,16 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     }
     // LDO lower(dst), dst
     code.extend_from_slice(&encode_ldo(dst, lower, dst));
+    // Zero-extend: STW (32-bit store) to FP-28 (dedicated scratch slot,
+    // reserved below the saved RP at FP-20 and saved old FP at FP-24),
+    // then LDW (32-bit load, zero-extended to 64). This fixes the
+    // sign-extension that results from 64-bit ADD during constant
+    // construction. Vreg slots start at FP-32, so FP-28 is never used
+    // by vreg spill/load and is safe as scratch within the function body.
+    if v >= 0x80000000 {
+        code.extend_from_slice(&encode_stw(dst, R3, -28));
+        code.extend_from_slice(&encode_ldw(R3, -28, dst));
+    }
     code
 }
 
@@ -672,11 +701,13 @@ impl Backend for HppaBackend {
 
         // PA-RISC stack grows UP. FP=R3 points to the base of the frame.
         // Locals are at NEGATIVE offsets from FP (below FP).
-        // vreg stack slots start at -28 (below RP at -20 and FP at -24).
-        // The prologue saves RP at SP-20 and old FP at SP-24, so vregs
-        // must not overlap with those save areas.
+        // vreg stack slots start at -32 (below RP at -20, old FP at -24,
+        // and a dedicated zero-extension scratch slot at -28).
+        // The prologue saves RP at SP-20 and old FP at SP-24. FP-28 is
+        // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
+        // of values >= 0x80000000, so vregs must start at -32.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = -28;
+        let mut current_offset: i32 = -32;
         let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
         vreg_ids.sort();
         for &id in &vreg_ids {
@@ -1245,11 +1276,36 @@ impl Backend for HppaBackend {
                                     code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
                                 }
                             }
-                            // BL call_target, R2 (save return addr in R2)
+                            // Call pattern (24 bytes, 6 instructions):
+                            //   1. BL,n +0, R1 — R1 = PC+8, branch to PC+8 (instr 3), skip delay slot
+                            //   2. NOP — delay slot (skipped by BL,n for out-of-range; executes for in-range)
+                            //   3. LDO 16(R1), R2 — R2 = PC+24 (return address)
+                            //   4. LDO disp(R1), R1 — R1 = target (patched)
+                            //   5. BV R0(R1) — branch to target
+                            //   6. NOP — delay slot for BV
+                            //
+                            // For in-range calls (disp ≤ 255, 16-byte aligned):
+                            //   - Patch instr 1 to BL disp, R2
+                            //   - NOP instrs 3, 4, 5
+                            //   - Return addr R2 = PC+8 (instr 2), then NOPs 3-6, then instr 7
+                            //
+                            // For out-of-range calls:
+                            //   - Keep BL,n +0, R1 (skip delay slot, branch to instr 3)
+                            //   - Patch instr 4 with target displacement
+                            //   - Return addr R2 = PC+24 (instr 7 = next after call)
                             let call_offset = code.len() as u64;
-                            let w = 0xE8400000u32; // BL with disp=0
-                            code.extend_from_slice(&w.to_be_bytes());
-                            code.extend_from_slice(&encode_nop()); // delay slot
+                            // Instr 1: BL,n +0, R1
+                            code.extend_from_slice(&0xE8200000u32.to_be_bytes());
+                            // Instr 2: NOP (delay slot)
+                            code.extend_from_slice(&encode_nop());
+                            // Instr 3: LDO 16(R1), R2 (return address = PC + 24)
+                            code.extend_from_slice(&encode_ldo_raw(R1, 16, R2));
+                            // Instr 4: LDO 0(R1), R1 (placeholder, patched with target disp)
+                            code.extend_from_slice(&encode_ldo_raw(R1, 0, R1));
+                            // Instr 5: BV R0(R1)
+                            code.extend_from_slice(&encode_bv_real(R1));
+                            // Instr 6: NOP (delay slot)
+                            code.extend_from_slice(&encode_nop());
                             relocations.push(RelocationEntry {
                                 offset: call_offset,
                                 symbol: call_target.clone(),
@@ -1451,16 +1507,23 @@ impl Backend for HppaBackend {
         const BASE_ADDR: u64 = 0x10000;
 
         // ── _start stub ──
-        // 1. BL main, R2 (call main, return value in R28)
-        // 2. NOP (delay slot)
-        // 3. COPY R28, R26 (move return to arg1 for exit)
-        // 4. LDI 1, R20 (SYS_exit)
-        // 5. GATE (syscall)
+        // 1. BL,n +0, R1 — call pattern instr 1 (patched for in-range or LDO for out-of-range)
+        // 2. NOP — delay slot
+        // 3. LDO 16(R1), R2 — return address = PC + 24
+        // 4. LDO disp(R1), R1 — target (patched)
+        // 5. BV R0(R1) — branch to target
+        // 6. NOP — delay slot
+        // 7. COPY R28, R26 (move return to arg1 for exit)
+        // 8. LDI 1, R20 (SYS_exit)
+        // 9. GATE (syscall)
         let mut start_stub: Vec<u8> = Vec::new();
 
-        // BL,n main, R2 — placeholder, will be patched
-        let _bl_offset = 0u64;
-        start_stub.extend_from_slice(&0xE8400000u32.to_be_bytes()); // BL,n disp=0, R2
+        // Call pattern (24 bytes) — same as function call pattern
+        start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
+        start_stub.extend_from_slice(&encode_nop()); // delay slot
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 16, R2)); // R2 = return addr
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // placeholder, patched
+        start_stub.extend_from_slice(&encode_bv_real(R1)); // BV R0(R1)
         start_stub.extend_from_slice(&encode_nop()); // delay slot
         // COPY R28, R26 (move return value to arg1)
         start_stub.extend_from_slice(&encode_copy(R28, R26));
@@ -1654,22 +1717,32 @@ impl Backend for HppaBackend {
         // Collect trampolines for backward/non-aligned calls.
         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
-        // ── Patch _start BL to main ──
+        // ── Patch _start call to main ──
+        // The _start stub uses the same 24-byte call pattern as function calls.
+        // Patch it the same way: in-range → BL disp,R2; out-of-range → LDO disp.
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
-            let bl_pc = 0i64; // BL is at offset 0 in all_code
-            let raw_disp = main_offset - bl_pc - 8;
-            if raw_disp >= 0 && raw_disp % 16 == 0 {
+            let abs_offset = 0i64; // _start call is at offset 0 in all_code
+            let raw_disp = main_offset - abs_offset - 8;
+
+            if raw_disp >= 0 && raw_disp % 16 == 0 && raw_disp / 16 <= 255 {
+                // In-range: patch BL directly
                 let disp = (raw_disp / 16) as i32;
-                let w = u32::from_be_bytes([all_code[0], all_code[1], all_code[2], all_code[3]]);
-                let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+                let patched = 0xE8400000u32 | ((disp as u32 & 0xFF) << 5);
                 all_code[0..4].copy_from_slice(&patched.to_be_bytes());
+                // NOP instructions 3, 4, 5 (at +8, +12, +16)
+                let nop = encode_nop();
+                all_code[8..12].copy_from_slice(&nop);
+                all_code[12..16].copy_from_slice(&nop);
+                all_code[16..20].copy_from_slice(&nop);
             } else {
-                // Non-aligned displacement: use trampoline (same as inter-function calls)
-                trampolines.push((0usize, main_offset as usize));
+                // Out-of-range: patch LDO displacement at offset +12
+                let ldo_disp = (main_offset - abs_offset - 8) as i16;
+                let ldo = encode_ldo_raw(R1, ldo_disp, R1);
+                all_code[12..16].copy_from_slice(&ldo);
             }
         }
 
@@ -1735,25 +1808,45 @@ impl Backend for HppaBackend {
                     })
                     .unwrap_or(ffi_stub_offset);
 
+                // The call site is a 24-byte pattern (6 instructions):
+                //   [abs_offset+0]  BL,n +0, R1   (instr 1)
+                //   [abs_offset+4]  NOP            (instr 2, delay slot)
+                //   [abs_offset+8]  LDO 16(R1),R2  (instr 3, return addr)
+                //   [abs_offset+12] LDO 0(R1),R1   (instr 4, target — PATCHED)
+                //   [abs_offset+16] BV R0(R1)      (instr 5)
+                //   [abs_offset+20] NOP            (instr 6, delay slot)
+                //
+                // For in-range forward calls (disp 0-255, 16-byte aligned):
+                //   - Patch instr 1 to BL disp, R2
+                //   - NOP instrs 3, 4, 5 (at +8, +12, +16)
+                //   - Return addr = PC+8 (instr 2), then NOPs, then instr 7
+                //
+                // For out-of-range or backward calls:
+                //   - Patch instr 4 (LDO at +12) with target displacement
+                //   - Keep BL,n +0, R1 (skips delay slot, branches to instr 3)
+                //   - Return addr R2 = PC+24 (instr 7 = next after call)
                 let raw_disp = target_offset as i64 - abs_offset as i64 - 8;
 
-                // PA-RISC BL: target = PC + 8 + disp * 16.  The hardware
-                // multiplies disp by 16, so disp must be raw_disp / 16.
-                // When raw_disp is NOT a multiple of 16, integer division
-                // loses precision and the BL targets the wrong address.
-                // Use a trampoline for non-aligned displacements.
-                if raw_disp >= 0 && raw_disp % 16 == 0 {
-                    // Forward call with 16-byte-aligned displacement: patch BL directly.
+                if raw_disp >= 0 && raw_disp % 16 == 0 && raw_disp / 16 <= 255 {
+                    // In-range forward call: patch BL directly, NOP the rest
                     let disp = (raw_disp / 16) as i32;
-                    let w = u32::from_be_bytes([
-                        all_code[abs_offset], all_code[abs_offset + 1],
-                        all_code[abs_offset + 2], all_code[abs_offset + 3],
-                    ]);
-                    let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+                    // Replace BL,n +0,R1 (0xE8200000) with BL disp,R2 (0xE8400000 | disp<<5)
+                    // Must clear bits 25-21 (link register) to avoid R1|R2=R3
+                    let patched = 0xE8400000u32 | ((disp as u32 & 0xFF) << 5);
                     all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
+                    // NOP instructions 3, 4, 5 (at +8, +12, +16)
+                    let nop = encode_nop();
+                    all_code[abs_offset + 8..abs_offset + 12].copy_from_slice(&nop);
+                    all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&nop);
+                    all_code[abs_offset + 16..abs_offset + 20].copy_from_slice(&nop);
                 } else {
-                    // Backward call OR non-aligned displacement: need trampoline.
-                    trampolines.push((abs_offset, target_offset));
+                    // Out-of-range or backward: patch LDO displacement in instr 4
+                    // R1 = abs_offset + 8 (from BL,n +0, R1)
+                    // target = R1 + ldo_disp = (abs_offset + 8) + ldo_disp
+                    // ldo_disp = target_offset - (abs_offset + 8)
+                    let ldo_disp = (target_offset as i64 - abs_offset as i64 - 8) as i16;
+                    let ldo = encode_ldo_raw(R1, ldo_disp, R1);
+                    all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&ldo);
                 }
             }
         }
@@ -1800,7 +1893,7 @@ impl Backend for HppaBackend {
                 all_code[*call_offset], all_code[*call_offset + 1],
                 all_code[*call_offset + 2], all_code[*call_offset + 3],
             ]);
-            let patched = (w & 0xFFFC001F) | ((disp as u32 & 0x1FFF) << 5);
+            let patched = patch_bl_disp(w, disp);
             all_code[*call_offset..*call_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
 
