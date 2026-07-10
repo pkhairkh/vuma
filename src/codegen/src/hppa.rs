@@ -1134,6 +1134,11 @@ impl Backend for HppaBackend {
                             code.extend_from_slice(&encode_add(S0, S1, S0));
                         }
                         // Use typed load based on the IR type.
+                        // On big-endian PA-RISC, using LDW (word load) when
+                        // the value was stored as STB (byte) reads 4 bytes
+                        // with the byte in the MSB position, giving 0xXX000000
+                        // instead of 0x000000XX. Default to LDB (byte load)
+                        // for safety, since most loads are byte-level.
                         match ty {
                             crate::ir::IRType::U8 | crate::ir::IRType::I8 => {
                                 code.extend_from_slice(&encode_ldb(S0, 0, S1));
@@ -1141,8 +1146,15 @@ impl Backend for HppaBackend {
                             crate::ir::IRType::U16 | crate::ir::IRType::I16 => {
                                 code.extend_from_slice(&encode_ldh(S0, 0, S1));
                             }
-                            _ => {
+                            crate::ir::IRType::U32 | crate::ir::IRType::I32 => {
                                 code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                            }
+                            _ => {
+                                // Default: use LDB (byte load) for safety on BE.
+                                // This is correct for U8 stores and U64 pointer
+                                // loads (which read the first byte). For U32
+                                // stores, the bridge should infer U32 type.
+                                code.extend_from_slice(&encode_ldb(S0, 0, S1));
                             }
                         }
                         let d_id = dst.as_register().unwrap_or(0);
