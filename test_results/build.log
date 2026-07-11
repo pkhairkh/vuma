@@ -2149,8 +2149,8 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
+warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
   --> src/pipeline.rs:76:39
@@ -2344,4 +2344,4 @@ warning: missing documentation for a function
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
 warning: `vuma-codegen` (lib) generated 309 warnings (run `cargo fix --lib -p vuma-codegen` to apply 91 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 40.68s
+    Finished `release-fast` profile [optimized] target(s) in 31.63s
