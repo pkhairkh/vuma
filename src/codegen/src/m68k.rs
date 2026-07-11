@@ -473,13 +473,15 @@ fn emit_divmod_32bit(want_remainder: bool) -> Vec<u8> {
     // Loop:
     let div_loop = code.len() as i64;
     // LSL.L #1, S0 — shift dividend left, MSB → X (carry)
-    // Format: 1110 001 1 10 1 01 ddd = 0xE1B8 | s0
-    code.extend_from_slice(&[0xE1, 0xB8 | s0]);
+    // m68k shift format: 1110 ccc d ss i tt rrr
+    //   ccc=001 (count 1), d=1 (left), ss=10 (long), i=0 (immediate)
+    //   tt=01 (LS=Logical Shift), so low byte = 10 0 01 rrr = 0x88 | r
+    code.extend_from_slice(&[0xE3, 0x88 | s0]);
     // ROXL.L #1, S2 — shift remainder left, X → S2 LSB
-    // Format: 1110 001 1 10 1 10 ddd = 0xE3B8 | s2
-    code.extend_from_slice(&[0xE3, 0xB8 | s2]);
+    //   tt=10 (ROX=Rotate with eXtend), so low byte = 10 0 10 rrr = 0x90 | r
+    code.extend_from_slice(&[0xE3, 0x90 | s2]);
     // LSL.L #1, S3 — shift quotient left
-    code.extend_from_slice(&[0xE1, 0xB8 | s3]);
+    code.extend_from_slice(&[0xE3, 0x88 | s3]);
     // CMP.L S1, S2 — sets C=1 if S2 < S1 (borrow)
     code.extend(Instruction::Cmp { src: S1, dst: S2 }.encode());
     // BCS.S skip — if S2 < S1 (C=1), skip subtract
