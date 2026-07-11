@@ -1927,24 +1927,18 @@ fn emit_binop(
         BinOpKind::Shl => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // SLLG S0, S0, S1: shift S0 left by (S1 & 0x3F).
-            // For register-based shift, use SLLG with B2=S1, D2=0.
-            // SLLG R1, R3, 0(B2): op1=0xEB, op2=0x0D.
-            // byte 1 = (R1<<4) | R3, byte 2 = (B2<<4) | 0, byte 3 = 0, byte 5 = 0x0D.
+            // SLLG S0, S0, S1: 64-bit shift left by (S1 & 0x3F).
+            // SLLG is always 64-bit. Do NOT apply LLGFR (32-bit truncation)
+            // because shifts by >= 32 produce values that need all 64 bits.
             code.extend_from_slice(&encode_rsy_a(0xEB, 0x0D, S0, S0, S1, 0));
-            if is_32bit {
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            }
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::ShrL => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // SRLG S0, S0, S1: op1=0xEB, op2=0x0C.
+            // SRLG S0, S0, S1: 64-bit shift right by (S1 & 0x3F).
+            // SRLG is always 64-bit. Do NOT apply LLGFR.
             code.extend_from_slice(&encode_rsy_a(0xEB, 0x0C, S0, S0, S1, 0));
-            if is_32bit {
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            }
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::ShrA => {
