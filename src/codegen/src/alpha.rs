@@ -1133,26 +1133,30 @@ fn emit_instr(
             );
         }
         IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
-            // Simplified: load old; if old==expected, store desired; dst = old.
+            // CAS: load old; if old==expected, store desired; dst = old.
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+            // Load old value from *addr into dst's stack slot.
             emit_instr(
                 &IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() },
                 vreg_stack_slots, alloc_offsets, code, relocations, frame_size, lr_save_off, fp_save_off,
             );
-            code.extend(ss_load_value(expected, vreg_stack_slots, S1));
-            // Compare dst's slot with expected.
+            // S0 = old (from dst's stack slot)
             code.extend(ss_ld(S0, dst_off));
+            // S1 = expected
+            code.extend(ss_load_value(expected, vreg_stack_slots, S1));
+            // S2 = (S0 == S1) ? 1 : 0
             code.extend(Instruction::Cmpeq { ra: S0, rb: S1, rc: S2 }.encode());
-            // If equal (S2 != 0), store desired to *addr.
+            // BEQ S2, skip_store (if S2 == 0, comparison failed, skip store)
+            // Skip 3 instructions: LDQ desired, LDQ addr, STQ
+            code.extend(Instruction::Beq { ra: S2, disp: 3 }.encode());
+            // S0 = desired
             code.extend(ss_load_value(desired, vreg_stack_slots, S0));
-            // CMOVNE S2, ... — actually we need a conditional store. Use BNE + STQ + skip.
-            // For simplicity, use: BNE S2, +2 instructions; STQ S0, 0(S3); <fallthrough>.
-            // But we need addr loaded. Let's do it differently: load addr, do the store unconditionally
-            // protected by CMOVNE on the value.
-            // Simplified: do unconditional store (incorrect for race but OK for single-thread).
+            // S3 = addr
             code.extend(ss_load_value(addr, vreg_stack_slots, S3));
+            // STQ S0, 0(S3) — store desired to *addr
             code.extend(Instruction::Stq { ra: S0, disp: 0, rb: S3 }.encode());
+            // skip_store: (dst already holds old value)
         }
     }
 }
