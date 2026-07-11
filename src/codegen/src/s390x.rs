@@ -1891,37 +1891,25 @@ fn emit_binop(
         BinOpKind::And => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit {
-                code.extend_from_slice(&encode_nrk(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                // NGR: op1=0xB9, op2=0x80.
-                code.extend_from_slice(&encode_rre(0xB9, 0x80, S0, S1));
-            }
+            // Always use 64-bit NGR. For 32-bit values, the high bits are 0
+            // (zero-extended on load), so 64-bit AND gives the same result.
+            // Using 64-bit avoids truncating 64-bit values (e.g. pointer
+            // reconstruction in read_u64: b0 | (b4 << 32)).
+            code.extend_from_slice(&encode_rre(0xB9, 0x80, S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Or => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit {
-                code.extend_from_slice(&encode_ork(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                // OGR: op1=0xB9, op2=0x81.
-                code.extend_from_slice(&encode_rre(0xB9, 0x81, S0, S1));
-            }
+            // Always use 64-bit OGR (same reasoning as AND).
+            code.extend_from_slice(&encode_rre(0xB9, 0x81, S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Xor => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit {
-                code.extend_from_slice(&encode_xrk(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                // XGR: op1=0xB9, op2=0x82.
-                code.extend_from_slice(&encode_rre(0xB9, 0x82, S0, S1));
-            }
+            // Always use 64-bit XGR (same reasoning as AND).
+            code.extend_from_slice(&encode_rre(0xB9, 0x82, S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Shl => {
