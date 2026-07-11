@@ -1331,7 +1331,17 @@ fn emit_binop(
                     code.extend(Instruction::AddqLi { ra: ZERO, lit: 1, rc: S1 }.encode());
                     code.extend(Instruction::Xor { ra: S0, rb: S1, rc: S0 }.encode());
                 }
-                BinOpKind::SLt => code.extend(Instruction::Cmplt { ra: S0, rb: S1, rc: S0 }.encode()),
+                BinOpKind::SLt => {
+                    // Signed less-than: XOR both operands with sign bit (0x8000...),
+                    // then use CMPULT (unsigned). This maps signed [-2^63, 2^63-1]
+                    // to unsigned [0, 2^64-1] monotonically.
+                    // Load sign bit: S4 = 1 << 63 (ss_load_imm can't handle 64-bit)
+                    code.extend(Instruction::Lda { ra: S4, disp: 1, rb: ZERO }.encode()); // S4 = 1
+                    code.extend_from_slice(&op_lit(0x12, S4, 63, S4, 0x39).to_le_bytes()); // S4 = S4 << 63
+                    code.extend_from_slice(&op_reg(0x11, S0, S4, S0, 0x40).to_le_bytes()); // XOR S0, S4, S0
+                    code.extend_from_slice(&op_reg(0x11, S1, S4, S1, 0x40).to_le_bytes()); // XOR S1, S4, S1
+                    code.extend(Instruction::Cmplt { ra: S0, rb: S1, rc: S0 }.encode());
+                }
                 BinOpKind::ULt => {
                     // ULT = !ULE && ... actually: ULT = !ULE?  No. ULE = (a <= b unsigned). ULT = (a < b unsigned) = !ULE? No, ULE includes equal. ULT = ULE && !EQ.
                     // Easier: ULT = !UGE. Or compute CMPULE and check.
@@ -1342,15 +1352,22 @@ fn emit_binop(
                     code.extend(Instruction::Xor { ra: S0, rb: S2, rc: S0 }.encode()); // S0 = !(b<=a) = (a<b)
                 }
                 BinOpKind::SLe => {
-                    // SLE = !SLT(b, a) = !(b < a).
-                    code.extend(Instruction::Cmplt { ra: S1, rb: S0, rc: S0 }.encode()); // S0 = (b < a)
+                    // SLE = !SLT(b, a) = !(b < a) (signed).
+                    // XOR both with sign bit, then CMPULT.
+                    code.extend(Instruction::Lda { ra: S4, disp: 1, rb: ZERO }.encode()); code.extend_from_slice(&op_lit(0x12, S4, 63, S4, 0x39).to_le_bytes());
+                    code.extend_from_slice(&op_reg(0x11, S1, S4, S1, 0x40).to_le_bytes()); // XOR S1 (b)
+                    code.extend_from_slice(&op_reg(0x11, S0, S4, S0, 0x40).to_le_bytes()); // XOR S0 (a)
+                    code.extend(Instruction::Cmplt { ra: S1, rb: S0, rc: S0 }.encode()); // S0 = (b' < a') = (b < a signed)
                     code.extend(Instruction::AddqLi { ra: ZERO, lit: 1, rc: S2 }.encode());
                     code.extend(Instruction::Xor { ra: S0, rb: S2, rc: S0 }.encode()); // S0 = !(b<a) = (a<=b)
                 }
                 BinOpKind::ULe => code.extend(Instruction::Cmpule { ra: S0, rb: S1, rc: S0 }.encode()),
                 BinOpKind::SGt => {
-                    // SGT = SLT(b, a).
-                    code.extend(Instruction::Cmplt { ra: S1, rb: S0, rc: S0 }.encode()); // S0 = (b < a) = (a > b)
+                    // SGT = SLT(b, a) (signed).
+                    code.extend(Instruction::Lda { ra: S4, disp: 1, rb: ZERO }.encode()); code.extend_from_slice(&op_lit(0x12, S4, 63, S4, 0x39).to_le_bytes());
+                    code.extend_from_slice(&op_reg(0x11, S1, S4, S1, 0x40).to_le_bytes()); // XOR S1 (b)
+                    code.extend_from_slice(&op_reg(0x11, S0, S4, S0, 0x40).to_le_bytes()); // XOR S0 (a)
+                    code.extend(Instruction::Cmplt { ra: S1, rb: S0, rc: S0 }.encode()); // S0 = (b' < a') = (b < a signed) = (a > b)
                 }
                 BinOpKind::UGt => {
                     // UGT = !ULE(a, b)... actually UGT(a, b) = ULE(b, a) && !EQ(a, b). Or simpler: UGT(a, b) = !ULE(a, b) && !EQ? No.
@@ -1363,8 +1380,11 @@ fn emit_binop(
                     code.extend(Instruction::Xor { ra: S0, rb: S2, rc: S0 }.encode()); // S0 = !(a<=b) = (a>b)
                 }
                 BinOpKind::SGe => {
-                    // SGE = !SLT(a, b).
-                    code.extend(Instruction::Cmplt { ra: S0, rb: S1, rc: S0 }.encode()); // S0 = (a < b)
+                    // SGE = !SLT(a, b) (signed).
+                    code.extend(Instruction::Lda { ra: S4, disp: 1, rb: ZERO }.encode()); code.extend_from_slice(&op_lit(0x12, S4, 63, S4, 0x39).to_le_bytes());
+                    code.extend_from_slice(&op_reg(0x11, S0, S4, S0, 0x40).to_le_bytes()); // XOR S0 (a)
+                    code.extend_from_slice(&op_reg(0x11, S1, S4, S1, 0x40).to_le_bytes()); // XOR S1 (b)
+                    code.extend(Instruction::Cmplt { ra: S0, rb: S1, rc: S0 }.encode()); // S0 = (a' < b') = (a < b signed)
                     code.extend(Instruction::AddqLi { ra: ZERO, lit: 1, rc: S2 }.encode());
                     code.extend(Instruction::Xor { ra: S0, rb: S2, rc: S0 }.encode()); // S0 = !(a<b) = (a>=b)
                 }
