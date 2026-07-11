@@ -1,6 +1,5 @@
 // SHA-256d Hash — Memory-Buffer Based
 // Expected exit code: 229 (0xe5)
-// skip_on: arm32, armeb, ppc64, ppc64le
 //
 // Computes SHA256d(SHA256(message)) over a message stored in allocated
 // memory, then returns the first byte of the digest as exit code.

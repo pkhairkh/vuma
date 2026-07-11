@@ -5667,12 +5667,10 @@ impl Backend for Arm32Backend {
                                 Gpr::R11.encoding(), Gpr::R0.encoding(), Gpr::R0.encoding(),
                             ));
                         }
+                        // ss_store_32_zero stores the 32-bit pointer to the low word
+                        // AND zeros the high word of the 8-byte vreg slot. This is
+                        // sufficient — no need for an additional high-word store.
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                        // Zero high word (32-bit pointer result in 64-bit slot)
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                        )); // MOV R1, #0
-                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
