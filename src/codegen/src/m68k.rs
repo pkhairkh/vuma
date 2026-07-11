@@ -369,10 +369,12 @@ impl fmt::Display for Instruction {
 // ===========================================================================
 
 /// Scratch data registers for stack-slot ISel.
-/// D0–D2 are caller-saved and free for our use.  We avoid D3–D7 (callee-saved).
+/// D0–D2 are caller-saved and free for our use.
+/// D3 is callee-saved, used as extra scratch for division (saved/restored).
 const S0: Gpr = Gpr::D0;
 const S1: Gpr = Gpr::D1;
 const S2: Gpr = Gpr::D2;
+const S3: Gpr = Gpr::D3;
 
 /// Frame pointer (A6) and stack pointer (A7).
 const FP: Gpr = Gpr::A6;
@@ -423,6 +425,104 @@ fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
         code.extend(Instruction::Load { base: Gpr::A1, offset: 0, dst }.encode());
         code
     }
+}
+
+/// Emit a 32-bit/32-bit unsigned division or modulo using shift-and-subtract.
+///
+/// The m68k `divu.w` instruction only supports 16-bit quotients. When the
+/// quotient exceeds 65535 (e.g., dividing a 32-bit address by a small
+/// constant), divu.w produces incorrect results or traps.
+///
+/// This function implements a proper 32-bit division using the standard
+/// shift-and-subtract algorithm with LSL.L and ROXL.L instructions:
+///
+/// For each of 32 iterations:
+///   1. LSL.L #1, dividend  — shift left, MSB → X (extend flag)
+///   2. ROXL.L #1, remainder — shift left, X → LSB (propagate MSB into remainder)
+///   3. LSL.L #1, quotient   — shift left (make room for new bit)
+///   4. If remainder >= divisor: subtract divisor from remainder, set quotient bit
+///
+/// Input: S0 = dividend, S1 = divisor
+/// Output: S0 = quotient (if want_remainder=false) or remainder (if true)
+/// Uses: S2 (remainder), S3 (quotient, saved/restored), stack (counter)
+fn emit_divmod_32bit(want_remainder: bool) -> Vec<u8> {
+    let mut code = Vec::new();
+    let s0 = S0.encoding() as u8 & 0x7;
+    let s1 = S1.encoding() as u8 & 0x7;
+    let s2 = S2.encoding() as u8 & 0x7;
+    let s3 = S3.encoding() as u8 & 0x7;
+
+    // Save D3 (callee-saved): MOVE.L D3, -(A7) = 0x2F03
+    code.extend_from_slice(&[0x2F, 0x03]);
+
+    // S2 = 0 (remainder)
+    code.extend(Instruction::Moveq { dst: S2, imm: 0 }.encode());
+    // S3 = 0 (quotient)
+    code.extend(Instruction::Moveq { dst: S3, imm: 0 }.encode());
+
+    // Push counter (32) to stack: MOVE.L D3, -(A7)
+    code.extend(Instruction::Moveq { dst: S3, imm: 32 }.encode());
+    code.extend_from_slice(&[0x2F, 0x03]);
+    // S3 = 0 (quotient, reinitialize after pushing counter)
+    code.extend(Instruction::Moveq { dst: S3, imm: 0 }.encode());
+
+    // Loop: 32 iterations
+    let div_loop = code.len() as i64;
+
+    // LSL.L #1, S0 — shift dividend left, MSB → X (extend flag)
+    // Encoding: 1110 001 1 10 0 01 rrr = 0xE388 | r
+    code.extend_from_slice(&[0xE3, 0x88 | s0]);
+
+    // ROXL.L #1, S2 — rotate remainder left through X: S2 = (S2 << 1) | X
+    // This propagates the dividend's MSB (now in X) into the remainder's LSB
+    // Encoding: 1110 001 1 10 0 10 rrr = 0xE390 | r
+    code.extend_from_slice(&[0xE3, 0x90 | s2]);
+
+    // LSL.L #1, S3 — shift quotient left (make room for new bit)
+    code.extend_from_slice(&[0xE3, 0x88 | s3]);
+
+    // CMP.L S1, S2 — sets C=1 (borrow) if S2 < S1
+    code.extend(Instruction::Cmp { src: S1, dst: S2 }.encode());
+
+    // BCS.S skip — if S2 < S1 (C=1), skip the subtract
+    let bcs_off = code.len();
+    code.extend_from_slice(&[0x65, 0x00]); // placeholder
+
+    // SUB.L S1, S2 — remainder -= divisor
+    code.extend(Instruction::Sub { src: S1, dst: S2 }.encode());
+
+    // ORI.L #1, S3 — set quotient LSB (quotient bit = 1)
+    // Encoding: 0000 0000 10 000 ddd, 0x00000001
+    code.extend_from_slice(&[0x00, 0x80 | s3, 0x00, 0x00, 0x00, 0x01]);
+
+    // skip:
+    let skip_end = code.len() as i64;
+    code[bcs_off + 1] = (skip_end - bcs_off as i64 - 2) as i8 as u8;
+
+    // SUBQ.L #1, (A7) — decrement counter on stack
+    // Encoding: 0101 001 1 10 010 111 = 0x5397
+    code.extend_from_slice(&[0x53, 0x97]);
+
+    // BNE.S loop — if counter != 0, branch back
+    let bne_off = code.len();
+    code.extend_from_slice(&[0x66, 0x00]); // placeholder
+    let bne_disp = (div_loop - bne_off as i64 - 2) as i8;
+    code[bne_off + 1] = bne_disp as u8;
+
+    // Pop counter (discard): MOVE.L (A7)+, D0 = 0x201F
+    code.extend_from_slice(&[0x20, 0x1F]);
+
+    // Move result to S0
+    if want_remainder {
+        code.extend(Instruction::Move { src: S2, dst: S0 }.encode());
+    } else {
+        code.extend(Instruction::Move { src: S3, dst: S0 }.encode());
+    }
+
+    // Restore D3: MOVE.L (A7)+, D3 = 0x261F
+    code.extend_from_slice(&[0x26, 0x1F]);
+
+    code
 }
 
 /// Load an IRValue into a scratch register.
@@ -828,15 +928,7 @@ fn emit_instr(
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // DIVU.W S1, S0: S0[15:0] = quotient, S0[31:16] = remainder.
-            // No SWAP needed — quotient is already in lower 16 bits.
-            // ANDI.L #0xFFFF clears the remainder from the upper 16 bits.
-            code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            {
-                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
-                code.extend_from_slice(&w.to_be_bytes());
-                code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
-            }
+            code.extend(emit_divmod_32bit(false));
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::BinOp {
@@ -1370,28 +1462,13 @@ fn emit_binop(
         BinOpKind::UDiv | BinOpKind::SDiv => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // DIVU.W: quotient in S0[15:0], remainder in S0[31:16].
-            // No SWAP — quotient is already in lower bits.
-            code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            {
-                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
-                code.extend_from_slice(&w.to_be_bytes());
-                code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
-            }
+            code.extend(emit_divmod_32bit(false));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::SRem | BinOpKind::URem => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // DIVU.W: remainder is in S0[31:16] (upper word).
-            // SWAP to move remainder to lower 16 bits, then ANDI.L to clear upper.
-            code.extend(Instruction::Divu { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Swap { dst: S0 }.encode());
-            {
-                let w = 0x0280u16 | (S0.encoding() as u16 & 0x7);
-                code.extend_from_slice(&w.to_be_bytes());
-                code.extend_from_slice(&0x0000_FFFFu32.to_be_bytes());
-            }
+            code.extend(emit_divmod_32bit(true));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::And => {
