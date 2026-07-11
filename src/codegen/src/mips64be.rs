@@ -17,7 +17,7 @@ pub struct Mips64BeBackend {
 
 impl Mips64BeBackend {
     pub fn new() -> Self {
-        Self { inner: Mips64Backend::new() }
+        Self { inner: Mips64Backend::new_be() }
     }
 }
 
