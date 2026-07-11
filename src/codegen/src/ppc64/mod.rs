@@ -4731,8 +4731,8 @@ impl Backend for PPC64Backend {
                                 if is_32bit {
                                     match op {
                                         // SLW/SRW clear upper 32 bits automatically
-                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
-                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Slw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
                                         BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Sraw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
                                         _ => unreachable!(),
                                     }
