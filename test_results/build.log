@@ -2362,4 +2362,4 @@ warning: missing documentation for a function
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
 warning: `vuma-codegen` (lib) generated 312 warnings (run `cargo fix --lib -p vuma-codegen` to apply 92 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 20.29s
+    Finished `release-fast` profile [optimized] target(s) in 32.98s

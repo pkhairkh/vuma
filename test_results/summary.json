@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-11 20:06:22 UTC",
+  "timestamp": "2026-07-11 20:21:25 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
@@ -7,14 +7,14 @@
   "skipped": 0,
   "pass_rate": "99.97%",
   "per_backend": {
-    "aarch64_be": {
-      "total": 5745,
-      "match": 5744,
-      "skipped": 0
-    },
     "aarch64": {
       "total": 5745,
       "match": 5745,
+      "skipped": 0
+    },
+    "arm32": {
+      "total": 5745,
+      "match": 5743,
       "skipped": 0
     },
     "riscv64": {
@@ -27,16 +27,6 @@
       "match": 5742,
       "skipped": 0
     },
-    "mips64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "arm32": {
-      "total": 5745,
-      "match": 5743,
-      "skipped": 0
-    },
     "mips64be": {
       "total": 5745,
       "match": 5738,
@@ -47,9 +37,14 @@
       "match": 5745,
       "skipped": 0
     },
-    "ppc64le": {
+    "aarch64_be": {
       "total": 5745,
-      "match": 5743,
+      "match": 5744,
+      "skipped": 0
+    },
+    "mips64": {
+      "total": 5745,
+      "match": 5745,
       "skipped": 0
     },
     "ppc64": {
@@ -57,12 +52,17 @@
       "match": 5743,
       "skipped": 0
     },
-    "sparc64": {
+    "ppc64le": {
+      "total": 5745,
+      "match": 5743,
+      "skipped": 0
+    },
+    "loongarch64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
     },
-    "loongarch64": {
+    "sparc64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -72,17 +72,12 @@
       "match": 5745,
       "skipped": 0
     },
-    "x86_32": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "alpha": {
+    "m68k": {
       "total": 5745,
       "match": 5744,
       "skipped": 0
     },
-    "m68k": {
+    "alpha": {
       "total": 5745,
       "match": 5744,
       "skipped": 0
@@ -95,6 +90,11 @@
     "hppa": {
       "total": 5745,
       "match": 5737,
+      "skipped": 0
+    },
+    "x86_32": {
+      "total": 5745,
+      "match": 5745,
       "skipped": 0
     },
     "wasm32": {
