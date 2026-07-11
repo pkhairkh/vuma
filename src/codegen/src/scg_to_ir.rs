@@ -2649,21 +2649,6 @@ impl IRBuilder {
                             }
                         }
                         IRType::U8
-                    } else if byte_offset == 0 {
-                        // When loading from offset 0 of a pointer vreg (from
-                        // allocate()), the value was likely stored as U64.
-                        // Use U64 for the load to match the store width.
-                        // This is critical for big-endian backends where a U8
-                        // load of a U64-stored value reads the MSB (0x00).
-                        // Byte-level access uses non-zero offsets or variable
-                        // offsets (which create new vregs not in pointer_vregs),
-                        // so this only affects loads from the buffer start.
-                        if let IRValue::Register(vid) = addr_val {
-                            if self.pointer_vregs.contains(&vid) {
-                                return IRType::U64;
-                            }
-                        }
-                        IRType::U8
                     } else {
                         IRType::U8
                     }
