@@ -1019,15 +1019,15 @@ warning: unused variable: `blk_idx`
      |          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blk_idx`
 
 warning: unused variable: `bne_off`
-    --> src/codegen/src/sparc64.rs:3385:17
+    --> src/codegen/src/sparc64.rs:3366:17
      |
-3385 |             let bne_off = code.len();
+3366 |             let bne_off = code.len();
      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bne_off`
 
 warning: value assigned to `stub_offset` is never read
-    --> src/codegen/src/sparc64.rs:4666:9
+    --> src/codegen/src/sparc64.rs:4647:9
      |
-4666 |         stub_offset += print_hex_stub.len();
+4647 |         stub_offset += print_hex_stub.len();
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -1846,6 +1846,18 @@ warning: function `encode_rrf_a` is never used
 474 | fn encode_rrf_a(op1: u8, op2: u8, r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
     |    ^^^^^^^^^^^^
 
+warning: function `encode_ork` is never used
+   --> src/codegen/src/s390x.rs:506:4
+    |
+506 | fn encode_ork(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
+    |    ^^^^^^^^^^
+
+warning: function `encode_xrk` is never used
+   --> src/codegen/src/s390x.rs:512:4
+    |
+512 | fn encode_xrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
+    |    ^^^^^^^^^^
+
 warning: function `ss_ld_typed` is never used
    --> src/codegen/src/s390x.rs:689:4
     |
@@ -2349,5 +2361,5 @@ warning: missing documentation for a function
      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
-warning: `vuma-codegen` (lib) generated 310 warnings (run `cargo fix --lib -p vuma-codegen` to apply 92 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 35.41s
+warning: `vuma-codegen` (lib) generated 312 warnings (run `cargo fix --lib -p vuma-codegen` to apply 92 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 39.20s
