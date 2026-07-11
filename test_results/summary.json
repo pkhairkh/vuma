@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-11 18:37:33 UTC",
+  "timestamp": "2026-07-11 19:20:02 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
@@ -7,22 +7,12 @@
   "skipped": 0,
   "pass_rate": "99.97%",
   "per_backend": {
-    "riscv64": {
+    "aarch64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
     },
     "x86_64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "arm32": {
-      "total": 5745,
-      "match": 5743,
-      "skipped": 0
-    },
-    "aarch64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -37,14 +27,14 @@
       "match": 5745,
       "skipped": 0
     },
+    "riscv64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
     "armeb": {
       "total": 5745,
       "match": 5742,
-      "skipped": 0
-    },
-    "mips64be": {
-      "total": 5745,
-      "match": 5738,
       "skipped": 0
     },
     "ppc64": {
@@ -57,9 +47,24 @@
       "match": 5743,
       "skipped": 0
     },
-    "s390x": {
+    "mips64be": {
+      "total": 5745,
+      "match": 5738,
+      "skipped": 0
+    },
+    "arm32": {
       "total": 5745,
       "match": 5743,
+      "skipped": 0
+    },
+    "loongarch64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "x86_32": {
+      "total": 5745,
+      "match": 5745,
       "skipped": 0
     },
     "riscv32": {
@@ -67,9 +72,14 @@
       "match": 5745,
       "skipped": 0
     },
-    "loongarch64": {
+    "s390x": {
       "total": 5745,
-      "match": 5745,
+      "match": 5743,
+      "skipped": 0
+    },
+    "m68k": {
+      "total": 5745,
+      "match": 5744,
       "skipped": 0
     },
     "sparc64": {
@@ -80,16 +90,6 @@
     "alpha": {
       "total": 5745,
       "match": 5743,
-      "skipped": 0
-    },
-    "x86_32": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "m68k": {
-      "total": 5745,
-      "match": 5744,
       "skipped": 0
     },
     "hppa": {
