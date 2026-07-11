@@ -1294,9 +1294,14 @@ fn emit_instr(
                 let w = 0x2040u16 | (1u16 << 9) | (S2.encoding() as u16 & 0x7);
                 code.extend_from_slice(&w.to_be_bytes());
             }
-            // MOVE.L S0, (A1)
+            // MOVE.L S0, (A1) — store desired to *addr
+            // m68k MOVE.L format: 00 SS DDD mmm mmm rrr
+            //   SS=10 (long), DDD=001 (A1), dest mode=010 ((An)), src mode=000 (Dn), src reg=S0
             {
-                let w = 0x2000u16 | (1u16 << 9) | (2u16 << 3) | (S0.encoding() as u16 & 0x7);
+                let w = 0x2000u16  // MOVE.L base (bits 15-12=0010, bits 13-12=10)
+                    | (1u16 << 9)  // dest reg = 1 (A1)
+                    | (2u16 << 6)  // dest mode = 010 ((An) indirect)
+                    | (S0.encoding() as u16 & 0x7);  // src reg (src mode = 000 = Dn)
                 code.extend_from_slice(&w.to_be_bytes());
             }
             let skip_disp = (code.len() as i64 - (bne_patch as i64 + 2)) as i16;
