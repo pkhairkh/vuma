@@ -3926,7 +3926,11 @@ impl Backend for Arm32Backend {
             if let Some(id) = param.as_register() {
                 if i < 4 {
                     let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+                    // Use ss_store_32_zero to store the 32-bit register value
+                    // AND zero the high 32 bits of the 8-byte slot. This prevents
+                    // garbage in the high word of I64/Address params, which would
+                    // cause SIGSEGV when used as pointers.
+                    let store_code = ss_store_32_zero(arg_regs[i], offset, fs);
                     instructions.push(AllocatedInstruction {
                         opcode: "str".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
@@ -3945,8 +3949,8 @@ impl Backend for Arm32Backend {
                     let mut param_code = Vec::new();
                     // LDR R0, [R11, #arg_offset_from_r11]
                     param_code.extend(ss_load_from_r11_plus(Gpr::R0, arg_offset_from_r11));
-                    // STR R0, [R11 - slot_offset]
-                    param_code.extend(ss_store_to_slot(Gpr::R0, slot_offset));
+                    // STR R0, [R11 - slot_offset] + zero high word
+                    param_code.extend(ss_store_32_zero(Gpr::R0, slot_offset, fs));
                     instructions.push(AllocatedInstruction {
                         opcode: "ldr+str".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
