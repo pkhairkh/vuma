@@ -43,6 +43,7 @@ fn main() {
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut b = IRBuilder::new();
     let ir_program = b.build(&codegen_scg).unwrap();
+    let ir_program = vuma_codegen::opt::run_optimizations(ir_program);
 
     println!("=== IR for {} (backend={}) ===", path, backend_name);
     for func in &ir_program.functions {

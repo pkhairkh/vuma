@@ -1413,7 +1413,13 @@ fn run_optimizations_inner(
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
         // let f = inline_small(f, let f = inline_small(f, &func_refs);func_refs);
-        let f = licm(f);
+        // LICM is DISABLED: it creates preheader blocks that the codegen
+        // doesn't emit correctly. The preheader's instructions (e.g., loop-
+        // invariant Add that computes the loop bound) are skipped because the
+        // jump from the entry block goes directly to the loop header instead
+        // of through the preheader. This leaves loop-bound vregs uninitialized,
+        // causing loops with parameter-dependent bounds to never execute.
+        // let f = licm(f);
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
         // ── DISABLED: scheduler causes pass-interaction miscompilation ──
@@ -1426,8 +1432,15 @@ fn run_optimizations_inner(
     }
 
     // ── Whole-program passes ──
-    // Disabled: cause miscompilation in combination with per-function passes.
-    program = cross_function_constant_prop(program);
+    // cross_function_constant_prop is DISABLED: it causes miscompilation
+    // when constant arguments are propagated into callee bodies. The
+    // propagated constants trigger e-graph rewrites that remove vreg
+    // definitions (Add instructions) while leaving the vreg's uses in
+    // place (e.g., Cmp instructions in loop headers). This leaves stack
+    // slots uninitialized, causing loops with parameter-dependent bounds
+    // to never execute (the comparison reads 0 from the uninitialized
+    // slot, so i < 0 is always false).
+    // program = cross_function_constant_prop(program);
     program = whole_program_dce(program);
     for func in &mut program.functions {
         *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
