@@ -3221,49 +3221,30 @@ fn emit_binop(
         BinOpKind::Shl => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, Gpr::L0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, Gpr::L1));
-            if is_32bit {
-                code.extend_from_slice(
-                    &Instruction::Sll {
-                        rd: Gpr::L0,
-                        rs1: Gpr::L0,
-                        rs2: Gpr::L1,
-                    }
-                    .encode(),
-                );
-            } else {
-                code.extend_from_slice(
-                    &Instruction::Sllx {
-                        rd: Gpr::L0,
-                        rs1: Gpr::L0,
-                        rs2: Gpr::L1,
-                    }
-                    .encode(),
-                );
-            }
+            // Always use 64-bit SLLX. 32-bit SLL masks shift count to 5 bits
+            // (0-31), making << 32 a no-op. SLLX masks to 6 bits (0-63).
+            code.extend_from_slice(
+                &Instruction::Sllx {
+                    rd: Gpr::L0,
+                    rs1: Gpr::L0,
+                    rs2: Gpr::L1,
+                }
+                .encode(),
+            );
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::ShrL => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, Gpr::L0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, Gpr::L1));
-            if is_32bit {
-                code.extend_from_slice(
-                    &Instruction::Srl {
-                        rd: Gpr::L0,
-                        rs1: Gpr::L0,
-                        rs2: Gpr::L1,
-                    }
-                    .encode(),
-                );
-            } else {
-                code.extend_from_slice(
-                    &Instruction::Srlx {
-                        rd: Gpr::L0,
-                        rs1: Gpr::L0,
-                        rs2: Gpr::L1,
-                    }
-                    .encode(),
-                );
-            }
+            // Always use 64-bit SRLX (same reasoning as Shl).
+            code.extend_from_slice(
+                &Instruction::Srlx {
+                    rd: Gpr::L0,
+                    rs1: Gpr::L0,
+                    rs2: Gpr::L1,
+                }
+                .encode(),
+            );
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::ShrA => {
