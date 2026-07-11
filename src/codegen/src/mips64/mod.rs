@@ -1772,13 +1772,25 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 /// jump instruction.
 pub struct Mips64Backend {
     target_info: Mips64TargetInfo,
+    /// Flag indicating big-endian mode (for mips64be wrapper).
+    /// When true, 64-bit loads/stores use BE byte order.
+    pub big_endian: bool,
 }
 
 impl Mips64Backend {
-    /// Create a new MIPS64 backend.
+    /// Create a new MIPS64 backend (little-endian by default).
     pub fn new() -> Self {
         Self {
             target_info: Mips64TargetInfo,
+            big_endian: false,
+        }
+    }
+
+    /// Create a new MIPS64 backend with big-endian mode.
+    pub fn new_be() -> Self {
+        Self {
+            target_info: Mips64TargetInfo,
+            big_endian: true,
         }
     }
 }
@@ -2584,7 +2596,7 @@ fn lower_binop_typed(
 
 /// Stack-slot based allocate_registers for MIPS64.
 /// Every vreg gets a stack slot; operations use scratch registers $t0-$t7.
-fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<AllocatedFunction, BackendError> {
     let func_name = func.name.clone();
 
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
@@ -3213,6 +3225,19 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lhu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
                         }
                         IRType::I32 | IRType::U32 => {
+                            // For big-endian (mips64be): use LWU (load word unsigned)
+                            // which uses the CPU's native byte order (BE). This matches
+                            // SW (store word) which also uses native byte order.
+                            // For little-endian (mips64): use LBU+shift+OR for unaligned access.
+                            if big_endian {
+                                if (-32768..=32767).contains(&off) {
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                    code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                }
+                            } else
                             // MIPS requires 4-byte alignment for LWU.
                             // Use LBU+shift+OR for unaligned 32-bit loads.
                             if (-32768..=32767).contains(&off) {
@@ -3243,6 +3268,21 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             }
                         }
                         _ => {
+                            // U64/Ptr load.
+                            // For big-endian (mips64be): use LD (load doubleword) which
+                            // uses the CPU's native byte order (BE). This is correct
+                            // because the data was stored in BE order by SD.
+                            // For little-endian (mips64): use byte-level LBU assembly
+                            // for unaligned access (MIPS requires 8-byte alignment for LD).
+                            if big_endian {
+                                if (-32768..=32767).contains(&off) {
+                                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                    code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                }
+                            } else
                             // U64/Ptr load: MIPS requires 8-byte alignment for LD.
                             // Use LBU (byte loads) for fully unaligned 64-bit access.
                             if (-32768..=32767).contains(&off) {
@@ -3320,6 +3360,20 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
                         }
                         _ => {
+                            // U64/Ptr store.
+                            // For big-endian (mips64be): use SD (store doubleword) which
+                            // uses the CPU's native byte order (BE). This is correct
+                            // because the data will be read by LD in BE order.
+                            // For little-endian (mips64): use SW + shift for unaligned access.
+                            if big_endian {
+                                if (-32768..=32767).contains(&off) {
+                                    code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                    code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                }
+                            } else
                             // U64/Ptr store: MIPS requires 8-byte alignment for SD.
                             // Use SW + shift to store unaligned 64-bit values.
                             if (-32768..=32767).contains(&off) {
@@ -4879,7 +4933,7 @@ impl Backend for Mips64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        mips64_allocate_registers_ss(func)
+        mips64_allocate_registers_ss(func, self.big_endian)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
