@@ -5833,23 +5833,27 @@ impl Backend for PPC64Backend {
         // ── PPC64LE Linux static executable ──
         //
         // Layout:
-        //   _start:  BL main           ; call main (result in R3)
-        //            LI R0, 1          ; sys_exit = 1
-        //            SC                ; syscall: exit(R3)
+        //   _start:  LD R3, 0(R1)        ; argc = *R1 (64-bit)
+        //            ADDI R4, R1, 8      ; argv = R1 + 8 (64-bit pointers)
+        //            BL main             ; call main(argc, argv) — result in R3
+        //            LI R0, 1            ; sys_exit = 1
+        //            SC                  ; syscall: exit(R3)
         //   <functions...>
         //
-        // The _start stub is 3 instructions = 12 bytes.
+        // The _start stub is 5 instructions = 20 bytes.
         // After that come all user functions.
 
         const R_PPC64_REL24: &str = "R_PPC64_REL24";
         const R_PPC64_ADDR64: &str = "R_PPC64_ADDR64";
 
         // ── _start stub ──
-        // BL <main>      — offset 0, needs relocation
-        // LI R0, 1       — offset 16 (sys_exit = 1 on PPC64 Linux)
-        // SC             — offset 20
+        // LD R3, 0(R1)   — offset 0  (load argc from stack pointer)
+        // ADDI R4, R1, 8 — offset 4  (argv = R1 + 8 on PPC64)
+        // BL <main>      — offset 8, needs relocation
+        // LI R0, 1       — offset 12 (sys_exit = 1 on PPC64 Linux)
+        // SC             — offset 16
 
-        let start_stub_size: usize = 20; // 5 × 4-byte instructions (LIS, ORI, BL, LI, SC)
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions (LD, ADDI, BL, LI, SC)
 
         // ── Compute function offsets ──
         // _start stub comes first, then user functions.
@@ -6203,8 +6207,23 @@ impl Backend for PPC64Backend {
 
         // ── Build _start stub bytes ──
         // QEMU user mode sets up R1 (stack pointer) before entering _start.
+        // On Linux PPC64, process entry stack layout:
+        //   [R1]     = argc (8 bytes)
+        //   [R1+8]   = argv[0] pointer
+        //   [R1+16]  = argv[1] pointer
+        //   ...
 
         let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // LD R3, 0(R1) — load argc from stack pointer (64-bit)
+        start_stub.extend_from_slice(&Instruction::Ld {
+            rt: Gpr::R3, ra: Gpr::R1, ds: 0,
+        }.encode());
+
+        // ADDI R4, R1, 8 — argv = R1 + 8 (64-bit pointers on PPC64)
+        start_stub.extend_from_slice(&Instruction::Addi {
+            rt: Gpr::R4, ra: Gpr::R1, simm: 8,
+        }.encode());
 
         // BL <main> — placeholder, will be patched
         // BL encoding: I-form, primary=18, LI=0, AA=0, LK=1
@@ -6216,7 +6235,7 @@ impl Backend for PPC64Backend {
         // SC (syscall)
         start_stub.extend_from_slice(&Instruction::Sc.encode());
 
-        // Pad to start_stub_size (20 bytes = 5 instructions, but we only have 3)
+        // Pad to start_stub_size (20 bytes = 5 instructions; should already be 20)
         while start_stub.len() < start_stub_size {
             start_stub.extend_from_slice(&[0u8; 4]); // NOP padding
         }
@@ -6227,12 +6246,12 @@ impl Backend for PPC64Backend {
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            // BL is at byte offset 0 within start_stub.
+            // BL is at byte offset 8 within start_stub (after LD R3 and ADDI R4).
             // BL target = CIA + LI*4, where CIA = address of BL instruction.
-            let li_val = (main_offset as i64) / 4;
+            let li_val = ((main_offset as i64) - 8) / 4;
             let imm24 = (li_val as u32) & 0x00FF_FFFF;
             let bl_word: u32 = (18u32 << 26) | (imm24 << 2) | 1;
-            start_stub[0..4].copy_from_slice(&bl_word.to_be_bytes());
+            start_stub[8..12].copy_from_slice(&bl_word.to_be_bytes());
         }
 
         // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──

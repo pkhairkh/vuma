@@ -2230,9 +2230,12 @@ impl Backend for S390XBackend {
         // ── s390x Linux static executable ──
         //
         // Layout:
-        //   _start:  BRASL R14, main    ; call main (return value in R2)
-        //            LGFI R1, 1          ; R1 = 1 (SYS_exit)
-        //            SVC 0               ; syscall: exit(R2)
+        //   _start:  LG   R2, 0(R15)      ; argc = *R15 (64-bit)
+        //            LGR  R3, R15         ; R3 = R15 (copy SP)
+        //            AGFI R3, 8           ; argv = R15 + 8 (64-bit pointers)
+        //            BRASL R14, main      ; call main(argc, argv) — return value in R2
+        //            LGFI R1, 1           ; R1 = 1 (SYS_exit)
+        //            SVC 0                ; syscall: exit(R2)
         //   <functions...>
         //   <FFI return-0 stub>
         //   <__vuma_alloc / __vuma_free stubs>
@@ -2249,10 +2252,13 @@ impl Backend for S390XBackend {
         let text_offset: u64 = phdr_end;
 
         // ── _start stub ──
-        // BRASL R14, main — 6 bytes, offset 0 (will be patched)
-        // LGFI R1, 1      — 6 bytes, offset 6
-        // SVC 0           — 2 bytes, offset 12
-        let start_stub_size: usize = 14;
+        // LG   R2, 0(R15)   — 6 bytes, offset 0  (load argc from stack)
+        // LGR  R3, R15      — 4 bytes, offset 6  (R3 = SP)
+        // AGFI R3, 8        — 6 bytes, offset 10 (argv = SP + 8)
+        // BRASL R14, main   — 6 bytes, offset 16 (will be patched)
+        // LGFI R1, 1        — 6 bytes, offset 22 (sys_exit)
+        // SVC 0             — 2 bytes, offset 28
+        let start_stub_size: usize = 30;
         // FFI return-0 stub: LGHI R2, 0 (4 bytes) + BR R14 (2 bytes) = 6 bytes.
         let ffi_stub_size: usize = 6;
         let ffi_stub_offset: usize = start_stub_size;
@@ -2770,6 +2776,16 @@ impl Backend for S390XBackend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // LG R2, 0(R15) — load argc from stack pointer (64-bit)
+        start_stub.extend_from_slice(&encode_lg(Gpr::R2, SP, 0));
+
+        // LGR R3, R15 — copy SP to R3
+        start_stub.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+
+        // AGFI R3, 8 — argv = R15 + 8 (64-bit pointers on s390x)
+        start_stub.extend_from_slice(&encode_agfi(Gpr::R3, 8));
+
         // BRASL R14, main — placeholder with disp=0, will be patched.
         let brasl_offset_in_start = start_stub.len();
         start_stub.extend_from_slice(&encode_brasl(LR, 0));

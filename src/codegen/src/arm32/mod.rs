@@ -6992,17 +6992,21 @@ impl Backend for Arm32Backend {
         // ── ARM32 Linux static executable ──
         //
         // Layout:
-        //   _start:  BL main          ; call main (result in r0)
+        //   _start:  LDR r0, [SP]     ; argc = *sp (32-bit)
+        //            ADD r1, SP, #4   ; argv = sp + 4 (32-bit pointers)
+        //            BL main          ; call main(argc, argv) — result in r0
         //            MOV r7, #1        ; sys_exit
         //            SVC #0            ; syscall
         //   <functions...>
         //   <runtime: print_hex, print_int, print_newline using SVC sys_write>
 
         // ── _start stub ──
+        // LDR r0, [SP]  — 4 bytes (load argc from stack pointer)
+        // ADD r1, SP, #4 — 4 bytes (argv = sp + 4 on ARM32)
         // BL <main>     — 4 bytes, needs offset patching
         // MOV r7, #1   — 4 bytes (sys_exit = 1 on ARM Linux)
         // SVC #0        — 4 bytes
-        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions
         let ffi_stub_size: usize = 8; // MOV R0, #0; BX LR (2 × 4 bytes)
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -7458,6 +7462,18 @@ impl Backend for Arm32Backend {
         // ── Build _start stub ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
+        // LDR r0, [SP] — load argc from stack pointer (32-bit argc on ARM)
+        start_stub.extend_from_slice(&encode_ls_imm(
+            Condition::Al, true, true, false, false, true,
+            Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+        ));
+
+        // ADD r1, SP, #4 — argv = sp + 4 (32-bit pointers on ARM)
+        start_stub.extend_from_slice(&encode_dp_imm(
+            Condition::Al, DP_ADD, false,
+            Gpr::R13.encoding(), Gpr::R1.encoding(), 0, 4,
+        ));
+
         // BL <main> — placeholder, will be patched
         // BL encoding: cond=AL, L=1, offset24=0
         start_stub.extend_from_slice(&encode_branch(Condition::Al, true, 0));
@@ -7484,15 +7500,11 @@ impl Backend for Arm32Backend {
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
             // ARM BL: offset = (target - (pc + 8)) / 4, where pc = address of BL
-            // BL is at offset 0 within all_code
-            // target = main_offset
-            // offset = (main_offset - 8) / 4
-            // But main_offset is relative to start of code, and PC reads as
-            // current_instruction_address + 8 in ARM mode.
-            // So: offset = (main_offset - (0 + 8)) / 4
-            let bl_offset = (main_offset as i32 - 8) / 4;
+            // BL is at byte offset 8 within start_stub (after LDR r0 and ADD r1)
+            // So: offset = (main_offset - (8 + 8)) / 4 = (main_offset - 16) / 4
+            let bl_offset = (main_offset as i32 - 16) / 4;
             let patched_bl = encode_branch(Condition::Al, true, bl_offset);
-            start_stub[0..4].copy_from_slice(&patched_bl);
+            start_stub[8..12].copy_from_slice(&patched_bl);
         }
 
         // ── Add FFI return-0 stub ──

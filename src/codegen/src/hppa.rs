@@ -1789,9 +1789,14 @@ impl Backend for HppaBackend {
         // ── HPPA Linux static executable ──
         //
         // Layout:
-        //   _start:  LDI 1, R20       ; SYS_exit
-        //            LDI 42, R28      ; exit code = 42
-        //            GATE              ; syscall
+        //   _start:  LDW   0(R30), R26        ; argc = *R30 (32-bit, from kernel)
+        //            LDO   4(R30), R25        ; argv = R30 + 4 (32-bit pointers)
+        //            LDI   1, R20             ; (set up stack below)
+        //            <set R30 = STACK_TOP>
+        //            <32-byte call pattern>  ; call main(argc in R26, argv in R25)
+        //            COPY  R28, R26          ; move return to arg1 for exit
+        //            LDI   1, R20            ; SYS_exit
+        //            GATE                     ; syscall
         //   <main function code>
         //   <FFI return-0 stub>
         //   <syscall stubs>
@@ -1820,17 +1825,26 @@ impl Backend for HppaBackend {
         // semantics, not runtime syscalls.
         //
         // Layout:
-        //   0. Set R30 = 0x830000 (top of 8MB stack at 0x30000..0x830000)
-        //   1. 32-byte call pattern → call main
-        //   2. COPY R28, R26 (move return to arg1 for exit)
-        //   3. LDI 1, R20 (SYS_exit)
-        //   4. GATE (syscall)
+        //   0. LDW 0(R30), R26 — load argc from kernel-provided stack
+        //      LDO 4(R30), R25 — argv = R30 + 4 (must be done BEFORE we overwrite R30)
+        //   1. Set R30 = 0x830000 (top of 8MB stack at 0x30000..0x830000)
+        //   2. 32-byte call pattern → call main(argc, argv)
+        //   3. COPY R28, R26 (move return to arg1 for exit)
+        //   4. LDI 1, R20 (SYS_exit)
+        //   5. GATE (syscall)
 
         const STACK_VADDR: u64 = BASE_ADDR + 0x20000; // 0x30000
         const STACK_MEMSZ: u64 = 0x800000;            // 8 MB
         const STACK_TOP: u64 = STACK_VADDR + STACK_MEMSZ; // 0x830000
 
         let mut start_stub: Vec<u8> = Vec::new();
+
+        // On PA-RISC Linux, the kernel passes argc in R26 and argv in R25 at
+        // process entry (register-based, not stack-based like x86_64).
+        // The call to main uses R26/R25 for the first two arguments, so we
+        // must NOT clobber them before the call. The ss_load_imm for R30 and
+        // the 32-byte call pattern below only use R1, R2, R20, R28, R30 —
+        // R26 and R25 are preserved.
 
         // Set R30 (stack pointer) to the top of the 8MB stack segment.
         // ss_load_imm emits 12 instructions (48 bytes) for 0x830000 — well

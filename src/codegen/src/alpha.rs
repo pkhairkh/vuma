@@ -1488,12 +1488,14 @@ impl Backend for AlphaBackend {
         let text_offset: u64 = phdr_end;
 
         // _start stub:
+        //   LDQ R16, 0(SP)   — 4 bytes (load argc from stack)
+        //   LDA R17, 8(SP)   — 4 bytes (argv = SP + 8, 64-bit pointers)
         //   BSR RA, main     — 4 bytes (will be patched)
         //   BIS ZERO, R0, R16 — 4 bytes (move return value to R16 = a0)
         //   LDA R0, 1(ZERO)   — 4 bytes (R0 = 1 = SYS_exit)
         //   CALL_PAL 0x83     — 4 bytes
-        // Total: 16 bytes.
-        let start_stub_size: usize = 16;
+        // Total: 24 bytes.
+        let start_stub_size: usize = 24;
         let ffi_stub_offset: usize = start_stub_size;
         // FFI return-0 stub: BIS ZERO, ZERO, R0 (4 bytes) + RET (4 bytes) = 8 bytes.
         let ffi_stub_size: usize = 8;
@@ -1831,6 +1833,13 @@ impl Backend for AlphaBackend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // LDQ R16, 0(SP) — load argc from stack pointer (64-bit)
+        start_stub.extend(Instruction::Ldq { ra: Gpr::R16, disp: 0, rb: SP }.encode());
+
+        // LDA R17, 8(SP) — argv = SP + 8 (64-bit pointers on alpha)
+        start_stub.extend(Instruction::Lda { ra: Gpr::R17, disp: 8, rb: SP }.encode());
+
         // BSR RA, main — 4 bytes (opcode 0x34, disp21 in low 21 bits).
         let bsr_offset_in_start = start_stub.len();
         start_stub.extend(Instruction::Bsr { ra: RA, disp: 0 }.encode());

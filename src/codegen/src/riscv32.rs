@@ -6249,20 +6249,22 @@ impl Backend for RiscV32Backend {
         // ── RISC-V 32 Linux static executable ──
         //
         // Layout:
-        //   _start:  JAL ra, main        ; call main (result in a0)
-        //            ADDI a0, a0, 0       ; (nop, keep result)
-        //            ADDI a7, zero, 93    ; sys_exit (93=exit; for single-threaded, same as exit_group=94)
-        //            ECALL                ; syscall
+        //   _start:  LW   a0, 0(sp)          ; argc = *sp (32-bit)
+        //            ADDI a1, sp, 4          ; argv = sp + 4 (32-bit pointers)
+        //            JAL  ra, main           ; call main(argc, argv) — result in a0
+        //            ADDI a7, zero, 93       ; sys_exit (93=exit; for single-threaded, same as exit_group=94)
+        //            ECALL                   ; syscall
         //   <functions...>
         //   <runtime: print_hex, print_int using ECALL sys_write>
 
         // ── _start stub ──
-        // JAL ra, <main>    — 4 bytes, needs offset patching
-        // ADDI a0, a0, 0    — 4 bytes (nop, keep result)
+        // LW   a0, 0(sp)    — 4 bytes (load argc from stack pointer)
+        // ADDI a1, sp, 4    — 4 bytes (argv = sp + 4 on RV32)
+        // JAL  ra, <main>   — 4 bytes, needs offset patching
         // ADDI a7, zero, 93 — 4 bytes (sys_exit = 93; exit_group = 94)
         // ECALL             — 4 bytes
 
-        let start_stub_size: usize = 16; // 4 × 4-byte instructions
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions
         // `ffi_stub` (li a0,0; ret) is appended right after _start in
         // `all_code` (see below), so the first user function actually
         // starts at offset `start_stub_size + ffi_stub_size` in
@@ -6620,6 +6622,26 @@ impl Backend for RiscV32Backend {
         // ── Build _start stub ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
+        // LW a0, 0(sp) — load argc from stack pointer (32-bit argc on RV32)
+        start_stub.extend_from_slice(
+            &Instruction::Lw {
+                rd: Gpr::A0,
+                rs1: Gpr::Sp,
+                imm: 0,
+            }
+            .encode(),
+        );
+
+        // ADDI a1, sp, 4 — argv = sp + 4 (32-bit pointers on RV32)
+        start_stub.extend_from_slice(
+            &Instruction::Addi {
+                rd: Gpr::A1,
+                rs1: Gpr::Sp,
+                imm: 4,
+            }
+            .encode(),
+        );
+
         // JAL ra, <main> — placeholder, will be patched
         // JAL encoding: opcode=1101111, rd=ra=1, imm20=0
         let jal_placeholder = Instruction::Jal {
@@ -6627,16 +6649,6 @@ impl Backend for RiscV32Backend {
             offset: 0,
         };
         start_stub.extend_from_slice(&jal_placeholder.encode());
-
-        // ADDI a0, a0, 0 (nop)
-        start_stub.extend_from_slice(
-            &Instruction::Addi {
-                rd: Gpr::A0,
-                rs1: Gpr::A0,
-                imm: 0,
-            }
-            .encode(),
-        );
 
         // ADDI a7, zero, 93 (sys_exit)
         start_stub.extend_from_slice(
@@ -6658,14 +6670,13 @@ impl Backend for RiscV32Backend {
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
             // JAL offset = target - pc, where pc = address of JAL
-            // JAL is at offset 0 within all_code
-            // target = main_offset
-            let jal_imm = main_offset as i32;
+            // JAL is at byte offset 8 within start_stub (after LW a0 and ADDI a1)
+            let jal_imm = (main_offset as i32) - 8;
             let patched_jal = Instruction::Jal {
                 rd: Gpr::Ra,
                 offset: jal_imm,
             };
-            start_stub[0..4].copy_from_slice(&patched_jal.encode());
+            start_stub[8..12].copy_from_slice(&patched_jal.encode());
         }
 
         // ── Add return-0 stub for unresolved FFI calls ──

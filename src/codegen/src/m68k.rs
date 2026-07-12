@@ -1727,12 +1727,28 @@ impl Backend for M68kBackend {
         let text_offset: u64 = phdr_end;
 
         // ── _start stub ──
-        // BSR.L main — 6 bytes (0x61 0x00 0xFF 0xFF + 4-byte disp32), offset 0.
+        // On Linux m68k, the process entry stack layout is:
+        //   [SP]     = argc (4 bytes, m68k is 32-bit)
+        //   [SP+4]   = argv[0] pointer
+        //   [SP+8]   = argv[1] pointer
+        //   ...
+        //   NULL
+        //   envp...
+        //   NULL
+        //   auxv...
+        //
+        // m68k calling convention: args in D1-D5 (then A0-A1), return in D0.
+        // So argc -> D1, argv -> D2.
+        //
+        // MOVE.L (A7), D1     — 2 bytes (load argc into D1, first arg)
+        // PEA 4(A7)           — 4 bytes (push argv pointer = SP+4 onto stack)
+        // MOVE.L (A7)+, D2    — 2 bytes (pop argv pointer into D2, second arg)
+        // BSR.L main          — 6 bytes (0x61FF + 4-byte disp32), offset 8.
         //   After return, D0 holds main's return value.
-        // MOVE.L D0, D1 — 2 bytes, offset 6.  (D1 = exit code)
-        // MOVEQ #1, D0 — 2 bytes, offset 8.   (D0 = SYS_exit = 1)
-        // TRAP #0      — 2 bytes, offset 10.
-        let start_stub_size: usize = 12;
+        // MOVE.L D0, D1       — 2 bytes, offset 14. (D1 = exit code)
+        // MOVEQ #1, D0        — 2 bytes, offset 16. (D0 = SYS_exit = 1)
+        // TRAP #0             — 2 bytes, offset 18.
+        let start_stub_size: usize = 20;
         let ffi_stub_offset: usize = start_stub_size;
         // FFI return-0 stub: MOVEQ #0, D0 (2 bytes) + RTS (2 bytes) = 4 bytes.
         let ffi_stub_size: usize = 4;
@@ -2287,6 +2303,22 @@ impl Backend for M68kBackend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // MOVE.L (A7), D1 — load argc into D1 (first arg).
+        // Encoding: dest=D1 (mode 0, reg 1), src=(A7) (mode 2, reg 7), size=long.
+        // = 00 10 001 000 010 111 = 0x2217
+        start_stub.extend_from_slice(&[0x22, 0x17]);
+
+        // PEA 4(A7) — push effective address of (SP+4) = &argv[0].
+        // PEA (d16, An): 0x4840 | (mode<<3) | reg, then 2-byte disp (BE).
+        // mode 5 (d16, An), reg 7 (A7): 0x4878, disp 0x0004.
+        start_stub.extend_from_slice(&[0x48, 0x78, 0x00, 0x04]);
+
+        // MOVE.L (A7)+, D2 — pop argv pointer into D2 (second arg).
+        // Encoding: dest=D2 (mode 0, reg 2), src=(A7)+ (mode 2, reg 7), size=long.
+        // = 00 10 010 000 010 111 = 0x2417
+        start_stub.extend_from_slice(&[0x24, 0x17]);
+
         // BSR.L main — 6 bytes: opcode 0x61FF + 4-byte disp32.
         // m68k BSR encoding: word 0x6100 | disp8. If disp8 == 0xFF, it's
         // BSR.L (32-bit displacement follows). If disp8 == 0x00, it's BSR.W
@@ -2298,6 +2330,7 @@ impl Backend for M68kBackend {
         let brasl_offset_in_start = start_stub.len();
         start_stub.extend_from_slice(&[0x61, 0xFF]);
         start_stub.extend_from_slice(&0u32.to_be_bytes());
+
         // MOVE.L D0, D1 — move main's return value (D0) to D1 (exit code arg).
         // m68k MOVE.L encoding: 0x20ss | (dst_reg << 9) | (dst_mode << 6) |
         //   (src_reg << 3) | src_mode, where ss=10 for long.
