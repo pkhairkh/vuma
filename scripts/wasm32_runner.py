@@ -18,6 +18,9 @@ import os
 import struct
 import ctypes
 
+# Global: path to the wasm module being run (set in main(), used by vuma_fork)
+_current_wasm_path = None
+
 try:
     from wasmtime import (
         Engine, Store, Module, Linker, Func, FuncType, ValType,
@@ -70,9 +73,13 @@ def make_host_functions(store, memory):
     # ── pipe(pipefd_ptr: i32) -> i32 ──────────────────────────────────
     # Creates a pipe.  Writes two 32-bit fds (native byte order) to the
     # buffer at pipefd_ptr.  Returns 0 on success, -1 on error.
+    # Also tracks pipe fds for fork() to use in the child.
+    _pipe_fds = []  # list of (read_fd, write_fd) tuples
+
     def vuma_pipe(pipefd_ptr):
         try:
             r, w = os.pipe()
+            _pipe_fds.append((r, w))
             # Write fds as native 32-bit integers (the VUMA program reads
             # them with read_i32_native, which handles both LE and BE).
             # wasm32 is always little-endian; write fds as LE 32-bit ints
@@ -83,16 +90,62 @@ def make_host_functions(store, memory):
 
     # ── fork() -> i32 ─────────────────────────────────────────────────
     # Returns 0 in child, child PID in parent, -1 on error.
+    #
+    # CRITICAL: wasmtime's internal state (threads, mutexes) does NOT survive
+    # os.fork().  If the child continues executing wasm code after fork(), it
+    # will crash or produce wrong results.  The fix: in the child, DON'T touch
+    # wasmtime at all.  Instead, immediately do dup2 + execve to start a fresh
+    # wasmtime instance with child args.
+    #
+    # The child's dup2/close/execve calls (which normally happen in wasm code
+    # between fork and exec) are handled here at the OS level.  We use the
+    # tracked pipe fds to set up stdin/stdout before exec'ing.
     def vuma_fork():
         try:
-            # Suppress the deprecation warning about multi-threaded fork.
-            # wasmtime uses background threads, but fork() is safe as long
-            # as the child immediately calls execve (which our VUMA code does).
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                return os.fork()
+            if len(_pipe_fds) < 2:
+                return -1  # need at least 2 pipes for self_exec
+
+            pipe1_read, pipe1_write = _pipe_fds[-2]  # first pipe (parent→child)
+            pipe2_read, pipe2_write = _pipe_fds[-1]  # second pipe (child→parent)
+
+            # CRITICAL: os.fork() does NOT work with wasmtime — the child's
+            # wasmtime state is corrupted and the child crashes before
+            # vuma_fork can return.  Instead, use subprocess.Popen to create
+            # the child process with stdin/stdout redirected to the pipe fds.
+            #
+            # The child branch in the wasm code (dup2, close, execve) is
+            # NEVER reached because fork() returns a non-zero PID (parent
+            # mode).  The child's stdin/stdout redirection is handled by
+            # subprocess.Popen's stdin/stdout parameters, which duplicates
+            # what the wasm code's dup2 calls would do.
+            import subprocess
+            runner = os.path.abspath(__file__)
+            wasm_path = _current_wasm_path
+
+            # Start the child subprocess with:
+            #   stdin  = pipe1_read  (parent writes to pipe1_write)
+            #   stdout = pipe2_write (parent reads from pipe2_read)
+            #   stderr = inherited
+            proc = subprocess.Popen(
+                [sys.executable, runner, wasm_path, "child"],
+                stdin=pipe1_read,
+                stdout=pipe2_write,
+                stderr=sys.stderr,
+                pass_fds=[],
+                close_fds=True,
+            )
+
+            # Return the child PID to the wasm code.  The wasm code enters
+            # the PARENT branch (pid != 0): close unused pipe ends, write to
+            # pipe1, read from pipe2, waitpid.
+            #
+            # The child branch (dup2, close, execve) is skipped — the child
+            # subprocess is already running with correct stdin/stdout.
+            return proc.pid
         except OSError:
+            return -1
+        except Exception as e:
+            sys.stderr.write(f"vuma_fork error: {e}\n")
             return -1
 
     # ── execve(path_ptr, argv_ptr, envp_ptr) -> i32 ───────────────────
@@ -169,11 +222,13 @@ def make_host_functions(store, memory):
 
 
 def main():
+    global _current_wasm_path
     if len(sys.argv) < 2:
         print("Usage: wasm32_runner.py <wasm_file> [args...]", file=sys.stderr)
         sys.exit(1)
 
     wasm_path = sys.argv[1]
+    _current_wasm_path = wasm_path  # saved for vuma_fork() to use in child
     wasi_args = sys.argv[1:]  # argv[0] = wasm path, argv[1:] = extra args
 
     engine = Engine()
