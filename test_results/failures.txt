@@ -1,5 +1,5 @@
-VUMA Test Failures — 2026-07-12 19:19:45 UTC
-Total: 6 failures across 1 tests
+VUMA Test Failures — 2026-07-12 20:31:42 UTC
+Total: 5 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  concurrency          self_exec.vuma                                exp= 100 [('s390x', 0, 'CR'), ('sparc64', 0, 'MM'), ('hppa', 0, 'MM'), ('m68k', 0, 'CR'), ('wasm32', 1, 'MM'), ('alpha', 124, 'TO')]
+  concurrency          self_exec.vuma                                exp= 100 [('s390x', 0, 'CR'), ('sparc64', 0, 'MM'), ('m68k', 0, 'CR'), ('hppa', 0, 'MM'), ('wasm32', 1, 'MM')]
