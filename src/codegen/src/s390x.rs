@@ -2282,30 +2282,25 @@ impl Backend for S390XBackend {
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // CRITICAL: R6 (S0) and R7 (S1) are callee-saved on s390x.
-            // mmap uses R6=fd and R7=offset. We must save the caller's
-            // R6/R7 before overwriting them, then restore after SVC.
-            // SVC preserves R6-R15, so the saved values survive.
-            // Use R0 (caller-saved) as scratch for SP adjustment.
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));  // R0 = 16
-            code.extend_from_slice(&encode_sgr(Gpr::R15, Gpr::R0));  // SP -= 16
-            code.extend_from_slice(&encode_stg(Gpr::R6, Gpr::R15, 0));  // save R6
-            code.extend_from_slice(&encode_stg(Gpr::R7, Gpr::R15, 8));  // save R7
-            // Setup mmap args: R2=addr(0), R3=length, R4=prot, R5=flags, R6=fd, R7=offset
-            code.extend_from_slice(&encode_lgr(Gpr::R3, Gpr::R2));  // R3 = size
-            code.extend_from_slice(&encode_lghi(Gpr::R2, 0));       // R2 = NULL
-            code.extend_from_slice(&encode_lghi(Gpr::R4, 3));       // R4 = PROT_RW
-            code.extend_from_slice(&encode_lgfi(Gpr::R5, 0x22));    // R5 = MAP_PRIVATE|ANON
-            code.extend_from_slice(&encode_lghi(Gpr::R6, -1));      // R6 = fd=-1
-            code.extend_from_slice(&encode_lghi(Gpr::R7, 0));       // R7 = offset=0
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));      // R1 = sys_mmap
-            code.extend_from_slice(&encode_svc(0));                  // syscall
-            // Restore callee-saved R6 and R7 from stack.
-            code.extend_from_slice(&encode_lg(Gpr::R6, Gpr::R15, 0));
-            code.extend_from_slice(&encode_lg(Gpr::R7, Gpr::R15, 8));
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));  // R0 = 16 (reloaded)
-            code.extend_from_slice(&encode_agr(Gpr::R15, Gpr::R0));  // SP += 16
-            code.extend_from_slice(&encode_br(LR));  // return
+            // Move args: R2=size → R3; R2=NULL (0)
+            // LGR R3, R2 (R3 = size)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, Gpr::R2));
+            // LGHI R2, 0 (R2 = NULL)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+            // LGHI R4, 3 (PROT_READ | PROT_WRITE)
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 3));
+            // LGFI R5, 0x22 (MAP_PRIVATE | MAP_ANONYMOUS)
+            code.extend_from_slice(&encode_lgfi(Gpr::R5, 0x22));
+            // LGHI R6, -1 (fd = -1)
+            code.extend_from_slice(&encode_lghi(Gpr::R6, -1));
+            // LGHI R7, 0 (offset = 0)
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 0));
+            // LGFI R1, 90 (sys_mmap)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
+            // SVC 0
+            code.extend_from_slice(&encode_svc(0));
+            // BR R14 (return)
+            code.extend_from_slice(&encode_br(LR));
             code
         };
         let vuma_free_stub: Vec<u8> = {
@@ -2447,18 +2442,10 @@ impl Backend for S390XBackend {
         // canonical equivalent.
         {
             let mut code = Vec::new();
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));
-            code.extend_from_slice(&encode_sgr(Gpr::R15, Gpr::R0));
-            code.extend_from_slice(&encode_stg(Gpr::R6, Gpr::R15, 0));
-            code.extend_from_slice(&encode_stg(Gpr::R7, Gpr::R15, 8));
-            code.extend_from_slice(&encode_lghi(Gpr::R6, 0));
-            code.extend_from_slice(&encode_lghi(Gpr::R7, 0));
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 367));
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 0)); // addr = NULL
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 0)); // addrlen = NULL
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 367)); // sys_recvfrom
             code.extend_from_slice(&encode_svc(0));
-            code.extend_from_slice(&encode_lg(Gpr::R6, Gpr::R15, 0));
-            code.extend_from_slice(&encode_lg(Gpr::R7, Gpr::R15, 8));
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));
-            code.extend_from_slice(&encode_agr(Gpr::R15, Gpr::R0));
             code.extend_from_slice(&encode_br(LR));
             syscall_stubs.push(("recv".to_string(), code));
         }
@@ -2467,18 +2454,10 @@ impl Backend for S390XBackend {
         // Same pattern as recv but uses sendto=366.
         {
             let mut code = Vec::new();
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));
-            code.extend_from_slice(&encode_sgr(Gpr::R15, Gpr::R0));
-            code.extend_from_slice(&encode_stg(Gpr::R6, Gpr::R15, 0));
-            code.extend_from_slice(&encode_stg(Gpr::R7, Gpr::R15, 8));
-            code.extend_from_slice(&encode_lghi(Gpr::R6, 0));
-            code.extend_from_slice(&encode_lghi(Gpr::R7, 0));
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 366));
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 0)); // addr = NULL
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 0)); // addrlen = 0
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 366)); // sys_sendto
             code.extend_from_slice(&encode_svc(0));
-            code.extend_from_slice(&encode_lg(Gpr::R6, Gpr::R15, 0));
-            code.extend_from_slice(&encode_lg(Gpr::R7, Gpr::R15, 8));
-            code.extend_from_slice(&encode_lghi(Gpr::R0, 16));
-            code.extend_from_slice(&encode_agr(Gpr::R15, Gpr::R0));
             code.extend_from_slice(&encode_br(LR));
             syscall_stubs.push(("send".to_string(), code));
         }
