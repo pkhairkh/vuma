@@ -1005,18 +1005,17 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 // LTGR S1, S0 (Load and Test 64-bit): S1 = S0, sets condition code based on S0.
                 // LTGR R1, R2: op1=0xB9, op2=0x02.
                 code.extend_from_slice(&encode_rre(0xB9, 0x02, S1, S0));
-                // BRC 0x6, true_block (branch if CC != 0, i.e., cond != 0).
-                // Mask 0x6 = "CC != 0" (i.e., not equal to zero).
-                // Mask encoding: 0x6 = bits 1,2 set = CC=1 or CC=2 = "not zero".
-                // Actually mask is 4 bits: each bit enables a CC: bit 3=CC=0, bit 2=CC=1,
-                // bit 1=CC=2, bit 0=CC=3. "Not equal" (cond != 0) means CC=1 or CC=2,
-                // so mask = 0b0110 = 0x6.
+                // BRCL 0x6, true_block (branch if CC != 0, i.e., cond != 0).
+                // Use BRCL (32-bit displacement) instead of BRC (16-bit) to avoid
+                // displacement overflow in large functions. BRC's 16-bit signed
+                // halfword displacement limits jumps to ±64KB, which is exceeded
+                // by self_exec and other complex test programs.
                 let true_patch = code.len();
-                code.extend_from_slice(&encode_brc(0x6, 0));
+                code.extend_from_slice(&encode_brcl(0x6, 0));
                 branch_patches.push(BranchPatch {
                     code_offset: true_patch,
                     target_label: true_block.clone(),
-                    is_long: false,
+                    is_long: true,
                 });
                 // BRCL 0xF, false_block (unconditional jump to false_block).
                 let false_patch = code.len();
@@ -1065,13 +1064,14 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                     code.extend(ss_load_imm(S1, *val));
                     // CGR R1, R2: op1=0xB9, op2=0x20.
                     code.extend_from_slice(&encode_rre(0xB9, 0x20, S1, S0));
-                    // BRC 0x8, label (branch if CC=0, i.e., equal). Mask 0x8 = CC=0.
+                    // BRCL 0x8, label (branch if CC=0, i.e., equal). Mask 0x8 = CC=0.
+                    // Use BRCL (32-bit) to avoid 16-bit displacement overflow.
                     let patch = code.len();
-                    code.extend_from_slice(&encode_brc(0x8, 0));
+                    code.extend_from_slice(&encode_brcl(0x8, 0));
                     branch_patches.push(BranchPatch {
                         code_offset: patch,
                         target_label: label.clone(),
-                        is_long: false,
+                        is_long: true,
                     });
                 }
                 // BRCL 0xF, default (unconditional jump to default).
