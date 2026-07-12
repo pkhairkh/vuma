@@ -387,54 +387,88 @@ fn is_big_endian() -> bool {
     return first == 1;
 }
 
-// Read a signed 32-bit value in native byte order.
-fn read_i32_native(buf: Address, offset: u64) -> i64 {
-    b0: i64 = *(buf + offset) as i64;
-    b1: i64 = *(buf + offset + 1) as i64;
-    b2: i64 = *(buf + offset + 2) as i64;
-    b3: i64 = *(buf + offset + 3) as i64;
-    if is_big_endian() {
-        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+// Detect native pointer size (4 for 32-bit targets, 8 for 64-bit).
+// On 32-bit QEMU, the stack (where argv lives) is below 0x80000000, so the
+// high 32 bits of argv are zero.  On 64-bit QEMU, the stack is above
+// 0x100000000, so the high 32 bits are non-zero.  This is reliable for all
+// QEMU user-mode targets and for wasm32 (addresses are always < 4 GB).
+fn ptr_size(argv: Address) -> u64 {
+    high: u64 = (argv as u64) >> 32;
+    result: u64 = 8;
+    if high == 0 {
+        result = 4;
     }
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    return result;
 }
 
-// Read an unsigned 64-bit value in native byte order.
-fn read_u64_native(buf: Address, offset: u64) -> u64 {
+// ── Native byte-order I/O helpers ──────────────────────────────────────────
+// All helpers take `be` (big-endian flag) as a parameter instead of calling
+// is_big_endian() internally.  This avoids a wasm32 codegen bug where calling
+// is_big_endian() (which allocates/frees memory) inside a function with u64
+// locals clobbers those locals.  The `be` flag is computed once in main() and
+// passed to every helper call.
+
+// Read an unsigned 32-bit value in native byte order.
+fn read_u32_native(buf: Address, offset: u64, be: bool) -> u64 {
     b0: u64 = *(buf + offset) as u64;
     b1: u64 = *(buf + offset + 1) as u64;
     b2: u64 = *(buf + offset + 2) as u64;
     b3: u64 = *(buf + offset + 3) as u64;
-    b4: u64 = *(buf + offset + 4) as u64;
-    b5: u64 = *(buf + offset + 5) as u64;
-    b6: u64 = *(buf + offset + 6) as u64;
-    b7: u64 = *(buf + offset + 7) as u64;
-    if is_big_endian() {
-        return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+    result: u64 = 0;
+    if be {
+        result = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    } else {
+        result = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return result;
 }
 
-// Write an unsigned 64-bit value in native byte order.
-fn write_u64_native(buf: Address, offset: u64, val: u64) {
-    if is_big_endian() {
-        *(buf + offset)     = (val >> 56) & 255;
-        *(buf + offset + 1) = (val >> 48) & 255;
-        *(buf + offset + 2) = (val >> 40) & 255;
-        *(buf + offset + 3) = (val >> 32) & 255;
-        *(buf + offset + 4) = (val >> 24) & 255;
-        *(buf + offset + 5) = (val >> 16) & 255;
-        *(buf + offset + 6) = (val >> 8) & 255;
-        *(buf + offset + 7) = val & 255;
+// Write an unsigned 32-bit value in native byte order.
+fn write_u32_native(buf: Address, offset: u64, val: u64, be: bool) {
+    if be {
+        *(buf + offset)     = (val >> 24) & 255;
+        *(buf + offset + 1) = (val >> 16) & 255;
+        *(buf + offset + 2) = (val >> 8) & 255;
+        *(buf + offset + 3) = val & 255;
     } else {
         *(buf + offset)     = val & 255;
         *(buf + offset + 1) = (val >> 8) & 255;
         *(buf + offset + 2) = (val >> 16) & 255;
         *(buf + offset + 3) = (val >> 24) & 255;
-        *(buf + offset + 4) = (val >> 32) & 255;
-        *(buf + offset + 5) = (val >> 40) & 255;
-        *(buf + offset + 6) = (val >> 48) & 255;
-        *(buf + offset + 7) = (val >> 56) & 255;
+    }
+}
+
+// Read a signed 32-bit value in native byte order.
+fn read_i32_native(buf: Address, offset: u64, be: bool) -> i64 {
+    return read_u32_native(buf, offset, be) as i64;
+}
+
+// Read an unsigned 64-bit value in native byte order.
+// Split into two 32-bit reads to avoid a wasm32 codegen bug with too many
+// u64 locals (8 byte variables + result exceeds the backend's capacity).
+fn read_u64_native(buf: Address, offset: u64, be: bool) -> u64 {
+    lo: u64 = read_u32_native(buf, offset, be);
+    hi: u64 = read_u32_native(buf, offset + 4, be);
+    result: u64 = 0;
+    if be {
+        result = (lo << 32) | hi;
+    } else {
+        result = lo | (hi << 32);
+    }
+    return result;
+}
+
+// Write an unsigned 64-bit value in native byte order.
+// Split into two 32-bit writes to avoid the wasm32 codegen bug.
+fn write_u64_native(buf: Address, offset: u64, val: u64, be: bool) {
+    lo: u64 = val & 4294967295;
+    hi: u64 = (val >> 32) & 4294967295;
+    if be {
+        write_u32_native(buf, offset, hi, be);
+        write_u32_native(buf, offset + 4, lo, be);
+    } else {
+        write_u32_native(buf, offset, lo, be);
+        write_u32_native(buf, offset + 4, hi, be);
     }
 }
 
@@ -443,61 +477,36 @@ fn write_u64_native(buf: Address, offset: u64, val: u64) {
 // ===========================================================================
 // Checks argv[1]: "child" → child mode, otherwise → parent mode.
 
-fn main(argc: i64, argv: Address) -> i32 {
-
-    // --- Determine mode by checking argv[1] against "child" ---
-    is_child: bool = false;
-    if argc >= 2 {
-        arg1_ptr: u64 = read_u64_native(argv, 8);   // argv[1] pointer
-        child_str = allocate(6);
-        *(child_str + 0) = 99;    // 'c'
-        *(child_str + 1) = 104;   // 'h'
-        *(child_str + 2) = 105;   // 'i'
-        *(child_str + 3) = 108;   // 'l'
-        *(child_str + 4) = 100;   // 'd'
-        *(child_str + 5) = 0;     // '\0'
-        cmp: i64 = strcmp(arg1_ptr as Address, child_str);
-        free(child_str);
-        if cmp == 0 {
-            is_child = true;
-        }
-    }
-
-    // =======================================================================
-    // CHILD MODE: read stdin, compute SHA256d, write hex to stdout
-    // =======================================================================
-    // After parent's dup2, fd 0 = pipe1 read end, fd 1 = pipe2 write end.
-
-    if is_child {
-        in_buf = allocate(256);
-        n: i64 = read(0, in_buf, 256);
-        if n <= 0 {
-            free(in_buf);
-            exit(1);
-        }
-
-        digest = allocate(32);
-        sha256d(in_buf, n as u64, digest);
+// Child mode: read stdin, compute SHA256d, write hex to stdout.
+// After parent's dup2, fd 0 = pipe1 read end, fd 1 = pipe2 write end.
+fn child_mode() -> i32 {
+    in_buf = allocate(256);
+    n: i64 = read(0, in_buf, 256);
+    if n <= 0 {
         free(in_buf);
-
-        hex_out = allocate(65);
-        bytes_to_hex(digest, 32, hex_out);
-        free(digest);
-        *(hex_out + 64) = 10;   // '\n'
-        write(1, hex_out, 65);
-        free(hex_out);
-
-        exit(0);
-        return 0;   // unreachable — exit() does not return
+        exit(1);
+        return 1;
     }
 
-    // =======================================================================
-    // PARENT MODE: create pipes, fork, exec child, communicate
-    // =======================================================================
+    digest = allocate(32);
+    sha256d(in_buf, n as u64, digest);
+    free(in_buf);
 
+    hex_out = allocate(65);
+    bytes_to_hex(digest, 32, hex_out);
+    free(digest);
+    *(hex_out + 64) = 10;   // '\n'
+    write(1, hex_out, 65);
+    free(hex_out);
+
+    exit(0);
+    return 0;   // unreachable — exit() does not return
+}
+
+// Parent mode: create pipes, fork, exec child, communicate.
+// Returns the first byte of the child's hex output as exit code.
+fn parent_mode(argc: i64, argv: Address, be: bool, ps: u64) -> i32 {
     // Step 1: Create two pipes
-    //   pipe1: parent → child  (parent writes, child reads via stdin)
-    //   pipe2: child → parent  (child writes via stdout, parent reads)
     pipe1fd = allocate(8);
     pipe2fd = allocate(8);
 
@@ -506,18 +515,20 @@ fn main(argc: i64, argv: Address) -> i32 {
         free(pipe1fd);
         free(pipe2fd);
         exit(2);
+        return 2;
     }
     ret = pipe(pipe2fd);
     if ret < 0 {
         free(pipe1fd);
         free(pipe2fd);
         exit(3);
+        return 3;
     }
 
-    p1_read:  i64 = read_i32_native(pipe1fd, 0);
-    p1_write: i64 = read_i32_native(pipe1fd, 4);
-    p2_read:  i64 = read_i32_native(pipe2fd, 0);
-    p2_write: i64 = read_i32_native(pipe2fd, 4);
+    p1_read:  i64 = read_i32_native(pipe1fd, 0, be);
+    p1_write: i64 = read_i32_native(pipe1fd, 4, be);
+    p2_read:  i64 = read_i32_native(pipe2fd, 0, be);
+    p2_write: i64 = read_i32_native(pipe2fd, 4, be);
 
     // Step 2: Fork
     pid: i64 = fork();
@@ -529,31 +540,29 @@ fn main(argc: i64, argv: Address) -> i32 {
         free(pipe1fd);
         free(pipe2fd);
         exit(4);
+        return 4;
     }
 
     if pid == 0 {
         // --- CHILD PROCESS (before exec) ---
-        // Redirect fds: stdin → pipe1 read, stdout → pipe2 write
         dup2(p1_read, 0);
         dup2(p2_write, 1);
-
-        // Close all original pipe fds (dup2'd copies remain open)
         close(p1_read);
         close(p1_write);
         close(p2_read);
         close(p2_write);
 
-        // Re-exec ourselves using argv[0] (the actual binary path provided
-        // by the kernel / test runner).  Hardcoding a relative path like
-        // "./self_exec" fails because the test harness runs the binary from
-        // an absolute /tmp path.  argv[0] is always the correct path.
-        argv0_ptr: u64 = read_u64_native(argv, 0);
+        // Re-exec using argv[0] (actual binary path)
+        argv0_val32: u64 = read_u32_native(argv, 0, be);
+        argv0_val64: u64 = read_u64_native(argv, 0, be);
+        argv0_ptr: u64 = 0;
+        if ps == 4 {
+            argv0_ptr = argv0_val32;
+        } else {
+            argv0_ptr = argv0_val64;
+        }
 
-        // Build argv array: [argv[0], "child", null]
-        // 3 pointers × 8 bytes = 24 bytes
-        argv_arr = allocate(24);
-
-        // "child\0" — 5 chars + null = 6 bytes
+        argv_arr = allocate(3 * ps);
         arg_str = allocate(6);
         *(arg_str + 0) = 99;     // 'c'
         *(arg_str + 1) = 104;    // 'h'
@@ -562,32 +571,35 @@ fn main(argc: i64, argv: Address) -> i32 {
         *(arg_str + 4) = 100;    // 'd'
         *(arg_str + 5) = 0;      // '\0'
 
-        // Write pointers into argv in NATIVE byte order (the kernel reads
-        // pointer arrays in the guest's native endianness).
-        write_u64_native(argv_arr, 0,  argv0_ptr);       // argv[0] = same path
-        write_u64_native(argv_arr, 8,  arg_str as u64);  // argv[1] = "child"
-        write_u64_native(argv_arr, 16, 0);               // argv[2] = null
+        if ps == 4 {
+            write_u32_native(argv_arr, 0,  argv0_ptr,       be);
+            write_u32_native(argv_arr, 4,  arg_str as u64,  be);
+            write_u32_native(argv_arr, 8,  0,               be);
+        } else {
+            write_u64_native(argv_arr, 0,  argv0_ptr,       be);
+            write_u64_native(argv_arr, 8,  arg_str as u64,  be);
+            write_u64_native(argv_arr, 16, 0,               be);
+        }
 
-        // Build envp: [null] — minimal environment
-        envp_arr = allocate(8);
-        write_u64_native(envp_arr, 0, 0);
+        envp_arr = allocate(ps);
+        if ps == 4 {
+            write_u32_native(envp_arr, 0, 0, be);
+        } else {
+            write_u64_native(envp_arr, 0, 0, be);
+        }
 
-        // Execute! execve replaces process; does not return on success.
         execve(argv0_ptr as Address, argv_arr, envp_arr);
 
-        // execve failed — clean up and exit
         free(arg_str);
         free(argv_arr);
         free(envp_arr);
         free(pipe1fd);
         free(pipe2fd);
         exit(5);
-        return 5;   // unreachable
+        return 5;
     }
 
     // --- PARENT PROCESS ---
-
-    // Close ends the parent doesn't use
     close(p1_read);
     close(p2_write);
 
@@ -615,16 +627,17 @@ fn main(argc: i64, argv: Address) -> i32 {
 
     written: i64 = write(p1_write, msg_buf, 20);
     free(msg_buf);
-    close(p1_write);   // signal EOF to child's stdin
+    close(p1_write);
 
     if written != 20 {
         close(p2_read);
         free(pipe1fd);
         free(pipe2fd);
         exit(6);
+        return 6;
     }
 
-    // Step 4: Read child's hex digest from pipe2 (64 hex chars + newline)
+    // Step 4: Read child's hex digest from pipe2
     out_buf = allocate(65);
     total_read: i64 = 0;
     while total_read < 65 {
@@ -648,4 +661,41 @@ fn main(argc: i64, argv: Address) -> i32 {
     free(pipe2fd);
 
     return result;
+}
+
+// Main entry point: detect mode and dispatch.
+fn main(argc: i64, argv: Address) -> i32 {
+    // Detect endianness FIRST (before any u64 locals) to avoid wasm32 bug.
+    be: bool = is_big_endian();
+    ps: u64 = ptr_size(argv);
+
+    // Check argv[1] against "child"
+    is_child: bool = false;
+    if argc >= 2 {
+        arg1_val32: u64 = read_u32_native(argv, ps, be);
+        arg1_val64: u64 = read_u64_native(argv, ps, be);
+        arg1_ptr: u64 = 0;
+        if ps == 4 {
+            arg1_ptr = arg1_val32;
+        } else {
+            arg1_ptr = arg1_val64;
+        }
+        child_str = allocate(6);
+        *(child_str + 0) = 99;
+        *(child_str + 1) = 104;
+        *(child_str + 2) = 105;
+        *(child_str + 3) = 108;
+        *(child_str + 4) = 100;
+        *(child_str + 5) = 0;
+        cmp: i64 = strcmp(arg1_ptr as Address, child_str);
+        free(child_str);
+        if cmp == 0 {
+            is_child = true;
+        }
+    }
+
+    if is_child {
+        return child_mode();
+    }
+    return parent_mode(argc, argv, be, ps);
 }
