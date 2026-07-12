@@ -1861,6 +1861,16 @@ impl Backend for M68kBackend {
                 ("epoll_ctl", 424),
                 ("epoll_wait", 425),
                 ("dup3", 431),
+                // ── Additional POSIX syscall stubs (stat family, getcwd,
+                // recv/send direct syscalls) ──
+                // m68k syscall numbers from arch/m68k/include/uapi/asm/unistd.h
+                // (same as ARM EABI for these calls).
+                ("stat", 106),
+                ("lstat", 107),
+                ("fstat", 108),
+                ("getcwd", 183),
+                ("recv", 291),
+                ("send", 290),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -1883,6 +1893,359 @@ impl Backend for M68kBackend {
         };
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
+
+        // ── rt_sigreturn (173) — special: no args, never returns.
+        // The kernel restores the saved signal context from the stack and
+        // resumes execution at the interrupted PC. We emit just
+        // `MOVE.L #173, D0 ; TRAP #0` followed by an ILLEGAL trap (0x4AFC)
+        // as a safety net in case the kernel ever does return.
+        // 173 > 127 so MOVEQ cannot be used; use MOVE.L #imm32, D0.
+        {
+            let mut code = Vec::new();
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 173 }.encode());
+            code.extend(Instruction::Trap0.encode());
+            // ILLEGAL (0x4AFC) — safety net.
+            code.extend_from_slice(&[0x4A, 0xFC]);
+            syscall_stubs.push(("rt_sigreturn".to_string(), code));
+        }
+
+        // ── waitpid(pid, wstatus, options) → wraps wait4(pid, wstatus, options, NULL)
+        // VUMA declares waitpid with 3 args (D1=pid, D2=wstatus, D3=options);
+        // the syscall wait4 takes a 4th arg (rusage, must be NULL) in D4.
+        {
+            let mut code = Vec::new();
+            // MOVEQ #0, D4 (rusage = NULL)
+            code.extend(Instruction::Moveq { dst: Gpr::D4, imm: 0 }.encode());
+            // MOVEQ #114, D0 (sys_wait4 — 114 fits in MOVEQ)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 114 }.encode());
+            code.extend(Instruction::Trap0.encode());
+            code.extend(Instruction::Rts.encode());
+            syscall_stubs.push(("waitpid".to_string(), code));
+        }
+
+        // ── strcmp(s1, s2) → int — assembly loop, not a syscall.
+        // m68k calling convention: integer args in D1-D5. s1 in D1, s2 in D2.
+        // Return in D0 = (*s1 - *s2) at first differing byte (or 0 if equal).
+        // Uses A0, A1 as pointers (post-increment), D3/D4 as byte scratch.
+        {
+            let mut code = Vec::new();
+            // MOVEA.L D1, A0 (A0 = s1)
+            // MOVEA.L Dn, An: 0x2000 | (an<<9) | (1<<6) | (0<<3) | dn
+            // For D1 → A0: 0x2000 | 0 | 0x40 | 0 | 1 = 0x2041
+            code.extend_from_slice(&[0x20, 0x41]);
+            // MOVEA.L D2, A1 (A1 = s2)
+            // For D2 → A1: 0x2000 | (1<<9) | 0x40 | 0 | 2 = 0x2242
+            code.extend_from_slice(&[0x22, 0x42]);
+
+            // strcmp_loop:
+            let loop_start = code.len();
+            // MOVEQ #0, D3 (clear D3 for zero-extension)
+            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 0 }.encode());
+            // MOVE.B (A0)+, D3 (load byte from s1, post-increment)
+            // MOVE.B (An)+, Dn: 0x1000 | (dn<<9) | (0<<6) | (3<<3) | an
+            // For (A0)+ → D3: 0x1000 | (3<<9) | 0 | (3<<3) | 0 = 0x1618
+            code.extend_from_slice(&[0x16, 0x18]);
+            // MOVEQ #0, D4 (clear D4 for zero-extension)
+            code.extend(Instruction::Moveq { dst: Gpr::D4, imm: 0 }.encode());
+            // MOVE.B (A1)+, D4 (load byte from s2)
+            // For (A1)+ → D4: 0x1000 | (4<<9) | 0 | (3<<3) | 1 = 0x1819
+            code.extend_from_slice(&[0x18, 0x19]);
+            // CMP.L D3, D4 (compare; sets CC based on D4 - D3)
+            code.extend(Instruction::Cmp { src: Gpr::D3, dst: Gpr::D4 }.encode());
+            // BNE.S done (cond=6=NE)
+            let bne_pos = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // placeholder
+            // TST.L D3 (test if D3 == 0)
+            code.extend(Instruction::Tst { dst: Gpr::D3 }.encode());
+            // BEQ.S done (cond=7=EQ — both bytes NUL, strings equal)
+            let beq_pos = code.len();
+            code.extend_from_slice(&[0x67, 0x00]); // placeholder
+            // BRA.S loop_start (unconditional)
+            let bra_pos = code.len();
+            code.extend_from_slice(&[0x60, 0x00]); // placeholder
+
+            // done: D0 = D3 - D4
+            let done_offset = code.len();
+            // Patch BNE and BEQ to target done_offset.
+            let bne_disp = (done_offset as i64 - bne_pos as i64 - 2) as i8;
+            code[bne_pos + 1] = bne_disp as u8;
+            let beq_disp = (done_offset as i64 - beq_pos as i64 - 2) as i8;
+            code[beq_pos + 1] = beq_disp as u8;
+            // Patch BRA to target loop_start.
+            let bra_disp = (loop_start as i64 - bra_pos as i64 - 2) as i8;
+            code[bra_pos + 1] = bra_disp as u8;
+
+            // SUB.L D4, D3 (D3 = D3 - D4)
+            code.extend(Instruction::Sub { src: Gpr::D4, dst: Gpr::D3 }.encode());
+            // MOVE.L D3, D0 (return value in D0)
+            code.extend(Instruction::Move { src: Gpr::D3, dst: Gpr::D0 }.encode());
+            // RTS
+            code.extend(Instruction::Rts.encode());
+            syscall_stubs.push(("strcmp".to_string(), code));
+        }
+
+        // ── print_int(D1 = signed 32-bit integer) — runtime helper ──
+        // Converts D1 to decimal ASCII and writes to stdout via sys_write
+        // (D0=4). Stack frame: LINK A6, #-32 (digit buffer + scratch).
+        // Register usage:
+        //   D0, D1, D2 = scratch for divmod and syscall (caller-saved)
+        //   D3 = saved/restored by inline divmod (callee-saved, save anyway)
+        //   D4 = current value (callee-saved, save/restore)
+        //   D5 = digit count (callee-saved, save/restore)
+        //   D6 = quotient (callee-saved, save/restore)
+        //   D7 = remainder / scratch (callee-saved, save/restore)
+        //   A0 = digit buffer pointer (scratch, A0/A1 are scratch)
+        //   A6 = frame pointer
+        //
+        // Inline divmod10: D4 → D6=quotient, D7=remainder.
+        //   Uses D0 (working dividend), D1 (counter), shift-and-subtract.
+        {
+            let mut code = Vec::new();
+
+            // ── Prologue ──
+            // LINK A6, #-32
+            code.extend(Instruction::Link { reg: Gpr::A6, disp: -32 }.encode());
+            // MOVEM.L D3-D7, -(SP) — save callee-saved
+            // Encoding: 0x48E7 + 2-byte mask. Mask for D3-D7 = 0x00F8.
+            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
+
+            // D4 = D1 (save input value)
+            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
+            // D5 = 0 (digit count)
+            code.extend(Instruction::Moveq { dst: Gpr::D5, imm: 0 }.encode());
+            // A0 = A6 (end-of-buffer pointer; digits grow down)
+            // MOVEA.L A6, A0: 0x2000 | (0<<9) | (1<<6) | (1<<3) | 6 = 0x204E
+            code.extend_from_slice(&[0x20, 0x4E]);
+
+            // ── Check sign of D4 ──
+            code.extend(Instruction::Tst { dst: Gpr::D4 }.encode());
+            // BPL.S positive (cond=10=PL)
+            let bpl_pos = code.len();
+            code.extend_from_slice(&[0x6A, 0x00]); // placeholder
+
+            // ── Negative: write '-' to stdout, negate D4 ──
+            // MOVEQ #45, D0 ('-')
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 45 }.encode());
+            // MOVE.L D0, -(SP) — push '-' (4 bytes, '-' as low byte)
+            code.extend_from_slice(&[0x2F, 0x00]);
+            // MOVEQ #1, D1 (fd = stdout)
+            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            // MOVE.L A7, D2 (buf = SP)
+            // MOVE.L An, Dn: 0x2000 | (dn<<9) | (0<<6) | (1<<3) | an
+            // For A7 → D2: 0x2000 | (2<<9) | 0 | (1<<3) | 7 = 0x240F
+            code.extend_from_slice(&[0x24, 0x0F]);
+            // MOVEQ #1, D3 (len = 1)
+            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+            // MOVEQ #4, D0 (sys_write)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+            // ADDQ.L #4, A7 (pop the 4-byte '-' buffer)
+            // ADDQ.L #4, An: 0101_100_0_11_001_111 = 0x58CF
+            code.extend_from_slice(&[0x58, 0xCF]);
+            // NEG.L D4 (negate D4)
+            // NEG.L Dn: 0x4480 | (dn<<9). For D4: 0x4480 | (4<<9) = 0x4C80
+            code.extend_from_slice(&[0x4C, 0x80]);
+
+            // ── positive: ──
+            let positive_offset = code.len();
+            // Patch BPL.S to target positive_offset
+            let bpl_disp = (positive_offset as i64 - bpl_pos as i64 - 2) as i8;
+            code[bpl_pos + 1] = bpl_disp as u8;
+
+            // ── Outer divmod loop ──
+            let outer_loop = code.len();
+
+            // ── Inline divmod10: D4 → D6=quotient, D7=remainder ──
+            // MOVE.L D4, D0 (working dividend)
+            code.extend(Instruction::Move { src: Gpr::D4, dst: Gpr::D0 }.encode());
+            // MOVEQ #0, D6 (quotient = 0)
+            code.extend(Instruction::Moveq { dst: Gpr::D6, imm: 0 }.encode());
+            // MOVEQ #0, D7 (remainder = 0)
+            code.extend(Instruction::Moveq { dst: Gpr::D7, imm: 0 }.encode());
+            // MOVEQ #32, D1 (counter = 32)
+            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 32 }.encode());
+
+            // ── Inner divmod loop ──
+            let inner_loop = code.len();
+            // ADD.L D0, D0 (D0 <<= 1, X = old MSB)
+            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D0 }.encode());
+            // ROXL.L #1, D7 (D7 = (D7 << 1) | X)
+            // ROXL.L #1, Dn: 1110_111_1_10_010_001 = 0xEFA9 for D7
+            code.extend_from_slice(&[0xEF, 0xA9]);
+            // LSL.L #1, D6 (D6 <<= 1)
+            // LSL.L #1, D6: 1110_110_1_10_001_001 = 0xED89
+            code.extend_from_slice(&[0xED, 0x89]);
+            // CMPI.L #10, D7
+            // CMPI.L #imm32, Dn: 0x0C80 | dn, then 4-byte imm. For D7: 0x0C87
+            code.extend_from_slice(&[0x0C, 0x87, 0x00, 0x00, 0x00, 0x0A]);
+            // BCS.S skip (cond=5=CS, skip SUBI + ORI = 12 bytes)
+            code.extend_from_slice(&[0x65, 0x0C]);
+            // SUBI.L #10, D7
+            // SUBI.L #imm32, Dn: 0x0480 | dn. For D7: 0x0487
+            code.extend_from_slice(&[0x04, 0x87, 0x00, 0x00, 0x00, 0x0A]);
+            // ORI.L #1, D6 (set quotient LSB)
+            // ORI.L #imm32, Dn: 0x0080 | dn. For D6: 0x0086
+            code.extend_from_slice(&[0x00, 0x86, 0x00, 0x00, 0x00, 0x01]);
+            // skip: SUBQ.L #1, D1 (counter--)
+            // SUBQ.L #1, Dn: 0101_001_1_11_000_rrr. For D1: 0x53C1
+            code.extend_from_slice(&[0x53, 0xC1]);
+            // BNE.S inner_loop (cond=6=NE)
+            let bne_inner_pos = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // placeholder
+            let bne_inner_disp = (inner_loop as i64 - bne_inner_pos as i64 - 2) as i8;
+            code[bne_inner_pos + 1] = bne_inner_disp as u8;
+
+            // ── After divmod10: D6=quotient, D7=remainder ──
+            // ADDI.B #48, D7 (remainder + '0')
+            // ADDI.B #imm8, Dn: 0x0600 | dn, then 2-byte imm. For D7: 0x0607
+            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x30]);
+            // SUBQ.L #1, A0 (A0--)
+            // SUBQ.L #1, An: 0101_001_1_11_001_000 = 0x53C8 for A0
+            code.extend_from_slice(&[0x53, 0xC8]);
+            // MOVE.B D7, (A0) (store digit)
+            // MOVE.B Dn, (An): 0x1000 | (dn<<9) | (2<<6) | an. For D7, A0: 0x1087
+            code.extend_from_slice(&[0x10, 0x87]);
+            // ADDQ.L #1, D5 (digit count++)
+            // ADDQ.L #1, Dn: 0101_001_0_11_000_101 = 0x52C5 for D5
+            code.extend_from_slice(&[0x52, 0xC5]);
+            // MOVE.L D6, D4 (D4 = quotient, becomes new value)
+            code.extend(Instruction::Move { src: Gpr::D6, dst: Gpr::D4 }.encode());
+            // TST.L D4
+            code.extend(Instruction::Tst { dst: Gpr::D4 }.encode());
+            // BNE.S outer_loop (loop back, cond=6=NE)
+            let bne_outer_pos = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // placeholder
+            let bne_outer_disp = (outer_loop as i64 - bne_outer_pos as i64 - 2) as i8;
+            code[bne_outer_pos + 1] = bne_outer_disp as u8;
+
+            // ── Zero check: if D5 == 0 (D4 was originally 0), store '0' ──
+            code.extend(Instruction::Tst { dst: Gpr::D5 }.encode());
+            // BNE.S write_digits (cond=6=NE)
+            let bne_zero_pos = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // placeholder
+            // MOVEQ #48, D7 ('0')
+            code.extend(Instruction::Moveq { dst: Gpr::D7, imm: 48 }.encode());
+            // SUBQ.L #1, A0
+            code.extend_from_slice(&[0x53, 0xC8]);
+            // MOVE.B D7, (A0)
+            code.extend_from_slice(&[0x10, 0x87]);
+            // ADDQ.L #1, D5
+            code.extend_from_slice(&[0x52, 0xC5]);
+
+            // ── write_digits: sys_write(1, A0, D5) ──
+            let write_digits_offset = code.len();
+            // Patch BNE.S to target write_digits_offset
+            let bne_zero_disp = (write_digits_offset as i64 - bne_zero_pos as i64 - 2) as i8;
+            code[bne_zero_pos + 1] = bne_zero_disp as u8;
+
+            // MOVEQ #1, D1 (fd = stdout)
+            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            // MOVE.L A0, D2 (buf = A0)
+            // MOVE.L An, Dn: 0x2000 | (dn<<9) | (0<<6) | (1<<3) | an. For A0 → D2: 0x2408
+            code.extend_from_slice(&[0x24, 0x08]);
+            // MOVE.L D5, D3 (len = D5)
+            code.extend(Instruction::Move { src: Gpr::D5, dst: Gpr::D3 }.encode());
+            // MOVEQ #4, D0 (sys_write)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+
+            // ── Epilogue ──
+            // MOVEM.L (SP)+, D3-D7 — restore callee-saved
+            // Encoding: 0x4CDF + 2-byte mask. Mask for D3-D7 = 0x00F8.
+            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0xF8]);
+            // UNLK A6
+            code.extend(Instruction::Unlk { reg: Gpr::A6 }.encode());
+            // RTS
+            code.extend(Instruction::Rts.encode());
+
+            syscall_stubs.push(("print_int".to_string(), code));
+        }
+
+        // ── print_hex(D1 = 32-bit value) — runtime helper ──
+        // Writes D1 as 8 hex digits (MSB first) to stdout via sys_write.
+        // Stack frame: LINK A6, #-16 (hex char buffer).
+        // Register usage:
+        //   D0, D1, D2, D3 = syscall scratch
+        //   D4 = current value (preserved across syscalls)
+        //   D5 = loop counter (0..8)
+        //   D7 = current nibble / hex char
+        //   A0 = buffer pointer (advances backward)
+        //   A6 = frame pointer
+        {
+            let mut code = Vec::new();
+
+            // ── Prologue ──
+            // LINK A6, #-16
+            code.extend(Instruction::Link { reg: Gpr::A6, disp: -16 }.encode());
+            // MOVEM.L D3-D7, -(SP)
+            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
+
+            // D4 = D1 (save value)
+            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
+            // D5 = 0 (counter)
+            code.extend(Instruction::Moveq { dst: Gpr::D5, imm: 0 }.encode());
+            // A0 = A6 (end-of-buffer pointer; chars grow down)
+            code.extend_from_slice(&[0x20, 0x4E]); // MOVEA.L A6, A0
+
+            // ── hex_loop: ──
+            let hex_loop = code.len();
+
+            // D7 = D4 (copy value)
+            code.extend(Instruction::Move { src: Gpr::D4, dst: Gpr::D7 }.encode());
+            // ANDI.L #0xF, D7 (extract low nibble)
+            // ANDI.L #imm32, Dn: 0x0280 | dn. For D7: 0x0287
+            code.extend_from_slice(&[0x02, 0x87, 0x00, 0x00, 0x00, 0x0F]);
+            // ADDI.B #48, D7 (nibble + '0')
+            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x30]);
+            // CMPI.B #57, D7 (compare with '9')
+            // CMPI.B #imm8, Dn: 0x0C00 | dn, then 2-byte imm. For D7: 0x0C07
+            code.extend_from_slice(&[0x0C, 0x07, 0x00, 0x39]);
+            // BLE.S store (cond=15=LE, skip ADDI.B = 4 bytes)
+            code.extend_from_slice(&[0x6F, 0x04]);
+            // ADDI.B #39, D7 (alpha adjust: 'a'-'9' = 39)
+            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x27]);
+            // store: SUBQ.L #1, A0
+            code.extend_from_slice(&[0x53, 0xC8]);
+            // MOVE.B D7, (A0)
+            code.extend_from_slice(&[0x10, 0x87]);
+            // LSR.L #4, D4 (shift value right by 4)
+            // LSR.L #4, D4: 1110_100_1_10_101_100 = 0xE9AC
+            code.extend_from_slice(&[0xE9, 0xAC]);
+            // ADDQ.L #1, D5 (counter++)
+            code.extend_from_slice(&[0x52, 0xC5]);
+            // CMPI.L #8, D5 (compare counter with 8)
+            // CMPI.L #imm32, Dn: 0x0C80 | dn. For D5: 0x0C85
+            code.extend_from_slice(&[0x0C, 0x85, 0x00, 0x00, 0x00, 0x08]);
+            // BNE.S hex_loop (cond=6=NE, loop back)
+            let bne_loop_pos = code.len();
+            code.extend_from_slice(&[0x66, 0x00]); // placeholder
+            let bne_loop_disp = (hex_loop as i64 - bne_loop_pos as i64 - 2) as i8;
+            code[bne_loop_pos + 1] = bne_loop_disp as u8;
+
+            // ── sys_write(1, A0, 8) ──
+            // MOVEQ #1, D1 (fd)
+            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            // MOVE.L A0, D2 (buf)
+            code.extend_from_slice(&[0x24, 0x08]);
+            // MOVEQ #8, D3 (len)
+            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 8 }.encode());
+            // MOVEQ #4, D0 (sys_write)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+
+            // ── Epilogue ──
+            // MOVEM.L (SP)+, D3-D7
+            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0xF8]);
+            // UNLK A6
+            code.extend(Instruction::Unlk { reg: Gpr::A6 }.encode());
+            // RTS
+            code.extend(Instruction::Rts.encode());
+
+            syscall_stubs.push(("print_hex".to_string(), code));
+        }
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -1911,6 +2274,14 @@ impl Backend for M68kBackend {
             func_offsets.insert(name.clone(), stub_offset);
             stub_offset += code.len();
         }
+
+        // ── Register __vuma_print_int / __vuma_print_hex as aliases
+        // pointing at the same offsets as print_int / print_hex, so user
+        // code can call them by their bare POSIX-friendly names.
+        let print_int_offset = func_offsets.get("print_int").copied().unwrap_or(0);
+        let print_hex_offset = func_offsets.get("print_hex").copied().unwrap_or(0);
+        func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
+        func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);

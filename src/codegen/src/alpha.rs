@@ -331,6 +331,15 @@ fn op_br(op: u32, ra: Gpr, disp: i32) -> u32 {
     (op << 26) | ((ra.encoding() as u32) << 21) | (disp as u32 & 0x1F_FFFF)
 }
 
+/// Patch a branch instruction's displacement in already-emitted code.
+/// `pos` is the byte offset of the 4-byte branch instruction.  `op` is the
+/// branch opcode (e.g. 0x39 for BEQ, 0x3D for BNE, 0x3F for BLT, 0x30 for BR).
+/// `ra` is the test register.  `disp` is the 21-bit signed word displacement.
+fn patch_alpha_branch(code: &mut Vec<u8>, pos: usize, op: u32, ra: Gpr, disp: i32) {
+    let word = op_br(op, ra, disp);
+    code[pos..pos + 4].copy_from_slice(&word.to_le_bytes());
+}
+
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1549,7 +1558,7 @@ impl Backend for AlphaBackend {
             code
         };
 
-        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+        let mut syscall_stubs: Vec<(String, Vec<u8>)> = {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
             for (name, num) in [
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
@@ -1565,11 +1574,215 @@ impl Backend for AlphaBackend {
                 ("sendto", 82), ("recvfrom", 102), ("clone", 220), ("fork", 2),
                 ("epoll_create1", 449), ("epoll_ctl", 424), ("epoll_wait", 425),
                 ("dup3", 431),
+                // ── Additional POSIX syscall stubs ──
+                // Alpha uses OSF/1 syscall numbers for the stat family
+                // (osf_stat=18, osf_lstat=68, osf_fstat=91).  QEMU's
+                // linux-user layer translates the OSF/1 stat struct to the
+                // host's struct stat, so these work correctly under qemu-alpha.
+                ("stat", 18), ("lstat", 68), ("fstat", 91),
+                ("getcwd", 367),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
             stubs
         };
+
+
+        // ── rt_sigreturn (173) — special: no args, never returns ──
+        {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(Gpr::R0, 173));
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::CallPal { palcode: 0x0 }.encode()); // safety trap
+            syscall_stubs.push(("rt_sigreturn".to_string(), code));
+        }
+
+        // ── waitpid(pid, wstatus, options) → wait4(pid, wstatus, options, NULL)
+        // Alpha a3=R19 is the 4th arg (rusage). Zero it before the syscall.
+        {
+            let mut code = Vec::new();
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R19 }.encode()); // rusage=NULL
+            code.extend(ss_load_imm(Gpr::R0, 84)); // sys_wait4
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("waitpid".to_string(), code));
+        }
+
+        // ── recv(fd, buf, len, flags) → recvfrom(fd, buf, len, flags, NULL, NULL)
+        // Alpha a4=R20 (addr), a5=R21 (addrlen). Both must be NULL.
+        {
+            let mut code = Vec::new();
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R20 }.encode());
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R21 }.encode());
+            code.extend(ss_load_imm(Gpr::R0, 102)); // sys_recvfrom
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("recv".to_string(), code));
+        }
+
+        // ── send(fd, buf, len, flags) → sendto(fd, buf, len, flags, NULL, 0)
+        {
+            let mut code = Vec::new();
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R20 }.encode());
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R21 }.encode());
+            code.extend(ss_load_imm(Gpr::R0, 82)); // sys_sendto
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("send".to_string(), code));
+        }
+
+        // ── strcmp(s1, s2) → int — assembly loop, not a syscall
+        // Alpha: a0=R16=s1, a1=R17=s2, return in R0.
+        {
+            let mut code = Vec::new();
+            // loop:
+            code.extend(Instruction::Ldbu { ra: Gpr::R1, disp: 0, rb: Gpr::R16 }.encode());
+            code.extend(Instruction::Ldbu { ra: Gpr::R2, disp: 0, rb: Gpr::R17 }.encode());
+            code.extend(Instruction::Subq { ra: Gpr::R1, rb: Gpr::R2, rc: Gpr::R3 }.encode());
+            code.extend(Instruction::Bne { ra: Gpr::R3, disp: 4 }.encode());  // BNE R3, done
+            code.extend(Instruction::Beq { ra: Gpr::R1, disp: 3 }.encode());  // BEQ R1, done
+            code.extend(Instruction::AddqLi { ra: Gpr::R16, lit: 1, rc: Gpr::R16 }.encode());
+            code.extend(Instruction::AddqLi { ra: Gpr::R17, lit: 1, rc: Gpr::R17 }.encode());
+            code.extend(Instruction::Br { ra: ZERO, disp: -8 }.encode());     // BR loop
+            // done:
+            code.extend(Instruction::Or { ra: ZERO, rb: Gpr::R3, rc: Gpr::R0 }.encode());
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("strcmp".to_string(), code));
+        }
+
+        // ── print_int(n) → void — decimal conversion + write(1, buf, len)
+        // Alpha: a0=R16=n.  Uses a 32-byte stack buffer.
+        // Algorithm: negate if negative (emit '-'), divmod-10 loop backwards,
+        // then write the digit string.  Handles n=0 by emitting a single '0'.
+        {
+            let mut code = Vec::new();
+            // LDA SP, -32(SP)
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: -32, rb: Gpr::R30 }.encode());
+            // R2 = n; R5 = 0 (sign flag)
+            code.extend(Instruction::Or { ra: Gpr::R16, rb: Gpr::R31, rc: Gpr::R2 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R31, rb: Gpr::R31, rc: Gpr::R5 }.encode());
+            // BLT R2, .neg  (placeholder)
+            code.extend(Instruction::Blt { ra: Gpr::R2, disp: 0 }.encode());
+            let blt_pos = code.len() - 4;
+            // BR .start  (skip .neg block)
+            code.extend(Instruction::Br { ra: Gpr::R31, disp: 0 }.encode());
+            let br_start_pos = code.len() - 4;
+            // .neg: R5=1, R2=-R2
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R5 }.encode());
+            code.extend(Instruction::Subq { ra: Gpr::R31, rb: Gpr::R2, rc: Gpr::R2 }.encode());
+            // .start: R4=10, R1=&buf[31]
+            let start_offset = code.len();
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R4 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: 31, rb: Gpr::R30 }.encode());
+            // .loop:
+            let loop_offset = code.len();
+            code.extend(Instruction::Divq { ra: Gpr::R2, rb: Gpr::R4, rc: Gpr::R3 }.encode()); // R3 = R2/10
+            code.extend(Instruction::Mulq { ra: Gpr::R3, rb: Gpr::R4, rc: Gpr::R6 }.encode()); // R6 = R3*10
+            code.extend(Instruction::Subq { ra: Gpr::R2, rb: Gpr::R6, rc: Gpr::R7 }.encode()); // R7 = R2-R6 = digit
+            code.extend(Instruction::AddqLi { ra: Gpr::R7, lit: 48, rc: Gpr::R7 }.encode());   // R7 = digit + '0'
+            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 0, rb: Gpr::R1 }.encode());      // *R1 = digit
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: -1, rb: Gpr::R1 }.encode());     // R1--
+            code.extend(Instruction::Or { ra: Gpr::R3, rb: Gpr::R31, rc: Gpr::R2 }.encode());  // R2 = quotient
+            code.extend(Instruction::Bne { ra: Gpr::R2, disp: 0 }.encode());                   // BNE R2, .loop
+            let bne_loop_pos = code.len() - 4;
+            // .after_loop: if R5 (neg), write '-'
+            code.extend(Instruction::Beq { ra: Gpr::R5, disp: 0 }.encode()); // skip '-' if not negative
+            let beq_skip_pos = code.len() - 4;
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 45, rc: Gpr::R7 }.encode()); // '-'
+            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 0, rb: Gpr::R1 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: -1, rb: Gpr::R1 }.encode());
+            let after_dash = code.len();
+            // R1+1 = first digit; len = (SP+32) - (R1+1)
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: 1, rb: Gpr::R1 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R3, disp: 32, rb: Gpr::R30 }.encode());
+            code.extend(Instruction::Subq { ra: Gpr::R3, rb: Gpr::R1, rc: Gpr::R4 }.encode());
+            // write(1, R1, R4)
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R16 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R1, rb: Gpr::R31, rc: Gpr::R17 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R4, rb: Gpr::R31, rc: Gpr::R18 }.encode());
+            code.extend(ss_load_imm(Gpr::R0, 4)); // sys_write
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: 32, rb: Gpr::R30 }.encode());
+            code.extend(Instruction::Ret.encode());
+
+            // ── Patch branch displacements ──
+            // Alpha branch target = PC + 4 + disp*4, where PC = branch instruction address.
+            // BLT at blt_pos → .neg at br_start_pos+4
+            let blt_target = br_start_pos + 4;
+            let blt_disp = ((blt_target as i64) - (blt_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, blt_pos, 0x3F, Gpr::R2, blt_disp as i32);
+            // BR at br_start_pos → .start at start_offset
+            let br_disp = ((start_offset as i64) - (br_start_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, br_start_pos, 0x30, Gpr::R31, br_disp as i32);
+            // BNE at bne_loop_pos → .loop at loop_offset
+            let bne_disp = ((loop_offset as i64) - (bne_loop_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, bne_loop_pos, 0x3D, Gpr::R2, bne_disp as i32);
+            // BEQ at beq_skip_pos → after_dash
+            let beq_disp = ((after_dash as i64) - (beq_skip_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, beq_skip_pos, 0x39, Gpr::R5, beq_disp as i32);
+
+            syscall_stubs.push(("print_int".to_string(), code));
+        }
+
+        // ── print_hex(n) → void — hex conversion + write(1, buf, len)
+        // Alpha: a0=R16=n.  Prints up to 16 hex digits + newline.
+        {
+            let mut code = Vec::new();
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: -32, rb: Gpr::R30 }.encode()); // SP -= 32
+            code.extend(Instruction::Or { ra: Gpr::R16, rb: Gpr::R31, rc: Gpr::R2 }.encode()); // R2 = n
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 15, rc: Gpr::R6 }.encode());  // R6 = 15 (mask)
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 9, rc: Gpr::R9 }.encode());   // R9 = 9
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 39, rc: Gpr::R10 }.encode()); // R10 = 39
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 4, rc: Gpr::R12 }.encode());  // R12 = 4 (shift)
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R7 }.encode());  // newline
+            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 16, rb: Gpr::R30 }.encode());    // buf[16] = '\n'
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: 15, rb: Gpr::R30 }.encode());    // R1 = &buf[15]
+            // .hex_loop:
+            let hx_loop = code.len();
+            code.extend(Instruction::And { ra: Gpr::R2, rb: Gpr::R6, rc: Gpr::R3 }.encode());  // R3 = R2 & 15
+            code.extend(Instruction::AddqLi { ra: Gpr::R3, lit: 48, rc: Gpr::R7 }.encode());   // R7 = R3 + '0'
+            code.extend(Instruction::Cmpule { ra: Gpr::R3, rb: Gpr::R9, rc: Gpr::R8 }.encode()); // R8 = (R3 <= 9)
+            code.extend(Instruction::Beq { ra: Gpr::R8, disp: 0 }.encode()); // BEQ R8, .alpha (placeholder)
+            let beq_alpha_pos = code.len() - 4;
+            // .digit: R7 is already R3+48, fall through to store
+            code.extend(Instruction::Br { ra: Gpr::R31, disp: 0 }.encode()); // BR .store (placeholder)
+            let br_store_pos = code.len() - 4;
+            // .alpha: R7 += 39
+            code.extend(Instruction::Addq { ra: Gpr::R7, rb: Gpr::R10, rc: Gpr::R7 }.encode());
+            // .store:
+            let store_offset = code.len();
+            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 0, rb: Gpr::R1 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: -1, rb: Gpr::R1 }.encode()); // R1--
+            code.extend(Instruction::Srl { ra: Gpr::R2, rb: Gpr::R12, rc: Gpr::R2 }.encode()); // R2 >>= 4
+            code.extend(Instruction::Bne { ra: Gpr::R2, disp: 0 }.encode()); // BNE R2, .hex_loop (placeholder)
+            let bne_hx_pos = code.len() - 4;
+            // Write: R1+1 = first digit, len = (SP+17) - (R1+1)
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: 1, rb: Gpr::R1 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R3, disp: 17, rb: Gpr::R30 }.encode());
+            code.extend(Instruction::Subq { ra: Gpr::R3, rb: Gpr::R1, rc: Gpr::R4 }.encode());
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R16 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R1, rb: Gpr::R31, rc: Gpr::R17 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R4, rb: Gpr::R31, rc: Gpr::R18 }.encode());
+            code.extend(ss_load_imm(Gpr::R0, 4));
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: 32, rb: Gpr::R30 }.encode());
+            code.extend(Instruction::Ret.encode());
+
+            // Patch branches
+            let beq_disp = ((store_offset as i64) - 4 - (beq_alpha_pos as i64) - 4) / 4;
+            // BEQ target = .alpha (right after BR). .alpha is at br_store_pos + 4.
+            let alpha_offset = br_store_pos + 4;
+            let beq_d = ((alpha_offset as i64) - (beq_alpha_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, beq_alpha_pos, 0x39, Gpr::R8, beq_d as i32);
+            // BR .store
+            let br_d = ((store_offset as i64) - (br_store_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, br_store_pos, 0x30, Gpr::R31, br_d as i32);
+            // BNE .hex_loop
+            let bne_d = ((hx_loop as i64) - (bne_hx_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, bne_hx_pos, 0x3D, Gpr::R2, bne_d as i32);
+
+            syscall_stubs.push(("print_hex".to_string(), code));
+        }
 
         // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
         // Alpha rt_sigaction syscall # = 352. VUMA declares 3 args; the kernel

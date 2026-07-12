@@ -6486,10 +6486,11 @@ impl Backend for RiscV32Backend {
                 ("rt_sigprocmask", 135),
                 ("dup3", 24),
                 ("recvfrom", 207), ("sendto", 206),
-                // NOTE: stat/lstat do not exist on the generic ABI; provided
-                // as newfstatat shims below. poll/alarm are omitted on RV32
-                // because the 32-bit time64 layout differs and a naive shim
-                // would invoke the wrong variant.
+                // alarm(37) and poll(73) take scalar integer arguments
+                // (unsigned seconds / int milliseconds) — no struct timeval
+                // or timespec is involved, so there is no time64 layout
+                // concern on RV32.  Both are safe as simple stubs.
+                ("alarm", 37), ("poll", 73),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

@@ -2721,6 +2721,11 @@ impl Backend for AArch64Backend {
             "__vuma_print_newline".to_string(),
             runtime_offsets_start + rt_newline_off,
         );
+        // Bare-name aliases so user code can call print_int / print_hex
+        // directly (matching x86_64, x86_32, and arm32 backends).
+        func_offsets.insert("print_int".to_string(), runtime_offsets_start + rt_int_off);
+        func_offsets.insert("print_hex".to_string(), runtime_offsets_start + rt_hex_off);
+        func_offsets.insert("print_newline".to_string(), runtime_offsets_start + rt_newline_off);
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
         let vuma_alloc_offset = current_offset + runtime_code.len();
@@ -2985,6 +2990,29 @@ impl Backend for AArch64Backend {
                 code.extend_from_slice(&0x910043FFu32.to_le_bytes());
                 code.extend_from_slice(&ret);
                 stubs.push(("poll".to_string(), code));
+            }
+
+            // strcmp(s1, s2) → int — assembly loop, not a syscall.
+            // AArch64 calling convention: X0=s1, X1=s2, return in X0.
+            // Loop: load a byte from each string, compare; if they differ or
+            // either is NUL, return the difference; else advance and repeat.
+            {
+                let code: Vec<u8> = [
+                    0x39400002u32, // LDRB W2, [X0]       — loop:
+                    0x39400023,    // LDRB W3, [X1]
+                    0x6B03002F,    // CMP W2, W3           (SUBS WZR, W2, W3)
+                    0x540000A1,    // B.NE done            (+5)
+                    0x34000082,    // CBZ W2, done         (+4)
+                    0x91000400,    // ADD X0, X0, #1
+                    0x91000421,    // ADD X1, X1, #1
+                    0x17FFFFF9,    // B loop               (-7)
+                    0x4B030040,    // SUB W0, W2, W3       — done:
+                    0xD65F03C0,    // RET
+                ]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+                stubs.push(("strcmp".to_string(), code));
             }
 
             stubs
