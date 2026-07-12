@@ -188,11 +188,13 @@ echo ""
 # exits(5), parent reads EOF, returns 0 instead of 100).
 echo "▸ Setting up binfmt_misc for QEMU (for self_exec fork+exec tests)..."
 BINFMT_OK=0
-if [ -d /proc/sys/fs/binfmt_misc ]; then
-    # Try to register handlers for each QEMU architecture.
-    # Format: :name:M:magic:mask:interpreter:flags
-    # The magic/mask match ELF headers for each architecture.
-    # F flag = fix binary (cache interpreter path at registration time)
+BINFMT_REGISTER="/proc/sys/fs/binfmt_misc/register"
+
+# Build the list of binfmt_misc entries for all QEMU architectures.
+# Format: :name:M:magic:mask:interpreter:flags
+# The magic/mask match ELF headers for each architecture.
+# F flag = fix binary (cache interpreter path at registration time)
+build_binfmt_entries() {
     for fmt in \
         ":qemu-aarch64:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-aarch64:F" \
         ":qemu-arm:M::\x7fELF\x01\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-arm:F" \
@@ -213,18 +215,50 @@ if [ -d /proc/sys/fs/binfmt_misc ]; then
         ":qemu-aarch64_be:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-aarch64_be:F" \
         ":qemu-armeb:M::\x7fELF\x01\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-armeb:F"
     do
-        echo "$fmt" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && BINFMT_OK=1
+        echo "$fmt"
     done
+}
+
+# Try to register all binfmt_misc entries at once.
+# Redirect ALL stderr (including shell redirection errors) to avoid spam.
+register_binfmt() {
+    local sudo_cmd=""
+    if [ "$(id -u)" != "0" ]; then
+        # Try sudo (non-interactive, may fail if no passwordless sudo)
+        sudo -n true 2>/dev/null && sudo_cmd="sudo"
+    fi
+    if [ -z "$sudo_cmd" ] && [ "$(id -u)" != "0" ]; then
+        return 1  # no root, no sudo
+    fi
+    # Write all entries — suppress ALL errors (shell + command)
+    build_binfmt_entries | while IFS= read -r fmt; do
+        if [ -n "$sudo_cmd" ]; then
+            echo "$fmt" | $sudo_cmd tee "$BINFMT_REGISTER" >/dev/null 2>/dev/null
+        else
+            echo "$fmt" > "$BINFMT_REGISTER" 2>/dev/null
+        fi
+    done 2>/dev/null
+    # Check if at least one registration succeeded
+    [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ] && return 0
+    [ -f /proc/sys/fs/binfmt_misc/qemu-x86_64 ] && return 0
+    return 1
+}
+
+if [ -w "$BINFMT_REGISTER" ] || [ "$(id -u)" = "0" ]; then
+    # We have write access (running as root)
+    register_binfmt && BINFMT_OK=1
+elif sudo -n true 2>/dev/null; then
+    # We have passwordless sudo
+    register_binfmt && BINFMT_OK=1
 fi
+
 if [ "$BINFMT_OK" = "1" ]; then
     echo "  ✓ binfmt_misc registered for QEMU architectures"
-elif [ "$(id -u)" = "0" ]; then
-    echo "  ⚠ binfmt_misc registration failed (mount binfmt_misc first?)"
-    echo "    try: mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
 else
-    echo "  ⚠ binfmt_misc requires root — self_exec will only work on native arch"
-    echo "    run as root or: sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
-    echo "    then re-run this script"
+    echo "  ⚠ binfmt_misc not available (needs root) — self_exec will only work on native arch"
+    echo "    To enable: sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
+    echo "    then: sudo $REPO_DIR/scripts/pi5_test_suite.sh --skip-build --no-push"
+    echo "    (or just run the full suite as root)"
 fi
 echo ""
 
