@@ -4950,14 +4950,15 @@ impl Backend for Mips64Backend {
         // ── MIPS64 Linux static executable ──
         //
         // Layout:
-        //   _start:  JAL main          ; call main (result in $v0)
-        //            NOP               ; delay slot
+        //   _start:  DADDIU $a1, $sp, 8     ; argv = $sp + 8 (64-bit pointers)
+        //            JAL main               ; call main(argc, argv) — result in $v0
+        //            LD $a0, 0($sp)         ; (delay slot) argc = *$sp (64-bit)
         //            daddu $a0, $v0, $zero  ; $a0 = exit code (return value of main)
         //            addiu $v0, $zero, 5058  ; sys_exit (MIPS64 N64: 5000 + 58)
         //            syscall           ; do the syscall
         //   <functions...>
         //
-        // The _start stub is 5 instructions = 20 bytes.
+        // The _start stub is 6 instructions = 24 bytes.
         // After that come all user functions.
 
         const R_MIPS_26: &str = "R_MIPS_26";
@@ -4972,7 +4973,7 @@ impl Backend for Mips64Backend {
         let text_offset: u64 = phdr_end; // No page alignment — match ELF builder
 
         // ── _start stub ──
-        let start_stub_size: usize = 20; // 5 × 4-byte instructions
+        let start_stub_size: usize = 24; // 6 × 4-byte instructions
         let ffi_stub_size: usize = 12; // ADDIU V0, ZERO, 0; JR RA; NOP (3 × 4 bytes)
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -5379,12 +5380,17 @@ impl Backend for Mips64Backend {
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
+        // DADDIU $a1, $sp, 8 — argv = $sp + 8 (64-bit pointers on MIPS64 N64)
+        let addiu_a1 = Instruction::Daddiu { rt: Gpr::A1, rs: Gpr::Sp, imm: 8 };
+        start_stub.extend_from_slice(&addiu_a1.encode());
+
         // JAL <main> — placeholder with target=0, will be patched
         let jal = Instruction::Jal { target: 0 };
         start_stub.extend_from_slice(&jal.encode());
 
-        // NOP (delay slot)
-        start_stub.extend_from_slice(&encode_nop());
+        // LD $a0, 0($sp) — delay slot: load argc from stack (64-bit)
+        let ld_a0 = Instruction::Ld { rt: Gpr::A0, base: Gpr::Sp, offset: 0 };
+        start_stub.extend_from_slice(&ld_a0.encode());
 
         // daddu $a0, $v0, $zero (move return value to $a0 for exit code)
         let mov_a0 = Instruction::Daddu { rd: Gpr::A0, rs: Gpr::V0, rt: Gpr::Zero };
@@ -5408,11 +5414,12 @@ impl Backend for Mips64Backend {
             let main_offset = func_offsets[key];
             let abs_addr = BASE_ADDR + text_offset + main_offset as u64;
             let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
+            // JAL is at byte offset 4 within start_stub (after DADDIU $a1)
             let existing = u32::from_le_bytes([
-                start_stub[0], start_stub[1], start_stub[2], start_stub[3],
+                start_stub[4], start_stub[5], start_stub[6], start_stub[7],
             ]);
             let patched = (existing & 0xFC000000) | target_field;
-            start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
+            start_stub[4..8].copy_from_slice(&patched.to_le_bytes());
         } else {
             // No main function — point JAL to the FFI return-0 stub so
             // the program exits cleanly with code 0 instead of jumping to
@@ -5420,10 +5427,10 @@ impl Backend for Mips64Backend {
             let abs_addr = BASE_ADDR + text_offset + ffi_stub_offset as u64;
             let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
             let existing = u32::from_le_bytes([
-                start_stub[0], start_stub[1], start_stub[2], start_stub[3],
+                start_stub[4], start_stub[5], start_stub[6], start_stub[7],
             ]);
             let patched = (existing & 0xFC000000) | target_field;
-            start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
+            start_stub[4..8].copy_from_slice(&patched.to_le_bytes());
         }
 
         // ── Add FFI return-0 stub ──
