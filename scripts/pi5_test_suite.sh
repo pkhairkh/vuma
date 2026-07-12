@@ -697,16 +697,48 @@ echo "▸ Test suite complete (exit code: $TEST_EXIT)"
 if [ $NO_PUSH -eq 0 ]; then
     echo "▸ Committing results..."
     cd "$REPO_DIR"
-    git add test_results/ 2>/dev/null || true
-    git add scripts/pi5_test_suite.sh 2>/dev/null || true
+
+    # Stage the critical result files explicitly. failures.txt and summary.json
+    # are the files needed for remote debugging — do NOT silently swallow errors
+    # from `git add` on them (the old `2>/dev/null || true` hid real problems).
+    for f in test_results/failures.txt test_results/summary.json; do
+        if [[ -f "$f" ]]; then
+            if ! git add "$f"; then
+                echo "ERROR: 'git add $f' failed. Test results may be incomplete in the commit."
+            fi
+        else
+            echo "WARNING: $f does not exist — cannot stage it."
+        fi
+    done
+    # Stage any other test_results/ changes and the runner script itself.
+    git add test_results/ 2>/dev/null || echo "WARNING: 'git add test_results/' reported an error."
+    git add scripts/pi5_test_suite.sh 2>/dev/null || echo "WARNING: 'git add scripts/pi5_test_suite.sh' reported an error."
 
     TIMESTAMP=$(date -u '+%Y-%m-%d_%H%M-UTC')
-    git commit -m "test: Full suite results ($TIMESTAMP) on $(hostname)
 
-$(cat test_results/summary.json 2>/dev/null || echo 'See test_results/ for details')" 2>/dev/null || echo "(nothing to commit)"
+    # Only print "(nothing to commit)" when the working tree is genuinely clean.
+    # Otherwise run the commit with stderr VISIBLE (no 2>/dev/null) so real
+    # failures (pre-commit hooks, gpg signing, lock files, etc.) are surfaced
+    # instead of being hidden behind the misleading "(nothing to commit)" line.
+    if [[ -z "$(git status --porcelain)" ]]; then
+        echo "(nothing to commit)"
+    else
+        if ! git commit -m "test: Full suite results ($TIMESTAMP) on $(hostname)
+
+$(cat test_results/summary.json 2>/dev/null || echo 'See test_results/ for details')"; then
+            echo "ERROR: git commit failed. Test results were NOT committed."
+            echo "  Run 'git status' and 'git commit' manually to diagnose."
+        fi
+    fi
 
     echo "▸ Pushing to GitHub..."
-    git push origin HEAD 2>&1 | tail -3 || echo "(push failed — check git remote)"
+    # Do not swallow push failures — surface a clear ERROR so the operator knows
+    # the local commit never reached the remote (pipefail is set at top of script,
+    # so a non-zero git push makes the whole pipe fail and triggers the branch).
+    if ! git push origin HEAD 2>&1 | tail -3; then
+        echo "ERROR: git push failed. Test results were committed locally but NOT pushed to GitHub."
+        echo "  Run 'git push' manually (check remote URL / credentials / network)."
+    fi
     echo "✓ Done"
 else
     echo "▸ Skipping commit/push (--no-push)"
