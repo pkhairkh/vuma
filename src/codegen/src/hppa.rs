@@ -1799,7 +1799,49 @@ impl Backend for HppaBackend {
         const BASE_ADDR: u64 = 0x10000;
 
         // ── _start stub ──
-        // 32-byte call pattern (same as function calls) + exit sequence
+        // The _start stub sets up a large 8MB stack via mmap before calling
+        // main.  QEMU's PA-RISC user-mode provides only ~1.6KB of initial
+        // stack, which is insufficient for deep recursion (e.g., Ackermann,
+        // recursive Fibonacci, signal handlers with SHA256d).  By allocating
+        // our own stack, we ensure all tests can run without SIGSEGV.
+        //
+        // Layout:
+        //   1. Set up mmap args and call mmap(NULL, 8MB, RW, PRIVATE|ANON, -1, 0)
+        //   2. Add 8MB to the result → R30 = stack top (stack grows down)
+        //   3. 32-byte call pattern → call main
+        //   4. COPY R28, R26 (move return to arg1 for exit)
+        //   5. LDI 1, R20 (SYS_exit)
+        //   6. GATE (syscall)
+
+        let mut start_stub: Vec<u8> = Vec::new();
+
+        // ── Stack setup: mmap(8MB) ──
+        // PA-RISC syscall: R20=syscall#, args in R26,R25,R24,R23,R22,R21
+        // mmap args: addr=0, len=8MB, prot=3(RW), flags=0x22(PRIVATE|ANON), fd=-1, offset=0
+        // R26 = 0 (addr = NULL)
+        start_stub.extend_from_slice(&encode_copy(R0, R26));
+        // R25 = 8MB (0x800000)
+        start_stub.extend(ss_load_imm(R25, 0x800000));
+        // R24 = 3 (PROT_READ|PROT_WRITE)
+        start_stub.extend(ss_load_imm(R24, 3));
+        // R23 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+        start_stub.extend(ss_load_imm(R23, 0x22));
+        // R22 = -1 (fd = -1)
+        start_stub.extend(ss_load_imm(R22, -1));
+        // R21 = 0 (offset = 0)
+        start_stub.extend_from_slice(&encode_copy(R0, R21));
+        // R20 = 90 (sys_mmap)
+        start_stub.extend(ss_load_imm(R20, 90));
+        // GATE (syscall)
+        start_stub.extend_from_slice(&encode_gate());
+        start_stub.extend_from_slice(&encode_nop()); // GATE delay slot
+
+        // R28 = mmap result (base of mapped region).
+        // Set R30 = R28 + 8MB (stack top, since stack grows down).
+        // R25 still holds 8MB from above.
+        start_stub.extend_from_slice(&encode_add(R28, R25, R30)); // R30 = R28 + 8MB
+
+        // 32-byte call pattern (8 instructions) — call main
         // 1. BL,n +0, R1 — call pattern instr 1
         // 2. NOP — delay slot (nullified)
         // 3. LDO 24(R1), R2 — return address = PC + 32
@@ -1809,7 +1851,6 @@ impl Backend for HppaBackend {
         // 9. COPY R28, R26 (move return to arg1 for exit)
         // 10. LDI 1, R20 (SYS_exit)
         // 11. GATE (syscall)
-        let mut start_stub: Vec<u8> = Vec::new();
 
         // 32-byte call pattern (8 instructions)
         start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
@@ -2029,7 +2070,8 @@ impl Backend for HppaBackend {
             code[br_start_pos..br_start_pos+4].copy_from_slice(&encode_bl(br_disp));
             let divblt_disp = ((divdone_offset as i64) - (divblt_pos as i64 + 8)) as i32;
             code[divblt_pos..divblt_pos+4].copy_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, divblt_disp));
-            syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // print_hex(n) → void — write hex representation to stdout.
@@ -2067,7 +2109,8 @@ impl Backend for HppaBackend {
             code.extend_from_slice(&encode_ldo(R30, 48, R30));
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
-            syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // __vuma_free(addr) → munmap(addr, 0).

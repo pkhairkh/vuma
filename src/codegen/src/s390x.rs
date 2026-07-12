@@ -2634,7 +2634,8 @@ impl Backend for S390XBackend {
             // BR R14
             code.extend_from_slice(&encode_br(LR));
 
-            syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // ── print_hex(R2 = 64-bit value) — runtime helper ──
@@ -2727,7 +2728,8 @@ impl Backend for S390XBackend {
             let brcl_store_be = (brcl_store_disp as i32).to_be_bytes();
             code[brcl_store_pos + 2..brcl_store_pos + 6].copy_from_slice(&brcl_store_be);
 
-            syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // ── Compute function offsets ──

@@ -2160,7 +2160,8 @@ impl Backend for M68kBackend {
             // RTS
             code.extend(Instruction::Rts.encode());
 
-            syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // ── print_hex(D1 = 32-bit value) — runtime helper ──
@@ -2244,7 +2245,8 @@ impl Backend for M68kBackend {
             // RTS
             code.extend(Instruction::Rts.encode());
 
-            syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub removed — calls resolve as unresolved externs (no-op)
+            // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // ── Compute function offsets ──
