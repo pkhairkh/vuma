@@ -1799,14 +1799,44 @@ impl Backend for HppaBackend {
         const BASE_ADDR: u64 = 0x10000;
 
         // ── _start stub ──
-        // Uses QEMU's default stack (no mmap — QEMU PA-RISC mmap is buggy).
+        // Allocates an 8MB stack via a dedicated PT_LOAD segment in the ELF
+        // (p_vaddr=0x30000, p_memsz=0x800000) and sets R30 to the TOP of
+        // that region before calling main.
+        //
+        // PA-RISC stack grows DOWN: each function prologue does
+        //   SUB R30, frame_size, R30
+        // and the epilogue restores via COPY R3, R30 (FP=entry-R30).
+        // So R30 decreases as calls deepen; the initial R30 must be the
+        // HIGHEST address of the stack region (p_vaddr + p_memsz).
+        //
+        // The previous design relied on QEMU's default stack, which is only
+        // ~1.6KB on aarch64 hosts — too small for deep recursion
+        // (arith_ackermann, quicksort) or heavy stack usage (signal_hash,
+        // mmap_sha256d, channel_demo, thread_pool, base64_encode). An
+        // earlier attempt (commit 12d83e0) used an mmap GATE syscall in
+        // _start, but that crashed QEMU's PA-RISC user-mode emulation.
+        // Reserving the region at ELF load time via PT_LOAD works on all
+        // hosts (x86_64 and aarch64) because it uses standard ELF loading
+        // semantics, not runtime syscalls.
+        //
         // Layout:
+        //   0. Set R30 = 0x830000 (top of 8MB stack at 0x30000..0x830000)
         //   1. 32-byte call pattern → call main
         //   2. COPY R28, R26 (move return to arg1 for exit)
         //   3. LDI 1, R20 (SYS_exit)
         //   4. GATE (syscall)
 
+        const STACK_VADDR: u64 = BASE_ADDR + 0x20000; // 0x30000
+        const STACK_MEMSZ: u64 = 0x800000;            // 8 MB
+        const STACK_TOP: u64 = STACK_VADDR + STACK_MEMSZ; // 0x830000
+
         let mut start_stub: Vec<u8> = Vec::new();
+
+        // Set R30 (stack pointer) to the top of the 8MB stack segment.
+        // ss_load_imm emits 12 instructions (48 bytes) for 0x830000 — well
+        // within the 128-byte search window used by the _start call-site
+        // patcher below.
+        start_stub.extend(ss_load_imm(R30, STACK_TOP as i64));
 
         // 32-byte call pattern (8 instructions)
         start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
@@ -2259,9 +2289,9 @@ impl Backend for HppaBackend {
             let trampoline_start = all_code.len();
 
             // Load absolute target address into R1 using ss_load_imm.
-            // text_offset = ((52 + 3*32) + 15) & !15 = 160
+            // text_offset = ((52 + 4*32) + 15) & !15 = 192
             // BASE_ADDR = 0x10000
-            let target_vaddr = (0x10000u64 + 160 + *target_offset as u64) as i64;
+            let target_vaddr = (0x10000u64 + 192 + *target_offset as u64) as i64;
             all_code.extend(ss_load_imm(R1, target_vaddr));
             // BV R0(R1) — branch to target
             all_code.extend_from_slice(&encode_bv_real(R1));
@@ -2302,7 +2332,7 @@ impl Backend for HppaBackend {
         }
 
         // ── Build ELF ──
-        let text_offset: u32 = ((52 + 3 * 32) + 15) & !15; // ELF32 header + 3 phdrs, 16-byte aligned
+        let text_offset: u32 = ((52 + 4 * 32) + 15) & !15; // ELF32 header + 4 phdrs, 16-byte aligned
         let entry = (BASE_ADDR + text_offset as u64) as u32;
         let text_filesz = text_offset + all_code.len() as u32;
 
@@ -2319,7 +2349,7 @@ impl Backend for HppaBackend {
         elf.extend_from_slice(&0x00400000u32.to_be_bytes()); // e_flags (PA-RISC 1.1, wide)
         elf.extend_from_slice(&52u16.to_be_bytes()); // e_ehsize
         elf.extend_from_slice(&32u16.to_be_bytes()); // e_phentsize
-        elf.extend_from_slice(&3u16.to_be_bytes()); // e_phnum
+        elf.extend_from_slice(&4u16.to_be_bytes()); // e_phnum
         elf.extend_from_slice(&40u16.to_be_bytes()); // e_shentsize
         elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
         elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
@@ -2353,6 +2383,23 @@ impl Backend for HppaBackend {
         elf.extend_from_slice(&0u32.to_be_bytes()); // p_memsz
         elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags
         elf.extend_from_slice(&4u32.to_be_bytes()); // p_align
+
+        // Phdr 4: LOAD (stack, RW) — reserves 8 MB of virtual memory for
+        // the user stack. The _start stub sets R30 to STACK_TOP
+        // (p_vaddr + p_memsz = 0x830000), and the stack grows DOWN toward
+        // p_vaddr (0x30000). p_filesz=0 (not file-backed) — the kernel/QEMU
+        // just reserves the virtual address range at ELF load time. This
+        // works on both x86_64 and aarch64 QEMU hosts; the previous design
+        // (relying on QEMU's default ~1.6KB stack on aarch64) caused
+        // SIGSEGV on tests with deep recursion or heavy stack usage.
+        elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset (not file-backed)
+        elf.extend_from_slice(&(STACK_VADDR as u32).to_be_bytes()); // p_vaddr
+        elf.extend_from_slice(&(STACK_VADDR as u32).to_be_bytes()); // p_paddr
+        elf.extend_from_slice(&0u32.to_be_bytes()); // p_filesz
+        elf.extend_from_slice(&(STACK_MEMSZ as u32).to_be_bytes()); // p_memsz = 8 MB
+        elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
+        elf.extend_from_slice(&0x1000u32.to_be_bytes()); // p_align
 
         // Pad to text_offset
         while (elf.len() as u32) < text_offset {
