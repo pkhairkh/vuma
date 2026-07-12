@@ -1,5 +1,4 @@
 // Base64 Encode — Encode binary data into Base64 ASCII representation
-// skip_on: hppa
 //
 // Implements RFC 4648 Base64 encoding. Every 3 input bytes produce 4 output
 // characters from the Base64 alphabet (A-Z, a-z, 0-9, +, /). Input data
