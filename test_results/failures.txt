@@ -1,9 +1,5 @@
-VUMA Test Failures — 2026-07-11 23:27:12 UTC
-Total: 5 failures across 5 tests
-Skipped: 18 (architecturally unavailable on target)
+VUMA Test Failures — 2026-07-12 17:09:56 UTC
+Total: 8 failures across 1 tests
+Skipped: 0 (architecturally unavailable on target)
 
-  arithmetic           arith_ackermann.vuma                          exp=   9 [('hppa', -11, 'CR')]
-  concurrency          channel_demo.vuma                             exp=   0 [('hppa', -11, 'CR')]
-  concurrency          signal_hash.vuma                              exp=   0 [('hppa', -11, 'CR')]
-  concurrency          thread_pool.vuma                              exp=   0 [('hppa', -11, 'CR')]
-  functions            fibonacci.vuma                                exp=  40 [('hppa', -11, 'CR')]
+  concurrency          self_exec.vuma                                exp= 100 [('mips64', 6, 'MM'), ('mips64be', 6, 'MM'), ('m68k', 0, 'CR'), ('sparc64', 0, 'MM'), ('alpha', 6, 'MM'), ('s390x', 0, 'CR'), ('hppa', 0, 'MM'), ('wasm32', 1, 'MM')]
