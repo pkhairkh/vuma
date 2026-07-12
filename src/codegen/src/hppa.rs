@@ -828,7 +828,7 @@ impl Backend for HppaBackend {
         // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
         // of values >= 0x80000000, so vregs must start at -32.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = -32;
+        let mut current_offset: i32 = -64; // Start below incoming args area (FP-32 to FP-1)
         let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
         vreg_ids.sort();
         for &id in &vreg_ids {
@@ -861,13 +861,20 @@ impl Backend for HppaBackend {
         code.extend(ss_load_imm(S0, frame_size as i64));
         code.extend_from_slice(&encode_sub(R30, S0, R30));  // SP -= frame_size
 
-        // Save incoming args. PA-RISC arg regs: R26, R25, R24, R23
+        // Save incoming args. PA-RISC arg regs: R26, R25, R24, R23 (first 4 args).
+        // Stack args (4+) are at [FP - 32 + (i-4)*4] (in the incoming args area).
         let arg_regs = [R26, R25, R24, R23];
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
+                let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
                 if i < arg_regs.len() {
-                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                    // Register arg: save from R26-R23 to vreg slot
                     code.extend_from_slice(&encode_stw(arg_regs[i], R3, offset as i16));
+                } else {
+                    // Stack arg: load from [FP - 32 + (i-4)*4] and save to vreg slot
+                    let stack_off = -32 + ((i - 4) * 4) as i32;
+                    code.extend_from_slice(&encode_ldw(R3, stack_off as i16, S0));
+                    code.extend_from_slice(&encode_stw(S0, R3, offset as i16));
                 }
             }
         }
@@ -1449,10 +1456,16 @@ impl Backend for HppaBackend {
                             code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&encode_nop());
                         } else {
-                            // Move args to R26-R23
+                            // Move args to R26-R23 (first 4 args).
+                            // Stack args (4+) go to [SP - 32 + (i-4)*4] (outgoing args area).
                             for (i, arg) in args.iter().enumerate() {
                                 if i < 4 {
                                     code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                                } else {
+                                    // Store stack arg at [SP - 32 + (i-4)*4]
+                                    let stack_off = -32 + ((i - 4) * 4) as i32;
+                                    code.extend(ss_load_value(arg, &vreg_stack_slots, S0));
+                                    code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
                                 }
                             }
                             // 32-byte call pattern (8 instructions):
