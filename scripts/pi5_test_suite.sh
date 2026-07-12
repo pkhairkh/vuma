@@ -63,6 +63,14 @@ echo "  ✓ Rust: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
 # If found, prepend that directory to PATH so all 19 QEMU binaries
 # (aarch64, x86_64, hppa, alpha, m68k, s390x, sparc64, etc.) are
 # discoverable. Otherwise fall back to system QEMU.
+#
+# CRITICAL: Always ensure /usr/bin and /bin are in PATH (prepend if needed).
+# When running under sudo, PATH may be stripped to a minimal set that
+# doesn't include all standard directories, causing commands like tr, xargs,
+# mkdir to fail with "Too many levels of symbolic links" (ELOOP) because
+# they resolve through broken symlink chains.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 QEMU_DIR=""
 for d in /tmp/my-project/bin /tmp/my-project/qemu-user-extract/usr/bin; do
     if [ -x "$d/qemu-aarch64" ]; then QEMU_DIR="$d"; break; fi
@@ -72,8 +80,8 @@ if [ -n "$QEMU_DIR" ]; then
     echo "  ✓ QEMU (bundled): $QEMU_DIR"
 elif ! command -v qemu-aarch64 &>/dev/null; then
     echo "  Installing QEMU..."
-    sudo apt update -qq && sudo apt install -y qemu-user qemu-user-static 2>/dev/null || {
-        echo "  ✗ Failed to install qemu-user. Run: sudo apt install qemu-user qemu-user-static"
+    apt update -qq && apt install -y qemu-user qemu-user-static 2>/dev/null || {
+        echo "  ✗ Failed to install qemu-user. Run: apt install qemu-user qemu-user-static"
         exit 1
     }
     echo "  ✓ QEMU: $(qemu-aarch64 --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
@@ -346,8 +354,14 @@ fi
 
 if [ "$BINFMT_OK" = "1" ]; then
     echo "  ✓ binfmt_misc registered for QEMU architectures (old entries replaced)"
-    # List registered archs for verification
-    echo "    Registered: $(ls /proc/sys/fs/binfmt_misc/qemu-* 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+    # List registered archs for verification (use pure bash, avoid xargs/tr
+    # which may fail with ELOOP under sudo on some systems)
+    registered_list=""
+    for f in /proc/sys/fs/binfmt_misc/qemu-*; do
+        [ -f "$f" ] || continue
+        registered_list+="$(basename "$f") "
+    done
+    echo "    Registered: $registered_list"
 else
     echo "  ⚠ binfmt_misc not available (needs root) — self_exec will only work on native arch"
     echo "    To enable: sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
