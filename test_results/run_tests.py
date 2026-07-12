@@ -34,19 +34,27 @@ BACKENDS["m68k"] = "qemu-m68k"
 BACKENDS["sparc64"] = "qemu-sparc64"
 BACKENDS["hppa"] = "qemu-hppa"
 
-# Check wasmtime
-WASMTIME = os.environ.get("WASMTIME_BIN", "")
-if WASMTIME and os.path.isfile(WASMTIME):
+# Check wasmtime — we use the Python wasmtime package for the custom runner
+# (scripts/wasm32_runner.py) which provides pipe/fork/execve/dup2/waitpid/strcmp
+# host functions that WASI does not support.
+try:
+    import wasmtime as _wt_check
     BACKENDS["wasm32"] = "WASMTIME"
-elif os.path.isfile(str(REPO / "wasmtime")):
-    WASMTIME = str(REPO / "wasmtime")
-    BACKENDS["wasm32"] = "WASMTIME"
-else:
-    # Try PATH
-    import shutil
-    if shutil.which("wasmtime"):
-        WASMTIME = "wasmtime"
+    WASMTIME = "python-wasmtime"
+except ImportError:
+    # Fall back to CLI wasmtime if the Python package is not available.
+    # (self_exec will fail on wasm32 in this case, but other tests work.)
+    WASMTIME = os.environ.get("WASMTIME_BIN", "")
+    if WASMTIME and os.path.isfile(WASMTIME):
         BACKENDS["wasm32"] = "WASMTIME"
+    elif os.path.isfile(str(REPO / "wasmtime")):
+        WASMTIME = str(REPO / "wasmtime")
+        BACKENDS["wasm32"] = "WASMTIME"
+    else:
+        import shutil
+        if shutil.which("wasmtime"):
+            WASMTIME = "wasmtime"
+            BACKENDS["wasm32"] = "WASMTIME"
 
 EXEC_TIMEOUT = 5
 EXPECTED_RE = re.compile(rb"//\s*Expected exit code:\s*(-?\d+)")
@@ -129,14 +137,18 @@ def run_one(args):
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
-            # Use --invoke _vuma_main for all tests EXCEPT those that use
-            # print_int/print_hex (which write to stdout, mixing with return value).
-            # For those, use proc_exit via plain 'wasmtime run'.
             test_name_lower = test_name.lower()
-            if "print" in test_name_lower:
-                cmd = [WASMTIME, "run", out]
+            if WASMTIME == "python-wasmtime":
+                # Use the custom wasmtime runner that provides pipe/fork/execve/
+                # dup2/waitpid/strcmp host functions via the Python wasmtime API.
+                runner = str(REPO / "scripts" / "wasm32_runner.py")
+                cmd = [sys.executable, runner, out]
             else:
-                cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
+                # Fallback: CLI wasmtime (self_exec won't work without host functions)
+                if "print" in test_name_lower:
+                    cmd = [WASMTIME, "run", out]
+                else:
+                    cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
         elif BACKENDS[backend] is None:
             os.chmod(out, 0o755)
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
@@ -154,12 +166,15 @@ def run_one(args):
                 ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3)
                 rc = ep.returncode
                 if backend == "wasm32":
-                    if "print" in test_name_lower:
-                        # Use proc_exit exit code for print tests
+                    # Custom runner returns _vuma_main's value as the exit code.
+                    # For CLI fallback, use the old print/non-print logic.
+                    if WASMTIME == "python-wasmtime":
+                        crashed = rc < 0 or rc > 128
+                        result["actual"] = rc; result["crashed"] = crashed
+                    elif "print" in test_name_lower:
                         crashed = rc < 0 or rc > 128
                         result["actual"] = rc; result["crashed"] = crashed
                     else:
-                        # Use --invoke stdout for other tests
                         stdout = ep.stdout.decode(errors="replace").strip()
                         if rc == 0 and stdout:
                             try: result["actual"] = int(stdout)
