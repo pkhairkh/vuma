@@ -3934,6 +3934,25 @@ impl Backend for Wasm32Backend {
         let print_newline_func_idx = module.add_function(print_newline_type_idx);
         module.add_code(emit_print_newline_runtime());
 
+        // ── read/write wrapper functions ─────────────────────────────
+        // VUMA declares read(fd: i64, buf: Address, count: i64) -> i64 and
+        // write(fd: i64, buf: Address, count: i64) -> i64, but WASI's
+        // fd_read/fd_write have completely different signatures:
+        //   fd_read(fd: i32, iovs: i32, iovs_len: i32, nread: i32) -> i32
+        //   fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
+        // These wrapper functions bridge the gap: they accept VUMA-style
+        // arguments, set up an iov structure in linear memory, call the
+        // WASI function, and return the result as i64.
+
+        let read_write_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        let vuma_read_func_idx = module.add_function(read_write_type_idx);
+        module.add_code(emit_read_wrapper());
+        let vuma_write_func_idx = module.add_function(read_write_type_idx);
+        module.add_code(emit_write_wrapper());
+
         // Export the runtime helpers so they can be called from outside.
         module.add_export(WasmExport {
             name: "__vuma_print_int".to_string(),
@@ -3960,11 +3979,11 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("print_int".to_string(), print_int_func_idx);
         func_name_to_idx.insert("print_hex".to_string(), print_hex_func_idx);
         func_name_to_idx.insert("print_newline".to_string(), print_newline_func_idx);
-        func_name_to_idx.insert("write".to_string(), WASI_FD_WRITE_IDX); // fd_write
+        func_name_to_idx.insert("write".to_string(), vuma_write_func_idx); // wrapper → fd_write
         func_name_to_idx.insert("exit".to_string(),  WASI_PROC_EXIT_IDX); // proc_exit
         // Map FFI/syscall names that match WASI imports so calls to these
         // externs resolve to the real WASI function instead of the stub.
-        func_name_to_idx.insert("read".to_string(),            WASI_FD_READ_IDX);
+        func_name_to_idx.insert("read".to_string(),            vuma_read_func_idx);
         func_name_to_idx.insert("fd_read".to_string(),         WASI_FD_READ_IDX);
         func_name_to_idx.insert("close".to_string(),           WASI_FD_CLOSE_IDX);
         func_name_to_idx.insert("fd_close".to_string(),        WASI_FD_CLOSE_IDX);
@@ -4552,9 +4571,86 @@ fn emit_print_newline_runtime() -> WasmFuncBody {
     }
 }
 
-// ===========================================================================
-// compile_to_wasm convenience function
-// ===========================================================================
+/// Emit the Wasm function body for `__vuma_read(fd: i64, buf: i32, count: i64) -> i64`.
+///
+/// This wrapper bridges VUMA's POSIX-style `read` signature to WASI's
+/// `fd_read` signature.  It sets up an iov structure in linear memory,
+/// calls `fd_read`, and returns the number of bytes read as an i64.
+///
+/// Parameters (locals 0-2):
+///   local 0: fd (i64)    — file descriptor
+///   local 1: buf (i32)   — buffer address in linear memory
+///   local 2: count (i64) — maximum bytes to read
+fn emit_read_wrapper() -> WasmFuncBody {
+    let mut body = Vec::new();
+
+    // Store iov.ptr = buf (local 1) at IOV_BUF_ADDR
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // Store iov.len = count (local 2) at IOV_BUF_ADDR+4
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(2).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 4 }.encode(&mut body);
+
+    // Call fd_read(fd, iov, 1, nread_ptr)
+    WasmInstr::LocalGet(0).encode(&mut body);              // fd
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);  // iovs ptr
+    WasmInstr::I32Const(1).encode(&mut body);              // iovs_len = 1
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);  // nread ptr
+    WasmInstr::Call(WASI_FD_READ_IDX).encode(&mut body);   // fd_read -> errno
+    WasmInstr::Drop.encode(&mut body);                      // drop errno
+
+    // Load nread from NWRITTEN_ADDR
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);
+    WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut body);
+
+    body.push(0x0B); // end
+
+    WasmFuncBody {
+        locals: vec![],
+        body,
+    }
+}
+
+/// Emit the Wasm function body for `__vuma_write(fd: i64, buf: i32, count: i64) -> i64`.
+///
+/// This wrapper bridges VUMA's POSIX-style `write` signature to WASI's
+/// `fd_write` signature.  It sets up an iov structure in linear memory,
+/// calls `fd_write`, and returns the number of bytes written as an i64.
+fn emit_write_wrapper() -> WasmFuncBody {
+    let mut body = Vec::new();
+
+    // Store iov.ptr = buf (local 1) at IOV_BUF_ADDR
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(1).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut body);
+
+    // Store iov.len = count (local 2) at IOV_BUF_ADDR+4
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);
+    WasmInstr::LocalGet(2).encode(&mut body);
+    WasmInstr::I32Store { align: 2, offset: 4 }.encode(&mut body);
+
+    // Call fd_write(fd, iov, 1, nwritten_ptr)
+    WasmInstr::LocalGet(0).encode(&mut body);              // fd
+    WasmInstr::I32Const(IOV_BUF_ADDR).encode(&mut body);  // iovs ptr
+    WasmInstr::I32Const(1).encode(&mut body);              // iovs_len = 1
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);  // nwritten ptr
+    WasmInstr::Call(WASI_FD_WRITE_IDX).encode(&mut body);  // fd_write -> errno
+    WasmInstr::Drop.encode(&mut body);                      // drop errno
+
+    // Load nwritten from NWRITTEN_ADDR
+    WasmInstr::I32Const(NWRITTEN_ADDR).encode(&mut body);
+    WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut body);
+
+    body.push(0x0B); // end
+
+    WasmFuncBody {
+        locals: vec![],
+        body,
+    }
+}
 
 /// Compile IR functions directly to a `.wasm` binary.
 ///

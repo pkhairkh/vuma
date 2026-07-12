@@ -143,11 +143,35 @@ echo "  ✓ Wasmtime CLI: ${WASMTIME_BIN:-NOT FOUND}"
 echo "▸ Installing wasmtime Python package for custom wasm32 runner..."
 if python3 -c "import wasmtime" 2>/dev/null; then
     echo "  ✓ wasmtime Python package already installed"
-elif pip3 install wasmtime 2>/dev/null || python3 -m pip install wasmtime 2>/dev/null; then
-    echo "  ✓ wasmtime Python package installed"
 else
-    echo "  ⚠ could not install wasmtime Python package"
-    echo "    (wasm32 self_exec will use CLI fallback; install with: pip3 install wasmtime)"
+    # Try multiple installation methods.  PEP 668 may block system-wide
+    # installs on some distros (Debian 12+, Ubuntu 23.04+); --break-system-packages
+    # overrides this.  --user installs into the user's site-packages.
+    WT_INSTALLED=0
+    for pip_cmd in \
+        "pip3 install wasmtime" \
+        "python3 -m pip install wasmtime" \
+        "pip3 install --break-system-packages wasmtime" \
+        "python3 -m pip install --break-system-packages wasmtime" \
+        "pip3 install --user wasmtime" \
+        "python3 -m pip install --user --break-system-packages wasmtime"
+    do
+        echo "  trying: $pip_cmd"
+        if eval "$pip_cmd" >/tmp/wt_pip.log 2>&1; then
+            if python3 -c "import wasmtime" 2>/dev/null; then
+                echo "  ✓ wasmtime Python package installed via: $pip_cmd"
+                WT_INSTALLED=1
+                break
+            fi
+        fi
+    done
+    if [ "$WT_INSTALLED" = "0" ]; then
+        echo "  ⚠ could not install wasmtime Python package"
+        echo "    last pip log:"
+        tail -5 /tmp/wt_pip.log 2>/dev/null | sed 's/^/      /'
+        echo "    (wasm32 self_exec will use CLI fallback)"
+        echo "    manual install: pip3 install --break-system-packages wasmtime"
+    fi
 fi
 echo ""
 

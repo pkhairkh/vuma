@@ -75,7 +75,8 @@ def make_host_functions(store, memory):
             r, w = os.pipe()
             # Write fds as native 32-bit integers (the VUMA program reads
             # them with read_i32_native, which handles both LE and BE).
-            write_mem(pipefd_ptr, struct.pack('ii', r, w))
+            # wasm32 is always little-endian; write fds as LE 32-bit ints
+            write_mem(pipefd_ptr, struct.pack('<ii', r, w))
             return 0
         except OSError:
             return -1
@@ -128,7 +129,8 @@ def make_host_functions(store, memory):
     def vuma_waitpid(pid, status_ptr, options):
         try:
             result = os.waitpid(pid, options)
-            write_mem(status_ptr, struct.pack('i', result[1]))
+            # wasm32 is always little-endian; write status as LE 32-bit int
+            write_mem(status_ptr, struct.pack('<i', result[1]))
             return result[0]
         except OSError:
             return -1
@@ -239,7 +241,8 @@ def main():
     def vuma_pipe(pipefd_ptr):
         try:
             r, w = os.pipe()
-            write_mem(pipefd_ptr, struct.pack('ii', r, w))
+            # wasm32 is always little-endian; write fds as LE 32-bit ints
+            write_mem(pipefd_ptr, struct.pack('<ii', r, w))
             return 0
         except OSError:
             return -1
@@ -278,7 +281,8 @@ def main():
     def vuma_waitpid(pid, status_ptr, options):
         try:
             result = os.waitpid(pid, options)
-            write_mem(status_ptr, struct.pack('i', result[1]))
+            # wasm32 is always little-endian; write status as LE 32-bit int
+            write_mem(status_ptr, struct.pack('<i', result[1]))
             return result[0]
         except OSError:
             return -1
