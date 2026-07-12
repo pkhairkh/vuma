@@ -1451,6 +1451,14 @@ const PRINT_BUF_ADDR: i32 = 0x0800;
 const IOV_BUF_ADDR: i32 = 0x0820;
 /// Address of the 4-byte nwritten result pointer.
 const NWRITTEN_ADDR: i32 = 0x0828;
+/// Address of the 4-byte argc count (set by wasi_args_sizes_get).
+const ARGC_ADDR: i32 = 0x0830;
+/// Address of the 4-byte argv buffer size (set by wasi_args_sizes_get).
+const ARGV_BUF_SIZE_ADDR: i32 = 0x0834;
+/// Address of the argv pointer array (up to 64 pointers = 256 bytes).
+const ARGV_PTRS_ADDR: i32 = 0x0838;
+/// Address of the argv string buffer (1024 bytes for argument strings).
+const ARGV_BUF_ADDR: i32 = 0x0938;
 
 /// Placeholder function index for unresolved Call instructions.
 /// Will be patched during `encode_program` when the function index mapping
@@ -3902,6 +3910,29 @@ impl Backend for Wasm32Backend {
             kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
         });  // idx 14 = VUMA_STRCMP_IDX
 
+        // vuma.read(fd, buf, count) → nbytes — uses OS read directly
+        // (WASI fd_read doesn't support pipe fds created by vuma.pipe)
+        let vuma_type_3_i32_rw = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "read".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32_rw },
+        });  // idx 15 = VUMA_READ_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "write".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32_rw },
+        });  // idx 16 = VUMA_WRITE_IDX
+        let vuma_type_1_i32_close = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "close".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_1_i32_close },
+        });  // idx 17 = VUMA_CLOSE_IDX
+
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
         let start_type_idx = module.add_type(WasmFuncType {
@@ -3979,13 +4010,13 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("print_int".to_string(), print_int_func_idx);
         func_name_to_idx.insert("print_hex".to_string(), print_hex_func_idx);
         func_name_to_idx.insert("print_newline".to_string(), print_newline_func_idx);
-        func_name_to_idx.insert("write".to_string(), vuma_write_func_idx); // wrapper → fd_write
+        func_name_to_idx.insert("write".to_string(), 16); // vuma.write (OS direct)
         func_name_to_idx.insert("exit".to_string(),  WASI_PROC_EXIT_IDX); // proc_exit
         // Map FFI/syscall names that match WASI imports so calls to these
         // externs resolve to the real WASI function instead of the stub.
-        func_name_to_idx.insert("read".to_string(),            vuma_read_func_idx);
+        func_name_to_idx.insert("read".to_string(),            15); // vuma.read
         func_name_to_idx.insert("fd_read".to_string(),         WASI_FD_READ_IDX);
-        func_name_to_idx.insert("close".to_string(),           WASI_FD_CLOSE_IDX);
+        func_name_to_idx.insert("close".to_string(),           17); // vuma.close
         func_name_to_idx.insert("fd_close".to_string(),        WASI_FD_CLOSE_IDX);
         func_name_to_idx.insert("lseek".to_string(),           WASI_FD_SEEK_IDX);
         func_name_to_idx.insert("fd_seek".to_string(),         WASI_FD_SEEK_IDX);
@@ -4112,29 +4143,54 @@ impl Backend for Wasm32Backend {
         // ── _start wrapper function ────────────────────────────────
         // _start is the Wasm entry point.  It calls main() and passes
         // the return value (if any) to the WASI proc_exit syscall.
+        // If main takes parameters (argc, argv), we set up WASI args
+        // before the call.
         let start_func_idx = module.add_function(start_type_idx);
 
         let mut start_body = Vec::new();
 
         if let Some(main_idx) = main_func_idx {
-            // Call main() — stores return value at memory address 0
+            // If main takes parameters, push argc and argv on the stack.
+            if let Some(ref ft) = main_func_type {
+                if ft.params.len() == 2 {
+                    // Call args_sizes_get(&argc, &argv_buf_size) to get argc
+                    WasmInstr::I32Const(ARGC_ADDR).encode(&mut start_body);
+                    WasmInstr::I32Const(ARGV_BUF_SIZE_ADDR).encode(&mut start_body);
+                    WasmInstr::Call(WASI_ARGS_SIZES_GET_IDX).encode(&mut start_body);
+                    WasmInstr::Drop.encode(&mut start_body); // drop errno
+                    // Call args_get(&argv_ptrs, &argv_buf) to get argv
+                    WasmInstr::I32Const(ARGV_PTRS_ADDR).encode(&mut start_body);
+                    WasmInstr::I32Const(ARGV_BUF_ADDR).encode(&mut start_body);
+                    WasmInstr::Call(WASI_ARGS_GET_IDX).encode(&mut start_body);
+                    WasmInstr::Drop.encode(&mut start_body); // drop errno
+                    // Load argc and push it (matching main's param type)
+                    WasmInstr::I32Const(ARGC_ADDR).encode(&mut start_body);
+                    WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut start_body);
+                    // If first param is i64, extend
+                    if ft.params[0] == WasmType::I64 {
+                        WasmInstr::I64ExtendI32S.encode(&mut start_body);
+                    }
+                    // Push argv pointer
+                    WasmInstr::I32Const(ARGV_PTRS_ADDR).encode(&mut start_body);
+                    // If second param is i64 (unlikely but handle it)
+                    if ft.params[1] == WasmType::I64 {
+                        WasmInstr::I64ExtendI32S.encode(&mut start_body);
+                    }
+                }
+            }
+
+            // Call main(argc, argv) — stores return value at memory address 0
             WasmInstr::Call(main_idx).encode(&mut start_body);
 
             // Load return value from memory address 0
-            // i32.const 0 (address)
             WasmInstr::I32Const(0).encode(&mut start_body);
-            // i32.load (addr -> value)
-            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut start_body); // align=4, offset=0
-            // Call proc_exit(return_value)
+            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut start_body);
             WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
         } else {
-            // No main function found — exit with code 1 (error).
             WasmInstr::I32Const(1).encode(&mut start_body);
             WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
         }
 
-        // proc_exit is divergent (never returns), but Wasm validation
-        // requires a well-formed block.  Add unreachable + end.
         WasmInstr::Unreachable.encode(&mut start_body);
         start_body.push(0x0B); // end
 
@@ -4162,7 +4218,35 @@ impl Backend for Wasm32Backend {
             });
             let test_func_idx = module.add_function(test_type_idx);
             let mut test_body = Vec::new();
-            // Call main() — stores return value at memory address 0
+
+            // If main takes parameters, push argc and argv on the stack.
+            if let Some(ref ft) = main_func_type {
+                if ft.params.len() == 2 {
+                    // Call args_sizes_get to get argc
+                    WasmInstr::I32Const(ARGC_ADDR).encode(&mut test_body);
+                    WasmInstr::I32Const(ARGV_BUF_SIZE_ADDR).encode(&mut test_body);
+                    WasmInstr::Call(WASI_ARGS_SIZES_GET_IDX).encode(&mut test_body);
+                    WasmInstr::Drop.encode(&mut test_body);
+                    // Call args_get to get argv
+                    WasmInstr::I32Const(ARGV_PTRS_ADDR).encode(&mut test_body);
+                    WasmInstr::I32Const(ARGV_BUF_ADDR).encode(&mut test_body);
+                    WasmInstr::Call(WASI_ARGS_GET_IDX).encode(&mut test_body);
+                    WasmInstr::Drop.encode(&mut test_body);
+                    // Load argc and push (matching main's param type)
+                    WasmInstr::I32Const(ARGC_ADDR).encode(&mut test_body);
+                    WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut test_body);
+                    if ft.params[0] == WasmType::I64 {
+                        WasmInstr::I64ExtendI32S.encode(&mut test_body);
+                    }
+                    // Push argv pointer
+                    WasmInstr::I32Const(ARGV_PTRS_ADDR).encode(&mut test_body);
+                    if ft.params[1] == WasmType::I64 {
+                        WasmInstr::I64ExtendI32S.encode(&mut test_body);
+                    }
+                }
+            }
+
+            // Call main(argc, argv) — stores return value at memory address 0
             WasmInstr::Call(main_idx).encode(&mut test_body);
             // Load return value from memory address 0
             WasmInstr::I32Const(0).encode(&mut test_body);

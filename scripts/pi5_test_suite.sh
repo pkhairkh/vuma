@@ -175,6 +175,59 @@ else
 fi
 echo ""
 
+# ── Step 1c: Set up binfmt_misc for QEMU ──
+# self_exec.vuma tests fork+execve, which requires the host kernel to be
+# able to execute guest binaries.  On a native host (e.g., aarch64 Pi
+# running aarch64 binaries), execve works natively.  For cross-architecture
+# binaries (e.g., x86_64 binary on aarch64 host), the kernel needs
+# binfmt_misc to find the right QEMU interpreter.
+#
+# We try to register QEMU handlers for all architectures.  This requires
+# root or CAP_SYS_ADMIN.  If it fails, self_exec will only work on the
+# native architecture — other backends will have execve fail (the child
+# exits(5), parent reads EOF, returns 0 instead of 100).
+echo "▸ Setting up binfmt_misc for QEMU (for self_exec fork+exec tests)..."
+BINFMT_OK=0
+if [ -d /proc/sys/fs/binfmt_misc ]; then
+    # Try to register handlers for each QEMU architecture.
+    # Format: :name:M:magic:mask:interpreter:flags
+    # The magic/mask match ELF headers for each architecture.
+    # F flag = fix binary (cache interpreter path at registration time)
+    for fmt in \
+        ":qemu-aarch64:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-aarch64:F" \
+        ":qemu-arm:M::\x7fELF\x01\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-arm:F" \
+        ":qemu-x86_64:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-x86_64:F" \
+        ":qemu-i386:M::\x7fELF\x01\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-i386:F" \
+        ":qemu-riscv64:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-riscv64:F" \
+        ":qemu-riscv32:M::\x7fELF\x01\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-riscv32:F" \
+        ":qemu-ppc64:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-ppc64:F" \
+        ":qemu-ppc64le:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-ppc64le:F" \
+        ":qemu-mips64:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-mips64:F" \
+        ":qemu-mips64el:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-mips64el:F" \
+        ":qemu-s390x:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-s390x:F" \
+        ":qemu-alpha:M::\x7fELF\x02\x41\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-alpha:F" \
+        ":qemu-m68k:M::\x7fELF\x01\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-m68k:F" \
+        ":qemu-sparc64:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-sparc64:F" \
+        ":qemu-hppa:M::\x7fELF\x02\x00\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-hppa:F" \
+        ":qemu-loongarch64:M::\x7fELF\x02\x01\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-loongarch64:F" \
+        ":qemu-aarch64_be:M::\x7fELF\x02\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-aarch64_be:F" \
+        ":qemu-armeb:M::\x7fELF\x01\x02\x01\x00:\xff\xff\xff\xff:\xff\xff\xff\xff:$REPO_DIR/qemu-armeb:F"
+    do
+        echo "$fmt" > /proc/sys/fs/binfmt_misc/register 2>/dev/null && BINFMT_OK=1
+    done
+fi
+if [ "$BINFMT_OK" = "1" ]; then
+    echo "  ✓ binfmt_misc registered for QEMU architectures"
+elif [ "$(id -u)" = "0" ]; then
+    echo "  ⚠ binfmt_misc registration failed (mount binfmt_misc first?)"
+    echo "    try: mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
+else
+    echo "  ⚠ binfmt_misc requires root — self_exec will only work on native arch"
+    echo "    run as root or: sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"
+    echo "    then re-run this script"
+fi
+echo ""
+
 # ── Step 2: Build compiler ──
 if [ $SKIP_BUILD -eq 0 ]; then
     echo "▸ Building VUMA compiler (profile: $BUILD_PROFILE)..."
