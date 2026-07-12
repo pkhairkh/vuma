@@ -1799,58 +1799,14 @@ impl Backend for HppaBackend {
         const BASE_ADDR: u64 = 0x10000;
 
         // ── _start stub ──
-        // The _start stub sets up a large 8MB stack via mmap before calling
-        // main.  QEMU's PA-RISC user-mode provides only ~1.6KB of initial
-        // stack, which is insufficient for deep recursion (e.g., Ackermann,
-        // recursive Fibonacci, signal handlers with SHA256d).  By allocating
-        // our own stack, we ensure all tests can run without SIGSEGV.
-        //
+        // Uses QEMU's default stack (no mmap — QEMU PA-RISC mmap is buggy).
         // Layout:
-        //   1. Set up mmap args and call mmap(NULL, 8MB, RW, PRIVATE|ANON, -1, 0)
-        //   2. Add 8MB to the result → R30 = stack top (stack grows down)
-        //   3. 32-byte call pattern → call main
-        //   4. COPY R28, R26 (move return to arg1 for exit)
-        //   5. LDI 1, R20 (SYS_exit)
-        //   6. GATE (syscall)
+        //   1. 32-byte call pattern → call main
+        //   2. COPY R28, R26 (move return to arg1 for exit)
+        //   3. LDI 1, R20 (SYS_exit)
+        //   4. GATE (syscall)
 
         let mut start_stub: Vec<u8> = Vec::new();
-
-        // ── Stack setup: mmap(8MB) ──
-        // PA-RISC syscall: R20=syscall#, args in R26,R25,R24,R23,R22,R21
-        // mmap args: addr=0, len=8MB, prot=3(RW), flags=0x22(PRIVATE|ANON), fd=-1, offset=0
-        // R26 = 0 (addr = NULL)
-        start_stub.extend_from_slice(&encode_copy(R0, R26));
-        // R25 = 8MB (0x800000)
-        start_stub.extend(ss_load_imm(R25, 0x800000));
-        // R24 = 3 (PROT_READ|PROT_WRITE)
-        start_stub.extend(ss_load_imm(R24, 3));
-        // R23 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
-        start_stub.extend(ss_load_imm(R23, 0x22));
-        // R22 = -1 (fd = -1)
-        start_stub.extend(ss_load_imm(R22, -1));
-        // R21 = 0 (offset = 0)
-        start_stub.extend_from_slice(&encode_copy(R0, R21));
-        // R20 = 90 (sys_mmap)
-        start_stub.extend(ss_load_imm(R20, 90));
-        // GATE (syscall)
-        start_stub.extend_from_slice(&encode_gate());
-        start_stub.extend_from_slice(&encode_nop()); // GATE delay slot
-
-        // R28 = mmap result (base of mapped region).
-        // Set R30 = R28 + 8MB (stack top, since stack grows down).
-        // R25 still holds 8MB from above.
-        start_stub.extend_from_slice(&encode_add(R28, R25, R30)); // R30 = R28 + 8MB
-
-        // 32-byte call pattern (8 instructions) — call main
-        // 1. BL,n +0, R1 — call pattern instr 1
-        // 2. NOP — delay slot (nullified)
-        // 3. LDO 24(R1), R2 — return address = PC + 32
-        // 4. LDO disp(R1), R1 — target (patched)
-        // 5-7. NOP — placeholders for long call LDOs
-        // 8. BV R0(R1) — branch to target (patched to BV,n for long calls)
-        // 9. COPY R28, R26 (move return to arg1 for exit)
-        // 10. LDI 1, R20 (SYS_exit)
-        // 11. GATE (syscall)
 
         // 32-byte call pattern (8 instructions)
         start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
@@ -2243,8 +2199,25 @@ impl Backend for HppaBackend {
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
-            let abs_offset = 0i64; // _start call is at offset 0 in all_code
-            patch_call_site(&mut all_code, 0, main_offset as usize, &mut trampolines);
+            // The _start stub has stack-setup code before the 32-byte call pattern.
+            // We need to find the call pattern's offset within start_stub.
+            // The call pattern starts with BL,n +0, R1 (0xE8200000).
+            // Search for it in the first 128 bytes of all_code.
+            let mut start_call_offset = 0usize;
+            for off in (0..128).step_by(4) {
+                if off + 4 <= all_code.len() {
+                    let w = u32::from_be_bytes([
+                        all_code[off], all_code[off + 1],
+                        all_code[off + 2], all_code[off + 3],
+                    ]);
+                    if w == 0xE8200000 {
+                        start_call_offset = off;
+                        break;
+                    }
+                }
+            }
+            let abs_offset = start_call_offset as i64;
+            patch_call_site(&mut all_code, start_call_offset, main_offset as usize, &mut trampolines);
         }
 
         // ── Patch inter-function calls ──
