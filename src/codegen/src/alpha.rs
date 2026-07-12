@@ -1566,7 +1566,7 @@ impl Backend for AlphaBackend {
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
                 ("mmap", 113), ("munmap", 111), ("exit", 1), ("exit_group", 4293),
                 ("brk", 17), ("getpid", 20), ("alarm", 27), ("kill", 42),
-                ("dup", 41), ("dup2", 63), ("execve", 59),
+                ("dup", 41), ("dup2", 90), ("execve", 59),
                 ("wait4", 84), ("unlink", 10), ("chdir", 12), ("lseek", 19),
                 ("ioctl", 54), ("fcntl", 55), ("futex", 433), ("poll", 94),
                 ("nanosleep", 162), ("mprotect", 50), ("clock_gettime", 410),
