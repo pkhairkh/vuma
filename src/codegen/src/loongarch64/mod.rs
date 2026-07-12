@@ -2501,15 +2501,17 @@ impl Backend for LoongArch64Backend {
         // ── LoongArch64 Linux static executable ──
         //
         // Layout:
-        //   _start:  BL main           ; call main (result in $a0)
-        //            addi.d $a7, $r0, 93 ; sys_exit = 93
-        //            syscall 0x0        ; exit(main_result)
+        //   _start:  LD.D $a0, $sp, 0       ; argc = *sp (64-bit)
+        //            ADDI.D $a1, $sp, 8     ; argv = sp + 8 (64-bit pointers)
+        //            BL main                ; call main(argc, argv) — result in $a0
+        //            addi.d $a7, $r0, 93    ; sys_exit = 93
+        //            syscall 0x0            ; exit(main_result)
         //   <functions...>
         //
-        // The _start stub is 3 instructions = 12 bytes.
+        // The _start stub is 5 instructions = 20 bytes.
         // After that come all user functions.
 
-        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions
         let ffi_stub_size: usize = 8; // ADDI.W A0, R0, 0; JIRL R0, RA, 0
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -2538,6 +2540,26 @@ impl Backend for LoongArch64Backend {
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
+        // LD.D $a0, $sp, 0 — load argc from stack pointer (64-bit)
+        start_stub.extend_from_slice(
+            &Instruction::LdD {
+                rd: Gpr::A0,
+                rj: Gpr::Sp,
+                imm12: 0,
+            }
+            .encode(),
+        );
+
+        // ADDI.D $a1, $sp, 8 — argv = sp + 8 (64-bit pointers on LoongArch64)
+        start_stub.extend_from_slice(
+            &Instruction::AddiD {
+                rd: Gpr::A1,
+                rj: Gpr::Sp,
+                imm12: 8,
+            }
+            .encode(),
+        );
+
         // BL <main> — placeholder, will be patched
         start_stub.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
 
@@ -2561,11 +2583,12 @@ impl Backend for LoongArch64Backend {
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            let bl_offset = (main_offset as i64) / 4;
+            // BL is at byte offset 8 within start_stub (after LD.D $a0 and ADDI.D $a1)
+            let bl_offset = ((main_offset as i64) - 8) / 4;
             // Re-encode the whole BL instruction
             let patched_word =
                 u32::from_le_bytes(Instruction::Bl { offs26: bl_offset as i32 }.encode());
-            start_stub[0..4].copy_from_slice(&patched_word.to_le_bytes());
+            start_stub[8..12].copy_from_slice(&patched_word.to_le_bytes());
         }
 
         // ── Add FFI return-0 stub ──

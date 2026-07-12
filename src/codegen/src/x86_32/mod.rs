@@ -3104,17 +3104,14 @@ impl Backend for X86_32Backend {
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
         // Build the _start stub (i386 Linux process entry):
         //
-        //   8B 04 24                mov eax, [esp]      ; argc       (3 bytes)
-        //   8D 4C 24 04             lea ecx, [esp+4]    ; argv       (4 bytes)
-        //   51                      push ecx            ; push argv  (1 byte)
-        //   50                      push eax            ; push argc  (1 byte)
+        //   8B 3C 24                mov edi, [esp]      ; argc -> arg0 (3 bytes)
+        //   8D 74 24 04             lea esi, [esp+4]    ; argv -> arg1 (4 bytes)
         //   E8 <rel32 to main>      call main           (5 bytes)
-        //   83 C4 08                add esp, 8          ; clean up   (3 bytes)
-        //   89 C3                   mov ebx, eax        ; exit code  (2 bytes)
-        //   B8 01 00 00 00          mov eax, 1          ; sys_exit   (5 bytes)
-        //   CD 80                   int 0x80            ; syscall    (2 bytes)
+        //   89 C3                   mov ebx, eax        ; exit code    (2 bytes)
+        //   B8 01 00 00 00          mov eax, 1          ; sys_exit     (5 bytes)
+        //   CD 80                   int 0x80            ; syscall      (2 bytes)
         //
-        // Total = 3 + 4 + 1 + 1 + 5 + 3 + 2 + 5 + 2 = 26 bytes
+        // Total = 3 + 4 + 5 + 2 + 5 + 2 = 21 bytes
         //
         // On Linux x86_32, the kernel sets up the process entry stack as:
         //   [ESP]     = argc   (4 bytes, NOT 8 like x86_64!)
@@ -3125,25 +3122,23 @@ impl Backend for X86_32Backend {
         //   envp[0], envp[1], ..., NULL
         //   auxv...
         //
-        // main(argc, argv) is called via the cdecl ABI: args pushed
-        // right-to-left (argv first, then argc), so that at function
-        // entry — after CALL pushes the return address — [ESP+4] = argc
-        // and [ESP+8] = argv, matching what main's prologue expects.
+        // main(argc, argv) uses the VUMA x86_32 custom calling convention
+        // (regparam-like): the first 4 args are passed in EDI, ESI, EDX,
+        // ECX (see stack_slot_isel.rs).  So we load argc into EDI and argv
+        // into ESI before calling main, instead of pushing them on the
+        // stack as in standard cdecl.
 
         // _start stub layout (byte offsets):
-        //   0..3   : mov eax, [esp]        (3 bytes)
-        //   3..7   : lea ecx, [esp+4]      (4 bytes)
-        //   7..8   : push ecx              (1 byte)
-        //   8..9   : push eax              (1 byte)
-        //   9..14  : call main             (5 bytes; E8 at offset 9, rel32 at 10..14)
-        //   14..17 : add esp, 8            (3 bytes)
-        //   17..19 : mov ebx, eax          (2 bytes)
-        //   19..24 : mov eax, 1            (5 bytes)
-        //   24..26 : int 0x80              (2 bytes)
-        let start_stub_size: usize = 26;
-        // The CALL instruction (E8) is at offset 9; its rel32 field starts
-        // at offset 10.  call_site = offset of the E8 byte = 9.
-        const CALL_SITE_OFFSET: usize = 9;
+        //   0..3   : mov edi, [esp]        (3 bytes)
+        //   3..7   : lea esi, [esp+4]      (4 bytes)
+        //   7..12  : call main             (5 bytes; E8 at offset 7, rel32 at 8..12)
+        //   12..14 : mov ebx, eax          (2 bytes)
+        //   14..19 : mov eax, 1            (5 bytes)
+        //   19..21 : int 0x80              (2 bytes)
+        let start_stub_size: usize = 21;
+        // The CALL instruction (E8) is at offset 7; its rel32 field starts
+        // at offset 8.  call_site = offset of the E8 byte = 7.
+        const CALL_SITE_OFFSET: usize = 7;
         const REL32_PATCH_OFFSET: usize = CALL_SITE_OFFSET + 1;
 
         // Build runtime syscall stubs for common POSIX operations.
@@ -3186,36 +3181,22 @@ impl Backend for X86_32Backend {
 
         // Build _start stub — i386 Linux process entry convention:
         //
-        //   mov eax, [esp]      ; argc = top of stack at process entry
-        //   lea ecx, [esp+4]    ; argv = pointer to argv[0]
-        //   push ecx            ; push argv (cdecl arg 2, pushed first)
-        //   push eax            ; push argc (cdecl arg 1, pushed second)
+        //   mov edi, [esp]      ; argc = top of stack at process entry
+        //   lea esi, [esp+4]    ; argv = pointer to argv[0]
         //   call main           ; main(argc, argv); EAX = return value
-        //   add esp, 8          ; clean up the 2 pushed args
         //   mov ebx, eax        ; EBX = exit code (arg1 for sys_exit)
         //   mov eax, 1          ; EAX = sys_exit (1 on i386, NOT 60!)
         //   int 0x80            ; syscall
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
-        // mov eax, [esp] — argc (3 bytes: 8B 04 24)
-        start_stub.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
+        // mov edi, [esp] — argc (3 bytes: 8B 3C 24)
+        start_stub.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
 
-        // lea ecx, [esp+4] — argv = &argv[0] (4 bytes: 8D 4C 24 04)
-        start_stub.extend(encode_lea_reg_mem(Gpr::Rcx, Gpr::Rsp, 4));
-
-        // push ecx — push argv (1 byte: 51)
-        start_stub.extend(encode_push(Gpr::Rcx));
-
-        // push eax — push argc (1 byte: 50)
-        start_stub.extend(encode_push(Gpr::Rax));
+        // lea esi, [esp+4] — argv = &argv[0] (4 bytes: 8D 74 24 04)
+        start_stub.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 4));
 
         // call main (E8 + rel32 placeholder, 5 bytes)
         start_stub.extend(encode_call_rel32(0));
-
-        // add esp, 8 — clean up pushed argc/argv (3 bytes: 83 C4 08)
-        // Note: encode_add_reg_imm32 emits the 6-byte 81 /0 id form;
-        // we want the shorter 3-byte 83 /0 ib form for small immediates.
-        start_stub.extend_from_slice(&[0x83, 0xC4, 0x08]);
 
         // mov ebx, eax — move main's return value to EBX (exit code arg)
         start_stub.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rax));
