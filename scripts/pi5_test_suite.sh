@@ -214,6 +214,13 @@ BINFMT_REGISTER="/proc/sys/fs/binfmt_misc/register"
 # riscv64, ppc64le, loongarch64, mips64el) to match the SAME magic, so only
 # one handler can be registered and execve fails for the others.
 #
+# CRITICAL: Do NOT register a binfmt_misc entry for the HOST's native
+# architecture. If the host is aarch64 and we register qemu-aarch64, every
+# native aarch64 binary (ls, cat, clear, bash itself!) would be intercepted
+# and run through qemu-aarch64 — which is ITSELF an aarch64 binary, causing
+# infinite recursion: kernel → binfmt → qemu-aarch64 → binfmt → qemu-aarch64
+# → ... → ELOOP. This bricks the system until reboot.
+#
 # 20-byte magic layout:
 #   bytes 0-3:  \x7fELF (magic)
 #   byte  4:    class (1=32-bit, 2=64-bit)
@@ -232,6 +239,27 @@ BINFMT_REGISTER="/proc/sys/fs/binfmt_misc/register"
 #   3. $(command -v qemu-$arch) (PATH lookup)
 # This ensures the binfmt entry points to a real, executable QEMU binary.
 build_binfmt_entries() {
+    # Detect host architecture to SKIP native arch registration.
+    # uname -m returns: aarch64, x86_64, riscv64, ppc64le, mips64, etc.
+    local host_arch
+    host_arch=$(uname -m)
+
+    # Map host arch to the binfmt entry name that must be SKIPPED.
+    # On aarch64 host: skip qemu-aarch64 (but NOT qemu-aarch64_be).
+    # On x86_64 host: skip qemu-x86_64 (but NOT qemu-x86_32).
+    local skip_native=""
+    case "$host_arch" in
+        aarch64)    skip_native="qemu-aarch64" ;;
+        x86_64)     skip_native="qemu-x86_64" ;;
+        riscv64)    skip_native="qemu-riscv64" ;;
+        ppc64le)    skip_native="qemu-ppc64le" ;;
+        ppc64)      skip_native="qemu-ppc64" ;;
+        mips64)     skip_native="qemu-mips64el" ;;  # Debian mips64el
+        mips)       skip_native="qemu-mipsel" ;;
+        s390x)      skip_native="qemu-s390x" ;;
+        loongarch64) skip_native="qemu-loongarch64" ;;
+    esac
+
     # Map: binfmt_name -> qemu_binary_name
     # Also: magic_hex mask_hex
     local entries=(
@@ -257,6 +285,15 @@ build_binfmt_entries() {
 
     for entry in "${entries[@]}"; do
         IFS='|' read -r name qemu_bin magic mask <<< "$entry"
+
+        # SKIP the native architecture to prevent infinite recursion.
+        # If host is aarch64 and we register qemu-aarch64, every native
+        # binary (including qemu-aarch64 itself) gets intercepted → ELOOP.
+        if [ -n "$skip_native" ] && [ "$name" = "$skip_native" ]; then
+            echo "SKIP: $name matches host arch ($host_arch) — not registering to avoid infinite recursion" >&2
+            continue
+        fi
+
         # Find the actual QEMU binary path
         local interp=""
         # Try QEMU_DIR first (bundled binaries)
