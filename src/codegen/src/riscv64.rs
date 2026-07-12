@@ -6383,6 +6383,24 @@ impl Backend for RiscV64Backend {
                 stubs.push(("alarm".to_string(), code));
             }
 
+            // strcmp(s1, s2) → int — assembly loop, not a syscall.
+            // RISC-V calling convention: a0=s1, a1=s2, return in a0.
+            {
+                let mut code = Vec::new();
+                // loop:
+                code.extend(Instruction::Lbu { rd: Gpr::A2, rs1: Gpr::A0, imm: 0 }.encode()); // LBU a2, 0(a0)
+                code.extend(Instruction::Lbu { rd: Gpr::A3, rs1: Gpr::A1, imm: 0 }.encode()); // LBU a3, 0(a1)
+                code.extend(Instruction::Bne { rs1: Gpr::A2, rs2: Gpr::A3, offset: 20 }.encode()); // BNE a2, a3, done
+                code.extend(Instruction::Beq { rs1: Gpr::A2, rs2: Gpr::Zero, offset: 16 }.encode()); // BEQ a2, zero, done
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::A0, imm: 1 }.encode()); // ADDI a0, a0, 1
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A1, imm: 1 }.encode()); // ADDI a1, a1, 1
+                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: -24 }.encode()); // J loop
+                // done:
+                code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::A2, rs2: Gpr::A3 }.encode()); // SUB a0, a2, a3
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode()); // RET
+                stubs.push(("strcmp".to_string(), code));
+            }
+
             stubs
         };
 
@@ -6407,6 +6425,10 @@ impl Backend for RiscV64Backend {
         func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        // Bare-name aliases so user code can call print_int / print_hex directly.
+        func_offsets.insert("print_int".to_string(), runtime_offsets_start);
+        func_offsets.insert("print_hex".to_string(), runtime_offsets_start);
+        func_offsets.insert("print_newline".to_string(), runtime_offsets_start);
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.

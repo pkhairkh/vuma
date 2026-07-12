@@ -2376,6 +2376,12 @@ impl Backend for S390XBackend {
                 ("epoll_ctl", 250),
                 ("epoll_wait", 251),
                 ("clone", 120),
+                // ── Additional POSIX syscall stubs (stat family + getcwd) ──
+                // s390x syscall numbers from arch/s390/include/uapi/asm/unistd.h.
+                ("stat", 106),
+                ("lstat", 107),
+                ("fstat", 108),
+                ("getcwd", 183),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -2397,6 +2403,332 @@ impl Backend for S390XBackend {
         };
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
+
+        // ── rt_sigreturn (174) — special: no args, never returns ──
+        // The kernel restores the saved signal context from the stack and
+        // resumes execution at the interrupted PC. We emit just
+        // `LGFI R1, 174 ; SVC 0` followed by an illegal-instruction trap
+        // (0x0001) as a safety net in case the kernel ever does return.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 174));
+            code.extend_from_slice(&encode_svc(0));
+            // Illegal-instruction trap (0x0001) — safety net.
+            code.extend_from_slice(&[0x00, 0x01]);
+            syscall_stubs.push(("rt_sigreturn".to_string(), code));
+        }
+
+        // ── waitpid(pid, wstatus, options) → wraps wait4(pid, wstatus, options, NULL)
+        // VUMA declares waitpid with 3 args (R2=pid, R3=wstatus, R4=options);
+        // the syscall wait4 takes a 4th arg (rusage, must be NULL) in R5.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 0)); // rusage = NULL
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 114)); // sys_wait4
+            code.extend_from_slice(&encode_svc(0));
+            code.extend_from_slice(&encode_br(LR));
+            syscall_stubs.push(("waitpid".to_string(), code));
+        }
+
+        // ── recv(fd, buf, len, flags) → recvfrom(fd, buf, len, flags, NULL, NULL)
+        // s390x args: R2-R5 are recv args; set R6=0 (addr=NULL), R7=0 (addrlen=NULL).
+        // s390x has no direct recv syscall; recvfrom=367 with NULL addr is the
+        // canonical equivalent.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 0)); // addr = NULL
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 0)); // addrlen = NULL
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 367)); // sys_recvfrom
+            code.extend_from_slice(&encode_svc(0));
+            code.extend_from_slice(&encode_br(LR));
+            syscall_stubs.push(("recv".to_string(), code));
+        }
+
+        // ── send(fd, buf, len, flags) → sendto(fd, buf, len, flags, NULL, 0)
+        // Same pattern as recv but uses sendto=366.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 0)); // addr = NULL
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 0)); // addrlen = 0
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 366)); // sys_sendto
+            code.extend_from_slice(&encode_svc(0));
+            code.extend_from_slice(&encode_br(LR));
+            syscall_stubs.push(("send".to_string(), code));
+        }
+
+        // ── strcmp(s1, s2) → int — assembly loop, not a syscall.
+        // s390x calling convention: R2=s1, R3=s2, return in R2.
+        // Loop: load byte from each (unsigned via LLGC), compare; if differ
+        // or NUL, return the difference; else advance and repeat.
+        // R4 = byte from s1, R5 = byte from s2, R6 = constant 1.
+        {
+            let mut code = Vec::new();
+            // LGHI R6, 1 (increment)
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 1));
+            // strcmp_loop:
+            let loop_start = code.len();
+            // LLGC R4, 0(R2) — Load Logical Character (unsigned byte) from s1
+            code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, Gpr::R4, Gpr::R0, Gpr::R2, 0));
+            // LLGC R5, 0(R3) — Load Logical Character from s2
+            code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, Gpr::R5, Gpr::R0, Gpr::R3, 0));
+            // CGR R4, R5 — Compare 64-bit (sets CC based on R4 - R5)
+            code.extend_from_slice(&encode_rre(0xB9, 0x20, Gpr::R4, Gpr::R5));
+            // BRC 0x6, done — branch if not equal (mask=6 = LT|GT)
+            let bne_pos = code.len();
+            code.extend_from_slice(&encode_brc(0x6, 0)); // placeholder disp
+            // LTGR R4, R4 — Load and Test 64-bit (sets CC based on R4)
+            code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R4, Gpr::R4));
+            // BRC 0x8, done — branch if equal to 0 (both bytes NUL → strings equal)
+            let beq_pos = code.len();
+            code.extend_from_slice(&encode_brc(0x8, 0)); // placeholder disp
+            // AGR R2, R6 — advance s1
+            code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R6));
+            // AGR R3, R6 — advance s2
+            code.extend_from_slice(&encode_agr(Gpr::R3, Gpr::R6));
+            // BRCL 0xF, loop_start — unconditional back-branch
+            let back_disp = ((loop_start as i64) - (code.len() as i64 + 6)) / 2;
+            code.extend_from_slice(&encode_brcl(0xF, back_disp as i32));
+            // done: R4 = R4 - R5 (return difference)
+            let done_offset = code.len();
+            code.extend_from_slice(&encode_sgr(Gpr::R4, Gpr::R5));
+            code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R4)); // return value in R2
+            code.extend_from_slice(&encode_br(LR));
+
+            // Patch BNE and BEQ to target done_offset.
+            // disp = (target_offset - branch_offset) / 2
+            let bne_disp = ((done_offset as i64) - (bne_pos as i64)) / 2;
+            let bne_disp_be = (bne_disp as i16).to_be_bytes();
+            code[bne_pos + 2..bne_pos + 4].copy_from_slice(&bne_disp_be);
+            let beq_disp = ((done_offset as i64) - (beq_pos as i64)) / 2;
+            let beq_disp_be = (beq_disp as i16).to_be_bytes();
+            code[beq_pos + 2..beq_pos + 4].copy_from_slice(&beq_disp_be);
+
+            syscall_stubs.push(("strcmp".to_string(), code));
+        }
+
+        // ── print_int(R2 = signed 64-bit integer) — runtime helper ──
+        // Converts R2 to decimal ASCII and writes to stdout (fd=1) via
+        // sys_write (syscall #4). Stack frame: 32 bytes (digit buffer).
+        // Register usage:
+        //   R2 = current value (and write syscall arg 1)
+        //   R3 = digit buffer pointer (and write syscall arg 2)
+        //   R4 = digit count (and write syscall arg 3)
+        //   R5 = scratch
+        //   R6 = constant 10 (divisor)
+        //   R8 = saved input value (across syscalls)
+        //   R9 = divmod quotient
+        {
+            let mut code: Vec<u8> = Vec::new();
+
+            // Prologue: SP -= 32 (allocate 32-byte digit buffer).
+            code.extend(adjust_sp(-32));
+            // R8 = R2 (save input value)
+            code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+            // R3 = SP + 32 (end-of-buffer pointer; digits grow downward)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+            code.extend_from_slice(&encode_agfi(Gpr::R3, 32));
+            // R4 = 0 (digit count)
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 0));
+            // R6 = 10 (divisor, hoisted out of loop)
+            code.extend_from_slice(&encode_lghi(Gpr::R6, 10));
+            // LTGR R8, R8 (test input value)
+            code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R8, Gpr::R8));
+            // BRC 0xA, divmod_loop — GE → R8 >= 0, skip negative handling
+            let brc_skip_neg_pos = code.len();
+            code.extend_from_slice(&encode_brc(0xA, 0)); // placeholder
+
+            // ── Negative case: write '-' to stdout, then negate R8 ──
+            // LGHI R5, 45 ('-')
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 45));
+            // STC R5, 16(SP) — store '-' at SP+16 (1-byte scratch)
+            code.extend_from_slice(&encode_stc(Gpr::R5, SP, 16));
+            // LGHI R2, 1 (fd = stdout)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 1));
+            // LGR R3, SP; AGFI R3, 16 (buf = SP+16)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+            code.extend_from_slice(&encode_agfi(Gpr::R3, 16));
+            // LGHI R4, 1 (len = 1)
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 1));
+            // LGFI R1, 4 (sys_write)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 4));
+            // SVC 0
+            code.extend_from_slice(&encode_svc(0));
+            // Restore R3 = SP + 32, R4 = 0 (clobbered by syscall prep)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+            code.extend_from_slice(&encode_agfi(Gpr::R3, 32));
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 0));
+            // LCGR R8, R8 (R8 = -R8; for INT64_MIN R8 is unchanged, but the
+            // unsigned DLGR loop below produces the correct decimal digits
+            // for 9223372036854775808.)
+            code.extend_from_slice(&encode_rre(0xB9, 0x03, Gpr::R8, Gpr::R8));
+
+            // ── divmod_loop: ──
+            let divmod_loop_offset = code.len();
+            // Patch BRC 0xA to target divmod_loop_offset
+            let brc_skip_neg_disp =
+                ((divmod_loop_offset as i64) - (brc_skip_neg_pos as i64)) / 2;
+            let brc_skip_neg_be = (brc_skip_neg_disp as i16).to_be_bytes();
+            code[brc_skip_neg_pos + 2..brc_skip_neg_pos + 4]
+                .copy_from_slice(&brc_skip_neg_be);
+
+            // LGR R9, R8 (move value to odd register of dividend pair)
+            code.extend_from_slice(&encode_lgr(Gpr::R9, Gpr::R8));
+            // LGHI R8, 0 (high 64 bits of dividend = 0, sign/zero extension)
+            code.extend_from_slice(&encode_lghi(Gpr::R8, 0));
+            // DLGR R8, R6 — R8 = remainder, R9 = quotient
+            code.extend_from_slice(&encode_dlgr(Gpr::R8, Gpr::R6));
+            // AGFI R8, 48 (R8 += '0')
+            code.extend_from_slice(&encode_agfi(Gpr::R8, 48));
+            // AGFI R3, -1 (R3--)
+            code.extend_from_slice(&encode_agfi(Gpr::R3, -1));
+            // STC R8, 0(R3) — store digit
+            code.extend_from_slice(&encode_stc(Gpr::R8, Gpr::R3, 0));
+            // AGFI R4, 1 (R4++)
+            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+            // LGR R8, R9 (R8 = quotient, becomes new value)
+            code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R9));
+            // LTGR R8, R8 (test)
+            code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R8, Gpr::R8));
+            // BRC 0x6, divmod_loop — NE → R8 != 0, loop back
+            let brc_loop_back_pos = code.len();
+            let brc_loop_back_disp =
+                ((divmod_loop_offset as i64) - (brc_loop_back_pos as i64)) / 2;
+            // Use BRCL (32-bit disp) for safety with far backward branches.
+            code.extend_from_slice(&encode_brcl(0x6, brc_loop_back_disp as i32));
+
+            // ── Zero check: if R4 == 0 (R8 was originally 0), store '0' ──
+            // LTGR R4, R4
+            code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R4, Gpr::R4));
+            // BRC 0x6, write_digits — NE → R4 != 0, skip "store '0'"
+            let brc_skip_zero_pos = code.len();
+            code.extend_from_slice(&encode_brc(0x6, 0)); // placeholder
+            // LGHI R5, 48 ('0')
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 48));
+            // AGFI R3, -1 (R3--)
+            code.extend_from_slice(&encode_agfi(Gpr::R3, -1));
+            // STC R5, 0(R3) — store '0'
+            code.extend_from_slice(&encode_stc(Gpr::R5, Gpr::R3, 0));
+            // AGFI R4, 1 (R4++)
+            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+
+            // ── write_digits: sys_write(1, R3, R4) ──
+            let write_digits_offset = code.len();
+            // Patch BRC 0x6 to target write_digits_offset
+            let brc_skip_zero_disp =
+                ((write_digits_offset as i64) - (brc_skip_zero_pos as i64)) / 2;
+            let brc_skip_zero_be = (brc_skip_zero_disp as i16).to_be_bytes();
+            code[brc_skip_zero_pos + 2..brc_skip_zero_pos + 4]
+                .copy_from_slice(&brc_skip_zero_be);
+
+            // LGHI R2, 1 (fd = stdout)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 1));
+            // R3 already points to start of digits
+            // R4 already has digit count
+            // LGFI R1, 4 (sys_write)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 4));
+            // SVC 0
+            code.extend_from_slice(&encode_svc(0));
+
+            // Epilogue: SP += 32
+            code.extend(adjust_sp(32));
+            // BR R14
+            code.extend_from_slice(&encode_br(LR));
+
+            syscall_stubs.push(("print_int".to_string(), code));
+        }
+
+        // ── print_hex(R2 = 64-bit value) — runtime helper ──
+        // Writes R2 as 16 hex digits (MSB first) to stdout via sys_write.
+        // Stack frame: 16 bytes (hex char buffer).
+        // Register usage:
+        //   R2 = input value (and write syscall arg 1)
+        //   R3 = buffer pointer (advances forward; write syscall arg 2)
+        //   R4 = loop counter (0..16; write syscall arg 3 = 16)
+        //   R5 = current shift amount (60, 56, ..., 4, 0)
+        //   R6 = current nibble / hex char
+        //   R7 = scratch for comparisons
+        //   R8 = saved value (across syscall)
+        {
+            let mut code: Vec<u8> = Vec::new();
+
+            // Prologue: SP -= 16
+            code.extend(adjust_sp(-16));
+            // R8 = R2 (save value)
+            code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+            // R3 = SP (buffer pointer, advances forward)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+            // R4 = 0 (counter)
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 0));
+            // R5 = 60 (initial shift amount)
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 60));
+
+            // hex_loop:
+            let hex_loop_offset = code.len();
+            // LGR R6, R8 (copy value)
+            code.extend_from_slice(&encode_lgr(Gpr::R6, Gpr::R8));
+            // SRLG R6, R6, R5 (variable shift right by R5)
+            // SRLG R1, R3, D2(B2): shift amount = (B2 + D2) & 0x3F.
+            // Use encode_rsy_a with B2=R5, D2=0.
+            code.extend_from_slice(&encode_rsy_a(0xEB, 0x0C, Gpr::R6, Gpr::R6, Gpr::R5, 0));
+            // NILL R6, 0xF (AND with 0xF) — RI-b format, op1=0xA5, op2=0x7.
+            code.extend_from_slice(&[0xA5, (Gpr::R6.encoding() << 4) | 0x7, 0x00, 0x0F]);
+            // LGHI R7, 9
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 9));
+            // CGR R6, R7 (compare nibble with 9)
+            code.extend_from_slice(&encode_rre(0xB9, 0x20, Gpr::R6, Gpr::R7));
+            // BRC 0x2, alpha — GT (nibble > 9) → alpha case
+            let brc_alpha_pos = code.len();
+            code.extend_from_slice(&encode_brc(0x2, 0)); // placeholder
+            // AGFI R6, 48 (nibble + '0')
+            code.extend_from_slice(&encode_agfi(Gpr::R6, 48));
+            // BRCL 0xF, store (unconditional skip over alpha)
+            let brcl_store_pos = code.len();
+            code.extend_from_slice(&encode_brcl(0xF, 0)); // placeholder
+            // alpha: AGFI R6, 87 (nibble + 'a' - 10)
+            let alpha_offset = code.len();
+            code.extend_from_slice(&encode_agfi(Gpr::R6, 87));
+            // store: STC R6, 0(R3)
+            let store_offset = code.len();
+            code.extend_from_slice(&encode_stc(Gpr::R6, Gpr::R3, 0));
+            // AGFI R3, 1 (advance buffer)
+            code.extend_from_slice(&encode_agfi(Gpr::R3, 1));
+            // AGFI R4, 1 (counter++)
+            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+            // AGFI R5, -4 (shift -= 4)
+            code.extend_from_slice(&encode_agfi(Gpr::R5, -4));
+            // LGHI R7, 16
+            code.extend_from_slice(&encode_lghi(Gpr::R7, 16));
+            // CGR R4, R7 (compare counter with 16)
+            code.extend_from_slice(&encode_rre(0xB9, 0x20, Gpr::R4, Gpr::R7));
+            // BRC 0x4, hex_loop — LT (R4 < 16) → loop
+            let brc_loop_pos = code.len();
+            let brc_loop_disp = ((hex_loop_offset as i64) - (brc_loop_pos as i64)) / 2;
+            // Use BRCL for safety with far backward branches.
+            code.extend_from_slice(&encode_brcl(0x4, brc_loop_disp as i32));
+
+            // sys_write(1, SP, 16)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 1)); // fd
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP)); // buf
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 16)); // len
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 4)); // sys_write
+            code.extend_from_slice(&encode_svc(0));
+
+            // Epilogue: SP += 16
+            code.extend(adjust_sp(16));
+            // BR R14
+            code.extend_from_slice(&encode_br(LR));
+
+            // Patch BRC 0x2 (alpha) to target alpha_offset.
+            let brc_alpha_disp = ((alpha_offset as i64) - (brc_alpha_pos as i64)) / 2;
+            let brc_alpha_be = (brc_alpha_disp as i16).to_be_bytes();
+            code[brc_alpha_pos + 2..brc_alpha_pos + 4].copy_from_slice(&brc_alpha_be);
+            // Patch BRCL 0xF (store) to target store_offset.
+            let brcl_store_disp = ((store_offset as i64) - (brcl_store_pos as i64)) / 2;
+            let brcl_store_be = (brcl_store_disp as i32).to_be_bytes();
+            code[brcl_store_pos + 2..brcl_store_pos + 6].copy_from_slice(&brcl_store_be);
+
+            syscall_stubs.push(("print_hex".to_string(), code));
+        }
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -2425,6 +2757,14 @@ impl Backend for S390XBackend {
             func_offsets.insert(name.clone(), stub_offset);
             stub_offset += code.len();
         }
+
+        // ── Register __vuma_print_int / __vuma_print_hex as aliases
+        // pointing at the same offsets as print_int / print_hex, so user
+        // code can call them by their bare POSIX-friendly names.
+        let print_int_offset = func_offsets.get("print_int").copied().unwrap_or(0);
+        let print_hex_offset = func_offsets.get("print_hex").copied().unwrap_or(0);
+        func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
+        func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);

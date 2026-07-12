@@ -4027,9 +4027,19 @@ impl Backend for Sparc64Backend {
                 ("sendto", 197),
                 ("epoll_create1", 293),
                 // NOTE: epoll_ctl/epoll_wait previously used 194/195 which
-                // collide with connect/getsockname on SPARC. Removed pending
-                // verification of the correct SPARC epoll syscall numbers.
+                // collide with connect/getsockname on SPARC. The correct
+                // SPARC64 epoll syscall numbers are 294 (epoll_ctl) and
+                // 295 (epoll_wait), verified against
+                // arch/sparc/include/uapi/asm/unistd.h.
+                ("epoll_ctl", 294),
+                ("epoll_wait", 295),
                 ("clone", 217),
+                // ── Additional POSIX syscall stubs ──
+                // SPARC64 stat family uses old syscall numbers (oldstat=38,
+                // oldlstat=68, oldfstat=91).  QEMU translates the old struct
+                // stat to the host's native struct stat.
+                ("stat", 38), ("lstat", 68), ("fstat", 91),
+                ("getcwd", 119),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -4081,6 +4091,81 @@ impl Backend for Sparc64Backend {
         };
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
+
+        // ── rt_sigreturn (175) — special: no args, never returns ──
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(
+                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 175 }.encode(),
+            );
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            // Safety trap in case the kernel ever returns (it shouldn't).
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x05 }.encode());
+            syscall_stubs.push(("rt_sigreturn".to_string(), code));
+        }
+
+        // ── waitpid(pid, wstatus, options) → wait4(pid, wstatus, options, NULL)
+        // SPARC64: %o3 = 4th arg (rusage). Zero it before the syscall.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O3, rs1: Gpr::G0, imm: 0 }.encode()); // rusage=NULL
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 7 }.encode());  // sys_wait4
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
+            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            syscall_stubs.push(("waitpid".to_string(), code));
+        }
+
+        // ── recv(fd, buf, len, flags) → recvfrom(fd, buf, len, flags, NULL, NULL)
+        // SPARC64: %o4 = addr, %o5 = addrlen. Both must be NULL.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::G0, imm: 0 }.encode()); // addr=NULL
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode()); // addrlen=NULL
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 198 }.encode()); // sys_recvfrom
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
+            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            syscall_stubs.push(("recv".to_string(), code));
+        }
+
+        // ── send(fd, buf, len, flags) → sendto(fd, buf, len, flags, NULL, 0)
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 197 }.encode()); // sys_sendto
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
+            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            syscall_stubs.push(("send".to_string(), code));
+        }
+
+        // ── strcmp(s1, s2) → int — assembly loop, not a syscall
+        // SPARC64: %o0=s1, %o1=s2, return in %o0. Uses %o2-%o4 as scratch.
+        // Branches have delay slots filled with NOP (0x01000000).
+        {
+            let mut code = Vec::new();
+            let nop: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
+            // loop:
+            code.extend_from_slice(&Instruction::Ldub { rd: Gpr::O2, rs1: Gpr::O0, imm: 0 }.encode()); // %o2 = *s1
+            code.extend_from_slice(&Instruction::Ldub { rd: Gpr::O3, rs1: Gpr::O1, imm: 0 }.encode()); // %o3 = *s2
+            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::O4, rs1: Gpr::O2, rs2: Gpr::O3 }.encode()); // %o4 = %o2 - %o3, set CC
+            code.extend_from_slice(&Instruction::Bne { offset: 9 }.encode());  // BNE done (+9 words)
+            code.extend_from_slice(&nop); // delay slot
+            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: Gpr::O2, rs2: Gpr::G0 }.encode()); // check %o2 == 0
+            code.extend_from_slice(&Instruction::Be { offset: 6 }.encode());   // BE done (+6 words)
+            code.extend_from_slice(&nop); // delay slot
+            code.extend_from_slice(&Instruction::AddImm { rd: Gpr::O0, rs1: Gpr::O0, imm: 1 }.encode()); // s1++
+            code.extend_from_slice(&Instruction::AddImm { rd: Gpr::O1, rs1: Gpr::O1, imm: 1 }.encode()); // s2++
+            code.extend_from_slice(&Instruction::Ba { offset: -10 }.encode()); // BA loop (-10 words)
+            code.extend_from_slice(&nop); // delay slot
+            // done:
+            code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::O4, rs2: Gpr::G0 }.encode()); // %o0 = %o4
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
+            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            syscall_stubs.push(("strcmp".to_string(), code));
+        }
 
         // ── Runtime helpers: print_int, print_hex ──
         // print_int(%o0) — print %o0 as a signed decimal integer to stdout.

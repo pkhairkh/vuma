@@ -9,8 +9,8 @@
 //! - No branch delay slots.
 //! - Linux/hppa syscall convention: syscall # in R20, args in R26-R23,
 //!   return in R28, invoke via `ble 0x100(%sr2,%r0)` (GATE instruction).
-//! - Stack grows upward (higher addresses). SP = R30. FP = R3.
-//! - R1 = return address (RP), R2 = return pointer (SP before call).
+//! - Stack grows upward (higher addresses). R30 = R30. FP = R3.
+//! - R1 = return address (RP), R2 = return pointer (R30 before call).
 //!
 //! ## PA-RISC Instruction Formats
 //!
@@ -31,15 +31,15 @@ use crate::ir::{alignment_of_with_ptr_width, size_of_with_ptr_width, IRFunction,
 // ===========================================================================
 
 /// PA-RISC general-purpose registers.
-/// R0 = hardwired zero, R1 = RP (return pointer), R2 = SP (previous),
+/// R0 = hardwired zero, R1 = RP (return pointer), R2 = R30 (previous),
 /// R3 = FP (frame pointer), R26-R23 = arg regs (reversed order),
-/// R28 = ret val, R29 = ret val2, R30 = SP (stack pointer),
+/// R28 = ret val, R29 = ret val2, R30 = R30 (stack pointer),
 /// R31 = link register for BL.
 type Reg = u8;
 
 const R0: Reg = 0;   // Hardwired zero
 const R1: Reg = 1;   // RP (return pointer)
-const R2: Reg = 2;   // Return SP (caller's SP)
+const R2: Reg = 2;   // Return R30 (caller's R30)
 const R3: Reg = 3;   // FP (frame pointer)
 const R4: Reg = 4;
 const R5: Reg = 5;
@@ -67,7 +67,7 @@ const R26: Reg = 26; // Syscall arg 1
 const R27: Reg = 27;
 const R28: Reg = 28; // Return value
 const R29: Reg = 29; // Return value 2
-const R30: Reg = 30; // SP (stack pointer)
+const R30: Reg = 30; // R30 (stack pointer)
 const R31: Reg = 31; // Link register target for BL
 
 // Global set of function names that return 64-bit values (I64/U64).
@@ -841,7 +841,7 @@ impl Backend for HppaBackend {
         // Locals are at NEGATIVE offsets from FP (below FP).
         // vreg stack slots start at -32 (below RP at -20, old FP at -24,
         // and a dedicated zero-extension scratch slot at -28).
-        // The prologue saves RP at SP-20 and old FP at SP-24. FP-28 is
+        // The prologue saves RP at R30-20 and old FP at R30-24. FP-28 is
         // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
         // of values >= 0x80000000, so vregs must start at -32.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
@@ -854,7 +854,7 @@ impl Backend for HppaBackend {
         }
 
         // Alloc regions: use mmap (__vuma_alloc) instead of stack space.
-        // QEMU's PA-RISC stack is small (~1.6KB below initial SP), so large
+        // QEMU's PA-RISC stack is small (~1.6KB below initial R30), so large
         // allocations on the stack would overflow. All allocate() calls
         // are routed to __vuma_alloc (mmap) at runtime.
         // alloc_offsets is kept empty — the Alloc instruction generates a
@@ -868,15 +868,15 @@ impl Backend for HppaBackend {
         let mut relocations: Vec<RelocationEntry> = Vec::new();
 
         // PA-RISC prologue:
-        // 1. STW R2, -20(SP) — save RP
-        // 2. STW R3, -24(SP) — save old FP (callee-saved)
-        // 3. COPY SP, R3 — FP = SP
-        // 4. SUB SP, frame_size, SP — SP -= frame_size
-        code.extend_from_slice(&encode_stw(R2, R30, -20));  // save RP at SP-20
-        code.extend_from_slice(&encode_stw(R3, R30, -24));  // save old FP at SP-24
-        code.extend_from_slice(&encode_copy(R30, R3));      // FP = SP
+        // 1. STW R2, -20(R30) — save RP
+        // 2. STW R3, -24(R30) — save old FP (callee-saved)
+        // 3. COPY R30, R3 — FP = R30
+        // 4. SUB R30, frame_size, R30 — R30 -= frame_size
+        code.extend_from_slice(&encode_stw(R2, R30, -20));  // save RP at R30-20
+        code.extend_from_slice(&encode_stw(R3, R30, -24));  // save old FP at R30-24
+        code.extend_from_slice(&encode_copy(R30, R3));      // FP = R30
         code.extend(ss_load_imm(S0, frame_size as i64));
-        code.extend_from_slice(&encode_sub(R30, S0, R30));  // SP -= frame_size
+        code.extend_from_slice(&encode_sub(R30, S0, R30));  // R30 -= frame_size
 
         // Initialize 64-bit temp slots to 0 (prevent garbage reads)
         code.extend_from_slice(&encode_stw(R0, R3, TMP64_A_HI as i16));
@@ -1491,12 +1491,12 @@ impl Backend for HppaBackend {
                             code.extend_from_slice(&encode_nop());
                         } else {
                             // Move args to R26-R23 (first 4 args).
-                            // Stack args (4+) go to [SP - 32 + (i-4)*4] (outgoing args area).
+                            // Stack args (4+) go to [R30 - 32 + (i-4)*4] (outgoing args area).
                             for (i, arg) in args.iter().enumerate() {
                                 if i < 4 {
                                     code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
                                 } else {
-                                    // Store stack arg at [SP - 32 + (i-4)*4]
+                                    // Store stack arg at [R30 - 32 + (i-4)*4]
                                     let stack_off = -32 + ((i - 4) * 4) as i32;
                                     code.extend(ss_load_value(arg, &vreg_stack_slots, S0));
                                     code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
@@ -1699,9 +1699,9 @@ impl Backend for HppaBackend {
                             code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
                         }
                     }
-                    code.extend_from_slice(&encode_copy(R3, R30)); // SP = FP
-                    code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from SP-20
-                    code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from SP-24
+                    code.extend_from_slice(&encode_copy(R3, R30)); // R30 = FP
+                    code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from R30-20
+                    code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from R30-24
                     code.extend_from_slice(&encode_bv(R2, R0));
                     code.extend_from_slice(&encode_nop()); // delay slot
                 }
@@ -1873,6 +1873,15 @@ impl Backend for HppaBackend {
             ("shutdown", 348), ("sendto", 349), ("recvfrom", 350),
             ("clone", 120), ("fork", 2),
             ("epoll_create1", 449), ("epoll_ctl", 424), ("epoll_wait", 425),
+                // ── Additional POSIX syscall stubs ──
+                // PA-RISC uses the common syscall numbers for the stat family
+                // (stat=106, lstat=107, fstat=108, getcwd=110).
+                ("stat", 106), ("lstat", 107), ("fstat", 108), ("getcwd", 110),
+                // recv/send alias recvfrom/sendto on PA-RISC (direct syscalls
+                // at 350/349). The caller passes 6 args for recvfrom/sendto;
+                // recv/send declarations with 4 args leave args 5-6 as 0 from
+                // the caller's frame, which the kernel interprets as NULL.
+                ("recv", 350), ("send", 349),
         ] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }
@@ -1887,6 +1896,178 @@ impl Backend for HppaBackend {
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("sigaction".to_string(), code));
+        }
+
+        // rt_sigreturn (173) — special: no args, never returns.
+        // PA-RISC rt_sigreturn = 173. The kernel restores the signal context.
+        {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(R20, 173));
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+            // Safety trap in case the kernel ever returns.
+            code.extend_from_slice(&encode_nop());
+            syscall_stubs.push(("rt_sigreturn".to_string(), code));
+        }
+
+        // waitpid(pid, wstatus, options) → wait4(pid, wstatus, options, NULL)
+        // PA-RISC: arg3 = R23 (4th arg). wait4 needs rusage=NULL in R23.
+        // VUMA's waitpid has only 3 args, so R23 may contain garbage.
+        {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(R23, 0));      // rusage = NULL
+            code.extend(ss_load_imm(R20, 114));    // sys_wait4
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+            code.extend_from_slice(&encode_bv(R2, R0)); // return
+            code.extend_from_slice(&encode_nop());      // BV delay slot
+            syscall_stubs.push(("waitpid".to_string(), code));
+        }
+
+        // strcmp(s1, s2) → int — assembly loop, not a syscall.
+        // PA-RISC calling convention: arg0=R26=s1, arg1=R25=s2, return in R28.
+        // Uses R20, R21, R22 as scratch. Return address in R2 (rp).
+        // COMB condition codes: 001 (=), with inverted=true for <>.
+        // Nullification (f=true): delay slot nullified if branch is taken.
+        // COMB displacement is relative to PC+8.
+        {
+            let mut code = Vec::new();
+            // loop: (offset 0)
+            code.extend_from_slice(&encode_ldb(R26, 0, R20));  // R20 = *s1
+            code.extend_from_slice(&encode_ldb(R25, 0, R21));  // R21 = *s2
+            code.extend_from_slice(&encode_sub(R20, R21, R22)); // R22 = R20 - R21
+            // COMB,<> R20, R21, done (branch if not equal, nullify delay)
+            // cond=001 (=), inverted=true → <>. f=true (nullify on taken).
+            // COMB at offset 12. done at offset 44. disp = 44 - (12+8) = 24.
+            code.extend_from_slice(&encode_cmpb(R20, R21, 0b001, true, true, 24));
+            code.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
+            // COMB,= R20, R0, done (branch if R20==0/NUL, nullify delay)
+            // COMB at offset 20. done at offset 44. disp = 44 - (20+8) = 16.
+            code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, true, 16));
+            code.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
+            code.extend_from_slice(&encode_ldo(R26, 1, R26)); // s1++
+            code.extend_from_slice(&encode_ldo(R25, 1, R25)); // s2++
+            // BL loop (unconditional). BL at offset 36. loop at 0.
+            // BL target = PC + 8 + (disp * 4). target_offset = 0 - (36+8) = -44.
+            code.extend_from_slice(&encode_bl(-44));
+            code.extend_from_slice(&encode_nop()); // BL delay slot (nullified)
+            // done: (offset 44)
+            code.extend_from_slice(&encode_copy(R22, R28));   // R28 = R22 (return value)
+            code.extend_from_slice(&encode_bv(R2, R0));       // return
+            code.extend_from_slice(&encode_nop());             // BV delay slot
+            syscall_stubs.push(("strcmp".to_string(), code));
+        }
+
+        // print_int(n) → void — write decimal representation to stdout.
+        // PA-RISC: arg0=R26=n. Uses repeated subtraction for divmod-10.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_ldo(R30, -48, R30)); // R30 -= 48
+            code.extend_from_slice(&encode_copy(R26, R19));   // R19 = n
+            code.extend_from_slice(&encode_copy(R0, R18));    // R18 = 0 (sign flag)
+            // BLT R19, .neg (cond=010, f=true, placeholder disp)
+            code.extend_from_slice(&encode_cmpb(R19, R0, 0b010, false, true, 0));
+            let blt_pos = code.len() - 4;
+            // B .start (placeholder)
+            code.extend_from_slice(&encode_bl(0));
+            let br_start_pos = code.len() - 4;
+            // .neg: R18=1, R19=-R19
+            code.extend_from_slice(&encode_ldi(1, R18));
+            code.extend_from_slice(&encode_sub(R0, R19, R19));
+            // .start: R17=10, R16=&buf[47]
+            let start_offset = code.len();
+            code.extend_from_slice(&encode_ldi(10, R17));
+            code.extend_from_slice(&encode_ldo(R30, 47, R16));
+            // .loop:
+            let loop_offset = code.len();
+            code.extend_from_slice(&encode_copy(R0, R15)); // R15 = quotient = 0
+            // .divloop:
+            let divloop_offset = code.len();
+            code.extend_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, 0)); // if R19 < 10, exit
+            let divblt_pos = code.len() - 4;
+            code.extend_from_slice(&encode_nop()); // delay slot
+            code.extend_from_slice(&encode_sub(R19, R17, R19)); // R19 -= 10
+            code.extend_from_slice(&encode_ldo(R15, 1, R15));   // R15++
+            let div_b_disp = ((divloop_offset as i64) - (code.len() as i64 + 8)) as i32;
+            code.extend_from_slice(&encode_bl(div_b_disp));
+            code.extend_from_slice(&encode_nop());
+            // .divdone: R19=remainder, R15=quotient
+            let divdone_offset = code.len();
+            code.extend_from_slice(&encode_ldo(R19, 48, R19)); // R19 += '0'
+            code.extend_from_slice(&encode_stb(R19, R16, 0));  // *R16 = digit
+            code.extend_from_slice(&encode_ldo(R16, -1, R16)); // R16--
+            code.extend_from_slice(&encode_copy(R15, R19));    // R19 = quotient
+            let loop_disp = ((loop_offset as i64) - (code.len() as i64 + 8)) as i32;
+            code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, true, loop_disp)); // if R19 != 0, loop
+            code.extend_from_slice(&encode_nop());
+            // if R18 (negative), write '-'
+            let skip_dash_target = code.len() + 12;
+            let skip_dash_disp = ((skip_dash_target as i64) - (code.len() as i64 + 8)) as i32;
+            code.extend_from_slice(&encode_cmpb(R18, R0, 0b001, false, true, skip_dash_disp));
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_ldi(45, R19));     // '-'
+            code.extend_from_slice(&encode_stb(R19, R16, 0));
+            code.extend_from_slice(&encode_ldo(R16, -1, R16));
+            // write(1, R16+1, len)
+            code.extend_from_slice(&encode_ldo(R16, 1, R16));
+            code.extend_from_slice(&encode_ldo(R30, 48, R15));
+            code.extend_from_slice(&encode_sub(R15, R16, R15));
+            code.extend_from_slice(&encode_ldi(1, R26));
+            code.extend_from_slice(&encode_copy(R16, R25));
+            code.extend_from_slice(&encode_copy(R15, R24));
+            code.extend_from_slice(&encode_ldi(4, R20));
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_ldo(R30, 48, R30));
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            // Patch branches
+            let neg_target = br_start_pos + 4;
+            let blt_disp = ((neg_target as i64) - (blt_pos as i64 + 8)) as i32;
+            code[blt_pos..blt_pos+4].copy_from_slice(&encode_cmpb(R19, R0, 0b010, false, true, blt_disp));
+            let br_disp = ((start_offset as i64) - (br_start_pos as i64 + 8)) as i32;
+            code[br_start_pos..br_start_pos+4].copy_from_slice(&encode_bl(br_disp));
+            let divblt_disp = ((divdone_offset as i64) - (divblt_pos as i64 + 8)) as i32;
+            code[divblt_pos..divblt_pos+4].copy_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, divblt_disp));
+            syscall_stubs.push(("print_int".to_string(), code));
+        }
+
+        // print_hex(n) → void — write hex representation to stdout.
+        // PA-RISC: arg0=R26=n. Uses nibble extraction with AND and SHRPW.
+        {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_ldo(R30, -48, R30)); // R30 -= 48
+            code.extend_from_slice(&encode_copy(R26, R19));   // R19 = n
+            code.extend_from_slice(&encode_ldi(15, R17));     // R17 = 15 (mask)
+            code.extend_from_slice(&encode_ldi(10, R14));     // newline
+            code.extend_from_slice(&encode_stb(R14, R30, 16)); // buf[16] = '\n'
+            code.extend_from_slice(&encode_ldo(R30, 15, R16)); // R16 = &buf[15]
+            // .hex_loop:
+            let hx_loop = code.len();
+            // R12 = R19 & 15 (PA-RISC AND: major=0x08, format: 0x08000000 | (r2<<21) | (r1<<16) | t)
+            let and_word: u32 = 0x08000000u32 | ((R17 as u32) << 21) | ((R19 as u32) << 16) | (R12 as u32);
+            code.extend_from_slice(&and_word.to_be_bytes());
+            code.extend_from_slice(&encode_ldo(R12, 48, R12)); // R12 += '0'
+            code.extend_from_slice(&encode_stb(R12, R16, 0));  // *R16 = digit
+            code.extend_from_slice(&encode_ldo(R16, -1, R16)); // R16--
+            code.extend_from_slice(&encode_shrpw(R19, R0, 4, R19)); // R19 >>= 4
+            let hx_loop_disp = ((hx_loop as i64) - (code.len() as i64 + 8)) as i32;
+            code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, true, hx_loop_disp)); // if R19 != 0, loop
+            code.extend_from_slice(&encode_nop());
+            // write(1, R16+1, len)
+            code.extend_from_slice(&encode_ldo(R16, 1, R16));
+            code.extend_from_slice(&encode_ldo(R30, 17, R15));
+            code.extend_from_slice(&encode_sub(R15, R16, R15));
+            code.extend_from_slice(&encode_ldi(1, R26));
+            code.extend_from_slice(&encode_copy(R16, R25));
+            code.extend_from_slice(&encode_copy(R15, R24));
+            code.extend_from_slice(&encode_ldi(4, R20));
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_ldo(R30, 48, R30));
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // __vuma_free(addr) → munmap(addr, 0).
