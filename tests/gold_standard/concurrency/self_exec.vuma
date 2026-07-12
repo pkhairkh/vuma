@@ -618,7 +618,7 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
     close(p1_read);
     close(p2_write);
 
-    // Step 3: Write "VUMA-SELF-EXEC-TEST" (20 bytes) to child via pipe1
+    // Step 3: Write "VUMA-SELF-EXEC-TEST" (19 bytes) to child via pipe1
     msg_buf = allocate(20);
     *(msg_buf + 0)  = 86;    // 'V'
     *(msg_buf + 1)  = 85;    // 'U'
@@ -640,11 +640,11 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
     *(msg_buf + 17) = 83;    // 'S'
     *(msg_buf + 18) = 84;    // 'T'
 
-    written: i64 = write(p1_write, msg_buf, 20);
+    written: i64 = write(p1_write, msg_buf, 19);
     free(msg_buf);
     close(p1_write);
 
-    if written != 20 {
+    if written != 19 {
         close(p2_read);
         free(pipe1fd);
         free(pipe2fd);
