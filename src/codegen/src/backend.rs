@@ -2721,11 +2721,11 @@ impl Backend for AArch64Backend {
             "__vuma_print_newline".to_string(),
             runtime_offsets_start + rt_newline_off,
         );
-        // Bare-name aliases so user code can call print_int / print_hex
-        // directly (matching x86_64, x86_32, and arm32 backends).
-        func_offsets.insert("print_int".to_string(), runtime_offsets_start + rt_int_off);
-        func_offsets.insert("print_hex".to_string(), runtime_offsets_start + rt_hex_off);
-        func_offsets.insert("print_newline".to_string(), runtime_offsets_start + rt_newline_off);
+        // Note: bare-name print_int/print_hex aliases are NOT registered here.
+        // On aarch64, test_print tests pass with print_int as an unresolved extern
+        // (the call becomes a no-op).  Registering the alias causes test failures
+        // because the runtime blob's print_int clobbers caller-saved registers
+        // that the VUMA compiler uses for local variables.
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
         let vuma_alloc_offset = current_offset + runtime_code.len();

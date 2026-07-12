@@ -85,7 +85,13 @@ def make_host_functions(store, memory):
     # Returns 0 in child, child PID in parent, -1 on error.
     def vuma_fork():
         try:
-            return os.fork()
+            # Suppress the deprecation warning about multi-threaded fork.
+            # wasmtime uses background threads, but fork() is safe as long
+            # as the child immediately calls execve (which our VUMA code does).
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return os.fork()
         except OSError:
             return -1
 
@@ -241,7 +247,6 @@ def main():
     def vuma_pipe(pipefd_ptr):
         try:
             r, w = os.pipe()
-            # wasm32 is always little-endian; write fds as LE 32-bit ints
             write_mem(pipefd_ptr, struct.pack('<ii', r, w))
             return 0
         except OSError:
@@ -249,7 +254,13 @@ def main():
 
     def vuma_fork():
         try:
-            return os.fork()
+            # Suppress the deprecation warning about multi-threaded fork.
+            # wasmtime uses background threads, but fork() is safe as long
+            # as the child immediately calls execve (which our VUMA code does).
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return os.fork()
         except OSError:
             return -1
 
@@ -297,6 +308,40 @@ def main():
                 return b1 - b2
         return 0
 
+    # vuma_read(fd, buf_ptr, count) → nbytes
+    # Uses os.read() directly — works with pipe fds that WASI fd_read
+    # doesn't support (WASI only manages its own pre-opened fds).
+    def vuma_read(fd, buf_ptr, count):
+        try:
+            data = os.read(fd, count)
+            mem = get_mem()
+            if mem is not None:
+                mem.write(store, data, buf_ptr)
+            return len(data)
+        except OSError:
+            return -1
+
+    # vuma_write(fd, buf_ptr, count) → nbytes
+    # Uses os.write() directly — works with pipe fds.
+    def vuma_write(fd, buf_ptr, count):
+        try:
+            mem = get_mem()
+            if mem is not None and count > 0:
+                data = mem.read(store, buf_ptr, buf_ptr + count)
+            else:
+                data = b''
+            return os.write(fd, data)
+        except OSError:
+            return -1
+
+    # vuma_close(fd) → 0 on success, -1 on error
+    def vuma_close(fd):
+        try:
+            os.close(fd)
+            return 0
+        except OSError:
+            return -1
+
     i32 = ValType.i32()
     # Define the custom "vuma" module host functions in the linker
     linker.define_func("vuma", "pipe", FuncType([i32], [i32]), vuma_pipe)
@@ -305,6 +350,10 @@ def main():
     linker.define_func("vuma", "dup2", FuncType([i32, i32], [i32]), vuma_dup2)
     linker.define_func("vuma", "waitpid", FuncType([i32, i32, i32], [i32]), vuma_waitpid)
     linker.define_func("vuma", "strcmp", FuncType([i32, i32], [i32]), vuma_strcmp)
+    # read/write/close use direct OS syscalls (bypass WASI for pipe fd support)
+    linker.define_func("vuma", "read", FuncType([i32, i32, i32], [i32]), vuma_read)
+    linker.define_func("vuma", "write", FuncType([i32, i32, i32], [i32]), vuma_write)
+    linker.define_func("vuma", "close", FuncType([i32], [i32]), vuma_close)
 
     # Instantiate the module
     instance = linker.instantiate(store, module)

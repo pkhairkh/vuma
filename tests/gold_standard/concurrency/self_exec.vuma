@@ -374,17 +374,23 @@ fn bytes_to_hex(data: Address, len: u64, out: Address) {
 // workaround — it is the only correct way to interpret kernel-produced
 // data when the language exposes only byte-level memory access.
 
-// Detect host byte order by storing 0x01020304 and inspecting byte 0.
-// Returns true on big-endian (byte 0 == 0x01), false on little-endian.
-fn is_big_endian() -> bool {
-    probe = allocate(4);
-    *(probe + 0) = 4;
-    *(probe + 1) = 3;
-    *(probe + 2) = 2;
-    *(probe + 3) = 1;
-    first: u32 = *(probe + 0);
-    free(probe);
-    return first == 1;
+// Detect host byte order from pipefd bytes.
+// pipe() writes fds as native 32-bit integers.  A valid fd is always
+// >= 3 and < 1024, so only ONE byte of the 4-byte value is nonzero:
+//   On LE: byte 0 = fd (nonzero), bytes 1-3 = 0
+//   On BE: byte 3 = fd (nonzero), bytes 0-2 = 0
+// This is 100% reliable for all Linux kernels and QEMU user-mode targets.
+// VUMA byte loads are endianness-independent, so we CANNOT detect
+// endianness by storing/loading values in our own memory — we MUST use
+// a kernel-produced value (like pipefd's) which is written in native
+// byte order.
+fn detect_be_from_pipefd(fd_buf: Address) -> bool {
+    b0: u64 = *(fd_buf + 0) as u64;
+    be: bool = false;
+    if b0 == 0 {
+        be = true;
+    }
+    return be;
 }
 
 // Detect native pointer size (4 for 32-bit targets, 8 for 64-bit).
@@ -505,7 +511,7 @@ fn child_mode() -> i32 {
 
 // Parent mode: create pipes, fork, exec child, communicate.
 // Returns the first byte of the child's hex output as exit code.
-fn parent_mode(argc: i64, argv: Address, be: bool, ps: u64) -> i32 {
+fn parent_mode(argc: i64, argv: Address) -> i32 {
     // Step 1: Create two pipes
     pipe1fd = allocate(8);
     pipe2fd = allocate(8);
@@ -517,6 +523,15 @@ fn parent_mode(argc: i64, argv: Address, be: bool, ps: u64) -> i32 {
         exit(2);
         return 2;
     }
+
+    // Detect native byte order from the pipefd bytes.
+    // pipe() writes fds in native byte order; a valid fd is a small
+    // positive integer (3-1023), so only one byte is nonzero.
+    be: bool = detect_be_from_pipefd(pipe1fd);
+
+    // Detect native pointer size from the argv address.
+    ps: u64 = ptr_size(argv);
+
     ret = pipe(pipe2fd);
     if ret < 0 {
         free(pipe1fd);
@@ -664,38 +679,16 @@ fn parent_mode(argc: i64, argv: Address, be: bool, ps: u64) -> i32 {
 }
 
 // Main entry point: detect mode and dispatch.
+// The parent execs the child with "child" as argv[1], so argc >= 2
+// means child mode.  This avoids needing to read argv[1] (which
+// requires knowing the native byte order and pointer size before
+// we've called pipe() to detect them).
 fn main(argc: i64, argv: Address) -> i32 {
-    // Detect endianness FIRST (before any u64 locals) to avoid wasm32 bug.
-    be: bool = is_big_endian();
-    ps: u64 = ptr_size(argv);
-
-    // Check argv[1] against "child"
-    is_child: bool = false;
+    result: i32 = 0;
     if argc >= 2 {
-        arg1_val32: u64 = read_u32_native(argv, ps, be);
-        arg1_val64: u64 = read_u64_native(argv, ps, be);
-        arg1_ptr: u64 = 0;
-        if ps == 4 {
-            arg1_ptr = arg1_val32;
-        } else {
-            arg1_ptr = arg1_val64;
-        }
-        child_str = allocate(6);
-        *(child_str + 0) = 99;
-        *(child_str + 1) = 104;
-        *(child_str + 2) = 105;
-        *(child_str + 3) = 108;
-        *(child_str + 4) = 100;
-        *(child_str + 5) = 0;
-        cmp: i64 = strcmp(arg1_ptr as Address, child_str);
-        free(child_str);
-        if cmp == 0 {
-            is_child = true;
-        }
+        result = child_mode();
+    } else {
+        result = parent_mode(argc, argv);
     }
-
-    if is_child {
-        return child_mode();
-    }
-    return parent_mode(argc, argv, be, ps);
+    return result;
 }
