@@ -5100,7 +5100,7 @@ impl Backend for Mips64Backend {
                 ("connect", 5203), ("bind", 5200), ("listen", 5201),
                 ("accept", 5202), ("setsockopt", 5195), ("shutdown", 5210),
                 // ── Phase 8: additional syscalls for full parity ──
-                ("dup3", 5287), ("lstat", 5107),
+                ("dup3", 5286), ("lstat", 5107),
                 ("recvfrom", 5207), ("sendto", 5206),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
@@ -5175,8 +5175,11 @@ impl Backend for Mips64Backend {
             // Use pipe2() which writes to buffer and returns 0 on success.
             {
                 let mut code = Vec::new();
-                // a1 = 0 (flags)
-                code.extend_from_slice(&[0x00, 0x00, 0x20, 0x2a]); // move a1, zero (or $a1, $zero, $zero)
+                // a1 = 0 (flags) — move $a1, $zero (or $a1, $zero, $zero)
+                // R-type: opcode=0, rs=0(zero), rt=0(zero), rd=5(a1), shamt=0, funct=0x25
+                // = (0 << 26) | (0 << 21) | (0 << 16) | (5 << 11) | (0 << 6) | 0x25
+                // = 0x00002825, encoded as LE bytes
+                code.extend_from_slice(&0x00002825u32.to_le_bytes());
                 // li v0, 5287 (sys_pipe2)
                 code.extend_from_slice(&crate::mips64::Instruction::Daddiu { rt: crate::mips64::Gpr::V0, rs: crate::mips64::Gpr::Zero, imm: 5287 }.encode());
                 // syscall
