@@ -3822,7 +3822,7 @@ impl Backend for Sparc64Backend {
 
         // ── _start stub ──
         // 5 instructions = 20 bytes
-        let start_stub_size: usize = 24; // 6 instructions: AND align + SAVE + CALL + NOP + OR + TA
+        let start_stub_size: usize = 80; // 20 instructions: MOV + AND + SAVE + 4*(LDUB+SLL+OR) + ADD + CALL + NOP + OR + TA
         let ffi_stub_size: usize = 12; // OR %g0, 0, %o0; JMPL %i7+8, %g0; RESTORE
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -3999,7 +3999,6 @@ impl Backend for Sparc64Backend {
                 ("kill", 37),
                 ("chdir", 12),
                 ("dup", 41),
-                ("pipe", 42),
                 ("ioctl", 54),
                 ("fcntl", 55),
                 ("futex", 142),
@@ -4091,6 +4090,45 @@ impl Backend for Sparc64Backend {
         };
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
+
+        // ── pipe(pipefd) — SPARC V9 pipe returns fds in registers:
+        // %o0 = read fd, %o1 = write fd.  We must store them to the buffer.
+        // The simple_stub just calls the syscall and returns; it doesn't
+        // store the register fds to the user buffer.
+        {
+            let mut code = Vec::new();
+            // Save %o0 (pipefd buffer ptr) to %l0 (callee-saved local)
+            code.extend_from_slice(
+                &Instruction::Or { rd: Gpr::L0, rs1: Gpr::O0, rs2: Gpr::G0 }.encode(),
+            );
+            // %g1 = 42 (sys_pipe)
+            code.extend_from_slice(
+                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 42 }.encode(),
+            );
+            // ta 0x6d (syscall) — returns read fd in %o0, write fd in %o1
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            // STW %o0, [%l0] — store read fd (32-bit)
+            code.extend_from_slice(
+                &Instruction::Stw { rd: Gpr::O0, rs1: Gpr::L0, imm: 0 }.encode(),
+            );
+            // STW %o1, [%l0+4] — store write fd (32-bit)
+            code.extend_from_slice(
+                &Instruction::Stw { rd: Gpr::O1, rs1: Gpr::L0, imm: 4 }.encode(),
+            );
+            // %o0 = 0 (return success)
+            code.extend_from_slice(
+                &Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 0 }.encode(),
+            );
+            // JMPL %i7+8, %g0 (return)
+            code.extend_from_slice(
+                &Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode(),
+            );
+            // RESTORE (delay slot)
+            code.extend_from_slice(
+                &Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode(),
+            );
+            syscall_stubs.push(("pipe".to_string(), code));
+        }
 
         // ── rt_sigreturn (175) — special: no args, never returns ──
         {
@@ -4732,10 +4770,17 @@ impl Backend for Sparc64Backend {
         stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
+        // On SPARC V9 Linux, the kernel sets up argc at [%sp] and argv at [%sp+8].
+        // QEMU-sparc64's initial %sp may be misaligned, causing SIGBUS on LDX.
+        // Fix: save original %sp to %o0 before SAVE, then after SAVE use %i0
+        // (which = caller's %o0) to load argc with LDUW (32-bit, only needs
+        // 4-byte alignment).  Then align %sp for the frame.
         let mut start_stub = Vec::with_capacity(start_stub_size);
-        // AND %sp, -16, %sp — align SP to 16 bytes (SPARC v9 requirement).
-        // The kernel/qemu may provide a misaligned initial SP; without
-        // alignment, STX/LDX instructions will SIGBUS.
+        // MOV %sp, %o0 — save original %sp to %o0 (becomes %i0 after SAVE)
+        start_stub.extend_from_slice(
+            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O6, rs2: Gpr::G0 }.encode(),
+        );
+        // AND %sp, -16, %sp — align %sp to 16 bytes (SPARC v9 requirement)
         start_stub.extend_from_slice(
             &Instruction::AndImm {
                 rd: Gpr::O6,
@@ -4745,11 +4790,69 @@ impl Backend for Sparc64Backend {
             .encode(),
         );
         // SAVE %sp, -192, %sp (allocate register window)
+        // After SAVE: %fp (%i6) = aligned %sp, %i0 = caller's %o0 = original %sp
         start_stub.extend_from_slice(
             &Instruction::Save {
                 rd: Gpr::O6,
                 rs1: Gpr::O6,
                 imm: -192,
+            }
+            .encode(),
+        );
+        // Load argc from [%i0] using byte loads (unaligned-safe).
+        // QEMU-sparc64's initial %sp may not be 4-byte aligned, so LDUW SIGBUS.
+        // argc is a 64-bit value but fits in 32 bits on Linux.
+        // We load 4 bytes (little-endian on sparc64 Linux user-mode) and combine.
+        // SPARC is big-endian, but Linux/sparc64 user-mode argc at [%sp] is
+        // stored in native (big-endian) byte order.
+        // Byte 0 = MSB, byte 3 = LSB.
+        // %o0 = (byte0 << 24) | (byte1 << 16) | (byte2 << 8) | byte3
+        // LDUB [%i0+0], %o0  (byte0 = MSB)
+        start_stub.extend_from_slice(
+            &Instruction::Ldub { rd: Gpr::O0, rs1: Gpr::I0, imm: 0 }.encode(),
+        );
+        // SLL %o0, 8, %o0  (shift left 8)
+        start_stub.extend_from_slice(
+            &Instruction::SllImm { rd: Gpr::O0, rs1: Gpr::O0, imm: 8 }.encode(),
+        );
+        // LDUB [%i0+1], %l0  (byte1)
+        start_stub.extend_from_slice(
+            &Instruction::Ldub { rd: Gpr::L0, rs1: Gpr::I0, imm: 1 }.encode(),
+        );
+        // OR %o0, %l0, %o0
+        start_stub.extend_from_slice(
+            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O0, rs2: Gpr::L0 }.encode(),
+        );
+        // SLL %o0, 8, %o0
+        start_stub.extend_from_slice(
+            &Instruction::SllImm { rd: Gpr::O0, rs1: Gpr::O0, imm: 8 }.encode(),
+        );
+        // LDUB [%i0+2], %l0  (byte2)
+        start_stub.extend_from_slice(
+            &Instruction::Ldub { rd: Gpr::L0, rs1: Gpr::I0, imm: 2 }.encode(),
+        );
+        // OR %o0, %l0, %o0
+        start_stub.extend_from_slice(
+            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O0, rs2: Gpr::L0 }.encode(),
+        );
+        // SLL %o0, 8, %o0
+        start_stub.extend_from_slice(
+            &Instruction::SllImm { rd: Gpr::O0, rs1: Gpr::O0, imm: 8 }.encode(),
+        );
+        // LDUB [%i0+3], %l0  (byte3 = LSB)
+        start_stub.extend_from_slice(
+            &Instruction::Ldub { rd: Gpr::L0, rs1: Gpr::I0, imm: 3 }.encode(),
+        );
+        // OR %o0, %l0, %o0  (final argc in %o0)
+        start_stub.extend_from_slice(
+            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O0, rs2: Gpr::L0 }.encode(),
+        );
+        // ADD %i0, 8, %o1 — argv = original %sp + 8 = %i0 + 8
+        start_stub.extend_from_slice(
+            &Instruction::AddImm {
+                rd: Gpr::O1,
+                rs1: Gpr::I0,
+                imm: 8,
             }
             .encode(),
         );
