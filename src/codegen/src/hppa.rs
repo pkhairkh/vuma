@@ -70,6 +70,23 @@ const R29: Reg = 29; // Return value 2
 const R30: Reg = 30; // SP (stack pointer)
 const R31: Reg = 31; // Link register target for BL
 
+// Global set of function names that return 64-bit values (I64/U64).
+static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
+fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {
+    FUNC_64BIT_RETURNS.get_or_init(|| std::sync::RwLock::new(None))
+}
+pub fn set_64bit_returns(names: &std::collections::HashSet<String>) {
+    *func_64bit_returns().write().unwrap() = Some(names.clone());
+}
+
+// Dedicated 64-bit temp slots (separate from 4-byte vreg slots).
+// TMP64_A: FP-44 (lo), FP-48 (hi) — Shl 32 result
+// TMP64_B: FP-52 (lo), FP-56 (hi) — Or result (for Return)
+// TMP64_C: FP-60 (lo), FP-64 (hi) — Call return high word (for ShrL 32)
+const TMP64_A_HI: i32 = -36;
+const TMP64_B_HI: i32 = -40;
+const TMP64_C_HI: i32 = -44;
+
 // Scratch registers for codegen
 const S0: Reg = R8;
 const S1: Reg = R9;
@@ -828,7 +845,7 @@ impl Backend for HppaBackend {
         // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
         // of values >= 0x80000000, so vregs must start at -32.
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = -64; // Start below incoming args area (FP-32 to FP-1)
+        let mut current_offset: i32 = -64; // Start below incoming args area
         let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
         vreg_ids.sort();
         for &id in &vreg_ids {
@@ -861,7 +878,12 @@ impl Backend for HppaBackend {
         code.extend(ss_load_imm(S0, frame_size as i64));
         code.extend_from_slice(&encode_sub(R30, S0, R30));  // SP -= frame_size
 
-        // Save incoming args. PA-RISC arg regs: R26, R25, R24, R23 (first 4 args).
+        // Initialize 64-bit temp slots to 0 (prevent garbage reads)
+        code.extend_from_slice(&encode_stw(R0, R3, TMP64_A_HI as i16));
+        code.extend_from_slice(&encode_stw(R0, R3, TMP64_B_HI as i16));
+        code.extend_from_slice(&encode_stw(R0, R3, TMP64_C_HI as i16));
+
+        // Save incoming args PA-RISC arg regs: R26, R25, R24, R23 (first 4 args).
         // Stack args (4+) are at [FP - 32 + (i-4)*4] (in the incoming args area).
         let arg_regs = [R26, R25, R24, R23];
         for (i, param) in func.params.iter().enumerate() {
@@ -1000,10 +1022,25 @@ impl Backend for HppaBackend {
                                 code.extend_from_slice(&encode_copy(S0, S0)); // nop-like
                             }
                             BinOpKind::Or => {
-                                // OR = 0x08000260 | (r1<<16) | r2
-                                let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
-                                code.extend_from_slice(&w.to_be_bytes());
-                                code.extend_from_slice(&encode_copy(S0, S0));
+                                // Check if this is a 64-bit Or (combining Shl 32 with checksum)
+                                // Detect: rhs is a Register (not Immediate) — means it's a variable
+                                let is_64bit_pack = !matches!(rhs, IRValue::Immediate(_)) &&
+                                    func.result_types.first()
+                                        .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                                        .unwrap_or(false);
+                                if is_64bit_pack {
+                                    // S0 = lhs_lo (0 from Shl 32), S1 = rhs_lo (checksum)
+                                    let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
+                                    code.extend_from_slice(&w.to_be_bytes());
+                                    // High word = TMP64_A_HI (from Shl 32), store to TMP64_B_HI
+                                    code.extend_from_slice(&encode_ldw(R3, TMP64_A_HI as i16, S4));
+                                    code.extend_from_slice(&encode_stw(S4, R3, TMP64_B_HI as i16));
+                                } else {
+                                    // Regular 32-bit OR
+                                    let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
+                                    code.extend_from_slice(&w.to_be_bytes());
+                                    code.extend_from_slice(&encode_copy(S0, S0));
+                                }
                             }
                             BinOpKind::Xor => {
                                 // XOR = 0x08000280 | (r1<<16) | r2
@@ -1143,58 +1180,55 @@ impl Backend for HppaBackend {
                                 code.extend_from_slice(&encode_copy(S2, S0));
                             }
                             BinOpKind::Shl => {
-                                // Variable left shift via loop: result = lhs;
-                                // while (shift > 0) { result <<= 1; shift--; }
-                                // S0 has lhs, S1 has shift. Use S4 as counter
-                                // (S3 is used by emit_backward_branch as link reg).
-                                code.extend_from_slice(&encode_copy(S1, S4));  // S4 = shift counter
-                                // S0 = lhs (already loaded)
-                                // loop: cmpb,= S4, R0, exit
-                                let loop_off = code.len();
-                                code.extend_from_slice(&encode_cmpb(S4, R0, 0b001, false, false, 0));
-                                code.extend_from_slice(&encode_nop());
-                                // Body: result = result + result (shift left 1); counter--
-                                code.extend_from_slice(&encode_shladd(1, S0, R0, S0));
-                                code.extend_from_slice(&encode_ldo(S4, -1, S4));
-                                let bl_off = code.len() as i64;
-                                code.extend(emit_backward_branch(loop_off as i64, bl_off));
-                                let exit_off = code.len() as i64;
-                                let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
-                                let cmpb_word = u32::from_be_bytes([
-                                    code[loop_off], code[loop_off + 1],
-                                    code[loop_off + 2], code[loop_off + 3],
-                                ]);
-                                let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
-                                code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
+                                // Check for 64-bit shift by 32 (pack high word)
+                                if rhs.as_immediate().map(|v| v == 32).unwrap_or(false) {
+                                    // 64-bit Shl 32: store lhs to TMP64_A_HI, S0 = 0
+                                    code.extend_from_slice(&encode_stw(S0, R3, TMP64_A_HI as i16));
+                                    code.extend_from_slice(&encode_copy(R0, S0));
+                                } else {
+                                    // Regular shift: loop-based
+                                    code.extend_from_slice(&encode_copy(S1, S4));
+                                    let loop_off = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S4, R0, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&encode_shladd(1, S0, R0, S0));
+                                    code.extend_from_slice(&encode_ldo(S4, -1, S4));
+                                    let bl_off = code.len() as i64;
+                                    code.extend(emit_backward_branch(loop_off as i64, bl_off));
+                                    let exit_off = code.len() as i64;
+                                    let cmpb_disp = ((exit_off - loop_off as i64 - 8) as i32) & !3;
+                                    let cmpb_word = u32::from_be_bytes([
+                                        code[loop_off], code[loop_off + 1],
+                                        code[loop_off + 2], code[loop_off + 3],
+                                    ]);
+                                    let cmpb_patched = (cmpb_word & !0x1FFF) | encode_cmpb_disp(cmpb_disp);
+                                    code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
+                                }
                             }
                             BinOpKind::ShrL | BinOpKind::ShrA => {
-                                // Variable right shift via 1-bit SHRPW loop:
-                                //   while (shift > 0) { result = SHRPW(R0, result, 1); shift--; }
-                                //
-                                // SHRPW r0, r2, 1, t = (0:r2) >> 1 = r2 >> 1 (zero-fill).
-                                // This is O(n) where n is the shift amount (max 32),
-                                // vs the old division loop which was O(x * n).
-                                code.extend_from_slice(&encode_copy(S1, S2));  // S2 = shift counter
-                                // S0 = lhs (already loaded)
-                                // Loop: while (S2 != 0) { S0 = SHRPW(R0, S0, 1, S0); S2--; }
-                                let loop_start = code.len();
-                                code.extend_from_slice(&encode_cmpb(S2, R0, 0b001, false, false, 0));
-                                code.extend_from_slice(&encode_nop());
-                                // S0 = S0 >> 1 (via SHRPW R0, S0, 1, S0)
-                                code.extend_from_slice(&encode_shrpw(R0, S0, 1, S0));
-                                // S2--
-                                code.extend_from_slice(&encode_ldo(S2, -1, S2));
-                                // Branch back to loop_start
-                                let bl_off = code.len() as i64;
-                                code.extend(emit_backward_branch(loop_start as i64, bl_off));
-                                let loop_exit = code.len() as i64;
-                                let disp = ((loop_exit - loop_start as i64 - 8) as i32) & !3;
-                                let w = u32::from_be_bytes([
-                                    code[loop_start], code[loop_start + 1],
-                                    code[loop_start + 2], code[loop_start + 3],
-                                ]);
-                                let patched = (w & !0x1FFF) | encode_cmpb_disp(disp);
-                                code[loop_start..loop_start + 4].copy_from_slice(&patched.to_be_bytes());
+                                // Check for 64-bit shift by 32 (unpack high word)
+                                if rhs.as_immediate().map(|v| v == 32).unwrap_or(false) {
+                                    // 64-bit ShrL 32: result = high word from TMP64_C_HI
+                                    code.extend_from_slice(&encode_ldw(R3, TMP64_C_HI as i16, S0));
+                                } else {
+                                    // Regular shift: SHRPW loop
+                                    code.extend_from_slice(&encode_copy(S1, S2));
+                                    let loop_start = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S2, R0, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&encode_shrpw(R0, S0, 1, S0));
+                                    code.extend_from_slice(&encode_ldo(S2, -1, S2));
+                                    let bl_off = code.len() as i64;
+                                    code.extend(emit_backward_branch(loop_start as i64, bl_off));
+                                    let loop_exit = code.len() as i64;
+                                    let disp = ((loop_exit - loop_start as i64 - 8) as i32) & !3;
+                                    let w = u32::from_be_bytes([
+                                        code[loop_start], code[loop_start + 1],
+                                        code[loop_start + 2], code[loop_start + 3],
+                                    ]);
+                                    let patched = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                    code[loop_start..loop_start + 4].copy_from_slice(&patched.to_be_bytes());
+                                }
                             }
                             BinOpKind::Eq | BinOpKind::Ne
                             | BinOpKind::SLt | BinOpKind::ULt
@@ -1516,6 +1550,16 @@ impl Backend for HppaBackend {
                                 let d_id = d.as_register().unwrap_or(0);
                                 let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                                 code.extend(ss_st(R28, d_off));
+                                // Check if callee returns 64-bit
+                                let is_64 = {
+                                    let lock = func_64bit_returns();
+                                    let guard = lock.read().unwrap();
+                                    guard.as_ref().map(|s| s.contains(call_target)).unwrap_or(false)
+                                };
+                                if is_64 {
+                                    // Store high word to TMP64_C_HI for later ShrL 32
+                                    code.extend_from_slice(&encode_stw(R29, R3, TMP64_C_HI as i16));
+                                }
                             }
                         }
                     }
@@ -1646,7 +1690,14 @@ impl Backend for HppaBackend {
                 }
                 IRTerminator::Return(vals) => {
                     if let Some(first_val) = vals.first() {
+                        let is_64 = func.result_types.first()
+                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                            .unwrap_or(false);
                         code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
+                        if is_64 {
+                            // Load high word from TMP64_B_HI into R29
+                            code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
+                        }
                     }
                     code.extend_from_slice(&encode_copy(R3, R30)); // SP = FP
                     code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from SP-20
