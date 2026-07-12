@@ -1566,7 +1566,7 @@ impl Backend for AlphaBackend {
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
                 ("mmap", 113), ("munmap", 111), ("exit", 1), ("exit_group", 4293),
                 ("brk", 17), ("getpid", 20), ("alarm", 27), ("kill", 42),
-                ("pipe", 40), ("dup", 41), ("dup2", 63), ("execve", 59),
+                ("dup", 41), ("dup2", 63), ("execve", 59),
                 ("wait4", 84), ("unlink", 10), ("chdir", 12), ("lseek", 19),
                 ("ioctl", 54), ("fcntl", 55), ("futex", 433), ("poll", 94),
                 ("nanosleep", 162), ("mprotect", 50), ("clock_gettime", 410),
@@ -1589,6 +1589,33 @@ impl Backend for AlphaBackend {
             stubs
         };
 
+        // ── pipe(pipefd) — Alpha pipe syscall returns fds in registers, NOT buffer.
+        // Linux alpha: sys_pipe (40) returns:
+        //   v0 (R0) = read fd
+        //   a4 (R20) = write fd
+        //   a3 (R19) = 0 on success, 1 on error
+        // VUMA code expects pipe(pipefd) to write two 32-bit fds to *pipefd
+        // and return 0 on success, -1 on error.
+        // So we must: save a0 (pipefd ptr), call pipe, store v0/a4 to [a0],
+        // then return 0 (success) or -1 (error).
+        {
+            let mut code = Vec::new();
+            // Save a0 (R16 = pipefd buffer ptr) to a temp (R1)
+            code.extend(Instruction::Or { ra: Gpr::R16, rb: ZERO, rc: Gpr::R1 }.encode());
+            // v0 (R0) = 40 (sys_pipe)
+            code.extend(ss_load_imm(Gpr::R0, 40));
+            // callsys
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            // Store read fd (v0) to [R1]  (STL = 32-bit store)
+            code.extend(Instruction::Stl { ra: Gpr::R0, disp: 0, rb: Gpr::R1 }.encode());
+            // Store write fd (a4 = R20) to [R1+4]
+            code.extend(Instruction::Stl { ra: Gpr::R20, disp: 4, rb: Gpr::R1 }.encode());
+            // Return 0 (success).  If pipe failed, the stored fds will be -1
+            // which close() will handle gracefully.
+            code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R0 }.encode());
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("pipe".to_string(), code));
+        }
 
         // ── rt_sigreturn (173) — special: no args, never returns ──
         {
