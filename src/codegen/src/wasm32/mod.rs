@@ -1386,6 +1386,61 @@ const WASI_ARGS_SIZES_GET_IDX: u32 = 7;
 /// Function index for the WASI `args_get` import.
 const WASI_ARGS_GET_IDX: u32 = 8;
 
+// ── Custom "vuma" module host function imports ───────────────────────────
+// These are provided by the custom wasmtime runner (scripts/wasm32_runner.py)
+// to support POSIX operations that WASI does not provide (fork, execve, pipe,
+// dup2, waitpid, etc.).  The host functions use the real OS to perform these
+// operations, bridging between the wasm sandbox and the host process model.
+const VUMA_PIPE_IDX: u32 = 9;        // (pipefd_ptr: i32) -> i32
+const VUMA_FORK_IDX: u32 = 10;       // () -> i32
+const VUMA_EXECVE_IDX: u32 = 11;     // (path: i32, argv: i32, envp: i32) -> i32
+const VUMA_DUP2_IDX: u32 = 12;       // (oldfd: i32, newfd: i32) -> i32
+const VUMA_WAITPID_IDX: u32 = 13;    // (pid: i32, status_ptr: i32, options: i32) -> i32
+const VUMA_STRCMP_IDX: u32 = 14;     // (s1: i32, s2: i32) -> i32
+const VUMA_STAT_IDX: u32 = 15;       // (path: i32, buf: i32) -> i32
+const VUMA_FSTAT_IDX: u32 = 16;      // (fd: i32, buf: i32) -> i32
+const VUMA_LSTAT_IDX: u32 = 17;      // (path: i32, buf: i32) -> i32
+const VUMA_GETCWD_IDX: u32 = 18;     // (buf: i32, size: i32) -> i32
+const VUMA_UNLINK_IDX: u32 = 19;     // (path: i32) -> i32
+const VUMA_GETPID_IDX: u32 = 20;     // () -> i32
+const VUMA_KILL_IDX: u32 = 21;       // (pid: i32, sig: i32) -> i32
+const VUMA_ALARM_IDX: u32 = 22;      // (seconds: i32) -> i32
+const VUMA_CHDIR_IDX: u32 = 23;      // (path: i32) -> i32
+const VUMA_FCHDIR_IDX: u32 = 24;     // N/A — placeholder
+const VUMA_IOCTL_IDX: u32 = 25;      // (fd: i32, req: i32, arg: i32) -> i32
+const VUMA_FCNTL_IDX: u32 = 26;      // (fd: i32, cmd: i32, arg: i32) -> i32
+const VUMA_SOCKET_IDX: u32 = 27;     // (domain: i32, ty: i32, proto: i32) -> i32
+const VUMA_CONNECT_IDX: u32 = 28;    // (fd: i32, addr: i32, len: i32) -> i32
+const VUMA_BIND_IDX: u32 = 29;       // (fd: i32, addr: i32, len: i32) -> i32
+const VUMA_LISTEN_IDX: u32 = 30;     // (fd: i32, backlog: i32) -> i32
+const VUMA_ACCEPT_IDX: u32 = 31;     // (fd: i32, addr: i32, len_ptr: i32) -> i32
+const VUMA_SEND_IDX: u32 = 32;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
+const VUMA_RECV_IDX: u32 = 33;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
+const VUMA_SENDTO_IDX: u32 = 34;     // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen: i32) -> i32
+const VUMA_RECVFROM_IDX: u32 = 35;   // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen_ptr: i32) -> i32
+const VUMA_SHUTDOWN_IDX: u32 = 36;   // (fd: i32, how: i32) -> i32
+const VUMA_SETSOCKOPT_IDX: u32 = 37; // (fd: i32, lvl: i32, opt: i32, val: i32, len: i32) -> i32
+const VUMA_DUP_IDX: u32 = 38;        // (fd: i32) -> i32
+const VUMA_DUP3_IDX: u32 = 39;       // (oldfd: i32, newfd: i32, flags: i32) -> i32
+const VUMA_POLL_IDX: u32 = 40;       // (fds: i32, nfds: i32, timeout: i32) -> i32
+const VUMA_NANOSLEEP_IDX: u32 = 41;  // (req: i32, rem: i32) -> i32
+const VUMA_FUTEX_IDX: u32 = 42;      // (uaddr: i32, op: i32, val: i32, to: i32, uaddr2: i32, val3: i32) -> i32
+const VUMA_EPOLL_CREATE1_IDX: u32 = 43; // (flags: i32) -> i32
+const VUMA_EPOLL_CTL_IDX: u32 = 44;  // (epfd: i32, op: i32, fd: i32, event: i32) -> i32
+const VUMA_EPOLL_WAIT_IDX: u32 = 45; // (epfd: i32, events: i32, maxevents: i32, timeout: i32) -> i32
+const VUMA_CLONE_IDX: u32 = 46;      // (flags: i32, stack: i32, ptid: i32, ctid: i32, tls: i32) -> i32
+const VUMA_SIGACTION_IDX: u32 = 47;  // (signum: i32, act: i32, oldact: i32) -> i32
+const VUMA_RT_SIGPROC_IDX: u32 = 48; // (how: i32, set: i32, oldset: i32, sigsetsize: i32) -> i32
+const VUMA_RT_SIGRETURN_IDX: u32 = 49; // () -> i32
+const VUMA_GETTIMEOFDAY_IDX: u32 = 50; // (tv: i32, tz: i32) -> i32
+const VUMA_MPROTECT_IDX: u32 = 51;   // (addr: i32, len: i32, prot: i32) -> i32
+const VUMA_BRK_IDX: u32 = 52;        // (addr: i32) -> i32
+const VUMA_OPEN_IDX: u32 = 53;       // (path: i32, flags: i32, mode: i32) -> i32
+const VUMA_MMAP_IDX: u32 = 54;       // (addr: i32, len: i32, prot: i32, flags: i32, fd: i32, off: i32) -> i32
+const VUMA_MUNMAP_IDX: u32 = 55;     // (addr: i32, len: i32) -> i32
+const VUMA_EXIT_GROUP_IDX: u32 = 56; // (code: i32) -> i32
+const VUMA_LSEEK_IDX: u32 = 57;      // placeholder — lseek uses WASI fd_seek
+
 // ── Runtime helper memory layout ─────────────────────────────────────────
 // These addresses are in page 0 of linear memory, well below the heap.
 // Used by the __vuma_print_int / __vuma_print_hex runtime helpers.
@@ -3802,6 +3857,51 @@ impl Backend for Wasm32Backend {
         module.add_import(WasmImport::wasi_args_get(args_get_type_idx));
         // args_get is now function index 8 (WASI_ARGS_GET_IDX).
 
+        // ── Custom "vuma" module host function imports ──────────────
+        // These are provided by the custom wasmtime runner
+        // (scripts/wasm32_runner.py) to support POSIX operations that
+        // WASI does not provide (fork, execve, pipe, dup2, waitpid, strcmp).
+        // The host functions use the real OS, bridging the wasm sandbox
+        // and the host process model.  All take/return i32 (wasm32 pointers
+        // and integers are 32-bit).
+        let vuma_type_0_i32 = module.add_type(WasmFuncType {
+            params: vec![], results: vec![WasmType::I32],
+        });  // () -> i32  (fork)
+        let vuma_type_1_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32], results: vec![WasmType::I32],
+        });  // (i32) -> i32  (pipe)
+        let vuma_type_2_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32], results: vec![WasmType::I32],
+        });  // (i32, i32) -> i32  (dup2, strcmp)
+        let vuma_type_3_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32], results: vec![WasmType::I32],
+        });  // (i32, i32, i32) -> i32  (execve, waitpid)
+        // Import indices 9-14 for the six critical self_exec functions.
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "pipe".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_1_i32 },
+        });  // idx 9 = VUMA_PIPE_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "fork".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_0_i32 },
+        });  // idx 10 = VUMA_FORK_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "execve".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 11 = VUMA_EXECVE_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "dup2".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 12 = VUMA_DUP2_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "waitpid".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 13 = VUMA_WAITPID_IDX
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "strcmp".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 14 = VUMA_STRCMP_IDX
+
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
         let start_type_idx = module.add_type(WasmFuncType {
@@ -3876,6 +3976,14 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("random_get".to_string(),      WASI_RANDOM_GET_IDX);
         func_name_to_idx.insert("args_sizes_get".to_string(),  WASI_ARGS_SIZES_GET_IDX);
         func_name_to_idx.insert("args_get".to_string(),        WASI_ARGS_GET_IDX);
+        // Custom "vuma" host function imports (provided by wasm32_runner.py).
+        // These map VUMA extern names to the custom import function indices.
+        func_name_to_idx.insert("pipe".to_string(),     VUMA_PIPE_IDX);
+        func_name_to_idx.insert("fork".to_string(),      VUMA_FORK_IDX);
+        func_name_to_idx.insert("execve".to_string(),    VUMA_EXECVE_IDX);
+        func_name_to_idx.insert("dup2".to_string(),      VUMA_DUP2_IDX);
+        func_name_to_idx.insert("waitpid".to_string(),   VUMA_WAITPID_IDX);
+        func_name_to_idx.insert("strcmp".to_string(),    VUMA_STRCMP_IDX);
 
         // ── Stub function for unknown externs ──────────────────────
         // When the wasm32 backend encounters a call to an unknown extern

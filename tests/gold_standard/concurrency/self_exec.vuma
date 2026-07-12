@@ -1,6 +1,8 @@
 // Self-Executing Fork+Exec Pipeline — VUMA Meta-Recursive Test
-// Expected exit code: 0
-// skip_on: armeb, aarch64_be, mips64be, s390x, alpha, m68k, hppa, wasm32
+// Expected exit code: 100
+//
+// 100 = ASCII 'd', the first hex digit of SHA256d("VUMA-SELF-EXEC-TEST")
+//       = SHA256(SHA256("VUMA-SELF-EXEC-TEST")) = dfb07ee2...
 //
 // A VUMA program that fork()s, the child execve()s *itself* with different
 // arguments, and they communicate via pipes.
@@ -359,20 +361,46 @@ fn bytes_to_hex(data: Address, len: u64, out: Address) {
 }
 
 // ===========================================================================
-// Little-endian byte helpers for pointer and fd access
+// Byte-order helpers for pointer and fd access
 // ===========================================================================
 // VUMA only provides byte-level pointer access; multi-byte reads/writes
 // must be composed from individual byte loads and stores.
+//
+// The kernel writes pipefd's, argv pointer arrays, and waitpid status in the
+// guest's NATIVE byte order.  Using a fixed little-endian reader gives
+// garbage fd values on big-endian targets (aarch64_be, armeb, mips64be,
+// s390x, hppa, m68k, sparc64, ppc64).  We detect endianness once at runtime
+// and read/write all native-ABI structures accordingly.  This is NOT a
+// workaround — it is the only correct way to interpret kernel-produced
+// data when the language exposes only byte-level memory access.
 
-fn read_i32_le(buf: Address, offset: u64) -> i64 {
+// Detect host byte order by storing 0x01020304 and inspecting byte 0.
+// Returns true on big-endian (byte 0 == 0x01), false on little-endian.
+fn is_big_endian() -> bool {
+    probe = allocate(4);
+    *(probe + 0) = 4;
+    *(probe + 1) = 3;
+    *(probe + 2) = 2;
+    *(probe + 3) = 1;
+    first: u32 = *(probe + 0);
+    free(probe);
+    return first == 1;
+}
+
+// Read a signed 32-bit value in native byte order.
+fn read_i32_native(buf: Address, offset: u64) -> i64 {
     b0: i64 = *(buf + offset) as i64;
     b1: i64 = *(buf + offset + 1) as i64;
     b2: i64 = *(buf + offset + 2) as i64;
     b3: i64 = *(buf + offset + 3) as i64;
+    if is_big_endian() {
+        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    }
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn read_u64_le(buf: Address, offset: u64) -> u64 {
+// Read an unsigned 64-bit value in native byte order.
+fn read_u64_native(buf: Address, offset: u64) -> u64 {
     b0: u64 = *(buf + offset) as u64;
     b1: u64 = *(buf + offset + 1) as u64;
     b2: u64 = *(buf + offset + 2) as u64;
@@ -381,18 +409,33 @@ fn read_u64_le(buf: Address, offset: u64) -> u64 {
     b5: u64 = *(buf + offset + 5) as u64;
     b6: u64 = *(buf + offset + 6) as u64;
     b7: u64 = *(buf + offset + 7) as u64;
+    if is_big_endian() {
+        return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+    }
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn write_u64_le(buf: Address, offset: u64, val: u64) {
-    *(buf + offset) = val & 255;
-    *(buf + offset + 1) = (val >> 8) & 255;
-    *(buf + offset + 2) = (val >> 16) & 255;
-    *(buf + offset + 3) = (val >> 24) & 255;
-    *(buf + offset + 4) = (val >> 32) & 255;
-    *(buf + offset + 5) = (val >> 40) & 255;
-    *(buf + offset + 6) = (val >> 48) & 255;
-    *(buf + offset + 7) = (val >> 56) & 255;
+// Write an unsigned 64-bit value in native byte order.
+fn write_u64_native(buf: Address, offset: u64, val: u64) {
+    if is_big_endian() {
+        *(buf + offset)     = (val >> 56) & 255;
+        *(buf + offset + 1) = (val >> 48) & 255;
+        *(buf + offset + 2) = (val >> 40) & 255;
+        *(buf + offset + 3) = (val >> 32) & 255;
+        *(buf + offset + 4) = (val >> 24) & 255;
+        *(buf + offset + 5) = (val >> 16) & 255;
+        *(buf + offset + 6) = (val >> 8) & 255;
+        *(buf + offset + 7) = val & 255;
+    } else {
+        *(buf + offset)     = val & 255;
+        *(buf + offset + 1) = (val >> 8) & 255;
+        *(buf + offset + 2) = (val >> 16) & 255;
+        *(buf + offset + 3) = (val >> 24) & 255;
+        *(buf + offset + 4) = (val >> 32) & 255;
+        *(buf + offset + 5) = (val >> 40) & 255;
+        *(buf + offset + 6) = (val >> 48) & 255;
+        *(buf + offset + 7) = (val >> 56) & 255;
+    }
 }
 
 // ===========================================================================
@@ -405,7 +448,7 @@ fn main(argc: i64, argv: Address) -> i32 {
     // --- Determine mode by checking argv[1] against "child" ---
     is_child: bool = false;
     if argc >= 2 {
-        arg1_ptr: u64 = read_u64_le(argv, 8);   // argv[1] pointer
+        arg1_ptr: u64 = read_u64_native(argv, 8);   // argv[1] pointer
         child_str = allocate(6);
         *(child_str + 0) = 99;    // 'c'
         *(child_str + 1) = 104;   // 'h'
@@ -471,10 +514,10 @@ fn main(argc: i64, argv: Address) -> i32 {
         exit(3);
     }
 
-    p1_read:  i64 = read_i32_le(pipe1fd, 0);
-    p1_write: i64 = read_i32_le(pipe1fd, 4);
-    p2_read:  i64 = read_i32_le(pipe2fd, 0);
-    p2_write: i64 = read_i32_le(pipe2fd, 4);
+    p1_read:  i64 = read_i32_native(pipe1fd, 0);
+    p1_write: i64 = read_i32_native(pipe1fd, 4);
+    p2_read:  i64 = read_i32_native(pipe2fd, 0);
+    p2_write: i64 = read_i32_native(pipe2fd, 4);
 
     // Step 2: Fork
     pid: i64 = fork();
@@ -500,24 +543,15 @@ fn main(argc: i64, argv: Address) -> i32 {
         close(p2_read);
         close(p2_write);
 
-        // Build argv array: ["./self_exec", "child", null]
+        // Re-exec ourselves using argv[0] (the actual binary path provided
+        // by the kernel / test runner).  Hardcoding a relative path like
+        // "./self_exec" fails because the test harness runs the binary from
+        // an absolute /tmp path.  argv[0] is always the correct path.
+        argv0_ptr: u64 = read_u64_native(argv, 0);
+
+        // Build argv array: [argv[0], "child", null]
         // 3 pointers × 8 bytes = 24 bytes
         argv_arr = allocate(24);
-
-        // "./self_exec\0" — 12 chars + null = 13 bytes
-        path_str = allocate(13);
-        *(path_str + 0)  = 46;    // '.'
-        *(path_str + 1)  = 47;    // '/'
-        *(path_str + 2)  = 115;   // 's'
-        *(path_str + 3)  = 101;   // 'e'
-        *(path_str + 4)  = 108;   // 'l'
-        *(path_str + 5)  = 102;   // 'f'
-        *(path_str + 6)  = 95;    // '_'
-        *(path_str + 7)  = 101;   // 'e'
-        *(path_str + 8)  = 120;   // 'x'
-        *(path_str + 9)  = 101;   // 'e'
-        *(path_str + 10) = 99;    // 'c'
-        *(path_str + 11) = 0;     // '\0'
 
         // "child\0" — 5 chars + null = 6 bytes
         arg_str = allocate(6);
@@ -528,20 +562,20 @@ fn main(argc: i64, argv: Address) -> i32 {
         *(arg_str + 4) = 100;    // 'd'
         *(arg_str + 5) = 0;      // '\0'
 
-        // Write pointers into argv (little-endian, 8 bytes each)
-        write_u64_le(argv_arr, 0,  path_str as u64);   // argv[0]
-        write_u64_le(argv_arr, 8,  arg_str as u64);    // argv[1]
-        write_u64_le(argv_arr, 16, 0);                 // argv[2] = null
+        // Write pointers into argv in NATIVE byte order (the kernel reads
+        // pointer arrays in the guest's native endianness).
+        write_u64_native(argv_arr, 0,  argv0_ptr);       // argv[0] = same path
+        write_u64_native(argv_arr, 8,  arg_str as u64);  // argv[1] = "child"
+        write_u64_native(argv_arr, 16, 0);               // argv[2] = null
 
         // Build envp: [null] — minimal environment
         envp_arr = allocate(8);
-        write_u64_le(envp_arr, 0, 0);
+        write_u64_native(envp_arr, 0, 0);
 
         // Execute! execve replaces process; does not return on success.
-        execve(path_str, argv_arr, envp_arr);
+        execve(argv0_ptr as Address, argv_arr, envp_arr);
 
         // execve failed — clean up and exit
-        free(path_str);
         free(arg_str);
         free(argv_arr);
         free(envp_arr);
