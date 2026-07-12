@@ -148,6 +148,11 @@ else
     # installs on some distros (Debian 12+, Ubuntu 23.04+); --break-system-packages
     # overrides this.  --user installs into the user's site-packages.
     WT_INSTALLED=0
+    # Use a unique temp file in the repo to avoid /tmp permission issues
+    # (e.g., when running as root via sudo and /tmp/wt_pip.log exists
+    # from a prior non-root run with restrictive permissions).
+    WT_PIP_LOG="$REPO_DIR/test_results/wt_pip_$$.$RANDOM.log"
+    mkdir -p "$REPO_DIR/test_results"
     for pip_cmd in \
         "pip3 install wasmtime" \
         "python3 -m pip install wasmtime" \
@@ -157,7 +162,7 @@ else
         "python3 -m pip install --user --break-system-packages wasmtime"
     do
         echo "  trying: $pip_cmd"
-        if eval "$pip_cmd" >/tmp/wt_pip.log 2>&1; then
+        if eval "$pip_cmd" >"$WT_PIP_LOG" 2>&1; then
             if python3 -c "import wasmtime" 2>/dev/null; then
                 echo "  ✓ wasmtime Python package installed via: $pip_cmd"
                 WT_INSTALLED=1
@@ -168,10 +173,12 @@ else
     if [ "$WT_INSTALLED" = "0" ]; then
         echo "  ⚠ could not install wasmtime Python package"
         echo "    last pip log:"
-        tail -5 /tmp/wt_pip.log 2>/dev/null | sed 's/^/      /'
+        tail -5 "$WT_PIP_LOG" 2>/dev/null | sed 's/^/      /'
         echo "    (wasm32 self_exec will use CLI fallback)"
         echo "    manual install: pip3 install --break-system-packages wasmtime"
     fi
+    # Clean up temp log
+    rm -f "$WT_PIP_LOG" 2>/dev/null
 fi
 echo ""
 
