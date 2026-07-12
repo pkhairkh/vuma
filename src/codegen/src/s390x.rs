@@ -2464,19 +2464,18 @@ impl Backend for S390XBackend {
 
         // ── strcmp(s1, s2) → int — assembly loop, not a syscall.
         // s390x calling convention: R2=s1, R3=s2, return in R2.
-        // Loop: load byte from each (unsigned via LLGC), compare; if differ
-        // or NUL, return the difference; else advance and repeat.
-        // R4 = byte from s1, R5 = byte from s2, R6 = constant 1.
+        // Uses R0 as increment (caller-saved, avoids clobbering callee-saved R6).
         {
             let mut code = Vec::new();
-            // LGHI R6, 1 (increment)
-            code.extend_from_slice(&encode_lghi(Gpr::R6, 1));
+            // LGHI R0, 1 (increment) — R0 is caller-saved
+            code.extend_from_slice(&encode_lghi(Gpr::R0, 1));
             // strcmp_loop:
             let loop_start = code.len();
             // LLGC R4, 0(R2) — Load Logical Character (unsigned byte) from s1
-            code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, Gpr::R4, Gpr::R0, Gpr::R2, 0));
+            // X2=0 means "no index register" on s390x (R0 as X2 = no index)
+            code.extend_from_slice(&encode_rxy_a(0xE3, 0x90, Gpr::R4, Gpr::R0, Gpr::R2, 0));
             // LLGC R5, 0(R3) — Load Logical Character from s2
-            code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, Gpr::R5, Gpr::R0, Gpr::R3, 0));
+            code.extend_from_slice(&encode_rxy_a(0xE3, 0x90, Gpr::R5, Gpr::R0, Gpr::R3, 0));
             // CGR R4, R5 — Compare 64-bit (sets CC based on R4 - R5)
             code.extend_from_slice(&encode_rre(0xB9, 0x20, Gpr::R4, Gpr::R5));
             // BRC 0x6, done — branch if not equal (mask=6 = LT|GT)
@@ -2487,10 +2486,10 @@ impl Backend for S390XBackend {
             // BRC 0x8, done — branch if equal to 0 (both bytes NUL → strings equal)
             let beq_pos = code.len();
             code.extend_from_slice(&encode_brc(0x8, 0)); // placeholder disp
-            // AGR R2, R6 — advance s1
-            code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R6));
-            // AGR R3, R6 — advance s2
-            code.extend_from_slice(&encode_agr(Gpr::R3, Gpr::R6));
+            // AGR R2, R0 — advance s1 (R2 += R0 = R2 + 1)
+            code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R0));
+            // AGR R3, R0 — advance s2
+            code.extend_from_slice(&encode_agr(Gpr::R3, Gpr::R0));
             // BRCL 0xF, loop_start — unconditional back-branch
             let back_disp = ((loop_start as i64) - (code.len() as i64 + 6)) / 2;
             code.extend_from_slice(&encode_brcl(0xF, back_disp as i32));
@@ -2501,7 +2500,6 @@ impl Backend for S390XBackend {
             code.extend_from_slice(&encode_br(LR));
 
             // Patch BNE and BEQ to target done_offset.
-            // disp = (target_offset - branch_offset) / 2
             let bne_disp = ((done_offset as i64) - (bne_pos as i64)) / 2;
             let bne_disp_be = (bne_disp as i16).to_be_bytes();
             code[bne_pos + 2..bne_pos + 4].copy_from_slice(&bne_disp_be);
