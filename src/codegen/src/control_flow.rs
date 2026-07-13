@@ -1,25 +1,51 @@
 //! # Control Flow Lowering
 //!
 //! This module handles complex control flow lowering for multi-target codegen. It
-//! translates high-level control flow patterns — switch/match dispatch,
-//! exception handling, tail call optimization, coroutine frames, and loop
-//! optimization — into IR-level representations that the emitter can process.
+//! translates high-level control flow patterns — switch/match dispatch, tail call
+//! optimization, and loop optimization — into IR-level representations that the
+//! emitter can process.
 //!
 //! ## Components
 //!
 //! - **SwitchLowerer** — Lowers `IRTerminator::Switch` into jump tables,
 //!   binary search trees, or if-else chains depending on target density.
-//! - **ExceptionLowerer** — Lowers `IRTerminator::Invoke` into call + landing
-//!   pad blocks and generates `.gcc_except_table` entries.
 //! - **TailCallLowerer** — Detects and lowers eligible tail calls into
 //!   frame-discarding jumps.
-//! - **CoroutineLowerer** — Transforms coroutine functions into state-machine
-//!   IR with heap-allocated frames.
 //! - **LoopOptimizer** — Identifies natural loops, checks unroll eligibility,
 //!   and performs loop unrolling.
+//!
+//! ## Wave 35 decision: DELETE exception & coroutine lowerers
+//!
+//! The previous `ExceptionLowerer` (lowers `IRTerminator::Invoke`) and
+//! `CoroutineLowerer` (transforms coroutine functions into state-machine IR)
+//! were removed in Wave 35 because the `.vuma` language has **no syntax** that
+//! can feed them:
+//!
+//! - **Exceptions**: The lexer (`src/parser/src/lexer.rs`) has no `try`,
+//!   `catch`, `raise`, `throw`, or equivalent token kinds. The parser
+//!   (`src/parser/src/parser.rs`) and AST (`src/parser/src/ast.rs`) define no
+//!   exception AST nodes. The lowering pass `to_scg.rs` never emits an
+//!   `IRTerminator::Invoke`. A repo-wide sweep of every `.vuma` file shows the
+//!   words "try"/"catch"/"raise"/"throw" only inside English-language comments,
+//!   never as language constructs.
+//! - **Coroutines**: The lexer has no `yield`, `resume`, or `coroutine` token
+//!   kinds. The `async`/`await` keywords DO exist in the lexer, and
+//!   `Expr::Async`/`Expr::Await` AST nodes exist, but they are lowered through
+//!   the parallel-region path in `to_scg.rs` (line ~1626: "Async block →
+//!   Parallel region") — NOT through `CoroutineLowerer`. `CoroutineLowerer`
+//!   scanned for IR blocks whose label starts with `"yield_"`, a convention
+//!   that no parser/AST producer ever emits. It was therefore dead code.
+//!
+//! The `IRTerminator::Invoke` and `IRTerminator::Resume` enum variants still
+//! exist in `src/codegen/src/ir.rs` (outside this file's ownership) and are
+//! handled defensively by `successor_indices` for IR-walking safety; they are
+//! simply never produced. Removing the enum variants is out of scope for Wave 35.
+//!
+//! Adding speculative language syntax is risky and explicitly out of scope, so
+//! the decision is to DELETE both lowerers rather than wire them.
 
 use crate::backend::{AArch64TargetInfo, TargetInfo};
-use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
+use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -535,282 +561,6 @@ impl SwitchLowerer {
 }
 
 // ===========================================================================
-// ExceptionLowerer
-// ===========================================================================
-
-/// Represents a landing pad for exception handling.
-#[derive(Debug, Clone)]
-pub struct LandingPad {
-    /// Label of the landing pad block.
-    pub label: String,
-    /// The type this pad catches, if any.
-    pub catch_type: Option<String>,
-    /// Action taken at this landing pad.
-    pub action: ExceptionAction,
-}
-
-/// Action taken at an exception landing pad.
-#[derive(Debug, Clone)]
-pub enum ExceptionAction {
-    /// Catch an exception of a specific type and branch to the target block.
-    Catch {
-        /// Target block label for the catch handler.
-        dst: String,
-    },
-    /// Run cleanup code (e.g. destructors) without catching.
-    Cleanup,
-    /// Only catch exceptions whose type is in the allowed list.
-    Filter {
-        /// List of exception type names that this filter catches.
-        allowed_types: Vec<String>,
-    },
-}
-
-/// Exception table entry for the `.gcc_except_table` section.
-///
-/// Each entry describes a region of code and its associated landing pad.
-#[derive(Debug, Clone)]
-pub struct ExceptionTableEntry {
-    /// Start offset (in bytes from function start) of the protected region.
-    pub start_offset: u32,
-    /// End offset (in bytes from function start) of the protected region.
-    pub end_offset: u32,
-    /// Offset of the landing pad from the function start.
-    pub landing_pad_offset: u32,
-    /// Action table index, if any.
-    pub action: Option<u32>,
-}
-
-/// Result of lowering an `IRTerminator::Invoke`.
-pub struct InvokeLowering {
-    /// The call instruction block (normal path).
-    pub call_block: IRBlock,
-    /// The landing pad block (exception path).
-    pub landing_pad: IRBlock,
-}
-
-/// Lowers `IRTerminator::Invoke` terminators into separate call and landing
-/// pad blocks, and generates exception table entries for the `.gcc_except_table`
-/// section.
-pub struct ExceptionLowerer;
-
-impl ExceptionLowerer {
-    /// Lower an Invoke terminator into:
-    /// 1. A Call instruction followed by a Jump to `normal`
-    /// 2. A landing pad block that catches and branches to `unwind`
-    ///
-    /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`Self::lower_invoke_for_target`] with `AArch64TargetInfo`.
-    pub fn lower_invoke(
-        dst: Option<IRValue>,
-        func: &str,
-        args: &[IRValue],
-        normal: &str,
-        unwind: &str,
-        vreg_counter: &mut u32,
-        label_counter: &mut u32,
-    ) -> InvokeLowering {
-        Self::lower_invoke_for_target(
-            dst,
-            func,
-            args,
-            normal,
-            unwind,
-            vreg_counter,
-            label_counter,
-            &AArch64TargetInfo,
-        )
-    }
-
-    /// Lower an Invoke terminator for the given target.
-    ///
-    /// The landing pad reads the exception pointer from a dedicated register
-    /// and the selector value from another, then branches to the unwind
-    /// destination. The number of vregs allocated for exception info depends
-    /// on the target's calling convention.
-    #[allow(clippy::too_many_arguments)]
-    pub fn lower_invoke_for_target(
-        dst: Option<IRValue>,
-        func: &str,
-        args: &[IRValue],
-        normal: &str,
-        unwind: &str,
-        vreg_counter: &mut u32,
-        label_counter: &mut u32,
-        target: &dyn TargetInfo,
-    ) -> InvokeLowering {
-        // Call block: perform the call and jump to normal continuation.
-        let call_label = next_label(label_counter, "invoke_call_");
-        let mut call_block = IRBlock::new(&call_label);
-
-        call_block.push(IRInstr::Call {
-            dst: dst.clone(),
-            func: func.to_string(),
-            args: args.to_vec(),
-            is_extern: true, // runtime function
-        });
-        call_block.terminator = IRTerminator::Jump(normal.to_string());
-
-        // Landing pad block: read exception info and branch to unwind target.
-        let pad_label = next_label(label_counter, "landing_pad_");
-        let mut landing_pad = IRBlock::new(&pad_label);
-
-        // Allocate vregs to receive the exception pointer and selector.
-        // On targets with a link register (ARM64, RISC-V, MIPS, PPC), the
-        // landing pad receives the exception pointer and selector in the
-        // first two integer argument registers. On x86_64, they arrive via
-        // the stack or in RAX/RDX depending on the ABI.
-        let _exception_ptr = next_vreg(vreg_counter);
-        let _selector = next_vreg(vreg_counter);
-
-        // On targets with branch delay slots (MIPS), the emitter must insert
-        // a NOP after the branch at the end of the landing pad. This is
-        // handled by the emitter, not the IR.
-        let _ = target; // Target info available for future per-ISA landing pad layout.
-
-        // The landing pad must eventually resume unwinding by branching to
-        // the unwind destination. In a full implementation we would insert
-        // type-check instructions here (compare selector against type_info
-        // addresses). For now we unconditionally branch to unwind.
-        landing_pad.terminator = IRTerminator::Jump(unwind.to_string());
-
-        log::debug!(
-            "ExceptionLowerer: lowered invoke @{} → call={}, pad={} (target={})",
-            func,
-            call_label,
-            pad_label,
-            target.isa_name()
-        );
-
-        InvokeLowering {
-            call_block,
-            landing_pad,
-        }
-    }
-
-    /// Generate the exception table for a function.
-    ///
-    /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`Self::generate_exception_table_for_target`] with `AArch64TargetInfo`.
-    pub fn generate_exception_table(func: &IRFunction) -> Vec<ExceptionTableEntry> {
-        Self::generate_exception_table_for_target(func, &AArch64TargetInfo)
-    }
-
-    /// Generate the exception table for a function, using the target's
-    /// instruction size for offset estimation.
-    ///
-    /// Walks all blocks in the function looking for `IRTerminator::Invoke`,
-    /// and for each one produces an `ExceptionTableEntry` that maps the
-    /// call-site region to its landing pad.
-    ///
-    /// **Note**: Offset computation is approximate at the IR level; the
-    /// emitter will patch these with actual byte offsets during code
-    /// emission.
-    pub fn generate_exception_table_for_target(
-        func: &IRFunction,
-        target: &dyn TargetInfo,
-    ) -> Vec<ExceptionTableEntry> {
-        let mut entries = Vec::new();
-
-        // Use the target's instruction alignment as the approximate size
-        // of each IR instruction. On fixed-width ISAs (ARM64, RISC-V, MIPS)
-        // this is 4 bytes; on variable-width ISAs (x86_64) it's 1 byte
-        // (a rough underestimate — the emitter will refine).
-        let instr_size = target.instruction_alignment() as u32;
-
-        // Track approximate byte offsets as we walk blocks.
-        let mut current_offset: u32 = 0;
-
-        for block in &func.blocks {
-            let block_start = current_offset;
-
-            for _instr in &block.instructions {
-                current_offset += instr_size;
-            }
-
-            // Check if this block's terminator is an Invoke.
-            if let IRTerminator::Invoke {
-                dst: _,
-                func: invoked_func,
-                args: _,
-                normal: _,
-                unwind,
-            } = &block.terminator
-            {
-                // The call site region spans the instructions of this block
-                // up to the invoke. The landing pad offset is approximate:
-                // we estimate it as the offset of the next block (since the
-                // landing pad block will be emitted right after the call).
-                let call_end_offset = current_offset;
-
-                // Estimate landing pad offset by searching for a block whose
-                // label matches the unwind target.
-                let mut pad_offset = 0u32;
-                let mut search_offset = 0u32;
-                for search_block in &func.blocks {
-                    if search_block.label == *unwind {
-                        pad_offset = search_offset;
-                        break;
-                    }
-                    search_offset +=
-                        (search_block.instructions.len() as u32) * instr_size + instr_size;
-                }
-
-                entries.push(ExceptionTableEntry {
-                    start_offset: block_start,
-                    end_offset: call_end_offset,
-                    landing_pad_offset: pad_offset,
-                    action: None, // No action table entry for simple catches.
-                });
-
-                log::debug!(
-                    "ExceptionLowerer: exception table entry for invoke @{} \
-                     range=[{}, {}) pad={} (target={})",
-                    invoked_func,
-                    block_start,
-                    call_end_offset,
-                    pad_offset,
-                    target.isa_name()
-                );
-            }
-
-            // Terminator counts as one instruction too.
-            current_offset += instr_size;
-        }
-
-        entries
-    }
-
-    /// Build a list of landing pads for a function by scanning all Invoke
-    /// terminators. This is useful for the emitter to know where to emit
-    /// landing pad code.
-    pub fn collect_landing_pads(func: &IRFunction) -> Vec<LandingPad> {
-        let mut pads = Vec::new();
-
-        for block in &func.blocks {
-            if let IRTerminator::Invoke {
-                dst: _,
-                func: _,
-                args: _,
-                normal: _,
-                unwind,
-            } = &block.terminator
-            {
-                pads.push(LandingPad {
-                    label: format!("landing_pad_for_{}", block.label),
-                    catch_type: None,
-                    action: ExceptionAction::Catch {
-                        dst: unwind.clone(),
-                    },
-                });
-            }
-        }
-
-        pads
-    }
-}
-
-// ===========================================================================
 // TailCallLowerer
 // ===========================================================================
 
@@ -1040,665 +790,6 @@ impl TailCallLowerer {
             func: func.to_string(),
             args: args.to_vec(),
         }
-    }
-}
-
-// ===========================================================================
-// CoroutineLowerer
-// ===========================================================================
-
-/// Coroutine state (suspended, running, completed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoroutineState {
-    /// The coroutine is suspended at a yield point, waiting to be resumed.
-    Suspended,
-    /// The coroutine is currently executing.
-    Running,
-    /// The coroutine has completed execution and cannot be resumed.
-    Completed,
-}
-
-impl CoroutineState {
-    /// Return the numeric encoding of this state.
-    pub fn as_u64(self) -> u64 {
-        match self {
-            CoroutineState::Suspended => 0,
-            CoroutineState::Running => 1,
-            CoroutineState::Completed => 2,
-        }
-    }
-}
-
-/// A yield point in a coroutine — where execution suspends.
-#[derive(Debug, Clone)]
-pub struct YieldPoint {
-    /// Unique index identifying this yield point (used for resume dispatch).
-    pub index: u32,
-    /// Label of the block that performs the suspend (save + return).
-    pub suspend_block: String,
-    /// Label of the block where execution resumes after this yield.
-    pub resume_block: String,
-    /// Values that are live across this yield point and must be spilled
-    /// to the coroutine frame.
-    pub live_values: Vec<IRValue>,
-}
-
-/// Layout of a coroutine frame on the heap.
-///
-/// The frame holds the coroutine's state, the yield index for resume
-/// dispatch, and spill slots for live values at each yield point.
-#[derive(Debug, Clone)]
-pub struct CoroutineFrame {
-    /// Size of the frame in bytes.
-    pub size: u32,
-    /// Alignment of the frame.
-    pub align: u32,
-    /// Offset of the state field within the frame.
-    pub state_offset: u32,
-    /// Offset of the yield index field.
-    pub yield_index_offset: u32,
-    /// Offsets for spilled live values at each yield point.
-    /// Each entry is (vreg_name, byte_offset).
-    pub spill_slots: Vec<(String, u32)>,
-}
-
-// These constants are no longer used directly; CoroutineLowerer uses
-// target.pointer_width() and target.stack_alignment() instead.
-// Kept for documentation reference.
-// const COROUTINE_FRAME_ALIGN: u32 = 8;
-// const STATE_FIELD_SIZE: u32 = 8;
-// const YIELD_INDEX_FIELD_SIZE: u32 = 8;
-// const SPILL_SLOT_SIZE: u32 = 8;
-
-/// Transforms coroutine functions into state-machine IR with heap-allocated
-/// frames. Each yield point becomes a suspend (save live values, update
-/// state, return) and each resume is dispatched via the yield index.
-pub struct CoroutineLowerer;
-
-impl CoroutineLowerer {
-    /// Analyze a function to find yield/resume points and compute the
-    /// coroutine frame layout.
-    ///
-    /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`Self::analyze_coroutine_for_target`] with `AArch64TargetInfo`.
-    pub fn analyze_coroutine(func: &IRFunction) -> Option<CoroutineFrame> {
-        Self::analyze_coroutine_for_target(func, &AArch64TargetInfo)
-    }
-
-    /// Analyze a function to find yield/resume points and compute the
-    /// coroutine frame layout, using target-specific sizes.
-    ///
-    /// Returns `None` if the function does not contain any yield points
-    /// (i.e. it's not a coroutine).
-    pub fn analyze_coroutine_for_target(
-        func: &IRFunction,
-        target: &dyn TargetInfo,
-    ) -> Option<CoroutineFrame> {
-        let yield_points = Self::find_yield_points(func);
-
-        if yield_points.is_empty() {
-            log::debug!(
-                "CoroutineLowerer: @{} is not a coroutine (no yield points)",
-                func.name
-            );
-            return None;
-        }
-
-        // Collect all local variables (vregs) used in the function.
-        let local_vars = Self::collect_local_vars(func);
-
-        let frame = Self::compute_frame_layout_for_target(&yield_points, &local_vars, target);
-
-        log::debug!(
-            "CoroutineLowerer: @{} is a coroutine with {} yield points, \
-             frame size={} align={} (target={})",
-            func.name,
-            yield_points.len(),
-            frame.size,
-            frame.align,
-            target.isa_name()
-        );
-
-        Some(frame)
-    }
-
-    /// Compute the frame layout given yield points and live values.
-    ///
-    /// This is the legacy ARM64-compatible entry point. It delegates to
-    /// [`Self::compute_frame_layout_for_target`] with `AArch64TargetInfo`.
-    pub fn compute_frame_layout(
-        yield_points: &[YieldPoint],
-        local_vars: &[IRValue],
-    ) -> CoroutineFrame {
-        Self::compute_frame_layout_for_target(yield_points, local_vars, &AArch64TargetInfo)
-    }
-
-    /// Compute the frame layout given yield points and live values,
-    /// using target-specific pointer width and alignment.
-    ///
-    /// The frame layout is:
-    /// ```text
-    /// offset 0:         state (pointer-sized)
-    /// offset ptr_size:  yield_index (pointer-sized)
-    /// offset 2*ptr_size: spill_slot_0
-    /// ...
-    /// ```
-    pub fn compute_frame_layout_for_target(
-        yield_points: &[YieldPoint],
-        local_vars: &[IRValue],
-        target: &dyn TargetInfo,
-    ) -> CoroutineFrame {
-        let ptr_width = target.pointer_width() as u32;
-        let frame_align = ptr_width; // Frame alignment = pointer width (8 on 64-bit, 4 on 32-bit)
-        let state_field_size = ptr_width;
-        let yield_index_field_size = ptr_width;
-        let spill_slot_size = ptr_width;
-
-        // Collect all unique live values that need spill slots.
-        let mut seen_regs: HashSet<u32> = HashSet::new();
-        let mut spill_slots: Vec<(String, u32)> = Vec::new();
-
-        for yp in yield_points {
-            for val in &yp.live_values {
-                if let Some(reg_id) = val.as_register() {
-                    if seen_regs.insert(reg_id) {
-                        let slot_offset = state_field_size
-                            + yield_index_field_size
-                            + (spill_slots.len() as u32) * spill_slot_size;
-                        spill_slots.push((format!("vreg_{}", reg_id), slot_offset));
-                    }
-                }
-            }
-        }
-
-        // Also add slots for any local vars not already covered.
-        for val in local_vars {
-            if let Some(reg_id) = val.as_register() {
-                if seen_regs.insert(reg_id) {
-                    let slot_offset = state_field_size
-                        + yield_index_field_size
-                        + (spill_slots.len() as u32) * spill_slot_size;
-                    spill_slots.push((format!("vreg_{}", reg_id), slot_offset));
-                }
-            }
-        }
-
-        let data_size = state_field_size
-            + yield_index_field_size
-            + (spill_slots.len() as u32) * spill_slot_size;
-
-        // Round up to alignment.
-        let aligned_size = align_to(data_size, frame_align);
-
-        CoroutineFrame {
-            size: aligned_size,
-            align: frame_align,
-            state_offset: 0,
-            yield_index_offset: state_field_size,
-            spill_slots,
-        }
-    }
-
-    /// Generate prologue code to set up the coroutine frame.
-    ///
-    /// The prologue:
-    /// 1. Allocates the frame on the heap (via a runtime call).
-    /// 2. Stores the initial state (Running) and yield index (0).
-    /// 3. Returns a pointer to the frame.
-    pub fn generate_prologue(frame: &CoroutineFrame, vreg_counter: &mut u32) -> Vec<IRInstr> {
-        let mut instrs = Vec::new();
-
-        // Allocate the frame: call __vuma_coro_alloc(size, align).
-        let frame_ptr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Call {
-            dst: Some(frame_ptr.clone()),
-            func: "__vuma_coro_alloc".to_string(),
-            args: vec![
-                IRValue::Immediate(frame.size as i64),
-                IRValue::Immediate(frame.align as i64),
-            ],
-            is_extern: true,
-        });
-
-        // Store initial state = Running (1).
-        let state_addr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Offset {
-            dst: state_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.state_offset as i64),
-        });
-        instrs.push(IRInstr::Store {
-            value: IRValue::Immediate(CoroutineState::Running as i64),
-            addr: state_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        // Store initial yield_index = 0.
-        let yi_addr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Offset {
-            dst: yi_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.yield_index_offset as i64),
-        });
-        instrs.push(IRInstr::Store {
-            value: IRValue::Immediate(0),
-            addr: yi_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        log::debug!(
-            "CoroutineLowerer: generated prologue, frame size={}",
-            frame.size
-        );
-
-        instrs
-    }
-
-    /// Generate a yield: save live values, update state, return.
-    ///
-    /// At each yield point:
-    /// 1. Store each live value to its spill slot in the frame.
-    /// 2. Store the yield index into the frame.
-    /// 3. Set the state to Suspended.
-    /// 4. Return (the coroutine is suspended).
-    pub fn generate_yield(
-        yield_point: &YieldPoint,
-        frame: &CoroutineFrame,
-        vreg_counter: &mut u32,
-    ) -> Vec<IRInstr> {
-        let mut instrs = Vec::new();
-
-        // We assume the frame pointer is available in a well-known vreg.
-        // In practice the prologue would have stored it and the register
-        // allocator would keep track. Here we create a placeholder load.
-        let frame_ptr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Call {
-            dst: Some(frame_ptr.clone()),
-            func: "__vuma_coro_get_frame".to_string(),
-            args: vec![],
-            is_extern: true,
-        });
-
-        // Save each live value to its spill slot.
-        for live_val in &yield_point.live_values {
-            if let Some(reg_id) = live_val.as_register() {
-                // Look up the spill slot offset for this vreg.
-                let slot_name = format!("vreg_{}", reg_id);
-                if let Some((_, offset)) = frame
-                    .spill_slots
-                    .iter()
-                    .find(|(name, _)| name == &slot_name)
-                {
-                    let slot_addr = next_vreg(vreg_counter);
-                    instrs.push(IRInstr::Offset {
-                        dst: slot_addr.clone(),
-                        base: frame_ptr.clone(),
-                        offset: IRValue::Immediate(*offset as i64),
-                    });
-                    instrs.push(IRInstr::Store {
-                        value: live_val.clone(),
-                        addr: slot_addr,
-                        offset: 0,
-                        ty: IRType::I64,
-                    });
-                }
-            }
-        }
-
-        // Store the yield index.
-        let yi_addr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Offset {
-            dst: yi_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.yield_index_offset as i64),
-        });
-        instrs.push(IRInstr::Store {
-            value: IRValue::Immediate(yield_point.index as i64),
-            addr: yi_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        // Set state to Suspended.
-        let state_addr = next_vreg(vreg_counter);
-        instrs.push(IRInstr::Offset {
-            dst: state_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.state_offset as i64),
-        });
-        instrs.push(IRInstr::Store {
-            value: IRValue::Immediate(CoroutineState::Suspended as i64),
-            addr: state_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        log::debug!(
-            "CoroutineLowerer: generated yield #{} ({} live values)",
-            yield_point.index,
-            yield_point.live_values.len()
-        );
-
-        instrs
-    }
-
-    /// Generate a resume dispatch: load yield index and jump to the
-    /// corresponding resume point.
-    ///
-    /// This generates a switch-like dispatch on the yield index field of
-    /// the coroutine frame. Each yield index maps to a resume block.
-    pub fn generate_resume_dispatch(
-        yield_points: &[YieldPoint],
-        frame: &CoroutineFrame,
-        vreg_counter: &mut u32,
-        label_counter: &mut u32,
-    ) -> Vec<IRBlock> {
-        let mut blocks = Vec::new();
-
-        if yield_points.is_empty() {
-            return blocks;
-        }
-
-        // Entry block: load yield index from frame.
-        let entry_label = next_label(label_counter, "coro_resume_");
-        let mut entry_block = IRBlock::new(&entry_label);
-
-        let frame_ptr = next_vreg(vreg_counter);
-        entry_block.push(IRInstr::Call {
-            dst: Some(frame_ptr.clone()),
-            func: "__vuma_coro_get_frame".to_string(),
-            args: vec![],
-            is_extern: true,
-        });
-
-        let yi_addr = next_vreg(vreg_counter);
-        entry_block.push(IRInstr::Offset {
-            dst: yi_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.yield_index_offset as i64),
-        });
-
-        let yield_index = next_vreg(vreg_counter);
-        entry_block.push(IRInstr::Load {
-            dst: yield_index.clone(),
-            addr: yi_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        // Set state to Running.
-        let state_addr = next_vreg(vreg_counter);
-        entry_block.push(IRInstr::Offset {
-            dst: state_addr.clone(),
-            base: frame_ptr.clone(),
-            offset: IRValue::Immediate(frame.state_offset as i64),
-        });
-        entry_block.push(IRInstr::Store {
-            value: IRValue::Immediate(CoroutineState::Running as i64),
-            addr: state_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-
-        // Also reload live values from spill slots for the appropriate
-        // yield point. We use a switch to dispatch.
-        let targets: Vec<(i64, String)> = yield_points
-            .iter()
-            .map(|yp| (yp.index as i64, yp.resume_block.clone()))
-            .collect();
-
-        // Default: no matching yield index → coroutine completed or error.
-        let completed_label = next_label(label_counter, "coro_completed_");
-
-        // Lower the switch using SwitchLowerer.
-        let switch_blocks = SwitchLowerer::lower_switch(
-            yield_index,
-            &targets,
-            &completed_label,
-            vreg_counter,
-            label_counter,
-        );
-
-        // The first switch block is the dispatch entry; set our entry block's
-        // terminator to jump into it.
-        if let Some(first_switch_block) = switch_blocks.first() {
-            entry_block.terminator = IRTerminator::Jump(first_switch_block.label.clone());
-        } else {
-            entry_block.terminator = IRTerminator::Jump(completed_label.clone());
-        }
-
-        blocks.push(entry_block);
-        blocks.extend(switch_blocks);
-
-        // Completed block: set state to Completed and return.
-        let mut completed_block = IRBlock::new(&completed_label);
-        let state_addr2 = next_vreg(vreg_counter);
-        completed_block.push(IRInstr::Call {
-            dst: Some(state_addr2.clone()),
-            func: "__vuma_coro_get_frame".to_string(),
-            args: vec![],
-            is_extern: true,
-        });
-        let state_field_addr = next_vreg(vreg_counter);
-        completed_block.push(IRInstr::Offset {
-            dst: state_field_addr.clone(),
-            base: state_addr2,
-            offset: IRValue::Immediate(frame.state_offset as i64),
-        });
-        completed_block.push(IRInstr::Store {
-            value: IRValue::Immediate(CoroutineState::Completed as i64),
-            addr: state_field_addr,
-            offset: 0,
-            ty: IRType::I64,
-        });
-        completed_block.terminator = IRTerminator::Return(vec![IRValue::Immediate(0)]);
-
-        blocks.push(completed_block);
-
-        // For each yield point, generate a reload block that loads the
-        // spilled live values from the frame before jumping to the actual
-        // resume block.
-        for yp in yield_points {
-            let reload_label = format!("coro_reload_{}", yp.index);
-            let mut reload_block = IRBlock::new(&reload_label);
-
-            let fptr = next_vreg(vreg_counter);
-            reload_block.push(IRInstr::Call {
-                dst: Some(fptr.clone()),
-                func: "__vuma_coro_get_frame".to_string(),
-                args: vec![],
-                is_extern: true,
-            });
-
-            for live_val in &yp.live_values {
-                if let Some(reg_id) = live_val.as_register() {
-                    let slot_name = format!("vreg_{}", reg_id);
-                    if let Some((_, offset)) = frame
-                        .spill_slots
-                        .iter()
-                        .find(|(name, _)| name == &slot_name)
-                    {
-                        let slot_addr = next_vreg(vreg_counter);
-                        reload_block.push(IRInstr::Offset {
-                            dst: slot_addr.clone(),
-                            base: fptr.clone(),
-                            offset: IRValue::Immediate(*offset as i64),
-                        });
-                        let loaded = next_vreg(vreg_counter);
-                        reload_block.push(IRInstr::Load {
-                            dst: loaded,
-                            addr: slot_addr,
-                            offset: 0,
-                            ty: IRType::I64,
-                        });
-                    }
-                }
-            }
-
-            reload_block.terminator = IRTerminator::Jump(yp.resume_block.clone());
-            blocks.push(reload_block);
-        }
-
-        log::debug!(
-            "CoroutineLowerer: generated resume dispatch with {} yield points ({} blocks)",
-            yield_points.len(),
-            blocks.len()
-        );
-
-        blocks
-    }
-
-    // ---- Internal helpers ----
-
-    /// Find yield points in a function by looking for blocks whose name
-    /// starts with "yield_" or that have specific marker instructions.
-    fn find_yield_points(func: &IRFunction) -> Vec<YieldPoint> {
-        let mut yield_points = Vec::new();
-        let mut yield_index = 0u32;
-
-        for (i, block) in func.blocks.iter().enumerate() {
-            // A block is a yield point if its label starts with "yield_".
-            let is_yield = block.label.starts_with("yield_");
-
-            if is_yield {
-                // The resume block is the next block in layout order, or
-                // a block named "resume_{suffix}" if it exists.
-                let suffix = block.label.strip_prefix("yield_").unwrap_or("");
-                let resume_label = format!("resume_{}", suffix);
-
-                // Fall back to the next block if the named resume block
-                // doesn't exist.
-                let actual_resume = if func.blocks.iter().any(|b| b.label == resume_label) {
-                    resume_label
-                } else if i + 1 < func.blocks.len() {
-                    func.blocks[i + 1].label.clone()
-                } else {
-                    format!("resume_fallback_{}", yield_index)
-                };
-
-                // Collect live values: all registers defined before this
-                // block that are still in use.
-                let live_values = Self::compute_live_in(func, &block.label);
-
-                yield_points.push(YieldPoint {
-                    index: yield_index,
-                    suspend_block: block.label.clone(),
-                    resume_block: actual_resume,
-                    live_values,
-                });
-
-                yield_index += 1;
-            }
-        }
-
-        yield_points
-    }
-
-    /// Compute the set of values that are live at the entry of a given block.
-    ///
-    /// This is a simplified liveness analysis: a value is live-in to a block
-    /// if it is used in that block or any successor without first being
-    /// defined.
-    fn compute_live_in(func: &IRFunction, block_label: &str) -> Vec<IRValue> {
-        // Build a map from block label to block index.
-        let label_to_idx: HashMap<String, usize> = func
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.label.clone(), i))
-            .collect();
-
-        // Build predecessor map.
-        let mut predecessors: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (i, block) in func.blocks.iter().enumerate() {
-            for succ in successor_indices(&block.terminator, &label_to_idx) {
-                predecessors.entry(succ).or_default().push(i);
-            }
-        }
-
-        // Simple backward data-flow: compute live-out and live-in for each
-        // block iteratively until convergence.
-        let n = func.blocks.len();
-        let mut live_out: Vec<HashSet<u32>> = vec![HashSet::new(); n];
-        let mut live_in: Vec<HashSet<u32>> = vec![HashSet::new(); n];
-
-        // Iterate to fixed point.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in (0..n).rev() {
-                let block = &func.blocks[i];
-
-                // live_out[i] = union of live_in[succ] for all successors.
-                let mut new_out: HashSet<u32> = HashSet::new();
-                for succ in successor_indices(&block.terminator, &label_to_idx) {
-                    new_out.extend(&live_in[succ]);
-                }
-
-                // live_in[i] = (use[i] ∪ live_out[i]) \ def[i]
-                let mut new_in: HashSet<u32> = HashSet::new();
-
-                // Add uses from instructions.
-                for _instr in &block.instructions {
-                    for reg in _instr.used_regs() {
-                        new_in.insert(reg);
-                    }
-                }
-
-                // Add uses from terminator.
-                if let Some(regs) = terminator_used_regs(&block.terminator) {
-                    for reg in regs {
-                        new_in.insert(reg);
-                    }
-                }
-
-                // Add live_out.
-                new_in.extend(&new_out);
-
-                // Remove definitions.
-                for instr in &block.instructions {
-                    for reg in instr.defined_regs() {
-                        new_in.remove(&reg);
-                    }
-                }
-
-                if new_out != live_out[i] || new_in != live_in[i] {
-                    changed = true;
-                    live_out[i] = new_out;
-                    live_in[i] = new_in;
-                }
-            }
-        }
-
-        // Return the live-in set for the requested block.
-        if let Some(&idx) = label_to_idx.get(block_label) {
-            live_in[idx]
-                .iter()
-                .map(|&id| IRValue::Register(id))
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Collect all local variable vregs defined in the function.
-    fn collect_local_vars(func: &IRFunction) -> Vec<IRValue> {
-        let mut seen: HashSet<u32> = HashSet::new();
-        let mut vars = Vec::new();
-
-        for block in &func.blocks {
-            for instr in &block.instructions {
-                for reg in instr.defined_regs() {
-                    if seen.insert(reg) {
-                        vars.push(IRValue::Register(reg));
-                    }
-                }
-            }
-        }
-
-        vars
     }
 }
 
@@ -2079,11 +1170,6 @@ impl LoopOptimizer {
 // Internal Helpers
 // ===========================================================================
 
-/// Round `value` up to the nearest multiple of `alignment`.
-fn align_to(value: u32, alignment: u32) -> u32 {
-    value.div_ceil(alignment) * alignment
-}
-
 /// Get the successor block indices for a terminator.
 fn successor_indices(
     terminator: &IRTerminator,
@@ -2133,23 +1219,6 @@ fn successor_indices(
             Vec::new()
         }
         IRTerminator::TailCall { .. } => Vec::new(),
-    }
-}
-
-/// Get the virtual registers used by a terminator (for liveness analysis).
-fn terminator_used_regs(terminator: &IRTerminator) -> Option<Vec<u32>> {
-    match terminator {
-        IRTerminator::Branch { cond, .. } => Some(cond.as_register().into_iter().collect()),
-        IRTerminator::Switch { discr, .. } => Some(discr.as_register().into_iter().collect()),
-        IRTerminator::Invoke { args, .. } => {
-            Some(args.iter().filter_map(|v| v.as_register()).collect())
-        }
-        IRTerminator::Resume { value } => Some(value.as_register().into_iter().collect()),
-        IRTerminator::TailCall { args, .. } => {
-            Some(args.iter().filter_map(|v| v.as_register()).collect())
-        }
-        IRTerminator::Return(vals) => Some(vals.iter().filter_map(|v| v.as_register()).collect()),
-        IRTerminator::Jump(_) | IRTerminator::Unreachable => None,
     }
 }
 
@@ -2543,55 +1612,6 @@ mod tests {
     }
 
     #[test]
-    fn test_exception_lower_invoke() {
-        let mut vreg = 10u32;
-        let mut label = 10u32;
-
-        let result = ExceptionLowerer::lower_invoke(
-            Some(IRValue::Register(5)),
-            "throw_func",
-            &[IRValue::Register(1)],
-            "normal_cont",
-            "unwind_cont",
-            &mut vreg,
-            &mut label,
-        );
-
-        // Call block should have a Call instruction and a Jump terminator.
-        assert!(matches!(
-            &result.call_block.instructions[0],
-            IRInstr::Call { .. }
-        ));
-        assert!(matches!(
-            &result.call_block.terminator,
-            IRTerminator::Jump(t) if t == "normal_cont"
-        ));
-
-        // Landing pad should jump to unwind.
-        assert!(matches!(
-            &result.landing_pad.terminator,
-            IRTerminator::Jump(t) if t == "unwind_cont"
-        ));
-    }
-
-    #[test]
-    fn test_exception_table_generation() {
-        let mut func = IRFunction::new("test_func");
-        func.append_block("invoke_block");
-        func.blocks[0].terminator = IRTerminator::Invoke {
-            dst: None,
-            func: "may_throw".to_string(),
-            args: vec![],
-            normal: "ok".to_string(),
-            unwind: "catch".to_string(),
-        };
-
-        let entries = ExceptionLowerer::generate_exception_table(&func);
-        // Should find at least one entry for the invoke.
-        assert_eq!(entries.len(), 1);
-    }
-
-    #[test]
     fn test_tail_call_eligibility_simple() {
         let mut func = IRFunction::new("caller");
         func.params.push(IRValue::Register(0));
@@ -2650,66 +1670,6 @@ mod tests {
             &[IRValue::Register(0), IRValue::Register(1)],
         );
         assert!(matches!(term, IRTerminator::TailCall { .. }));
-    }
-
-    #[test]
-    fn test_coroutine_frame_layout() {
-        let yield_points = vec![
-            YieldPoint {
-                index: 0,
-                suspend_block: "yield_0".to_string(),
-                resume_block: "resume_0".to_string(),
-                live_values: vec![IRValue::Register(1), IRValue::Register(2)],
-            },
-            YieldPoint {
-                index: 1,
-                suspend_block: "yield_1".to_string(),
-                resume_block: "resume_1".to_string(),
-                live_values: vec![IRValue::Register(1), IRValue::Register(3)],
-            },
-        ];
-
-        let frame = CoroutineLowerer::compute_frame_layout(&yield_points, &[]);
-
-        // Frame should have state, yield_index, and 3 spill slots
-        // (vreg 1, 2, 3 — note vreg 1 is shared across yield points).
-        assert_eq!(frame.spill_slots.len(), 3);
-        assert_eq!(frame.state_offset, 0);
-        assert_eq!(frame.yield_index_offset, 8);
-        // Total: 8 + 8 + 3*8 = 40, rounded to 8 → 40.
-        assert_eq!(frame.size, 40);
-    }
-
-    #[test]
-    fn test_coroutine_analyze_non_coroutine() {
-        let func = IRFunction::new("normal_func");
-        assert!(CoroutineLowerer::analyze_coroutine(&func).is_none());
-    }
-
-    #[test]
-    fn test_coroutine_analyze_with_yield() {
-        let mut func = IRFunction::new("my_coro");
-        func.append_block("yield_point1");
-        func.blocks[1].terminator = IRTerminator::Return(vec![]);
-
-        let result = CoroutineLowerer::analyze_coroutine(&func);
-        // The block is named "yield_point1" which doesn't start with "yield_"
-        // — it starts with "yield_". Wait, "yield_point1" starts with "yield_"
-        // so it should be detected.
-        // Actually, "yield_point1" starts with "yield_p" not "yield_"... let me check.
-        // "yield_point1" does NOT start with "yield_" because it's "yield_point1".
-        // Let me fix the test.
-        // Actually "yield_point1".starts_with("yield_") is true since "yield_" is the first 6 chars
-        // and "yield_point1" starts with "yield_".
-        // Wait: "yield_point1" - first 6 chars are "yield_" - yes it does start with "yield_".
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn test_coroutine_state_encoding() {
-        assert_eq!(CoroutineState::Suspended.as_u64(), 0);
-        assert_eq!(CoroutineState::Running.as_u64(), 1);
-        assert_eq!(CoroutineState::Completed.as_u64(), 2);
     }
 
     #[test]
@@ -2800,30 +1760,103 @@ mod tests {
         assert_eq!(LoopOptimizer::choose_unroll_factor(&odd_trip, 4), 1);
     }
 
+    /// Wave 35 regression / decision test.
+    ///
+    /// `ExceptionLowerer` and `CoroutineLowerer` were deleted in Wave 35
+    /// because `.vuma` has no syntax that feeds them (see the module-level
+    /// "Wave 35 decision" doc comment for the full audit). This test
+    /// verifies that the surviving lowerers — `SwitchLowerer`,
+    /// `TailCallLowerer`, and `LoopOptimizer` — still work end-to-end on a
+    /// hand-built IR after the deletion, and that the file still compiles
+    /// (which transitively proves the deleted types left no dangling
+    /// references inside `control_flow.rs`).
+    ///
+    /// The audit evidence:
+    /// - `src/parser/src/lexer.rs` has token kinds for `Async`, `Await`,
+    ///   `Spawn`, `Lock`, `Unlock`, `Channel`, `Send`, `Recv` — but NOT for
+    ///   `try`, `catch`, `raise`, `throw`, `yield`, `resume`, or
+    ///   `coroutine`.
+    /// - `src/parser/src/ast.rs` defines `Expr::Async` and `Expr::Await`
+    ///   but no `Try`/`Catch`/`Raise`/`Throw`/`Yield`/`Resume` nodes.
+    /// - `src/parser/src/to_scg.rs` lowers `Expr::Async` into a parallel
+    ///   region (line ~1626) — NOT into `IRTerminator::Invoke` or any
+    ///   coroutine IR. The `IRTerminator::Invoke` and `IRTerminator::Resume`
+    ///   enum variants (defined in `src/codegen/src/ir.rs`, outside this
+    ///   file's ownership) are therefore unreachable from any `.vuma`
+    ///   source.
+    /// - A repo-wide `.vuma` file sweep finds the words "try"/"catch"/
+    ///   "raise"/"throw"/"yield" only inside English-language comments,
+    ///   never as language constructs.
     #[test]
-    fn test_align_to() {
-        assert_eq!(align_to(0, 8), 0);
-        assert_eq!(align_to(1, 8), 8);
-        assert_eq!(align_to(7, 8), 8);
-        assert_eq!(align_to(8, 8), 8);
-        assert_eq!(align_to(9, 8), 16);
-        assert_eq!(align_to(40, 8), 40);
-    }
+    fn test_wave35_exception_coroutine_removed() {
+        // --- SwitchLowerer still works ---
+        let targets = vec![
+            (0i64, "zero".to_string()),
+            (1, "one".to_string()),
+            (2, "two".to_string()),
+        ];
+        let strategy = SwitchLowerer::choose_strategy(&targets, "default");
+        assert_eq!(strategy, SwitchStrategy::IfElseChain);
 
-    #[test]
-    fn test_landing_pads_collection() {
-        let mut func = IRFunction::new("test");
-        // The default entry block is "entry"; set its terminator to Invoke.
-        func.blocks[0].terminator = IRTerminator::Invoke {
-            dst: None,
-            func: "f".to_string(),
-            args: vec![],
-            normal: "n".to_string(),
-            unwind: "u".to_string(),
+        let mut vreg = 100u32;
+        let mut label = 100u32;
+        let blocks = SwitchLowerer::lower_if_else_chain(
+            IRValue::Register(0),
+            &targets,
+            "default",
+            &mut vreg,
+            &mut label,
+        );
+        assert_eq!(blocks.len(), targets.len());
+
+        // --- TailCallLowerer still works ---
+        let mut func = IRFunction::new("wave35_caller");
+        func.params.push(IRValue::Register(0));
+        func.results.push(IRValue::Register(1));
+        let call_dst = Some(IRValue::Register(1));
+        let return_vals = vec![IRValue::Register(1)];
+        assert!(TailCallLowerer::is_tail_call_eligible(
+            &call_dst,
+            &return_vals,
+            &func
+        ));
+
+        // --- LoopOptimizer still works ---
+        let mut func = IRFunction::new("wave35_loop");
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].terminator = IRTerminator::Jump("loop_header".to_string());
+
+        func.append_block("loop_header");
+        func.blocks[1].terminator = IRTerminator::Branch {
+            cond: IRValue::Register(0),
+            true_block: "loop_body".to_string(),
+            false_block: "exit".to_string(),
         };
 
-        let pads = ExceptionLowerer::collect_landing_pads(&func);
-        assert_eq!(pads.len(), 1);
-        assert_eq!(pads[0].label, "landing_pad_for_entry");
+        func.append_block("loop_body");
+        func.blocks[2].push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        func.blocks[2].terminator = IRTerminator::Jump("loop_header".to_string());
+
+        func.append_block("exit");
+        func.blocks[3].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+
+        let loops = LoopOptimizer::identify_loops(&func);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].header_block, "loop_header");
+
+        // If this test compiles AND runs, the deletion is sound:
+        // `ExceptionLowerer` and `CoroutineLowerer` (and their supporting
+        // types `LandingPad`, `ExceptionAction`, `ExceptionTableEntry`,
+        // `InvokeLowering`, `CoroutineState`, `YieldPoint`, `CoroutineFrame`,
+        // and the helpers `align_to`, `terminator_used_regs`,
+        // `compute_live_in`, `find_yield_points`, `collect_local_vars`) are
+        // gone from this module, with no dangling references.
     }
+
 }
