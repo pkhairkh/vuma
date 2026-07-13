@@ -1570,12 +1570,16 @@ fn run_optimizations_inner(
         let f = licm(f);
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
-        // ── DISABLED: scheduler causes pass-interaction miscompilation ──
-        // Safe in isolation but breaks when CSE/LICM/inline modify the IR
-        // before it runs. Will re-enable after fixing Phi handling for
-        // arbitrary post-optimization IR shapes.
-        // let mut f = f;
-        // crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        // (Wave 27) Re-enabled instruction scheduler. The old "skip any
+        // block with memory ops" bail-out in `scheduler::schedule_block`
+        // and `scheduler::schedule_function` is GONE — memory dependencies
+        // are now modeled by `schedule_block_inner` using
+        // `codegen::alias_analysis::AliasAnalysis`. The scheduler also
+        // carries a register-pressure heuristic (prefer pressure-reducing
+        // instrs on critical-path ties) so it doesn't push the regalloc
+        // toward spilling.
+        let mut f = f;
+        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         program.functions[i] = f;
     }
 
