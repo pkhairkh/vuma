@@ -3822,7 +3822,7 @@ impl Backend for Sparc64Backend {
 
         // ── _start stub ──
         // 5 instructions = 20 bytes
-        let start_stub_size: usize = 32; // 8 instructions: SAVE + LDUW + ADD + CALL + NOP + OR + TA
+        let start_stub_size: usize = 32; // 8 instrs: AND + SAVE + LDUW + ADD + CALL + NOP + OR + TA
         let ffi_stub_size: usize = 12; // OR %g0, 0, %o0; JMPL %i7+8, %g0; RESTORE
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -4769,8 +4769,16 @@ impl Backend for Sparc64Backend {
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
+        // AND %sp, -16, %sp — align SP to 16 bytes (required for LDUW/LDX)
+        start_stub.extend_from_slice(
+            &Instruction::AndImm {
+                rd: Gpr::O6,
+                rs1: Gpr::O6,
+                imm: -16,
+            }
+            .encode(),
+        );
         // SAVE %sp, -192, %sp (allocate register window)
-        // After SAVE: %fp = old %sp, %sp = old %sp - 192
         start_stub.extend_from_slice(
             &Instruction::Save {
                 rd: Gpr::O6,
@@ -4780,7 +4788,7 @@ impl Backend for Sparc64Backend {
             .encode(),
         );
         // Load argc from [%fp] (old [%sp]) and argv = %fp + 8
-        // LDUW [%fp+0], %o0 — load argc (32-bit, fits in 32 bits)
+        // LDUW [%fp+0], %o0 — load argc (32-bit)
         start_stub.extend_from_slice(
             &Instruction::Lduw {
                 rd: Gpr::O0,
