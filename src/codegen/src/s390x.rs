@@ -1049,8 +1049,11 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 code.extend_from_slice(&encode_br(LR));
             }
             crate::ir::IRTerminator::Unreachable => {
-                // Emit a trap: SVC 0 with R1 = 0 (invalid syscall).  Or just a NOP.
-                code.extend_from_slice(&encode_nop());
+                // Emit a trap: LGFI R1, -1; SVC 0 (invalid syscall number).
+                // This must NOT fall through — a NOP would cause the child block
+                // to fall through to the parent block, executing parent code.
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, -1));
+                code.extend_from_slice(&encode_svc(0));
             }
             crate::ir::IRTerminator::Switch {
                 discr,

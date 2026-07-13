@@ -1709,6 +1709,10 @@ impl Backend for HppaBackend {
                     code.extend_from_slice(&encode_nop());
                 }
                 IRTerminator::Unreachable => {
+                    // DIAG trap — must NOT fall through. A NOP would cause
+                    // the child block to fall through to the parent block.
+                    code.extend(ss_load_imm(R20, -1));
+                    code.extend_from_slice(&encode_gate());
                     code.extend_from_slice(&encode_nop());
                 }
                 IRTerminator::Resume { .. } => {
