@@ -1775,21 +1775,19 @@ mod tests {
         assert!(result.diagnostics.is_empty(), "No diagnostics expected");
     }
 
-    /// Wave 20: This test exercises the `VumaCompiler` API compile path.
-    /// `verification_level` is set to `None` because the IVE cleanup
-    /// invariant has a known false-positive on top-level `region`
-    /// declarations in certain SCG configurations (the `mark_static_lifetime`
-    /// fix in `verification.rs:820-849` handles the simple case but not
-    /// all variants).  Wave 20's memory-safety blocking pass
-    /// (`analyze_with_scg_liveness`) is kept enabled (via the default
-    /// `memory_safety: true`) to verify it does NOT flag this program.
+    /// (Wave 19) The cleanup-extractor false positive on top-level `region`
+    /// declarations has been fixed: `extract_cleanup_graph` now marks
+    /// allocations with no incoming `ControlFlow` edge as static-lifetime
+    /// (spec §5.4), and both `CleanupVerifier::dfs_verify` and
+    /// `LivenessVerifier::check_resource_leaks` filter out leak reports
+    /// for static-lifetime resources. This test now runs with full
+    /// `Normal` verification to guard against regressions. (Wave 20's
+    /// memory-safety blocking pass is also kept enabled via the default
+    /// `memory_safety: true`.)
     #[test]
     fn test_compile_with_allocation() {
         let compiler = VumaCompiler::with_config(CompileConfig {
-            verification_level: VerificationLevel::None,
-            // memory_safety defaults to true (Wave 20).  We keep it
-            // enabled to verify the analyzer does NOT flag the top-level
-            // `region` as a leak.
+            verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
         });
         let source = r#"
