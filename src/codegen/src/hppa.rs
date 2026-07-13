@@ -1641,6 +1641,9 @@ impl Backend for HppaBackend {
                         let skip_patched = (skip_word & !0x1FFF) | encode_cmpb_disp(skip_disp);
                         code[skip_off..skip_off + 4].copy_from_slice(&skip_patched.to_be_bytes());
                     }
+                    IRInstr::Syscall { .. } => {
+                        unimplemented!("IRInstr::Syscall not yet implemented for hppa (Wave 12)");
+                    }
                 }
             }
 

@@ -1402,6 +1402,9 @@ fn emit_instr(
             // dst already holds old value (in its stack slot).
             let _ = dst_off;
         }
+        IRInstr::Syscall { .. } => {
+            unimplemented!("IRInstr::Syscall not yet implemented for m68k (Wave 12)");
+        }
     }
 }
 

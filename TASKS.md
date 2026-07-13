@@ -197,12 +197,20 @@
 
 > Each backend implements `encode_syscall_instr` independently.
 
-- [ ] **[BE-x86_64]** Emit `mov eax, nr; syscall` from `IRInstr::Syscall`. `src/codegen/src/x86_64/mod.rs`
-- [ ] **[BE-aarch64]** Emit `MOV X8, nr; SVC #0`. `src/codegen/src/backend.rs`
-- [ ] **[BE-riscv64]** Emit `LI a7, nr; ECALL`. `src/codegen/src/riscv64.rs`
-- [ ] **[BE-riscv32]** Emit `LI a7, nr; ECALL`. `src/codegen/src/riscv32.rs`
-- [ ] **[BE-arm32]** Emit `MOV r7, nr; SVC #0`. `src/codegen/src/arm32/mod.rs`
-- [ ] **[BE-x86_32]** Emit `MOV eax, nr; INT 0x80`. `src/codegen/src/x86_32/mod.rs`
+- [x] **[BE-x86_64]** Emit `mov eax, nr; syscall` from `IRInstr::Syscall`. `src/codegen/src/x86_64/mod.rs` — DONE in `x86_64/stack_slot_isel.rs`. Loads up to 6 args into the syscall ABI registers (RDI/RSI/RDX/R10/R8/R9 — note arg4 → R10, NOT RCX as in SysV), `MOV EAX, nr`, `SYSCALL`, stores RAX to dst's stack slot. Reuses the existing `load_value`/`store_vreg`/`encode_syscall` helpers.
+- [x] **[BE-aarch64]** Emit `MOV X8, nr; SVC #0`. `src/codegen/src/backend.rs` — DONE in `arm64.rs` (the AArch64 isel) and `emit.rs` (both the register-based and stack-slot-based emitters). The `arm64.rs::select_from_ir` arm moves args into X0-X5 (reverse order to avoid clobbering), emits `MOVZ X8, nr` + `SVC #0`, moves X0 to dst. The `emit.rs` arms do the same via `emit_instruction(Instruction::MOV/SVC)` and `emit_load_immediate`.
+- [x] **[BE-riscv64]** Emit `LI a7, nr; ECALL`. `src/codegen/src/riscv64.rs` — DONE. Loads up to 6 args into a0-a5 via `ss_load_value`, `ss_load_imm(A7, nr)`, `ECALL`, stores a0 to dst via `ss_store_to_slot`. Also added `"ecall"` to the opcode-name match.
+- [x] **[BE-riscv32]** Emit `LI a7, nr; ECALL`. `src/codegen/src/riscv32.rs` — DONE (same pattern as riscv64).
+- [x] **[BE-arm32]** Emit `MOV r7, nr; SVC #0`. `src/codegen/src/arm32/mod.rs` — DONE. Loads args 0-3 into R0-R3, pushes args 5-6 onto the stack (kernel reads from [SP]), `load_immediate_arm32(R7, nr)`, `SVC #0`, cleans up stack, stores R0 (32-bit sign-extended) to dst via `ss_store_32_zero`.
+- [x] **[BE-x86_32]** Emit `MOV eax, nr; INT 0x80`. `src/codegen/src/x86_32/mod.rs` — DONE in `x86_32/stack_slot_isel.rs`. Saves EBX (callee-saved), loads up to 5 args into EBX/ECX/EDX/ESI/EDI (the i386 syscall ABI; EBP/arg6 avoided to preserve the frame pointer), `MOV EAX, nr`, `INT 0x80`, stores EAX to dst, restores EBX.
+
+> **Prerequisite:** Wave 11 depends on Wave 10's `IRInstr::Syscall` variant. Since Wave 10 had not landed when this work was done, the minimal `IRInstr::Syscall { nr: u32, args: Vec<IRValue>, dst: Option<IRValue> }` variant was added to `ir.rs` (matching Wave 10's specified signature), along with `defined_regs`, `used_regs`, and `Display` implementations. This is the `[IR]` sub-task of Wave 10; the SCG/parser/pipeline sub-tasks remain for the Wave 10 agent. When Wave 10 lands, the identical signature should merge cleanly.
+
+> **Tier-2/3 backends:** All non-tier-1 backends (alpha, hppa, m68k, mips64, ppc64, s390x, sparc64, loongarch64) have `IRInstr::Syscall { .. } => unimplemented!("… (Wave 12)")` arms to keep the code compiling. Wave 12 will implement real emission for these. The `wasm32` backend emits `i32.const -38` (-ENOSYS) as the syscall result, matching its wave-5 unknown-extern fallback behavior.
+
+> **Analysis passes:** `opt.rs` (`substitute_instr`) substitutes vreg IDs in `Syscall { nr, args, dst }`. All other passes (effects, scheduler, regalloc, etc.) either have `_` wildcard arms or use `match` patterns that don't require a `Syscall` arm (they filter by `if let`).
+
+> **Verification:** `cargo check` (full workspace) → 0 errors. `cargo test -p vuma-codegen --lib` → 779 passed / 15 failed, IDENTICAL to the pre-wave-11 baseline (same 15 pre-existing failures, none touching syscall emission). Zero regressions.
 
 ---
 

@@ -1168,6 +1168,9 @@ fn emit_instr(
             code.extend(Instruction::Stq { ra: S0, disp: 0, rb: S3 }.encode());
             // skip_store: (dst already holds old value)
         }
+        IRInstr::Syscall { .. } => {
+            unimplemented!("IRInstr::Syscall not yet implemented for alpha (Wave 12)");
+        }
     }
 }
 

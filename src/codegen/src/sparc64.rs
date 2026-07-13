@@ -3058,6 +3058,9 @@ fn emit_instr(
             let patched = (existing & !0x3F_FFFF) | ((disp as u32) & 0x3F_FFFF);
             code[bne_offset..bne_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
+        IRInstr::Syscall { .. } => {
+            unimplemented!("IRInstr::Syscall not yet implemented for sparc64 (Wave 12)");
+        }
     }
 }
 

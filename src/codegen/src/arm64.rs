@@ -4531,6 +4531,35 @@ impl InstructionSelector {
             IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
                 // Atomic operations handled by the emitter's emit_ir_instr.
             }
+            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            // dst = syscall(nr, args…) — raw Linux syscall.
+            // AArch64 ABI: args in X0-X5, nr in X8, SVC #0, result in X0.
+            // Move args high→low to avoid clobbering, then MOVZ X8 + SVC.
+            IRInstr::Syscall { nr, args, dst } => {
+                let arg_regs = [
+                    Register::X0, Register::X1, Register::X2,
+                    Register::X3, Register::X4, Register::X5,
+                ];
+                let num_args = args.len().min(arg_regs.len());
+                // Move args into X0-X5 (reverse order to avoid clobbering).
+                for i in (0..num_args).rev() {
+                    let src = resolve(&args[i]);
+                    self.push(Instruction::MOV { rd: arg_regs[i], rm: src });
+                }
+                // MOVZ X8, nr  (syscall number; all __NR_* fit in 16 bits)
+                self.push(Instruction::MOVZ {
+                    rd: Register::X8,
+                    imm16: *nr as u16,
+                    shift: 0,
+                });
+                // SVC #0
+                self.push(Instruction::SVC { imm16: 0 });
+                // Move result (X0) to dst register
+                if let Some(d) = dst {
+                    let rd = resolve(d);
+                    self.push(Instruction::MOV { rd, rm: Register::X0 });
+                }
+            }
         }
         Ok(())
     }

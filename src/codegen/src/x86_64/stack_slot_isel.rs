@@ -72,6 +72,7 @@ use super::{
     encode_pop, encode_push,
     encode_ret,
     encode_rol_reg_cl, encode_ror_reg_cl,
+    encode_syscall,
     encode_sar_reg_cl,
     encode_setcc,
     encode_shl_reg_cl, encode_shr_reg_cl,
@@ -1635,6 +1636,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Result: Rax has the old value (whether swap succeeded or not)
                     let dst_id = dst.as_register().unwrap_or(0);
                     code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
+                }
+
+                // ── Syscall (Wave 11) ──────────────────────────────────────
+                // dst = syscall(nr, args…) — raw Linux syscall.
+                // x86_64 syscall ABI: args in RDI/RSI/RDX/R10/R8/R9, nr in
+                // EAX, result in RAX. Note arg4 → R10 (NOT RCX as in SysV —
+                // the kernel clobbers RCX and R11). No stack args (max 6).
+                IRInstr::Syscall { nr, args, dst } => {
+                    let mut code = Vec::new();
+                    let syscall_arg_regs =
+                        [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::R10, Gpr::R8, Gpr::R9];
+                    let num_reg_args = args.len().min(syscall_arg_regs.len());
+                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                        code.extend(load_value(arg, syscall_arg_regs[i]));
+                    }
+                    // MOV EAX, nr  (syscall number; all __NR_* fit in 32 bits)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+                    // SYSCALL
+                    code.extend(encode_syscall());
+                    // Store return value (RAX) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
                     code
                 }
             };

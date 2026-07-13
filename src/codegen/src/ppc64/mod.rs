@@ -4093,6 +4093,9 @@ fn lower_ir_instr_ppc64(
                 _ => {}
             }
         }
+        IRInstr::Syscall { .. } => {
+            unimplemented!("IRInstr::Syscall not yet implemented for ppc64 (Wave 12)");
+        }
     }
 
     (result, relocations)
@@ -5738,6 +5741,9 @@ impl Backend for PPC64Backend {
                     // (Branch/CondBranch handlers), not at the phi block entry.
                     // See func.build_phi_map().
                     IRInstr::Phi { .. } => Instruction::Nop.encode().to_vec(),
+                    IRInstr::Syscall { .. } => {
+                        unimplemented!("IRInstr::Syscall not yet implemented for ppc64 (Wave 12)");
+                    }
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic
