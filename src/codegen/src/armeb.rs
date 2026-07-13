@@ -1,8 +1,32 @@
 //! # ARM32 Big-Endian Backend (armeb)
 //!
-//! Thin wrapper around the little-endian `arm32` backend that produces
-//! big-endian ARM32 ELF binaries. Swaps all 4-byte instruction words
-//! and ELF header fields from LE to BE.
+//! **Wave 49 — wrapper pattern documentation.**
+//!
+//! `armeb` is a thin wrapper around the little-endian `Arm32Backend` (field
+//! `inner: Arm32Backend`) that produces big-endian ARM32 ELF binaries for
+//! `qemu-armeb`. It delegates `target_info` and `allocate_registers` to
+//! `self.inner.*`, then **word-swaps each 4-byte instruction word LE→BE**
+//! inside `encode_function`, `return_stub`, `trampoline`, and the executable
+//! `PT_LOAD` segment of `encode_program`. The ELF (32-bit) header / PHDR /
+//! SHDR fields are also flipped via `swap_le_elf32_to_be`.
+//!
+//! ## BE32 vs BE8
+//!
+//! ARMv7 supports two big-endian modes (ARM ARM v7-C, section A3.2 —
+//! "Instruction and data endianness"):
+//!   * **BE8** (`CPSR.E = 1`, instruction-fetch always LE): each 4-byte
+//!     instruction word is stored **little-endian** even on a BE data
+//!     system. Used by all `arm*-linux-gnueabihf` BE targets since
+//!     ARMv6T2+.
+//!   * **BE32** (`CPSR.E = 0`, classic big-endian): each 4-byte
+//!     instruction word is stored **big-endian**, matching the data ABI.
+//!     Used by legacy `armeb-*` Linux/uClibc targets and what
+//!     `qemu-armeb` expects.
+//!
+//! `armeb` (this backend) targets **BE32** mode: `encode_function` byte-
+//! swaps every 4-byte word LE→BE after the parent `Arm32Backend` emits
+//! LE words (each encoder writes `word.to_le_bytes()`), so `qemu-armeb`
+//! fetches the correct big-endian instruction words.
 //!
 //! ## `IRInstr::Syscall` inheritance (Wave 13)
 //!
