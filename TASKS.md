@@ -79,16 +79,19 @@
 
 # Wave 4 — wasm32 WASI coverage: filesystem ops
 
-> Each task maps a POSIX name to a WASI import in `func_name_to_idx`. All in
-> `src/codegen/src/wasm32/mod.rs:4013-4036` but independent additions.
+> Each task maps a POSIX name to a `vuma.*` host function import (not raw WASI,
+> because WASI preview1's filesystem APIs are capability-based with 8-arg
+> signatures incompatible with POSIX). All in `src/codegen/src/wasm32/mod.rs`
+> and `scripts/wasm32_runner.py`.
 
-- [ ] **[BE-wasm32]** Map `open` → WASI `path_open` (or document capability-based rejection).
-- [ ] **[BE-wasm32]** Map `stat`/`lstat`/`fstat` → WASI `fd_filestat_get` / `path_filestat_get`.
-- [ ] **[BE-wasm32]** Map `unlink` → `path_unlink_file`.
-- [ ] **[BE-wasm32]** Map `mkdir` → `path_create_directory`.
-- [ ] **[BE-wasm32]** Map `rename` → `path_rename`.
-- [ ] **[BE-wasm32]** Map `rmdir` → `path_remove_directory`.
-- [ ] **[BE-wasm32]** Map `link`/`symlink`/`readlink` → WASI equivalents.
+- [x] **[BE-wasm32]** Map `open` → `vuma.open(path, flags, mode)` host fn (idx 18). Calls real `os.open()`.
+- [x] **[BE-wasm32]** Map `stat`/`lstat`/`fstat` → `vuma.stat`/`vuma.lstat`/`vuma.fstat` host fns (idx 19-21). Calls real `os.stat()`/`os.lstat()`/`os.fstat()`, writes simplified 64-byte struct stat to buffer.
+- [x] **[BE-wasm32]** Map `unlink` → `vuma.unlink(path)` host fn (idx 22). Calls real `os.unlink()`.
+- [x] **[BE-wasm32]** Map `mkdir` → `vuma.mkdir(path, mode)` host fn (idx 23). Calls real `os.mkdir()`.
+- [x] **[BE-wasm32]** Map `rename` → `vuma.rename(oldpath, newpath)` host fn (idx 25). Calls real `os.rename()`.
+- [x] **[BE-wasm32]** Map `rmdir` → `vuma.rmdir(path)` host fn (idx 24). Calls real `os.rmdir()`.
+- [x] **[BE-wasm32]** Map `link`/`symlink`/`readlink` → `vuma.link`/`vuma.symlink`/`vuma.readlink` host fns (idx 26-28). Calls real `os.link()`/`os.symlink()`/`os.readlink()`.
+- [x] **[BE-wasm32]** Fix stale VUMA_*_IDX constants: old VUMA_STAT_IDX=15/FSTAT=16/LSTAT=17 conflicted with actual read/write/close imports at indices 15-17. Updated to correct indices 19-21. Old VUMA_OPEN_IDX=53 updated to 18.
 
 ---
 
