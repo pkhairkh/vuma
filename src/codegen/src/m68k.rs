@@ -1896,6 +1896,22 @@ impl Backend for M68kBackend {
                 ("getcwd", 183),
                 ("recv", 291),
                 ("send", 290),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (m68k unistd.h) ──
+                // m68k has 5 reg args (D1-D5); all these take ≤5 args → simple_stub.
+                // chown/fchown map to the modern 32-bit-uid variants (chown32=198,
+                // fchown32=207); the 16-bit chown=16/fchown=95 are NOT exposed.
+                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
+                ("link", 9), ("symlink", 83), ("readlink", 85),
+                ("chmod", 15), ("chown", 198), ("umask", 60),
+                ("fchmod", 94), ("fchown", 207),
+                ("openat", 288), ("unlinkat", 294), ("renameat", 295),
+                ("linkat", 296), ("symlinkat", 297), ("readlinkat", 298),
+                ("fchmodat", 299), ("faccessat", 300), ("fchownat", 291),
+                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
+                ("sync", 36), ("syncfs", 343),
+                ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
+                ("preadv", 329), ("pwritev", 330),
+                ("fchdir", 133), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

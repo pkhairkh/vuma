@@ -6218,6 +6218,19 @@ impl Backend for RiscV64Backend {
                 ("recvfrom", 207), ("sendto", 206),
                 // NOTE: stat/lstat/poll/alarm do not exist on the generic ABI.
                 // They are provided as newfstatat/ppoll/setitimer shims below.
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
+                // RV64 has 8 reg args (a0-a7); all take ≤5 args → simple_stub.
+                // Plain mkdir/rmdir/rename/link/symlink/readlink/chmod/chown do
+                // NOT exist on the generic ABI — provided as *at wrappers below.
+                ("umask", 166), ("fchmod", 52), ("fchown", 55),
+                ("openat", 56), ("unlinkat", 35), ("renameat", 38),
+                ("linkat", 37), ("symlinkat", 36), ("readlinkat", 78),
+                ("faccessat", 48), ("fchmodat", 53), ("fchownat", 54),
+                ("ftruncate", 46), ("fsync", 82), ("fdatasync", 83),
+                ("sync", 81), ("syncfs", 306),
+                ("pread", 67), ("pwrite", 68), ("readv", 65), ("writev", 66),
+                ("preadv", 69), ("pwritev", 70),
+                ("fchdir", 50), ("chroot", 51),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6404,6 +6417,108 @@ impl Backend for RiscV64Backend {
                 code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::A2, rs2: Gpr::A3 }.encode()); // SUB a0, a2, a3
                 code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode()); // RET
                 stubs.push(("strcmp".to_string(), code));
+            }
+
+            // ── Wave 7 wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
+            // RV64 (asm-generic) lacks the legacy mkdir/rmdir/rename/link/
+            // symlink/readlink/chmod/chown syscalls; expose the plain names by
+            // inserting AT_FDCWD=-100 (fits ADDI imm12) and shifting args.
+            // AT_REMOVEDIR=0x200. Shuffle high→low to avoid clobbering.
+
+            // mkdir(path, mode) → mkdirat(AT_FDCWD, path, mode)  [mkdirat=34]
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = mode
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 34 }.encode());     // mkdirat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("mkdir".to_string(), code));
+            }
+            // rmdir(path) → unlinkat(AT_FDCWD, path, AT_REMOVEDIR=0x200)  [unlinkat=35]
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0x200 }.encode());  // a2 = AT_REMOVEDIR
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 35 }.encode());     // unlinkat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("rmdir".to_string(), code));
+            }
+            // rename(old, new) → renameat(AT_FDCWD, old, AT_FDCWD, new)  [renameat=38]
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A3, Gpr::A1));                                                    // a3 = new
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: -100 }.encode());   // a2 = AT_FDCWD
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = old
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 38 }.encode());     // renameat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("rename".to_string(), code));
+            }
+            // link(old, new) → linkat(AT_FDCWD, old, AT_FDCWD, new, 0)  [linkat=37]
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());      // a4 = 0 (flags)
+                code.extend(mv(Gpr::A3, Gpr::A1));                                                    // a3 = new
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: -100 }.encode());   // a2 = AT_FDCWD
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = old
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 37 }.encode());     // linkat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("link".to_string(), code));
+            }
+            // symlink(target, linkpath) → symlinkat(target, AT_FDCWD, linkpath)  [symlinkat=36]
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = linkpath
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: -100 }.encode());   // a1 = AT_FDCWD
+                // a0 = target (unchanged)
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 36 }.encode());     // symlinkat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("symlink".to_string(), code));
+            }
+            // readlink(path, buf, siz) → readlinkat(AT_FDCWD, path, buf, siz)  [readlinkat=78]
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A3, Gpr::A2));                                                    // a3 = siz
+                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = buf
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 78 }.encode());     // readlinkat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("readlink".to_string(), code));
+            }
+            // chmod(path, mode) → fchmodat(AT_FDCWD, path, mode, 0)  [fchmodat=53]
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());      // a3 = 0 (flags)
+                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = mode
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 53 }.encode());     // fchmodat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("chmod".to_string(), code));
+            }
+            // chown(path, owner, group) → fchownat(AT_FDCWD, path, owner, group, 0)  [fchownat=54]
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());      // a4 = 0 (flags)
+                code.extend(mv(Gpr::A3, Gpr::A2));                                                    // a3 = group
+                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = owner
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 54 }.encode());     // fchownat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("chown".to_string(), code));
             }
 
             stubs

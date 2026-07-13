@@ -1926,6 +1926,24 @@ impl Backend for HppaBackend {
                 // recv/send declarations with 4 args leave args 5-6 as 0 from
                 // the caller's frame, which the kernel interprets as NULL.
                 ("recv", 350), ("send", 349),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (parisc unistd.h) ──
+                // PA-RISC has 6 syscall arg regs (R26-R23 + 2 more); all these
+                // take ≤5 args → simple_stub (same pattern as the existing 6-arg
+                // futex/sendto stubs). parisc chown=180/fchown=95 are already the
+                // modern 32-bit sys_chown/sys_fchown (no 16-bit split). Note
+                // pread64=108/pwrite64=109 (differ from the common table).
+                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
+                ("link", 9), ("symlink", 83), ("readlink", 85),
+                ("chmod", 15), ("chown", 180), ("umask", 60),
+                ("fchmod", 94), ("fchown", 95),
+                ("openat", 275), ("unlinkat", 281), ("renameat", 282),
+                ("linkat", 283), ("symlinkat", 284), ("readlinkat", 285),
+                ("fchmodat", 286), ("faccessat", 287), ("fchownat", 278),
+                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
+                ("sync", 36), ("syncfs", 327),
+                ("pread", 108), ("pwrite", 109), ("readv", 145), ("writev", 146),
+                ("preadv", 315), ("pwritev", 316),
+                ("fchdir", 133), ("chroot", 61),
         ] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }

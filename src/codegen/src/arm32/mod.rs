@@ -7257,9 +7257,36 @@ impl Backend for Arm32Backend {
                 // NOTE: lstat/dup3/recvfrom/sendto were previously listed
                 // again here (duplicate of the entries at lines ~7236). The
                 // duplicates emitted ~56 bytes of dead code; removed.
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (arm unistd.h) ──
+                // ARM EABI has 4 reg args (R0-R3); all these take ≤4 args →
+                // simple_stub. chown=212/fchown=207 are the modern 32-bit-uid
+                // chown32/fchown32 (arm's chown=182 is the 16-bit sys_chown16,
+                // NOT exposed). The 5-arg linkat(330) & fchownat(325) are
+                // registered below via six_arg_stub (loads arg5 from the
+                // caller's stack; arg6 is garbage and ignored by 5-arg syscalls).
+                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
+                ("link", 9), ("symlink", 83), ("readlink", 85),
+                ("chmod", 15), ("chown", 212), ("umask", 60),
+                ("fchmod", 94), ("fchown", 207),
+                ("openat", 322), ("unlinkat", 328), ("renameat", 329),
+                ("symlinkat", 331), ("readlinkat", 332),
+                ("fchmodat", 333), ("faccessat", 334),
+                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
+                ("sync", 36), ("syncfs", 373),
+                ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
+                ("preadv", 361), ("pwritev", 362),
+                ("fchdir", 133), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
+
+            // ── Wave 7: 5-arg *at syscalls (linkat, fchownat) ──
+            // ARM EABI passes args 5+ on the caller's stack; six_arg_stub
+            // loads arg5 (and arg6) into R4/R5 before SVC. For these 5-arg
+            // syscalls the kernel ignores R5 (arg6), so reusing six_arg_stub
+            // is safe.
+            stubs.push(("linkat".to_string(), six_arg_stub(330)));
+            stubs.push(("fchownat".to_string(), six_arg_stub(325)));
 
             // rt_sigreturn (173) — special: no args, never returns.
             // The kernel restores the saved signal context from the stack

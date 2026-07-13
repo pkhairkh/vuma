@@ -2983,6 +2983,85 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_newline".to_string(), code));
     }
 
+    // ── Wave 7: POSIX file-metadata & I/O syscalls (i386 syscall_32.tbl) ──
+    // i386 SysV passes the first 4 args in EDI/ESI/EDX/ECX and args 5-6 on the
+    // caller's stack ([ESP+4]/[ESP+8] at entry). The i386 syscall ABI instead
+    // wants args in EBX/ECX/EDX/ESI/EDI/EBP with the syscall number in EAX.
+    // EBX is callee-saved so every stub saves/restores it. The closure below
+    // emits the correct per-arg-count shuffle (high→low, stack-based) and is
+    // used for all wave-7 syscalls (max 5 args — EBP/arg6 is never needed).
+    // chown=212/fchown=207 are the modern 32-bit-uid chown32/fchown32 (i386's
+    // chown=182 is the 16-bit sys_chown16, NOT exposed).
+    let syscall_stub = |num: i32, nargs: usize| -> Vec<u8> {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        match nargs {
+            0 => {}
+            1 => {
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1
+            }
+            2 => {
+                code.extend(encode_push(Gpr::Rsi));                   // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+            }
+            3 => {
+                // EBX=arg1, ECX=arg2, EDX=arg3 (already in EDX)
+                code.extend(encode_push(Gpr::Rsi));                   // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+            }
+            4 => {
+                // EBX=arg1, ECX=arg2, EDX=arg3(ok), ESI=arg4
+                code.extend(encode_push(Gpr::Rcx));                   // push arg4
+                code.extend(encode_push(Gpr::Rsi));                   // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+                code.extend(encode_pop(Gpr::Rsi));                    // ESI = arg4
+            }
+            5 => {
+                // EBX=arg1, ECX=arg2, EDX=arg3, ESI=arg4, EDI=arg5(stack).
+                // arg1 lives in EDI but EDI is also the syscall arg5 target, so
+                // move arg1→EBX first, then load arg5 from the stack into EDI.
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1 (EDI free)
+                code.extend(encode_push(Gpr::Rcx));                   // push arg4
+                code.extend(encode_push(Gpr::Rsi));                   // push arg2
+                // [ESP]=arg2,[ESP+4]=arg4,[ESP+8]=saved_EBX,[ESP+12]=retaddr,[ESP+16]=arg5
+                code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 16)); // EDI = arg5
+                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+                code.extend(encode_pop(Gpr::Rsi));                    // ESI = arg4
+            }
+            _ => {} // 6-arg syscalls not needed for wave 7
+        }
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, num));
+        code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
+        code.extend(encode_ret());
+        code
+    };
+    for (name, num, nargs) in [
+        // Family 1: dir/link ops
+        ("mkdir", 39, 2), ("rmdir", 40, 1), ("rename", 38, 2),
+        ("link", 9, 2), ("symlink", 83, 2), ("readlink", 85, 3),
+        // Family 2: mode/owner (chown/fchown → 32-bit chown32/fchown32)
+        ("chmod", 15, 2), ("chown", 212, 3), ("umask", 60, 1),
+        ("fchmod", 94, 2), ("fchown", 207, 3),
+        // Family 3: *at variants
+        ("openat", 295, 4), ("unlinkat", 301, 3), ("renameat", 302, 4),
+        ("linkat", 303, 5), ("symlinkat", 304, 3), ("readlinkat", 305, 4),
+        ("fchmodat", 306, 4), ("faccessat", 307, 3), ("fchownat", 298, 5),
+        // Family 4: sync/truncate
+        ("ftruncate", 93, 2), ("fsync", 118, 1), ("fdatasync", 148, 1),
+        ("sync", 36, 0), ("syncfs", 344, 1),
+        // Family 5: positioned & vector I/O
+        ("pread", 180, 4), ("pwrite", 181, 4), ("readv", 145, 3), ("writev", 146, 3),
+        ("preadv", 333, 4), ("pwritev", 334, 4),
+        // Family 7: cwd/root (getcwd/chdir already registered above)
+        ("fchdir", 133, 1), ("chroot", 61, 1),
+    ] {
+        stubs.push((name.to_string(), syscall_stub(num, nargs)));
+    }
+
     stubs
 }
 
