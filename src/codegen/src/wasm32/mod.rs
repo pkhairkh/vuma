@@ -1361,6 +1361,11 @@ const HEAP_PTR_GLOBAL_IDX: u32 = 0;
 /// the first page for globals / stack).
 const HEAP_START: i32 = 65536;
 
+/// `ENOSYS` errno value (Linux / generic POSIX ABI) returned by the generic
+/// unknown-extern stub so callers can detect unsupported syscalls.  Used by
+/// the Wave 5 stub to replace the previous silent `-1` fallback.
+const ENOSYS_ERRNO: i32 = 38;
+
 // ── WASI import function indices ─────────────────────────────────────────
 // These are the function indices of WASI imports in the module.
 // fd_write is the first import (index 0), proc_exit is the second (index 1),
@@ -1427,15 +1432,40 @@ const VUMA_LINK_IDX: u32 = 26;       // (oldpath: i32, newpath: i32) -> i32
 const VUMA_SYMLINK_IDX: u32 = 27;    // (target: i32, linkpath: i32) -> i32
 const VUMA_READLINK_IDX: u32 = 28;   // (path: i32, buf: i32, bufsize: i32) -> i32
 
-// ── Reserved for future waves (indices 29+) ──
-// The following POSIX operations will be added as vuma.* host imports in
-// later waves. Their constants are NOT yet imported — do not reference them
-// in func_name_to_idx until the import declaration is added.
-//   Wave 5: getcwd, getpid, kill, alarm, chdir, fchdir, ioctl, fcntl,
-//           socket, connect, bind, listen, accept, send, recv, sendto,
-//           recvfrom, shutdown, setsockopt, dup, dup3, poll, nanosleep,
-//           futex, epoll_*, clone, sigaction, rt_sigprocmask, rt_sigreturn,
-//           gettimeofday, mprotect, brk, mmap, munmap, exit_group
+// ── Socket / process / sync ops imports (indices 29-44, Wave 5) ──
+// POSIX-compatible socket, send/recv, socket-option, memory-management,
+// and sleep host functions.  Backed by the real OS via the wasmtime runner
+// (scripts/wasm32_runner.py), consistent with the Wave 4 filesystem pattern.
+//
+// Note on sendmsg / recvmsg / futex / clone: these are intentionally NOT
+// mapped here.  They are fundamentally incompatible with the wasm32 sandbox
+// (msghdr struct marshaling for sendmsg/recvmsg; thread/process semantics
+// for futex/clone).  They resolve to the generic -ENOSYS stub so callers
+// can detect they are unsupported (see the stub near `encode_program`).
+const VUMA_SOCKET_IDX: u32 = 29;       // (domain, type, protocol) -> fd
+const VUMA_BIND_IDX: u32 = 30;         // (fd, addr_ptr, addrlen) -> errno
+const VUMA_LISTEN_IDX: u32 = 31;       // (fd, backlog) -> errno
+const VUMA_ACCEPT_IDX: u32 = 32;       // (fd, addr_ptr, addrlen_ptr) -> fd
+const VUMA_CONNECT_IDX: u32 = 33;      // (fd, addr_ptr, addrlen) -> errno
+const VUMA_SEND_IDX: u32 = 34;         // (fd, buf, len, flags) -> nbytes
+const VUMA_RECV_IDX: u32 = 35;         // (fd, buf, len, flags) -> nbytes
+const VUMA_SENDTO_IDX: u32 = 36;       // (fd, buf, len, flags, addr_ptr, addrlen) -> nbytes
+const VUMA_RECVFROM_IDX: u32 = 37;     // (fd, buf, len, flags, addr_ptr, addrlen_ptr) -> nbytes
+const VUMA_SETSOCKOPT_IDX: u32 = 38;   // (fd, level, optname, optval_ptr, optlen) -> errno
+const VUMA_GETSOCKOPT_IDX: u32 = 39;   // (fd, level, optname, optval_ptr, optlen_ptr) -> errno
+const VUMA_SHUTDOWN_IDX: u32 = 40;     // (fd, how) -> errno
+const VUMA_MMAP_IDX: u32 = 41;         // (addr, len, prot, flags, fd, offset) -> ptr
+const VUMA_MUNMAP_IDX: u32 = 42;       // (addr, len) -> errno
+const VUMA_MPROTECT_IDX: u32 = 43;     // (addr, len, prot) -> errno
+const VUMA_NANOSLEEP_IDX: u32 = 44;    // (req_ptr, rem_ptr) -> errno
+
+// ── Reserved for future waves (indices 45+) ──
+// POSIX operations still to be wired in later waves.  Their constants are
+// NOT yet imported — do not reference them in func_name_to_idx until the
+// import declaration is added.
+//   getcwd, getpid, kill, alarm, chdir, fchdir, ioctl, fcntl, dup, dup3,
+//   poll, futex, epoll_*, sigaction, rt_sigprocmask, rt_sigreturn,
+//   gettimeofday, brk, exit_group
 
 // ── Runtime helper memory layout ─────────────────────────────────────────
 // These addresses are in page 0 of linear memory, well below the heap.
@@ -3992,6 +4022,108 @@ impl Backend for Wasm32Backend {
             kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
         });  // idx 28 = VUMA_READLINK_IDX
 
+        // ── Socket / send-recv / sockopt / mmap / nanosleep host fn imports ──
+        // (Wave 5) POSIX-compatible socket family backed by the real OS via
+        // the wasmtime runner.  All take/return i32 (wasm32 pointers & ints
+        // are 32-bit), matching the Wave 4 filesystem host-function pattern.
+        // Return values are ALSO written to mem[0] by the host functions,
+        // consistent with the codegen's extern-return-via-mem[0] convention.
+        let vuma_type_4_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });  // (i32,i32,i32,i32) -> i32  (send, recv)
+        let vuma_type_5_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32,
+                         WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });  // (i32,i32,i32,i32,i32) -> i32  (setsockopt, getsockopt)
+        let vuma_type_6_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32,
+                         WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });  // (i32,i32,i32,i32,i32,i32) -> i32  (sendto, recvfrom, mmap)
+
+        // socket(domain, type, protocol) → fd   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "socket".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 29 = VUMA_SOCKET_IDX
+        // bind(fd, addr_ptr, addrlen) → errno   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "bind".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 30 = VUMA_BIND_IDX
+        // listen(fd, backlog) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "listen".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 31 = VUMA_LISTEN_IDX
+        // accept(fd, addr_ptr, addrlen_ptr) → fd   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "accept".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 32 = VUMA_ACCEPT_IDX
+        // connect(fd, addr_ptr, addrlen) → errno   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "connect".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 33 = VUMA_CONNECT_IDX
+        // send(fd, buf, len, flags) → nbytes
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "send".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_4_i32 },
+        });  // idx 34 = VUMA_SEND_IDX
+        // recv(fd, buf, len, flags) → nbytes
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "recv".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_4_i32 },
+        });  // idx 35 = VUMA_RECV_IDX
+        // sendto(fd, buf, len, flags, addr_ptr, addrlen) → nbytes
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "sendto".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_6_i32 },
+        });  // idx 36 = VUMA_SENDTO_IDX
+        // recvfrom(fd, buf, len, flags, addr_ptr, addrlen_ptr) → nbytes
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "recvfrom".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_6_i32 },
+        });  // idx 37 = VUMA_RECVFROM_IDX
+        // setsockopt(fd, level, optname, optval_ptr, optlen) → errno
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "setsockopt".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_5_i32 },
+        });  // idx 38 = VUMA_SETSOCKOPT_IDX
+        // getsockopt(fd, level, optname, optval_ptr, optlen_ptr) → errno
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "getsockopt".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_5_i32 },
+        });  // idx 39 = VUMA_GETSOCKOPT_IDX
+        // shutdown(fd, how) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "shutdown".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 40 = VUMA_SHUTDOWN_IDX
+        // mmap(addr, len, prot, flags, fd, offset) → ptr
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "mmap".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_6_i32 },
+        });  // idx 41 = VUMA_MMAP_IDX
+        // munmap(addr, len) → errno   — reuses (i32,i32)→i32 (no-op on wasm32)
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "munmap".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 42 = VUMA_MUNMAP_IDX
+        // mprotect(addr, len, prot) → errno   — reuses (i32,i32,i32)→i32 (no-op)
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "mprotect".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 43 = VUMA_MPROTECT_IDX
+        // nanosleep(req_ptr, rem_ptr) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "nanosleep".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 44 = VUMA_NANOSLEEP_IDX
+
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
         let start_type_idx = module.add_type(WasmFuncType {
@@ -4105,22 +4237,73 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("link".to_string(),      VUMA_LINK_IDX);
         func_name_to_idx.insert("symlink".to_string(),   VUMA_SYMLINK_IDX);
         func_name_to_idx.insert("readlink".to_string(),  VUMA_READLINK_IDX);
+        // Socket family (Wave 5) — vuma.* host functions backed by the real OS.
+        func_name_to_idx.insert("socket".to_string(),    VUMA_SOCKET_IDX);
+        func_name_to_idx.insert("bind".to_string(),      VUMA_BIND_IDX);
+        func_name_to_idx.insert("listen".to_string(),    VUMA_LISTEN_IDX);
+        func_name_to_idx.insert("accept".to_string(),    VUMA_ACCEPT_IDX);
+        func_name_to_idx.insert("connect".to_string(),   VUMA_CONNECT_IDX);
+        // Send / recv family (Wave 5).  sendmsg / recvmsg are intentionally
+        // NOT mapped — they resolve to the generic -ENOSYS stub (msghdr
+        // marshaling is too complex for the wasm32 bridge).
+        func_name_to_idx.insert("send".to_string(),      VUMA_SEND_IDX);
+        func_name_to_idx.insert("recv".to_string(),      VUMA_RECV_IDX);
+        func_name_to_idx.insert("sendto".to_string(),    VUMA_SENDTO_IDX);
+        func_name_to_idx.insert("recvfrom".to_string(),  VUMA_RECVFROM_IDX);
+        // Socket options (Wave 5).
+        func_name_to_idx.insert("setsockopt".to_string(), VUMA_SETSOCKOPT_IDX);
+        func_name_to_idx.insert("getsockopt".to_string(), VUMA_GETSOCKOPT_IDX);
+        func_name_to_idx.insert("shutdown".to_string(),   VUMA_SHUTDOWN_IDX);
+        // Memory management (Wave 5).  mmap anonymous = bump-allocate in
+        // linear memory; file-backed = -ENOSYS; munmap/mprotect = no-op 0.
+        func_name_to_idx.insert("mmap".to_string(),      VUMA_MMAP_IDX);
+        func_name_to_idx.insert("munmap".to_string(),    VUMA_MUNMAP_IDX);
+        func_name_to_idx.insert("mprotect".to_string(),  VUMA_MPROTECT_IDX);
+        // Sleep (Wave 5).  clock_gettime is already aliased to WASI
+        // clock_time_get above; nanosleep is a new vuma.* host function.
+        func_name_to_idx.insert("nanosleep".to_string(), VUMA_NANOSLEEP_IDX);
 
         // ── Stub function for unknown externs ──────────────────────
         // When the wasm32 backend encounters a call to an unknown extern
-        // function (e.g. epoll_create1, close, socket), it resolves the
+        // function (e.g. epoll_create1, sendmsg, futex, clone — any POSIX
+        // syscall not mapped to a real vuma.* host import), it resolves the
         // call to this stub function index instead of crashing.
-        // The stub returns -1 (error), allowing tests to detect unsupported
-        // functionality gracefully.
+        //
+        // The stub returns `-ENOSYS` (-38) so callers can *detect* that the
+        // syscall is unsupported (rather than the previous silent -1, which
+        // was indistinguishable from a real runtime error).  This is the
+        // Wave 5 resolution: unsupported syscalls surface a real errno.
+        //
+        // The stub is typed `() -> i32`.  Wasm's `call` instruction only
+        // pops `params.len()` (=0) values, so any caller arguments stay on
+        // the stack as orphans and are dropped at the enclosing block's End
+        // (the codegen's block-end Drop-all logic keeps the stack clean).
+        // This means a single `() -> i32` stub correctly serves callers of
+        // any arity.
+        //
+        // The stub ALSO writes `-ENOSYS` to linear memory address 0,
+        // because the wasm32 codegen reads extern return values from mem[0]
+        // (not from the wasm stack result).  Without this write, callers
+        // would read stale mem[0] data instead of the -ENOSYS result.
+        //
+        // ENOSYS = 38 on Linux/generic POSIX ABI.
         let stub_type_idx = module.add_type(WasmFuncType {
             params: vec![],
             results: vec![WasmType::I32],
         });
         let stub_func_idx = module.add_function(stub_type_idx);
-        // Stub body: i32.const -1; end
+        // Stub body:
+        //   i32.const 0        ;; address 0 (the extern-return slot)
+        //   i32.const -38      ;; -ENOSYS
+        //   i32.store          ;; mem[0] = -ENOSYS
+        //   i32.const -38      ;; wasm-stack result = -ENOSYS
+        //   end
         let stub_body = {
             let mut b = Vec::new();
-            WasmInstr::I32Const(-1).encode(&mut b);
+            WasmInstr::I32Const(0).encode(&mut b);       // address
+            WasmInstr::I32Const(-ENOSYS_ERRNO).encode(&mut b); // value
+            WasmInstr::I32Store { align: 2, offset: 0 }.encode(&mut b);
+            WasmInstr::I32Const(-ENOSYS_ERRNO).encode(&mut b); // return value
             b.push(0x0B); // end
             b
         };
@@ -4420,11 +4603,12 @@ fn resolve_call_relocations(
         let resolved_idx = match func_name_to_idx.get(&reloc.symbol) {
             Some(&idx) => idx,
             None => {
-                // External symbol — resolve to the stub function that returns -1.
+                // External symbol — resolve to the generic stub that returns
+                // -ENOSYS so callers can detect unsupported syscalls (Wave 5).
                 // This allows tests to detect unsupported functionality gracefully
-                // (e.g. epoll_create1 returns -1 on wasm32/WASI).
+                // (e.g. epoll_create1 returns -ENOSYS on wasm32/WASI).
                 log::debug!(
-                    "unresolved call target '{}' in wasm32 module — using stub (returns -1)",
+                    "unresolved call target '{}' in wasm32 module — using stub (returns -ENOSYS)",
                     reloc.symbol
                 );
                 stub_func_idx
