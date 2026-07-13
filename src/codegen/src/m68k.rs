@@ -1795,12 +1795,24 @@ impl Backend for M68kBackend {
         };
 
         let vuma_free_stub: Vec<u8> = {
-            // VUMA's allocate() is lowered to stack allocation (IRInstr::Alloc),
-            // not mmap. So free() should be a no-op — calling munmap on a stack
-            // address would unmap the stack page and SIGSEGV on the next stack
-            // access (e.g., RTS which reads the return address from SP).
-            // Just return immediately.
+            // __vuma_free(addr in D1) -> munmap(addr, 4096).
+            // m68k __NR_munmap = 91. Caller passes addr in D1 (arg0); munmap's
+            // second arg (length) goes in D2. We pass length=4096 (page size)
+            // so the kernel unmaps at least one page.
+            //
+            // NOTE: IRInstr::Alloc on m68k lowers to stack-relative offsets, so
+            // __vuma_alloc is only invoked via explicit IRInstr::Call (e.g. from
+            // stdlib). This stub ensures such allocations can be properly freed.
+            // If a caller mistakenly passes a stack address, munmap returns
+            // -EINVAL (no SIGSEGV — the kernel validates the range first).
             let mut code = Vec::new();
+            // D2 = 4096 (0x1000) — length for munmap.
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D2, imm: 0x1000 }.encode());
+            // D0 = 91 (sys_munmap). D1 = addr (already from caller).
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 91 }.encode());
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+            // RTS
             code.extend(Instruction::Rts.encode());
             code
         };

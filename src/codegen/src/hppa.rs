@@ -1484,12 +1484,11 @@ impl Backend for HppaBackend {
                         code.extend_from_slice(&encode_nop());
                     }
                     IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
-                        // Skip __vuma_free calls — VUMA uses stack allocation, not mmap.
-                        // __vuma_free is a no-op stub, so just emit NOPs.
-                        if call_target == "__vuma_free" {
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&encode_nop());
-                        } else {
+                        // Emit a real call to the target. __vuma_free's stub (defined
+                        // in the syscall_stubs table below) issues a real munmap
+                        // syscall (__NR_munmap=91); it is not a no-op despite the
+                        // stale comment that previously suggested skipping it here.
+                        {
                             // Move args to R26-R23 (first 4 args).
                             // Stack args (4+) go to [R30 - 32 + (i-4)*4] (outgoing args area).
                             for (i, arg) in args.iter().enumerate() {

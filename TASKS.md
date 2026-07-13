@@ -39,13 +39,13 @@
 
 > All tasks touch disjoint files. Zero dependencies between them.
 
-- [ ] **[BE-sparc64]** Verify `setsockopt=355` is correct against `arch/sparc/include/uapi/asm/unistd.h` (audit flagged it as a bug but commit `899a287` claims correction; confirm and close). `src/codegen/src/sparc64.rs:4054`
-- [ ] **[BE-alpha]** Fix `pipe` stub to propagate failure instead of unconditionally returning 0. `src/codegen/src/alpha.rs:1638`
-- [ ] **[BE-riscv32]** Switch `clock_gettime` from legacy `113` to `clock_gettime64=403` (Y2038). `src/codegen/src/riscv32.rs:6486`
-- [ ] **[DEP]** Remove dead workspace deps `colored`, `anyhow`, `env_logger` (declared, never `use`d). `Cargo.toml:54-57`
-- [ ] **[BE-hppa]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/hppa.rs:1488`
-- [ ] **[BE-m68k]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/m68k.rs:1799`
-- [ ] **[BE-sparc64]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/sparc64.rs:3965`
+- [x] **[BE-sparc64]** Verify `setsockopt=355` is correct against `arch/sparc/include/uapi/asm/unistd.h` (audit flagged it as a bug but commit `899a287` claims correction; confirm and close). `src/codegen/src/sparc64.rs:4054` — **VERIFIED NOT-A-BUG**: 355 is the correct modern sparc64 `__NR_setsockopt`. Added clarifying comment to prevent re-flagging.
+- [x] **[BE-alpha]** Fix `pipe` stub to propagate failure instead of unconditionally returning 0. `src/codegen/src/alpha.rs:1638` — replaced the confused hand-encoding attempt + unconditional `OR ZERO,ZERO,R0` with the existing `Instruction::Cmovne { ra: R19, rb: R1, rc: R0 }` (opcode 0x11, function 0x26) so `callsys` errors propagate as `-1`.
+- [x] **[BE-riscv32]** Switch `clock_gettime` from legacy `113` to `clock_gettime64=403` (Y2038). `src/codegen/src/riscv32.rs:6486`
+- [x] **[DEP]** Remove dead workspace deps `colored`, `anyhow`, `env_logger` (declared, never `use`d). `Cargo.toml:54-57` + `src/tests/Cargo.toml:23` — removed from both `[workspace.dependencies]`, root `[dependencies]`, and `src/tests/Cargo.toml`.
+- [x] **[BE-hppa]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/hppa.rs:1488` — the real munmap stub already existed at `hppa.rs:2129` but the Call handler was short-circuiting `__vuma_free` calls with NOPs. Removed the skip-code so the real stub is now invoked.
+- [x] **[BE-m68k]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/m68k.rs:1799` — replaced `RTS`-only no-op with `D2=4096; D0=91; TRAP #0; RTS` (real `__NR_munmap=91`).
+- [x] **[BE-sparc64]** Replace no-op `__vuma_free` with real `munmap` syscall stub. `src/codegen/src/sparc64.rs:3965` — replaced `JMPL %o7+8`-only no-op with `%o1=4096; OR %g0,73,%g1; TA 0x6d; JMPL %o7+8; NOP` (real `__NR_munmap=73`).
 
 ---
 
