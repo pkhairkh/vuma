@@ -73,8 +73,9 @@ use vuma_ive::{
 use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow, NodeData, NodeId, NodePayload,
-    NodeType, PassManager, PipelineResult as ScgPipelineResult, SCG, SCGPass, ComputationKind,
+    EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow, LoopInvariantCodeMotion, NodeData,
+    NodeId, NodePayload, NodeType, PassManager, PipelineResult as ScgPipelineResult, SCG, SCGPass,
+    ComputationKind,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6197,6 +6198,12 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
             pm.add_pass(ConstantFolding::new());
             pm.add_pass(CommonSubexpressionElimination::new());
             pm.add_pass(DeadCodeElimination::new()); // second pass after CSE
+            // (Wave 26) Loop-invariant code motion at O2+ — hoists
+            // loop-invariant SCG computation nodes to the loop pre-header.
+            // Skipped at O1 (LICM can grow code if the loop body is large)
+            // and at O0 (no optimisation).
+            pm.add_pass(LoopInvariantCodeMotion::new());
+            pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
         }
         OptLevel::O3 => {
             pm.add_pass(DeadCodeElimination::new());
@@ -6206,6 +6213,9 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
             pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
             pm.add_pass(ConstantFolding::new()); // re-fold after inlining
             pm.add_pass(CommonSubexpressionElimination::new());
+            // (Wave 26) LICM at O3, after inlining+DCE so it sees the
+            // post-inline loop structure.
+            pm.add_pass(LoopInvariantCodeMotion::new());
             pm.add_pass(DeadCodeElimination::new()); // final cleanup
         }
     }
