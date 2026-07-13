@@ -130,13 +130,17 @@
 > One task per syscall family; each task touches every backend's stub table
 > but the families are independent. Run all 7 in parallel.
 
-- [ ] **[BE-all]** Add `mkdir`/`rmdir`/`rename`/`link`/`symlink`/`readlink` to every backend's `syscall_stubs`.
-- [ ] **[BE-all]** Add `chmod`/`chown`/`umask`/`fchmod`/`fchown`.
-- [ ] **[BE-all]** Add `*at` variants: `openat`/`unlinkat`/`renameat`/`linkat`/`symlinkat`/`readlinkat`/`faccessat`/`fchmodat`/`fchownat`.
-- [ ] **[BE-all]** Add `ftruncate`/`fsync`/`fdatasync`/`sync`/`syncfs`.
-- [ ] **[BE-all]** Add `pread`/`pwrite`/`readv`/`writev`/`preadv`/`pwritev`.
-- [ ] **[BE-all]** Add `lseek` (where missing) / `dup`/`dup2`/`dup3`/`fcntl`/`ioctl`.
-- [ ] **[BE-all]** Add `getcwd`/`chdir`/`fchdir`/`chroot`.
+- [x] **[BE-all]** Add `mkdir`/`rmdir`/`rename`/`link`/`symlink`/`readlink` to every backend's `syscall_stubs`. — DONE on all 14 ELF backends. On the 4 asm-generic arches (aarch64, riscv64, riscv32, loongarch64) the plain names don't exist as syscalls, so they are exposed as `*at(AT_FDCWD=-100, …)` wrappers (mkdir→mkdirat, rmdir→unlinkat(AT_REMOVEDIR=0x200), rename→renameat, link→linkat, symlink→symlinkat, readlink→readlinkat). On the 10 legacy arches (x86_64, x86_32, arm32, m68k, ppc64, s390x, sparc64, alpha, hppa, mips64) they are direct `simple_stub`/dedicated entries with each arch's real `__NR_*` from its kernel `syscall.tbl`. wasm32 already has them as `vuma.*` host imports (wave 4).
+- [x] **[BE-all]** Add `chmod`/`chown`/`umask`/`fchmod`/`fchown`. — DONE. `umask`/`fchmod`/`fchown` are direct on all arches. `chmod`/`chown` on generic arches are wrappers (→fchmodat/fchownat with AT_FDCWD + flags=0); on legacy arches they map to the MODERN 32-bit-uid variant (chown32/fchown32) where a 16-bit split exists: i386 chown=212/fchown=207, m68k chown=198/fchown=207, arm chown=212/fchown=207, s390 chown=212/fchown=207, sparc chown=35(chown32)/fchown=32(fchown32). Arches with no split use the native chown (ppc=181, alpha=16, parisc=180, mips n64=90, x86_64=92, all generic→wrapper).
+- [x] **[BE-all]** Add `*at` variants: `openat`/`unlinkat`/`renameat`/`linkat`/`symlinkat`/`readlinkat`/`faccessat`/`fchmodat`/`fchownat`. — DONE on all 14 ELF backends as direct stubs with each arch's real `__NR_*at` (verified against kernel `syscall.tbl`). 5-arg `linkat`/`fchownat` use a dedicated stub on the 4-reg-arg arches: arm32 reuses `six_arg_stub` (loads arg5 from caller stack; arg6 ignored), x86_32 uses a new `syscall_stub(num,nargs)` helper with a correct 5-arg shuffle (arg1 EDI→EBX before loading arg5 from stack into EDI).
+- [x] **[BE-all]** Add `ftruncate`/`fsync`/`fdatasync`/`sync`/`syncfs`. — DONE on all 14 ELF backends. Per-arch numbers verified (e.g. sparc fsync=95/fdatasync=253, alpha fdatasync=447/syncfs=500, mips n64 fsync=5072/syncfs=5301). `sync` is 0-arg.
+- [x] **[BE-all]** Add `pread`/`pwrite`/`readv`/`writev`/`preadv`/`pwritev`. — DONE on all 14 ELF backends (mapped to pread64/pwrite64). Per-arch numbers verified (ppc pread64=179, parisc pread64=108, sparc pread64=67, alpha pread64=349, mips n64 pread64=5016). RV32 caveat documented: 64-bit `off_t` strictly needs an a3:a4 pair but the simple stub passes a0-a3 (low 32 bits) — coverage registered, full 64-bit offset support deferred.
+- [x] **[BE-all]** Add `lseek` (where missing) / `dup`/`dup2`/`dup3`/`fcntl`/`ioctl`. — VERIFIED ALREADY-PRESENT on all 14 ELF backends (all six names registered in every backend's stub table from prior waves); no additions needed.
+- [x] **[BE-all]** Add `getcwd`/`chdir`/`fchdir`/`chroot`. — `getcwd`/`chdir` already present on all 14 ELF backends; `fchdir`/`chroot` ADDED to all 14 with per-arch numbers (e.g. sparc fchdir=176, alpha fchdir=13, mips n64 fchdir=5079/chroot=5156).
+
+> **wasm32 note:** wave-7 families 2–7 are not mapped to `vuma.*` host imports on wasm32 (WASI preview1 has no POSIX equivalents). They resolve to wasm32's unknown-extern fallback stub (returns -1; wave 5 is refining this to `-ENOSYS`). wasm32 was deliberately not edited here to avoid conflicting with the in-progress wave-5 wasm32 `-ENOSYS` rework; its wave-7 coverage is via that fallback.
+
+> **Verification:** `cargo check -p vuma-codegen` → 0 errors. `cargo test -p vuma-codegen --lib` → 779 passed / 15 failed, IDENTICAL to the pre-wave-7 baseline (same 15 pre-existing failures in loongarch64/scg_to_ir/wasm32/x86_32-elf/x86_64-isel, none touching wave-7 stubs). All per-arch syscall numbers were extracted from the authoritative kernel `arch/*/kernel/syscalls/syscall.tbl` files (fetched from torvalds/linux), not from memory — critical for arches whose tables diverge (sparc, alpha, parisc, mips n64 with its 5000 base offset).
 
 ---
 

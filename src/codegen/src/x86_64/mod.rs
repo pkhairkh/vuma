@@ -2871,6 +2871,27 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("dup3", 292),
         // VUMA heap-free helper -- same as munmap
         ("__vuma_free", 11),
+        // ── Wave 7: POSIX file-metadata & I/O syscalls (x86_64 syscall_64.tbl) ──
+        // All take ≤5 args; x86_64 has 6 register args (RDI/RSI/RDX/R10/R8/R9),
+        // so every entry fits the simple "mov eax,#num; syscall; ret" stub.
+        // Family 1: dir/link ops
+        ("mkdir", 83), ("rmdir", 84), ("rename", 82),
+        ("link", 86), ("symlink", 88), ("readlink", 89),
+        // Family 2: mode/owner
+        ("chmod", 90), ("fchmod", 91), ("chown", 92),
+        ("fchown", 93), ("umask", 95),
+        // Family 3: *at variants
+        ("fchownat", 260), ("openat", 257), ("unlinkat", 263),
+        ("renameat", 264), ("linkat", 265), ("symlinkat", 266),
+        ("readlinkat", 267), ("fchmodat", 268), ("faccessat", 269),
+        // Family 4: sync/truncate
+        ("ftruncate", 46), ("fsync", 74), ("fdatasync", 75),
+        ("sync", 162), ("syncfs", 306),
+        // Family 5: positioned & vector I/O
+        ("pread", 17), ("pwrite", 18), ("readv", 19), ("writev", 20),
+        ("preadv", 295), ("pwritev", 296),
+        // Family 7: cwd/root (getcwd=79/chdir=80 already above)
+        ("fchdir", 81), ("chroot", 161),
     ] {
         stubs.push((name.to_string(), simple_stub(num)));
     }

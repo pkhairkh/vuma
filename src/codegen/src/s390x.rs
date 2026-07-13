@@ -2403,6 +2403,22 @@ impl Backend for S390XBackend {
                 ("lstat", 107),
                 ("fstat", 108),
                 ("getcwd", 183),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (s390 unistd.h) ──
+                // s390x has 5 reg args (R2-R6); all these take ≤5 args → simple_stub.
+                // chown=212/fchown=207 are the modern 32-bit-uid variants
+                // (s390's old 16-bit chown slot was repurposed; 212 is sys_chown).
+                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
+                ("link", 9), ("symlink", 83), ("readlink", 85),
+                ("chmod", 15), ("chown", 212), ("umask", 60),
+                ("fchmod", 94), ("fchown", 207),
+                ("openat", 288), ("unlinkat", 294), ("renameat", 295),
+                ("linkat", 296), ("symlinkat", 297), ("readlinkat", 298),
+                ("fchmodat", 299), ("faccessat", 300), ("fchownat", 291),
+                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
+                ("sync", 36), ("syncfs", 338),
+                ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
+                ("preadv", 328), ("pwritev", 329),
+                ("fchdir", 133), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
