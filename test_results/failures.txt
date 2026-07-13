@@ -1,5 +1,4 @@
-VUMA Test Failures — 2026-07-13 15:52:33 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-13 16:34:05 UTC
+Total: 0 failures across 0 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  concurrency          self_exec.vuma                                exp= 100 [('sparc64', 0, 'MM')]
