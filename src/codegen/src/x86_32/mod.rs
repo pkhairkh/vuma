@@ -3070,6 +3070,26 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("timerfd_gettime", 326, 2), ("signalfd", 327, 4),
         ("inotify_init1", 332, 1), ("inotify_add_watch", 292, 3), ("inotify_rm_watch", 293, 2),
         ("ptrace", 26, 4),
+        // ── Wave 8: POSIX process & identity syscalls (i386 syscall_32.tbl) ──
+        // Identity uses the modern *32 variants (199-214) per Wave 7 precedent.
+        // 5-arg syscalls (waitid/execveat/prctl) use nargs=5 → syscall_stub
+        // moves arg1 EDI→EBX then loads arg5 from [ESP+16] into EDI.
+        // Family 1: identity
+        ("getuid", 199, 0), ("geteuid", 201, 0), ("getgid", 200, 0), ("getegid", 202, 0),
+        ("setuid", 213, 1), ("setgid", 214, 1), ("setresuid", 208, 3), ("setresgid", 210, 3),
+        // Family 2: process group (getpid already present)
+        ("getppid", 64, 0), ("getsid", 147, 1), ("setsid", 66, 0),
+        ("setpgid", 57, 2), ("getpgid", 132, 1), ("getpgrp", 65, 0),
+        // Family 3: clone/wait (clone/wait4 already present)
+        ("vfork", 190, 0), ("clone3", 435, 2), ("waitid", 284, 5),
+        // Family 4: exec/exit (execve/exit_group already present)
+        ("execveat", 358, 5),
+        // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+        ("tgkill", 270, 3), ("tkill", 238, 2), ("rt_sigaction", 174, 4),
+        // Family 6: directory read (readdir=89 is sys_old_readdir, deprecated)
+        ("getdents64", 220, 3), ("getdents", 141, 3), ("readdir", 89, 3),
+        // Family 7: system (arch_prctl NOT on i386)
+        ("prctl", 172, 5), ("uname", 122, 1), ("sysinfo", 116, 1),
     ] {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }

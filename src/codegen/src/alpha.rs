@@ -1626,6 +1626,29 @@ impl Backend for AlphaBackend {
                 ("timerfd_gettime", 483), ("signalfd", 484),
                 ("inotify_init1", 489), ("inotify_add_watch", 445), ("inotify_rm_watch", 446),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (alpha syscall.tbl) ──
+                // alpha is OSF-derived; numbers diverge widely. All take ≤5 args;
+                // alpha has 6 reg args (a0-a5) → simple_stub for all.
+                // Family 1: identity. NOTE: alpha has NO standalone getuid/getgid —
+                // getxuid=24 returns ruid|(euid<<32), getxgid=47 returns rgid|(egid<<32).
+                // We register getuid/getgid at these numbers (OSF combined-return
+                // quirk; a real libc extracts the low 32 bits).
+                ("getuid", 24), ("geteuid", 531), ("getgid", 47), ("getegid", 530),
+                ("setuid", 23), ("setgid", 132), ("setresuid", 343), ("setresgid", 371),
+                // Family 2: process group (getpid already present at 20=getxpid)
+                ("getppid", 532), ("getsid", 234), ("setsid", 147),
+                ("setpgid", 39), ("getpgid", 233), ("getpgrp", 63),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 66), ("clone3", 545), ("waitid", 438),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 513),
+                // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
+                // already present)
+                ("tgkill", 424), ("tkill", 381),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 377), ("getdents", 305),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 348), ("uname", 339), ("sysinfo", 318),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

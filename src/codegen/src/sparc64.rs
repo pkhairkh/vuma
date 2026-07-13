@@ -4135,6 +4135,25 @@ impl Backend for Sparc64Backend {
                 ("timerfd_gettime", 316), ("signalfd", 317),
                 ("inotify_init1", 322), ("inotify_add_watch", 152), ("inotify_rm_watch", 156),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (sparc64 syscall.tbl) ──
+                // sparc64 numbers are SunOS-derived and highly divergent. All take
+                // ≤5 args; sparc64 has 6 reg args (o0-o5) → simple_stub for all.
+                // Family 1: identity (no uid16 split on sparc64)
+                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
+                ("setuid", 23), ("setgid", 46), ("setresuid", 108), ("setresgid", 110),
+                // Family 2: process group (getpid already present)
+                ("getppid", 197), ("getsid", 252), ("setsid", 175),
+                ("setpgid", 185), ("getpgid", 224), ("getpgrp", 81),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 66), ("clone3", 435), ("waitid", 279),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 350),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 211), ("tkill", 187), ("rt_sigaction", 102),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 154), ("getdents", 174),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 147), ("uname", 189), ("sysinfo", 214),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

@@ -2904,6 +2904,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("timerfd_gettime", 287), ("signalfd", 289),
         ("inotify_init1", 294), ("inotify_add_watch", 254), ("inotify_rm_watch", 255),
         ("ptrace", 101),
+        // ── Wave 8: POSIX process & identity syscalls (x86_64 syscall_64.tbl) ──
+        // All take ≤5 args; x86_64 has 6 reg args (RDI/RSI/RDX/R10/R8/R9) → simple_stub.
+        // Family 1: identity
+        ("getuid", 102), ("geteuid", 107), ("getgid", 104), ("getegid", 108),
+        ("setuid", 105), ("setgid", 106), ("setresuid", 117), ("setresgid", 119),
+        // Family 2: process group (getpid already present)
+        ("getppid", 110), ("getsid", 124), ("setsid", 112),
+        ("setpgid", 109), ("getpgid", 121), ("getpgrp", 111),
+        // Family 3: clone/wait (clone/wait4 already present)
+        ("vfork", 58), ("clone3", 435), ("waitid", 247),
+        // Family 4: exec/exit (execve/exit_group already present)
+        ("execveat", 322),
+        // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+        ("tgkill", 234), ("tkill", 200), ("rt_sigaction", 13),
+        // Family 6: directory read (readdir ABSENT on x86_64 → use getdents64)
+        ("getdents64", 217), ("getdents", 78),
+        // Family 7: system (arch_prctl=158 is x86_64-only)
+        ("prctl", 157), ("arch_prctl", 158), ("uname", 63), ("sysinfo", 99),
     ] {
         stubs.push((name.to_string(), simple_stub(num)));
     }

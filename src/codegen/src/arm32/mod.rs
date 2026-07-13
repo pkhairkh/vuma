@@ -7291,6 +7291,24 @@ impl Backend for Arm32Backend {
                 ("timerfd_gettime", 354), ("signalfd", 355),
                 ("inotify_init1", 360), ("inotify_add_watch", 317), ("inotify_rm_watch", 318),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (arm32 syscall.tbl) ──
+                // ≤4-arg syscalls use simple_stub (ARM EABI: 4 reg args r0-r3).
+                // 5-arg syscalls (waitid/execveat/prctl) use six_arg_stub below.
+                // Identity uses the modern *32 variants (199-214) per Wave 7 precedent.
+                // Family 1: identity
+                ("getuid", 199), ("geteuid", 201), ("getgid", 200), ("getegid", 202),
+                ("setuid", 213), ("setgid", 214), ("setresuid", 208), ("setresgid", 210),
+                // Family 2: process group (getpid already present)
+                ("getppid", 64), ("getsid", 147), ("setsid", 66),
+                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                // Family 3: clone/wait (clone/wait4 already present; clone3=2args fits)
+                ("vfork", 190), ("clone3", 435),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 268), ("tkill", 238), ("rt_sigaction", 174),
+                // Family 6: directory read (readdir ABSENT on EABI → use getdents64)
+                ("getdents64", 217), ("getdents", 141),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("uname", 122), ("sysinfo", 116),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -7307,6 +7325,12 @@ impl Backend for Arm32Backend {
             // Uses six_arg_stub to load arg5 (new_address) from the caller's
             // stack into R4; R5 (arg6) is garbage and ignored by the 5-arg syscall.
             stubs.push(("mremap".to_string(), six_arg_stub(163)));
+            // ── Wave 8: 5-arg syscalls (waitid/execveat/prctl) ──
+            // ARM EABI passes args 5+ on the caller's stack; six_arg_stub
+            // loads arg5 from [SP] (arg6 is ignored by these 5-arg syscalls).
+            stubs.push(("waitid".to_string(), six_arg_stub(280)));
+            stubs.push(("execveat".to_string(), six_arg_stub(387)));
+            stubs.push(("prctl".to_string(), six_arg_stub(172)));
 
             // rt_sigreturn (173) — special: no args, never returns.
             // The kernel restores the saved signal context from the stack

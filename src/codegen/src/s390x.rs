@@ -2431,6 +2431,25 @@ impl Backend for S390XBackend {
                 ("timerfd_gettime", 321), ("signalfd", 322),
                 ("inotify_init1", 324), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (s390x syscall.tbl) ──
+                // s390x uid syscalls are at 199-214 (already 32-bit, no *32 suffix).
+                // All take ≤5 args; s390x has 5 reg args (r2-r6) → simple_stub for all.
+                // Family 1: identity
+                ("getuid", 199), ("geteuid", 201), ("getgid", 200), ("getegid", 202),
+                ("setuid", 213), ("setgid", 214), ("setresuid", 208), ("setresgid", 210),
+                // Family 2: process group (getpid already present)
+                ("getppid", 64), ("getsid", 147), ("setsid", 66),
+                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 190), ("clone3", 435), ("waitid", 281),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 354),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 241), ("tkill", 237), ("rt_sigaction", 174),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 220), ("getdents", 141),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 172), ("uname", 122), ("sysinfo", 116),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
