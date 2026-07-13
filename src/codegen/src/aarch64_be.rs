@@ -1,11 +1,25 @@
 //! # AArch64 Big-Endian Backend (aarch64_be)
 //!
-//! Thin wrapper around the little-endian `arm64` backend that produces
-//! big-endian AArch64 ELF binaries.
+//! **Wave 49 — wrapper pattern documentation.**
 //!
-//! Key difference from ppc64le/mips64be: AArch64 instructions are ALWAYS
-//! little-endian encoded, even on big-endian data systems. So we only
-//! swap ELF header fields and program headers — NOT instruction words.
+//! `aarch64_be` is a thin wrapper around the little-endian `AArch64Backend`
+//! (field `inner: AArch64Backend`) that produces big-endian AArch64 ELF
+//! binaries. It delegates `target_info`, `allocate_registers`, and
+//! `emit_function_regalloc` (i.e. `encode_function`, `return_stub`,
+//! `trampoline`, `disassemble`) verbatim to `self.inner.*` — and, crucially,
+//! returns the parent's instruction bytes **UNCHANGED**.
+//!
+//! ## Why no instruction byte-swap?
+//!
+//! Per the ARM Architecture Reference Manual for AArch64 (ARM DDI 0487,
+//! section D6.1.3 "Instruction fetches"), AArch64 instruction fetches are
+//! **always little-endian**, regardless of the data endianness selected by
+//! `PSTATE.E` (or by the ELF `EI_DATA` byte). The big-endian AArch64 ABI
+//! therefore only swaps data loads/stores (LDR/STR with `PSTATE.E=1`); the
+//! 32-bit instruction words are stored LE in `.text`. Because the parent
+//! `AArch64Backend` already emits LE instruction bytes, `encode_function`
+//! simply forwards them — no swap. Only the ELF header / PHDR fields (the
+//! data ABI) are flipped in `encode_program` via `swap_le_elf_to_be`.
 //!
 //! ## `IRInstr::Syscall` inheritance (Wave 13)
 //!
