@@ -1290,7 +1290,28 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
                 DiagnosticSourceLocation::unknown(),
             )]
         }
+        VumaError::MemorySafety { report } => {
+            // One diagnostic per violation.  Each violation kind has its
+            // own error code (E041 = UAF, E042 = double-free, E043 = leak,
+            // E044 = uninit-read, E045 = dangling-pointer) sourced from
+            // `MemorySafetyViolation::code()`.
+            report
+                .violations
+                .iter()
+                .flat_map(|v| from_memory_safety_violation_list(v))
+                .collect()
+        }
     }
+}
+
+/// Helper: convert a single `MemorySafetyViolation` into a one-element
+/// `Vec<VumaDiagnostic>` (so it can be flat-mapped in
+/// `from_vuma_error`'s `MemorySafety` arm).  This wraps
+/// [`from_memory_safety_violation`] which returns a single diagnostic.
+fn from_memory_safety_violation_list(
+    violation: &vuma_codegen::MemorySafetyViolation,
+) -> Vec<VumaDiagnostic> {
+    vec![from_memory_safety_violation(violation)]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
