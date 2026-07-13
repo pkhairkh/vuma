@@ -303,9 +303,12 @@ def main():
         try:
             r, w = os.pipe()
             write_mem(pipefd_ptr, struct.pack('<ii', r, w))
-            return 0
+            ret = 0
         except OSError:
-            return -1
+            ret = -1
+        # Codegen reads return value from mem[0] (i32) for non-void externs.
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     def vuma_fork():
         try:
@@ -315,9 +318,11 @@ def main():
             import warnings
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                return os.fork()
+                ret = os.fork()
         except OSError:
-            return -1
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     def vuma_execve(path_ptr, argv_ptr, envp_ptr):
         try:
@@ -334,34 +339,43 @@ def main():
                     k, v = e.split('=', 1)
                     env[k] = v
             os.execvpe(sys.executable, new_argv, env)
-            return -1
+            ret = -1
         except OSError:
-            return -1
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     def vuma_dup2(oldfd, newfd):
         try:
-            return os.dup2(oldfd, newfd)
+            ret = os.dup2(oldfd, newfd)
         except OSError:
-            return -1
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     def vuma_waitpid(pid, status_ptr, options):
         try:
             result = os.waitpid(pid, options)
             # wasm32 is always little-endian; write status as LE 32-bit int
             write_mem(status_ptr, struct.pack('<i', result[1]))
-            return result[0]
+            ret = result[0]
         except OSError:
-            return -1
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     def vuma_strcmp(s1_ptr, s2_ptr):
         s1 = read_cstr(s1_ptr)
         s2 = read_cstr(s2_ptr)
+        diff = 0
         for i in range(max(len(s1), len(s2)) + 1):
             b1 = s1[i] if i < len(s1) else 0
             b2 = s2[i] if i < len(s2) else 0
             if b1 != b2:
-                return b1 - b2
-        return 0
+                diff = b1 - b2
+                break
+        write_mem(0, struct.pack('<i', diff))
+        return diff
 
     # vuma_read(fd, buf_ptr, count) → nbytes
     # Uses os.read() directly — works with pipe fds that WASI fd_read
@@ -408,9 +422,11 @@ def main():
     def vuma_close(fd):
         try:
             os.close(fd)
-            return 0
+            ret = 0
         except OSError:
-            return -1
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
 
     i32 = ValType.i32()
     # Define the custom "vuma" module host functions in the linker
@@ -443,6 +459,12 @@ def main():
         except SystemExit:
             raise
         except Exception as e:
+            # ExitTrap is raised when the wasm code calls proc_exit (e.g.
+            # child_mode's exit(0)).  In the parent process, this means the
+            # child's exit was caught — but the parent should continue and
+            # _vuma_main should return the parent's exit code.  If we reach
+            # here, the parent itself called proc_exit (e.g. via exit(N)),
+            # so we exit with 1 to signal an abnormal termination.
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
