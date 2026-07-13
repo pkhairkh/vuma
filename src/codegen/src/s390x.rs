@@ -2751,6 +2751,35 @@ impl Backend for S390XBackend {
             // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
+        // ── print_newline() → void — write '\n' to stdout ──
+        // No arguments. Uses sys_write(1, &newline, 1).
+        // s390x syscall convention: R1=syscall#, R2=fd, R3=buf, R4=count,
+        // SVC 0 = syscall trap. R15 = SP. R14 = LR (return address).
+        {
+            let mut code: Vec<u8> = Vec::new();
+            // SP -= 16 (stack space for the newline byte)
+            code.extend(adjust_sp(-16));
+            // LGHI R5, 10 ('\n')
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 10));
+            // STC R5, 0(SP) — store newline at [SP]
+            code.extend_from_slice(&encode_stc(Gpr::R5, SP, 0));
+            // LGHI R2, 1 (fd = stdout)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 1));
+            // LGR R3, SP (buf = SP)
+            code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
+            // LGHI R4, 1 (len = 1)
+            code.extend_from_slice(&encode_lghi(Gpr::R4, 1));
+            // LGFI R1, 4 (sys_write)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 4));
+            // SVC 0
+            code.extend_from_slice(&encode_svc(0));
+            // SP += 16 (restore stack)
+            code.extend(adjust_sp(16));
+            // BR R14 (return)
+            code.extend_from_slice(&encode_br(LR));
+            syscall_stubs.push(("print_newline".to_string(), code));
+        }
+
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
         let mut current_offset: usize = start_stub_size + ffi_stub_size;
@@ -2784,8 +2813,10 @@ impl Backend for S390XBackend {
         // code can call them by their bare POSIX-friendly names.
         let print_int_offset = func_offsets.get("print_int").copied().unwrap_or(0);
         let print_hex_offset = func_offsets.get("print_hex").copied().unwrap_or(0);
+        let print_newline_offset = func_offsets.get("print_newline").copied().unwrap_or(0);
         func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
         func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
+        func_offsets.insert("__vuma_print_newline".to_string(), print_newline_offset);
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);

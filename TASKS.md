@@ -67,13 +67,13 @@
 
 > One task per backend. Independent stub additions.
 
-- [ ] **[BE-x86_32]** Add `print_newline` stub. `src/codegen/src/x86_32/mod.rs`
-- [ ] **[BE-alpha]** Add `print_newline` stub. `src/codegen/src/alpha.rs`
-- [ ] **[BE-hppa]** Add `print_newline` stub. `src/codegen/src/hppa.rs`
-- [ ] **[BE-m68k]** Add `print_newline` stub. `src/codegen/src/m68k.rs`
-- [ ] **[BE-s390x]** Add `print_newline` stub. `src/codegen/src/s390x.rs`
-- [ ] **[BE-riscv32]** Add `print_newline` stub. `src/codegen/src/riscv32.rs`
-- [ ] **[BE-riscv64]** Add `print_newline` stub. `src/codegen/src/riscv64.rs`
+- [x] **[BE-x86_32]** Add `print_newline` stub. `src/codegen/src/x86_32/mod.rs` — added `write(1,&newline,1)` stub with EBX save/restore + `__vuma_print_newline` alias registration.
+- [x] **[BE-alpha]** Add `print_newline` stub. `src/codegen/src/alpha.rs` — added `LDA SP,-16; STB '\n',0(SP); R16=1,R17=SP,R18=1,R0=4; CALL_PAL 0x83; LDA SP,16; RET` stub.
+- [x] **[BE-hppa]** Add `print_newline` stub. `src/codegen/src/hppa.rs` — added `LDO -16(SP); STB '\n',0(SP); R26=1,R25=SP,R24=1,R20=4; GATE; LDO 16(SP); BV R2(R0)` stub.
+- [x] **[BE-m68k]** Add `print_newline` stub. `src/codegen/src/m68k.rs` — added `MOVEQ #10,D0; MOVE.L D0,-(SP); D1=1,D2=SP,D3=1,D0=4; TRAP #0; ADDQ.L #4,SP; RTS` stub + `__vuma_print_newline` alias.
+- [x] **[BE-s390x]** Add `print_newline` stub. `src/codegen/src/s390x.rs` — added `SP-=16; STC '\n',0(SP); R2=1,R3=SP,R4=1,R1=4; SVC 0; SP+=16; BR R14` stub + `__vuma_print_newline` alias.
+- [x] **[BE-riscv32]** Add `print_newline` stub. `src/codegen/src/riscv32.rs` — runtime blob already had `__vuma_print_newline`; added bare `print_newline` alias to `func_offsets`.
+- [x] **[BE-riscv64]** Add `print_newline` stub. `src/codegen/src/riscv64.rs` — runtime blob already had `__vuma_print_newline`; added bare `print_newline` alias to `func_offsets`.
 
 ---
 
