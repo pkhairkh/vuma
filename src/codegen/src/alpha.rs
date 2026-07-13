@@ -1582,7 +1582,10 @@ impl Backend for AlphaBackend {
                 ("socket", 97), ("connect", 98), ("bind", 104), ("listen", 106),
                 ("accept", 99), ("setsockopt", 105), ("shutdown", 103),
                 ("sendto", 82), ("recvfrom", 102), ("clone", 220), ("fork", 2),
-                ("epoll_create1", 449), ("epoll_ctl", 424), ("epoll_wait", 425),
+                // [wave 9 fix] epoll numbers corrected from kernel alpha syscall.tbl:
+                //   old (wrong): 449/424/425 (those are migrate_pages/tgkill/stat64)
+                //   correct:      486/408/409
+                ("epoll_create1", 486), ("epoll_ctl", 408), ("epoll_wait", 409),
                 ("dup3", 431),
                 // ── Additional POSIX syscall stubs ──
                 // Alpha uses OSF/1 syscall numbers for the stat family
@@ -1609,6 +1612,20 @@ impl Backend for AlphaBackend {
                 ("pread", 349), ("pwrite", 350), ("readv", 120), ("writev", 121),
                 ("preadv", 490), ("pwritev", 491),
                 ("fchdir", 13), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (alpha unistd.h) ──
+                // alpha has 6 reg args (R16-R21); all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(485), signalfd→signalfd4(484) = modern variants.
+                // alpha numbers diverge: mlock=314, mincore=375, madvise=75,
+                // getrlimit=144, getrusage=364, times=323, mremap=341, etc.
+                ("mlock", 314), ("munlock", 315), ("mlockall", 316), ("munlockall", 317),
+                ("mincore", 375), ("madvise", 75), ("msync", 217), ("mremap", 341),
+                ("getrlimit", 144), ("setrlimit", 145), ("prlimit64", 496),
+                ("getrusage", 364), ("times", 323),
+                ("getrandom", 511),
+                ("eventfd", 485), ("timerfd_create", 481), ("timerfd_settime", 482),
+                ("timerfd_gettime", 483), ("signalfd", 484),
+                ("inotify_init1", 489), ("inotify_add_watch", 445), ("inotify_rm_watch", 446),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

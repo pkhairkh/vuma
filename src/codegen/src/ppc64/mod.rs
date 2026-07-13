@@ -6120,6 +6120,18 @@ impl Backend for PPC64Backend {
                 ("pread", 179), ("pwrite", 180), ("readv", 145), ("writev", 146),
                 ("preadv", 320), ("pwritev", 321),
                 ("fchdir", 133), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (ppc unistd.h) ──
+                // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(314), signalfd→signalfd4(313) = modern variants.
+                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
+                ("mincore", 206), ("madvise", 205), ("msync", 144), ("mremap", 163),
+                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 325),
+                ("getrusage", 77), ("times", 43),
+                ("getrandom", 359),
+                ("eventfd", 314), ("timerfd_create", 306), ("timerfd_settime", 311),
+                ("timerfd_gettime", 312), ("signalfd", 313),
+                ("inotify_init1", 318), ("inotify_add_watch", 276), ("inotify_rm_watch", 277),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

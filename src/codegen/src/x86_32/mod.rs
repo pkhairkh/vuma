@@ -2467,7 +2467,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("futex".to_string(), code));
     }
 
-    // epoll_ctl(epfd, op, fd, event) → int  [i386 syscall 253]
+    // epoll_ctl(epfd, op, fd, event) → int  [i386 syscall 255]
     // VUMA args: EDI=epfd, ESI=op, EDX=fd, ECX=event
     //   → EBX=epfd, ECX=op, EDX=fd, ESI=event
     // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
@@ -3058,6 +3058,18 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("preadv", 333, 4), ("pwritev", 334, 4),
         // Family 7: cwd/root (getcwd/chdir already registered above)
         ("fchdir", 133, 1), ("chroot", 61, 1),
+        // ── Wave 9: POSIX system & advanced syscalls (i386 syscall_32.tbl) ──
+        // eventfd→eventfd2(328), signalfd→signalfd4(327) = modern variants.
+        // mremap is 5-arg (old_addr, old_size, new_size, flags, new_addr).
+        ("mlock", 150, 2), ("munlock", 151, 2), ("mlockall", 152, 1), ("munlockall", 153, 0),
+        ("mincore", 218, 3), ("madvise", 219, 3), ("msync", 144, 3), ("mremap", 163, 5),
+        ("getrlimit", 76, 2), ("setrlimit", 75, 2), ("prlimit64", 340, 4),
+        ("getrusage", 77, 2), ("times", 43, 1),
+        ("getrandom", 355, 3),
+        ("eventfd", 328, 2), ("timerfd_create", 322, 2), ("timerfd_settime", 325, 4),
+        ("timerfd_gettime", 326, 2), ("signalfd", 327, 4),
+        ("inotify_init1", 332, 1), ("inotify_add_watch", 292, 3), ("inotify_rm_watch", 293, 2),
+        ("ptrace", 26, 4),
     ] {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }

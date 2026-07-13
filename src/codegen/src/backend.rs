@@ -2818,6 +2818,18 @@ impl Backend for AArch64Backend {
                 ("pread", 67), ("pwrite", 68), ("readv", 65), ("writev", 66),
                 ("preadv", 69), ("pwritev", 70),
                 ("fchdir", 50), ("chroot", 51),
+                // ── Wave 9: POSIX system & advanced syscalls (asm-generic) ──
+                // AArch64 has 8 reg args; all take ≤5 args → simple stub.
+                // eventfd→eventfd2(19), signalfd→signalfd4(74) = modern variants.
+                ("mlock", 228), ("munlock", 229), ("mlockall", 230), ("munlockall", 231),
+                ("mincore", 232), ("madvise", 233), ("msync", 227), ("mremap", 216),
+                ("getrlimit", 163), ("setrlimit", 164), ("prlimit64", 261),
+                ("getrusage", 165), ("times", 153),
+                ("getrandom", 278),
+                ("eventfd", 19), ("timerfd_create", 85), ("timerfd_settime", 86),
+                ("timerfd_gettime", 87), ("signalfd", 74),
+                ("inotify_init1", 26), ("inotify_add_watch", 27), ("inotify_rm_watch", 28),
+                ("ptrace", 117),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));

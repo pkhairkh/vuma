@@ -1916,7 +1916,10 @@ impl Backend for HppaBackend {
             ("listen", 342), ("accept", 344), ("setsockopt", 346),
             ("shutdown", 348), ("sendto", 349), ("recvfrom", 350),
             ("clone", 120), ("fork", 2),
-            ("epoll_create1", 449), ("epoll_ctl", 424), ("epoll_wait", 425),
+            // [wave 9 fix] epoll numbers corrected from kernel parisc syscall.tbl:
+            //   old (wrong): 449/424/425 (those are m68k numbers, not parisc)
+            //   correct:      311/225/226
+            ("epoll_create1", 311), ("epoll_ctl", 225), ("epoll_wait", 226),
                 // ── Additional POSIX syscall stubs ──
                 // PA-RISC uses the common syscall numbers for the stat family
                 // (stat=106, lstat=107, fstat=108, getcwd=110).
@@ -1944,6 +1947,18 @@ impl Backend for HppaBackend {
                 ("pread", 108), ("pwrite", 109), ("readv", 145), ("writev", 146),
                 ("preadv", 315), ("pwritev", 316),
                 ("fchdir", 133), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (parisc unistd.h) ──
+                // PA-RISC has 6 syscall arg regs; all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(310), signalfd→signalfd4(309) = modern variants.
+                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
+                ("mincore", 72), ("madvise", 119), ("msync", 144), ("mremap", 163),
+                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 321),
+                ("getrusage", 77), ("times", 43),
+                ("getrandom", 339),
+                ("eventfd", 310), ("timerfd_create", 306), ("timerfd_settime", 307),
+                ("timerfd_gettime", 308), ("signalfd", 309),
+                ("inotify_init1", 314), ("inotify_add_watch", 270), ("inotify_rm_watch", 271),
+                ("ptrace", 26),
         ] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }
