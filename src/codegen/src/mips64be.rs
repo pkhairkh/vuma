@@ -1,10 +1,27 @@
 //! # MIPS64 Big-Endian Backend (mips64be)
 //!
-//! Thin wrapper around the little-endian `mips64` backend that produces
-//! big-endian MIPS64 ELF binaries. The existing mips64 backend encodes
-//! instructions in little-endian byte order (for `qemu-mips64el`). This
-//! wrapper swaps all 4-byte instruction words and ELF header fields to
-//! big-endian for `qemu-mips64`.
+//! **Wave 49 — wrapper pattern documentation.**
+//!
+//! `mips64be` is a thin wrapper around the little-endian `Mips64Backend`
+//! (field `inner: Mips64Backend`, constructed via `Mips64Backend::new_be()`)
+//! that produces big-endian MIPS64 ELF binaries for `qemu-mips64`. It
+//! delegates `target_info` and `allocate_registers` to `self.inner.*`,
+//! then **byte-swaps each 4-byte instruction word LE→BE** inside
+//! `encode_function`, `return_stub`, `trampoline`, and the executable
+//! `PT_LOAD` segment of `encode_program`. The ELF64 header / PHDR fields
+//! are also flipped via `swap_le_elf_to_be`.
+//!
+//! ## MIPS endianness & instruction encoding
+//!
+//! MIPS32/64 is a bi-endian ISA (MIPS Architecture for Programmers,
+//! Volume II rev. 6.06 §A.6 "Endian-ness"). The instruction encoding
+//! itself is byte-order-independent at the ISA level; only the in-memory
+//! storage of the 32-bit fixed-width instruction words and the multi-byte
+//! ELF/data fields change between LE (`qemu-mips64el`, `ELFDATA2LSB`) and
+//! BE (`qemu-mips64`, `ELFDATA2MSB`). The parent `mips64` backend always
+//! emits LE instruction bytes (each encoder writes `word.to_le_bytes()`);
+//! this wrapper re-serialises every 4-byte word in BE byte order so that
+//! `qemu-mips64` fetches the correct big-endian instruction stream.
 //!
 //! ## `IRInstr::Syscall` inheritance (Wave 13)
 //!

@@ -1,7 +1,40 @@
 //! # PowerPC64 Little-Endian Backend (ppc64le)
 //!
-//! Thin wrapper around the big-endian `ppc64` backend (`crate::ppc64`) that
-//! produces **little-endian** PPC64 ELF binaries.
+//! **Wave 49 — wrapper pattern & ABI documentation.**
+//!
+//! `ppc64le` is a thin wrapper around the big-endian `PPC64Backend` (field
+//! `inner: PPC64Backend`, constructed via `PPC64Backend::new_le()`) that
+//! produces **little-endian** PPC64 ELF binaries for `qemu-ppc64le`. The
+//! ABI flag is fixed at construction time — `new_le()` flips the backend's
+//! `is_le` bit — and `encode_function` / `return_stub` / `trampoline` /
+//! `disassemble` byte-swap every 4-byte instruction word BE→LE so the
+//! kernel-side syscall stubs skip the data byte-swap they would otherwise
+//! need on a big-endian program.
+//!
+//! ## ELFv2 vs ELFv1 ABI
+//!
+//! PowerPC64 has two historical ABIs (OpenPower ABI / 64-bit ELF v2 spec,
+//! §1.1 "ABI compliance"):
+//!   * **ELFv1** (`e_flags = 0x1`, legacy big-endian ppc64 Linux pre-2014):
+//!     function descriptors (code pointer + TOC pointer + environment
+//!     pointer stored in `.opd`), caller passes the function-pointer
+//!     address in `R12` and the callee's prologue loads the real entry
+//!     point + TOC from `.opd`. `R2` is the TOC pointer; `CR2` is
+//!     preserved across calls.
+//!   * **ELFv2** (`e_flags = 0x2`, all ppc64le + post-2014 ppc64 BE):
+//!     **no function descriptors** — the symbol's address IS the code
+//!     entry point. The caller passes its own TOC pointer in `R12` and
+//!     the callee sets up `R2` itself (typically `mr R2, R12` for local
+//!     calls or via a `__glink_PLTresolve` stub for external calls). The
+//!     stack frame layout follows the ABI v2 register-save convention
+//!     (save area at `SP+0..SP+8`, CR save at `SP+8`, LR save at
+//!     `SP+16`, TOC save at `SP+24`, parameter area at `SP+32+`).
+//!
+//! The parent `PPC64Backend` **always emits ELFv2** (`e_flags = 0x2`,
+//! `ppc64/mod.rs:1772`); there is no ELFv1 mode in VUMA. The `is_le`
+//! flag therefore selects only byte order, NOT ABI. ELFv2 is identical
+//! for `ppc64` (BE) and `ppc64le` (LE) apart from the `EI_DATA` byte
+//! and the instruction-word byte order.
 //!
 //! ## Background
 //!
