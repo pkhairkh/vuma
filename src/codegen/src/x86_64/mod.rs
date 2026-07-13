@@ -902,6 +902,156 @@ pub fn encode_rol_reg_cl(dst: Gpr) -> Vec<u8> {
 }
 
 // ===========================================================================
+// SSE / AVX SIMD Instruction Encoders (Wave 29)
+// ===========================================================================
+//
+// These encoders produce the x86_64 machine-code bytes for SSE2/SSSE3/SSE4.1
+// and AVX SIMD instructions used by the vectorizer's `PackedOp` lowering
+// (`vectorize::PackedOpKind::Add/Sub/Mul`). They are unit-tested directly
+// (asserting exact opcode bytes) and are the hook the backend will call to
+// emit SIMD code once ISel integration is wired (TODO(wave29)).
+//
+// Intel-syntax operands: `dst` is the destination register (encoded in the
+// ModR/M `rm` field for legacy SSE, in the VEX `vd` field for AVX); `src` is
+// the source register (encoded in the ModR/M `reg` field for SSE, in the VEX
+// `vn` field for AVX).
+//
+// References: Intel 64 and IA-32 Architectures Software Developer's Manual,
+// Vol. 2A/2B, SSE2 and AVX instruction set references.
+
+/// Encode the SSE2 mandatory prefix (66 / F2 / F3) plus 0F escape, with an
+/// optional REX prefix for XMM8–XMM15 operands. `reg_in_modrm` is the
+/// register encoded in the ModR/M `reg` field; `rm_in_modrm` is the register
+/// in the `rm` field. `mod_bits=3` for register-register operands.
+fn emit_sse_header(code: &mut Vec<u8>, prefix: u8, reg: Xmm, rm: Xmm) {
+    let r = reg.needs_rex();
+    let b = rm.needs_rex();
+    if r || b {
+        // REX (no REX.W — SIMD ops are 128/256-bit, not 64-bit GP).
+        code.push(0x40 | ((r as u8) << 2) | (b as u8));
+    }
+    code.push(prefix);
+    code.push(0x0F);
+}
+
+/// Encode `paddq xmm1, xmm2` (SSE2): `66 0F D4 /r`.
+///
+/// `dst` (xmm1) is the rm field; `src` (xmm2) is the reg field.
+pub fn encode_sse_paddq(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    emit_sse_header(&mut code, 0x66, src, dst);
+    code.push(0xD4);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode `psubd xmm1, xmm2` (SSE2): `66 0F FA /r`.
+pub fn encode_sse_psubd(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    emit_sse_header(&mut code, 0x66, src, dst);
+    code.push(0xFA);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode `pmulld xmm1, xmm2` (SSE4.1): `66 0F 38 40 /r`.
+pub fn encode_sse_pmulld(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(5);
+    emit_sse_header(&mut code, 0x66, src, dst);
+    code.push(0x38);
+    code.push(0x40);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode `movdqu xmm1, [r64+offset]` (SSE2 load): `F3 0F 6F /r`.
+///
+/// `dst` (xmm1) is the reg field; `base` is the rm field (memory operand).
+pub fn encode_sse_movdqu_load(dst: Xmm, base: Gpr, offset: i32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(8);
+    let r = dst.needs_rex();
+    let b = base.needs_rex();
+    if r || b {
+        code.push(0x40 | ((r as u8) << 2) | (b as u8));
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x6F);
+    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+    code
+}
+
+/// Encode `movdqu [r64+offset], xmm1` (SSE2 store): `F3 0F 7F /r`.
+///
+/// `src` (xmm1) is the reg field; `base` is the rm field (memory operand).
+pub fn encode_sse_movdqu_store(base: Gpr, offset: i32, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(8);
+    let r = src.needs_rex();
+    let b = base.needs_rex();
+    if r || b {
+        code.push(0x40 | ((r as u8) << 2) | (b as u8));
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x7F);
+    encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
+    code
+}
+
+/// Encode a 2-byte VEX prefix (C5) for 128-bit AVX instructions without XMM8+
+/// or R8+ operands. For operands in the high register file, callers should use
+/// a 3-byte VEX prefix (C4); this minimal encoder supports the common case
+/// where all operands are in the low 8 registers.
+fn emit_vex2(code: &mut Vec<u8>, pp: u8, opcode: u8, dst: Xmm, src1: Xmm, src2_or_rm: Xmm) {
+    // C5 RvvvvLpp — R is the inverted REX.R bit (for src2/reg field),
+    //   vvvv encodes the inverted src1 register, L is 0 for 128-bit,
+    //   pp is the mandatory-prefix payload (00=none, 01=66, 10=F3, 11=F2).
+    // We assume all registers are XMM0–XMM7 (no REX bits needed) for this
+    // minimal encoder.
+    let r_bit = !(src2_or_rm.encoding() >> 3) & 1; // inverted bit 3 of src2/rm
+    let vvvv = !src1.encoding() & 0x0F;
+    let pp_field = pp & 0x03;
+    let c5_byte2 = (r_bit << 7) | (vvvv << 3) | pp_field;
+    code.push(0xC5);
+    code.push(c5_byte2);
+    code.push(opcode);
+}
+
+/// Encode `vpaddq xmm1, xmm2, xmm3` (AVX): `VEX.128.66.0F.WIG D4 /r`.
+///
+/// All operands must be XMM0–XMM7 (the 3-byte VEX form for XMM8+ is not
+/// emitted by this minimal encoder).
+pub fn encode_avx_vpaddq(dst: Xmm, src1: Xmm, src2: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    emit_vex2(&mut code, 0x01, 0xD4, dst, src1, src2); // pp=01 for 66 prefix
+    code.push(modrm(3, src2.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode `vmovdqu xmm1, [r64+offset]` (AVX load): `VEX.128.F3.0F.WIG 6F /r`.
+pub fn encode_avx_vmovdqu_load(dst: Xmm, base: Gpr, offset: i32) -> Vec<u8> {
+    // For memory operands we use the 3-byte VEX form to allow R8–R15 base
+    // registers. VEX.3: C4 RXBmmmmm WvvvvLpp.
+    let mut code = Vec::with_capacity(8);
+    let r_bit = 1; // inverted REX.R for dst in reg field, no high bit assumed for XMM0–7
+    let x_bit = 1;
+    let b_bit = !(base.encoding() >> 3) & 1; // inverted bit 3 of base
+    let mmmmm = 0x01; // 0F escape
+    let w = 1; // WIG (ignored, but 1 is common)
+    let vvvv = 0x0F; // no additional src register (1111 = none)
+    let l = 0; // 128-bit
+    let pp = 0b10; // F3 prefix
+    let c4_byte1 = (r_bit << 7) | (x_bit << 6) | (b_bit << 5) | mmmmm;
+    let c4_byte2 = (w << 7) | (vvvv << 3) | (l << 2) | pp;
+    code.push(0xC4);
+    code.push(c4_byte1);
+    code.push(c4_byte2);
+    code.push(0x6F);
+    encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
+    code
+}
+
+// ===========================================================================
 // Memory Operand Helper
 // ===========================================================================
 
@@ -4729,6 +4879,72 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
         assert!(lines[1].contains("sub"), "Expected sub, got: {}", lines[1]);
+    }
+
+    // ── SSE / AVX SIMD Encoder Tests (Wave 29) ──────────────────────────
+
+    #[test]
+    fn test_sse_paddq_xmm0_xmm1() {
+        // `paddq xmm0, xmm1` → 66 0F D4 C8
+        //   (SSE2; dst=xmm0 in rm field, src=xmm1 in reg field; mod=3)
+        let code = encode_sse_paddq(Xmm::Xmm0, Xmm::Xmm1);
+        assert_eq!(code, vec![0x66, 0x0F, 0xD4, 0xC8]);
+    }
+
+    #[test]
+    fn test_sse_psubd_xmm0_xmm1() {
+        // `psubd xmm0, xmm1` → 66 0F FA C8
+        let code = encode_sse_psubd(Xmm::Xmm0, Xmm::Xmm1);
+        assert_eq!(code, vec![0x66, 0x0F, 0xFA, 0xC8]);
+    }
+
+    #[test]
+    fn test_sse_pmulld_xmm0_xmm1() {
+        // `pmulld xmm0, xmm1` (SSE4.1) → 66 0F 38 40 C8
+        let code = encode_sse_pmulld(Xmm::Xmm0, Xmm::Xmm1);
+        assert_eq!(code, vec![0x66, 0x0F, 0x38, 0x40, 0xC8]);
+    }
+
+    #[test]
+    fn test_sse_paddq_rex_for_high_xmm() {
+        // `paddq xmm8, xmm1` — dst in high register file → REX.B.
+        // 41 66 0F D4 C8 (REX.B=0x41, then SSE2 paddq with rm=0 (low3 of Xmm8),
+        // reg=1 (Xmm1)).
+        let code = encode_sse_paddq(Xmm::Xmm8, Xmm::Xmm1);
+        assert_eq!(code, vec![0x41, 0x66, 0x0F, 0xD4, 0xC8]);
+    }
+
+    #[test]
+    fn test_sse_paddq_rex_rb_for_high_xmm_pair() {
+        // `paddq xmm8, xmm9` — both high → REX.RB.
+        // 45 66 0F D4 C8 (REX.RB=0x45, SSE2 paddq, rm=0, reg=1).
+        let code = encode_sse_paddq(Xmm::Xmm8, Xmm::Xmm9);
+        assert_eq!(code, vec![0x45, 0x66, 0x0F, 0xD4, 0xC8]);
+    }
+
+    #[test]
+    fn test_sse_movdqu_load_zero_offset() {
+        // `movdqu xmm0, [rax]` → F3 0F 6F 00 (no REX, mod=00, rm=000=rax, reg=000=xmm0)
+        let code = encode_sse_movdqu_load(Xmm::Xmm0, Gpr::Rax, 0);
+        assert_eq!(code, vec![0xF3, 0x0F, 0x6F, 0x00]);
+    }
+
+    #[test]
+    fn test_sse_movdqu_store_disp8() {
+        // `movdqu [rax+8], xmm0` → F3 0F 7F 40 08
+        //   mod=01 (disp8), reg=000 (xmm0), rm=000 (rax); disp8=8
+        let code = encode_sse_movdqu_store(Gpr::Rax, 8, Xmm::Xmm0);
+        assert_eq!(code, vec![0xF3, 0x0F, 0x7F, 0x40, 0x08]);
+    }
+
+    #[test]
+    fn test_avx_vpaddq_xmm0_xmm1_xmm2() {
+        // `vpaddq xmm0, xmm1, xmm2` → VEX.128.66.0F.WIG D4 /r
+        //   C5 F1 D4 D0
+        //   (C5 = 2-byte VEX; F1 = R=1, vvvv=1110 (inverted XMM1), L=0, pp=01 (66);
+        //    D4 = opcode; D0 = ModR/M: mod=3, reg=010 (xmm2), rm=000 (xmm0))
+        let code = encode_avx_vpaddq(Xmm::Xmm0, Xmm::Xmm1, Xmm::Xmm2);
+        assert_eq!(code, vec![0xC5, 0xF1, 0xD4, 0xD0]);
     }
 }
 pub mod disasm;
