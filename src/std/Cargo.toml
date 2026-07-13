@@ -12,9 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
-libc = { version = "0.2", optional = true }
 log.workspace = true
 
 [features]
 default = []
-os-linux = ["libc"]

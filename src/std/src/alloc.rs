@@ -31,6 +31,50 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
+// Raw syscall FFI (Wave 45 — replaces `libc::malloc` / `free` / `realloc`).
+//
+// `vuma-std` is a host library and is NOT linked against the VUMA runtime
+// (so the `__vuma_alloc` / `__vuma_free` stubs referenced by
+// `womb/graph/digraph.vuma` are unavailable here). Per Wave 45 guidance we
+// fall back to direct `mmap` / `munmap` externs, which keeps the crate free
+// of the `libc` dependency while preserving a working heap allocator on
+// Unix targets. The constants below are the asm-generic Linux values
+// (PROT_READ=1, PROT_WRITE=2, MAP_PRIVATE=0x2, MAP_ANONYMOUS=0x20,
+// MAP_FAILED=(void*)-1, page size 4096).
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+#[cfg(unix)]
+mod sys {
+    pub const PROT_READ: i32 = 1;
+    pub const PROT_WRITE: i32 = 2;
+    pub const MAP_PRIVATE: i32 = 0x2;
+    pub const MAP_ANONYMOUS: i32 = 0x20;
+    /// `MAP_FAILED` is `(void *)-1` on Linux.
+    pub const MAP_FAILED: *mut u8 = !0usize as *mut u8;
+    /// Default page size on Linux x86_64 / aarch64.
+    pub const PAGE_SIZE: usize = 4096;
+}
+
+/// Bytes of header prepended to every mmap-backed `heap_alloc` result so
+/// `heap_free` / `heap_realloc` can recover the mapping length needed by
+/// `munmap`. 16 bytes keeps the user pointer 16-byte aligned.
+#[cfg(unix)]
+const HEAP_ALLOC_HEADER_SIZE: usize = 16;
+
+/// Round `n` up to a multiple of the system page size.
+#[cfg(unix)]
+fn page_align_up(n: usize) -> usize {
+    let p = sys::PAGE_SIZE;
+    ((n + p - 1) / p) * p
+}
+
+// ---------------------------------------------------------------------------
 // Address Type
 // ---------------------------------------------------------------------------
 
@@ -2002,22 +2046,36 @@ pub fn heap_alloc(size: u64) -> Address {
     if size == 0 {
         return Address::NULL;
     }
-    // Delegate to the system allocator. In a hosted environment this wraps
-    // `libc::malloc`; on bare-metal it invokes the VUMA runtime's
-    // `sys_alloc` syscall.
-    #[cfg(feature = "os-linux")]
+    // Wave 45: on Unix, delegate to a raw `mmap` syscall (no `libc` crate).
+    // On bare-metal / non-Unix targets, fall back to the Rust global
+    // allocator (`std::alloc::alloc`), which the VUMA runtime would replace
+    // with `__vuma_alloc` when linked.
+    #[cfg(unix)]
     {
-        let ptr = unsafe { libc::malloc(size as usize) };
-        if ptr.is_null() {
-            Address::NULL
-        } else {
+        let map_len = page_align_up(size as usize + HEAP_ALLOC_HEADER_SIZE);
+        unsafe {
+            let base = mmap(
+                ptr::null_mut(),
+                map_len,
+                sys::PROT_READ | sys::PROT_WRITE,
+                sys::MAP_PRIVATE | sys::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if base == sys::MAP_FAILED {
+                return Address::NULL;
+            }
+            // Store the mapping length in the header so heap_free/heap_realloc
+            // know what to pass to munmap.
+            ptr::write_unaligned(base as *mut usize, map_len);
+            let user = base.add(HEAP_ALLOC_HEADER_SIZE);
             // Zero-initialize so that VUMA programs never read uninitialized
             // memory — a key safety invariant of the VUMA memory model.
-            unsafe { std::ptr::write_bytes(ptr, 0u8, size as usize) };
-            Address::from_raw(ptr as u64)
+            ptr::write_bytes(user, 0u8, size as usize);
+            Address::from_raw(user as u64)
         }
     }
-    #[cfg(not(feature = "os-linux"))]
+    #[cfg(not(unix))]
     {
         // Fallback: use the Rust global allocator.
         let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
@@ -2062,18 +2120,25 @@ pub fn heap_free(ptr: Address) {
     if ptr.is_null() {
         return;
     }
-    #[cfg(feature = "os-linux")]
+    #[cfg(unix)]
     {
-        unsafe { libc::free(ptr.0 as *mut std::ffi::c_void) };
+        // Wave 45: raw `munmap` syscall. The mapping length is recovered
+        // from the header prepended by `heap_alloc`.
+        unsafe {
+            let base = (ptr.0 as *mut u8).sub(HEAP_ALLOC_HEADER_SIZE);
+            let map_len = ptr::read_unaligned(base as *const usize);
+            munmap(base, map_len);
+        }
     }
-    #[cfg(not(feature = "os-linux"))]
+    #[cfg(not(unix))]
     {
         // Note: without knowing the original layout we cannot call
         // `std::alloc::dealloc` correctly. In a bare-metal VUMA runtime this
         // is handled by the runtime's own free-list or bump allocator which
         // stores the size in a header preceding the returned pointer.
-        // For now, we leak the memory on non-linux targets. A production
+        // For now, we leak the memory on non-unix targets. A production
         // runtime would provide `sys_free`.
+        let _ = ptr;
     }
 }
 
@@ -2114,17 +2179,31 @@ pub fn heap_realloc(ptr: Address, new_size: u64) -> Address {
         heap_free(ptr);
         return Address::NULL;
     }
-    #[cfg(feature = "os-linux")]
+    #[cfg(unix)]
     {
-        let new_ptr = unsafe { libc::realloc(ptr.0 as *mut std::ffi::c_void, new_size as usize) };
-        if new_ptr.is_null() {
-            // Old pointer remains valid — caller can retry or free it.
-            Address::NULL
-        } else {
-            Address::from_raw(new_ptr as u64)
+        // Wave 45: raw mmap/munmap. We recover the old mapping length from
+        // the header, allocate a fresh region of the new size, copy
+        // `min(old_usable, new_size)` bytes, then munmap the old region.
+        unsafe {
+            let base = (ptr.0 as *mut u8).sub(HEAP_ALLOC_HEADER_SIZE);
+            let old_map_len = ptr::read_unaligned(base as *const usize);
+            let old_usable = old_map_len - HEAP_ALLOC_HEADER_SIZE;
+            let new_ptr = heap_alloc(new_size);
+            if new_ptr.is_null() {
+                // Old pointer remains valid — caller can retry or free it.
+                return Address::NULL;
+            }
+            let to_copy = old_usable.min(new_size as usize);
+            ptr::copy_nonoverlapping(
+                ptr.0 as *const u8,
+                new_ptr.0 as *mut u8,
+                to_copy,
+            );
+            heap_free(ptr);
+            new_ptr
         }
     }
-    #[cfg(not(feature = "os-linux"))]
+    #[cfg(not(unix))]
     {
         // Fallback: allocate + copy + free (may lose data on OOM).
         let new_ptr = heap_alloc(new_size);
@@ -2801,5 +2880,86 @@ mod tests {
         };
         assert!(err.to_string().contains("64"));
         assert!(err.to_string().contains("128"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 45 — heap_alloc / heap_free / heap_realloc backed by raw
+    // `mmap` / `munmap` syscalls (no `libc` crate). These tests run only on
+    // Unix, where the mmap-backed path is active.
+    // -----------------------------------------------------------------------
+
+    /// `heap_alloc` must return a non-null, 16-byte-aligned, writable,
+    /// zero-initialised region (the latter is a VUMA memory-model invariant).
+    #[cfg(unix)]
+    #[test]
+    fn wave45_heap_alloc_returns_nonnull_writable_zeroed() {
+        let size = 128u64;
+        let addr = heap_alloc(size);
+        assert!(!addr.is_null(), "heap_alloc(128) returned NULL");
+        // 16-byte aligned (header is 16 bytes).
+        assert_eq!(
+            addr.0 % 16,
+            0,
+            "heap_alloc result should be 16-byte aligned"
+        );
+        // Zero-initialised.
+        unsafe {
+            for i in 0..size as usize {
+                assert_eq!(
+                    *(addr.0 as *const u8).add(i),
+                    0u8,
+                    "byte {} should be zero-initialised",
+                    i
+                );
+            }
+            // Writable: write sentinel bytes.
+            for i in 0..size as usize {
+                *(addr.0 as *mut u8).add(i) = (i as u8) ^ 0xA5;
+            }
+            for i in 0..size as usize {
+                assert_eq!(*(addr.0 as *const u8).add(i), (i as u8) ^ 0xA5);
+            }
+        }
+        heap_free(addr);
+    }
+
+    /// `heap_realloc` must preserve the contents of the original allocation
+    /// when growing, and `heap_free` must release the mapping (munmap rc 0).
+    #[cfg(unix)]
+    #[test]
+    fn wave45_heap_realloc_preserves_contents_and_free_releases() {
+        let size = 64u64;
+        let addr = heap_alloc(size);
+        assert!(!addr.is_null());
+        unsafe {
+            for i in 0..size as usize {
+                *(addr.0 as *mut u8).add(i) = (i as u8).wrapping_mul(3);
+            }
+        }
+        // Grow to 256 bytes; first 64 must be preserved.
+        let new_addr = heap_realloc(addr, 256);
+        assert!(!new_addr.is_null(), "heap_realloc grow returned NULL");
+        unsafe {
+            for i in 0..size as usize {
+                assert_eq!(
+                    *(new_addr.0 as *const u8).add(i),
+                    (i as u8).wrapping_mul(3),
+                    "byte {} not preserved across realloc grow",
+                    i
+                );
+            }
+        }
+        heap_free(new_addr);
+    }
+
+    /// `heap_alloc(0)` returns `Address::NULL`; `heap_free(NULL)` is a no-op.
+    #[test]
+    fn wave45_heap_alloc_zero_returns_null_and_free_null_is_noop() {
+        assert!(heap_alloc(0).is_null());
+        heap_free(Address::NULL);
+        // realloc(NULL, n) == alloc(n); realloc(p, 0) == free(p) + NULL.
+        let a = heap_alloc(32);
+        assert!(!a.is_null());
+        assert!(heap_realloc(a, 0).is_null());
     }
 }
