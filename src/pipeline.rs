@@ -194,6 +194,13 @@ pub struct CompileConfig {
     pub stop_on_first_error: bool,
     /// Maximum inline size (number of SCG nodes) for the inlining pass.
     pub max_inline_size: usize,
+    /// (Wave 25) Cost threshold for the IR-level inliner
+    /// (`opt::inline_with_threshold`). A callee whose
+    /// `function_inline_cost` (per-instr cost + 2*arg_count -
+    /// 3*const_arg_count) is ≤ this threshold gets inlined at the call
+    /// site. Default 40 — generous enough to inline small helpers like
+    /// `fn add_one(x) { x + 1 }` while preventing runaway code growth.
+    pub inline_threshold: u32,
     /// Enable memory safety checks (use-after-free, double-free, leaks, etc.).
     pub memory_safety: bool,
     /// Enable runtime bounds checks for array accesses (--safe flag).
@@ -254,6 +261,7 @@ impl Default for CompileConfig {
             debug_info: false,
             stop_on_first_error: true,
             max_inline_size: 50,
+            inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
             memory_safety: true,
             runtime_bounds_checks: false,
             section_headers: false,
@@ -5154,7 +5162,11 @@ pub fn compile_with_path(
         } else {
             vuma_codegen::target_desc::LatencyTable::default_ooo()
         };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+            ir_program,
+            &latency_table,
+            config.inline_threshold,
+        );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
@@ -5629,7 +5641,11 @@ pub fn compile_with_recovery(
         } else {
             vuma_codegen::target_desc::LatencyTable::default_ooo()
         };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+            ir_program,
+            &latency_table,
+            config.inline_threshold,
+        );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
@@ -5980,6 +5996,7 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         debug_info: false,
         stop_on_first_error: true,
         max_inline_size: 50,
+        inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
         memory_safety: true,
         runtime_bounds_checks: false,
         section_headers: false,
