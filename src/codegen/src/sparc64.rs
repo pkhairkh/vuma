@@ -4087,13 +4087,15 @@ impl Backend for Sparc64Backend {
                 ("recvfrom", 125),
                 ("sendto", 133),
                 ("epoll_create1", 319),
-                // NOTE: epoll_ctl/epoll_wait previously used 194/195 which
-                // collide with connect/getsockname on SPARC. The correct
-                // SPARC64 epoll syscall numbers are 294 (epoll_ctl) and
-                // 295 (epoll_wait), verified against
-                // arch/sparc/include/uapi/asm/unistd.h.
-                ("epoll_ctl", 294),
-                ("epoll_wait", 295),
+                // [wave 9 fix] epoll_ctl/epoll_wait corrected back to 194/195.
+                // A prior commit changed these to 294/295 claiming 194/195
+                // "collide with connect/getsockname" — that was wrong:
+                // sparc connect=98, getsockname=150 (no collision). Per
+                // arch/sparc/kernel/syscalls/syscall.tbl: 194=epoll_ctl,
+                // 195=epoll_wait, 294=readlinkat, 295=fchmodat. The 294/295
+                // values duplicated wave-7's readlinkat/fchmodat entries.
+                ("epoll_ctl", 194),
+                ("epoll_wait", 195),
                 ("clone", 217),
                 // ── Additional POSIX syscall stubs ──
                 // SPARC64 stat family uses old syscall numbers (oldstat=38,
@@ -4119,6 +4121,20 @@ impl Backend for Sparc64Backend {
                 ("pread", 67), ("pwrite", 68), ("readv", 120), ("writev", 121),
                 ("preadv", 324), ("pwritev", 325),
                 ("fchdir", 176), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (sparc unistd.h) ──
+                // sparc64 has 6 reg args (o0-o5); all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(318), signalfd→signalfd4(317) = modern variants.
+                // sparc numbers diverge: mlock=237, mincore=78, madvise=75,
+                // getrlimit=144, mremap=250, inotify_add_watch=152, etc.
+                ("mlock", 237), ("munlock", 238), ("mlockall", 239), ("munlockall", 240),
+                ("mincore", 78), ("madvise", 75), ("msync", 65), ("mremap", 250),
+                ("getrlimit", 144), ("setrlimit", 145), ("prlimit64", 331),
+                ("getrusage", 117), ("times", 43),
+                ("getrandom", 347),
+                ("eventfd", 318), ("timerfd_create", 312), ("timerfd_settime", 315),
+                ("timerfd_gettime", 316), ("signalfd", 317),
+                ("inotify_init1", 322), ("inotify_add_watch", 152), ("inotify_rm_watch", 156),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

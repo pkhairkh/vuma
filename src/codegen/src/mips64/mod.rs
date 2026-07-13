@@ -5121,6 +5121,18 @@ impl Backend for Mips64Backend {
                 ("pread", 5016), ("pwrite", 5017), ("readv", 5018), ("writev", 5019),
                 ("preadv", 5289), ("pwritev", 5290),
                 ("fchdir", 5079), ("chroot", 5156),
+                // ── Wave 9: POSIX system & advanced syscalls (mips n64 unistd) ──
+                // MIPS n64 uses a 5000 base offset; all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(5284), signalfd→signalfd4(5283) = modern variants.
+                ("mlock", 5146), ("munlock", 5147), ("mlockall", 5148), ("munlockall", 5149),
+                ("mincore", 5026), ("madvise", 5027), ("msync", 5025), ("mremap", 5024),
+                ("getrlimit", 5095), ("setrlimit", 5155), ("prlimit64", 5297),
+                ("getrusage", 5096), ("times", 5098),
+                ("getrandom", 5313),
+                ("eventfd", 5284), ("timerfd_create", 5280), ("timerfd_settime", 5282),
+                ("timerfd_gettime", 5281), ("signalfd", 5283),
+                ("inotify_init1", 5288), ("inotify_add_watch", 5244), ("inotify_rm_watch", 5245),
+                ("ptrace", 5099),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
