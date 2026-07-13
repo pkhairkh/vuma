@@ -1729,7 +1729,7 @@ mod tests {
         func.current_block().terminator = IRTerminator::Return(vec![]);
 
         let config = EmitConfig::linux_elf();
-        let mut elf = emit_elf(&[func], &[], &config).unwrap();
+        let mut elf = emit_elf(&[func], &[], &config, &[]).unwrap();
 
         // Build debug info.
         let mut db = DwarfBuilder::new();

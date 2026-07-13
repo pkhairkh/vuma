@@ -133,7 +133,7 @@ const NATIVE_BACKENDS: &[BackendKind] = &[
 fn test_debug_elf_sections_present() {
     let func = make_simple_function();
     let config = debug_elf_config(BackendKind::AArch64);
-    let elf = emit_elf(&[func], &[], &config).expect("ELF emission should succeed");
+    let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF emission should succeed");
 
     // Verify ELF is valid
     assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be correct");
@@ -639,7 +639,7 @@ fn test_extern_block_to_registry() {
 fn test_extern_calls_undefined_symbols_in_elf() {
     let func = make_extern_call_function();
     let config = EmitConfig::relocatable_obj_for(BackendKind::AArch64);
-    let elf = emit_elf(&[func], &[], &config).expect("ELF obj emission should succeed");
+    let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF obj emission should succeed");
 
     // Verify ELF magic
     assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be correct");
@@ -764,7 +764,7 @@ fn test_extern_calls_undefined_symbols_in_elf() {
 fn test_relocations_for_extern_calls() {
     let func = make_extern_call_function();
     let config = EmitConfig::relocatable_obj_for(BackendKind::AArch64);
-    let elf = emit_elf(&[func], &[], &config).expect("ELF obj emission should succeed");
+    let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF obj emission should succeed");
 
     // Parse section headers to find .rela.text
     let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
@@ -899,7 +899,7 @@ fn test_ffi_demo_compiles_x86_64() {
     let ir_program = builder.build(&cg_scg).expect("IR building should succeed");
 
     let config = EmitConfig::relocatable_obj_for(BackendKind::X86_64);
-    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config)
+    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
         .expect("ffi_demo x86_64 ELF obj emission should succeed");
 
     // Verify ELF is valid
@@ -1073,7 +1073,7 @@ fn test_dwarf_debug_full_pipeline() {
     config.debug_info = true;
     config.section_headers = true;
 
-    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config)
+    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
         .expect("ELF emission with debug info should succeed");
 
     // Verify ELF magic
@@ -1114,7 +1114,7 @@ fn test_no_debug_sections_without_flag() {
     config.debug_info = false;
     config.section_headers = true;
 
-    let elf = emit_elf(&[func], &[], &config).expect("ELF emission should succeed");
+    let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF emission should succeed");
 
     let elf_str = String::from_utf8_lossy(&elf);
     assert!(

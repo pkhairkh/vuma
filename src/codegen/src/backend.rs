@@ -2567,7 +2567,7 @@ impl Backend for AArch64Backend {
         // performs register allocation and instruction encoding.
         let mut emitter = crate::emit::Emitter::new();
         let code = emitter
-            .emit_function(func)
+            .emit_function(func, None)
             .map_err(|e| BackendError::RegisterAllocFailed {
                 isa: "aarch64",
                 reason: e.to_string(),

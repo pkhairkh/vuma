@@ -76,7 +76,7 @@ fn compile_to_aarch64_elf(scg: &Scg) -> Vec<u8> {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let config = EmitConfig::linux_elf();
-    emit_elf(&ir_program.functions, &ir_program.data_sections, &config)
+    emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
         .expect("ELF emission should succeed")
 }
 
@@ -86,7 +86,7 @@ fn compile_to_aarch64_words(scg: &Scg) -> Vec<u32> {
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let mut emitter = Emitter::new();
     emitter
-        .emit_function(&ir_program.functions[0])
+        .emit_function(&ir_program.functions[0], None)
         .expect("Emission should succeed")
 }
 
