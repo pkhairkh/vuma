@@ -428,6 +428,161 @@ def main():
         write_mem(0, struct.pack('<i', ret))
         return ret
 
+    # ── Filesystem ops (Wave 4) ──────────────────────────────────────
+    # These host functions bridge POSIX filesystem syscalls to the wasm
+    # sandbox.  They read path strings from wasm linear memory, call the
+    # real OS, and write return values to mem[0] (the codegen's convention
+    # for extern return values).
+
+    # vuma_open(path_ptr, flags, mode) → fd
+    # flags and mode are POSIX integers (O_RDONLY=0, O_WRONLY=1, O_CREAT=64,
+    # O_TRUNC=512, O_APPEND=1024, etc. — same as Linux generic ABI).
+    def vuma_open(path_ptr, flags, mode):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            ret = os.open(path, flags, mode)
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_stat(path_ptr, buf_ptr) → 0 on success, -1 on error
+    # Writes a simplified struct stat to buf_ptr:
+    #   offset  0: st_dev   (u64)
+    #   offset  8: st_ino   (u64)
+    #   offset 16: st_mode  (u32)
+    #   offset 20: st_nlink (u32)
+    #   offset 24: st_uid   (u32)
+    #   offset 28: st_gid   (u32)
+    #   offset 32: st_size  (u64)
+    #   offset 40: st_atime (u64)
+    #   offset 48: st_mtime (u64)
+    #   offset 56: st_ctime (u64)
+    # Total: 64 bytes.
+    def _write_stat_buf(buf_ptr, st):
+        """Write a simplified 64-byte struct stat to wasm memory."""
+        data = struct.pack('<QQIIIIIQQQ',
+                           st.st_dev, st.st_ino, st.st_mode, st.st_nlink,
+                           st.st_uid, st.st_gid, 0,  # pad
+                           st.st_size, int(st.st_atime), int(st.st_mtime),
+                           int(st.st_ctime))
+        write_mem(buf_ptr, data)
+
+    def vuma_stat(path_ptr, buf_ptr):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            st = os.stat(path)
+            _write_stat_buf(buf_ptr, st)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    def vuma_fstat(fd, buf_ptr):
+        try:
+            st = os.fstat(fd)
+            _write_stat_buf(buf_ptr, st)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    def vuma_lstat(path_ptr, buf_ptr):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            st = os.lstat(path)
+            _write_stat_buf(buf_ptr, st)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_unlink(path_ptr) → 0 on success, -1 on error
+    def vuma_unlink(path_ptr):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            os.unlink(path)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_mkdir(path_ptr, mode) → 0 on success, -1 on error
+    def vuma_mkdir(path_ptr, mode):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            os.mkdir(path, mode)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_rmdir(path_ptr) → 0 on success, -1 on error
+    def vuma_rmdir(path_ptr):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            os.rmdir(path)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_rename(oldpath_ptr, newpath_ptr) → 0 on success, -1 on error
+    def vuma_rename(oldpath_ptr, newpath_ptr):
+        try:
+            old = read_cstr(oldpath_ptr).decode('utf-8', errors='replace')
+            new = read_cstr(newpath_ptr).decode('utf-8', errors='replace')
+            os.rename(old, new)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_link(oldpath_ptr, newpath_ptr) → 0 on success, -1 on error
+    def vuma_link(oldpath_ptr, newpath_ptr):
+        try:
+            old = read_cstr(oldpath_ptr).decode('utf-8', errors='replace')
+            new = read_cstr(newpath_ptr).decode('utf-8', errors='replace')
+            os.link(old, new)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_symlink(target_ptr, linkpath_ptr) → 0 on success, -1 on error
+    def vuma_symlink(target_ptr, linkpath_ptr):
+        try:
+            target = read_cstr(target_ptr).decode('utf-8', errors='replace')
+            linkpath = read_cstr(linkpath_ptr).decode('utf-8', errors='replace')
+            os.symlink(target, linkpath)
+            ret = 0
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_readlink(path_ptr, buf_ptr, bufsize) → nbytes, or -1 on error
+    def vuma_readlink(path_ptr, buf_ptr, bufsize):
+        try:
+            path = read_cstr(path_ptr).decode('utf-8', errors='replace')
+            target = os.readlink(path).encode('utf-8')
+            if len(target) >= bufsize:
+                target = target[:bufsize - 1]
+            write_mem(buf_ptr, target)
+            ret = len(target)
+        except OSError:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
     i32 = ValType.i32()
     # Define the custom "vuma" module host functions in the linker
     linker.define_func("vuma", "pipe", FuncType([i32], [i32]), vuma_pipe)
@@ -440,6 +595,18 @@ def main():
     linker.define_func("vuma", "read", FuncType([i32, i32, i32], [i32]), vuma_read)
     linker.define_func("vuma", "write", FuncType([i32, i32, i32], [i32]), vuma_write)
     linker.define_func("vuma", "close", FuncType([i32], [i32]), vuma_close)
+    # Filesystem ops (Wave 4) — POSIX-compatible host functions
+    linker.define_func("vuma", "open", FuncType([i32, i32, i32], [i32]), vuma_open)
+    linker.define_func("vuma", "stat", FuncType([i32, i32], [i32]), vuma_stat)
+    linker.define_func("vuma", "fstat", FuncType([i32, i32], [i32]), vuma_fstat)
+    linker.define_func("vuma", "lstat", FuncType([i32, i32], [i32]), vuma_lstat)
+    linker.define_func("vuma", "unlink", FuncType([i32], [i32]), vuma_unlink)
+    linker.define_func("vuma", "mkdir", FuncType([i32, i32], [i32]), vuma_mkdir)
+    linker.define_func("vuma", "rmdir", FuncType([i32], [i32]), vuma_rmdir)
+    linker.define_func("vuma", "rename", FuncType([i32, i32], [i32]), vuma_rename)
+    linker.define_func("vuma", "link", FuncType([i32, i32], [i32]), vuma_link)
+    linker.define_func("vuma", "symlink", FuncType([i32, i32], [i32]), vuma_symlink)
+    linker.define_func("vuma", "readlink", FuncType([i32, i32, i32], [i32]), vuma_readlink)
 
     # Instantiate the module
     instance = linker.instantiate(store, module)
