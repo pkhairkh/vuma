@@ -72,6 +72,7 @@ use super::{
     encode_pop, encode_push,
     encode_ret,
     encode_rol_reg_cl, encode_ror_reg_cl,
+    encode_syscall,
     encode_sar_reg_cl,
     encode_setcc,
     encode_shl_reg_cl, encode_shr_reg_cl,
@@ -2203,6 +2204,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Result: EAX has the old value (whether swap succeeded or not)
                     let dst_id = dst.as_register().unwrap_or(0);
                     code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
+                }
+
+                // ── Syscall (Wave 11) ──────────────────────────────────────
+                // dst = syscall(nr, args…) — raw Linux syscall.
+                // i386 syscall ABI: args in EBX/ECX/EDX/ESI/EDI/EBP, nr in EAX,
+                // INT 0x80, result in EAX. EBX is callee-saved → save/restore.
+                // Max 5 args (EBP/arg6 is the frame pointer; avoid clobbering).
+                IRInstr::Syscall { nr, args, dst } => {
+                    let mut code = Vec::new();
+                    // Save EBX (callee-saved, outermost).
+                    code.extend(encode_push(Gpr::Rbx));
+                    // i386 syscall arg registers (args 1-5).
+                    let syscall_arg_regs =
+                        [Gpr::Rbx, Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi];
+                    let num_reg_args = args.len().min(syscall_arg_regs.len());
+                    // Load args into syscall registers. Load high-to-low to
+                    // avoid clobbering (though load_value uses the target reg
+                    // directly, so order doesn't strictly matter here).
+                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                        code.extend(load_value(arg, syscall_arg_regs[i]));
+                    }
+                    // MOV EAX, nr  (syscall number)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+                    // INT 0x80
+                    code.extend(encode_syscall());
+                    // Store return value (EAX) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
+                    // Restore EBX
+                    code.extend(encode_pop(Gpr::Rbx));
                     code
                 }
             };

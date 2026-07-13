@@ -3903,6 +3903,9 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
 
                     code.extend(c);
                 }
+                IRInstr::Syscall { .. } => {
+                    unimplemented!("IRInstr::Syscall not yet implemented for mips64 (Wave 12)");
+                }
             }
         }
     }

@@ -6827,6 +6827,56 @@ impl Backend for Arm32Backend {
                         code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
                         code
                     }
+
+                    // ── Syscall (Wave 11) ──────────────────────────────────
+                    // dst = syscall(nr, args…) — raw Linux syscall.
+                    // ARM EABI: args in R0-R3 + [SP]/[SP+4] for args 5-6, nr in
+                    // R7, SVC #0, result (32-bit, sign-extended) in R0.
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        let mut code = Vec::new();
+                        let num_args = args.len();
+                        let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
+                        let stack_bytes = num_stack_args * 4;
+                        // Push args 5-6 onto the stack (kernel reads from [SP]).
+                        if stack_bytes > 0 {
+                            code.extend_from_slice(&emit_sub_sp(stack_bytes as i32));
+                            for (i, arg) in args.iter().enumerate() {
+                                if i >= 4 {
+                                    let off = ((i - 4) * 4) as u32;
+                                    code.extend(ss_load_value(
+                                        arg, &vreg_stack_slots, Gpr::R12,
+                                    ));
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, true, false, false, false,
+                                        Gpr::R13.encoding(), Gpr::R12.encoding(), off,
+                                    ));
+                                }
+                            }
+                        }
+                        // Load args 0-3 into R0-R3
+                        let reg_args = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
+                        for (i, arg) in args.iter().take(4).enumerate() {
+                            code.extend(ss_load_value(
+                                arg, &vreg_stack_slots, reg_args[i],
+                            ));
+                        }
+                        // MOV R7, nr  (syscall number)
+                        code.extend(load_immediate_arm32(Gpr::R7, *nr));
+                        // SVC #0
+                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                        // Clean up stack args
+                        if stack_bytes > 0 {
+                            code.extend_from_slice(&emit_add_sp(stack_bytes as i32));
+                        }
+                        // Store return value (R0, 32-bit sign-extended) to dst slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset =
+                                vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
+                        code
+                    }
                 };
 
                 let encoded_len = encoded.len() as u64;
