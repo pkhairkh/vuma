@@ -48,6 +48,7 @@
 
 pub mod callgraph;
 pub mod diff;
+pub mod digraph;
 pub mod dominance;
 pub mod edge;
 pub mod graph;
