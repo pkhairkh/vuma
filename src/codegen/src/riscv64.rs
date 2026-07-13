@@ -6427,6 +6427,11 @@ impl Backend for RiscV64Backend {
         func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        // Bare-name alias so user code can call print_newline() directly.
+        // (print_int / print_hex bare aliases are handled separately — see
+        // Wave 2. print_newline is safe to register because its runtime
+        // dispatcher entry doesn't depend on argument registers being set.)
+        func_offsets.insert("print_newline".to_string(), runtime_offsets_start);
         // Note: bare-name print_int/print_hex aliases are NOT registered here.
         // test_print tests pass with print_int as an unresolved extern (no-op).
         current_offset += runtime_code.len();

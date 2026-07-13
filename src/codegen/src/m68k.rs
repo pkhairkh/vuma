@@ -2269,6 +2269,33 @@ impl Backend for M68kBackend {
             // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
+        // ── print_newline() → void — write '\n' to stdout ──
+        // No arguments. Uses sys_write(1, &newline, 1).
+        // m68k syscall convention: D0=syscall#, D1=fd, D2=buf, D3=count,
+        // TRAP #0 = syscall trap. A7 = SP.
+        {
+            let mut code = Vec::new();
+            // MOVEQ #10, D0 ('\n') — load newline char
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 10 }.encode());
+            // MOVE.L D0, -(SP) — push newline onto stack (4 bytes, 0x0A as low byte)
+            code.extend_from_slice(&[0x2F, 0x00]);
+            // MOVEQ #1, D1 (fd = stdout)
+            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            // MOVE.L A7, D2 (buf = SP) — 0x2000|(2<<9)|(0<<6)|(1<<3)|7 = 0x240F
+            code.extend_from_slice(&[0x24, 0x0F]);
+            // MOVEQ #1, D3 (len = 1)
+            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+            // MOVEQ #4, D0 (sys_write)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+            // ADDQ.L #4, A7 (pop the 4-byte newline buffer) — 0x58CF
+            code.extend_from_slice(&[0x58, 0xCF]);
+            // RTS
+            code.extend(Instruction::Rts.encode());
+            syscall_stubs.push(("print_newline".to_string(), code));
+        }
+
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
         let mut current_offset: usize = start_stub_size + ffi_stub_size;
@@ -2302,8 +2329,10 @@ impl Backend for M68kBackend {
         // code can call them by their bare POSIX-friendly names.
         let print_int_offset = func_offsets.get("print_int").copied().unwrap_or(0);
         let print_hex_offset = func_offsets.get("print_hex").copied().unwrap_or(0);
+        let print_newline_offset = func_offsets.get("print_newline").copied().unwrap_or(0);
         func_offsets.insert("__vuma_print_int".to_string(), print_int_offset);
         func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
+        func_offsets.insert("__vuma_print_newline".to_string(), print_newline_offset);
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);

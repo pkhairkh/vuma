@@ -2957,6 +2957,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_int".to_string(), code));
     }
 
+    // ── print_newline: Write '\n' (0x0A) to stdout ──
+    // No arguments. Uses sys_write(1, &newline, 1).
+    // EBX is callee-saved on i386 SysV but is syscall arg1 — save/restore it.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                       // save EBX (callee-saved)
+        code.extend_from_slice(&[0x6A, 0x0A]);                    // push 0x0A (newline, sign-extended to 4 bytes)
+        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1));           // ebx = 1 (stdout fd)
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsp));      // ecx = &newline (buf)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1));           // edx = 1 (count)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));           // eax = 4 (sys_write)
+        code.extend(encode_syscall());                            // int 0x80
+        code.extend(encode_pop(Gpr::Rax));                        // pop newline (restore stack)
+        code.extend(encode_pop(Gpr::Rbx));                        // restore EBX
+        code.extend(encode_ret());
+        stubs.push(("print_newline".to_string(), code));
+    }
+
     stubs
 }
 
@@ -3163,6 +3181,7 @@ impl Backend for X86_32Backend {
         for (short, canonical) in [
             ("print_int", "__vuma_print_int"),
             ("print_hex", "__vuma_print_hex"),
+            ("print_newline", "__vuma_print_newline"),
         ] {
             if let Some(&off) = func_offsets.get(short) {
                 func_offsets.insert(canonical.to_string(), off);

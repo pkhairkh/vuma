@@ -6600,9 +6600,11 @@ impl Backend for RiscV32Backend {
         func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
         // Public aliases (without __vuma_ prefix) so user code can call
-        // print_int / print_hex directly. They share the same entry point.
+        // print_int / print_hex / print_newline directly. They share the
+        // same entry point (the runtime dispatcher selects based on a0/a7).
         func_offsets.insert("print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("print_hex".to_string(), runtime_offsets_start);
+        func_offsets.insert("print_newline".to_string(), runtime_offsets_start);
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
