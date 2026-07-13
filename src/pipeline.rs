@@ -6380,7 +6380,7 @@ mod tests {
             b.instructions.iter().any(|i| {
                 matches!(
                     i,
-                    vuma_codegen::ir::IRInstruction::BinOp {
+                    vuma_codegen::ir::IRInstr::BinOp {
                         op: BinOpKind::ShrA,
                         ..
                     }
@@ -6481,7 +6481,7 @@ mod tests {
             b.instructions.iter().any(|i| {
                 matches!(
                     i,
-                    vuma_codegen::ir::IRInstruction::BinOp {
+                    vuma_codegen::ir::IRInstr::BinOp {
                         op: BinOpKind::ShrL,
                         ..
                     }
