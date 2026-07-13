@@ -1818,6 +1818,35 @@ impl Backend for AlphaBackend {
             // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
+        // ── print_newline() → void — write '\n' to stdout ──
+        // No arguments. Uses sys_write(1, &newline, 1).
+        // Alpha syscall convention: R16=fd, R17=buf, R18=count, R0=syscall#,
+        // CALL_PAL 0x83 = callsys. R30 = SP.
+        {
+            let mut code = Vec::new();
+            // LDA SP, -16(SP) — make stack space for the newline byte
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: -16, rb: Gpr::R30 }.encode());
+            // R1 = 10 ('\n')
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R1 }.encode());
+            // STB R1, 0(SP) — store newline at [SP]
+            code.extend(Instruction::Stb { ra: Gpr::R1, disp: 0, rb: Gpr::R30 }.encode());
+            // R16 = 1 (stdout fd)
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R16 }.encode());
+            // R17 = SP (buf)
+            code.extend(Instruction::Or { ra: Gpr::R30, rb: Gpr::R31, rc: Gpr::R17 }.encode());
+            // R18 = 1 (count)
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R18 }.encode());
+            // R0 = 4 (sys_write)
+            code.extend(ss_load_imm(Gpr::R0, 4));
+            // callsys
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            // LDA SP, 16(SP) — restore stack
+            code.extend(Instruction::Lda { ra: Gpr::R30, disp: 16, rb: Gpr::R30 }.encode());
+            // RET
+            code.extend(Instruction::Ret.encode());
+            syscall_stubs.push(("print_newline".to_string(), code));
+        }
+
         // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
         // Alpha rt_sigaction syscall # = 352. VUMA declares 3 args; the kernel
         // requires a 4th arg (sigsetsize=8) in R19 (a3). We set R19=8 before

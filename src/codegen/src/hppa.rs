@@ -2116,6 +2116,37 @@ impl Backend for HppaBackend {
             // syscall_stubs.push(("print_hex".to_string(), code));
         }
 
+        // ── print_newline() → void — write '\n' to stdout ──
+        // No arguments. Uses sys_write(1, &newline, 1).
+        // PA-RISC syscall convention: R26=fd, R25=buf, R24=count, R20=syscall#,
+        // GATE = syscall trap. R30 = SP. R2 = return address (preserved).
+        {
+            let mut code = Vec::new();
+            // R30 -= 16 (stack space for the newline byte)
+            code.extend_from_slice(&encode_ldo(R30, -16, R30));
+            // R19 = 10 ('\n')
+            code.extend_from_slice(&encode_ldi(10, R19));
+            // STB R19, 0(R30) — store newline at [R30]
+            code.extend_from_slice(&encode_stb(R19, R30, 0));
+            // R26 = 1 (stdout fd)
+            code.extend_from_slice(&encode_ldi(1, R26));
+            // R25 = R30 (buf)
+            code.extend_from_slice(&encode_copy(R30, R25));
+            // R24 = 1 (count)
+            code.extend_from_slice(&encode_ldi(1, R24));
+            // R20 = 4 (sys_write)
+            code.extend_from_slice(&encode_ldi(4, R20));
+            // GATE
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // delay slot
+            // R30 += 16 (restore stack)
+            code.extend_from_slice(&encode_ldo(R30, 16, R30));
+            // BV R2(R0) — return
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop()); // delay slot
+            syscall_stubs.push(("print_newline".to_string(), code));
+        }
+
         // __vuma_free(addr) → munmap(addr, 0).
         // parisc __NR_munmap = 91. Caller passes addr in R26; munmap's second
         // arg (length) is unused by Linux for whole-region unmap but the
