@@ -199,7 +199,7 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
         IRInstr::Syscall { nr, args, dst } => IRInstr::Syscall {
             nr: *nr,
             args: args.iter().map(sv).collect(),
-            dst: dst.as_ref().map(&sv),
+            dst: dst.as_ref().map(sv),
         },
     }
 }

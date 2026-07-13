@@ -67,6 +67,8 @@ pub enum NodeType {
     Match,
     /// A constant-time security operation node (ct_select, ct_eq).
     ConstantTime,
+    /// A direct syscall node (first-class syscall invocation).
+    Syscall,
 }
 
 impl std::fmt::Display for NodeType {
@@ -86,6 +88,7 @@ impl std::fmt::Display for NodeType {
             NodeType::EnumDef => write!(f, "EnumDef"),
             NodeType::Match => write!(f, "Match"),
             NodeType::ConstantTime => write!(f, "ConstantTime"),
+            NodeType::Syscall => write!(f, "Syscall"),
         }
     }
 }
@@ -170,6 +173,8 @@ pub enum NodePayload {
     Match(MatchNode),
     /// Payload for `NodeType::ConstantTime`.
     ConstantTime(ConstantTimeNode),
+    /// Payload for `NodeType::Syscall`.
+    Syscall(SyscallNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -657,6 +662,22 @@ pub enum ConstantTimeOp {
     CtSelect,
     /// Constant-time equality check: `ct_eq(a, b)`.
     CtEq,
+}
+
+/// A direct syscall node — first-class syscall invocation.
+///
+/// Represents a `syscall(nr, args...)` expression in the source. The `nr` is
+/// a generic Linux ABI syscall number (see `vuma_codegen::ir::generic_syscall_name`
+/// for the mapping). The SCG tracks syscalls as first-class nodes so that IVE
+/// can verify their safety properties (e.g. arg buffer validity).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SyscallNode {
+    /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
+    pub nr: u32,
+    /// Result variable name, or `None` for void syscalls (e.g. exit).
+    pub dst: Option<String>,
+    /// Argument variable names.
+    pub args: Vec<String>,
 }
 
 #[cfg(test)]

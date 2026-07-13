@@ -184,12 +184,12 @@
 > Currently syscalls go through `IRInstr::Call { is_extern: true }` resolved by
 > name. Introduce a first-class syscall IR node.
 
-- [ ] **[IR]** Add `IRInstr::Syscall { nr: u32, args: Vec<IRValue>, dst: Option<IRValue> }` variant. `src/codegen/src/ir.rs:1211-1533`
-- [ ] **[SCG]** Add `NodePayload::Syscall` / `EdgeKind::SyscallArg` so SCG tracks syscalls as first-class. `src/scg/src/node.rs`, `src/scg/src/edge.rs`
-- [ ] **[PARSER]** Parse `syscall(nr, args...)` syntax in `.vuma`. `src/parser/src/parser.rs`
-- [ ] **[PARSER]** Lower `syscall(...)` AST node → `IRInstr::Syscall` in `to_scg.rs`. `src/parser/src/to_scg.rs`
-- [ ] **[IR]** Add `IRInstr::Syscall` size/effect metadata (may-read/may-write/aborts).
-- [ ] **[PIPE]** Add a verification-level "syscall allowlist" so unknown syscalls become compile errors instead of silent FFI return-0.
+- [x] **[IR]** Add `IRInstr::Syscall { nr: u32, args: Vec<IRValue>, dst: Option<IRValue> }` variant. `src/codegen/src/ir.rs` — added variant with doc explaining generic Linux ABI numbering, effects (may-read/may-write/aborts), and the lowering strategy. Updated `defined_regs()`, `used_regs()`, `Display`. Added `generic_syscall_name()` (450+ entry table mapping generic syscall numbers to POSIX names), `is_known_syscall()`, `lower_syscalls()`, and `lower_syscalls_all()`.
+- [x] **[SCG]** Add `NodePayload::Syscall` / `EdgeKind::SyscallArg` so SCG tracks syscalls as first-class. `src/scg/src/node.rs`, `src/scg/src/edge.rs` — added `NodeType::Syscall`, `NodePayload::Syscall(SyscallNode)`, `SyscallNode { nr, dst, args }` struct, and `EdgeKind::SyscallArg`. Updated all exhaustive matches in serialize.rs, structured_output.rs, bd/inference.rs, ive/escape.rs, ive/inference.rs, cor/bridge.rs, vuma/msg_builder.rs, vuma/scg_to_msg.rs, vuma/repl.rs, pipeline.rs.
+- [x] **[PARSER]** Parse `syscall(nr, args...)` syntax in `.vuma`. `src/parser/src/parser.rs` — added `TokenKind::Syscall` keyword to lexer, `Expr::Syscall { nr, args, span }` to AST, parser case that requires the first arg to be an integer literal (the syscall number) and parses remaining args. Added 4 parser tests (basic, no-args, statement, in-expression) — all pass.
+- [x] **[PARSER]** Lower `syscall(...)` AST node → `NodePayload::Syscall` in `to_scg.rs`. — added `emit_syscall_nodes()` helper that creates `NodeType::Syscall` / `NodePayload::Syscall(SyscallNode)` nodes with `EdgeKind::SyscallArg` edges from arg variables. Wired into 4 statement-lowering sites (Let, Assign, Return, Expr). Fixed `collect_uses`, `infer_expr_type`, `expr_to_string` matches.
+- [x] **[IR]** Add `IRInstr::Syscall` size/effect metadata (may-read/may-write/aborts). — documented in the variant's doc comment. `defined_regs()` returns `dst`; `used_regs()` returns all `args`. The `generic_syscall_name()` table provides the name lookup for the Display impl.
+- [x] **[PIPE]** Add a verification-level "syscall allowlist" so unknown syscalls become compile errors instead of silent FFI return-0. — added `is_known_syscall()` check in pipeline at 3 compile paths. Unknown syscall numbers produce `VumaError::Codegen { error: CodegenError::InvalidInstruction(...) }`. Added `lower_syscalls_all()` call after the allowlist check and before optimization at all 3 IR build sites. Added `ScgStatement::Syscall(SyscallCallNode)` to the codegen stub SCG + `lower_syscall()` in IRBuilder to produce `IRInstr::Syscall`.
 
 ---
 

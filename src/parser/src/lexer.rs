@@ -384,6 +384,8 @@ pub enum TokenKind {
     CtSelect,
     /// `ct_eq` — constant-time equality check intrinsic
     CtEq,
+    /// `syscall` — direct syscall intrinsic
+    Syscall,
     /// Format string literal: `f"..."`
     FormatStr,
     /// Rust-style macro invocation identifier ending with `!`
@@ -549,6 +551,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::ErrKw => write!(f, "'Err'"),
             TokenKind::CtSelect => write!(f, "'ct_select'"),
             TokenKind::CtEq => write!(f, "'ct_eq'"),
+            TokenKind::Syscall => write!(f, "'syscall'"),
             TokenKind::FormatStr => write!(f, "format string"),
             TokenKind::MacroIdent => write!(f, "macro identifier"),
 
@@ -666,6 +669,7 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         // Constant-time security intrinsics
         "ct_select" => Some(TokenKind::CtSelect),
         "ct_eq" => Some(TokenKind::CtEq),
+        "syscall" => Some(TokenKind::Syscall),
 
         _ => None,
     }

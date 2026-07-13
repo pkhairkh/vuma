@@ -2332,6 +2332,46 @@ impl<'src> Parser<'src> {
                 })
             }
 
+            // ---- Direct syscall intrinsic ----
+            TokenKind::Syscall => {
+                // syscall(nr, args...) — first arg is the syscall number
+                // (must be an integer literal), remaining args are syscall args.
+                let span = self.current.span;
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                // Parse the syscall number — must be an integer literal.
+                let nr = if self.at(TokenKind::Number) {
+                    let lexeme = self.current.lexeme.clone();
+                    self.advance();
+                    lexeme.parse::<u32>().map_err(|_| {
+                        ParseError::new(
+                            format!("syscall number must be a non-negative integer, got: {}", lexeme),
+                            span,
+                            ParseErrorKind::InvalidSyntax,
+                        )
+                    })?
+                } else {
+                    return Err(ParseError::new(
+                        "syscall number (first argument) must be an integer literal".to_string(),
+                        self.current.span,
+                        ParseErrorKind::InvalidSyntax,
+                    ));
+                };
+                // Parse remaining arguments.
+                let mut args = Vec::new();
+                while self.at(TokenKind::Comma) {
+                    self.advance(); // consume ','
+                    args.push(self.parse_expr()?);
+                }
+                let end = self.current.span.end;
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::Syscall {
+                    nr,
+                    args,
+                    span: Span::new(span.start, end),
+                })
+            }
+
             // ---- Literals ----
             TokenKind::Number => {
                 let lexeme = self.current.lexeme.clone();
@@ -3553,6 +3593,7 @@ impl Expr {
             Expr::AtomicCas { span, .. } => *span,
             Expr::Block { span, .. } => *span,
             Expr::MatchExpr { span, .. } => *span,
+            Expr::Syscall { span, .. } => *span,
         }
     }
 }

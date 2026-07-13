@@ -70,6 +70,11 @@ pub enum EdgeKind {
         /// The return values (node IDs of values being returned).
         return_values: Vec<NodeId>,
     },
+    /// A syscall-argument edge: connects a value-producing node to a
+    /// `NodeType::Syscall` node, indicating that the value is passed as an
+    /// argument to the syscall. Analogous to `DataFlow` but specifically for
+    /// syscall arguments, enabling IVE to verify arg buffer validity.
+    SyscallArg,
 }
 
 impl std::fmt::Display for EdgeKind {
@@ -90,6 +95,7 @@ impl std::fmt::Display for EdgeKind {
             } => {
                 write!(f, "Return({} -> {})", from_node, to_node)
             }
+            EdgeKind::SyscallArg => write!(f, "SyscallArg"),
         }
     }
 }

@@ -180,6 +180,11 @@ fn compute_escape_kind(
                         }
                     }
                 }
+                EdgeKind::SyscallArg => {
+                    // A pointer passed as a syscall argument escapes to the
+                    // kernel — conservatively treat as escaping to the heap.
+                    max_escape = worse_escape(max_escape, EscapeKind::EscapesToHeap);
+                }
             }
         }
     }

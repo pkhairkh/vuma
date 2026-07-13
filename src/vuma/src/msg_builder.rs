@@ -499,6 +499,9 @@ impl MsgBuilder {
             ScgNodeType::Access => self.rule_access(&node_data)?,
             ScgNodeType::Cast => self.rule_cast(&node_data)?,
             ScgNodeType::Effect => self.rule_effect(&node_data)?,
+            // Syscalls are side effects (read/write/etc.) and are handled
+            // analogously to Effect nodes via `rule_syscall`.
+            ScgNodeType::Syscall => self.rule_syscall(&node_data)?,
             ScgNodeType::Control
             | ScgNodeType::Phantom
             | ScgNodeType::VTable
@@ -816,6 +819,52 @@ impl MsgBuilder {
         }
     }
 
+    /// Process syscall nodes: like effect nodes, syscalls are side effects
+    /// that read/write memory (e.g. Linux `read`/`write`). We create an
+    /// `Access` in the MSG, classifying the access kind from the syscall's
+    /// ABI number. The syscall's `dst` (result) and `args` are not needed to
+    /// emit the MSG access, but `nr` drives the Read/Write heuristic.
+    fn rule_syscall(&mut self, node: &NodeData) -> Result<ScgNodeMapping, BuilderError> {
+        let syscall = match &node.payload {
+            NodePayload::Syscall(s) => s,
+            _ => {
+                return Err(BuilderError::ValidationFailed(
+                    "Syscall node has non-Syscall payload".to_string(),
+                ))
+            }
+        };
+
+        let pp = Self::convert_program_point(&node.program_point);
+
+        // Heuristic: Linux ABI syscall 0 = `read` (input); every other common
+        // syscall (write=1, send=44, exit=60, close=3, unlink=87, ...) mutates
+        // memory or process state, so classify it as a Write. The argument
+        // list (`args`) and result (`dst`) are surfaced here for completeness.
+        let _ = (syscall.dst.as_ref(), syscall.args.len());
+        let access_kind = if syscall.nr == 0 {
+            AccessKind::Read
+        } else {
+            AccessKind::Write
+        };
+
+        // For syscall nodes, try to find a source derivation, or fall back
+        // to the first available derivation in the MSG.
+        let target_derivation_id = self
+            .find_source_derivation_for_node(node)
+            .ok()
+            .or_else(|| self.first_derivation_id());
+
+        if let Some(did) = target_derivation_id {
+            let aid = self.alloc_access_id();
+            let access_entry = Access::new(aid, did, access_kind, 1, pp);
+            self.msg.add_access(access_entry);
+            Ok(ScgNodeMapping::Access(aid))
+        } else {
+            // No derivation available; skip this syscall node.
+            Ok(ScgNodeMapping::None)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Edge processing — Rule SYNC
     // -----------------------------------------------------------------------
@@ -839,9 +888,12 @@ impl MsgBuilder {
                 | ScgEdgeKind::Return { .. } => {
                     self.process_sync_edge(&edge)?;
                 }
-                ScgEdgeKind::DataFlow | ScgEdgeKind::Derivation => {
+                ScgEdgeKind::DataFlow
+                | ScgEdgeKind::Derivation
+                | ScgEdgeKind::SyscallArg => {
                     // These edge types are handled during node processing
-                    // (they establish derivation chains).
+                    // (they establish derivation chains / data flow into
+                    // syscalls) and do not produce MSG SyncEdges here.
                 }
             }
         }

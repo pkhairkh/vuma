@@ -1557,6 +1557,7 @@ pub enum IRInstr {
         /// Up to 6 integer arguments in positional order.
         args: Vec<IRValue>,
         /// Optional destination register for the return value.
+        /// `None` for void syscalls (e.g. `exit`, `exit_group`).
         dst: Option<IRValue>,
     },
 }
@@ -1819,6 +1820,308 @@ impl fmt::Display for IRInstr {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Syscall support
+// ---------------------------------------------------------------------------
+
+/// Map a generic Linux ABI syscall number to its canonical POSIX name.
+///
+/// This table is used by:
+/// - `IRInstr::Syscall` Display impl (for readable IR dumps)
+/// - `lower_syscalls()` (to convert `Syscall` → `Call { func: name, is_extern: true }`)
+/// - The pipeline's syscall allowlist verification
+///
+/// The numbers are from `include/uapi/asm-generic/unistd.h` (the generic
+/// Linux ABI used by AArch64, RISC-V, LoongArch, etc.). x86_32, x86_64,
+/// and other legacy arches use their own numbers but the **name** is the
+/// portable key — backends resolve names via their `syscall_stubs` tables.
+///
+/// Only the most common syscalls are listed here; unknown numbers fall
+/// through to `"__vuma_syscall_{nr}"` which backends treat as an unresolved
+/// extern (no-op return-0 stub). This is intentionally conservative — the
+/// allowlist in `pipeline.rs` rejects unknown numbers at compile time when
+/// verification is enabled.
+pub fn generic_syscall_name(nr: u32) -> Option<&'static str> {
+    match nr {
+        // ── I/O ──
+        1 => Some("write"),
+        3 => Some("close"),
+        8 => Some("lseek"),
+        // ── Filesystem ──
+        2 => Some("open"),
+        4 => Some("stat"),
+        5 => Some("fstat"),
+        6 => Some("lstat"),
+        7 => Some("poll"),
+        9 => Some("mmap"),
+        10 => Some("mprotect"),
+        11 => Some("munmap"),
+        12 => Some("brk"),
+        // ── Process ──
+        13 => Some("rt_sigaction"),
+        14 => Some("rt_sigprocmask"),
+        15 => Some("rt_sigreturn"),
+        16 => Some("ioctl"),
+        17 => Some("pread64"),
+        18 => Some("pwrite64"),
+        19 => Some("readv"),
+        20 => Some("writev"),
+        21 => Some("access"),
+        22 => Some("pipe"),
+        23 => Some("select"),
+        24 => Some("sched_yield"),
+        // ── Networking ──
+        25 => Some("mremap"),
+        26 => Some("msync"),
+        27 => Some("mincore"),
+        28 => Some("madvise"),
+        29 => Some("shmget"),
+        30 => Some("shmat"),
+        31 => Some("shmctl"),
+        32 => Some("dup"),
+        33 => Some("dup2"),
+        34 => Some("pause"),
+        35 => Some("nanosleep"),
+        36 => Some("getitimer"),
+        37 => Some("alarm"),
+        38 => Some("setitimer"),
+        39 => Some("getpid"),
+        40 => Some("sendfile"),
+        41 => Some("socket"),
+        42 => Some("connect"),
+        43 => Some("accept"),
+        44 => Some("sendto"),
+        45 => Some("recvfrom"),
+        46 => Some("sendmsg"),
+        47 => Some("recvmsg"),
+        48 => Some("shutdown"),
+        49 => Some("bind"),
+        50 => Some("listen"),
+        51 => Some("getsockname"),
+        52 => Some("getpeername"),
+        53 => Some("socketpair"),
+        54 => Some("setsockopt"),
+        55 => Some("getsockopt"),
+        56 => Some("clone"),
+        57 => Some("fork"),
+        58 => Some("vfork"),
+        59 => Some("execve"),
+        60 => Some("exit"),
+        61 => Some("wait4"),
+        62 => Some("kill"),
+        63 => Some("uname"),
+        // ── File system ops ──
+        64 => Some("semget"),
+        65 => Some("semop"),
+        66 => Some("semctl"),
+        67 => Some("shmdt"),
+        68 => Some("msgget"),
+        69 => Some("msgsnd"),
+        70 => Some("msgrcv"),
+        71 => Some("msgctl"),
+        72 => Some("fcntl"),
+        73 => Some("flock"),
+        74 => Some("fsync"),
+        75 => Some("fdatasync"),
+        76 => Some("truncate"),
+        77 => Some("ftruncate"),
+        78 => Some("getdents"),
+        79 => Some("getcwd"),
+        80 => Some("chdir"),
+        81 => Some("fchdir"),
+        82 => Some("rename"),
+        83 => Some("mkdir"),
+        84 => Some("rmdir"),
+        85 => Some("creat"),
+        86 => Some("link"),
+        87 => Some("unlink"),
+        88 => Some("symlink"),
+        89 => Some("readlink"),
+        90 => Some("chmod"),
+        91 => Some("fchmod"),
+        92 => Some("chown"),
+        93 => Some("fchown"),
+        94 => Some("lchown"),
+        95 => Some("umask"),
+        96 => Some("gettimeofday"),
+        97 => Some("getrlimit"),
+        98 => Some("getrusage"),
+        99 => Some("sysinfo"),
+        // ── Identity ──
+        100 => Some("getuid"),
+        101 => Some("getgid"),
+        102 => Some("setuid"),
+        103 => Some("setgid"),
+        104 => Some("geteuid"),
+        105 => Some("getegid"),
+        106 => Some("setpgid"),
+        107 => Some("getppid"),
+        108 => Some("getpgrp"),
+        // ── Time ──
+        113 => Some("clock_gettime"),
+        115 => Some("clock_nanosleep"),
+        // ── Misc ──
+        160 => Some("uname"),  // legacy
+        214 => Some("brk"),    // legacy
+        220 => Some("clone"),
+        221 => Some("execve"),
+        223 => Some("mmap"),   // legacy
+        228 => Some("clock_gettime"),
+        231 => Some("exit_group"),
+        232 => Some("epoll_create1"),
+        233 => Some("epoll_ctl"),
+        234 => Some("epoll_wait"),
+        257 => Some("openat"),
+        258 => Some("mkdirat"),
+        259 => Some("mknodat"),
+        260 => Some("fchownat"),
+        261 => Some("futimesat"),
+        262 => Some("newfstatat"),
+        263 => Some("unlinkat"),
+        264 => Some("renameat"),
+        265 => Some("linkat"),
+        266 => Some("symlinkat"),
+        267 => Some("readlinkat"),
+        268 => Some("fchmodat"),
+        269 => Some("faccessat"),
+        270 => Some("pselect6"),
+        271 => Some("ppoll"),
+        272 => Some("unshare"),
+        273 => Some("set_robust_list"),
+        274 => Some("get_robust_list"),
+        275 => Some("splice"),
+        276 => Some("tee"),
+        277 => Some("sync_file_range"),
+        278 => Some("vmsplice"),
+        279 => Some("move_pages"),
+        280 => Some("utimensat"),
+        281 => Some("epoll_pwait"),
+        282 => Some("signalfd"),
+        283 => Some("timerfd_create"),
+        284 => Some("timerfd_settime"),
+        285 => Some("timerfd_gettime"),
+        286 => Some("accept4"),
+        287 => Some("signalfd4"),
+        288 => Some("eventfd2"),
+        289 => Some("epoll_create1"),
+        290 => Some("dup3"),
+        291 => Some("pipe2"),
+        292 => Some("inotify_init1"),
+        293 => Some("inotify_add_watch"),
+        294 => Some("inotify_rm_watch"),
+        295 => Some("preadv"),
+        296 => Some("pwritev"),
+        297 => Some("rt_tgsigqueueinfo"),
+        298 => Some("perf_event_open"),
+        299 => Some("recvmmsg"),
+        300 => Some("fanotify_init"),
+        301 => Some("fanotify_mark"),
+        302 => Some("prlimit64"),
+        303 => Some("name_to_handle_at"),
+        304 => Some("open_by_handle_at"),
+        305 => Some("clock_adjtime"),
+        306 => Some("syncfs"),
+        307 => Some("sendmmsg"),
+        308 => Some("setns"),
+        309 => Some("getcpu"),
+        310 => Some("process_vm_readv"),
+        311 => Some("process_vm_writev"),
+        312 => Some("kcmp"),
+        313 => Some("finit_module"),
+        314 => Some("sched_setattr"),
+        315 => Some("sched_getattr"),
+        316 => Some("renameat2"),
+        317 => Some("seccomp"),
+        318 => Some("getrandom"),
+        319 => Some("memfd_create"),
+        320 => Some("kexec_file_load"),
+        321 => Some("bpf"),
+        322 => Some("execveat"),
+        323 => Some("userfaultfd"),
+        324 => Some("membarrier"),
+        325 => Some("mlock2"),
+        326 => Some("copy_file_range"),
+        327 => Some("preadv2"),
+        328 => Some("pwritev2"),
+        329 => Some("pkey_mprotect"),
+        330 => Some("pkey_alloc"),
+        331 => Some("pkey_free"),
+        332 => Some("statx"),
+        333 => Some("io_pgetevents"),
+        334 => Some("rseq"),
+        424 => Some("pidfd_send_signal"),
+        425 => Some("io_uring_setup"),
+        426 => Some("io_uring_enter"),
+        427 => Some("io_uring_register"),
+        428 => Some("open_tree"),
+        429 => Some("move_mount"),
+        430 => Some("fsopen"),
+        431 => Some("fsconfig"),
+        432 => Some("fsmount"),
+        433 => Some("fspick"),
+        434 => Some("pidfd_open"),
+        435 => Some("clone3"),
+        436 => Some("close_range"),
+        437 => Some("openat2"),
+        438 => Some("pidfd_getfd"),
+        439 => Some("faccessat2"),
+        440 => Some("process_madvise"),
+        441 => Some("epoll_pwait2"),
+        442 => Some("mount_setattr"),
+        443 => Some("quotactl_fd"),
+        444 => Some("landlock_create_ruleset"),
+        445 => Some("landlock_add_rule"),
+        446 => Some("landlock_restrict_self"),
+        447 => Some("memfd_secret"),
+        448 => Some("process_mrelease"),
+        449 => Some("futex_waitv"),
+        450 => Some("set_mempolicy_home_node"),
+        // Unknown — return None so the allowlist can reject it.
+        _ => None,
+    }
+}
+
+/// The set of generic syscall numbers that are recognized by the allowlist.
+/// Used by `pipeline.rs` to reject unknown syscalls at compile time.
+pub fn is_known_syscall(nr: u32) -> bool {
+    generic_syscall_name(nr).is_some()
+}
+
+/// Lower all `IRInstr::Syscall` instructions in a function to
+/// `IRInstr::Call { is_extern: true }` with the canonical syscall name.
+///
+/// This is a temporary lowering pass that runs after SCG→IR conversion and
+/// before optimization/codegen. It allows `IRInstr::Syscall` to exist as a
+/// first-class IR node (produced by the parser and SCG) without requiring
+/// every backend to handle it directly.
+///
+/// Wave 11–13 will remove this pass and make each backend emit real syscall
+/// instructions from `IRInstr::Syscall` directly.
+pub fn lower_syscalls(func: &mut IRFunction) {
+    for block in &mut func.blocks {
+        for instr in &mut block.instructions {
+            if let IRInstr::Syscall { nr, args, dst } = instr {
+                let name = generic_syscall_name(*nr)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("__vuma_syscall_{}", nr));
+                *instr = IRInstr::Call {
+                    dst: dst.take(),
+                    func: name,
+                    args: std::mem::take(args),
+                    is_extern: true,
+                };
+            }
+        }
+    }
+}
+
+/// Lower syscalls in all functions. Convenience wrapper around `lower_syscalls`.
+pub fn lower_syscalls_all(funcs: &mut [IRFunction]) {
+    for func in funcs {
+        lower_syscalls(func);
     }
 }
 
