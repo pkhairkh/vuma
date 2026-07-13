@@ -1843,12 +1843,12 @@ impl Backend for HppaBackend {
 
         let mut start_stub: Vec<u8> = Vec::new();
 
-        // On PA-RISC Linux, the kernel passes argc in R26 and argv in R25 at
-        // process entry (register-based, not stack-based like x86_64).
-        // The call to main uses R26/R25 for the first two arguments, so we
-        // must NOT clobber them before the call. The ss_load_imm for R30 and
-        // the 32-byte call pattern below only use R1, R2, R20, R28, R30 —
-        // R26 and R25 are preserved.
+        // QEMU-hppa passes argc in R25 and argv in R24 at process entry
+        // (different from real PA-RISC Linux which uses R26=argc, R25=argv).
+        // The codegen expects R26=argc, R25=argv (PA-RISC calling convention).
+        // Swap: R26 = R25 (argc), R25 = R24 (argv).
+        start_stub.extend_from_slice(&encode_copy(R25, R26)); // R26 = R25 (argc)
+        start_stub.extend_from_slice(&encode_copy(R24, R25)); // R25 = R24 (argv)
 
         // Set R30 (stack pointer) to the top of the 8MB stack segment.
         // ss_load_imm emits 12 instructions (48 bytes) for 0x830000 — well
