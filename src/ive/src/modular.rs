@@ -75,15 +75,31 @@ pub fn analyze_function(
 ) -> FunctionSummary {
     let mut summary = FunctionSummary::new();
 
+    // Collect the set of function_nodes for fast membership testing.
+    let node_set: HashSet<NodeId> = function_nodes.iter().copied().collect();
+
     for &node_id in function_nodes {
         if let Some(node) = scg.get_node(node_id) {
             match &node.payload {
                 NodePayload::Allocation(alloc) => {
                     summary.allocates = true;
                     let region_id = alloc.region_id.as_u64() as u32;
-                    // Check if this region escapes (returned or stored)
-                    // For now, mark all allocations as potentially escaping
-                    summary.escaping_regions.insert(region_id);
+                    // (Wave 16) Real escape analysis: an allocation escapes
+                    // if its value flows (via DataFlow edges) to a node
+                    // outside this function's boundary — specifically:
+                    //   1. A FunctionReturn node (the allocation is returned
+                    //      to the caller).
+                    //   2. An Effect node with observable I/O (the allocation
+                    //      is written to a global/external sink).
+                    //   3. A Call edge's from_node (the allocation is passed
+                    //      as an argument to another function).
+                    //
+                    // If none of these conditions hold, the allocation does
+                    // NOT escape and the function is responsible for freeing
+                    // it (or it's a local temporary).
+                    if allocation_escapes(scg, node_id, &node_set) {
+                        summary.escaping_regions.insert(region_id);
+                    }
                 }
                 NodePayload::Deallocation(dealloc) => {
                     let region_id = dealloc.region_id.as_u64() as u32;
@@ -107,6 +123,90 @@ pub fn analyze_function(
 
     summary.is_pure = !summary.allocates && !summary.performs_io && summary.modified_regions.is_empty();
     summary
+}
+
+/// (Wave 16) Determine whether an allocation node escapes the function.
+///
+/// An allocation escapes if its value flows (via `DataFlow` edges) to:
+/// - A `FunctionReturn` control node (returned to caller), or
+/// - An `Effect` node that is observable (I/O / global store), or
+/// - A `Call` edge's source node (passed as an argument to another function).
+///
+/// Allocations that only flow to local `Access` or `Deallocation` nodes
+/// within the same function do NOT escape.
+fn allocation_escapes(
+    scg: &SCG,
+    alloc_node: NodeId,
+    function_nodes: &HashSet<NodeId>,
+) -> bool {
+    use vuma_scg::edge::EdgeKind;
+    use vuma_scg::node::{ControlKind, NodeType};
+
+    // BFS through DataFlow edges starting from the allocation node.
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    visited.insert(alloc_node);
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(alloc_node);
+
+    while let Some(cur) = queue.pop_front() {
+        for edge in scg.edges() {
+            // Follow DataFlow edges (value flows from source → target).
+            let is_data_flow = matches!(edge.kind, EdgeKind::DataFlow);
+            // Also follow Call edges where this node is the source (value
+            // passed as a call argument to another function).
+            let is_call_from = matches!(
+                &edge.kind,
+                EdgeKind::Call { from_node, .. } if *from_node == cur
+            );
+            // Also follow Return edges (value returned from a call).
+            let is_return = matches!(
+                &edge.kind,
+                EdgeKind::Return { return_values, .. } if return_values.contains(&cur)
+            );
+
+            if (is_data_flow && edge.source == cur) || is_call_from || is_return {
+                let target = if is_data_flow {
+                    edge.target
+                } else if let EdgeKind::Call { to_node, .. } = &edge.kind {
+                    *to_node
+                } else {
+                    // For Return edges, the target is where execution resumes
+                    // — the value has escaped to the caller.
+                    return true;
+                };
+
+                if visited.insert(target) {
+                    if let Some(target_node) = scg.get_node(target) {
+                        // Escape condition 1: flows to a FunctionReturn node.
+                        if target_node.node_type == NodeType::Control {
+                            if let NodePayload::Control(ctrl) = &target_node.payload {
+                                if ctrl.kind == ControlKind::FunctionReturn {
+                                    return true;
+                                }
+                            }
+                        }
+                        // Escape condition 2: flows to an observable Effect node.
+                        if target_node.node_type == NodeType::Effect {
+                            if let NodePayload::Effect(eff) = &target_node.payload {
+                                if eff.is_observable {
+                                    return true;
+                                }
+                            }
+                        }
+                        // Escape condition 3: flows to a node OUTSIDE this
+                        // function (crosses function boundary via DataFlow).
+                        if !function_nodes.contains(&target) {
+                            return true;
+                        }
+                        // Continue BFS for transitive flows.
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Analyze all functions in the SCG and produce summaries.

@@ -973,6 +973,9 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
             VerificationLevel::Quick => IveVerificationLevel::Quick,
             VerificationLevel::Normal => IveVerificationLevel::Normal,
             VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::Modular => IveVerificationLevel::Modular,
+            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
+            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);

@@ -49,10 +49,27 @@ pub enum InvariantKind {
     Origin,
     /// Every acquired resource is eventually released.
     Cleanup,
+    /// (Wave 16) Constant-time safety: secret values do not influence
+    /// control flow or memory addresses.  Only checked under
+    /// [`VerificationLevel::ConstantTime`] and [`VerificationLevel::Hardened`].
+    ConstantTime,
+    /// (Wave 16) Interprocedural analysis: cross-function leaks, data
+    /// races, and lock-discipline violations.  Only checked under
+    /// [`VerificationLevel::Exhaustive`] and [`VerificationLevel::Hardened`].
+    Interprocedural,
+    /// (Wave 16) Modular analysis: per-function verification using
+    /// function summaries.  Only checked under
+    /// [`VerificationLevel::Modular`] and [`VerificationLevel::Hardened`].
+    Modular,
 }
 
 impl InvariantKind {
-    /// Return all five invariant kinds in canonical order.
+    /// Return the five core invariant kinds in canonical order.
+    ///
+    /// These are the invariants checked at the [`VerificationLevel::Normal`]
+    /// level.  The three extended kinds (`ConstantTime`, `Interprocedural`,
+    /// `Modular`) are NOT included here — they are opt-in via their
+    /// respective verification levels.
     pub fn all() -> &'static [InvariantKind; 5] {
         &[
             InvariantKind::Liveness,
@@ -79,6 +96,9 @@ impl InvariantKind {
             InvariantKind::Interpretation => "interpretation",
             InvariantKind::Origin => "origin",
             InvariantKind::Cleanup => "cleanup",
+            InvariantKind::ConstantTime => "constant-time",
+            InvariantKind::Interprocedural => "interprocedural",
+            InvariantKind::Modular => "modular",
         }
     }
 }
@@ -101,11 +121,22 @@ impl fmt::Display for InvariantKind {
 pub enum VerificationLevel {
     /// Only run cheap, syntactic checks (exclusivity, origin).
     Quick,
-    /// Run all five invariant checks (default).
+    /// Run all five core invariant checks (default).
     #[default]
     Normal,
     /// Run all checks and attempt formal proof generation.
+    /// Also runs the interprocedural analysis (Wave 16).
     Exhaustive,
+    /// (Wave 16) Run the five core invariants plus modular per-function
+    /// verification using function summaries.
+    Modular,
+    /// (Wave 16) Run the five core invariants plus the constant-time
+    /// invariant (6th invariant).  Detects secret-dependent branches
+    /// and memory accesses via taint propagation.
+    ConstantTime,
+    /// (Wave 16) Run all 6 invariants (5 core + constant-time) plus
+    /// interprocedural and modular analyses.  The most thorough level.
+    Hardened,
 }
 
 impl fmt::Display for VerificationLevel {
@@ -114,6 +145,9 @@ impl fmt::Display for VerificationLevel {
             VerificationLevel::Quick => write!(f, "QUICK"),
             VerificationLevel::Normal => write!(f, "NORMAL"),
             VerificationLevel::Exhaustive => write!(f, "EXHAUSTIVE"),
+            VerificationLevel::Modular => write!(f, "MODULAR"),
+            VerificationLevel::ConstantTime => write!(f, "CONSTANT_TIME"),
+            VerificationLevel::Hardened => write!(f, "HARDENED"),
         }
     }
 }
@@ -524,7 +558,7 @@ impl InvariantAggregator {
         Self {
             engine: VerificationEngine::new(),
             level: VerificationLevel::Normal,
-            cache: InvariantKind::all().iter().map(|_| None).collect(),
+            cache: (0..EXTENDED_INVARIANT_COUNT).map(|_| None).collect(),
             verbose: false,
         }
     }
@@ -634,7 +668,7 @@ impl InvariantAggregator {
 
     /// Clear the internal cache, forcing all checks to be re-run.
     pub fn clear_cache(&mut self) {
-        self.cache = InvariantKind::all().iter().map(|_| None).collect();
+        self.cache = (0..EXTENDED_INVARIANT_COUNT).map(|_| None).collect();
     }
 
     /// Returns the current verification level.
@@ -651,7 +685,32 @@ impl InvariantAggregator {
         match self.level {
             VerificationLevel::Quick => InvariantKind::quick_set().to_vec(),
             VerificationLevel::Normal => InvariantKind::all().to_vec(),
-            VerificationLevel::Exhaustive => InvariantKind::all().to_vec(),
+            VerificationLevel::Exhaustive => {
+                // Core 5 + interprocedural analysis.
+                let mut v = InvariantKind::all().to_vec();
+                v.push(InvariantKind::Interprocedural);
+                v
+            }
+            VerificationLevel::Modular => {
+                // Core 5 + modular analysis.
+                let mut v = InvariantKind::all().to_vec();
+                v.push(InvariantKind::Modular);
+                v
+            }
+            VerificationLevel::ConstantTime => {
+                // Core 5 + constant-time (6th invariant).
+                let mut v = InvariantKind::all().to_vec();
+                v.push(InvariantKind::ConstantTime);
+                v
+            }
+            VerificationLevel::Hardened => {
+                // All 6 invariants + interprocedural + modular.
+                let mut v = InvariantKind::all().to_vec();
+                v.push(InvariantKind::ConstantTime);
+                v.push(InvariantKind::Interprocedural);
+                v.push(InvariantKind::Modular);
+                v
+            }
         }
     }
 
@@ -671,11 +730,16 @@ impl InvariantAggregator {
             InvariantKind::Interpretation => self.engine.verify_interpretation(input),
             InvariantKind::Origin => self.engine.verify_origin(input),
             InvariantKind::Cleanup => self.engine.verify_cleanup(input),
+            InvariantKind::ConstantTime => self.verify_constant_time(input),
+            InvariantKind::Interprocedural => self.verify_interprocedural(input),
+            InvariantKind::Modular => self.verify_modular(input),
         };
 
-        // In exhaustive mode, attempt to attach proof evidence for
+        // In exhaustive/hardened mode, attempt to attach proof evidence for
         // proven properties.
-        if self.level == VerificationLevel::Exhaustive && result.is_proven() {
+        if matches!(self.level, VerificationLevel::Exhaustive | VerificationLevel::Hardened)
+            && result.is_proven()
+        {
             result = result.with_evidence(Evidence::FormalProof {
                 steps: vec![ProofStep::from(format!(
                     "proof of {} verified by IVE",
@@ -685,6 +749,217 @@ impl InvariantAggregator {
         }
 
         result
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 16: Extended analysis helpers
+    // -----------------------------------------------------------------------
+
+    /// Verify the constant-time invariant: secret values must not influence
+    /// control flow (branches) or memory addresses (accesses).
+    ///
+    /// Extracts `secret_nodes`, `branch_nodes`, `access_nodes`, and data-flow
+    /// `edges` from the SCG and delegates to
+    /// [`crate::constant_time::verify_constant_time`].
+    fn verify_constant_time(&self, input: &VerificationInput) -> VerificationResult {
+        use crate::constant_time::verify_constant_time as ct_verify;
+        use vuma_scg::edge::EdgeKind;
+        use vuma_scg::node::{ControlKind, NodePayload, NodeType};
+
+        let scg = &input.scg;
+        let mut secret_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut branch_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut access_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        for node in scg.nodes() {
+            let id = node.id.as_u64();
+            // Branch nodes: Control nodes with kind=Branch.
+            if node.node_type == NodeType::Control {
+                if let NodePayload::Control(ctrl) = &node.payload {
+                    if ctrl.kind == ControlKind::Branch {
+                        branch_nodes.insert(id);
+                    }
+                    // Secret heuristic: check Control node labels for "secret".
+                    if let Some(label) = &ctrl.label {
+                        if label.to_lowercase().contains("secret") {
+                            secret_nodes.insert(id);
+                        }
+                    }
+                }
+            }
+            // Access nodes: memory read/write nodes.
+            if node.node_type == NodeType::Access {
+                access_nodes.insert(id);
+            }
+            // Secret heuristic: check source file name for "secret".
+            if let Some(ref file) = node.program_point.file {
+                if file.to_lowercase().contains("secret") {
+                    secret_nodes.insert(id);
+                }
+            }
+        }
+
+        // Collect data-flow edges as (source, target) pairs.
+        let edges: Vec<(u64, u64)> = scg
+            .edges()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlow))
+            .map(|e| (e.source.as_u64(), e.target.as_u64()))
+            .collect();
+
+        let violations = ct_verify(&secret_nodes, &branch_nodes, &access_nodes, &edges);
+
+        if violations.is_empty() {
+            VerificationResult::new(
+                "constant-time",
+                VerificationStatus::Proven,
+                format!(
+                    "constant-time check passed ({} secret(s), {} branch(es), {} access(es))",
+                    secret_nodes.len(),
+                    branch_nodes.len(),
+                    access_nodes.len()
+                ),
+            )
+        } else {
+            let msgs: Vec<String> = violations.iter().map(|v| v.message.clone()).collect();
+            VerificationResult::new(
+                "constant-time",
+                VerificationStatus::Violated {
+                    counterexample: crate::result::CounterExample::new(
+                        Vec::new(),
+                        default_program_point(),
+                        msgs.join("; "),
+                    ),
+                },
+                format!("constant-time violated: {} violation(s)", violations.len()),
+            )
+        }
+    }
+
+    /// Verify interprocedural invariants: cross-function leaks, data races,
+    /// and lock-discipline violations.
+    ///
+    /// Builds a [`CallGraph`] from the SCG, computes function summaries
+    /// bottom-up, and delegates to
+    /// [`crate::interprocedural::verify_interprocedural_invariants`].
+    fn verify_interprocedural(&self, input: &VerificationInput) -> VerificationResult {
+        use crate::interprocedural::{compute_summaries, verify_interprocedural_invariants};
+        use vuma_scg::callgraph::CallGraph;
+
+        let scg = &input.scg;
+        let call_graph = CallGraph::build(scg);
+        let summaries = compute_summaries(scg, &call_graph);
+        let violations = verify_interprocedural_invariants(scg, &call_graph, &summaries);
+
+        if violations.is_empty() {
+            VerificationResult::new(
+                "interprocedural",
+                VerificationStatus::Proven,
+                format!(
+                    "interprocedural check passed ({} function(s) analyzed)",
+                    summaries.len()
+                ),
+            )
+        } else {
+            let msgs: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
+            VerificationResult::new(
+                "interprocedural",
+                VerificationStatus::Violated {
+                    counterexample: crate::result::CounterExample::new(
+                        Vec::new(),
+                        default_program_point(),
+                        msgs.join("; "),
+                    ),
+                },
+                format!(
+                    "interprocedural violations: {} violation(s)",
+                    violations.len()
+                ),
+            )
+        }
+    }
+
+    /// Verify modular invariants: per-function verification using function
+    /// summaries (allocation/free discipline, purity, escape analysis).
+    ///
+    /// Extracts function entries from the SCG and delegates to
+    /// [`crate::modular::verify_all_functions`].
+    fn verify_modular(&self, input: &VerificationInput) -> VerificationResult {
+        use crate::modular::verify_all_functions;
+        use vuma_scg::node::{ControlKind, NodePayload, NodeType};
+
+        let scg = &input.scg;
+        // Build function_entries: (name, node_ids) for each function.
+        let (entries, _returns) = scg.function_boundary_nodes();
+        let mut function_entries: Vec<(String, Vec<vuma_scg::node::NodeId>)> = Vec::new();
+
+        for entry_id in &entries {
+            // BFS through ControlFlow edges to collect all nodes in this function.
+            let mut nodes = vec![*entry_id];
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(*entry_id);
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(*entry_id);
+            while let Some(cur) = queue.pop_front() {
+                for edge in scg.edges() {
+                    if edge.source == cur && !visited.contains(&edge.target) {
+                        visited.insert(edge.target);
+                        // Stop at FunctionReturn (don't include return nodes of
+                        // other functions — but include our own).
+                        if let Some(n) = scg.get_node(edge.target) {
+                            if n.node_type == NodeType::Control {
+                                if let NodePayload::Control(ctrl) = &n.payload {
+                                    if ctrl.kind == ControlKind::FunctionReturn {
+                                        nodes.push(edge.target);
+                                        continue; // include but don't traverse past
+                                    }
+                                    if ctrl.kind == ControlKind::FunctionEntry {
+                                        continue; // don't cross into another function
+                                    }
+                                }
+                            }
+                            nodes.push(edge.target);
+                            queue.push_back(edge.target);
+                        }
+                    }
+                }
+            }
+
+            // Function name: use the label from the entry node's Control payload,
+            // or a synthetic name.
+            let name = scg.get_node(*entry_id).and_then(|n| {
+                if let NodePayload::Control(ctrl) = &n.payload {
+                    ctrl.label.clone()
+                } else {
+                    None
+                }
+            }).unwrap_or_else(|| format!("fn_{}", entry_id.as_u64()));
+            function_entries.push((name, nodes));
+        }
+
+        let issues = verify_all_functions(scg, &function_entries);
+
+        if issues.is_empty() {
+            VerificationResult::new(
+                "modular",
+                VerificationStatus::Proven,
+                format!(
+                    "modular check passed ({} function(s) verified)",
+                    function_entries.len()
+                ),
+            )
+        } else {
+            VerificationResult::new(
+                "modular",
+                VerificationStatus::Violated {
+                    counterexample: crate::result::CounterExample::new(
+                        Vec::new(),
+                        default_program_point(),
+                        issues.join("; "),
+                    ),
+                },
+                format!("modular violations: {} issue(s)", issues.len()),
+            )
+        }
     }
 }
 
@@ -726,7 +1001,11 @@ fn compute_overall_verdict(results: &[PerInvariantResult]) -> OverallVerdict {
     }
 }
 
-/// Map an invariant kind to a cache index (0..5).
+/// Map an invariant kind to a cache index (0..7).
+///
+/// Indices 0-4 are the five core invariants; 5-7 are the Wave 16 extended
+/// kinds.  The cache vector in [`InvariantAggregator`] is sized to
+/// `EXTENDED_INVARIANT_COUNT` (8) to accommodate all kinds.
 fn invariant_index(kind: InvariantKind) -> Option<usize> {
     match kind {
         InvariantKind::Liveness => Some(0),
@@ -734,7 +1013,19 @@ fn invariant_index(kind: InvariantKind) -> Option<usize> {
         InvariantKind::Interpretation => Some(2),
         InvariantKind::Origin => Some(3),
         InvariantKind::Cleanup => Some(4),
+        InvariantKind::ConstantTime => Some(5),
+        InvariantKind::Interprocedural => Some(6),
+        InvariantKind::Modular => Some(7),
     }
+}
+
+/// The total number of invariant kinds (5 core + 3 extended = 8).
+const EXTENDED_INVARIANT_COUNT: usize = 8;
+
+/// Construct a default [`ProgramPoint`] (empty string) for use in
+/// counterexamples where the exact source location is not known.
+fn default_program_point() -> crate::result::ProgramPoint {
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +1074,9 @@ mod tests {
         assert_eq!(format!("{}", VerificationLevel::Quick), "QUICK");
         assert_eq!(format!("{}", VerificationLevel::Normal), "NORMAL");
         assert_eq!(format!("{}", VerificationLevel::Exhaustive), "EXHAUSTIVE");
+        assert_eq!(format!("{}", VerificationLevel::Modular), "MODULAR");
+        assert_eq!(format!("{}", VerificationLevel::ConstantTime), "CONSTANT_TIME");
+        assert_eq!(format!("{}", VerificationLevel::Hardened), "HARDENED");
     }
 
     #[test]
@@ -829,12 +1123,76 @@ mod tests {
     }
 
     #[test]
-    fn verify_all_exhaustive_returns_five_results() {
+    fn verify_all_exhaustive_returns_six_results() {
+        // Wave 16: Exhaustive now runs 5 core + interprocedural = 6 checks.
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Exhaustive);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 5);
+        assert_eq!(result.per_invariant.len(), 6);
         assert_eq!(result.level, VerificationLevel::Exhaustive);
+    }
+
+    // ── Wave 16: new verification level tests ───────────────────────────
+
+    #[test]
+    fn verify_all_modular_returns_six_results() {
+        // Modular: 5 core + modular analysis = 6 checks.
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Modular);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.per_invariant.len(), 6);
+        assert_eq!(result.level, VerificationLevel::Modular);
+    }
+
+    #[test]
+    fn verify_all_constant_time_returns_six_results() {
+        // ConstantTime: 5 core + constant-time (6th invariant) = 6 checks.
+        let aggregator =
+            InvariantAggregator::new().with_level(VerificationLevel::ConstantTime);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.per_invariant.len(), 6);
+        assert_eq!(result.level, VerificationLevel::ConstantTime);
+    }
+
+    #[test]
+    fn verify_all_hardened_returns_eight_results() {
+        // Hardened: 5 core + constant-time + interprocedural + modular = 8 checks.
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Hardened);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.per_invariant.len(), 8);
+        assert_eq!(result.level, VerificationLevel::Hardened);
+    }
+
+    #[test]
+    fn invariant_kind_extended_labels() {
+        assert_eq!(InvariantKind::ConstantTime.label(), "constant-time");
+        assert_eq!(InvariantKind::Interprocedural.label(), "interprocedural");
+        assert_eq!(InvariantKind::Modular.label(), "modular");
+    }
+
+    #[test]
+    fn invariant_index_covers_all_eight_kinds() {
+        assert_eq!(invariant_index(InvariantKind::Liveness), Some(0));
+        assert_eq!(invariant_index(InvariantKind::Exclusivity), Some(1));
+        assert_eq!(invariant_index(InvariantKind::Interpretation), Some(2));
+        assert_eq!(invariant_index(InvariantKind::Origin), Some(3));
+        assert_eq!(invariant_index(InvariantKind::Cleanup), Some(4));
+        assert_eq!(invariant_index(InvariantKind::ConstantTime), Some(5));
+        assert_eq!(invariant_index(InvariantKind::Interprocedural), Some(6));
+        assert_eq!(invariant_index(InvariantKind::Modular), Some(7));
+    }
+
+    #[test]
+    fn extended_invariant_count_is_eight() {
+        assert_eq!(EXTENDED_INVARIANT_COUNT, 8);
+    }
+
+    #[test]
+    fn cache_sized_for_all_eight_kinds() {
+        let aggregator = InvariantAggregator::new();
+        assert_eq!(aggregator.cache.len(), EXTENDED_INVARIANT_COUNT);
     }
 
     #[test]
