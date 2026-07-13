@@ -1804,8 +1804,23 @@ impl Backend for HppaBackend {
         })
     }
 
-    fn encode_function(&self, _func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
-        Ok(Vec::new())
+    fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
+        // Concatenate encoded bytes from all blocks/instructions. Previously
+        // this returned an empty Vec, which meant `encode_function` produced
+        // no bytes — breaking the Wave 13 Syscall conformance test and any
+        // other caller that relied on `encode_function` (e.g. cross-backend
+        // code-size comparisons in the test suite).  The actual instruction
+        // bytes are already stored in each `AllocatedInstruction.encoded`
+        // field by `allocate_registers`; `encode_program` re-derives them
+        // independently via its own code-emission loop, which is why the
+        // ELF output still worked.
+        let mut bytes = Vec::new();
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                bytes.extend_from_slice(&instr.encoded);
+            }
+        }
+        Ok(bytes)
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
