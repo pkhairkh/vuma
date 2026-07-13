@@ -23,7 +23,6 @@
 //! - [`interpretation`]      — Interpretation invariant verifier.
 //! - [`origin`]              — Origin invariant verifier.
 //! - [`cleanup`]             — Cleanup invariant verifier.
-//! - [`bd_solver`]           — BD fixpoint constraint solver.
 //!
 //! # Example
 //!
@@ -45,7 +44,6 @@
 //! // results is a Vec<VerificationResult> — one per invariant
 //! ```
 
-pub mod bd_solver;
 pub mod cache;
 pub mod cleanup;
 pub mod constraint;
