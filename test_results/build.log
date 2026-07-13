@@ -1,56 +1,3 @@
-    Updating crates.io index
-warning: spurious network error (3 tries remaining): [6] Could not resolve hostname (Could not resolve host: index.crates.io)
-warning: spurious network error (2 tries remaining): [6] Could not resolve hostname (Could not resolve host: index.crates.io)
-     Locking 133 packages to latest compatible versions
-      Adding colored v2.2.0 (available: v3.1.1)
-      Adding env_logger v0.10.2 (available: v0.11.11)
-      Adding hashbrown v0.14.5 (available: v0.17.1)
-      Adding petgraph v0.6.5 (available: v0.8.3)
-      Adding thiserror v1.0.69 (available: v2.0.18)
-      Adding toml v0.8.23 (available: v1.1.2+spec-1.1.0)
-   Compiling proc-macro2 v1.0.106
-   Compiling unicode-ident v1.0.24
-   Compiling quote v1.0.46
-   Compiling serde_core v1.0.228
-   Compiling serde v1.0.228
-   Compiling equivalent v1.0.2
-   Compiling memchr v2.8.3
-   Compiling hashbrown v0.17.1
-   Compiling syn v2.0.118
-   Compiling cfg-if v1.0.4
-   Compiling indexmap v2.14.0
-   Compiling version_check v0.9.5
-   Compiling zerocopy v0.8.54
-   Compiling once_cell v1.21.4
-   Compiling ahash v0.8.12
-   Compiling zmij v1.0.22
-   Compiling serde_json v1.0.150
-   Compiling allocator-api2 v0.2.21
-   Compiling fixedbitset v0.4.2
-   Compiling itoa v1.0.18
-   Compiling thiserror v1.0.69
-   Compiling libc v0.2.186
-   Compiling petgraph v0.6.5
-   Compiling serde_derive v1.0.228
-   Compiling thiserror-impl v1.0.69
-   Compiling smallvec v1.15.2
-   Compiling log v0.4.33
-   Compiling crossbeam-utils v0.8.22
-   Compiling crossbeam-epoch v0.9.20
-   Compiling crossbeam-deque v0.8.7
-   Compiling autocfg v1.5.1
-   Compiling utf8parse v0.2.2
-   Compiling getrandom v0.4.3
-   Compiling rustix v1.1.4
-   Compiling anstyle-parse v1.0.0
-   Compiling num-traits v0.2.19
-   Compiling aho-corasick v1.1.4
-   Compiling linux-raw-sys v0.12.1
-   Compiling regex-syntax v0.8.11
-   Compiling anstyle-query v1.1.5
-   Compiling winnow v0.7.15
-   Compiling hashbrown v0.14.5
-   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
 warning: unnecessary parentheses around `let` scrutinee expression
     --> src/scg/src/transform.rs:2317:34
      |
@@ -69,18 +16,63 @@ help: remove these parentheses
 2320 ~                 } {
      |
 
-   Compiling toml_datetime v0.6.11
-   Compiling serde_spanned v0.6.9
-   Compiling rayon-core v1.13.0
-   Compiling toml_write v0.1.2
-   Compiling is_terminal_polyfill v1.70.2
-   Compiling colorchoice v1.0.5
-   Compiling bitflags v2.13.0
-   Compiling anstyle v1.0.14
-   Compiling anstream v1.0.0
-   Compiling toml_edit v0.22.27
-   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
+warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
+  --> src/ive/src/modular.rs:16:43
+   |
+16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
+   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NodeType`
+  --> src/ive/src/query.rs:17:43
+   |
+17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
+   |                                           ^^^^^^^^
+
+warning: unused variable: `summaries`
+   --> src/ive/src/modular.rs:336:5
+    |
+336 |     summaries: &HashMap<String, FunctionSummary>,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `consistent` is never read
+  --> src/ive/src/query.rs:37:5
+   |
+31 | pub struct QuerySystem {
+   |            ----------- field in this struct
+...
+37 |     consistent: bool,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
+warning: unused variable: `deref_inner`
+    --> src/parser/src/to_scg.rs:2959:40
+     |
+2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2961:22
+     |
+2961 |                 for (struct_name, layout) in &self.struct_table {
+     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2971:18
+     |
+2971 |             for (struct_name, layout) in &self.struct_table {
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
 warning: unused import: `CastKind`
   --> src/codegen/src/alpha.rs:46:28
    |
@@ -191,15 +183,6 @@ warning: unused import: `CmpKind`
 25 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
    |                                      ^^^^^^^
 
-   Compiling regex-automata v0.4.15
-   Compiling strsim v0.11.1
-   Compiling clap_lex v1.1.0
-   Compiling fastrand v2.4.1
-   Compiling heck v0.5.0
-   Compiling anyhow v1.0.103
-   Compiling clap_derive v4.6.1
-   Compiling tempfile v3.27.0
-   Compiling clap_builder v4.6.0
 warning: unused variable: `data_offset`
     --> src/codegen/src/arm32/mod.rs:2308:9
      |
@@ -375,7 +358,6 @@ warning: value assigned to `external_symbols` is never read
      = help: maybe it is overwritten before being read?
      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
-   Compiling regex v1.13.0
 warning: unused variable: `tt`
     --> src/codegen/src/ir.rs:1691:37
      |
@@ -412,8 +394,6 @@ warning: unused variable: `loop_start`
 3130 | ...                   let loop_start = code.len();
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
 
-warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
-   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
 warning: variable does not need to be mutable
    --> src/codegen/src/opt.rs:930:5
     |
@@ -488,21 +468,6 @@ warning: unused variable: `out`
 127 |         out: u32,
     |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
 
-warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
-  --> src/ive/src/modular.rs:16:43
-   |
-16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
-   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused import: `NodeType`
-  --> src/ive/src/query.rs:17:43
-   |
-17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
-   |                                           ^^^^^^^^
-
-   Compiling toml v0.8.23
 warning: unused variable: `stwbrx`
     --> src/codegen/src/ppc64/mod.rs:6034:13
      |
@@ -574,25 +539,6 @@ warning: unused variable: `ecall`
     |
 251 | pub fn simple_stub(num: i32, jalr: fn() -> [u8; 4], addi: fn(u32, u32, i32) -> [u8; 4], ecall: fn() -> [u8; 4]) -> Vec<u8> {
     |                                                                                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_ecall`
-
-warning: unused variable: `summaries`
-   --> src/ive/src/modular.rs:336:5
-    |
-336 |     summaries: &HashMap<String, FunctionSummary>,
-    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `consistent` is never read
-  --> src/ive/src/query.rs:37:5
-   |
-31 | pub struct QuerySystem {
-   |            ----------- field in this struct
-...
-37 |     consistent: bool,
-   |     ^^^^^^^^^^
-   |
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `rd_reg`
     --> src/codegen/src/riscv64.rs:1925:21
@@ -666,8 +612,6 @@ warning: unused variable: `rd_reg`
 6574 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
      |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
-   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
-   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
 warning: unreachable pattern
    --> src/codegen/src/riscv32.rs:902:13
     |
@@ -2429,27 +2373,6 @@ help: use `let _ = ...` to ignore the resulting value
 235 |     let _ = word | (dst as u32 & 0x1F);
     |     +++++++
 
-warning: unused variable: `deref_inner`
-    --> src/parser/src/to_scg.rs:2959:40
-     |
-2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
-     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
-     |
-     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2961:22
-     |
-2961 |                 for (struct_name, layout) in &self.struct_table {
-     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2971:18
-     |
-2971 |             for (struct_name, layout) in &self.struct_table {
-     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
 warning: field `config` is never read
    --> src/cor/src/deployment.rs:517:5
@@ -2463,22 +2386,9 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
-   Compiling is-terminal v0.4.17
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-   Compiling either v1.16.0
-   Compiling iana-time-zone v0.1.65
-   Compiling humantime v2.4.0
-   Compiling lazy_static v1.5.0
-   Compiling termcolor v1.4.1
-   Compiling env_logger v0.10.2
-   Compiling colored v2.2.0
-   Compiling chrono v0.4.45
-warning: `vuma-cor` (lib) generated 1 warning
-   Compiling rayon v1.12.0
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
-   Compiling clap v4.6.1
+warning: `vuma-cor` (lib) generated 1 warning
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
   --> src/pipeline.rs:76:39
    |
@@ -2671,4 +2581,4 @@ warning: missing documentation for a function
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
 warning: `vuma-codegen` (lib) generated 349 warnings (run `cargo fix --lib -p vuma-codegen` to apply 97 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 3m 02s
+    Finished `release-fast` profile [optimized] target(s) in 31.43s
