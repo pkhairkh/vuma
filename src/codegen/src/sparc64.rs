@@ -3960,12 +3960,35 @@ impl Backend for Sparc64Backend {
             code
         };
         let vuma_free_stub: Vec<u8> = {
-            // VUMA's allocate() is lowered to stack allocation, not mmap.
-            // Calling munmap on a stack address unmaps the stack page,
-            // causing SIGSEGV. Make __vuma_free a no-op (just return).
-            // NOTE: no SAVE/RESTORE — just JMPL %o7+8, %g0 + NOP.
-            // (Using RESTORE without a matching SAVE corrupts register windows.)
+            // __vuma_free(addr in %o0) -> munmap(addr, 4096).
+            // SPARC64 __NR_munmap = 73. Caller passes addr in %o0 (arg0, already
+            // in place). munmap's second arg (length) goes in %o1. We pass
+            // length=4096 (page size) so the kernel unmaps at least one page.
+            //
+            // NOTE: IRInstr::Alloc on sparc64 lowers to stack-relative offsets,
+            // so __vuma_alloc is only invoked via explicit IRInstr::Call (e.g.
+            // from stdlib). This stub ensures such allocations can be freed.
+            // If a caller mistakenly passes a stack address, munmap returns
+            // -EINVAL (no SIGSEGV — the kernel validates the range first).
+            //
+            // Leaf-style return: no SAVE/RESTORE (using RESTORE without a
+            // matching SAVE corrupts register windows).
             let mut code = Vec::new();
+            // %o1 = 4096 (0x1000) — length for munmap. Does NOT fit in OrImm's
+            // 13-bit signed immediate (max +4095), so use ss_load_imm.
+            code.extend(ss_load_imm(Gpr::O1, 0x1000));
+            // OR %g0, 73, %g1  (sys_munmap = 73)
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 73,
+                }
+                .encode(),
+            );
+            // TA 0x6d
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            // JMPL %o7+8, %g0 (leaf-style return)
             code.extend_from_slice(
                 &Instruction::Jmpl {
                     rd: Gpr::G0,
@@ -3974,7 +3997,8 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            code.extend_from_slice(&encode_nop()); // delay slot
+            // NOP (delay slot)
+            code.extend_from_slice(&encode_nop());
             code
         };
 
@@ -4047,6 +4071,12 @@ impl Backend for Sparc64Backend {
                 //  198 recvfrom, 199 sendmsg, 200 recvmsg, 201 shutdown,
                 //  202 setsockopt, 203 getsockopt). The previous table used
                 // generic-ABI numbers which invoked the wrong kernel function.
+                //
+                // NOTE: 189-203 above are the OBSOLETE SunOS direct-call numbers,
+                // listed for historical context only. The modern Linux sparc64
+                // numbers (verified against arch/sparc/include/uapi/asm/unistd.h)
+                // are used below: bind=353, listen=354, setsockopt=355, etc.
+                // Do NOT "fix" setsockopt=355 to 358 — 355 IS correct for sparc64.
                 ("connect", 98),
                 ("bind", 353),
                 ("listen", 354),

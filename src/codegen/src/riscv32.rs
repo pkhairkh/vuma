@@ -6483,7 +6483,7 @@ impl Backend for RiscV32Backend {
                 ("setsockopt", 208),
                 ("waitpid", 260),   // wait4 (260)
                 ("brk", 214),
-                ("clock_gettime", 113),
+                ("clock_gettime", 403),       // clock_gettime64 — Y2038-safe (RV32 uses 64-bit __kernel_timespec)
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
                 ("dup3", 24),
