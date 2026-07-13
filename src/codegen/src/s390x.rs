@@ -253,7 +253,7 @@ fn encode_lghi(r1: Gpr, imm: i16) -> [u8; 4] {
 /// Format: RIL-a, 6 bytes.
 fn encode_lgfi(r1: Gpr, imm: i32) -> [u8; 6] {
     let op1: u8 = 0xC0;
-    let op2: u8 = 0x1;
+    let op2: u8 = 0x1;  // LGFI = op2=0x1 (confirmed correct per s390x PoP)
     let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
     let imm_be = imm.to_be_bytes();
     [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
