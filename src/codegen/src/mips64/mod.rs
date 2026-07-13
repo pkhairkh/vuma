@@ -5133,6 +5133,26 @@ impl Backend for Mips64Backend {
                 ("timerfd_gettime", 5281), ("signalfd", 5283),
                 ("inotify_init1", 5288), ("inotify_add_watch", 5244), ("inotify_rm_watch", 5245),
                 ("ptrace", 5099),
+                // ── Wave 8: POSIX process & identity syscalls (mips n64, +5000 base) ──
+                // mips n64 uses __NR_Linux=5000 base offset. All take ≤5 args;
+                // mips64 has 8 reg args ($a0-$a7) → simple_stub for all.
+                // Family 1: identity (mips64 is 64-bit, no uid16 split)
+                ("getuid", 5100), ("geteuid", 5105), ("getgid", 5102), ("getegid", 5106),
+                ("setuid", 5103), ("setgid", 5104), ("setresuid", 5115), ("setresgid", 5117),
+                // Family 2: process group (getpid already present)
+                ("getppid", 5108), ("getsid", 5122), ("setsid", 5110),
+                ("setpgid", 5107), ("getpgid", 5119), ("getpgrp", 5109),
+                // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
+                // callers use clone(CLONE_VFORK))
+                ("clone3", 5435), ("waitid", 5237),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 5316),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 5225), ("tkill", 5192), ("rt_sigaction", 5013),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 5308), ("getdents", 5076),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 5153), ("uname", 5061), ("sysinfo", 5097),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

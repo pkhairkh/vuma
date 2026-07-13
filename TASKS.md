@@ -146,13 +146,13 @@
 
 # Wave 8 — Missing POSIX syscalls: process & identity (all backends)
 
-- [ ] **[BE-all]** Add `getuid`/`geteuid`/`getgid`/`getegid`/`setuid`/`setgid`/`setresuid`/`setresgid`.
-- [ ] **[BE-all]** Add `getpid`/`getppid`/`getsid`/`setsid`/`setpgid`/`getpgid`/`getpgrp`.
-- [ ] **[BE-all]** Add `vfork`/`clone`/`clone3`/`waitid`/`wait4`.
-- [ ] **[BE-all]** Add `execve`/`execveat`/`exit_group` (where missing).
-- [ ] **[BE-all]** Add `kill`/`tgkill`/`tkill`/`rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`.
-- [ ] **[BE-all]** Add `getdents64`/`readdir`/`getdents`.
-- [ ] **[BE-all]** Add `prctl`/`arch_prctl` (x86_64 only) /`uname`/`sysinfo`.
+- [x] **[BE-all]** Add `getuid`/`geteuid`/`getgid`/`getegid`/`setuid`/`setgid`/`setresuid`/`setresgid`. All 14 ELF backends. Numbers verified against authoritative kernel syscall tables (fetched from torvalds/linux). uid16-split arches (x86_32, arm32, m68k) use the modern `*32` variants (199/201/200/202/213/214/208/210) per Wave 7 chown32 precedent. s390x uses the same 199-214 range without suffix (already 32-bit). ppc64/sparc64/hppa use native 24/49/47/50/23/46. alpha has NO standalone getuid/getgid — registered at getxuid=24/getxgid=47 (OSF combined-return quirk documented). Generic arches (aarch64/riscv*/loongarch64) use asm-generic 174/175/176/177/146/144/147/149. mips n64 uses +5000 base (5100/5105/5102/5106/5103/5104/5115/5117). x86_64 uses 102/107/104/108/105/106/117/119.
+- [x] **[BE-all]** Add `getpid`/`getppid`/`getsid`/`setsid`/`setpgid`/`getpgid`/`getpgrp`. getpid was already present on all backends (skipped). The other 6 added everywhere. getpgrp is ABSENT in asm-generic (aarch64/riscv*/loongarch64) — skipped there (callers use getpgid(0)); present on all other arches. alpha getpid already registered at getxpid=20 (OSF combined pid|ppid return).
+- [x] **[BE-all]** Add `vfork`/`clone`/`clone3`/`waitid`/`wait4`. clone and wait4 were already present on all backends (skipped). clone3 (435 on most; 5435 mips n64; 545 alpha), waitid, and vfork added. vfork is ABSENT in asm-generic and mips n64 — skipped there (callers use clone(CLONE_VFORK)); present on all other arches (x86_64=58, arm32/x86_32/s390x/m68k=190, ppc64=189, sparc64/alpha=66, hppa=113).
+- [x] **[BE-all]** Add `execve`/`execveat`/`exit_group` (where missing). execve and exit_group were already present on all backends (skipped). execveat added everywhere (x86_64=322, x86_32=358, arm32=387, ppc64=362, mips n64=5316, s390x=354, sparc64=350, alpha=513, hppa=342, m68k=355, generic=281).
+- [x] **[BE-all]** Add `kill`/`tgkill`/`tkill`/`rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`. kill, rt_sigprocmask, and rt_sigreturn were already present on all backends (skipped). rt_sigaction was already present on alpha/hppa/m68k (skipped there); added on the other 11 backends. tgkill and tkill added on all 14. Numbers verified per-arch (e.g. sparc64 rt_sigaction=102/tgkill=211/tkill=187; alpha rt_sigaction=352[already present]/tgkill=424/tkill=381; mips n64 rt_sigaction=5013/tgkill=5225/tkill=5192; x86_64 rt_sigaction=13/tgkill=234/tkill=200).
+- [x] **[BE-all]** Add `getdents64`/`readdir`/`getdents`. getdents64 added on all 14. getdents added on all except generic arches (ABSENT in asm-generic — use getdents64). readdir is ABSENT/deprecated on most arches — added only where the kernel table has a real entry (x86_32=89, m68k=89, both sys_old_readdir); skipped elsewhere (documented → use getdents64).
+- [x] **[BE-all]** Add `prctl`/`arch_prctl` (x86_64 only) /`uname`/`sysinfo`. prctl, uname, sysinfo added on all 14 backends. arch_prctl added ONLY on x86_64 (158) — it is x86_64-specific (i386 has a limited 384 variant but excluded per task scope; absent on all other arches). uname numbers diverge (hppa=59; most=122; sparc64=189; alpha=339; mips n64=5061; x86_64=63; generic=160). sysinfo (most=116; sparc64=214; alpha=318; mips n64=5097; x86_64=99; generic=179).
 
 ---
 

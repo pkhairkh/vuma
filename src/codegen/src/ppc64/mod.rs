@@ -6132,6 +6132,25 @@ impl Backend for PPC64Backend {
                 ("timerfd_gettime", 312), ("signalfd", 313),
                 ("inotify_init1", 318), ("inotify_add_watch", 276), ("inotify_rm_watch", 277),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (powerpc syscall.tbl) ──
+                // ppc64 has no uid16 split (getuid=24 is already 32-bit). All take
+                // ≤5 args; ppc64 has 6 reg args (r3-r8) → simple_stub for all.
+                // Family 1: identity
+                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
+                ("setuid", 23), ("setgid", 46), ("setresuid", 164), ("setresgid", 169),
+                // Family 2: process group (getpid already present)
+                ("getppid", 64), ("getsid", 147), ("setsid", 66),
+                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 189), ("clone3", 435), ("waitid", 272),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 362),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 250), ("tkill", 208), ("rt_sigaction", 173),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 202), ("getdents", 141),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 171), ("uname", 122), ("sysinfo", 116),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

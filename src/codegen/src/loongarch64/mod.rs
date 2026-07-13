@@ -2698,6 +2698,28 @@ impl Backend for LoongArch64Backend {
                 ("timerfd_gettime", 87), ("signalfd", 74),
                 ("inotify_init1", 26), ("inotify_add_watch", 27), ("inotify_rm_watch", 28),
                 ("ptrace", 117),
+                // ── Wave 8: POSIX process & identity syscalls (asm-generic/unistd.h) ──
+                // All present directly in asm-generic (no *at wrapping). All take
+                // ≤5 args; LoongArch has 8 reg args (a0-a7) → simple_stub for all.
+                // Family 1: identity
+                ("getuid", 174), ("geteuid", 175), ("getgid", 176), ("getegid", 177),
+                ("setuid", 146), ("setgid", 144), ("setresuid", 147), ("setresgid", 149),
+                // Family 2: process group (getpid already present; getpgrp ABSENT in
+                // asm-generic → callers use getpgid(0))
+                ("getppid", 173), ("getsid", 156), ("setsid", 157),
+                ("setpgid", 154), ("getpgid", 155),
+                // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
+                // callers use clone(CLONE_VFORK))
+                ("clone3", 435), ("waitid", 95),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 281),
+                // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
+                ("tgkill", 131), ("tkill", 130), ("rt_sigaction", 134),
+                // Family 6: directory read (getdents/readdir ABSENT in asm-generic →
+                // use getdents64)
+                ("getdents64", 61),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 167), ("uname", 160), ("sysinfo", 179),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: num }.encode());

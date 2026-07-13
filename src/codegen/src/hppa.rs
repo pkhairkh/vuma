@@ -1959,6 +1959,26 @@ impl Backend for HppaBackend {
                 ("timerfd_gettime", 308), ("signalfd", 309),
                 ("inotify_init1", 314), ("inotify_add_watch", 270), ("inotify_rm_watch", 271),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (parisc syscall.tbl) ──
+                // parisc has no uid16 split (getuid=24 is already 32-bit). All take
+                // ≤5 args; hppa has 6 reg args (arg0-arg3, r1-r18) → simple_stub.
+                // Family 1: identity
+                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
+                ("setuid", 23), ("setgid", 46), ("setresuid", 164), ("setresgid", 170),
+                // Family 2: process group (getpid already present)
+                ("getppid", 64), ("getsid", 147), ("setsid", 66),
+                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 113), ("clone3", 435), ("waitid", 235),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 342),
+                // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
+                // already present)
+                ("tgkill", 259), ("tkill", 208),
+                // Family 6: directory read (readdir ABSENT → use getdents64)
+                ("getdents64", 201), ("getdents", 141),
+                // Family 7: system (arch_prctl is x86_64-only; uname=59 divergent)
+                ("prctl", 172), ("uname", 59), ("sysinfo", 116),
         ] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }
