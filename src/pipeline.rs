@@ -53,6 +53,12 @@ use vuma_codegen::{
     },
     CastKind as CodegenCastKind, CodegenError,
 };
+// (Wave 32) Escape analysis + effect analysis are wired into the O2+
+// codegen-opt stage.  We import the modules so the pipeline can call
+// `escape_analysis::analyze_escapes_program`, drive SROA / alloc
+// elision, and call `effects::analyze_program_effects` for
+// interprocedural effect propagation.
+use vuma_codegen::{effects, escape_analysis};
 
 // Re-import the same types under their canonical (un-aliased) names so the
 // moved AST→codegen SCG bridge functions (see end of this file) can use
@@ -5171,6 +5177,24 @@ pub fn compile_with_path(
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
+    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
+    // effect propagation at O2+.  Runs AFTER the main codegen-opt pass so
+    // the analysis sees the post-optimisation IR (and so SROA's cleanup
+    // happens before regalloc).  Gated behind O2+ because SROA's
+    // rename-walk is O(instructions × accesses) per alloc.
+    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+        let te = Instant::now();
+        let summary = run_escape_and_effects_passes(&mut ir_program);
+        log::debug!(
+            "escape+effects: sroa_promoted={} allocs_elided={} pure_fns={}/{}",
+            summary.sroa_promoted,
+            summary.allocs_elided,
+            summary.pure_functions,
+            summary.total_functions
+        );
+        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
+    }
+
     let ir_function_count = ir_program.functions.len();
     let ir_instruction_count: usize = ir_program
         .functions
@@ -5648,6 +5672,21 @@ pub fn compile_with_recovery(
             config.inline_threshold,
         );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
+    }
+
+    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
+    // effect propagation at O2+.  See `compile` for the full rationale.
+    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+        let te = Instant::now();
+        let summary = run_escape_and_effects_passes(&mut ir_program);
+        log::debug!(
+            "escape+effects (recovery): sroa_promoted={} allocs_elided={} pure_fns={}/{}",
+            summary.sroa_promoted,
+            summary.allocs_elided,
+            summary.pure_functions,
+            summary.total_functions
+        );
+        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
     }
 
     let ir_function_count = ir_program.functions.len();
@@ -6179,6 +6218,55 @@ fn extract_extern_functions(ast: &AstProgram) -> HashSet<String> {
         }
     }
     extern_fns
+}
+
+/// (Wave 32) Summary of the escape+effects passes run on a program.
+///
+/// Returned by [`run_escape_and_effects_passes`] and pushed into the
+/// pipeline's `stage_timings` as a single `escape-effects` entry so
+/// callers can introspect how much work the passes did without
+/// re-running them.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EscapeAndEffectsSummary {
+    /// Number of allocations promoted by SROA (across all functions).
+    pub sroa_promoted: usize,
+    /// Number of non-escaping alloc/free pairs elided.
+    pub allocs_elided: usize,
+    /// Number of functions whose final interprocedural effect set is `Pure`.
+    pub pure_functions: usize,
+    /// Total number of functions analysed.
+    pub total_functions: usize,
+}
+
+/// (Wave 32) Drive escape-analysis-driven SROA + alloc elision +
+/// interprocedural effect analysis on `program`.
+///
+/// Should be called at O2+ **after** the main codegen-opt pass so the
+/// analysis sees the post-optimisation IR (and so SROA's cleanup
+/// happens before regalloc).  The effect map is computed via
+/// [`effects::analyze_program_effects`] (which now does fixpoint
+/// propagation across call edges); this function exposes only the
+/// `Pure`-count summary, but a later pass that wants the full map can
+/// re-call `analyze_program_effects` directly.
+pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffectsSummary {
+    let mut summary = EscapeAndEffectsSummary::default();
+    summary.total_functions = program.functions.len();
+
+    // Phase 1: per-function escape analysis + transforms.
+    // We recompute `analyze_escapes` per function (rather than calling
+    // `analyze_escapes_program` once) so we can mutate each function
+    // in-place between analysis and transform.
+    for func in &mut program.functions {
+        let escape_info = escape_analysis::analyze_escapes(func);
+        summary.sroa_promoted += escape_analysis::scalar_replace_aggregates(func, &escape_info);
+        summary.allocs_elided += escape_analysis::elide_non_escaping_allocs(func, &escape_info);
+    }
+
+    // Phase 2: interprocedural effect analysis on the post-transform IR.
+    let effects_map = effects::analyze_program_effects(&program.functions);
+    summary.pure_functions = effects_map.values().filter(|e| e.is_pure()).count();
+
+    summary
 }
 
 /// Run SCG transformation passes based on the optimisation level.
