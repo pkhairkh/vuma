@@ -762,8 +762,9 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 code.extend(Instruction::Rts.encode());
             }
             crate::ir::IRTerminator::Unreachable => {
-                // Just RTS (shouldn't happen).
-                code.extend(Instruction::Rts.encode());
+                // ILLEGAL instruction (0x4AFC) — must NOT fall through.
+                // RTS would return to caller, potentially falling through to parent code.
+                code.extend_from_slice(&[0x4A, 0xFC]);
             }
             crate::ir::IRTerminator::Switch { discr, targets, default } => {
                 // Simplified: linear compare-and-branch sequence.

@@ -714,7 +714,8 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 code.extend(Instruction::Ret.encode());
             }
             crate::ir::IRTerminator::Unreachable => {
-                code.extend(Instruction::Nop.encode());
+                // CALL_PAL 0 — trap. Must NOT fall through.
+                code.extend(Instruction::CallPal { palcode: 0x0 }.encode());
             }
             crate::ir::IRTerminator::Switch { discr, targets, default } => {
                 code.extend(ss_load_value(discr, &vreg_stack_slots, S0));
