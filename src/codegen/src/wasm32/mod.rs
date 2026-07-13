@@ -1391,55 +1391,51 @@ const WASI_ARGS_GET_IDX: u32 = 8;
 // to support POSIX operations that WASI does not provide (fork, execve, pipe,
 // dup2, waitpid, etc.).  The host functions use the real OS to perform these
 // operations, bridging between the wasm sandbox and the host process model.
+//
+// WASI preview1's filesystem APIs are capability-based (require preopened
+// directory fds) and have signatures incompatible with POSIX (e.g. path_open
+// takes 8 args including dirfd, lookup_flags, rights_base, rights_inheriting,
+// fdflags).  We therefore provide POSIX-compatible vuma.* host functions that
+// call the real OS syscalls directly, consistent with the existing pipe/fork/
+// execve pattern.
+//
+// MUST be kept in sync with the order imports are added in `encode_program`
+// and with the host function definitions in scripts/wasm32_runner.py.
+
+// ── Existing imports (indices 9-17) ──
 const VUMA_PIPE_IDX: u32 = 9;        // (pipefd_ptr: i32) -> i32
 const VUMA_FORK_IDX: u32 = 10;       // () -> i32
 const VUMA_EXECVE_IDX: u32 = 11;     // (path: i32, argv: i32, envp: i32) -> i32
 const VUMA_DUP2_IDX: u32 = 12;       // (oldfd: i32, newfd: i32) -> i32
 const VUMA_WAITPID_IDX: u32 = 13;    // (pid: i32, status_ptr: i32, options: i32) -> i32
 const VUMA_STRCMP_IDX: u32 = 14;     // (s1: i32, s2: i32) -> i32
-const VUMA_STAT_IDX: u32 = 15;       // (path: i32, buf: i32) -> i32
-const VUMA_FSTAT_IDX: u32 = 16;      // (fd: i32, buf: i32) -> i32
-const VUMA_LSTAT_IDX: u32 = 17;      // (path: i32, buf: i32) -> i32
-const VUMA_GETCWD_IDX: u32 = 18;     // (buf: i32, size: i32) -> i32
-const VUMA_UNLINK_IDX: u32 = 19;     // (path: i32) -> i32
-const VUMA_GETPID_IDX: u32 = 20;     // () -> i32
-const VUMA_KILL_IDX: u32 = 21;       // (pid: i32, sig: i32) -> i32
-const VUMA_ALARM_IDX: u32 = 22;      // (seconds: i32) -> i32
-const VUMA_CHDIR_IDX: u32 = 23;      // (path: i32) -> i32
-const VUMA_FCHDIR_IDX: u32 = 24;     // N/A — placeholder
-const VUMA_IOCTL_IDX: u32 = 25;      // (fd: i32, req: i32, arg: i32) -> i32
-const VUMA_FCNTL_IDX: u32 = 26;      // (fd: i32, cmd: i32, arg: i32) -> i32
-const VUMA_SOCKET_IDX: u32 = 27;     // (domain: i32, ty: i32, proto: i32) -> i32
-const VUMA_CONNECT_IDX: u32 = 28;    // (fd: i32, addr: i32, len: i32) -> i32
-const VUMA_BIND_IDX: u32 = 29;       // (fd: i32, addr: i32, len: i32) -> i32
-const VUMA_LISTEN_IDX: u32 = 30;     // (fd: i32, backlog: i32) -> i32
-const VUMA_ACCEPT_IDX: u32 = 31;     // (fd: i32, addr: i32, len_ptr: i32) -> i32
-const VUMA_SEND_IDX: u32 = 32;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
-const VUMA_RECV_IDX: u32 = 33;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
-const VUMA_SENDTO_IDX: u32 = 34;     // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen: i32) -> i32
-const VUMA_RECVFROM_IDX: u32 = 35;   // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen_ptr: i32) -> i32
-const VUMA_SHUTDOWN_IDX: u32 = 36;   // (fd: i32, how: i32) -> i32
-const VUMA_SETSOCKOPT_IDX: u32 = 37; // (fd: i32, lvl: i32, opt: i32, val: i32, len: i32) -> i32
-const VUMA_DUP_IDX: u32 = 38;        // (fd: i32) -> i32
-const VUMA_DUP3_IDX: u32 = 39;       // (oldfd: i32, newfd: i32, flags: i32) -> i32
-const VUMA_POLL_IDX: u32 = 40;       // (fds: i32, nfds: i32, timeout: i32) -> i32
-const VUMA_NANOSLEEP_IDX: u32 = 41;  // (req: i32, rem: i32) -> i32
-const VUMA_FUTEX_IDX: u32 = 42;      // (uaddr: i32, op: i32, val: i32, to: i32, uaddr2: i32, val3: i32) -> i32
-const VUMA_EPOLL_CREATE1_IDX: u32 = 43; // (flags: i32) -> i32
-const VUMA_EPOLL_CTL_IDX: u32 = 44;  // (epfd: i32, op: i32, fd: i32, event: i32) -> i32
-const VUMA_EPOLL_WAIT_IDX: u32 = 45; // (epfd: i32, events: i32, maxevents: i32, timeout: i32) -> i32
-const VUMA_CLONE_IDX: u32 = 46;      // (flags: i32, stack: i32, ptid: i32, ctid: i32, tls: i32) -> i32
-const VUMA_SIGACTION_IDX: u32 = 47;  // (signum: i32, act: i32, oldact: i32) -> i32
-const VUMA_RT_SIGPROC_IDX: u32 = 48; // (how: i32, set: i32, oldset: i32, sigsetsize: i32) -> i32
-const VUMA_RT_SIGRETURN_IDX: u32 = 49; // () -> i32
-const VUMA_GETTIMEOFDAY_IDX: u32 = 50; // (tv: i32, tz: i32) -> i32
-const VUMA_MPROTECT_IDX: u32 = 51;   // (addr: i32, len: i32, prot: i32) -> i32
-const VUMA_BRK_IDX: u32 = 52;        // (addr: i32) -> i32
-const VUMA_OPEN_IDX: u32 = 53;       // (path: i32, flags: i32, mode: i32) -> i32
-const VUMA_MMAP_IDX: u32 = 54;       // (addr: i32, len: i32, prot: i32, flags: i32, fd: i32, off: i32) -> i32
-const VUMA_MUNMAP_IDX: u32 = 55;     // (addr: i32, len: i32) -> i32
-const VUMA_EXIT_GROUP_IDX: u32 = 56; // (code: i32) -> i32
-const VUMA_LSEEK_IDX: u32 = 57;      // placeholder — lseek uses WASI fd_seek
+// NOTE: indices 15-17 are vuma.read / vuma.write / vuma.close (declared
+// separately below because they use a distinct type index for clarity).
+// The old VUMA_STAT/FSTAT/LSTAT constants that pointed at 15-17 were WRONG
+// (they conflicted with read/write/close) and have been fixed below.
+
+// ── Filesystem ops imports (indices 18-28, Wave 4) ──
+const VUMA_OPEN_IDX: u32 = 18;       // (path: i32, flags: i32, mode: i32) -> i32
+const VUMA_STAT_IDX: u32 = 19;       // (path: i32, buf: i32) -> i32
+const VUMA_FSTAT_IDX: u32 = 20;      // (fd: i32, buf: i32) -> i32
+const VUMA_LSTAT_IDX: u32 = 21;      // (path: i32, buf: i32) -> i32
+const VUMA_UNLINK_IDX: u32 = 22;     // (path: i32) -> i32
+const VUMA_MKDIR_IDX: u32 = 23;      // (path: i32, mode: i32) -> i32
+const VUMA_RMDIR_IDX: u32 = 24;      // (path: i32) -> i32
+const VUMA_RENAME_IDX: u32 = 25;     // (oldpath: i32, newpath: i32) -> i32
+const VUMA_LINK_IDX: u32 = 26;       // (oldpath: i32, newpath: i32) -> i32
+const VUMA_SYMLINK_IDX: u32 = 27;    // (target: i32, linkpath: i32) -> i32
+const VUMA_READLINK_IDX: u32 = 28;   // (path: i32, buf: i32, bufsize: i32) -> i32
+
+// ── Reserved for future waves (indices 29+) ──
+// The following POSIX operations will be added as vuma.* host imports in
+// later waves. Their constants are NOT yet imported — do not reference them
+// in func_name_to_idx until the import declaration is added.
+//   Wave 5: getcwd, getpid, kill, alarm, chdir, fchdir, ioctl, fcntl,
+//           socket, connect, bind, listen, accept, send, recv, sendto,
+//           recvfrom, shutdown, setsockopt, dup, dup3, poll, nanosleep,
+//           futex, epoll_*, clone, sigaction, rt_sigprocmask, rt_sigreturn,
+//           gettimeofday, mprotect, brk, mmap, munmap, exit_group
 
 // ── Runtime helper memory layout ─────────────────────────────────────────
 // These addresses are in page 0 of linear memory, well below the heap.
@@ -3933,6 +3929,69 @@ impl Backend for Wasm32Backend {
             kind: WasmImportKind::Function { type_idx: vuma_type_1_i32_close },
         });  // idx 17 = VUMA_CLOSE_IDX
 
+        // ── Filesystem ops host function imports (Wave 4) ──────────
+        // POSIX-compatible filesystem operations that WASI preview1 doesn't
+        // support with POSIX signatures (WASI path_open needs 8 args incl.
+        // dirfd + rights; path_filestat_get needs fileflags; etc.).
+        // These vuma.* host functions call the real OS syscalls directly.
+        // Type indices are reused from the existing vuma_type_* declarations.
+
+        // open(path, flags, mode) → fd   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "open".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 18 = VUMA_OPEN_IDX
+        // stat(path, buf) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "stat".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 19 = VUMA_STAT_IDX
+        // fstat(fd, buf) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "fstat".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 20 = VUMA_FSTAT_IDX
+        // lstat(path, buf) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "lstat".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 21 = VUMA_LSTAT_IDX
+        // unlink(path) → errno   — reuses (i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "unlink".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_1_i32 },
+        });  // idx 22 = VUMA_UNLINK_IDX
+        // mkdir(path, mode) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "mkdir".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 23 = VUMA_MKDIR_IDX
+        // rmdir(path) → errno   — reuses (i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "rmdir".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_1_i32 },
+        });  // idx 24 = VUMA_RMDIR_IDX
+        // rename(oldpath, newpath) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "rename".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 25 = VUMA_RENAME_IDX
+        // link(oldpath, newpath) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "link".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 26 = VUMA_LINK_IDX
+        // symlink(target, linkpath) → errno   — reuses (i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "symlink".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
+        });  // idx 27 = VUMA_SYMLINK_IDX
+        // readlink(path, buf, bufsize) → nbytes   — reuses (i32,i32,i32)→i32
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "readlink".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_3_i32 },
+        });  // idx 28 = VUMA_READLINK_IDX
+
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
         let start_type_idx = module.add_type(WasmFuncType {
@@ -4034,6 +4093,18 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("dup2".to_string(),      VUMA_DUP2_IDX);
         func_name_to_idx.insert("waitpid".to_string(),   VUMA_WAITPID_IDX);
         func_name_to_idx.insert("strcmp".to_string(),    VUMA_STRCMP_IDX);
+        // Filesystem ops (Wave 4) — vuma.* host functions calling real OS.
+        func_name_to_idx.insert("open".to_string(),      VUMA_OPEN_IDX);
+        func_name_to_idx.insert("stat".to_string(),      VUMA_STAT_IDX);
+        func_name_to_idx.insert("fstat".to_string(),     VUMA_FSTAT_IDX);
+        func_name_to_idx.insert("lstat".to_string(),     VUMA_LSTAT_IDX);
+        func_name_to_idx.insert("unlink".to_string(),    VUMA_UNLINK_IDX);
+        func_name_to_idx.insert("mkdir".to_string(),     VUMA_MKDIR_IDX);
+        func_name_to_idx.insert("rmdir".to_string(),     VUMA_RMDIR_IDX);
+        func_name_to_idx.insert("rename".to_string(),    VUMA_RENAME_IDX);
+        func_name_to_idx.insert("link".to_string(),      VUMA_LINK_IDX);
+        func_name_to_idx.insert("symlink".to_string(),   VUMA_SYMLINK_IDX);
+        func_name_to_idx.insert("readlink".to_string(),  VUMA_READLINK_IDX);
 
         // ── Stub function for unknown externs ──────────────────────
         // When the wasm32 backend encounters a call to an unknown extern
@@ -6819,6 +6890,54 @@ mod wasm_target_tests {
         }
 
         assert!(found_fd_write, "Module should import fd_write from WASI");
+    }
+
+    #[test]
+    fn test_wasm_module_has_filesystem_host_imports() {
+        // Wave 4: verify that the module includes vuma.open, vuma.stat,
+        // vuma.unlink, vuma.mkdir, vuma.rename, vuma.rmdir, vuma.link,
+        // vuma.symlink, and vuma.readlink host function imports.
+        let func = make_main_returning(0);
+        let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
+
+        // Scan the import section for the expected host function names.
+        let expected_imports = [
+            "open", "stat", "fstat", "lstat", "unlink",
+            "mkdir", "rmdir", "rename", "link", "symlink", "readlink",
+        ];
+        let mut found: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        let mut offset = 8;
+        while offset < wasm.len() {
+            let section_id = wasm[offset];
+            offset += 1;
+            let (size, size_len) = decode_unsigned_leb128(&wasm[offset..]);
+            offset += size_len;
+            let section_end = offset + size as usize;
+
+            if section_id == SECTION_IMPORT {
+                let section_bytes = &wasm[offset..section_end];
+                for name in &expected_imports {
+                    let name_bytes = name.as_bytes();
+                    for i in 0..section_bytes.len().saturating_sub(name_bytes.len()) {
+                        if &section_bytes[i..i + name_bytes.len()] == name_bytes {
+                            found.insert(name);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            offset = section_end;
+        }
+
+        for name in &expected_imports {
+            assert!(
+                found.contains(name),
+                "Module should import vuma.{} — not found in import section",
+                name
+            );
+        }
     }
 
     #[test]
