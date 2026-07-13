@@ -1764,15 +1764,11 @@ impl Backend for M68kBackend {
         // __vuma_free(addr in D1) -> munmap(addr, 0)
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // Args: D1 = size (incoming).  We need: D1=size, D2=PROT, D3=flags, D4=fd, D5=offset.
-            // Move D1 → D2 (save size).
-            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D2 }.encode());
-            // D1 = 0 (NULL addr)
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
-            // D2 = 3 (PROT_READ | PROT_WRITE) — overwrite with 3 since size was moved.
-            // Wait, we need D1=size for mmap.  Let me redo.
-            code.clear();
-            // D2 = size
+            // CRITICAL: D3, D4, D5 are callee-saved on m68k. mmap2 uses
+            // D3=prot, D4=flags, D5=fd. Save/restore them with MOVEM.L.
+            // MOVEM.L D3-D5, -(SP) = 0x48E7 0x0038 (mask: D3=bit3, D4=bit4, D5=bit5)
+            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x38]);
+            // D2 = size (from D1)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D2 }.encode());
             // D1 = NULL
             code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
@@ -1782,22 +1778,17 @@ impl Backend for M68kBackend {
             code.extend(Instruction::MoveImm32 { dst: Gpr::D4, imm: 0x22 }.encode());
             // D5 = -1 (fd)
             code.extend(Instruction::Moveq { dst: Gpr::D5, imm: -1 }.encode());
-            // D0 = 90 (sys_mmap) — but D2 has size; we need D1=size, D2=prot, D3=flags, D4=fd, D5=offset
-            // m68k mmap args: D1=addr, D2=length, D3=prot, D4=flags, D5=fd, then offset on stack.
-            // Hmm, we have D1=0(NULL), D2=size, D3=3(PROT), D4=0x22(flags), D5=-1(fd).  Good.
-            // Push offset=0 onto stack.
+            // Push offset=0 onto stack
             code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
-            // PEA (SP) — push 0 offset... simpler: PE.L #0 is PEA #0 which isn't valid.
-            // Use: MOVEQ #0, D0; MOVE.L D0, -(SP).
-            // PUSH D0 onto stack: MOVE.L D0, -(SP) = 0x2F00.
-            code.extend_from_slice(&[0x2F, 0x00]);
-            // D0 = 90 (sys_mmap)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode()); // mmap2
+            code.extend_from_slice(&[0x2F, 0x00]); // MOVE.L D0, -(SP)
+            // D0 = 192 (mmap2)
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
-            // Pop the offset arg off the stack: ADDQ.L #4, SP.
-            // ADDQ.L #4, A7: 0x5FC4.
+            // Pop offset: ADDQ.L #4, SP
             code.extend_from_slice(&[0x5F, 0xC4]);
+            // Restore D3-D5: MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038
+            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
             // RTS
             code.extend(Instruction::Rts.encode());
             code
@@ -2312,8 +2303,9 @@ impl Backend for M68kBackend {
 
         // PEA 4(A7) — push effective address of (SP+4) = &argv[0].
         // PEA (d16, An): 0x4840 | (mode<<3) | reg, then 2-byte disp (BE).
-        // mode 5 (d16, An), reg 7 (A7): 0x4878, disp 0x0004.
-        start_stub.extend_from_slice(&[0x48, 0x78, 0x00, 0x04]);
+        // mode 5 (d16, An), reg 7 (A7): 0x4840 | (5<<3) | 7 = 0x486F, disp 0x0004.
+        // CRITICAL: 0x4878 is PEA (absolute short), NOT PEA 4(A7)!
+        start_stub.extend_from_slice(&[0x48, 0x6F, 0x00, 0x04]);
 
         // MOVE.L (A7)+, D2 — pop argv pointer into D2 (second arg).
         // Encoding: dest=D2 (mode 0, reg 2), src=(A7)+ (mode 2, reg 7), size=long.
