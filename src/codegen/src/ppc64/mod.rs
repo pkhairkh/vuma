@@ -4094,7 +4094,8 @@ fn lower_ir_instr_ppc64(
             }
         }
         IRInstr::Syscall { .. } => {
-            unimplemented!("IRInstr::Syscall not yet implemented for ppc64 (Wave 12)");
+            // Dead code path — lower_ir_instr_ppc64 is never called.
+            // The real implementation is in allocate_registers (stack-slot ISel).
         }
     }
 
@@ -5741,8 +5742,29 @@ impl Backend for PPC64Backend {
                     // (Branch/CondBranch handlers), not at the phi block entry.
                     // See func.build_phi_map().
                     IRInstr::Phi { .. } => Instruction::Nop.encode().to_vec(),
-                    IRInstr::Syscall { .. } => {
-                        unimplemented!("IRInstr::Syscall not yet implemented for ppc64 (Wave 12)");
+                    IRInstr::Syscall { nr, args, dst } => {
+                        // ppc64 Linux syscall: args in R3-R8, nr in R0,
+                        // `sc`, result in R3.
+                        let mut code = Vec::new();
+                        let syscall_arg_regs =
+                            [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8];
+                        let num_reg_args = args.len().min(syscall_arg_regs.len());
+                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                            code.extend(ss_load_value(
+                                arg, &vreg_stack_slots, syscall_arg_regs[i],
+                            ));
+                        }
+                        // LI R0, nr
+                        code.extend(ss_load_imm(Gpr::R0, *nr as i64));
+                        // SC
+                        code.extend_from_slice(&Instruction::Sc.encode());
+                        // Store result (R3) to dst's stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_to_slot(Gpr::R3, dst_off));
+                        }
+                        code
                     }
                 };
                 current_byte_offset += encoded.len() as u64;

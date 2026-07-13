@@ -3903,8 +3903,31 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
 
                     code.extend(c);
                 }
-                IRInstr::Syscall { .. } => {
-                    unimplemented!("IRInstr::Syscall not yet implemented for mips64 (Wave 12)");
+                IRInstr::Syscall { nr, args, dst } => {
+                    // MIPS64 N64 Linux syscall: args in $a0-$a3 + $t0-$t1,
+                    // nr in $v0, `syscall`, result in $v0.
+                    // MIPS N64: first 4 args in $a0-$a3, args 5-6 in $a4-$a5
+                    // (named $t0-$t1 in the Gpr enum).
+                    let syscall_arg_regs = [
+                        Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
+                        Gpr::T0, Gpr::T1,
+                    ];
+                    let num_reg_args = args.len().min(syscall_arg_regs.len());
+                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                        code.extend(ss_load_value(
+                            arg, &vreg_stack_slots, syscall_arg_regs[i],
+                        ));
+                    }
+                    // LI $v0, nr
+                    code.extend(ss_load_imm(Gpr::V0, *nr as i64));
+                    // SYSCALL
+                    code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                    // Store result ($v0) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        code.extend(ss_sd(Gpr::V0, dst_off));
+                    }
                 }
             }
         }

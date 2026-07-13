@@ -1783,8 +1783,25 @@ fn emit_instr(
             let disp_be = (disp as i16).to_be_bytes();
             code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
         }
-        IRInstr::Syscall { .. } => {
-            unimplemented!("IRInstr::Syscall not yet implemented for s390x (Wave 12)");
+        IRInstr::Syscall { nr, args, dst } => {
+            // s390x Linux syscall: args in R2-R7, nr in R1,
+            // `SVC 0`, result in R2.
+            let syscall_arg_regs =
+                [Gpr::R2, Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7];
+            let num_reg_args = args.len().min(syscall_arg_regs.len());
+            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+            }
+            // LGFI R1, nr
+            code.extend(ss_load_imm(Gpr::R1, *nr as i64));
+            // SVC 0
+            code.extend_from_slice(&encode_svc(0));
+            // Store result (R2) to dst's stack slot
+            if let Some(d) = dst {
+                let dst_id = d.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_st(Gpr::R2, dst_off));
+            }
         }
     }
 }

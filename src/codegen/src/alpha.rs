@@ -1168,8 +1168,25 @@ fn emit_instr(
             code.extend(Instruction::Stq { ra: S0, disp: 0, rb: S3 }.encode());
             // skip_store: (dst already holds old value)
         }
-        IRInstr::Syscall { .. } => {
-            unimplemented!("IRInstr::Syscall not yet implemented for alpha (Wave 12)");
+        IRInstr::Syscall { nr, args, dst } => {
+            // alpha Linux syscall: args in R16-R21, nr in R0,
+            // `call_pal 0x83` (callsys), result in R0.
+            let syscall_arg_regs =
+                [Gpr::R16, Gpr::R17, Gpr::R18, Gpr::R19, Gpr::R20, Gpr::R21];
+            let num_reg_args = args.len().min(syscall_arg_regs.len());
+            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+            }
+            // LDI R0, nr
+            code.extend(ss_load_imm(Gpr::R0, *nr as i64));
+            // CALL_PAL 0x83 (callsys)
+            code.extend_from_slice(&Instruction::CallPal { palcode: 0x83 }.encode());
+            // Store result (R0) to dst's stack slot
+            if let Some(d) = dst {
+                let dst_id = d.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_st(Gpr::R0, dst_off));
+            }
         }
     }
 }

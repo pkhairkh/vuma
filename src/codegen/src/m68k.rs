@@ -1402,8 +1402,25 @@ fn emit_instr(
             // dst already holds old value (in its stack slot).
             let _ = dst_off;
         }
-        IRInstr::Syscall { .. } => {
-            unimplemented!("IRInstr::Syscall not yet implemented for m68k (Wave 12)");
+        IRInstr::Syscall { nr, args, dst } => {
+            // m68k Linux syscall: args in D1-D5, nr in D0,
+            // `trap #0`, result in D0.
+            let syscall_arg_regs =
+                [Gpr::D1, Gpr::D2, Gpr::D3, Gpr::D4, Gpr::D5];
+            let num_reg_args = args.len().min(syscall_arg_regs.len());
+            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+            }
+            // MOVEQ #nr, D0  (or ss_load_imm for large numbers)
+            code.extend(ss_load_imm(Gpr::D0, *nr as i64));
+            // TRAP #0
+            code.extend(Instruction::Trap0.encode());
+            // Store result (D0) to dst's stack slot
+            if let Some(d) = dst {
+                let dst_id = d.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_st(Gpr::D0, dst_off));
+            }
         }
     }
 }
