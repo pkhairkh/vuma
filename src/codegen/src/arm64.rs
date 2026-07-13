@@ -3310,6 +3310,70 @@ impl std::fmt::Display for Operand {
 }
 
 // ---------------------------------------------------------------------------
+// NEON SIMD Encoders (Wave 29)
+// ---------------------------------------------------------------------------
+//
+// Free-standing encoders for Advanced SIMD (NEON) instructions used by the
+// vectorizer's `PackedOp` lowering (`vectorize::PackedOpKind::Add/Sub/Mul`).
+// These produce the 32-bit A64 machine-code word directly and are the hook
+// the backend will call once ISel integration is wired (TODO(wave29)).
+//
+// All operands are 5-bit SIMD/FP register indices (0–31). The `4S` arrangement
+// (4 × 32-bit lanes = 128-bit Q register) is used for i32 elements; `2D`
+// (2 × 64-bit) would be used for i64.
+//
+// References: ARM Architecture Reference Manual ARMv8-A, C4.1.69 (ADD vector),
+// C4.1.69 (SUB vector), C4.1.69 (MUL vector), C4.1.69 (MLA vector), C4.1.69
+// (LD1/ST1 single structure).
+
+/// Encode `add vd.4s, vn.4s, vm.4s` (NEON integer add, 4S).
+///
+/// Encoding: `0 Q 001110 size 1 Rm 100001 Rn Rd` with Q=1, size=00 for 4S.
+/// Base = `0x4E208400`.
+pub fn encode_neon_add_v4s(vd: u8, vn: u8, vm: u8) -> u32 {
+    0x4E208400u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32)
+}
+
+/// Encode `sub vd.4s, vn.4s, vm.4s` (NEON integer subtract, 4S).
+///
+/// Base = `0x6E208400` (bit 30 set for SUB).
+pub fn encode_neon_sub_v4s(vd: u8, vn: u8, vm: u8) -> u32 {
+    0x6E208400u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32)
+}
+
+/// Encode `mul vd.4s, vn.4s, vm.4s` (NEON integer multiply, 4S).
+///
+/// Encoding: `0 Q 001110 size 1 Rm 100111 Rn Rd` with Q=1, size=00 for 4S.
+/// Base = `0x4E209C00`.
+pub fn encode_neon_mul_v4s(vd: u8, vn: u8, vm: u8) -> u32 {
+    0x4E209C00u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32)
+}
+
+/// Encode `mla vd.4s, vn.4s, vm.4s` (NEON multiply-accumulate, 4S).
+///
+/// `vd = vd + vn * vm` (lane-wise). Encoding: `0 Q 001110 size 0 Rm 100101 Rn Rd`
+/// with Q=1, size=00. Base = `0x4E209400`.
+pub fn encode_neon_mla_v4s(vd: u8, vn: u8, vm: u8) -> u32 {
+    0x4E209400u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32)
+}
+
+/// Encode `ld1 {vt.4s}, [xn]` (NEON single-structure load, 4S, no offset).
+///
+/// Encoding: `0 Q 0011000 1 00000 0110 00 Rn Rt` with Q=1 for 4S.
+/// Base = `0x4C407000`.
+pub fn encode_neon_ld1_4s(vt: u8, rn: Register) -> u32 {
+    0x4C407000u32 | ((rn.encoding() as u32) << 5) | (vt as u32)
+}
+
+/// Encode `st1 {vt.4s}, [xn]` (NEON single-structure store, 4S, no offset).
+///
+/// Encoding: `0 Q 0011000 0 00000 0110 00 Rn Rt` with Q=1 for 4S.
+/// Base = `0x4C007000`.
+pub fn encode_neon_st1_4s(vt: u8, rn: Register) -> u32 {
+    0x4C007000u32 | ((rn.encoding() as u32) << 5) | (vt as u32)
+}
+
+// ---------------------------------------------------------------------------
 // InstructionSelector
 // ---------------------------------------------------------------------------
 
@@ -5884,5 +5948,61 @@ mod tests {
         assert_eq!(format!("{}", fmov_xd), "fmov x0, d8");
         let fmov_xd_enc = fmov_xd.encode().unwrap();
         assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 10) | 0);
+    }
+
+    // ── NEON SIMD Encoder Tests (Wave 29) ──────────────────────────────
+
+    #[test]
+    fn test_neon_add_v0_v1_v2() {
+        // `add v0.4s, v1.4s, v2.4s` → 0x4E228420
+        //   Base 0x4E208400 | (Rm=2 << 16) | (Rn=1 << 5) | Rd=0
+        let enc = encode_neon_add_v4s(0, 1, 2);
+        assert_eq!(enc, 0x4E228420);
+    }
+
+    #[test]
+    fn test_neon_sub_v0_v1_v2() {
+        // `sub v0.4s, v1.4s, v2.4s` → 0x6E228420
+        let enc = encode_neon_sub_v4s(0, 1, 2);
+        assert_eq!(enc, 0x6E228420);
+    }
+
+    #[test]
+    fn test_neon_mul_v0_v1_v2() {
+        // `mul v0.4s, v1.4s, v2.4s` → 0x4E229C20
+        //   Base 0x4E209C00 | (Rm=2 << 16) | (Rn=1 << 5) | Rd=0
+        let enc = encode_neon_mul_v4s(0, 1, 2);
+        assert_eq!(enc, 0x4E229C20);
+    }
+
+    #[test]
+    fn test_neon_mla_v0_v1_v2() {
+        // `mla v0.4s, v1.4s, v2.4s` → 0x4E229420
+        //   Base 0x4E209400 | (Rm=2 << 16) | (Rn=1 << 5) | Rd=0
+        let enc = encode_neon_mla_v4s(0, 1, 2);
+        assert_eq!(enc, 0x4E229420);
+    }
+
+    #[test]
+    fn test_neon_ld1_v0_x0() {
+        // `ld1 {v0.4s}, [x0]` → 0x4C407000 (base) | (Rn=0 << 5) | Rt=0 = 0x4C407000
+        let enc = encode_neon_ld1_4s(0, Register::X0);
+        assert_eq!(enc, 0x4C407000);
+    }
+
+    #[test]
+    fn test_neon_st1_v0_x1() {
+        // `st1 {v0.4s}, [x1]` → 0x4C007000 (base) | (Rn=1 << 5) | Rt=0 = 0x4C007020
+        let enc = encode_neon_st1_4s(0, Register::X1);
+        assert_eq!(enc, 0x4C007020);
+    }
+
+    #[test]
+    fn test_neon_high_register_indices() {
+        // `add v15.4s, v16.4s, v17.4s` — all registers in low-5-bit range.
+        let enc = encode_neon_add_v4s(15, 16, 17);
+        // Base 0x4E208400 | (17 << 16) | (16 << 5) | 15
+        let expected = 0x4E208400u32 | (17u32 << 16) | (16u32 << 5) | 15u32;
+        assert_eq!(enc, expected);
     }
 }
