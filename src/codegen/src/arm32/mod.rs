@@ -7335,6 +7335,23 @@ impl Backend for Arm32Backend {
             stubs.push(("futex".to_string(), six_arg_stub(240)));
 
             // mmap → old_mmap(struct *) — ARM EABI sys_old_mmap = 90.
+            // [wave 6 — mmap ABI normalization, verified] ARM EABI's legacy
+            // sys_mmap (90) does NOT take 6 register args; it takes a single
+            // pointer in R0 to a struct mmap_arg_struct {
+            //   void *addr; size_t len; int prot; int flags;
+            //   int fd; off_t offset;   // offset in BYTES
+            // }. This stub builds that struct on the caller's stack, loads fd
+            // and offset from the caller's stack args ([SP+0]/[SP+4] per
+            // AAPCS, after the R4-R5 save), stores all six fields into the
+            // struct, sets R0 = SP (struct pointer), R7 = 90, and SVC #0.
+            //
+            // This matches __vuma_alloc (which uses the same struct-pointer
+            // sys_old_mmap=90 path with offset=0): both use the SAME offset
+            // unit (bytes, via the struct's `offset` field), satisfying the
+            // wave-6 "same offset-unit handling as __vuma_alloc" requirement.
+            // The byte offset is passed through to the kernel unmodified — no
+            // >>12 conversion, because sys_old_mmap (unlike mmap2) takes bytes.
+            //
             // Caller args: R0=addr, R1=len, R2=prot, R3=flags,
             //              [SP+0]=fd, [SP+4]=offset (per AAPCS).
             // Need to build a struct {addr, len, prot, flags, fd, offset} on

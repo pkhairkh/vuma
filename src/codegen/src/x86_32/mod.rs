@@ -2321,6 +2321,14 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // i386 has no plain mmap syscall; mmap2 takes offset in 4KB pages instead
     // of bytes.  We convert the caller's byte offset to pages (>> 12).
     //
+    // [wave 6 — mmap ABI normalization] This stub exposes mmap2 (offset-in-
+    // pages) semantics for the bare `extern "C" { fn mmap(...) }` declaration,
+    // mirroring how `__vuma_alloc` above (line ~2139) calls mmap2(192) with a
+    // page-granular offset. The only difference is that __vuma_alloc hardcodes
+    // offset=0 (anonymous), whereas this stub accepts the caller's byte offset
+    // from the stack and converts it to pages — both use the SAME offset unit
+    // (pages, via syscall 192), satisfying the wave-6 requirement.
+    //
     // VUMA calling convention (i386): args 0-3 in registers, args 4-5 on stack.
     //   EDI=addr, ESI=length, EDX=prot, ECX=flags,
     //   [ESP+4]=fd, [ESP+8]=offset (bytes)
