@@ -31,7 +31,7 @@ use crate::node::{
     ComputationKind, ComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode,
     DeallocationNode, EffectNode, EnumDefNode, EnumVariantInfo, MatchArmInfo,
     MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
-    ProgramPoint, StructDefNode, StructFieldInfo, VTableNode,
+    ProgramPoint, StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -62,6 +62,7 @@ const NODE_TYPE_STRUCT_DEF: u32 = 10;
 const NODE_TYPE_ENUM_DEF: u32 = 11;
 const NODE_TYPE_MATCH: u32 = 12;
 const NODE_TYPE_CONSTANT_TIME: u32 = 13;
+const NODE_TYPE_SYSCALL: u32 = 14;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -70,6 +71,7 @@ const EDGE_KIND_ANNOTATION: u32 = 3;
 const EDGE_KIND_DISPATCH: u32 = 4;
 const EDGE_KIND_CALL: u32 = 5;
 const EDGE_KIND_RETURN: u32 = 6;
+const EDGE_KIND_SYSCALL_ARG: u32 = 7;
 
 const ACCESS_MODE_READ: u32 = 0;
 const ACCESS_MODE_WRITE: u32 = 1;
@@ -359,6 +361,7 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::EnumDef => NODE_TYPE_ENUM_DEF,
         NodeType::Match => NODE_TYPE_MATCH,
         NodeType::ConstantTime => NODE_TYPE_CONSTANT_TIME,
+        NodeType::Syscall => NODE_TYPE_SYSCALL,
     }
 }
 
@@ -378,6 +381,7 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_ENUM_DEF => Ok(NodeType::EnumDef),
         NODE_TYPE_MATCH => Ok(NodeType::Match),
         NODE_TYPE_CONSTANT_TIME => Ok(NodeType::ConstantTime),
+        NODE_TYPE_SYSCALL => Ok(NodeType::Syscall),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -394,6 +398,7 @@ fn edge_kind_to_tag(ek: &EdgeKind) -> u32 {
         EdgeKind::Dispatch => EDGE_KIND_DISPATCH,
         EdgeKind::Call { .. } => EDGE_KIND_CALL,
         EdgeKind::Return { .. } => EDGE_KIND_RETURN,
+        EdgeKind::SyscallArg => EDGE_KIND_SYSCALL_ARG,
     }
 }
 
@@ -418,6 +423,7 @@ fn tag_to_edge_kind(tag: u32) -> Result<EdgeKind, DeserializeError> {
             to_node: crate::node::NodeId::new(0),
             return_values: vec![],
         }),
+        EDGE_KIND_SYSCALL_ARG => Ok(EdgeKind::SyscallArg),
         _ => Err(DeserializeError::InvalidValue {
             field: "EdgeKind".to_string(),
             value: format!("{}", tag),
@@ -942,6 +948,22 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
                 w.write_string(op);
             }
         }
+        NodePayload::Syscall(s) => {
+            w.write_u32_le(NODE_TYPE_SYSCALL);
+            w.write_u32_le(s.nr);
+            // dst: write 0 for None, 1 for Some(name) followed by the name
+            match &s.dst {
+                None => w.write_u32_le(0),
+                Some(name) => {
+                    w.write_u32_le(1);
+                    w.write_string(name);
+                }
+            }
+            w.write_u64_le(s.args.len() as u64);
+            for arg in &s.args {
+                w.write_string(arg);
+            }
+        }
     }
 }
 
@@ -1209,6 +1231,21 @@ fn read_payload(
                 operands,
             }))
         }
+        NodeType::Syscall => {
+            let nr = reader.read_u32_le(&format!("{}.nr", context))?;
+            let has_dst = reader.read_u32_le(&format!("{}.has_dst", context))?;
+            let dst = if has_dst != 0 {
+                Some(reader.read_string(&format!("{}.dst", context))?)
+            } else {
+                None
+            };
+            let arg_count = reader.read_u64_le(&format!("{}.arg_count", context))?;
+            let mut args = Vec::with_capacity(arg_count as usize);
+            for i in 0..arg_count {
+                args.push(reader.read_string(&format!("{}.arg[{}]", context, i))?);
+            }
+            Ok(NodePayload::Syscall(SyscallNode { nr, dst, args }))
+        }
         // Womb data model variants were removed; tags 14..=25 now fall
         // through to the `tag_to_node_type` error path above before
         // reaching this match.
@@ -1458,6 +1495,7 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::Dispatch => "bold dashed",
             EdgeKind::Call { .. } => "bold solid",
             EdgeKind::Return { .. } => "bold dotted",
+            EdgeKind::SyscallArg => "solid",
         };
         let color = match edge_data.kind {
             EdgeKind::DataFlow => "black",
@@ -1467,6 +1505,7 @@ pub fn serialize_scg_dot(scg: &SCG) -> String {
             EdgeKind::Dispatch => "red",
             EdgeKind::Call { .. } => "green",
             EdgeKind::Return { .. } => "orange",
+            EdgeKind::SyscallArg => "darkgreen",
         };
         let kind_str = format!("{}", edge_data.kind);
         let label = edge_data.label.as_deref().unwrap_or(&kind_str);
@@ -1535,6 +1574,7 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
+        NodePayload::Syscall(s) => format!("syscall({})", s.nr),
     };
 
     let ann = node

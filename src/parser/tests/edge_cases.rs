@@ -350,3 +350,41 @@ fn test_parse_loop_keyword() {
     let program = result.unwrap();
     assert_eq!(program.items.len(), 1, "should have exactly one function");
 }
+
+// ---- Wave 10: syscall() intrinsic parsing ----
+
+#[test]
+fn test_parse_syscall_basic() {
+    // syscall(1, fd, buf, count) — write syscall
+    let source = "fn f() { let ret = syscall(1, fd, buf, count); }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "syscall with args should parse");
+}
+
+#[test]
+fn test_parse_syscall_no_args() {
+    // syscall(60) — exit syscall (no args, no return)
+    let source = "fn f() { syscall(60); }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "syscall with no args should parse");
+}
+
+#[test]
+fn test_parse_syscall_as_statement() {
+    // syscall as a bare statement (void return)
+    let source = "fn f() { syscall(60, 0); }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "syscall as statement should parse");
+}
+
+#[test]
+fn test_parse_syscall_in_expression() {
+    // syscall used in a larger expression
+    let source = "fn f() { let x = syscall(1, fd, buf, count) + 1; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "syscall in expression should parse");
+}

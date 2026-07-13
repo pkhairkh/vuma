@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use vuma_scg::{
     AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, node::ComputationKind, ComputationNode, ControlKind,
     ControlNode, DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, VTableNode, SCG,
+    NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, SyscallNode, VTableNode, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -549,6 +549,11 @@ impl AstToScg {
                     self.emit_call_nodes(callee, args, id, scg, region)?;
                 }
 
+                // If the RHS is a direct syscall — emit a Syscall node.
+                if let Expr::Syscall { nr, args, span } = &l.value {
+                    self.emit_syscall_nodes(*nr, args, id, scg, region, span)?;
+                }
+
                 // If the RHS is an async expression → parallel region.
                 if let Expr::Async { body, .. } = &l.value {
                     self.emit_async_region(body, id, scg, region, &l.span)?;
@@ -658,6 +663,11 @@ impl AstToScg {
                 // Check if the RHS is a function call.
                 if let Expr::Call { callee, args, .. } = &a.value {
                     self.emit_call_nodes(callee, args, id, scg, region)?;
+                }
+
+                // Check if the RHS is a direct syscall.
+                if let Expr::Syscall { nr, args, span } = &a.value {
+                    self.emit_syscall_nodes(*nr, args, id, scg, region, span)?;
                 }
 
                 // Update variable definition for simple assignments.
@@ -1480,6 +1490,11 @@ impl AstToScg {
                         let _ = scg.add_edge(call_comp_id, id, EdgeKind::DataFlow);
                         let _ = scg.add_edge(call_comp_id, id, EdgeKind::ControlFlow);
                         return Ok(call_comp_id);
+                    } else if let Expr::Syscall { nr, args, span } = v {
+                        // Return value is a direct syscall → Syscall node.
+                        let syscall_id =
+                            self.emit_syscall_nodes(*nr, args, id, scg, region, span)?;
+                        return Ok(syscall_id);
                     } else {
                         // For other expressions (variables, binary ops, etc.)
                         let comp_id = scg.add_node(
@@ -1519,6 +1534,11 @@ impl AstToScg {
                 // 10. Function calls → FunctionEntry/FunctionReturn nodes
                 if let Expr::Call { callee, args, .. } = &e.expr {
                     self.emit_call_nodes(callee, args, id, scg, region)?;
+                }
+
+                // Direct syscall → Syscall node.
+                if let Expr::Syscall { nr, args, span } = &e.expr {
+                    self.emit_syscall_nodes(*nr, args, id, scg, region, span)?;
                 }
 
                 // 5. Pointer derive/offset → Derivation edges
@@ -1820,6 +1840,68 @@ impl AstToScg {
         let _ = scg.add_edge(ret_id, caller_node, EdgeKind::DataFlow);
 
         Ok(())
+    }
+
+    // -- 11c. Syscall → Syscall node ----------------------------------------
+    //    Lowers a direct `syscall(nr, args...)` expression into a dedicated
+    //    `NodeType::Syscall` node. Each argument's source variables are wired
+    //    to the syscall via `EdgeKind::SyscallArg` edges (mirroring how
+    //    `emit_call_nodes` wires per-argument `DataFlow` edges for calls).
+    //    The result variable name and per-argument variable names are stored
+    //    on the `SyscallNode` payload so that IVE can verify syscall safety
+    //    properties (e.g. argument buffer validity).
+
+    fn emit_syscall_nodes(
+        &self,
+        nr: u32,
+        args: &[Expr],
+        caller_node: NodeId,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+        span: &Span,
+    ) -> Result<NodeId, ParseError> {
+        // Fresh result-variable name (unique per call site) and per-argument
+        // variable names, stored on the SyscallNode payload.
+        let caller_uid = caller_node.as_u64();
+        let result_var = format!("syscall_ret_{}", caller_uid);
+        let arg_var_names: Vec<String> = args
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("syscall_arg{}_{}", i, caller_uid))
+            .collect();
+
+        let syscall_id = scg.add_node(
+            NodeType::Syscall,
+            NodePayload::Syscall(SyscallNode {
+                nr,
+                dst: Some(result_var),
+                args: arg_var_names,
+            }),
+            self.span_to_pp(span),
+        );
+        region.add_node(syscall_id);
+
+        // ControlFlow edge from the enclosing statement node to the syscall.
+        let _ = scg.add_edge(caller_node, syscall_id, EdgeKind::ControlFlow);
+
+        // For each argument expression, wire `SyscallArg` edges from the
+        // variables it uses to the syscall node. `expr_uses` walks the full
+        // expression tree, so nested deref/field/index dependencies are
+        // captured as well — matching the per-argument edge semantics of
+        // `emit_call_nodes` but with the syscall-specific edge kind.
+        for arg in args {
+            for var_name in &self.expr_uses(arg) {
+                if let Some(source_node) = self.lookup_var(var_name) {
+                    let _ = scg.add_edge(source_node, syscall_id, EdgeKind::SyscallArg);
+                }
+            }
+        }
+
+        // DataFlow edge from the syscall result back to the caller node, so
+        // the result is visible to subsequent uses of the binding / expr.
+        let _ = scg.add_edge(syscall_id, caller_node, EdgeKind::DataFlow);
+
+        Ok(syscall_id)
     }
 
     // -- Closure lowering (2b) ------------------------------------------------
@@ -2741,6 +2823,11 @@ impl AstToScg {
             Expr::AtomicCas { .. } => {}
             Expr::Block { .. } => {}
             Expr::MatchExpr { .. } => {}
+            Expr::Syscall { args, .. } => {
+                for a in args {
+                    self.collect_uses(a, uses);
+                }
+            }
         }
     }
 
@@ -2902,6 +2989,8 @@ impl AstToScg {
             Expr::AtomicCas { .. } => "u32".to_string(),
             Expr::Block { .. } => "block".to_string(),
             Expr::MatchExpr { .. } => "unknown".to_string(),
+            // Linux syscalls return `isize`, which is `i64` on the 64-bit ABI.
+            Expr::Syscall { .. } => "i64".to_string(),
         }
     }
 
@@ -3093,6 +3182,10 @@ impl AstToScg {
             Expr::AtomicCas { .. } => "atomic_cas(…)".to_string(),
             Expr::Block { .. } => "{block}".to_string(),
             Expr::MatchExpr { .. } => "match(…)".to_string(),
+            Expr::Syscall { nr, args, .. } => {
+                let a: Vec<String> = args.iter().map(|e| self.expr_to_string(e)).collect();
+                format!("syscall({}, {})", nr, a.join(", "))
+            }
         }
     }
 

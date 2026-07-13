@@ -194,6 +194,9 @@ pub enum ScgStatement {
     /// Compute the address of a named symbol (function or data).
     /// Lowers to `IRInstr::GetAddress`.
     GetAddress(GetAddressNode),
+    /// Direct syscall — lowers to `IRInstr::Syscall`, then to `IRInstr::Call`
+    /// via `lower_syscalls()` before codegen.
+    Syscall(SyscallCallNode),
 }
 
 /// Control-flow node.
@@ -360,6 +363,22 @@ pub struct CallNode {
     /// `out = atomic_load(...)`). When set, lower_call also registers this
     /// name in the names map so resolve_expr can find it.
     pub reassigns: Option<String>,
+}
+
+/// Direct syscall node — first-class syscall invocation.
+///
+/// Produced by the bridge when it encounters `Expr::Syscall { nr, args, .. }`
+/// in the AST. The `IRBuilder` lowers this to `IRInstr::Syscall`, which is
+/// then converted to `IRInstr::Call { is_extern: true }` by
+/// `lower_syscalls()` before optimization/codegen.
+#[derive(Debug, Clone)]
+pub struct SyscallCallNode {
+    /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
+    pub nr: u32,
+    /// Optional destination variable for the return value.
+    pub dst: Option<String>,
+    /// Argument expressions.
+    pub args: Vec<ScgExpr>,
 }
 
 /// A simple expression in the SCG.
@@ -996,6 +1015,9 @@ impl IRBuilder {
             }
             ScgStatement::Call(call) => {
                 self.lower_call(call, ir_func, names)?;
+            }
+            ScgStatement::Syscall(syscall) => {
+                self.lower_syscall(syscall, ir_func, names)?;
             }
             ScgStatement::Return(vals) => {
                 let mut ir_vals: Vec<IRValue> = vals
@@ -3276,6 +3298,53 @@ impl IRBuilder {
     }
 
     // =======================================================================
+    // Syscall lowering
+    // =======================================================================
+
+    /// Lower a direct syscall node to an `IRInstr::Syscall` instruction.
+    ///
+    /// This emits a first-class syscall IR node which `lower_syscalls_all()`
+    /// (called from the pipeline after `IRBuilder::build`) converts to
+    /// `IRInstr::Call { is_extern: true }` with the canonical syscall name.
+    ///
+    /// The destination vreg (if any) is registered in the `names` map so
+    /// that subsequent expressions can refer to the syscall's result by the
+    /// user-visible name.
+    fn lower_syscall(
+        &mut self,
+        syscall: &SyscallCallNode,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        // Evaluate each argument expression to an IRValue, reusing the
+        // same resolver that `lower_call` uses (handles Vars, Ints, labels,
+        // BinOps, Loads, etc.).
+        let arg_values: Vec<IRValue> = syscall
+            .args
+            .iter()
+            .map(|e| self.resolve_expr(e, names, ir_func))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Allocate a destination vreg if the syscall has a result.
+        let dst = match &syscall.dst {
+            Some(name) => {
+                let vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                names.insert(name.clone(), vreg);
+                Some(IRValue::Register(vreg))
+            }
+            None => None,
+        };
+
+        ir_func.current_block().push(IRInstruction::Syscall {
+            nr: syscall.nr,
+            args: arg_values,
+            dst,
+        });
+        Ok(())
+    }
+
+    // =======================================================================
     // Constant-time operation lowering
     // =======================================================================
 
@@ -3958,6 +4027,16 @@ impl IRBuilder {
                     defs.insert(name.clone());
                 }
                 for arg in &c.args {
+                    Self::expr_uses(arg, &mut uses);
+                }
+            }
+            ScgStatement::Syscall(s) => {
+                // A syscall defines its dst (if any) and uses each arg
+                // expression. Same shape as `ScgStatement::Call`.
+                if let Some(ref name) = s.dst {
+                    defs.insert(name.clone());
+                }
+                for arg in &s.args {
                     Self::expr_uses(arg, &mut uses);
                 }
             }

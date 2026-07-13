@@ -577,6 +577,12 @@ impl MemorySafetyAnalyzer {
                         }
                     }
                 }
+                ScgStatement::Syscall(_) => {
+                    // Syscalls are side-effecting (they may read/write user
+                    // buffers via the kernel), but they do not deallocate
+                    // VUMA-tracked allocations, so there is nothing to
+                    // record here. Treated like a non-deallocating Call.
+                }
                 ScgStatement::Control(ctrl) => {
                     match ctrl {
                         ControlNode::If {

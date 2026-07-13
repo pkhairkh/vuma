@@ -67,7 +67,7 @@ pub use node::{
     AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode,
     ComputationKind, ComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode,
     DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
-    ProgramPoint, VTableNode,
+    ProgramPoint, SyscallNode, VTableNode,
 };
 
 /// Central visitor trait for dispatching on NodePayload.
