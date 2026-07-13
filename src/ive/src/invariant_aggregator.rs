@@ -23,7 +23,7 @@
 //! [`Normal`]: VerificationLevel::Normal
 //! [`Exhaustive`]: VerificationLevel::Exhaustive
 
-use crate::result::{ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus};
+use crate::result::{ConfidenceLevel, VerificationResult, VerificationStatus};
 use crate::verification::{VerificationEngine, VerificationInput};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -735,18 +735,11 @@ impl InvariantAggregator {
             InvariantKind::Modular => self.verify_modular(input),
         };
 
-        // In exhaustive/hardened mode, attempt to attach proof evidence for
-        // proven properties.
-        if matches!(self.level, VerificationLevel::Exhaustive | VerificationLevel::Hardened)
-            && result.is_proven()
-        {
-            result = result.with_evidence(Evidence::FormalProof {
-                steps: vec![ProofStep::from(format!(
-                    "proof of {} verified by IVE",
-                    kind.label()
-                ))],
-            });
-        }
+        // Wave 18: The fake FormalProof string-evidence was removed.
+        // Real proof-system cross-checking now happens in api.rs's
+        // build_proof_bundle(), which calls ProofChecker::check on the
+        // prove_* tactics' output. IVE no longer claims to have formal
+        // proof evidence when it only did dataflow analysis.
 
         result
     }

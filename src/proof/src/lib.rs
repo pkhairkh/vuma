@@ -51,6 +51,9 @@ pub use interpretation_proofs::{
     prove_interpretation, BDCompatibilityProof, InterpretationProof, InterpretationTactic,
     ProofFailure as InterpretationProofFailure, ReinterpretationSafetyProof,
 };
+pub use liveness_proofs::prove_liveness;
+pub use exclusivity_proofs::prove_exclusivity;
+pub use cleanup_proofs::prove_cleanup;
 pub use proof::{
     Conclusion, Fact, FactKind, Goal, InvariantName, Proof, ProofContext, ProofStep, Target,
 };
