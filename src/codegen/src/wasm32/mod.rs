@@ -3404,6 +3404,22 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 ctx.emit(WasmInstr::Drop);
             }
         }
+        IRInstr::Syscall { nr, args, dst } => {
+            // Wave 11: wasm32 has no direct syscall instruction. Map the
+            // first-class IRInstr::Syscall to the existing vuma.* host-import
+            // mechanism if a matching name is known, otherwise return -ENOSYS.
+            // For now, emit i32.const -38 (ENOSYS) as the result, matching the
+            // wave-5 unknown-extern fallback behavior.
+            let _ = (nr, args);
+            if let Some(d) = dst {
+                if let IRValue::Register(id) = d {
+                    ctx.emit(WasmInstr::I32Const(-38)); // -ENOSYS
+                    ctx.pop_to_vreg(*id, WasmType::I64);
+                } else {
+                    ctx.emit(WasmInstr::Drop);
+                }
+            }
+        }
     }
     Ok(())
 }

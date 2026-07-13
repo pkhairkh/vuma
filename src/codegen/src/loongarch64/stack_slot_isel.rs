@@ -1874,6 +1874,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Phi { .. } => {
                     Vec::new()
                 }
+                IRInstr::Syscall { .. } => {
+                    unimplemented!("IRInstr::Syscall not yet implemented for loongarch64 (Wave 12)");
+                }
             };
 
             if !code.is_empty() {

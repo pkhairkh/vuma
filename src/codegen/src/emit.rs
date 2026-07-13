@@ -1494,6 +1494,25 @@ impl Emitter {
                 })?;
                 self.emit_instruction(Instruction::CSET { rd, cond: crate::arm64::Condition::EQ })?;
             }
+            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            IRInstr::Syscall { nr, args, dst } => {
+                let arg_regs = [Register::X0, Register::X1, Register::X2,
+                                Register::X3, Register::X4, Register::X5];
+                for (i, arg) in args.iter().enumerate().take(6) {
+                    let src = self.resolve_reg(arg)?;
+                    if src != arg_regs[i] {
+                        self.emit_instruction(Instruction::MOV {
+                            rd: arg_regs[i], rm: src,
+                        })?;
+                    }
+                }
+                self.emit_load_immediate(Register::X8, *nr as i64)?;
+                self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                if let Some(d) = dst {
+                    let rd = self.resolve_reg(d)?;
+                    self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
+                }
+            }
         }
         Ok(())
     }
@@ -3240,6 +3259,21 @@ impl Emitter {
                 })?;
                 // Store result to dst's stack slot
                 self.ss_store_to_slot(Register::X14, dst_offset)?;
+            }
+            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            IRInstr::Syscall { nr, args, dst } => {
+                let arg_regs = [Register::X0, Register::X1, Register::X2,
+                                Register::X3, Register::X4, Register::X5];
+                for (i, arg) in args.iter().enumerate().take(6) {
+                    self.ss_load_value(arg, arg_regs[i], slots)?;
+                }
+                self.emit_load_immediate(Register::X8, *nr as i64)?;
+                self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                if let Some(d) = dst {
+                    let dst_id = d.as_register().unwrap_or(0);
+                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                    self.ss_store_to_slot(Register::X0, dst_offset)?;
+                }
             }
         }
         Ok(())

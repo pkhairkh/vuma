@@ -1783,6 +1783,9 @@ fn emit_instr(
             let disp_be = (disp as i16).to_be_bytes();
             code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
         }
+        IRInstr::Syscall { .. } => {
+            unimplemented!("IRInstr::Syscall not yet implemented for s390x (Wave 12)");
+        }
     }
 }
 

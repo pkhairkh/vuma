@@ -1530,6 +1530,35 @@ pub enum IRInstr {
         /// `None` defaults to 64-bit (X register) behavior.
         ty: Option<IRType>,
     },
+
+    /// Raw syscall: `dst = syscall(nr, args…)` (Wave 10/11 — first-class
+    /// syscall IR node).
+    ///
+    /// Performs a Linux syscall with number `nr`, passing up to 6 integer
+    /// arguments. The return value (in the syscall result register, e.g.
+    /// RAX on x86_64) is stored into `dst` if present. This is a first-class
+    /// alternative to `IRInstr::Call { is_extern: true }` resolved by name —
+    /// it lets the compiler track syscalls directly and enables a
+    /// verification-level syscall allowlist.
+    ///
+    /// **Effects:** may-read/write arbitrary memory, may-write any register
+    /// clobbered by the kernel, and may abort (e.g. `exit`). Backends must
+    /// treat it as a full memory/control barrier.
+    ///
+    /// Backend lowering (Wave 11, tier-1):
+    /// - x86_64: `mov eax, nr; syscall` (args in RDI/RSI/RDX/R10/R8/R9)
+    /// - aarch64: `mov x8, nr; svc #0` (args in X0-X5)
+    /// - riscv64/32: `li a7, nr; ecall` (args in a0-a5)
+    /// - arm32: `mov r7, nr; svc #0` (args in R0-R3 + stack)
+    /// - x86_32: `mov eax, nr; int 0x80` (args in EBX/ECX/EDX/ESI/EDI/EBP)
+    Syscall {
+        /// Syscall number (arch-specific `__NR_*` value).
+        nr: u32,
+        /// Up to 6 integer arguments in positional order.
+        args: Vec<IRValue>,
+        /// Optional destination register for the return value.
+        dst: Option<IRValue>,
+    },
 }
 
 impl IRInstr {
@@ -1547,6 +1576,11 @@ impl IRInstr {
             | IRInstr::Offset { dst, .. }
             | IRInstr::Select { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Call { dst, .. } => dst
+                .as_ref()
+                .and_then(|v| v.as_register())
+                .into_iter()
+                .collect(),
+            IRInstr::Syscall { dst, .. } => dst
                 .as_ref()
                 .and_then(|v| v.as_register())
                 .into_iter()
@@ -1591,6 +1625,7 @@ impl IRInstr {
             }
             IRInstr::UnaryOp { operand, .. } => operand.as_register().into_iter().collect(),
             IRInstr::Call { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
+            IRInstr::Syscall { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
             IRInstr::Alloc { .. } | IRInstr::GetAddress { .. } => vec![],
             IRInstr::Free { ptr } => ptr.as_register().into_iter().collect(),
             IRInstr::Cast { src, .. } => src.as_register().into_iter().collect(),
@@ -1771,6 +1806,17 @@ impl fmt::Display for IRInstr {
             }
             IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
                 write!(f, "{} = atomic_cas {}, {}, {} ({})", dst, addr, expected, desired, ty)
+            }
+            IRInstr::Syscall { nr, args, dst } => {
+                let args_str = args
+                    .iter()
+                    .map(|a| format!("{}", a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match dst {
+                    Some(d) => write!(f, "{} = syscall {}({})", d, nr, args_str),
+                    None => write!(f, "syscall {}({})", nr, args_str),
+                }
             }
         }
     }

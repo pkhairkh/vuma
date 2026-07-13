@@ -6102,6 +6102,33 @@ impl Backend for RiscV32Backend {
 
                         code
                     }
+
+                    // ── Syscall (Wave 11) ──────────────────────────────────
+                    // dst = syscall(nr, args…) — raw Linux syscall.
+                    // RISC-V ABI: args in a0-a5, nr in a7, ECALL, result in a0.
+                    IRInstr::Syscall { nr, args, dst } => {
+                        let mut code = Vec::new();
+                        let syscall_arg_regs =
+                            [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                        let num_reg_args = args.len().min(syscall_arg_regs.len());
+                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                            code.extend(
+                                ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]),
+                            );
+                        }
+                        // LI a7, nr  (syscall number)
+                        code.extend(ss_load_imm(Gpr::A7, *nr as i64));
+                        // ECALL
+                        code.extend(Instruction::Ecall.encode());
+                        // Store return value (a0) to dst's stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset =
+                                vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                        }
+                        code
+                    }
                 };
 
                 if !encoded.is_empty() {
@@ -6155,6 +6182,7 @@ impl Backend for RiscV32Backend {
                         IRInstr::Offset { .. } => "addi", IRInstr::GetAddress { .. } => "getaddr",
                         IRInstr::Ret { .. } => "ret", IRInstr::Branch { .. } => "j",
                         IRInstr::CondBranch { .. } => "bnez", IRInstr::Call { .. } => "call",
+                        IRInstr::Syscall { .. } => "ecall",
                         IRInstr::Phi { .. } => "nop",
                         IRInstr::AtomicLoad { .. } => "atomic_load",
                         IRInstr::AtomicStore { .. } => "atomic_store",
