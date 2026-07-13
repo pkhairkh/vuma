@@ -4768,12 +4768,14 @@ impl Backend for Sparc64Backend {
         stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
-        // QEMU-sparc64 puts argc at [original_SP] (no stack bias).
-        // We save original SP before AND alignment, then load argc from it.
+        // QEMU-sparc64 provides a misaligned initial SP. The real stack
+        // pointer (with V9 bias of 2047) is at SP+2047, which IS aligned.
+        // argc is at [SP+2047], argv = SP+2047+8.
+        // Use %g2 (global, preserved across SAVE) to hold original SP.
         let mut start_stub = Vec::with_capacity(start_stub_size);
-        // MOV %sp, %o0 — save original SP (becomes %i0 after SAVE)
+        // MOV %sp, %g2 — save original SP in global register
         start_stub.extend_from_slice(
-            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O6, rs2: Gpr::G0 }.encode(),
+            &Instruction::Or { rd: Gpr::G2, rs1: Gpr::O6, rs2: Gpr::G0 }.encode(),
         );
         // AND %sp, -16, %sp — align SP (required for STX in prologues)
         start_stub.extend_from_slice(
@@ -4784,7 +4786,7 @@ impl Backend for Sparc64Backend {
             }
             .encode(),
         );
-        // SAVE %sp, -192, %sp — after SAVE: %fp = aligned SP, %i0 = original SP
+        // SAVE %sp, -192, %sp — allocate register window
         start_stub.extend_from_slice(
             &Instruction::Save {
                 rd: Gpr::O6,
@@ -4793,22 +4795,22 @@ impl Backend for Sparc64Backend {
             }
             .encode(),
         );
-        // Load argc from [original_SP] using byte loads (unaligned-safe).
-        // QEMU-sparc64 enforces alignment on LDUW/LDX, but original SP
-        // is misaligned (odd). argc is a 64-bit value at [original_SP].
-        // On big-endian, byte 7 = LSB. For argc=1, byte 7 = 1.
-        // LDUB [%i0+3], %o0 — load LSB of 32-bit argc (byte 3 on BE).
-        // Also try byte 7 for 64-bit argc. Use byte 3 first since sparc64
-        // QEMU may use 32-bit argc.
+        // LDUW [%g2+2047], %o0 — load argc from [original_SP + 2047]
+        // 2047 = 0x7FF. original_SP + 2047 is 16-byte aligned (V9 bias).
         start_stub.extend_from_slice(
-            &Instruction::Ldub { rd: Gpr::O0, rs1: Gpr::I0, imm: 3 }.encode(),
+            &Instruction::Lduw {
+                rd: Gpr::O0,
+                rs1: Gpr::G2,
+                imm: 2047,
+            }
+            .encode(),
         );
-        // ADD %i0, 8, %o1 — argv = original_SP + 8
+        // ADD %g2, 2055, %o1 — argv = original_SP + 2047 + 8 = %g2 + 2055
         start_stub.extend_from_slice(
             &Instruction::AddImm {
                 rd: Gpr::O1,
-                rs1: Gpr::I0,
-                imm: 8,
+                rs1: Gpr::G2,
+                imm: 2055,
             }
             .encode(),
         );
