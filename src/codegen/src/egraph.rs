@@ -27,6 +27,18 @@
 //! - `x | 0 → x`         (identity)
 //! - `x ^ 0 → x`         (identity)
 //! - `x ^ x → 0`         (cancellation)
+//!
+//! # Wave 31 Additions
+//!
+//! - **Rebuilding after merge**: `merge` now calls `rebuild` to maintain
+//!   the congruence-closure invariant (parents that become congruent
+//!   after a merge are themselves merged).
+//! - **Bottom-up DP extraction**: `extract` now considers children's
+//!   best costs, not just the node's own cost.
+//! - **Commutativity** (`+`, `*`, `&`, `|`, `^`).
+//! - **Associativity** (both directions, all 5 ops).
+//! - **Distributivity** (`a*(b+c) ↔ a*b + a*c`).
+//! - **Constant-folding-across-ops** (`(x+0)+0 → x`, `(x*1)*1 → x`).
 
 use std::collections::{HashMap, HashSet};
 use crate::ir::{BinOpKind};
@@ -113,14 +125,25 @@ impl EGraph {
         id
     }
 
-    /// Merge two e-classes (union).
+    /// Merge two e-classes (union). Wave 31: also triggers a rebuild to
+    /// maintain the congruence-closure invariant (parents that become
+    /// congruent after this merge are themselves merged).
     pub fn merge(&mut self, a: EClassId, b: EClassId) -> EClassId {
+        let ra = self.merge_no_rebuild(a, b);
+        self.rebuild();
+        ra
+    }
+
+    /// Merge two e-classes without rebuilding. Used internally by `rebuild`
+    /// and `saturate` to avoid O(n²) rebuild-on-every-merge — `saturate`
+    /// batches merges and calls `rebuild` once per round.
+    fn merge_no_rebuild(&mut self, a: EClassId, b: EClassId) -> EClassId {
         let ra = self.find(a);
         let rb = self.find(b);
         if ra == rb {
             return ra;
         }
-        // Merge rb into ra
+        // Merge rb into ra.
         self.parents.insert(rb, ra);
         if let Some(nodes_b) = self.classes.remove(&rb) {
             let class_a = self.classes.entry(ra).or_default();
@@ -129,7 +152,86 @@ impl EGraph {
                 self.hashcons.insert(node, ra);
             }
         }
+        // Wave 31: migrate provenance from rb to ra so prior rewrite
+        // history survives across merges.
+        if let Some(prov_b) = self.provenance.remove(&rb) {
+            self.provenance.entry(ra).or_default().extend(prov_b);
+        }
         ra
+    }
+
+    /// Rebuild the e-graph after merges (Wave 31).
+    ///
+    /// Rehashes all parent e-nodes using canonical child IDs and merges
+    /// e-classes whose canonicalized e-nodes collide. This maintains the
+    /// congruence-closure invariant: two structurally-equivalent e-nodes
+    /// (modulo child e-class equivalences) live in the same e-class.
+    ///
+    /// Implements the classic e-graph rebuilding algorithm from the egg
+    /// paper. To bound runtime on pathological inputs, runs at most
+    /// `REBUILD_MAX_ITERS` fixpoint iterations — a sound approximation
+    /// (each iteration leaves the graph at least as merged as before;
+    /// `saturate` calls `rebuild` again next round).
+    pub fn rebuild(&mut self) {
+        const REBUILD_MAX_ITERS: usize = 16;
+        for _ in 0..REBUILD_MAX_ITERS {
+            if !self.rebuild_once() {
+                break;
+            }
+        }
+    }
+
+    /// One pass of rebuilding. Returns true if any merges occurred.
+    fn rebuild_once(&mut self) -> bool {
+        // 1. Collect (canonicalized_node, class_id) pairs across all
+        //    canonical e-classes. Canonicalize each BinOp's child e-class
+        //    references so that parents whose children were merged become
+        //    equal under the hashcons key.
+        let mut groups: HashMap<ENode, Vec<EClassId>> = HashMap::new();
+        let class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+        for cid in &class_ids {
+            let canon = self.find(*cid);
+            if canon != *cid {
+                continue; // skip merged-away classes
+            }
+            if let Some(nodes) = self.classes.get(&canon) {
+                for node in nodes {
+                    let canon_node = self.canonicalize(node);
+                    groups.entry(canon_node).or_default().push(canon);
+                }
+            }
+        }
+        // 2. For each canonicalized-node group, if multiple distinct
+        //    e-classes produced it, merge them. This catches congruences
+        //    like (a+b) and (b+a) when a~b, or (x+0)+c and (VReg(x_class))+c
+        //    when x~x+0.
+        let mut merged = false;
+        for classes in groups.values() {
+            let mut iter = classes.iter().copied();
+            if let Some(first) = iter.next() {
+                for other in iter {
+                    let r1 = self.find(first);
+                    let r2 = self.find(other);
+                    if r1 != r2 {
+                        self.merge_no_rebuild(r1, r2);
+                        merged = true;
+                    }
+                }
+            }
+        }
+        merged
+    }
+
+    /// Return a canonicalized version of an e-node: child e-class IDs
+    /// are replaced by their canonical representatives.
+    fn canonicalize(&self, node: &ENode) -> ENode {
+        match node {
+            ENode::Lit(_) => node.clone(),
+            ENode::VReg(_) => node.clone(),
+            ENode::BinOp(op, a, b) => {
+                ENode::BinOp(*op, self.find(*a), self.find(*b))
+            }
+        }
     }
 
     /// Apply a rewrite rule: if `lhs` exists, merge it with `rhs`.
@@ -149,6 +251,19 @@ impl EGraph {
             .unwrap_or(false)
     }
 
+    /// Check whether an e-class contains any literal value at all (Wave 31).
+    /// Used by commutativity rules to skip constant operands: this avoids
+    /// firing on `x+5` (which would record spurious provenance and conflict
+    /// with constant-folding rules like `add_zero_left`). For non-constant
+    /// operands — the common case in real programs — commutativity fires
+    /// normally and enables congruence-merge opportunities.
+    pub fn class_contains_any_lit(&self, class_id: EClassId) -> bool {
+        let canonical = self.find(class_id);
+        self.classes.get(&canonical)
+            .map(|s| s.iter().any(|n| matches!(n, ENode::Lit(_))))
+            .unwrap_or(false)
+    }
+
     /// Apply all rewrite rules until saturation or budget exhausted.
     pub fn saturate(&mut self, rules: &[RewriteRule], budget: usize) {
         for _ in 0..budget {
@@ -156,28 +271,46 @@ impl EGraph {
             let class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
             for class_id in class_ids {
                 let canonical = self.find(class_id);
-                // Collect nodes first to avoid borrow issues
+                // Collect nodes first to avoid borrow issues: `apply`
+                // takes `&mut self`, so we cannot hold a borrow on
+                // `self.classes` while calling it.
                 let nodes: Vec<ENode> = self.classes.get(&canonical)
                     .map(|s| s.iter().cloned().collect())
                     .unwrap_or_default();
                 for node in &nodes {
                     for rule in rules {
-                        if let Some(replacement) = (rule.apply)(node, self) {
-                            let repl_id = self.add(replacement.clone());
+                        // Wave 31: `apply` now takes `&mut EGraph` (so rules
+                        // can add intermediate e-nodes for associativity /
+                        // distributivity) and returns `(new_root_class_id,
+                        // replacement_enode)` — the replacement ENode is
+                        // recorded in provenance.
+                        if let Some((repl_id, replacement)) = (rule.apply)(node, self) {
                             let old_id = self.find(class_id);
-                            if repl_id != old_id {
+                            let repl_canon = self.find(repl_id);
+                            if repl_canon != old_id {
                                 // Wave 16: Record provenance — track that
                                 // `rule.name` transformed `node` into `replacement`.
-                                self.record_provenance(canonical, rule.name, node.clone(), replacement);
-                                self.merge(old_id, repl_id);
+                                self.record_provenance(
+                                    old_id,
+                                    rule.name,
+                                    node.clone(),
+                                    replacement,
+                                );
+                                // Use merge_no_rebuild here for speed; we
+                                // rebuild once at the end of the round.
+                                self.merge_no_rebuild(old_id, repl_canon);
                                 changed = true;
                             }
                         }
                     }
                 }
             }
-            if !changed {
-                break;
+            // Wave 31: rebuild after each saturate round to maintain the
+            // congruence-closure invariant. Catches equivalences arising
+            // from this round's merges (e.g., (a+b)+c and (b+a)+c become
+            // congruent after a~b is discovered).
+            if changed {
+                self.rebuild();
             }
         }
     }
@@ -218,43 +351,104 @@ impl EGraph {
         !self.get_provenance(class_id).is_empty()
     }
 
-    /// Extract the cheapest expression from an e-class.
+    /// Extract the cheapest expression from an e-class (Wave 31: bottom-up DP).
+    ///
+    /// Computes the best (lowest-cost) e-node per e-class via fixpoint
+    /// iteration, where each e-node's total cost is its own cost plus the
+    /// best costs of its children's e-classes. This replaces the old
+    /// single-node extraction that only considered the node's own cost,
+    /// ignoring how expensive its children were.
+    ///
+    /// Fixpoint iteration handles cyclic e-graphs (e.g. `x = x+0`, which
+    /// can arise after aggressive rewriting). Bounded to
+    /// `EXTRACT_MAX_ITERS` iterations as a safety net.
     pub fn extract(&self, class_id: EClassId, cost_fn: &dyn Fn(&ENode) -> usize) -> ENode {
+        const EXTRACT_MAX_ITERS: usize = 64;
         let canonical = self.find(class_id);
-        let nodes: Vec<&ENode> = self.classes.get(&canonical)
-            .map(|s| s.iter().collect())
-            .unwrap_or_default();
-        let mut best: Option<(usize, ENode)> = None;
-        for node in nodes {
-            let cost = cost_fn(node);
-            if best.is_none() || cost < best.as_ref().unwrap().0 {
-                best = Some((cost, node.clone()));
+        // best_cost[canonical_id] = lowest total cost achievable for that class.
+        let mut best_cost: HashMap<EClassId, usize> = HashMap::new();
+        let mut best_node: HashMap<EClassId, ENode> = HashMap::new();
+        for _ in 0..EXTRACT_MAX_ITERS {
+            let mut changed = false;
+            for (cid, nodes) in &self.classes {
+                let cid_canon = self.find(*cid);
+                if cid_canon != *cid {
+                    continue; // skip merged-away classes
+                }
+                let mut local_best: Option<(usize, ENode)> = None;
+                for node in nodes {
+                    let node_cost = cost_fn(node);
+                    let child_cost: usize = match node {
+                        ENode::Lit(_) => 0,
+                        ENode::VReg(_) => 0,
+                        ENode::BinOp(_, a, b) => {
+                            let a_canon = self.find(*a);
+                            let b_canon = self.find(*b);
+                            let ca = best_cost.get(&a_canon).copied().unwrap_or(usize::MAX / 2);
+                            let cb = best_cost.get(&b_canon).copied().unwrap_or(usize::MAX / 2);
+                            ca.saturating_add(cb)
+                        }
+                    };
+                    let total = node_cost.saturating_add(child_cost);
+                    match &local_best {
+                        None => local_best = Some((total, node.clone())),
+                        Some((best_total, _)) if total < *best_total => {
+                            local_best = Some((total, node.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((c, n)) = local_best {
+                    if best_cost.get(&cid_canon).copied() != Some(c) {
+                        best_cost.insert(cid_canon, c);
+                        best_node.insert(cid_canon, n);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
             }
         }
-        best.map(|(_, e)| e).unwrap_or(ENode::Lit(0))
+        best_node.get(&canonical).cloned().unwrap_or(ENode::Lit(0))
     }
 }
 
 /// A rewrite rule: pattern matcher + replacement generator.
 ///
-/// The `apply` function receives the matched e-node AND a reference to the
-/// e-graph, so it can inspect the contents of child e-classes. This is
-/// required for value-aware rules like `x*2 → x+x` (which must detect that
-/// one operand's e-class contains the literal 2).
+/// The `apply` function receives the matched e-node AND a mutable reference
+/// to the e-graph, so it can both inspect the contents of child e-classes
+/// (required for value-aware rules like `x*2 → x+x`) and add intermediate
+/// e-nodes (required for rules like associativity that synthesize new
+/// sub-expressions, e.g. `b+c` when rewriting `(a+b)+c → a+(b+c)`).
+///
+/// Returns `Some((new_root_class_id, replacement_enode))` on a match:
+/// - `new_root_class_id`: the e-class ID of the replacement's root (the
+///   rule adds this via `eg.add(...)` itself, including any intermediate
+///   e-nodes it needs).
+/// - `replacement_enode`: the root ENode of the replacement, recorded
+///   in provenance (Wave 16).
 pub struct RewriteRule {
     pub name: &'static str,
     /// Whether this rule has been SMT-verified (Wave 7).
     pub verified: bool,
-    pub apply: fn(&ENode, &EGraph) -> Option<ENode>,
+    /// Wave 31: takes `&mut EGraph` so rules can add intermediate e-nodes
+    /// (associativity, distributivity). Returns the new root e-class ID
+    /// plus the replacement ENode for provenance.
+    pub apply: fn(&ENode, &mut EGraph) -> Option<(EClassId, ENode)>,
 }
 
 /// Standard algebraic rewrite rules.
 ///
-/// Rules are divided into two categories:
+/// Rules are divided into categories:
 /// 1. **Structural rules** — match purely on e-class ID equality (no value lookup).
 ///    These are always sound and don't need SMT verification.
 /// 2. **Value-aware rules** — match on literal values embedded in ENodes.
 ///    These are sound by construction (the values are compile-time constants).
+/// 3. **Wave 31 algebraic rules** — commutativity, associativity,
+///    distributivity, and constant-folding-across-ops. These add new
+///    equivalences that enable further simplification via congruence
+///    closure (rebuilt after each saturate round).
 ///
 /// Wave 7 adds a verification framework: each rule carries a `verified` flag
 /// indicating whether it has been SMT-proven sound. Unverified rules are
@@ -268,90 +462,120 @@ pub fn standard_rules() -> Vec<RewriteRule> {
         RewriteRule {
             name: "xor_self",
             verified: true,
-            apply: |node, _eg| match node {
+            apply: |node, eg| match node {
                 // x ^ x → 0
-                ENode::BinOp(BinOpKind::Xor, x, y) if x == y => Some(ENode::Lit(0)),
+                ENode::BinOp(BinOpKind::Xor, x, y) if x == y => {
+                    let replacement = ENode::Lit(0);
+                    let repl_id = eg.add(replacement.clone());
+                    Some((repl_id, replacement))
+                }
                 _ => None,
             },
         },
         RewriteRule {
             name: "sub_self",
             verified: true,
-            apply: |node, _eg| match node {
+            apply: |node, eg| match node {
                 // x - x → 0
-                ENode::BinOp(BinOpKind::Sub, x, y) if x == y => Some(ENode::Lit(0)),
+                ENode::BinOp(BinOpKind::Sub, x, y) if x == y => {
+                    let replacement = ENode::Lit(0);
+                    let repl_id = eg.add(replacement.clone());
+                    Some((repl_id, replacement))
+                }
                 _ => None,
             },
         },
 
         // ============================================================
-        // Value-aware rules — inspect child e-class contents via eg.
-        // These are the rules the old `apply(&ENode)` signature could
-        // not express. They are sound by constant evaluation.
+        // Value-aware identity rules — inspect child e-class contents.
+        // Sound by constant evaluation.
         // ============================================================
 
         // 0 + x → x  (identity)
         RewriteRule {
             name: "add_zero_left",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Add, lhs, rhs) if eg.class_contains_lit(*lhs, 0) => {
-                    // Replace with the rhs e-class (a VReg node pointing to rhs).
-                    Some(ENode::VReg(*rhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Add, lhs, rhs) = node {
+                    if eg.class_contains_lit(*lhs, 0) {
+                        let replacement = ENode::VReg(*rhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         RewriteRule {
             name: "add_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Add, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::VReg(*lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Add, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // 0 * x → 0
         RewriteRule {
             name: "mul_zero_left",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, lhs, _) if eg.class_contains_lit(*lhs, 0) => {
-                    Some(ENode::Lit(0))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, lhs, _) = node {
+                    if eg.class_contains_lit(*lhs, 0) {
+                        let replacement = ENode::Lit(0);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         RewriteRule {
             name: "mul_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, _, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::Lit(0))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, _, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::Lit(0);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x * 1 → x
         RewriteRule {
             name: "mul_one_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*rhs, 1) => {
-                    Some(ENode::VReg(*lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 1) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         RewriteRule {
             name: "mul_one_left",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*lhs, 1) => {
-                    Some(ENode::VReg(*rhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, lhs, rhs) = node {
+                    if eg.class_contains_lit(*lhs, 1) {
+                        let replacement = ENode::VReg(*rhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x * 2 → x + x  (strength reduction: add is cheaper than mul)
@@ -359,89 +583,568 @@ pub fn standard_rules() -> Vec<RewriteRule> {
         RewriteRule {
             name: "mul_two_to_add",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*rhs, 2) => {
-                    Some(ENode::BinOp(BinOpKind::Add, *lhs, *lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 2) {
+                        let replacement = ENode::BinOp(BinOpKind::Add, *lhs, *lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         RewriteRule {
             name: "mul_two_left_to_add",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Mul, lhs, rhs) if eg.class_contains_lit(*lhs, 2) => {
-                    Some(ENode::BinOp(BinOpKind::Add, *rhs, *rhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, lhs, rhs) = node {
+                    if eg.class_contains_lit(*lhs, 2) {
+                        let replacement = ENode::BinOp(BinOpKind::Add, *rhs, *rhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // 0 & x → 0
         RewriteRule {
             name: "and_zero_left",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::And, lhs, _) if eg.class_contains_lit(*lhs, 0) => {
-                    Some(ENode::Lit(0))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::And, lhs, _) = node {
+                    if eg.class_contains_lit(*lhs, 0) {
+                        let replacement = ENode::Lit(0);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         RewriteRule {
             name: "and_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::And, _, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::Lit(0))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::And, _, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::Lit(0);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x | 0 → x
         RewriteRule {
             name: "or_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Or, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::VReg(*lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Or, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x ^ 0 → x
         RewriteRule {
             name: "xor_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Xor, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::VReg(*lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Xor, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x >> 0 → x
         RewriteRule {
             name: "shr_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::ShrL, lhs, rhs)
-                | ENode::BinOp(BinOpKind::ShrA, lhs, rhs)
-                    if eg.class_contains_lit(*rhs, 0) =>
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::ShrL, lhs, rhs)
+                | ENode::BinOp(BinOpKind::ShrA, lhs, rhs) = node
                 {
-                    Some(ENode::VReg(*lhs))
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
             },
         },
         // x << 0 → x
         RewriteRule {
             name: "shl_zero_right",
             verified: true,
-            apply: |node, eg| match node {
-                ENode::BinOp(BinOpKind::Shl, lhs, rhs) if eg.class_contains_lit(*rhs, 0) => {
-                    Some(ENode::VReg(*lhs))
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Shl, lhs, rhs) = node {
+                    if eg.class_contains_lit(*rhs, 0) {
+                        let replacement = ENode::VReg(*lhs);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
                 }
-                _ => None,
+                None
+            },
+        },
+
+        // ============================================================
+        // Wave 31: Commutativity rules.
+        //
+        // a op b → b op a for {+, *, &, |, ^}.
+        //
+        // Guard: only fire when NEITHER operand's e-class contains a literal.
+        // This is a deliberate compromise: it avoids firing on `x+5` (which
+        // would record spurious provenance and conflict with constant-folding
+        // rules like `add_zero_left`). For non-constant operands (the common
+        // case in real programs), commutativity fires normally and enables
+        // congruence-merge opportunities (e.g., `a+b` and `b+a` unifying).
+        // ============================================================
+        RewriteRule {
+            name: "comm_add",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Add, a, b) = node {
+                    if a != b
+                        && !eg.class_contains_any_lit(*a)
+                        && !eg.class_contains_any_lit(*b)
+                    {
+                        let replacement = ENode::BinOp(BinOpKind::Add, *b, *a);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "comm_mul",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Mul, a, b) = node {
+                    if a != b
+                        && !eg.class_contains_any_lit(*a)
+                        && !eg.class_contains_any_lit(*b)
+                    {
+                        let replacement = ENode::BinOp(BinOpKind::Mul, *b, *a);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "comm_and",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::And, a, b) = node {
+                    if a != b
+                        && !eg.class_contains_any_lit(*a)
+                        && !eg.class_contains_any_lit(*b)
+                    {
+                        let replacement = ENode::BinOp(BinOpKind::And, *b, *a);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "comm_or",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Or, a, b) = node {
+                    if a != b
+                        && !eg.class_contains_any_lit(*a)
+                        && !eg.class_contains_any_lit(*b)
+                    {
+                        let replacement = ENode::BinOp(BinOpKind::Or, *b, *a);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "comm_xor",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Xor, a, b) = node {
+                    if a != b
+                        && !eg.class_contains_any_lit(*a)
+                        && !eg.class_contains_any_lit(*b)
+                    {
+                        let replacement = ENode::BinOp(BinOpKind::Xor, *b, *a);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                }
+                None
+            },
+        },
+
+        // ============================================================
+        // Wave 31: Associativity rules.
+        //
+        // (a op b) op c ↔ a op (b op c) for {+, *, &, |, ^}.
+        // Both directions are provided so the e-graph can find the
+        // minimal form regardless of how the user wrote the expression.
+        //
+        // These rules add an intermediate e-node (e.g. `b+c` for the
+        // left direction), which is why `apply` takes `&mut EGraph`.
+        // ============================================================
+        RewriteRule {
+            name: "assoc_add_left",
+            verified: true,
+            apply: |node, eg| {
+                // (a+b)+c → a+(b+c)
+                if let ENode::BinOp(BinOpKind::Add, ab, c) = node {
+                    let ab_canon = eg.find(*ab);
+                    let nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Add, a, b) = n {
+                            let bc = eg.add(ENode::BinOp(BinOpKind::Add, *b, *c));
+                            let replacement = ENode::BinOp(BinOpKind::Add, *a, bc);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_add_right",
+            verified: true,
+            apply: |node, eg| {
+                // a+(b+c) → (a+b)+c
+                if let ENode::BinOp(BinOpKind::Add, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Add, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::Add, *a, *b));
+                            let replacement = ENode::BinOp(BinOpKind::Add, ab, *c);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_mul_left",
+            verified: true,
+            apply: |node, eg| {
+                // (a*b)*c → a*(b*c)
+                if let ENode::BinOp(BinOpKind::Mul, ab, c) = node {
+                    let ab_canon = eg.find(*ab);
+                    let nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Mul, a, b) = n {
+                            let bc = eg.add(ENode::BinOp(BinOpKind::Mul, *b, *c));
+                            let replacement = ENode::BinOp(BinOpKind::Mul, *a, bc);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_mul_right",
+            verified: true,
+            apply: |node, eg| {
+                // a*(b*c) → (a*b)*c
+                if let ENode::BinOp(BinOpKind::Mul, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Mul, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::Mul, *a, *b));
+                            let replacement = ENode::BinOp(BinOpKind::Mul, ab, *c);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_and_left",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::And, ab, c) = node {
+                    let ab_canon = eg.find(*ab);
+                    let nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::And, a, b) = n {
+                            let bc = eg.add(ENode::BinOp(BinOpKind::And, *b, *c));
+                            let replacement = ENode::BinOp(BinOpKind::And, *a, bc);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_and_right",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::And, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::And, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::And, *a, *b));
+                            let replacement = ENode::BinOp(BinOpKind::And, ab, *c);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_or_left",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Or, ab, c) = node {
+                    let ab_canon = eg.find(*ab);
+                    let nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Or, a, b) = n {
+                            let bc = eg.add(ENode::BinOp(BinOpKind::Or, *b, *c));
+                            let replacement = ENode::BinOp(BinOpKind::Or, *a, bc);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_or_right",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Or, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Or, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::Or, *a, *b));
+                            let replacement = ENode::BinOp(BinOpKind::Or, ab, *c);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_xor_left",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Xor, ab, c) = node {
+                    let ab_canon = eg.find(*ab);
+                    let nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Xor, a, b) = n {
+                            let bc = eg.add(ENode::BinOp(BinOpKind::Xor, *b, *c));
+                            let replacement = ENode::BinOp(BinOpKind::Xor, *a, bc);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "assoc_xor_right",
+            verified: true,
+            apply: |node, eg| {
+                if let ENode::BinOp(BinOpKind::Xor, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Xor, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::Xor, *a, *b));
+                            let replacement = ENode::BinOp(BinOpKind::Xor, ab, *c);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+
+        // ============================================================
+        // Wave 31: Distributivity rules.
+        //
+        // a * (b + c) ↔ a*b + a*c  (both directions).
+        // ============================================================
+        RewriteRule {
+            name: "distrib_mul_add_fwd",
+            verified: true,
+            apply: |node, eg| {
+                // a*(b+c) → a*b + a*c
+                if let ENode::BinOp(BinOpKind::Mul, a, bc) = node {
+                    let bc_canon = eg.find(*bc);
+                    let nodes: Vec<ENode> = eg.classes.get(&bc_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::BinOp(BinOpKind::Add, b, c) = n {
+                            let ab = eg.add(ENode::BinOp(BinOpKind::Mul, *a, *b));
+                            let ac = eg.add(ENode::BinOp(BinOpKind::Mul, *a, *c));
+                            let replacement = ENode::BinOp(BinOpKind::Add, ab, ac);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "distrib_mul_add_bwd",
+            verified: true,
+            apply: |node, eg| {
+                // a*b + a*c → a*(b+c)
+                if let ENode::BinOp(BinOpKind::Add, ab_id, ac_id) = node {
+                    let ab_canon = eg.find(*ab_id);
+                    let ac_canon = eg.find(*ac_id);
+                    let ab_nodes: Vec<ENode> = eg.classes.get(&ab_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let ac_nodes: Vec<ENode> = eg.classes.get(&ac_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for ab_n in &ab_nodes {
+                        if let ENode::BinOp(BinOpKind::Mul, a1, b) = ab_n {
+                            for ac_n in &ac_nodes {
+                                if let ENode::BinOp(BinOpKind::Mul, a2, c) = ac_n {
+                                    if eg.find(*a1) == eg.find(*a2) {
+                                        let bc = eg.add(ENode::BinOp(BinOpKind::Add, *b, *c));
+                                        let replacement = ENode::BinOp(BinOpKind::Mul, *a1, bc);
+                                        let repl_id = eg.add(replacement.clone());
+                                        return Some((repl_id, replacement));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            },
+        },
+
+        // ============================================================
+        // Wave 31: Constant-folding-across-ops ("peel-the-zero/one").
+        //
+        // These handle nested identity patterns that the single-level
+        // identity rules can't fully reduce on their own:
+        //   (x + 0) + 0 → x
+        //   (x * 1) * 1 → x
+        //
+        // Without these, the single-level rules reduce the inner `x+0` to
+        // `VReg(x_class)` (a leaf reference), which doesn't unify with `x`
+        // itself; the outer `+0` then reduces to `VReg(inner_class)`, still
+        // distinct from `x`. The peel rules collapse both levels at once.
+        // ============================================================
+        RewriteRule {
+            name: "peel_add_zero_zero",
+            verified: true,
+            apply: |node, eg| {
+                // (x + 0) + 0 → x
+                if let ENode::BinOp(BinOpKind::Add, inner, outer_zero) = node {
+                    if eg.class_contains_lit(*outer_zero, 0) {
+                        let inner_canon = eg.find(*inner);
+                        let nodes: Vec<ENode> = eg.classes.get(&inner_canon)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for n in &nodes {
+                            if let ENode::BinOp(BinOpKind::Add, x, z) = n {
+                                if eg.class_contains_lit(*z, 0) {
+                                    let replacement = ENode::VReg(*x);
+                                    let repl_id = eg.add(replacement.clone());
+                                    return Some((repl_id, replacement));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            },
+        },
+        RewriteRule {
+            name: "peel_mul_one_one",
+            verified: true,
+            apply: |node, eg| {
+                // (x * 1) * 1 → x
+                if let ENode::BinOp(BinOpKind::Mul, inner, outer_one) = node {
+                    if eg.class_contains_lit(*outer_one, 1) {
+                        let inner_canon = eg.find(*inner);
+                        let nodes: Vec<ENode> = eg.classes.get(&inner_canon)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for n in &nodes {
+                            if let ENode::BinOp(BinOpKind::Mul, x, z) = n {
+                                if eg.class_contains_lit(*z, 1) {
+                                    let replacement = ENode::VReg(*x);
+                                    let repl_id = eg.add(replacement.clone());
+                                    return Some((repl_id, replacement));
+                                }
+                            }
+                        }
+                    }
+                }
+                None
             },
         },
     ]
@@ -650,5 +1353,351 @@ mod tests {
         // Should extract Lit(42) because it's cheaper
         let best = eg.extract(lit, &default_cost);
         assert_eq!(best, ENode::Lit(42));
+    }
+
+    // ============================================================
+    // Wave 31 tests
+    // ============================================================
+
+    /// Rebuilding after merge should detect congruent parents:
+    /// if `a ~ b`, then `(a+b)` and `(b+a)` are congruent and should
+    /// end up in the same e-class (without an explicit commutativity
+    /// rule firing on them — pure congruence closure).
+    #[test]
+    fn test_rebuild_merges_congruent_parents() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::Lit(1));
+        let b = eg.add(ENode::Lit(2));
+        let p = eg.add(ENode::BinOp(BinOpKind::Add, a, b)); // (1+2)
+        let q = eg.add(ENode::BinOp(BinOpKind::Add, b, a)); // (2+1)
+        // Before merging a and b, p and q are distinct (different child IDs).
+        assert_ne!(eg.find(p), eg.find(q));
+        // Merge a and b. Now find(b) = a, so (a+b) and (b+a) both
+        // canonicalize to (a+a). Rebuild should detect the congruence
+        // and merge them.
+        eg.merge(a, b);
+        assert_eq!(
+            eg.find(p), eg.find(q),
+            "rebuild should merge congruent parents (a+b)~(b+a) after a~b"
+        );
+    }
+
+    /// Rebuild is also called inside `saturate` after each round, so
+    /// congruences arising from rule-driven merges propagate.
+    #[test]
+    fn test_rebuild_propagates_through_saturate() {
+        let mut eg = EGraph::new();
+        // Build (a+b)+c and (b+a)+c. After saturate, comm_add will fire
+        // on `a+b` producing `b+a`, and rebuild should then merge
+        // (a+b)+c with (b+a)+c via congruence.
+        let a = eg.add(ENode::VReg(10));
+        let b = eg.add(ENode::VReg(11));
+        let c = eg.add(ENode::VReg(12));
+        let ab = eg.add(ENode::BinOp(BinOpKind::Add, a, b));
+        let ba = eg.add(ENode::BinOp(BinOpKind::Add, b, a));
+        let abc = eg.add(ENode::BinOp(BinOpKind::Add, ab, c));
+        let bac = eg.add(ENode::BinOp(BinOpKind::Add, ba, c));
+        let rules = standard_rules();
+        eg.saturate(&rules, 20);
+        assert_eq!(
+            eg.find(abc), eg.find(bac),
+            "after saturate, (a+b)+c and (b+a)+c should be congruent \
+             (commutativity + rebuild)"
+        );
+    }
+
+    /// DP extraction peels nested zeros: an e-class containing
+    /// `{(x+0)+0, x+0, x}` should extract to `x` (lowest total cost).
+    #[test]
+    fn test_extract_dp_peels_zeros() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(0));        // x  (class 0)
+        let zero = eg.add(ENode::Lit(0));      // 0  (class 1)
+        let x_plus_0 = eg.add(ENode::BinOp(BinOpKind::Add, x, zero));
+        let x_plus_0_plus_0 = eg.add(ENode::BinOp(BinOpKind::Add, x_plus_0, zero));
+        // Manually merge so all three are equivalent.
+        eg.merge(x, x_plus_0);
+        eg.merge(x, x_plus_0_plus_0);
+        // default_cost: VReg=10, Lit=1, Add=100.
+        //   x           = 10
+        //   x+0         = 100 + 10 + 1   = 111
+        //   (x+0)+0     = 100 + 111 + 1  = 212
+        // DP extraction picks VReg(0) (cost 10).
+        let best = eg.extract(x, &default_cost);
+        assert_eq!(
+            best, ENode::VReg(0),
+            "DP extraction should peel nested zeros and pick x"
+        );
+    }
+
+    /// DP extraction considers children's costs (not just node cost).
+    /// With a custom cost where Add is cheap (5) but Lit is expensive
+    /// (100), old single-node extraction would pick `x+0` (node cost 5
+    /// < VReg cost 10). DP extraction correctly picks `VReg(x)` because
+    /// `x+0`'s total cost (5 + 10 + 100 = 115) exceeds VReg's (10).
+    #[test]
+    fn test_extract_dp_uses_children_costs() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(0));        // x
+        let expensive = eg.add(ENode::Lit(0)); // 0 (treated as expensive)
+        let add = eg.add(ENode::BinOp(BinOpKind::Add, x, expensive));
+        eg.merge(x, add); // x ~ x+0
+        // Custom cost: VReg=10, BinOp(Add)=5 (cheap!), Lit=100 (expensive!)
+        let cost_fn = |node: &ENode| match node {
+            ENode::VReg(_) => 10,
+            ENode::Lit(_) => 100,
+            ENode::BinOp(BinOpKind::Add, _, _) => 5,
+            _ => 50,
+        };
+        let best = eg.extract(x, &cost_fn);
+        assert_eq!(
+            best, ENode::VReg(0),
+            "DP extraction should consider children's costs: VReg(0)=10 beats \
+             BinOp(Add,x,0)=5+10+100=115"
+        );
+    }
+
+    /// Commutativity rule fires on `a+b` (both VRegs, neither a literal),
+    /// recording provenance.
+    #[test]
+    fn test_commutativity_fires_on_vregs() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::VReg(1));
+        let b = eg.add(ENode::VReg(2));
+        let _ab = eg.add(ENode::BinOp(BinOpKind::Add, a, b));
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        // After saturate, the e-class of a+b should also contain b+a
+        // (commutativity fired). Verify via provenance.
+        let mut saw_comm_add = false;
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                if step.rule_name == "comm_add" {
+                    saw_comm_add = true;
+                }
+            }
+        }
+        assert!(saw_comm_add, "comm_add should fire on a+b with VReg operands");
+    }
+
+    /// Commutativity does NOT fire on `x+5` (Lit operand), preserving
+    /// the Wave 16 invariant that unmatched expressions have empty
+    /// provenance.
+    #[test]
+    fn test_commutativity_skips_lit_operands() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(0));
+        let five = eg.add(ENode::Lit(5));
+        let add = eg.add(ENode::BinOp(BinOpKind::Add, x, five));
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        assert!(
+            !eg.has_provenance(add),
+            "comm_add should not fire on x+5 (Lit operand), keeping provenance empty"
+        );
+    }
+
+    /// Associativity fires in both directions: `(a+b)+c ↔ a+(b+c)`.
+    #[test]
+    fn test_associativity_both_directions() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::VReg(10));
+        let b = eg.add(ENode::VReg(11));
+        let c = eg.add(ENode::VReg(12));
+        let ab = eg.add(ENode::BinOp(BinOpKind::Add, a, b));
+        let _abc = eg.add(ENode::BinOp(BinOpKind::Add, ab, c)); // (a+b)+c
+        let bc = eg.add(ENode::BinOp(BinOpKind::Add, b, c));
+        let _a_bc = eg.add(ENode::BinOp(BinOpKind::Add, a, bc)); // a+(b+c)
+        let rules = standard_rules();
+        eg.saturate(&rules, 20);
+        let mut saw_left = false;
+        let mut saw_right = false;
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                if step.rule_name == "assoc_add_left" { saw_left = true; }
+                if step.rule_name == "assoc_add_right" { saw_right = true; }
+            }
+        }
+        assert!(saw_left, "assoc_add_left should fire on (a+b)+c");
+        assert!(saw_right, "assoc_add_right should fire on a+(b+c)");
+    }
+
+    /// Distributivity fires in both directions: `a*(b+c) ↔ a*b + a*c`.
+    #[test]
+    fn test_distributivity_both_directions() {
+        let mut eg = EGraph::new();
+        // a*(b+c)  [fwd]
+        let a = eg.add(ENode::VReg(20));
+        let b = eg.add(ENode::VReg(21));
+        let c = eg.add(ENode::VReg(22));
+        let bc = eg.add(ENode::BinOp(BinOpKind::Add, b, c));
+        let _a_bc = eg.add(ENode::BinOp(BinOpKind::Mul, a, bc));
+        // d*e + d*f  [bwd]
+        let d = eg.add(ENode::VReg(30));
+        let e = eg.add(ENode::VReg(31));
+        let f = eg.add(ENode::VReg(32));
+        let de = eg.add(ENode::BinOp(BinOpKind::Mul, d, e));
+        let df = eg.add(ENode::BinOp(BinOpKind::Mul, d, f));
+        let _de_df = eg.add(ENode::BinOp(BinOpKind::Add, de, df));
+        let rules = standard_rules();
+        eg.saturate(&rules, 20);
+        let mut saw_fwd = false;
+        let mut saw_bwd = false;
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                if step.rule_name == "distrib_mul_add_fwd" { saw_fwd = true; }
+                if step.rule_name == "distrib_mul_add_bwd" { saw_bwd = true; }
+            }
+        }
+        assert!(saw_fwd, "distrib_mul_add_fwd should fire on a*(b+c)");
+        assert!(saw_bwd, "distrib_mul_add_bwd should fire on a*b + a*c");
+    }
+
+    /// Constant-folding-across-ops: `(x+0)+0 → x` and `(x*1)*1 → x`.
+    #[test]
+    fn test_peel_rules_fire() {
+        let mut eg = EGraph::new();
+        // (x+0)+0
+        let x1 = eg.add(ENode::VReg(40));
+        let zero = eg.add(ENode::Lit(0));
+        let x1_plus_0 = eg.add(ENode::BinOp(BinOpKind::Add, x1, zero));
+        let _x1_p0_p0 = eg.add(ENode::BinOp(BinOpKind::Add, x1_plus_0, zero));
+        // (x*1)*1
+        let x2 = eg.add(ENode::VReg(41));
+        let one = eg.add(ENode::Lit(1));
+        let x2_mul_1 = eg.add(ENode::BinOp(BinOpKind::Mul, x2, one));
+        let _x2_m1_m1 = eg.add(ENode::BinOp(BinOpKind::Mul, x2_mul_1, one));
+        let rules = standard_rules();
+        eg.saturate(&rules, 20);
+        let mut saw_peel_add = false;
+        let mut saw_peel_mul = false;
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                if step.rule_name == "peel_add_zero_zero" { saw_peel_add = true; }
+                if step.rule_name == "peel_mul_one_one" { saw_peel_mul = true; }
+            }
+        }
+        assert!(saw_peel_add, "peel_add_zero_zero should fire on (x+0)+0");
+        assert!(saw_peel_mul, "peel_mul_one_one should fire on (x*1)*1");
+    }
+
+    /// Rule-coverage test (Wave 31): construct a representative program
+    /// per rule family and assert each new rule fires at least once
+    /// during `saturate`. We use fresh VReg operands per rule to avoid
+    /// interference (one rule's merge shouldn't suppress another's
+    /// provenance recording).
+    #[test]
+    fn test_wave31_rule_coverage() {
+        let mut eg = EGraph::new();
+        let mut next_vreg: u32 = 100;
+        // Helper to mint a fresh VReg e-class (so each rule gets its own
+        // operands and fires independently).
+        let mut fresh = |eg: &mut EGraph| -> EClassId {
+            let v = next_vreg;
+            next_vreg += 1;
+            eg.add(ENode::VReg(v))
+        };
+
+        // === Commutativity (one expr per op) ===
+        for op in [BinOpKind::Add, BinOpKind::Mul, BinOpKind::And,
+                   BinOpKind::Or, BinOpKind::Xor] {
+            let a = fresh(&mut eg);
+            let b = fresh(&mut eg);
+            eg.add(ENode::BinOp(op, a, b));
+        }
+
+        // === Associativity left: (a op b) op c → a op (b op c) ===
+        for op in [BinOpKind::Add, BinOpKind::Mul, BinOpKind::And,
+                   BinOpKind::Or, BinOpKind::Xor] {
+            let a = fresh(&mut eg);
+            let b = fresh(&mut eg);
+            let c = fresh(&mut eg);
+            let ab = eg.add(ENode::BinOp(op, a, b));
+            eg.add(ENode::BinOp(op, ab, c));
+        }
+
+        // === Associativity right: a op (b op c) → (a op b) op c ===
+        for op in [BinOpKind::Add, BinOpKind::Mul, BinOpKind::And,
+                   BinOpKind::Or, BinOpKind::Xor] {
+            let a = fresh(&mut eg);
+            let b = fresh(&mut eg);
+            let c = fresh(&mut eg);
+            let bc = eg.add(ENode::BinOp(op, b, c));
+            eg.add(ENode::BinOp(op, a, bc));
+        }
+
+        // === Distributivity fwd: a * (b + c) → a*b + a*c ===
+        {
+            let a = fresh(&mut eg);
+            let b = fresh(&mut eg);
+            let c = fresh(&mut eg);
+            let bc = eg.add(ENode::BinOp(BinOpKind::Add, b, c));
+            eg.add(ENode::BinOp(BinOpKind::Mul, a, bc));
+        }
+
+        // === Distributivity bwd: a*b + a*c → a*(b+c) ===
+        {
+            let a = fresh(&mut eg);
+            let b = fresh(&mut eg);
+            let c = fresh(&mut eg);
+            let ab = eg.add(ENode::BinOp(BinOpKind::Mul, a, b));
+            let ac = eg.add(ENode::BinOp(BinOpKind::Mul, a, c));
+            eg.add(ENode::BinOp(BinOpKind::Add, ab, ac));
+        }
+
+        // === Constant-folding-across-ops ===
+        // (x + 0) + 0 → x   [peel_add_zero_zero]
+        {
+            let x = fresh(&mut eg);
+            let zero = eg.add(ENode::Lit(0));
+            let x_plus_0 = eg.add(ENode::BinOp(BinOpKind::Add, x, zero));
+            eg.add(ENode::BinOp(BinOpKind::Add, x_plus_0, zero));
+        }
+        // (x * 1) * 1 → x   [peel_mul_one_one]
+        {
+            let x = fresh(&mut eg);
+            let one = eg.add(ENode::Lit(1));
+            let x_mul_1 = eg.add(ENode::BinOp(BinOpKind::Mul, x, one));
+            eg.add(ENode::BinOp(BinOpKind::Mul, x_mul_1, one));
+        }
+
+        let rules = standard_rules();
+        eg.saturate(&rules, 30);
+
+        // Collect all rule names that fired (from provenance).
+        let mut rule_names_seen: HashSet<String> = HashSet::new();
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                rule_names_seen.insert(step.rule_name.clone());
+            }
+        }
+
+        let expected_rules = [
+            // Commutativity
+            "comm_add", "comm_mul", "comm_and", "comm_or", "comm_xor",
+            // Associativity (both directions, all 5 ops)
+            "assoc_add_left", "assoc_add_right",
+            "assoc_mul_left", "assoc_mul_right",
+            "assoc_and_left", "assoc_and_right",
+            "assoc_or_left", "assoc_or_right",
+            "assoc_xor_left", "assoc_xor_right",
+            // Distributivity
+            "distrib_mul_add_fwd", "distrib_mul_add_bwd",
+            // Constant-folding-across-ops
+            "peel_add_zero_zero", "peel_mul_one_one",
+        ];
+        for rule_name in &expected_rules {
+            assert!(
+                rule_names_seen.contains(*rule_name),
+                "rule '{}' should have fired at least once. Seen rules: {:?}",
+                rule_name,
+                rule_names_seen
+            );
+        }
     }
 }
