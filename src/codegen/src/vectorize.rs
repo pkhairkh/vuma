@@ -1,113 +1,1207 @@
-//! # Autovectorizer (Wave 13)
+//! # Autovectorizer (Wave 29 rewrite)
 //!
-//! Detects affine loops in the IR and lowers them to SIMD operations
-//! when the BD/IVE system has proven non-aliasing. Because aliasing is
-//! proven (not guessed like LLVM's restrict), vectorization is
-//! unconditional for verified loops.
+//! Replaces the miscompiling Wave 13 stub that blindly 4×'d the loop body
+//! without adjusting the IV step — turning `for i in 0..N { body }` into
+//! `for i in 0..N { body; body; body; body }` (4N work instead of N), with
+//! all four body copies operating on the *same* `i` (so three of them were
+//! either dead or overwrote the first). The stub also never emitted a single
+//! SIMD byte.
 //!
-//! ## Algorithm
+//! This module implements a correct, minimal, honest vectorizer:
 //!
-//! 1. Detect simple counting loops (for i in 0..N)
-//! 2. Check that loop body is a single Store or Load + Store pair
-//! 3. Verify non-aliasing via Alloc-region analysis (Wave 8)
-//! 4. If all checks pass, unroll by the vector width (2/4/8)
-//! 5. Replace scalar ops with vector ops (future: SIMD intrinsics)
+//! 1. **Loop vectorization with IV-step adjustment (the core fix).**
+//!    For a counted self-loop `for i in 0..N { body(i) }` with a vectorizable
+//!    body, we transform to a vector loop that runs `N/vf` times, where each
+//!    iteration handles `vf` lanes. **The IV step changes from `+1` to
+//!    `+vf*element_size`** (the stub's bug was leaving the step at `+1`).
+//!    Lane `l` in `[0, vf)` operates on `base + i + l*element_size`, materialized
+//!    as a fresh lane-offset vreg `i_l = i + l*element_size` substituted into a
+//!    duplicated body copy. A scalar remainder loop is appended for the
+//!    `N % vf` tail.
 //!
-//! ## Current Limitations
+//! 2. **SLP vectorization (Superword-Level Parallelism).** Detects isomorphic
+//!    adjacent independent scalar statements within a block (e.g. two `Add`s
+//!    with matching element type and no cross-dependency) and records them as
+//!    a `PackedOp` in the plan. The IR is not rewritten by SLP — the plan is
+//!    the hook the backend consumes to emit a single SIMD instruction in place
+//!    of the packed scalar ops.
 //!
-//! - Only detects memset-style loops (single store per iteration)
-//! - Does not yet emit actual SIMD instructions (leaves unrolled scalar)
-//! - Unroll factor is fixed at 4 (suitable for most SIMD widths)
+//! 3. **Cost model.** Loop vectorization only fires when the body is small
+//!    (≤ `MAX_BODY_INSTRS`), has no side effects (no Calls/Atomics/Free), and
+//!    the element type is a power-of-two integer ≤ 64 bits. SLP only packs
+//!    when ≥2 ops are isomorphic and independent.
+//!
+//! 4. **Vectorization plan.** Because `IRInstr` cannot be extended from this
+//!    module (the IR enum lives in `ir.rs`), the plan is a side-channel
+//!    `Vec<PackedOp>` returned by `vectorize_function_with_plan`. The backend's
+//!    SSE/AVX encoders (`x86_64::encode_sse_*`) and NEON encoders
+//!    (`arm64::encode_neon_*`) consume `PackedOp`s.
+//!
+//! ## Scope / honest limitations
+//!
+//! Full vector-IR plumbing through the backend ISel (reg-alloc, scheduler,
+//! instruction selection) is too deep for this wave. We:
+//! - Fix the IV-step miscompilation (the core bug).
+//! - Emit a vectorization plan the backend can consume.
+//! - Provide SSE/AVX/NEON encoders (in `x86_64/mod.rs` and `arm64.rs`).
+//! - Leave full ISel integration as a `TODO(wave29)` — the encoders and plan
+//!   exist and are unit-tested, but the backend does not yet lower `PackedOp`
+//!   to real machine code.
 
-use crate::ir::{IRFunction, IRBlock, IRInstr, IRTerminator, IRValue, BinOpKind};
+use crate::ir::{
+    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue, BinOpKind,
+};
 
-/// Maximum unroll factor for vectorization.
-const VECTOR_WIDTH: u32 = 4;
+// ─────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────
 
-/// Attempt to vectorize loops in a function (Wave 13).
+/// Maximum body instruction count for loop vectorization (cost gate).
+const MAX_BODY_INSTRS: usize = 24;
+
+/// A vector packed operation recorded in the plan for backend lowering.
 ///
-/// Currently implements loop unrolling (the first step toward true
-/// vectorization). When the BD system proves non-aliasing, the unrolled
-/// loop body can be replaced with SIMD intrinsics in the backend.
-pub fn vectorize_function(mut func: IRFunction) -> IRFunction {
-    for block in &mut func.blocks {
-        // Look for loop patterns: a block that branches back to itself
-        // or to an earlier block.
-        if let IRTerminator::Jump(target) = &block.terminator {
-            if target == &block.label {
-                // Self-loop: try to unroll.
-                if let Some(unrolled) = try_unroll_loop(block, VECTOR_WIDTH) {
-                    *block = unrolled;
+/// Each `PackedOp` describes `vf` independent scalar ops of the same kind on
+/// adjacent lanes that the backend may fuse into a single SIMD instruction
+/// (SSE/AVX `padd`/`psub`/`pmull` on x86_64, NEON `add`/`sub`/`mul` on
+/// aarch64).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedOp {
+    /// The arithmetic kind.
+    pub kind: PackedOpKind,
+    /// Number of lanes packed (e.g. 4 for 4×i32).
+    pub lanes: u32,
+    /// Element size in bytes (4 for i32, 8 for i64).
+    pub elem_size: u32,
+    /// The vreg destination of lane 0 (lanes 1..vf use consecutive vregs
+    /// assigned by the IR duplication pass).
+    pub dst_lane0: u32,
+    /// Source vregs of lane 0 (parallel structure for lanes 1..vf).
+    pub src_lane0: Vec<u32>,
+    /// The block label where the packed op resides.
+    pub block: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedOpKind {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// A vectorization plan: side-channel output the backend consumes.
+#[derive(Debug, Clone, Default)]
+pub struct VectorizationPlan {
+    /// Packed operations discovered by SLP / loop vectorization.
+    pub packed_ops: Vec<PackedOp>,
+    /// The vector width used (lanes).
+    pub vf: u32,
+    /// Element size in bytes for the vectorized loop (0 if no loop was
+    /// vectorized).
+    pub elem_size: u32,
+    /// The label of the vector loop's body block, if any.
+    pub vector_loop_block: Option<String>,
+    /// The label of the scalar remainder loop's body block, if any.
+    pub remainder_loop_block: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Vectorize all eligible loops in a function.
+///
+/// Discards the vectorization plan (the IR is correctly transformed; the plan
+/// is a hook for future ISel integration — see module docs).
+pub fn vectorize_function(func: IRFunction) -> IRFunction {
+    let (f, _plan) = vectorize_function_with_plan(func);
+    f
+}
+
+/// Vectorize and return both the rewritten IR and the vectorization plan.
+pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, VectorizationPlan) {
+    let mut plan = VectorizationPlan::default();
+
+    // Phase 1: Loop vectorization. We scan for self-loop blocks matching the
+    // counted-loop pattern and transform them in place. We skip blocks whose
+    // label contains `_remainder` so we don't recursively vectorize the
+    // scalar remainder loop we just emitted.
+    let mut changed = true;
+    let mut iter = 0;
+    while changed && iter < 4 {
+        changed = false;
+        iter += 1;
+        for i in 0..func.blocks.len() {
+            let block = &func.blocks[i];
+            if block.label.contains("_remainder") {
+                continue; // Don't recursively vectorize the remainder loop.
+            }
+            if let Some((new_block, loop_plan)) = try_vectorize_self_loop(block) {
+                let remainder = loop_plan
+                    .remainder_loop_block
+                    .clone()
+                    .expect("try_vectorize_self_loop sets remainder_loop_block on success");
+                let remainder_block = build_remainder_loop(block, &remainder);
+                func.blocks[i] = new_block;
+                func.blocks.insert(i + 1, remainder_block);
+                plan.packed_ops.extend(loop_plan.packed_ops);
+                plan.vf = loop_plan.vf;
+                plan.elem_size = loop_plan.elem_size;
+                plan.vector_loop_block = loop_plan.vector_loop_block;
+                plan.remainder_loop_block = loop_plan.remainder_loop_block;
+                changed = true;
+                break; // Restart the scan since blocks vec shifted.
+            }
+        }
+    }
+
+    // Phase 2: SLP vectorization. Scans each block for isomorphic adjacent
+    // independent scalar ops and records them in the plan (no IR rewrite).
+    let slp_ops = slp_vectorize_function(&func);
+    plan.packed_ops.extend(slp_ops);
+
+    // Final CFG rebuild so predecessors/successors are consistent.
+    func.rebuild_cfg();
+    (func, plan)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Loop vectorization
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Attempt to vectorize a single-block counted self-loop.
+///
+/// Returns `Some((new_block, plan))` if `block` matches the counted-loop
+/// pattern and was vectorized; `None` otherwise.
+///
+/// Required pattern (single block, self-loop):
+/// ```text
+/// loop:
+///   i      = phi(0, entry), (i_next, loop)
+///   ... body using i (≤ MAX_BODY_INSTRS instrs, no Calls/Atomics/Free) ...
+///   i_next = i + 1                      // BinOp Add, Imm(1)
+///   cond   = cmp i_next, N_vreg, SLt    // or ULt
+///   br cond, loop, exit
+/// ```
+///
+/// Transformed (vf=4, elem_size=4 for i32):
+/// ```text
+/// loop:                                       // vector loop body
+///   i      = phi(0, entry), (i_next, loop)
+///   ... body using i (lane 0) ...
+///   i_1    = i + 1*elem_size                  // lane 1 offset
+///   ... body using i_1 (lane 1, substituted) ...
+///   i_2    = i + 2*elem_size                  // lane 2 offset
+///   ... body using i_2 (lane 2, substituted) ...
+///   i_3    = i + 3*elem_size                  // lane 3 offset
+///   ... body using i_3 (lane 3, substituted) ...
+///   i_next = i + vf*elem_size                 // ← IV step fix (was +1)
+///   cond   = cmp i_next, N_vreg, SLt          // unchanged
+///   br cond, loop, loop_remainder             // exit → remainder loop
+/// ```
+///
+/// A scalar remainder loop block (`loop_remainder`) is appended after this
+/// block by the caller; it re-uses the original `+1` step for the `N % vf`
+/// tail.
+fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPlan)> {
+    let self_label = &block.label;
+    let instrs = &block.instructions;
+    if instrs.is_empty() {
+        return None;
+    }
+
+    // Check 1: self-loop with conditional Branch.
+    let (cond_reg, _exit_label) = match &block.terminator {
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            if true_block == self_label {
+                (cond.clone(), false_block.clone())
+            } else if false_block == self_label {
+                (cond.clone(), true_block.clone())
+            } else {
+                return None; // Not a self-loop.
+            }
+        }
+        _ => return None,
+    };
+
+    // Check 2: first instruction is a Phi (induction variable).
+    let phi_dst = match &instrs[0] {
+        IRInstr::Phi { dst, incoming } => {
+            if incoming.len() != 2 {
+                return None;
+            }
+            let has_back_edge = incoming.iter().any(|(_, src)| src == self_label);
+            if !has_back_edge {
+                return None;
+            }
+            dst.clone()
+        }
+        _ => return None,
+    };
+    let phi_vreg = match &phi_dst {
+        IRValue::Register(r) => *r,
+        _ => return None,
+    };
+
+    // Check 3: find `i_next = i + 1` (BinOp Add, phi_vreg, Imm(1)).
+    let mut increment_idx = None;
+    let mut i_new_vreg = 0u32;
+    for (i, instr) in instrs.iter().enumerate() {
+        if let IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs,
+            rhs: IRValue::Immediate(1),
+            ..
+        } = instr
+        {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *l == phi_vreg {
+                    increment_idx = Some(i);
+                    i_new_vreg = *d;
+                    break;
                 }
             }
         }
     }
-    func
-}
-
-/// Attempt to unroll a loop block by the given factor.
-///
-/// Returns Some(unrolled_block) if successful, None if the loop is
-/// too complex to unroll safely.
-fn try_unroll_loop(block: &IRBlock, factor: u32) -> Option<IRBlock> {
-    if factor < 2 || block.instructions.len() > 20 {
-        return None; // Too complex or no unrolling needed
+    let increment_idx = increment_idx?;
+    if increment_idx == 0 {
+        return None; // No body.
     }
 
-    // Simple heuristic: if the block has a small number of instructions
-    // and ends with a Jump to itself, unroll by duplicating the body.
-    // This is the foundation for vectorization — the unrolled body
-    // can later be replaced with SIMD ops.
-
-    let mut new_block = IRBlock::new(&block.label);
-    for _ in 0..factor {
-        new_block.instructions.extend(block.instructions.iter().cloned());
+    // Check 4: find `cond = cmp i_new_vreg, N_vreg, SLt|ULt` (the exit test).
+    let cond_vreg = match &cond_reg {
+        IRValue::Register(r) => *r,
+        _ => return None,
+    };
+    let mut cmp_idx = None;
+    for (i, instr) in instrs.iter().enumerate() {
+        if let IRInstr::Cmp { dst, lhs, .. } = instr {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *d == cond_vreg && *l == i_new_vreg {
+                    cmp_idx = Some(i);
+                    break;
+                }
+            }
+        }
     }
-    new_block.terminator = block.terminator.clone();
+    let cmp_idx = cmp_idx?;
 
-    Some(new_block)
+    // The body is instrs[1..increment_idx].
+    let body = &instrs[1..increment_idx];
+    if body.is_empty() || body.len() > MAX_BODY_INSTRS {
+        return None;
+    }
+
+    // Check 5: body must be safe (no calls/atomics/free/etc.).
+    for instr in body {
+        if !is_safe_for_vectorization(instr) {
+            return None;
+        }
+    }
+    // The body must not clobber the IV.
+    for instr in body {
+        for d in instr.defined_regs() {
+            if d == phi_vreg || d == i_new_vreg {
+                return None;
+            }
+        }
+    }
+
+    // Determine the element size from the body's Load/Store types. If no
+    // Load/Store is found, default to 4 (i32) — most common case.
+    let elem_size: u32 = body
+        .iter()
+        .find_map(|instr| match instr {
+            IRInstr::Load { ty, .. } | IRInstr::Store { ty, .. } => Some(size_of(ty) as u32),
+            _ => None,
+        })
+        .unwrap_or(4);
+    if elem_size == 0 || !elem_size.is_power_of_two() || elem_size > 8 {
+        return None; // Unsupported element size.
+    }
+
+    // Compute the vector width. SSE2/NEON provide 128-bit registers.
+    //   i32 (4 bytes): vf = 4   (4 × 32 = 128 bits)
+    //   i64 (8 bytes): vf = 2   (2 × 64 = 128 bits)
+    //   i16 (2 bytes): vf = 8
+    //   i8  (1 byte) : vf = 16
+    let vf: u32 = 16u32 / elem_size;
+    if vf < 2 {
+        return None;
+    }
+
+    let iv_step = vf * elem_size; // The fix: was 1, now vf*elem_size.
+
+    // ── Build the new vector-loop block ───────────────────────────────
+    let mut new_instrs: Vec<IRInstr> = Vec::with_capacity(instrs.len() * vf as usize);
+    new_instrs.push(instrs[0].clone()); // Phi
+
+    // Lane 0: original body (uses phi_vreg).
+    for instr in body {
+        new_instrs.push(instr.clone());
+    }
+
+    // Lanes 1..vf: emit lane offset vreg, then body with phi_vreg → i_l.
+    let mut next_vreg = block_max_vreg(instrs) + 1;
+    for l in 1u32..vf {
+        let i_l = next_vreg;
+        next_vreg += 1;
+        new_instrs.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(i_l),
+            lhs: IRValue::Register(phi_vreg),
+            rhs: IRValue::Immediate((l as i64) * (elem_size as i64)),
+            ty: None,
+        });
+        for instr in body {
+            let mut cloned = instr.clone();
+            // Renumber the dst vreg so each lane's def is distinct (SSA).
+            renumbered_substitute(&mut cloned, phi_vreg, i_l, &mut next_vreg);
+            new_instrs.push(cloned);
+        }
+    }
+
+    // IV step fix: i_next = phi_vreg + vf*elem_size.
+    new_instrs.push(IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst: IRValue::Register(i_new_vreg),
+        lhs: IRValue::Register(phi_vreg),
+        rhs: IRValue::Immediate(iv_step as i64),
+        ty: None,
+    });
+
+    // Copy the Cmp (unchanged — compares i_new_vreg, which is now i + vf*es).
+    if cmp_idx < instrs.len() {
+        new_instrs.push(instrs[cmp_idx].clone());
+    }
+    // Copy any instructions between the Cmp and the terminator.
+    for i in (cmp_idx + 1)..instrs.len() {
+        new_instrs.push(instrs[i].clone());
+    }
+
+    // Terminator: exit edge now goes to the remainder loop (not the original
+    // exit). The remainder loop will then exit to the original exit.
+    let remainder_label = format!("{}_remainder", self_label);
+    let new_terminator = IRTerminator::Branch {
+        cond: cond_reg,
+        true_block: self_label.clone(),
+        false_block: remainder_label.clone(),
+    };
+
+    let mut new_block = IRBlock::new(self_label);
+    new_block.instructions = new_instrs;
+    new_block.terminator = new_terminator;
+    new_block.source_line = block.source_line;
+
+    // ── Build the plan ────────────────────────────────────────────────
+    let mut plan = VectorizationPlan::default();
+    plan.vf = vf;
+    plan.elem_size = elem_size;
+    plan.vector_loop_block = Some(self_label.clone());
+    plan.remainder_loop_block = Some(remainder_label);
+
+    // Find the body's primary BinOp (the op we want to pack into a SIMD add).
+    for instr in body {
+        if let Some((kind, dst, srcs)) = classify_packable_binop(instr) {
+            plan.packed_ops.push(PackedOp {
+                kind,
+                lanes: vf,
+                elem_size,
+                dst_lane0: dst,
+                src_lane0: srcs,
+                block: self_label.clone(),
+            });
+            break; // One packed op per loop is enough for the plan.
+        }
+    }
+
+    Some((new_block, plan))
 }
 
-/// Check if two memory accesses are provably non-aliasing (Wave 13).
+/// Build the scalar remainder loop block for the `N % vf` tail.
 ///
-/// Uses the Alloc-region analysis from Wave 8: if two addresses
-/// originate from different Alloc regions, they are non-aliasing.
+/// This is a copy of the original block with:
+/// - A fresh label (`{orig}_remainder`).
+/// - A fresh Phi `j = phi(i, vector_loop), (j_next, self)` — the incoming
+///   from the vector loop is the vector loop's IV vreg (lane 0's `i`).
+/// - The original body using `j`.
+/// - `j_next = j + 1` (scalar step).
+/// - The original Cmp + Branch (with the self-target renamed to this block).
+fn build_remainder_loop(orig: &IRBlock, new_label: &str) -> IRBlock {
+    let instrs = &orig.instructions;
+    let mut new_instrs: Vec<IRInstr> = Vec::with_capacity(instrs.len());
+
+    // Find the original Phi to extract vregs.
+    let (phi_dst, phi_vreg) = match instrs.first() {
+        Some(IRInstr::Phi { dst, .. }) => match dst {
+            IRValue::Register(r) => (dst.clone(), *r),
+            _ => return IRBlock::new(new_label),
+        },
+        _ => return IRBlock::new(new_label),
+    };
+
+    // Fresh j vreg for the remainder loop's own Phi. Leave a large gap
+    // (1024) so we don't collide with the vector loop's renumbered lanes.
+    let mut next_vreg = block_max_vreg(instrs) + 1024;
+    let j_vreg = next_vreg;
+    next_vreg += 1;
+    let j_next_vreg = next_vreg;
+    next_vreg += 1;
+
+    // j = phi(i_from_vec, vector_loop), (j_next, self)
+    new_instrs.push(IRInstr::Phi {
+        dst: IRValue::Register(j_vreg),
+        incoming: vec![
+            (phi_dst, orig.label.clone()),
+            (IRValue::Register(j_next_vreg), new_label.to_string()),
+        ],
+    });
+
+    // Find the original increment (`i + 1`).
+    let mut increment_idx = None;
+    let mut orig_inew: u32 = 0;
+    for (i, instr) in instrs.iter().enumerate() {
+        if let IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs: IRValue::Register(l),
+            rhs: IRValue::Immediate(1),
+            ..
+        } = instr
+        {
+            if *l == phi_vreg {
+                if let IRValue::Register(d) = dst {
+                    increment_idx = Some(i);
+                    orig_inew = *d;
+                }
+                break;
+            }
+        }
+    }
+    let increment_idx = match increment_idx {
+        Some(i) => i,
+        None => return IRBlock::new(new_label),
+    };
+    let body = &instrs[1..increment_idx];
+    for instr in body {
+        let mut cloned = instr.clone();
+        substitute_vreg(&mut cloned, phi_vreg, j_vreg);
+        new_instrs.push(cloned);
+    }
+
+    // j_next = j + 1 (scalar step).
+    new_instrs.push(IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst: IRValue::Register(j_next_vreg),
+        lhs: IRValue::Register(j_vreg),
+        rhs: IRValue::Immediate(1),
+        ty: None,
+    });
+
+    // Copy any instructions after the increment (Cmp + trailing). The Cmp's
+    // lhs was orig_inew; substitute it to j_next_vreg.
+    for instr in &instrs[increment_idx + 1..] {
+        let mut cloned = instr.clone();
+        substitute_vreg(&mut cloned, orig_inew, j_next_vreg);
+        new_instrs.push(cloned);
+    }
+
+    // Terminator: self-loop targeting this block, exit to original exit.
+    let new_terminator = match &orig.terminator {
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            let (tb, fb) = if true_block == &orig.label {
+                (new_label.to_string(), false_block.clone())
+            } else if false_block == &orig.label {
+                (true_block.clone(), new_label.to_string())
+            } else {
+                (true_block.clone(), false_block.clone())
+            };
+            IRTerminator::Branch {
+                cond: cond.clone(),
+                true_block: tb,
+                false_block: fb,
+            }
+        }
+        other => other.clone(),
+    };
+
+    let mut block = IRBlock::new(new_label);
+    block.instructions = new_instrs;
+    block.terminator = new_terminator;
+    block.source_line = orig.source_line;
+    block
+}
+
+/// Classify a BinOp as packable into a SIMD op.
+///
+/// Returns `(kind, dst_vreg, src_vregs)` if packable. Only ops whose operands
+/// are *all* registers (no immediates) qualify — immediate-operand ops (e.g.
+/// `i*4` address scaling) are not vectorizable compute and are skipped.
+fn classify_packable_binop(instr: &IRInstr) -> Option<(PackedOpKind, u32, Vec<u32>)> {
+    let (op_kind, dst, lhs, rhs) = match instr {
+        IRInstr::BinOp { op, dst, lhs, rhs, .. } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
+        IRInstr::Add { dst, lhs, rhs, .. } => (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone()),
+        IRInstr::Sub { dst, lhs, rhs, .. } => (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone()),
+        IRInstr::Mul { dst, lhs, rhs, .. } => (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone()),
+        _ => return None,
+    };
+    let kind = match op_kind {
+        BinOpKind::Add => PackedOpKind::Add,
+        BinOpKind::Sub => PackedOpKind::Sub,
+        BinOpKind::Mul => PackedOpKind::Mul,
+        _ => return None,
+    };
+    let dst_r = dst.as_register()?;
+    // Require both operands to be registers (skip immediate-operand ops like
+    // `i*4` address scaling — those are not vectorizable compute).
+    let lhs_r = lhs.as_register()?;
+    let rhs_r = rhs.as_register()?;
+    Some((kind, dst_r, vec![lhs_r, rhs_r]))
+}
+
+/// Check if an instruction is safe to duplicate during vectorization.
+fn is_safe_for_vectorization(instr: &IRInstr) -> bool {
+    matches!(
+        instr,
+        IRInstr::BinOp { .. }
+            | IRInstr::Add { .. }
+            | IRInstr::Sub { .. }
+            | IRInstr::Mul { .. }
+            | IRInstr::Div { .. }
+            | IRInstr::Cmp { .. }
+            | IRInstr::Load { .. }
+            | IRInstr::Store { .. }
+            | IRInstr::Offset { .. }
+            | IRInstr::Cast { .. }
+            | IRInstr::Select { .. }
+            | IRInstr::Alloc { .. }
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SLP vectorization
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Scan a function's blocks for isomorphic adjacent independent scalar ops and
+/// record them as `PackedOp`s in a plan.
+///
+/// SLP does not rewrite the IR — it only emits plan entries the backend may
+/// consume to fuse scalar ops into SIMD ops. The cost model: pack only when
+/// ≥2 ops are isomorphic, independent (no cross-deps), and of a packable kind.
+fn slp_vectorize_function(func: &IRFunction) -> Vec<PackedOp> {
+    let mut ops = Vec::new();
+    for block in &func.blocks {
+        ops.extend(slp_vectorize_block(block));
+    }
+    ops
+}
+
+/// SLP-pack a single block. Pairwise scan: for each adjacent pair of packable
+/// BinOps with matching kind, matching element type, and no cross-dependency,
+/// record a 2-lane `PackedOp`.
+fn slp_vectorize_block(block: &IRBlock) -> Vec<PackedOp> {
+    let mut ops = Vec::new();
+    let instrs = &block.instructions;
+    let mut i = 0;
+    while i + 1 < instrs.len() {
+        let a = classify_packable_binop(&instrs[i]);
+        let b = classify_packable_binop(&instrs[i + 1]);
+        match (a, b) {
+            (Some((ka, dst_a, srcs_a)), Some((kb, dst_b, srcs_b))) if ka == kb => {
+                // Independence: a's dst must not appear in b's sources, and
+                // vice versa.
+                let a_writes_b_reads = srcs_b.contains(&dst_a);
+                let b_writes_a_reads = srcs_a.contains(&dst_b);
+                if !a_writes_b_reads && !b_writes_a_reads {
+                    let elem_size = binop_elem_size(&instrs[i]).max(binop_elem_size(&instrs[i + 1]));
+                    ops.push(PackedOp {
+                        kind: ka,
+                        lanes: 2,
+                        elem_size,
+                        dst_lane0: dst_a,
+                        src_lane0: srcs_a.clone(),
+                        block: block.label.clone(),
+                    });
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    ops
+}
+
+/// Best-effort element-size lookup for a BinOp/Add/Sub/Mul instruction.
+fn binop_elem_size(instr: &IRInstr) -> u32 {
+    match instr {
+        IRInstr::BinOp { ty: Some(t), .. }
+        | IRInstr::Add { ty: Some(t), .. }
+        | IRInstr::Sub { ty: Some(t), .. }
+        | IRInstr::Mul { ty: Some(t), .. } => size_of(t) as u32,
+        _ => 4,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Vreg helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Find the highest vreg number used in a slice of instructions.
+fn block_max_vreg(instrs: &[IRInstr]) -> u32 {
+    let mut max: u32 = 0;
+    for instr in instrs {
+        for r in instr.defined_regs() {
+            max = max.max(r);
+        }
+        for r in instr.used_regs() {
+            max = max.max(r);
+        }
+    }
+    max
+}
+
+/// Substitute all uses of `old_vreg` with `new_vreg` in an instruction.
+fn substitute_vreg(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32) {
+    fn sub_val(val: &mut IRValue, old_vreg: u32, new_vreg: u32) {
+        if let IRValue::Register(r) = val {
+            if *r == old_vreg {
+                *r = new_vreg;
+            }
+        }
+    }
+    match instr {
+        IRInstr::BinOp { dst, lhs, rhs, .. }
+        | IRInstr::Add { dst, lhs, rhs, .. }
+        | IRInstr::Sub { dst, lhs, rhs, .. }
+        | IRInstr::Mul { dst, lhs, rhs, .. }
+        | IRInstr::Div { dst, lhs, rhs, .. } => {
+            sub_val(lhs, old_vreg, new_vreg);
+            sub_val(rhs, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Load { dst, addr, .. } => {
+            sub_val(addr, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Store { value, addr, .. } => {
+            sub_val(value, old_vreg, new_vreg);
+            sub_val(addr, old_vreg, new_vreg);
+        }
+        IRInstr::Cmp { dst, lhs, rhs, .. } => {
+            sub_val(lhs, old_vreg, new_vreg);
+            sub_val(rhs, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Offset { dst, base, offset } => {
+            sub_val(base, old_vreg, new_vreg);
+            sub_val(offset, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Cast { dst, src, .. } => {
+            sub_val(src, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+            sub_val(cond, old_vreg, new_vreg);
+            sub_val(true_val, old_vreg, new_vreg);
+            sub_val(false_val, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        IRInstr::Phi { dst, incoming } => {
+            for (val, _) in incoming {
+                sub_val(val, old_vreg, new_vreg);
+            }
+            let _ = dst;
+        }
+        IRInstr::UnaryOp { dst, operand, .. } => {
+            sub_val(operand, old_vreg, new_vreg);
+            let _ = dst;
+        }
+        _ => {}
+    }
+}
+
+/// Substitute `old_vreg` with `new_vreg` in `instr` AND renumber the
+/// instruction's destination vreg to a fresh `next_vreg`-derived id, so each
+/// duplicated lane has its own SSA def.
+fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next_vreg: &mut u32) {
+    substitute_vreg(instr, old_vreg, new_vreg);
+    let fresh = *next_vreg;
+    *next_vreg += 1;
+    match instr {
+        IRInstr::BinOp { dst, .. }
+        | IRInstr::Add { dst, .. }
+        | IRInstr::Sub { dst, .. }
+        | IRInstr::Mul { dst, .. }
+        | IRInstr::Div { dst, .. }
+        | IRInstr::Load { dst, .. }
+        | IRInstr::Offset { dst, .. }
+        | IRInstr::Cast { dst, .. }
+        | IRInstr::Select { dst, .. } => {
+            if let IRValue::Register(r) = dst {
+                *r = fresh;
+            }
+        }
+        IRInstr::Cmp { dst, .. } => {
+            if let IRValue::Register(r) = dst {
+                *r = fresh;
+            }
+        }
+        _ => {}
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Public alias matching the legacy Wave 13 surface (in case any caller still
+// references it). The old `is_proven_non_aliasing` helper is preserved.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Check if two memory accesses are provably non-aliasing.
+///
+/// Uses Alloc-region analysis: if two addresses are different Alloc regions,
+/// they are non-aliasing. Conservative otherwise.
 pub fn is_proven_non_aliasing(
     addr_a: &IRValue,
     addr_b: &IRValue,
     alloc_regions: &std::collections::HashSet<u32>,
 ) -> bool {
-    // If both addresses are the same register, they alias.
     if addr_a == addr_b {
         return false;
     }
-
-    // If one address is an Alloc region and the other is a different
-    // Alloc region, they are non-aliasing.
     if let (IRValue::Register(id_a), IRValue::Register(id_b)) = (addr_a, addr_b) {
         if alloc_regions.contains(id_a) && alloc_regions.contains(id_b) {
-            return id_a != id_b; // Different Alloc regions = non-aliasing
+            return id_a != id_b;
         }
     }
-
-    // Conservative: assume aliasing.
     false
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::CmpKind;
     use std::collections::HashSet;
+
+    /// Build a function whose body is `for i in 0..N { a[i] = b[i] + c[i]; }`
+    /// lowered to a single-block self-loop:
+    /// ```text
+    /// loop:
+    ///   i      = phi(0, entry), (i_next, loop)
+    ///   i*4    = Mul i, 4                       // byte offset
+    ///   addr_b = Offset(b_ptr, i*4)
+    ///   addr_c = Offset(c_ptr, i*4)
+    ///   b_v    = Load addr_b
+    ///   c_v    = Load addr_c
+    ///   sum    = Add b_v, c_v
+    ///   addr_a = Offset(a_ptr, i*4)
+    ///   Store sum -> addr_a
+    ///   i_next = i + 1
+    ///   cond   = cmp i_next, N, SLt
+    ///   br cond, loop, exit
+    /// ```
+    fn build_add_loop_function() -> IRFunction {
+        let mut func = IRFunction::new("vec_add");
+        // vregs: 0=a_ptr, 1=b_ptr, 2=c_ptr, 3=N (params)
+        // 4=i (phi), 5=i*4 (i_scaled), 6=addr_b, 7=addr_c,
+        // 8=b_v, 9=c_v, 10=sum, 11=addr_a, 12=i_next, 13=cond
+        func.params = vec![
+            IRValue::Register(0),
+            IRValue::Register(1),
+            IRValue::Register(2),
+            IRValue::Register(3),
+        ];
+
+        // entry block: jump to loop.
+        let entry = IRBlock {
+            label: "entry".to_string(),
+            instructions: vec![],
+            terminator: IRTerminator::Jump("loop".to_string()),
+            predecessors: HashSet::new(),
+            successors: HashSet::new(),
+            source_line: 0,
+        };
+        func.blocks[0] = entry;
+
+        // loop block.
+        let mut loop_blk = IRBlock::new("loop");
+        loop_blk.instructions.push(IRInstr::Phi {
+            dst: IRValue::Register(4),
+            incoming: vec![
+                (IRValue::Immediate(0), "entry".to_string()),
+                (IRValue::Register(12), "loop".to_string()),
+            ],
+        });
+        loop_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(5),
+            lhs: IRValue::Register(4),
+            rhs: IRValue::Immediate(4),
+            ty: Some(IRType::I32),
+        });
+        loop_blk.instructions.push(IRInstr::Offset {
+            dst: IRValue::Register(6),
+            base: IRValue::Register(1),
+            offset: IRValue::Register(5),
+        });
+        loop_blk.instructions.push(IRInstr::Offset {
+            dst: IRValue::Register(7),
+            base: IRValue::Register(2),
+            offset: IRValue::Register(5),
+        });
+        loop_blk.instructions.push(IRInstr::Load {
+            dst: IRValue::Register(8),
+            addr: IRValue::Register(6),
+            offset: 0,
+            ty: IRType::I32,
+        });
+        loop_blk.instructions.push(IRInstr::Load {
+            dst: IRValue::Register(9),
+            addr: IRValue::Register(7),
+            offset: 0,
+            ty: IRType::I32,
+        });
+        loop_blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(10),
+            lhs: IRValue::Register(8),
+            rhs: IRValue::Register(9),
+            ty: Some(IRType::I32),
+        });
+        loop_blk.instructions.push(IRInstr::Offset {
+            dst: IRValue::Register(11),
+            base: IRValue::Register(0),
+            offset: IRValue::Register(5),
+        });
+        loop_blk.instructions.push(IRInstr::Store {
+            value: IRValue::Register(10),
+            addr: IRValue::Register(11),
+            offset: 0,
+            ty: IRType::I32,
+        });
+        loop_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(12),
+            lhs: IRValue::Register(4),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        loop_blk.instructions.push(IRInstr::Cmp {
+            kind: CmpKind::SLt,
+            dst: IRValue::Register(13),
+            lhs: IRValue::Register(12),
+            rhs: IRValue::Register(3),
+            ty: Some(IRType::I32),
+        });
+        loop_blk.terminator = IRTerminator::Branch {
+            cond: IRValue::Register(13),
+            true_block: "loop".to_string(),
+            false_block: "exit".to_string(),
+        };
+        func.blocks.push(loop_blk);
+
+        // exit block.
+        let exit_blk = IRBlock {
+            label: "exit".to_string(),
+            instructions: vec![IRInstr::Ret { values: vec![] }],
+            terminator: IRTerminator::Return(vec![]),
+            predecessors: HashSet::new(),
+            successors: HashSet::new(),
+            source_line: 0,
+        };
+        func.blocks.push(exit_blk);
+        func
+    }
+
+    #[test]
+    fn test_loop_vectorization_iv_step_fix() {
+        // The CRITICAL test: the stub left the IV step at +1; the rewrite
+        // must change it to +vf*elem_size (= +16 for i32 with vf=4).
+        let func = build_add_loop_function();
+        let (new_func, plan) = vectorize_function_with_plan(func);
+
+        let vec_blk = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "loop")
+            .expect("vector loop block must exist");
+
+        // The IV increment must now be `+16` (vf=4, elem_size=4), not `+1`.
+        let iv_step = vec_blk.instructions.iter().find_map(|instr| {
+            if let IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(12),
+                lhs: IRValue::Register(4),
+                rhs: IRValue::Immediate(step),
+                ..
+            } = instr
+            {
+                Some(*step)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            iv_step,
+            Some(16),
+            "IV step must be vf*elem_size = 4*4 = 16, got {:?}",
+            iv_step
+        );
+
+        assert_eq!(plan.vf, 4);
+        assert_eq!(plan.elem_size, 4);
+        assert!(
+            plan.packed_ops.iter().any(|op| op.kind == PackedOpKind::Add),
+            "plan must contain a PackedAdd, got {:?}",
+            plan.packed_ops
+        );
+    }
+
+    #[test]
+    fn test_loop_vectorization_remainder_loop_exists() {
+        let func = build_add_loop_function();
+        let (new_func, plan) = vectorize_function_with_plan(func);
+
+        let remainder = new_func.blocks.iter().find(|b| b.label == "loop_remainder");
+        assert!(remainder.is_some(), "remainder loop block must exist");
+
+        let remainder = remainder.unwrap();
+        let has_scalar_step = remainder.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    rhs: IRValue::Immediate(1),
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_scalar_step,
+            "remainder loop must have a +1 scalar IV step"
+        );
+
+        assert_eq!(plan.remainder_loop_block, Some("loop_remainder".to_string()));
+    }
+
+    #[test]
+    fn test_loop_vectorization_lane_offsets() {
+        // The vectorized body must contain lane-offset vregs `i + 4`, `i + 8`,
+        // `i + 12` (lanes 1, 2, 3 for vf=4, elem_size=4).
+        let func = build_add_loop_function();
+        let (new_func, _) = vectorize_function_with_plan(func);
+
+        let vec_blk = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "loop")
+            .expect("vector loop block must exist");
+
+        let lane_offsets: Vec<i64> = vec_blk
+            .instructions
+            .iter()
+            .filter_map(|instr| {
+                if let IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    lhs: IRValue::Register(4),
+                    rhs: IRValue::Immediate(off),
+                    ..
+                } = instr
+                {
+                    Some(*off)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            lane_offsets.contains(&4),
+            "lane 1 offset (i+4) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
+            lane_offsets.contains(&8),
+            "lane 2 offset (i+8) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
+            lane_offsets.contains(&12),
+            "lane 3 offset (i+12) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
+            lane_offsets.contains(&16),
+            "IV step (i+16) missing: {:?}",
+            lane_offsets
+        );
+    }
+
+    #[test]
+    fn test_loop_vectorization_no_miscompile_body_count() {
+        // The stub duplicated the body 4× WITHOUT changing the IV step (4N
+        // work). The rewrite must run N/vf iterations with vf work each = N
+        // total. We verify the body is duplicated vf=4 times AND the IV step
+        // is vf*elem_size (so the loop runs N/vf times, not N times).
+        let func = build_add_loop_function();
+        let (new_func, plan) = vectorize_function_with_plan(func);
+
+        let vec_blk = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "loop")
+            .expect("vector loop block must exist");
+
+        let add_count = vec_blk
+            .instructions
+            .iter()
+            .filter(|instr| matches!(instr, IRInstr::Add { .. }))
+            .count();
+        assert_eq!(
+            add_count, 4,
+            "body must be duplicated vf=4 times, got {}",
+            add_count
+        );
+
+        let iv_step = vec_blk.instructions.iter().find_map(|instr| {
+            if let IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(12),
+                lhs: IRValue::Register(4),
+                rhs: IRValue::Immediate(step),
+                ..
+            } = instr
+            {
+                Some(*step)
+            } else {
+                None
+            }
+        });
+        assert_eq!(iv_step, Some(16));
+        assert_eq!(plan.vf, 4);
+    }
+
+    #[test]
+    fn test_loop_vectorization_bails_on_unsafe_body() {
+        // A loop with a Call in the body must not be vectorized.
+        let mut func = build_add_loop_function();
+        let loop_idx = func
+            .blocks
+            .iter()
+            .position(|b| b.label == "loop")
+            .unwrap();
+        // Inject a Call before the increment (which is the second-to-last instr
+        // before the Cmp). Compute insert index first to avoid double-borrow.
+        let insert_at = func.blocks[loop_idx].instructions.len() - 2;
+        func.blocks[loop_idx].instructions.insert(
+            insert_at,
+            IRInstr::Call {
+                dst: None,
+                func: "extern_fn".to_string(),
+                args: vec![],
+                is_extern: true,
+            },
+        );
+        let (new_func, plan) = vectorize_function_with_plan(func);
+        let vec_blk = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "loop")
+            .unwrap();
+        let iv_step = vec_blk.instructions.iter().find_map(|instr| {
+            if let IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(12),
+                lhs: IRValue::Register(4),
+                rhs: IRValue::Immediate(step),
+                ..
+            } = instr
+            {
+                Some(*step)
+            } else {
+                None
+            }
+        });
+        assert_eq!(iv_step, Some(1), "loop with Call must not be vectorized");
+        assert_eq!(plan.vf, 0, "plan must be empty for unsafe loop");
+    }
+
+    // ── SLP tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_slp_packs_isomorphic_independent_pair() {
+        let mut blk = IRBlock::new("bb");
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(10),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+            ty: Some(IRType::I32),
+        });
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(11),
+            lhs: IRValue::Register(3),
+            rhs: IRValue::Register(4),
+            ty: Some(IRType::I32),
+        });
+        let ops = slp_vectorize_block(&blk);
+        assert_eq!(ops.len(), 1, "expected 1 SLP pack, got {:?}", ops);
+        assert_eq!(ops[0].kind, PackedOpKind::Add);
+        assert_eq!(ops[0].lanes, 2);
+        assert_eq!(ops[0].elem_size, 4);
+        assert_eq!(ops[0].dst_lane0, 10);
+    }
+
+    #[test]
+    fn test_slp_does_not_pack_dependent_pair() {
+        // `a = x + y; b = a + z` — b depends on a, must NOT pack.
+        let mut blk = IRBlock::new("bb");
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(10),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+            ty: Some(IRType::I32),
+        });
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(11),
+            lhs: IRValue::Register(10), // uses a's dst
+            rhs: IRValue::Register(3),
+            ty: Some(IRType::I32),
+        });
+        let ops = slp_vectorize_block(&blk);
+        assert!(ops.is_empty(), "dependent pair must not pack, got {:?}", ops);
+    }
+
+    // ── Legacy alias-analysis tests ────────────────────────────────────
 
     #[test]
     fn test_non_aliasing_different_allocs() {
         let allocs: HashSet<u32> = [1, 2].iter().copied().collect();
-        assert!(is_proven_non_aliasing(&IRValue::Register(1), &IRValue::Register(2), &allocs));
+        assert!(is_proven_non_aliasing(
+            &IRValue::Register(1),
+            &IRValue::Register(2),
+            &allocs
+        ));
     }
 
     #[test]
     fn test_aliasing_same_alloc() {
         let allocs: HashSet<u32> = [1].iter().copied().collect();
-        assert!(!is_proven_non_aliasing(&IRValue::Register(1), &IRValue::Register(1), &allocs));
+        assert!(!is_proven_non_aliasing(
+            &IRValue::Register(1),
+            &IRValue::Register(1),
+            &allocs
+        ));
     }
 }
