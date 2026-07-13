@@ -529,7 +529,9 @@ fn tag_to_deployment_target(
 
 /// Intermediate representation used for JSON serialization.
 ///
-/// This struct flattens the SCG's internal petgraph representation into
+/// This struct flattens the SCG's internal `DiGraph` representation (see
+/// `crate::digraph`, the hand-written Vec-backed directed graph introduced
+/// in Wave 39 of the VUMA remediation plan as a petgraph replacement) into
 /// a simple structure that can be serialized with serde.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SerializedSCG {
@@ -2118,5 +2120,115 @@ mod tests {
         assert_eq!(edge.source, n1);
         assert_eq!(edge.target, n2);
         assert_eq!(edge.kind, EdgeKind::DataFlow);
+    }
+
+    // ── Wave 40 conformance test ────────────────────────────────────────
+    //
+    // Wave 40 of the VUMA remediation plan removes the `petgraph` dependency
+    // from the workspace. Wave 39 replaced every petgraph usage in the SCG
+    // with the hand-written `crate::digraph::DiGraph`. This test pins the
+    // *behavioural* contract of the three graph algorithms
+    // (`toposort`, `tarjan_scc`, `has_path_connecting`) to the same results
+    // petgraph produced for an identical hand-constructed graph. The
+    // expected values below were derived by inspection of the graph
+    // topology and confirmed to match petgraph 0.6's `toposort`,
+    // `tarjan_scc`, and `has_path_connecting` semantics:
+    //
+    //   * `toposort`       — Kahn-style DFS postorder (LIFO), `Err` on cycle.
+    //   * `tarjan_scc`     — SCCs in reverse topological order (children
+    //                        before parents on the condensation DAG).
+    //   * `has_path_connecting` — BFS reachability; `from == to` is a trivial
+    //                              path when the node exists.
+    //
+    // If a future refactor of `crate::digraph` changes any of these
+    // semantics, this test will fire and force a deliberate decision.
+    #[test]
+    fn test_wave40_digraph_matches_petgraph_semantics() {
+        use crate::digraph::{
+            has_path_connecting, tarjan_scc, toposort, DiGraph, NodeIndex,
+        };
+
+        // Graph (a 3-node cycle feeding an acyclic tail):
+        //
+        //     0 ─→ 1 ─→ 2 ─→ 0        (cycle: SCC {0, 1, 2})
+        //     2 ─→ 3 ─→ 4             (acyclic tail; SCC {3}, then SCC {4})
+        //
+        // Condensation DAG: {0,1,2} → {3} → {4}. petgraph's `tarjan_scc`
+        // returns SCCs in reverse topological order (children first), so the
+        // expected order is [{4}, {3}, {0,1,2}]. The exact internal ordering
+        // inside the cycle SCC depends on traversal order; we only pin the
+        // partition + count + reverse-topo constraint.
+        let mut g: DiGraph<u32, ()> = DiGraph::new();
+        let n0 = g.add_node(0);
+        let n1 = g.add_node(1);
+        let n2 = g.add_node(2);
+        let n3 = g.add_node(3);
+        let n4 = g.add_node(4);
+        g.add_edge(n0, n1, ());
+        g.add_edge(n1, n2, ());
+        g.add_edge(n2, n0, ());
+        g.add_edge(n2, n3, ());
+        g.add_edge(n3, n4, ());
+
+        // ── toposort: graph has a cycle → must return Err. ──
+        assert!(toposort(&g).is_err(), "graph has a cycle; toposort must err");
+
+        // ── tarjan_scc: exactly one 3-node cycle + two singletons. ──
+        let sccs = tarjan_scc(&g);
+        assert_eq!(sccs.len(), 3, "expect 3 SCCs: {{0,1,2}}, {{3}}, {{4}}");
+        let mut sccs_sorted: Vec<Vec<usize>> =
+            sccs.iter().map(|s| s.iter().map(|n| n.0).collect()).collect();
+        for s in sccs_sorted.iter_mut() {
+            s.sort();
+        }
+        sccs_sorted.sort();
+        assert_eq!(
+            sccs_sorted,
+            vec![vec![0, 1, 2], vec![3], vec![4]],
+            "SCC partition must match petgraph tarjan_scc"
+        );
+        // Reverse-topo: the leaf SCCs ({4}, then {3}) appear before the
+        // cycle ({0,1,2}), since the condensation DAG is
+        // {0,1,2} → {3} → {4} and petgraph returns children first.
+        let cycle_pos = sccs.iter().position(|s| s.len() == 3).unwrap();
+        let n4_pos = sccs.iter().position(|s| s.contains(&n4)).unwrap();
+        let n3_pos = sccs.iter().position(|s| s.contains(&n3)).unwrap();
+        assert!(n4_pos < n3_pos, "{{4}} SCC precedes {{3}} SCC (reverse topo)");
+        assert!(n3_pos < cycle_pos, "{{3}} SCC precedes cycle (reverse topo)");
+
+        // ── has_path_connecting: BFS reachability, both directions. ──
+        // 0 can reach every node (cycle lets it climb to 2→3→4).
+        for target in [n1, n2, n3, n4] {
+            assert!(
+                has_path_connecting(&g, n0, target),
+                "0 reaches {target:?}"
+            );
+        }
+        // 3 cannot reach 0 (acyclic tail, no back-edges into the cycle).
+        assert!(
+            !has_path_connecting(&g, n3, n0),
+            "3 has no path back to 0 (acyclic tail)"
+        );
+        // Trivial path.
+        assert!(has_path_connecting(&g, n2, n2), "trivial path n2 → n2");
+        // Non-existent node index → no path.
+        assert!(
+            !has_path_connecting(&g, n0, NodeIndex(99)),
+            "no path to non-existent node"
+        );
+
+        // ── toposort on the acyclic subset: remove the back-edge. ──
+        // Break the cycle by removing edge 2→0; the graph becomes a chain
+        // 0→1→2→3→4. petgraph toposort must succeed and place 0 before 1,
+        // 1 before 2, 2 before 3, 3 before 4.
+        let e_2_0 = g.find_edge(n2, n0).expect("edge 2→0 exists");
+        g.remove_edge(e_2_0);
+        let order = toposort(&g).expect("acyclic after removing 2→0");
+        assert_eq!(order.len(), 5, "all 5 nodes present in topo order");
+        let pos = |n: NodeIndex| order.iter().position(|&x| x == n).unwrap();
+        assert!(pos(n0) < pos(n1), "0 before 1");
+        assert!(pos(n1) < pos(n2), "1 before 2");
+        assert!(pos(n2) < pos(n3), "2 before 3");
+        assert!(pos(n3) < pos(n4), "3 before 4");
     }
 }

@@ -12,7 +12,6 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
-petgraph.workspace = true
 indexmap.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
