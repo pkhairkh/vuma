@@ -1138,6 +1138,21 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Direct syscall: `syscall(nr, args...)`
+    ///
+    /// The first argument is the generic Linux ABI syscall number (an integer
+    /// literal). The remaining arguments are the syscall's arguments.
+    /// Examples:
+    ///   `syscall(1, fd, buf, count)`  — write(fd, buf, count)
+    ///   `syscall(60, code)`           — exit(code)
+    Syscall {
+        /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
+        nr: u32,
+        /// Argument expressions (up to 6 on Linux).
+        args: Vec<Expr>,
+        /// Source span.
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

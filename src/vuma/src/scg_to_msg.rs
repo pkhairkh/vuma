@@ -355,6 +355,7 @@ fn process_node(
         }
         NodeType::Computation
         | NodeType::Effect
+        | NodeType::Syscall
         | NodeType::Control
         | NodeType::Phantom
         | NodeType::VTable
@@ -365,7 +366,9 @@ fn process_node(
         | NodeType::ConstantTime => {
             // These node types do not directly produce MSG constructs.
             // However, if they participate in derivation chains via Derivation
-            // edges, we create a passthrough derivation.
+            // edges, we create a passthrough derivation. Syscall nodes are
+            // side-effecting (like Effect nodes) and are handled here as
+            // passthroughs rather than producing their own MSG entity.
             process_passthrough(scg, ctx, node)?;
         }
     }

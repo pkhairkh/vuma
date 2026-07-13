@@ -445,6 +445,29 @@ impl InferenceEngine {
                         description: desc,
                     }));
                 }
+                EdgeKind::SyscallArg => {
+                    // Syscall-arg edges impose data-flow-like constraints:
+                    // the argument value must be valid before the syscall.
+                    let src = scg.get_node(edge.source);
+                    let dst = scg.get_node(edge.target);
+                    let desc = match (src, dst) {
+                        (Some(s), Some(d)) => format!(
+                            "syscall-arg flows from {:?}({}) to {:?}({})",
+                            s.node_type,
+                            s.id.as_u64(),
+                            d.node_type,
+                            d.id.as_u64()
+                        ),
+                        _ => format!(
+                            "syscall-arg flows from {} to {}",
+                            edge.source.as_u64(),
+                            edge.target.as_u64()
+                        ),
+                    };
+                    constraints.push(Constraint::ResourceFlow(ResourceFlowConstraint {
+                        description: desc,
+                    }));
+                }
             }
         }
 

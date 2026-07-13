@@ -164,6 +164,7 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::EnumDef(e) => format!("enum {}", e.name),
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
+        NodePayload::Syscall(s) => format!("syscall({})", s.nr),
     }
 }
 

@@ -49,7 +49,7 @@ use vuma_codegen::{
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
-        Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, SwitchArm,
+        Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, SwitchArm, SyscallCallNode,
     },
     CastKind as CodegenCastKind, CodegenError,
 };
@@ -2423,6 +2423,25 @@ fn convert_node_to_statement_with_externs(
                 args: vec![],
                 is_extern,
                 reassigns: None,
+            })))
+        }
+
+        NodePayload::Syscall(syscall) => {
+            // Wave 10: lower a syscall to a first-class
+            // `ScgStatement::Syscall`. The `IRBuilder` lowers this to
+            // `IRInstr::Syscall`, which `lower_syscalls_all()` (called from
+            // the pipeline after `IRBuilder::build`) then converts to
+            // `IRInstr::Call { is_extern: true }` with the canonical syscall
+            // name (e.g. `write`, `exit`). Backends resolve that name via
+            // their existing `syscall_stubs` tables.
+            single(Some(ScgStatement::Syscall(SyscallCallNode {
+                nr: syscall.nr,
+                dst: syscall.dst.clone(),
+                args: syscall
+                    .args
+                    .iter()
+                    .map(|a| ScgExpr::Var(a.clone()))
+                    .collect(),
             })))
         }
 
@@ -4930,6 +4949,38 @@ pub fn compile_with_path(
         }
     };
 
+    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers
+    // at compile time. Since `nr` is arch-specific (Wave 11/12 design), we
+    // use a range check rather than a name lookup. Valid Linux syscall
+    // numbers are in the range 0..=600 across all supported architectures.
+    for func in &ir_program.functions {
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let vuma_codegen::ir::IRInstr::Syscall { nr, .. } = instr {
+                    if *nr > 600 {
+                        errors.push(VumaError::Codegen {
+                            error: CodegenError::InvalidInstruction(format!(
+                                "Invalid syscall number {}: exceeds maximum (600)",
+                                nr
+                            )),
+                        });
+                        if config.stop_on_first_error {
+                            return Err(errors);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
+    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // to codegen unchanged. The generic_syscall_name() table and
+    // lower_syscalls() function remain in ir.rs as utilities.
+
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
     // The backend is determined from the emit config (which derives from
@@ -5345,6 +5396,45 @@ pub fn compile_with_recovery(
         }
     };
 
+    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers.
+    // Since `nr` is arch-specific (Wave 11/12 design), we use a range check.
+    let mut had_syscall_error = false;
+    for func in &ir_program.functions {
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let vuma_codegen::ir::IRInstr::Syscall { nr, .. } = instr {
+                    if *nr > 600 {
+                        errors.push(VumaError::Codegen {
+                            error: CodegenError::InvalidInstruction(format!(
+                                "Invalid syscall number {}: exceeds maximum (600)",
+                                nr
+                            )),
+                        });
+                        had_syscall_error = true;
+                    }
+                }
+            }
+        }
+    }
+    if had_syscall_error {
+        timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+        return CompileResult::Partial(PartialCompilationOutput {
+            ast: Some(ast),
+            scg: Some(scg),
+            msg: Some(msg),
+            verification,
+            stage_timings: timings,
+            ir_function_count: None,
+            ir_instruction_count: None,
+            last_completed_stage: last_completed,
+            diagnostics: errors,
+        });
+    }
+
+    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
+    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // to codegen unchanged.
+
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
     if !matches!(config.opt_level, OptLevel::O0) {
@@ -5720,6 +5810,33 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         Ok(ir) => ir,
         Err(e) => return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]),
     };
+
+    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers.
+    // Since `nr` is arch-specific (Wave 11/12 design), we use a range check.
+    let mut allowlist_errors: Vec<VumaError> = Vec::new();
+    for func in &ir_program.functions {
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let vuma_codegen::ir::IRInstr::Syscall { nr, .. } = instr {
+                    if *nr > 600 {
+                        allowlist_errors.push(VumaError::Codegen {
+                            error: CodegenError::InvalidInstruction(format!(
+                                "Invalid syscall number {}: exceeds maximum (600)",
+                                nr
+                            )),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if !allowlist_errors.is_empty() {
+        return Err(allowlist_errors);
+    }
+
+    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
+    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // to codegen unchanged.
 
     // ── Codegen-Level IR Optimization (production caller) ────────
     ir_program = vuma_codegen::opt::run_optimizations(ir_program);
@@ -7058,6 +7175,44 @@ pub fn flatten_expr(
             }
         }
 
+        // ── Direct syscall: flatten args, emit SyscallCallNode ──
+        //
+        // Wave 10: `syscall(nr, args...)` is a first-class AST expression
+        // that lowers to `ScgStatement::Syscall`. The IRBuilder then emits
+        // `IRInstr::Syscall`, which `lower_syscalls_all()` (called from the
+        // pipeline after `IRBuilder::build`) converts to an extern
+        // `IRInstr::Call` with the canonical syscall name (`write`, `exit`,
+        // …) so backends can resolve it via their existing `syscall_stubs`
+        // tables.
+        //
+        // Void syscalls (exit, exit_group) get `dst: None` so the IR doesn't
+        // contain a dead vreg that would never be assigned. For all other
+        // syscalls, we allocate a fresh temp and return it as a `Var` so the
+        // result can flow into surrounding expressions.
+        Expr::Syscall { nr, args, .. } => {
+            let flat_args: Vec<ScgExpr> = args
+                .iter()
+                .map(|a| flatten_expr(a, stmts, ctx))
+                .collect();
+            let is_void_syscall = matches!(*nr, 60 | 231); // exit, exit_group
+            if is_void_syscall {
+                stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                    nr: *nr,
+                    dst: None,
+                    args: flat_args,
+                }));
+                ScgExpr::Int(0)
+            } else {
+                let dst = ctx.alloc_temp();
+                stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                    nr: *nr,
+                    dst: Some(dst.clone()),
+                    args: flat_args,
+                }));
+                ScgExpr::Var(dst)
+            }
+        }
+
         // ── Atomic operations: emit as CallNodes with special names ──
         // The backend's instruction selector recognizes these names and lowers
         // them to proper atomic machine instructions (LDAXR/STLXR on AArch64,
@@ -7398,6 +7553,22 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 }
             }
 
+            // Wave 10: `let x = syscall(nr, args…)` → SyscallCallNode with
+            // dst = the let-binding's name. This avoids a wasted temp +
+            // Add(0) copy when the result is consumed directly.
+            if let vuma_parser::ast::Expr::Syscall { nr, args, .. } = &let_stmt.value {
+                let flat_args: Vec<ScgExpr> = args
+                    .iter()
+                    .map(|a| flatten_expr(a, &mut stmts, ctx))
+                    .collect();
+                stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                    nr: *nr,
+                    dst: Some(let_stmt.name.clone()),
+                    args: flat_args,
+                }));
+                return stmts;
+            }
+
             // Check if the RHS is an Allocate expression → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
                 let size_val: u32 = match size.as_ref() {
@@ -7567,6 +7738,21 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     }));
                     return stmts;
                 }
+            }
+
+            // Wave 10: `x = syscall(nr, args…)` → SyscallCallNode with
+            // dst = the assignment target. Mirrors the Call path above.
+            if let vuma_parser::ast::Expr::Syscall { nr, args, .. } = &assign_stmt.value {
+                let flat_args: Vec<ScgExpr> = args
+                    .iter()
+                    .map(|a| flatten_expr(a, &mut stmts, ctx))
+                    .collect();
+                stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                    nr: *nr,
+                    dst: Some(dst),
+                    args: flat_args,
+                }));
+                return stmts;
             }
 
             // General case: flatten the value expression and assign to dst

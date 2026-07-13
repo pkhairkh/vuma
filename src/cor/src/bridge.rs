@@ -83,7 +83,8 @@ fn map_node_type(
         vuma_scg::NodeType::StructDef
         | vuma_scg::NodeType::EnumDef
         | vuma_scg::NodeType::Match
-        | vuma_scg::NodeType::ConstantTime => NodeKind::Entry,
+        | vuma_scg::NodeType::ConstantTime
+        | vuma_scg::NodeType::Syscall => NodeKind::Entry,
     }
 }
 
@@ -111,6 +112,7 @@ fn edge_weight(kind: &vuma_scg::EdgeKind) -> u64 {
         vuma_scg::EdgeKind::Dispatch => 10,
         vuma_scg::EdgeKind::Call { .. } => 10,
         vuma_scg::EdgeKind::Return { .. } => 10,
+        vuma_scg::EdgeKind::SyscallArg => 1,
     }
 }
 
