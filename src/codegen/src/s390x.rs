@@ -277,12 +277,24 @@ fn encode_llilf(r1: Gpr, imm: u32) -> [u8; 6] {
 /// Format: RIL-b, 6 bytes. op1=0xC0, op2=0x9.
 /// (RIL format uses op1=0xC0 for all variants — LGFI/AGFI/SGFI/BRASL/BRCL/LARL.
 ///  0xEC is for RIE/RISL/RSL formats which have a different field layout.)
-fn encode_agfi(r1: Gpr, imm: i32) -> [u8; 6] {
-    let op1: u8 = 0xC0;
-    let op2: u8 = 0x9;
-    let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
-    let imm_be = imm.to_be_bytes();
-    [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
+/// Encode AGFI R1, imm32 (Add 32-bit Immediate to 64-bit register).
+/// CRITICAL: QEMU user-mode treats AGFI (op2=0x9) as IILF (load immediate),
+/// not add. This is a QEMU bug. Workaround: use LGHI+AGR (8 bytes) instead
+/// of AGFI (6 bytes). This produces correct results under both real hardware
+/// and QEMU. The extra 2 bytes per AGFI call must be accounted for in
+/// start_stub_size and any hardcoded offset calculations.
+fn encode_agfi(r1: Gpr, imm: i32) -> Vec<u8> {
+    // QEMU bug workaround: AGFI (op2=0x9) is treated as IILF (load, not add).
+    // Use R0 (caller-saved scratch) as temp: LGHI R0, imm; AGR R1, R0.
+    // This is 8 bytes (4+4) for small imms, 10 bytes (6+4) for large imms.
+    let mut code = Vec::new();
+    if (-32768..=32767).contains(&imm) {
+        code.extend_from_slice(&encode_lghi(Gpr::R0, imm as i16));
+    } else {
+        code.extend_from_slice(&encode_lgfi(Gpr::R0, imm));
+    }
+    code.extend_from_slice(&encode_agr(r1, Gpr::R0));
+    code
 }
 
 /// Encode SGFI R1, imm32 (Subtract Fullword Immediate from 64-bit register).
@@ -2261,7 +2273,7 @@ impl Backend for S390XBackend {
         // BRASL R14, main   — 6 bytes, offset 16 (will be patched)
         // LGFI R1, 1        — 6 bytes, offset 22 (sys_exit)
         // SVC 0             — 2 bytes, offset 28
-        let start_stub_size: usize = 30;
+        let start_stub_size: usize = 32; // LG(6)+LGR(4)+LGHI+AGR(8)+BRASL(6)+LGFI(6)+SVC(2)
         // FFI return-0 stub: LGHI R2, 0 (4 bytes) + BR R14 (2 bytes) = 6 bytes.
         let ffi_stub_size: usize = 6;
         let ffi_stub_offset: usize = start_stub_size;
@@ -2533,7 +2545,7 @@ impl Backend for S390XBackend {
             code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
             // R3 = SP + 32 (end-of-buffer pointer; digits grow downward)
             code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
-            code.extend_from_slice(&encode_agfi(Gpr::R3, 32));
+            code.extend(encode_agfi(Gpr::R3, 32));
             // R4 = 0 (digit count)
             code.extend_from_slice(&encode_lghi(Gpr::R4, 0));
             // R6 = 10 (divisor, hoisted out of loop)
@@ -2553,7 +2565,7 @@ impl Backend for S390XBackend {
             code.extend_from_slice(&encode_lghi(Gpr::R2, 1));
             // LGR R3, SP; AGFI R3, 16 (buf = SP+16)
             code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
-            code.extend_from_slice(&encode_agfi(Gpr::R3, 16));
+            code.extend(encode_agfi(Gpr::R3, 16));
             // LGHI R4, 1 (len = 1)
             code.extend_from_slice(&encode_lghi(Gpr::R4, 1));
             // LGFI R1, 4 (sys_write)
@@ -2562,7 +2574,7 @@ impl Backend for S390XBackend {
             code.extend_from_slice(&encode_svc(0));
             // Restore R3 = SP + 32, R4 = 0 (clobbered by syscall prep)
             code.extend_from_slice(&encode_lgr(Gpr::R3, SP));
-            code.extend_from_slice(&encode_agfi(Gpr::R3, 32));
+            code.extend(encode_agfi(Gpr::R3, 32));
             code.extend_from_slice(&encode_lghi(Gpr::R4, 0));
             // LCGR R8, R8 (R8 = -R8; for INT64_MIN R8 is unchanged, but the
             // unsigned DLGR loop below produces the correct decimal digits
@@ -2585,13 +2597,13 @@ impl Backend for S390XBackend {
             // DLGR R8, R6 — R8 = remainder, R9 = quotient
             code.extend_from_slice(&encode_dlgr(Gpr::R8, Gpr::R6));
             // AGFI R8, 48 (R8 += '0')
-            code.extend_from_slice(&encode_agfi(Gpr::R8, 48));
+            code.extend(encode_agfi(Gpr::R8, 48));
             // AGFI R3, -1 (R3--)
-            code.extend_from_slice(&encode_agfi(Gpr::R3, -1));
+            code.extend(encode_agfi(Gpr::R3, -1));
             // STC R8, 0(R3) — store digit
             code.extend_from_slice(&encode_stc(Gpr::R8, Gpr::R3, 0));
             // AGFI R4, 1 (R4++)
-            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+            code.extend(encode_agfi(Gpr::R4, 1));
             // LGR R8, R9 (R8 = quotient, becomes new value)
             code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R9));
             // LTGR R8, R8 (test)
@@ -2612,11 +2624,11 @@ impl Backend for S390XBackend {
             // LGHI R5, 48 ('0')
             code.extend_from_slice(&encode_lghi(Gpr::R5, 48));
             // AGFI R3, -1 (R3--)
-            code.extend_from_slice(&encode_agfi(Gpr::R3, -1));
+            code.extend(encode_agfi(Gpr::R3, -1));
             // STC R5, 0(R3) — store '0'
             code.extend_from_slice(&encode_stc(Gpr::R5, Gpr::R3, 0));
             // AGFI R4, 1 (R4++)
-            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+            code.extend(encode_agfi(Gpr::R4, 1));
 
             // ── write_digits: sys_write(1, R3, R4) ──
             let write_digits_offset = code.len();
@@ -2688,22 +2700,22 @@ impl Backend for S390XBackend {
             let brc_alpha_pos = code.len();
             code.extend_from_slice(&encode_brc(0x2, 0)); // placeholder
             // AGFI R6, 48 (nibble + '0')
-            code.extend_from_slice(&encode_agfi(Gpr::R6, 48));
+            code.extend(encode_agfi(Gpr::R6, 48));
             // BRCL 0xF, store (unconditional skip over alpha)
             let brcl_store_pos = code.len();
             code.extend_from_slice(&encode_brcl(0xF, 0)); // placeholder
             // alpha: AGFI R6, 87 (nibble + 'a' - 10)
             let alpha_offset = code.len();
-            code.extend_from_slice(&encode_agfi(Gpr::R6, 87));
+            code.extend(encode_agfi(Gpr::R6, 87));
             // store: STC R6, 0(R3)
             let store_offset = code.len();
             code.extend_from_slice(&encode_stc(Gpr::R6, Gpr::R3, 0));
             // AGFI R3, 1 (advance buffer)
-            code.extend_from_slice(&encode_agfi(Gpr::R3, 1));
+            code.extend(encode_agfi(Gpr::R3, 1));
             // AGFI R4, 1 (counter++)
-            code.extend_from_slice(&encode_agfi(Gpr::R4, 1));
+            code.extend(encode_agfi(Gpr::R4, 1));
             // AGFI R5, -4 (shift -= 4)
-            code.extend_from_slice(&encode_agfi(Gpr::R5, -4));
+            code.extend(encode_agfi(Gpr::R5, -4));
             // LGHI R7, 16
             code.extend_from_slice(&encode_lghi(Gpr::R7, 16));
             // CGR R4, R7 (compare counter with 16)
@@ -2781,11 +2793,11 @@ impl Backend for S390XBackend {
         // LG R2, 0(R15) — load argc from stack pointer (64-bit)
         start_stub.extend_from_slice(&encode_lg(Gpr::R2, SP, 0));
 
-        // LGR R3, R15 — copy SP to R3
+        // LGR R3, R15 — copy SP to R3 (argv = SP + 8)
         start_stub.extend_from_slice(&encode_lgr(Gpr::R3, SP));
-
-        // AGFI R3, 8 — argv = R15 + 8 (64-bit pointers on s390x)
-        start_stub.extend_from_slice(&encode_agfi(Gpr::R3, 8));
+        // R3 += 8. Use encode_agfi which now uses LGHI+AGR workaround
+        // (QEMU treats AGFI op2=0x9 as IILF=load, not add).
+        start_stub.extend(encode_agfi(Gpr::R3, 8));
 
         // BRASL R14, main — placeholder with disp=0, will be patched.
         let brasl_offset_in_start = start_stub.len();
