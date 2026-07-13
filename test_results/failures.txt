@@ -1,4 +1,4 @@
-VUMA Test Failures — 2026-07-13 13:26:23 UTC
+VUMA Test Failures — 2026-07-13 13:54:45 UTC
 Total: 2 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
