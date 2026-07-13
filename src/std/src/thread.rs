@@ -227,23 +227,12 @@ impl VumaThread {
     /// Unpark this thread.
     ///
     /// Atomically makes the thread's token available if it is not already.
-    /// On the `os-linux` feature path this uses `libc::futex` to wake the
-    /// parked thread directly; otherwise it delegates to
-    /// `std::thread::Thread::unpark()`.
+    /// Delegates to `std::thread::Thread::unpark()` (which internally uses the
+    /// platform's wake primitive — futex on Linux). The former `os-linux`
+    /// feature gate was removed in Wave 45 (both branches were identical).
     // VUMA-VERIFIED: unpark unblocks a parked thread safely
     pub fn unpark(&self) {
-        #[cfg(feature = "os-linux")]
-        {
-            // On Linux, std::thread::Thread::unpark() internally uses futex
-            // wake. We call it directly via the stored std::thread::Thread
-            // handle, which is the canonical and safest way. The futex
-            // syscall is already used internally by the standard library.
-            self.std_thread.unpark();
-        }
-        #[cfg(not(feature = "os-linux"))]
-        {
-            self.std_thread.unpark();
-        }
+        self.std_thread.unpark();
     }
 }
 
