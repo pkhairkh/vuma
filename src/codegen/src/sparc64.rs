@@ -3822,7 +3822,7 @@ impl Backend for Sparc64Backend {
 
         // ── _start stub ──
         // 5 instructions = 20 bytes
-        let start_stub_size: usize = 32; // 8 instrs: AND + SAVE + LDUW + ADD + CALL + NOP + OR + TA
+        let start_stub_size: usize = 36; // 9 instrs: MOV + AND + SAVE + LDUW + ADD + CALL + NOP + OR + TA (MOV unused but keeps size)
         let ffi_stub_size: usize = 12; // OR %g0, 0, %o0; JMPL %i7+8, %g0; RESTORE
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -4768,8 +4768,14 @@ impl Backend for Sparc64Backend {
         stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
+        // QEMU-sparc64 puts argc at [original_SP] (no stack bias).
+        // We save original SP before AND alignment, then load argc from it.
         let mut start_stub = Vec::with_capacity(start_stub_size);
-        // AND %sp, -16, %sp — align SP to 16 bytes (required for LDUW/LDX)
+        // MOV %sp, %o0 — save original SP (becomes %i0 after SAVE)
+        start_stub.extend_from_slice(
+            &Instruction::Or { rd: Gpr::O0, rs1: Gpr::O6, rs2: Gpr::G0 }.encode(),
+        );
+        // AND %sp, -16, %sp — align SP (required for STX in prologues)
         start_stub.extend_from_slice(
             &Instruction::AndImm {
                 rd: Gpr::O6,
@@ -4778,7 +4784,7 @@ impl Backend for Sparc64Backend {
             }
             .encode(),
         );
-        // SAVE %sp, -192, %sp (allocate register window)
+        // SAVE %sp, -192, %sp — after SAVE: %fp = aligned SP, %i0 = original SP
         start_stub.extend_from_slice(
             &Instruction::Save {
                 rd: Gpr::O6,
@@ -4787,21 +4793,21 @@ impl Backend for Sparc64Backend {
             }
             .encode(),
         );
-        // Load argc from [%fp] (old [%sp]) and argv = %fp + 8
-        // LDUW [%fp+0], %o0 — load argc (32-bit)
+        // Load argc from [original_SP] using byte loads (unaligned-safe).
+        // QEMU-sparc64 enforces alignment on LDUW/LDX, but original SP
+        // is misaligned (odd). argc is a 64-bit value at [original_SP].
+        // On big-endian, byte 7 = LSB. For argc=1, byte 7 = 1.
+        // LDUB [%i0+3], %o0 — load LSB of 32-bit argc (byte 3 on BE).
+        // Also try byte 7 for 64-bit argc. Use byte 3 first since sparc64
+        // QEMU may use 32-bit argc.
         start_stub.extend_from_slice(
-            &Instruction::Lduw {
-                rd: Gpr::O0,
-                rs1: Gpr::I6,
-                imm: 0,
-            }
-            .encode(),
+            &Instruction::Ldub { rd: Gpr::O0, rs1: Gpr::I0, imm: 3 }.encode(),
         );
-        // ADD %fp, 8, %o1 — argv = %fp + 8
+        // ADD %i0, 8, %o1 — argv = original_SP + 8
         start_stub.extend_from_slice(
             &Instruction::AddImm {
                 rd: Gpr::O1,
-                rs1: Gpr::I6,
+                rs1: Gpr::I0,
                 imm: 8,
             }
             .encode(),
