@@ -53,6 +53,24 @@ use std::io::{
 use std::os::unix::io::AsRawFd;
 
 // ---------------------------------------------------------------------------
+// Raw syscall FFI (Wave 45 — replaces `libc::read` / `libc::write`).
+//
+// Declaring the libc-vendor `read` / `write` symbols directly lets vuma-std
+// perform I/O without depending on the `libc` crate. The `cfg(unix)` gate
+// matches the existing `std::os::unix::io::AsRawFd` import above. The
+// externs live in a private `sys` module so they don't shadow method names
+// like `write` / `read` in the rest of the file.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod sys {
+    extern "C" {
+        pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VUMA I/O Error Types
 // ---------------------------------------------------------------------------
 
@@ -857,33 +875,29 @@ impl VumaReader for VumaStdin {
             }
             Ok(i)
         } else {
-            // Linux: read from stdin.
-            #[cfg(feature = "os-linux")]
+            // Unix: read from stdin via raw `read` syscall (Wave 45).
+            #[cfg(unix)]
             {
-                let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                let ret = unsafe { sys::read(self.fd, buf.as_mut_ptr(), buf.len()) };
                 if ret < 0 {
                     let err = std::io::Error::last_os_error();
                     Err(VumaIoError::new(
                         VumaIoErrorKind::ReadFailed,
-                        format!("libc::read failed on fd {}: {}", self.fd, err),
+                        format!("read syscall failed on fd {}: {}", self.fd, err),
                         self.capd(),
                     ))
                 } else {
                     Ok(ret as usize)
                 }
             }
-            #[cfg(not(feature = "os-linux"))]
+            #[cfg(not(unix))]
             {
-                log::warn!("VumaStdin::read: no OS backend");
-                let mut handle = std::io::stdin();
-                match handle.read(buf) {
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(VumaIoError::new(
-                        VumaIoErrorKind::ReadFailed,
-                        format!("stdin read failed: {}", e),
-                        self.capd(),
-                    )),
-                }
+                let _ = buf;
+                Err(VumaIoError::new(
+                    VumaIoErrorKind::ReadFailed,
+                    "VumaStdin::read requires Unix".to_string(),
+                    self.capd(),
+                ))
             }
         }
     }
@@ -1037,48 +1051,43 @@ impl VumaWriter for VumaStdout {
             }
             Ok(buf.len())
         } else {
-            // Linux: write to stdout.
-            #[cfg(feature = "os-linux")]
+            // Unix: write to stdout via raw `write` syscall (Wave 45).
+            #[cfg(unix)]
             {
-                let ret = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len()) };
+                let ret = unsafe { sys::write(self.fd, buf.as_ptr(), buf.len()) };
                 if ret < 0 {
                     let err = std::io::Error::last_os_error();
                     Err(VumaIoError::new(
                         VumaIoErrorKind::WriteFailed,
-                        format!("libc::write failed on fd {}: {}", self.fd, err),
+                        format!("write syscall failed on fd {}: {}", self.fd, err),
                         self.capd(),
                     ))
                 } else {
                     Ok(ret as usize)
                 }
             }
-            #[cfg(not(feature = "os-linux"))]
+            #[cfg(not(unix))]
             {
-                log::warn!("VumaStdout::write: no OS backend");
-                let mut handle = std::io::stdout();
-                match handle.write(buf) {
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(VumaIoError::new(
-                        VumaIoErrorKind::WriteFailed,
-                        format!("stdout write failed: {}", e),
-                        self.capd(),
-                    )),
-                }
+                let _ = buf;
+                Err(VumaIoError::new(
+                    VumaIoErrorKind::WriteFailed,
+                    "VumaStdout::write requires Unix".to_string(),
+                    self.capd(),
+                ))
             }
         }
     }
 
     fn flush(&mut self) -> VumaIoResult<()> {
         if !self.bare_metal {
-            #[cfg(feature = "os-linux")]
+            #[cfg(unix)]
             {
-                // libc::write is unbuffered at the OS level; no explicit flush
-                // needed. For file-backed fds one could call libc::fsync, but
+                // `write` is unbuffered at the OS level; no explicit flush
+                // needed. For file-backed fds one could call `fsync`, but
                 // stdout (fd 1) is typically a pipe/tty where fsync would fail.
             }
-            #[cfg(not(feature = "os-linux"))]
+            #[cfg(not(unix))]
             {
-                // Linux: flush real stdout.
                 let mut handle = std::io::stdout();
                 if let Err(e) = handle.flush() {
                     return Err(VumaIoError::new(
@@ -1240,47 +1249,42 @@ impl VumaWriter for VumaStderr {
             }
             Ok(buf.len())
         } else {
-            // Linux: write to stderr.
-            #[cfg(feature = "os-linux")]
+            // Unix: write to stderr via raw `write` syscall (Wave 45).
+            #[cfg(unix)]
             {
-                let ret = unsafe { libc::write(self.fd, buf.as_ptr() as *const _, buf.len()) };
+                let ret = unsafe { sys::write(self.fd, buf.as_ptr(), buf.len()) };
                 if ret < 0 {
                     let err = std::io::Error::last_os_error();
                     Err(VumaIoError::new(
                         VumaIoErrorKind::WriteFailed,
-                        format!("libc::write failed on fd {}: {}", self.fd, err),
+                        format!("write syscall failed on fd {}: {}", self.fd, err),
                         self.capd(),
                     ))
                 } else {
                     Ok(ret as usize)
                 }
             }
-            #[cfg(not(feature = "os-linux"))]
+            #[cfg(not(unix))]
             {
-                log::warn!("VumaStderr::write: no OS backend");
-                let mut handle = std::io::stderr();
-                match handle.write(buf) {
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(VumaIoError::new(
-                        VumaIoErrorKind::WriteFailed,
-                        format!("stderr write failed: {}", e),
-                        self.capd(),
-                    )),
-                }
+                let _ = buf;
+                Err(VumaIoError::new(
+                    VumaIoErrorKind::WriteFailed,
+                    "VumaStderr::write requires Unix".to_string(),
+                    self.capd(),
+                ))
             }
         }
     }
 
     fn flush(&mut self) -> VumaIoResult<()> {
         if !self.bare_metal {
-            #[cfg(feature = "os-linux")]
+            #[cfg(unix)]
             {
-                // libc::write is unbuffered at the OS level; no explicit flush
+                // `write` is unbuffered at the OS level; no explicit flush
                 // needed for stderr (fd 2).
             }
-            #[cfg(not(feature = "os-linux"))]
+            #[cfg(not(unix))]
             {
-                // Linux: flush real stderr.
                 let mut handle = std::io::stderr();
                 if let Err(e) = handle.flush() {
                     return Err(VumaIoError::new(
@@ -1974,8 +1978,8 @@ impl fmt::Display for File {
 ///
 /// - CapD: { Read }
 pub struct Stdin {
-    /// File descriptor used by os-linux syscall path.
-    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    /// File descriptor used by Unix syscall path.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fd: i32,
 }
 
@@ -2001,13 +2005,14 @@ impl Stdin {
     /// Read up to `buf_len` bytes from stdin.
     // VUMA-VERIFIED: read delegates to real stdin
     pub fn read(&mut self, buf_len: usize) -> Result<Vec<u8>, String> {
-        let mut buf = vec![0u8; buf_len];
-        #[cfg(feature = "os-linux")]
+        #[cfg(unix)]
         {
-            let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+            let mut buf = vec![0u8; buf_len];
+            // Wave 45: raw `read` syscall extern (no `libc` crate).
+            let ret = unsafe { sys::read(self.fd, buf.as_mut_ptr(), buf.len()) };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
-                Err(format!("libc::read failed on fd {}: {}", self.fd, err))
+                Err(format!("read syscall failed on fd {}: {}", self.fd, err))
             } else if ret == 0 {
                 Ok(Vec::new())
             } else {
@@ -2015,18 +2020,10 @@ impl Stdin {
                 Ok(buf)
             }
         }
-        #[cfg(not(feature = "os-linux"))]
+        #[cfg(not(unix))]
         {
-            let mut handle = std::io::stdin();
-            use std::io::Read;
-            match handle.read(&mut buf) {
-                Ok(0) => Ok(Vec::new()),
-                Ok(n) => {
-                    buf.truncate(n);
-                    Ok(buf)
-                }
-                Err(e) => Err(format!("stdin read failed: {}", e)),
-            }
+            let _ = buf_len;
+            Err("Stdin::read requires Unix".to_string())
         }
     }
 }
@@ -2046,8 +2043,8 @@ impl Default for Stdin {
 ///
 /// - CapD: { Write }
 pub struct Stdout {
-    /// File descriptor used by os-linux syscall path.
-    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    /// File descriptor used by Unix syscall path.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fd: i32,
 }
 
@@ -2073,20 +2070,21 @@ impl Stdout {
     /// Write the given bytes to stdout.
     // VUMA-VERIFIED: write delegates to real stdout
     pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
-        #[cfg(feature = "os-linux")]
+        #[cfg(unix)]
         {
-            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+            // Wave 45: raw `write` syscall extern (no `libc` crate).
+            let ret = unsafe { sys::write(self.fd, data.as_ptr(), data.len()) };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
-                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+                Err(format!("write syscall failed on fd {}: {}", self.fd, err))
             } else {
                 Ok(ret as usize)
             }
         }
-        #[cfg(not(feature = "os-linux"))]
+        #[cfg(not(unix))]
         {
-            log::warn!("Stdout::write: no OS backend");
-            Ok(data.len())
+            let _ = data;
+            Err("Stdout::write requires Unix".to_string())
         }
     }
 }
@@ -2103,8 +2101,8 @@ impl Default for Stdout {
 ///
 /// - CapD: { Write }
 pub struct Stderr {
-    /// File descriptor used by os-linux syscall path.
-    #[cfg_attr(not(feature = "os-linux"), allow(dead_code))]
+    /// File descriptor used by Unix syscall path.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fd: i32,
 }
 
@@ -2130,20 +2128,21 @@ impl Stderr {
     /// Write the given bytes to stderr.
     // VUMA-VERIFIED: write delegates to real stderr
     pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
-        #[cfg(feature = "os-linux")]
+        #[cfg(unix)]
         {
-            let ret = unsafe { libc::write(self.fd, data.as_ptr() as *const _, data.len()) };
+            // Wave 45: raw `write` syscall extern (no `libc` crate).
+            let ret = unsafe { sys::write(self.fd, data.as_ptr(), data.len()) };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
-                Err(format!("libc::write failed on fd {}: {}", self.fd, err))
+                Err(format!("write syscall failed on fd {}: {}", self.fd, err))
             } else {
                 Ok(ret as usize)
             }
         }
-        #[cfg(not(feature = "os-linux"))]
+        #[cfg(not(unix))]
         {
-            log::warn!("Stderr::write: no OS backend");
-            Ok(data.len())
+            let _ = data;
+            Err("Stderr::write requires Unix".to_string())
         }
     }
 }
@@ -2439,14 +2438,15 @@ impl UdpSocket {
 /// return (-1), not undefined behavior.
 // VUMA-VERIFIED: read is bounded by count and produces a ReadEdge
 pub fn read_bytes(fd: i32, buf: crate::alloc::Address, count: u64) -> i64 {
-    #[cfg(feature = "os-linux")]
+    #[cfg(unix)]
     {
-        let ret = unsafe { libc::read(fd, buf.0 as *mut std::ffi::c_void, count as usize) };
+        // Wave 45: raw `read` syscall extern (no `libc` crate).
+        let ret = unsafe { sys::read(fd, buf.0 as *mut u8, count as usize) };
         ret as i64
     }
-    #[cfg(not(feature = "os-linux"))]
+    #[cfg(not(unix))]
     {
-        // On non-Linux targets, this is a stub that returns an error.
+        // On non-Unix targets, this is a stub that returns an error.
         // A bare-metal VUMA runtime would map this to a UART/MMIO read.
         let _ = (fd, buf, count);
         -1
@@ -2483,12 +2483,13 @@ pub fn read_bytes(fd: i32, buf: crate::alloc::Address, count: u64) -> i64 {
 /// readable memory.
 // VUMA-VERIFIED: write is bounded by count and produces a WriteEdge
 pub fn write_bytes(fd: i32, buf: crate::alloc::Address, count: u64) -> i64 {
-    #[cfg(feature = "os-linux")]
+    #[cfg(unix)]
     {
-        let ret = unsafe { libc::write(fd, buf.0 as *const std::ffi::c_void, count as usize) };
+        // Wave 45: raw `write` syscall extern (no `libc` crate).
+        let ret = unsafe { sys::write(fd, buf.0 as *const u8, count as usize) };
         ret as i64
     }
-    #[cfg(not(feature = "os-linux"))]
+    #[cfg(not(unix))]
     {
         let _ = (fd, buf, count);
         -1
@@ -3105,9 +3106,9 @@ mod tests {
         assert!(display_bm.contains("bare-metal"));
     }
 
-    // --- os-linux feature-gated tests ---
+    // --- Unix raw-syscall I/O tests (Wave 45: previously os-linux feature gate) ---
 
-    #[cfg(feature = "os-linux")]
+    #[cfg(unix)]
     mod os_linux {
         use super::*;
 
@@ -3124,7 +3125,9 @@ mod tests {
         fn test_libc_stderr_write() {
             let mut stderr = VumaStderr::new();
             let data = b"vuma-libc-stderr-test\n";
-            let n = stderr.write(data).unwrap();
+            // `VumaStderr` implements both `VumaWriter` and `StdWrite`;
+            // disambiguate explicitly to the VUMA trait.
+            let n = VumaWriter::write(&mut stderr, data).unwrap();
             assert_eq!(n, data.len());
             StdWrite::flush(&mut stderr).unwrap();
         }
@@ -3158,7 +3161,9 @@ mod tests {
         fn test_libc_legacy_stdout_write() {
             let mut stdout = Stdout::new();
             let data = b"vuma-legacy-stdout-test\n";
-            let n = StdWrite::write(&mut stdout, data).unwrap();
+            // Legacy `Stdout` only has an inherent `write` method (it does
+            // not implement `StdWrite`); call it directly.
+            let n = stdout.write(data).unwrap();
             assert_eq!(n, data.len());
         }
 
@@ -3184,6 +3189,31 @@ mod tests {
                 f.close().unwrap();
             }
             let _ = std::fs::remove_file(&tmp);
+        }
+
+        // --- Wave 45: raw `read` / `write` syscall externs (no `libc`) ---
+
+        /// `write_bytes` to stderr (fd 2) via the raw `write` syscall must
+        /// succeed and report the full byte count. Wave 45 removed the
+        /// `libc::write` call from this path; this test pins the new
+        /// behaviour.
+        #[test]
+        fn wave45_write_bytes_uses_raw_syscall() {
+            let msg = b"wave45-raw-write-syscall\n";
+            let buf = crate::alloc::Address::from_raw(msg.as_ptr() as u64);
+            let n = write_bytes(2, buf, msg.len() as u64);
+            assert_eq!(n, msg.len() as i64, "write_bytes(fd=2) should write all bytes");
+        }
+
+        /// `read_bytes` from an invalid fd must return -1 (errno EBADF),
+        /// proving the raw `read` syscall path is wired (not a silent stub).
+        #[test]
+        fn wave45_read_bytes_invalid_fd_returns_negative() {
+            // fd 9999 is almost certainly not open.
+            let mut sink = [0u8; 4];
+            let buf = crate::alloc::Address::from_raw(sink.as_mut_ptr() as u64);
+            let n = read_bytes(9999, buf, sink.len() as u64);
+            assert!(n < 0, "read_bytes on invalid fd should return < 0, got {}", n);
         }
     }
 
