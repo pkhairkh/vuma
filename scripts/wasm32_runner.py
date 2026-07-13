@@ -583,6 +583,421 @@ def main():
         write_mem(0, struct.pack('<i', ret))
         return ret
 
+    # ── Socket / send-recv / sockopt / mmap / nanosleep host functions ────
+    # (Wave 5) POSIX-compatible socket family backed by the real OS.
+    #
+    # The fds returned by socket()/accept() are real host OS file
+    # descriptors.  We use socket.socket(fileno=fd) to wrap them for
+    # bind/listen/connect/send/recv/etc., then call .detach() so the
+    # wrapper does NOT close the fd when garbage-collected.  This keeps
+    # the fd alive for subsequent calls (send/recv/close/shutdown).
+    #
+    # sockaddr_in layout (AF_INET = 2, 16 bytes), little-endian on wasm32:
+    #   offset  0: sin_family  (u16)
+    #   offset  2: sin_port    (u16, network byte order — big endian)
+    #   offset  4: sin_addr    (u32, network byte order)
+    #   offset  8: sin_zero    (8 bytes padding)
+    import socket as _socket_mod
+    AF_INET = _socket_mod.AF_INET
+    SOCK_STREAM = _socket_mod.SOCK_STREAM
+    SOCK_DGRAM = _socket_mod.SOCK_DGRAM
+
+    # Linux <asm-generic/mman-common.h> flag bits we recognize.
+    MAP_ANONYMOUS = 0x20
+    MAP_FAILED = -1
+
+    # Bump-allocator state for anonymous mmap.  The mmap region lives in
+    # wasm linear memory starting at MMAP_BASE (1 MiB, well above the
+    # __vuma_alloc heap at 64 KiB and the print/args scratch at <4 KiB).
+    # We grow the wasm memory as needed via memory.grow().
+    MMAP_BASE = 0x100000  # 1 MiB
+    _mmap_bump = [MMAP_BASE]  # mutable holder so closures can update it
+
+    def _ensure_mem_size(end_addr):
+        """Grow wasm linear memory so that [0, end_addr) is valid.
+        Returns True on success, False if growth failed (memory max hit)."""
+        mem = get_mem()
+        if mem is None:
+            return False
+        page = 65536
+        cur_pages = mem.data_len(store) // page
+        need_pages = (end_addr + page - 1) // page
+        if need_pages <= cur_pages:
+            return True
+        # Grow by the delta.  memory.grow returns the old size in pages
+        # (>=0) on success or -1 (as a signed value) on failure.
+        delta = need_pages - cur_pages
+        try:
+            rc = mem.grow(store, delta)
+        except Exception:
+            return False
+        if rc is None or (isinstance(rc, int) and rc < 0):
+            return False
+        return True
+
+    def _read_sockaddr_in(addr_ptr, addrlen):
+        """Read a sockaddr_in (AF_INET) from wasm memory.
+        Returns a (host_ip_string, port) tuple, or None on failure."""
+        mem = get_mem()
+        if mem is None or addr_ptr == 0:
+            return None
+        try:
+            raw = mem.read(store, addr_ptr, addr_ptr + min(addrlen, 16))
+        except Exception:
+            return None
+        if len(raw) < 8:
+            return None
+        family = struct.unpack('<H', raw[0:2])[0]
+        if family != AF_INET:
+            return None
+        port = struct.unpack('>H', raw[2:4])[0]  # network byte order
+        addr = struct.unpack('>I', raw[4:8])[0]  # network byte order
+        host = _socket_mod.inet_ntoa(struct.pack('>I', addr))
+        return (host, port)
+
+    def _write_sockaddr_in(addr_ptr, host, port):
+        """Write a sockaddr_in (16 bytes) for (host, port) to wasm memory.
+        Also writes addrlen=16.  Used by accept()/recvfrom()."""
+        if addr_ptr == 0:
+            return
+        addr = struct.unpack('>I', _socket_mod.inet_aton(host))[0]
+        sa = struct.pack('<H', AF_INET) + struct.pack('>H', port) \
+            + struct.pack('>I', addr) + b'\x00' * 8
+        write_mem(addr_ptr, sa)
+
+    def _wrap_fd(fd):
+        """Wrap a raw OS fd in a socket object WITHOUT taking ownership.
+        Caller MUST .detach() before the wrapper is GC'd to avoid closing."""
+        try:
+            s = _socket_mod.socket(fileno=fd)
+            return s
+        except OSError:
+            return None
+
+    # vuma_socket(domain, type, protocol) → fd, or -errno on error
+    def vuma_socket(domain, type_, protocol):
+        try:
+            s = _socket_mod.socket(domain, type_, protocol)
+            fd = s.fileno()
+            s.detach()  # release ownership so GC doesn't close the fd
+            ret = fd
+        except OSError as e:
+            ret = -(e.errno or 1)
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_bind(fd, addr_ptr, addrlen) → 0 on success, -errno on error
+    def vuma_bind(fd, addr_ptr, addrlen):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                apa = _read_sockaddr_in(addr_ptr, addrlen)
+                if apa is None:
+                    ret = -97  # EAFNOSUPPORT
+                else:
+                    s.bind(apa)
+                    ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_listen(fd, backlog) → 0 on success, -errno on error
+    def vuma_listen(fd, backlog):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                s.listen(backlog)
+                ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_accept(fd, addr_ptr, addrlen_ptr) → client fd, or -errno on error
+    # Writes the client's sockaddr_in to addr_ptr (if non-NULL) and the
+    # addrlen (16) to addrlen_ptr (if non-NULL).
+    def vuma_accept(fd, addr_ptr, addrlen_ptr):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                conn, addr = s.accept()
+                cfd = conn.fileno()
+                conn.detach()  # release ownership of the client fd
+                if addr_ptr != 0:
+                    host, port = addr[0], addr[1]
+                    _write_sockaddr_in(addr_ptr, host, port)
+                if addrlen_ptr != 0:
+                    write_mem(addrlen_ptr, struct.pack('<i', 16))
+                ret = cfd
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_connect(fd, addr_ptr, addrlen) → 0 on success, -errno on error
+    def vuma_connect(fd, addr_ptr, addrlen):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                apa = _read_sockaddr_in(addr_ptr, addrlen)
+                if apa is None:
+                    ret = -97  # EAFNOSUPPORT
+                else:
+                    s.connect(apa)
+                    ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_send(fd, buf_ptr, len, flags) → nbytes, or -errno on error
+    def vuma_send(fd, buf_ptr, length, flags):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                mem = get_mem()
+                data = mem.read(store, buf_ptr, buf_ptr + length) if (mem and length > 0) else b''
+                n = s.send(data, flags)
+                ret = n
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_recv(fd, buf_ptr, len, flags) → nbytes, or -errno on error
+    def vuma_recv(fd, buf_ptr, length, flags):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                data = s.recv(length, flags)
+                mem = get_mem()
+                if mem is not None and data:
+                    mem.write(store, data, buf_ptr)
+                ret = len(data)
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_sendto(fd, buf_ptr, len, flags, addr_ptr, addrlen) → nbytes
+    def vuma_sendto(fd, buf_ptr, length, flags, addr_ptr, addrlen):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                mem = get_mem()
+                data = mem.read(store, buf_ptr, buf_ptr + length) if (mem and length > 0) else b''
+                apa = _read_sockaddr_in(addr_ptr, addrlen) if addr_ptr != 0 else None
+                if apa is None and addr_ptr != 0:
+                    ret = -97  # EAFNOSUPPORT
+                elif apa is None:
+                    n = s.send(data, flags)
+                    ret = n
+                else:
+                    n = s.sendto(data, flags, apa)
+                    ret = n
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_recvfrom(fd, buf_ptr, len, flags, addr_ptr, addrlen_ptr) → nbytes
+    def vuma_recvfrom(fd, buf_ptr, length, flags, addr_ptr, addrlen_ptr):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                data, addr = s.recvfrom(length, flags)
+                mem = get_mem()
+                if mem is not None and data:
+                    mem.write(store, data, buf_ptr)
+                if addr_ptr != 0 and addr:
+                    host, port = addr[0], addr[1]
+                    _write_sockaddr_in(addr_ptr, host, port)
+                if addrlen_ptr != 0:
+                    write_mem(addrlen_ptr, struct.pack('<i', 16))
+                ret = len(data)
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_setsockopt(fd, level, optname, optval_ptr, optlen) → 0 / -errno
+    def vuma_setsockopt(fd, level, optname, optval_ptr, optlen):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                mem = get_mem()
+                val = mem.read(store, optval_ptr, optval_ptr + optlen) if (mem and optlen > 0) else b''
+                # setsockopt accepts an int (auto-packed) or a bytes object.
+                if optlen == 4:
+                    s.setsockopt(level, optname, struct.unpack('<i', val)[0])
+                else:
+                    s.setsockopt(level, optname, val)
+                ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_getsockopt(fd, level, optname, optval_ptr, optlen_ptr) → 0 / -errno
+    # Writes the option value to optval_ptr and the length to optlen_ptr.
+    def vuma_getsockopt(fd, level, optname, optval_ptr, optlen_ptr):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                mem = get_mem()
+                # Read the requested buffer length.
+                buflen = 4
+                if mem is not None and optlen_ptr != 0:
+                    raw_len = mem.read(store, optlen_ptr, optlen_ptr + 4)
+                    if len(raw_len) == 4:
+                        buflen = struct.unpack('<i', raw_len)[0]
+                if buflen <= 0:
+                    buflen = 4
+                val = s.getsockopt(level, optname, buflen)
+                if mem is not None:
+                    if optval_ptr != 0:
+                        mem.write(store, val, optval_ptr)
+                    if optlen_ptr != 0:
+                        mem.write(store, struct.pack('<i', len(val)), optlen_ptr)
+                ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_shutdown(fd, how) → 0 / -errno
+    def vuma_shutdown(fd, how):
+        s = _wrap_fd(fd)
+        if s is None:
+            ret = -9  # EBADF
+        else:
+            try:
+                s.shutdown(how)
+                ret = 0
+            except OSError as e:
+                ret = -(e.errno or 1)
+            finally:
+                try: s.detach()
+                except Exception: pass
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_mmap(addr, len, prot, flags, fd, offset) → ptr, or -1 (MAP_FAILED)
+    # Anonymous mmap (MAP_ANONYMOUS): bump-allocate in wasm linear memory,
+    # growing memory as needed.  File-backed mmap: unsupported → MAP_FAILED.
+    def vuma_mmap(addr, length, prot, flags, fd, offset):
+        if length <= 0:
+            ret = -1  # MAP_FAILED
+        elif not (flags & MAP_ANONYMOUS):
+            # File-backed mmap is not supported in the wasm32 sandbox.
+            ret = -1  # MAP_FAILED (errno ENOSYS would be set by the kernel)
+        else:
+            page = 65536
+            aligned_len = (length + page - 1) & ~(page - 1)
+            ptr = _mmap_bump[0]
+            end = ptr + aligned_len
+            if not _ensure_mem_size(end):
+                ret = -1  # MAP_FAILED (ENOMEM)
+            else:
+                _mmap_bump[0] = end
+                ret = ptr
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_munmap(addr, len) → 0 (no-op on wasm32; bump-allocator can't free)
+    def vuma_munmap(addr, length):
+        ret = 0
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_mprotect(addr, len, prot) → 0 (no-op; wasm has no page protection)
+    def vuma_mprotect(addr, length, prot):
+        ret = 0
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # vuma_nanosleep(req_ptr, rem_ptr) → 0 on success, -errno on error
+    # req is a struct timespec { tv_sec: i64, tv_nsec: i64 } (16 bytes).
+    # rem (if non-NULL) receives the remaining time on interruption.
+    def vuma_nanosleep(req_ptr, rem_ptr):
+        import time as _time_mod
+        try:
+            mem = get_mem()
+            if mem is None:
+                ret = -14  # EFAULT
+            else:
+                raw = mem.read(store, req_ptr, req_ptr + 16)
+                if len(raw) < 16:
+                    ret = -14  # EFAULT
+                else:
+                    tv_sec, tv_nsec = struct.unpack('<qq', raw)
+                    if tv_sec < 0 or tv_nsec < 0 or tv_nsec >= 1_000_000_000:
+                        ret = -22  # EINVAL
+                    else:
+                        secs = tv_sec + tv_nsec / 1_000_000_000.0
+                        _time_mod.sleep(secs)
+                        if rem_ptr != 0:
+                            # No remainder (slept the full duration).
+                            write_mem(rem_ptr, struct.pack('<qq', 0, 0))
+                        ret = 0
+        except OSError as e:
+            ret = -(e.errno or 1)
+        except Exception:
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
     i32 = ValType.i32()
     # Define the custom "vuma" module host functions in the linker
     linker.define_func("vuma", "pipe", FuncType([i32], [i32]), vuma_pipe)
@@ -607,6 +1022,30 @@ def main():
     linker.define_func("vuma", "link", FuncType([i32, i32], [i32]), vuma_link)
     linker.define_func("vuma", "symlink", FuncType([i32, i32], [i32]), vuma_symlink)
     linker.define_func("vuma", "readlink", FuncType([i32, i32, i32], [i32]), vuma_readlink)
+    # Socket family (Wave 5) — POSIX-compatible host functions backed by the
+    # real OS socket layer.  sendmsg / recvmsg are NOT defined here; they
+    # resolve to the generic -ENOSYS stub in the wasm module (msghdr
+    # marshaling is too complex for the wasm32 bridge).
+    linker.define_func("vuma", "socket", FuncType([i32, i32, i32], [i32]), vuma_socket)
+    linker.define_func("vuma", "bind", FuncType([i32, i32, i32], [i32]), vuma_bind)
+    linker.define_func("vuma", "listen", FuncType([i32, i32], [i32]), vuma_listen)
+    linker.define_func("vuma", "accept", FuncType([i32, i32, i32], [i32]), vuma_accept)
+    linker.define_func("vuma", "connect", FuncType([i32, i32, i32], [i32]), vuma_connect)
+    linker.define_func("vuma", "send", FuncType([i32, i32, i32, i32], [i32]), vuma_send)
+    linker.define_func("vuma", "recv", FuncType([i32, i32, i32, i32], [i32]), vuma_recv)
+    linker.define_func("vuma", "sendto", FuncType([i32, i32, i32, i32, i32, i32], [i32]), vuma_sendto)
+    linker.define_func("vuma", "recvfrom", FuncType([i32, i32, i32, i32, i32, i32], [i32]), vuma_recvfrom)
+    linker.define_func("vuma", "setsockopt", FuncType([i32, i32, i32, i32, i32], [i32]), vuma_setsockopt)
+    linker.define_func("vuma", "getsockopt", FuncType([i32, i32, i32, i32, i32], [i32]), vuma_getsockopt)
+    linker.define_func("vuma", "shutdown", FuncType([i32, i32], [i32]), vuma_shutdown)
+    # Memory management (Wave 5).  mmap anonymous = bump-allocate in linear
+    # memory; file-backed = MAP_FAILED (-1); munmap/mprotect = no-op 0.
+    linker.define_func("vuma", "mmap", FuncType([i32, i32, i32, i32, i32, i32], [i32]), vuma_mmap)
+    linker.define_func("vuma", "munmap", FuncType([i32, i32], [i32]), vuma_munmap)
+    linker.define_func("vuma", "mprotect", FuncType([i32, i32, i32], [i32]), vuma_mprotect)
+    # Sleep (Wave 5).  clock_gettime is already aliased to WASI
+    # clock_time_get; nanosleep is a new host function (real time.sleep).
+    linker.define_func("vuma", "nanosleep", FuncType([i32, i32], [i32]), vuma_nanosleep)
 
     # Instantiate the module
     instance = linker.instantiate(store, module)

@@ -100,13 +100,13 @@
 > Currently silently return -1. Either map to host functions or document as
 > unsupported with a real error code (not silent -1).
 
-- [ ] **[BE-wasm32]** Resolve `socket`/`bind`/`listen`/`accept`/`connect` — either add `vuma.socket.*` host imports or return `-ENOSYS`.
-- [ ] **[BE-wasm32]** Resolve `send`/`recv`/`sendto`/`recvfrom`/`sendmsg`/`recvmsg`.
-- [ ] **[BE-wasm32]** Resolve `setsockopt`/`getsockopt`/`shutdown`.
-- [ ] **[BE-wasm32]** Resolve `mmap`/`munmap`/`mprotect` (no-op or document).
-- [ ] **[BE-wasm32]** Resolve `futex`/`clone` (or document as unsupported).
-- [ ] **[BE-wasm32]** Resolve `nanosleep`/`clock_gettime` (already have `clock_time_get` — alias).
-- [ ] **[BE-wasm32]** Replace silent -1 fallback with explicit `-ENOSYS` so callers can detect unsupported syscalls. `src/codegen/src/wasm32/mod.rs:4044-4059`
+- [x] **[BE-wasm32]** Resolve `socket`/`bind`/`listen`/`accept`/`connect` — either add `vuma.socket.*` host imports or return `-ENOSYS`. `src/codegen/src/wasm32/mod.rs` + `scripts/wasm32_runner.py` — added `vuma.socket`/`bind`/`listen`/`accept`/`connect` host imports (indices 29-33) backed by the real OS socket layer via Python's `socket` module (fd wrapped with `fileno=` + `detach()` so GC doesn't close it). sockaddr_in (AF_INET) marshaled to/from wasm linear memory.
+- [x] **[BE-wasm32]** Resolve `send`/`recv`/`sendto`/`recvfrom`/`sendmsg`/`recvmsg`. — added `vuma.send`/`recv`/`sendto`/`recvfrom` host imports (indices 34-37). `sendmsg`/`recvmsg` intentionally NOT mapped: they resolve to the generic `-ENOSYS` stub (msghdr struct marshaling — iovec arrays + ancillary data — is too complex for the wasm32 bridge; documented in the constants comment).
+- [x] **[BE-wasm32]** Resolve `setsockopt`/`getsockopt`/`shutdown`. — added `vuma.setsockopt`/`getsockopt`/`shutdown` host imports (indices 38-40). optval marshaled as bytes (4-byte opts unpacked as i32); getsockopt writes the value + length back to the caller's buffers.
+- [x] **[BE-wasm32]** Resolve `mmap`/`munmap`/`mprotect` (no-op or document). — added `vuma.mmap`/`munmap`/`mprotect` host imports (indices 41-43). `mmap` anonymous (`MAP_ANONYMOUS=0x20`) bump-allocates in wasm linear memory (region base 1 MiB, grows memory via `memory.grow` as needed); file-backed `mmap` returns `MAP_FAILED` (-1, documented unsupported). `munmap`/`mprotect` are no-ops returning 0 (wasm has no page protection / the bump allocator can't free).
+- [x] **[BE-wasm32]** Resolve `futex`/`clone` (or document as unsupported). — intentionally NOT mapped: `futex` (inter-thread locking) and `clone` (thread/process creation) are fundamentally incompatible with wasm32's single-threaded sandbox. They resolve to the generic `-ENOSYS` stub so callers detect they are unsupported (documented in the constants comment).
+- [x] **[BE-wasm32]** Resolve `nanosleep`/`clock_gettime` (already have `clock_time_get` — alias). — `clock_gettime` was already aliased to WASI `clock_time_get` (index 5) in `func_name_to_idx`; left as-is. Added `vuma.nanosleep` host import (index 44) backed by real `time.sleep`: reads `struct timespec { tv_sec, tv_nsec }` (16 bytes, i64+i64 LE) from `req_ptr`, sleeps, writes zero remainder to `rem_ptr` if non-NULL.
+- [x] **[BE-wasm32]** Replace silent -1 fallback with explicit `-ENOSYS` so callers can detect unsupported syscalls. `src/codegen/src/wasm32/mod.rs` — the generic unknown-extern stub now writes `-ENOSYS` (-38) to linear memory address 0 (the codegen's extern-return slot) AND returns `-ENOSYS` on the wasm stack, replacing the previous `i32.const -1` that was indistinguishable from a real runtime error. Added `ENOSYS_ERRNO=38` constant. The `() -> i32` stub correctly serves callers of any arity because wasm `call` only pops `params.len()` (=0) values, leaving extra caller args as stack orphans that the codegen's block-end Drop-all logic cleans up.
 
 ---
 
