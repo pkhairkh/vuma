@@ -908,6 +908,17 @@ fn inline_cost(instr: &IRInstr) -> u32 {
 
 /// Compute the total inlining cost of a function, with savings for
 /// constant arguments that will be folded after inlining.
+///
+/// (Wave 25) The cost model is **per-instruction** (using [`inline_cost`])
+/// plus a **per-call-argument** overhead of `2 * args.len()`. The
+/// per-arg overhead models:
+///   - the register-allocator pressure each argument adds at the call
+///     site (live-range for the arg, plus the call setup), and
+///   - the work the inliner has to do to remap each parameter vreg.
+///
+/// Constant arguments get a `3`-cycle credit because they fold away
+/// after inlining (e.g. `add(x, 1)` with `x = 5` becomes `add(5, 1)`
+/// which constant-folds to `6`, eliminating the Add entirely).
 fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
     let mut cost: u32 = 0;
     for block in &callee.blocks {
@@ -915,6 +926,9 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
             cost = cost.saturating_add(inline_cost(instr));
         }
     }
+    // (Wave 25) Per-argument overhead: 2 cycles per arg, modeling
+    // regalloc pressure + inliner remap cost.
+    cost = cost.saturating_add((args.len() as u32).saturating_mul(2));
     // Savings: each constant argument reduces cost (will be constant-folded).
     // This models the fact that `fn add(x, y) { x + y }` called with
     // `add(3, 4)` becomes `3 + 4` which folds to `7` — the entire function
@@ -939,6 +953,13 @@ pub fn inline_small(
 }
 
 /// Inlining with a caller-specified cost threshold.
+///
+/// (Wave 25) Caps total inlines per function at `MAX_INLINES_PER_FN` to
+/// prevent runaway inlining in the presence of mutual recursion (A calls
+/// B calls A) — direct self-recursion is already skipped above, but
+/// mutual recursion would otherwise loop until the block list explodes.
+pub const MAX_INLINES_PER_FN: u32 = 256;
+
 pub fn inline_with_threshold(
     mut func: IRFunction,
     program_funcs: &HashMap<String, &IRFunction>,
@@ -946,6 +967,13 @@ pub fn inline_with_threshold(
 ) -> IRFunction {
     let mut vreg_counter = max_vreg_id(&func) + 1;
     let mut inline_id: u32 = 0;
+
+    // (Wave 25) Visited-set + total-inline cap: prevents mutual-recursion
+    // explosions. We track which callees have already been inlined into
+    // this caller — a callee that has been inlined once is not inlined
+    // again (its second call site would just re-inline the same body,
+    // doubling code size with no benefit).
+    let mut inlined_callees: HashSet<String> = HashSet::new();
 
     let mut block_idx = 0;
     while block_idx < func.blocks.len() {
@@ -964,6 +992,16 @@ pub fn inline_with_threshold(
                 if *callee_name == func.name {
                     continue;
                 }
+                // (Wave 25) Don't re-inline a callee we've already inlined
+                // — mutual-recursion / repeat-call guard.
+                if inlined_callees.contains(callee_name) {
+                    continue;
+                }
+                // (Wave 25) Total-inline cap — prevents pathological
+                // blow-up even when the visited-set doesn't catch it.
+                if inline_id >= MAX_INLINES_PER_FN {
+                    continue;
+                }
                 if let Some(callee) = program_funcs.get(callee_name) {
                     // Only inline single-block callees (no branches/loops).
                     // Multi-block inlining requires block-graph rewiring that
@@ -972,7 +1010,17 @@ pub fn inline_with_threshold(
                     // inlining is provably correct: the callee's instructions
                     // are inserted inline, the Return is replaced with a Jump
                     // to the continuation, and no Phi nodes are involved.
-                    if callee.instruction_count() <= 5 {
+                    //
+                    // (Wave 25 fix): the previous code hard-coded
+                    // `instruction_count() <= 5` and silently ignored the
+                    // `threshold` parameter — so callers that bumped the
+                    // threshold from `CompileConfig` never actually got more
+                    // aggressive inlining, and the per-instruction cost model
+                    // in `function_inline_cost` was dead code. Use the cost
+                    // model + threshold now.
+                    if callee.blocks.len() == 1
+                        && function_inline_cost(callee, args) <= threshold
+                    {
                         call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
                         break;
                     }
@@ -984,6 +1032,9 @@ pub fn inline_with_threshold(
             let callee = program_funcs.get(&callee_name).unwrap();
             let prefix = format!("inl{}_{}", inline_id, func.blocks[block_idx].label);
             inline_id += 1;
+            // (Wave 25) Record that this callee has been inlined into `func`
+            // so we don't re-inline it at a later call site.
+            inlined_callees.insert(callee_name.clone());
 
             // Build vreg mapping: callee params → caller args.
             // Maps ALL parameter types: Register, Address, Immediate.
@@ -1360,10 +1411,12 @@ pub fn run_optimizations_with_profile(
     latency_table: &crate::target_desc::LatencyTable,
     profile: &crate::egraph::ProfileData,
 ) -> IRProgram {
-    if !profile.has_data() {
-        return run_optimizations_with_target(program, latency_table);
-    }
-    run_optimizations_inner(program, latency_table, Some(profile))
+    run_optimizations_with_profile_and_inline_threshold(
+        program,
+        latency_table,
+        profile,
+        DEFAULT_INLINE_THRESHOLD,
+    )
 }
 
 /// Run optimizations with a target-specific latency table.
@@ -1379,16 +1432,59 @@ pub fn run_optimizations_with_target(
     program: IRProgram,
     latency_table: &crate::target_desc::LatencyTable,
 ) -> IRProgram {
-    run_optimizations_inner(program, latency_table, None)
+    run_optimizations_with_target_and_inline_threshold(
+        program,
+        latency_table,
+        DEFAULT_INLINE_THRESHOLD,
+    )
+}
+
+/// Default inline cost threshold (Wave 25). Matches the historical
+/// `INLINE_THRESHOLD_O2` of 8 plus head-room for argument-count cost
+/// (each constant arg saves 3). The `CompileConfig.inline_threshold`
+/// default mirrors this value.
+pub const DEFAULT_INLINE_THRESHOLD: u32 = 40;
+
+/// Run optimizations with a target-specific latency table and an explicit
+/// inline cost threshold (Wave 25). The threshold is plumbed in from
+/// `CompileConfig.inline_threshold` by the pipeline driver.
+pub fn run_optimizations_with_target_and_inline_threshold(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    inline_threshold: u32,
+) -> IRProgram {
+    run_optimizations_inner(program, latency_table, None, inline_threshold)
+}
+
+/// Run optimizations with PGO data and an explicit inline cost threshold.
+pub fn run_optimizations_with_profile_and_inline_threshold(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    profile: &crate::egraph::ProfileData,
+    inline_threshold: u32,
+) -> IRProgram {
+    if !profile.has_data() {
+        return run_optimizations_with_target_and_inline_threshold(
+            program,
+            latency_table,
+            inline_threshold,
+        );
+    }
+    run_optimizations_inner(program, latency_table, Some(profile), inline_threshold)
 }
 
 /// Inner optimization driver shared by `run_optimizations_with_target` and
 /// `run_optimizations_with_profile`. The optional profile (Wave 12) switches
 /// the e-graph cost function from `target_cost_fn` to `pgo_cost_fn`.
+///
+/// (Wave 25) `inline_threshold` is the per-callee cost budget — callees
+/// whose `function_inline_cost` ≤ threshold get inlined at their call
+/// sites. Plumbed in from `CompileConfig.inline_threshold`.
 fn run_optimizations_inner(
     mut program: IRProgram,
     latency_table: &crate::target_desc::LatencyTable,
     profile: Option<&crate::egraph::ProfileData>,
+    inline_threshold: u32,
 ) -> IRProgram {
     // Build a function lookup table (cloned to avoid borrow conflicts when
     // mutating program.functions).
@@ -1417,7 +1513,12 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // let f = inline_small(f, let f = inline_small(f, &func_refs);func_refs);
+        // (Wave 25) Re-enabled inliner. The "caller never inlined" bug was
+        // that `inline_with_threshold` ignored its `threshold` parameter
+        // and hard-coded `instruction_count() <= 5`, so callers that bumped
+        // the threshold from CompileConfig had no effect. Fixed above to
+        // use `function_inline_cost(callee, args) <= threshold`.
+        let f = inline_with_threshold(f, &func_refs, inline_threshold);
         // LICM is DISABLED: it creates preheader blocks that the codegen
         // doesn't emit correctly. The preheader's instructions (e.g., loop-
         // invariant Add that computes the loop bound) are skipped because the
@@ -3161,5 +3262,147 @@ mod working_tests {
             }
             other => panic!("expected unchanged BinOp, got {:?}", other),
         }
+    }
+
+    // ---- Wave 25 Inliner Tests ----
+
+    #[test]
+    fn wave25_inline_reduces_call_count() {
+        // Callee: fn add_one(x) { v1 = x + 1; ret v1 } — 1 instr, cost
+        //   = inline_cost(Add)=1 + 2*1 arg = 3 (one const-arg credit → 0)
+        //   ≤ DEFAULT_INLINE_THRESHOLD, so it should be inlined.
+        let mut callee = IRFunction::new("add_one");
+        callee.params = vec![IRValue::Register(0)];
+        callee.param_types = vec![IRType::I64];
+        callee.blocks[0].instructions = vec![IRInstr::Add {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        }];
+        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        callee.results = vec![IRValue::Register(1)];
+        callee.result_types = vec![IRType::I64];
+
+        // Caller: v0 = call add_one(42); ret v0
+        let mut caller = IRFunction::new("main");
+        caller.blocks[0].instructions = vec![IRInstr::Call {
+            dst: Some(IRValue::Register(0)),
+            func: "add_one".to_string(),
+            args: vec![IRValue::Immediate(42)],
+            is_extern: false,
+        }];
+        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+
+        let func_map: HashMap<String, &IRFunction> =
+            [("add_one".to_string(), &callee)].into_iter().collect();
+
+        let result = inline_with_threshold(caller, &func_map, DEFAULT_INLINE_THRESHOLD);
+
+        // After inlining, no Call to add_one should remain in `main`.
+        let call_count = result
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "add_one"))
+            .count();
+        assert_eq!(call_count, 0, "call to add_one should have been inlined away");
+        // The inlined body should contain an Add instruction.
+        let has_add = result
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i, IRInstr::Add { .. }));
+        assert!(has_add, "inlined body should contain the Add instruction");
+    }
+
+    #[test]
+    fn wave25_recursive_fn_not_inlined_infinitely() {
+        // Direct self-recursion: `fn rec(n) { return rec(n); }`.
+        // The inliner skips `callee_name == func.name`, so the call is
+        // preserved verbatim and the function stays at 1 block / 1 call.
+        let mut rec = IRFunction::new("rec");
+        rec.params = vec![IRValue::Register(0)];
+        rec.param_types = vec![IRType::I64];
+        rec.blocks[0].instructions = vec![IRInstr::Call {
+            dst: Some(IRValue::Register(1)),
+            func: "rec".to_string(),
+            args: vec![IRValue::Register(0)],
+            is_extern: false,
+        }];
+        rec.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+
+        let rec_clone = rec.clone();
+        let func_map: HashMap<String, &IRFunction> =
+            [("rec".to_string(), &rec_clone)].into_iter().collect();
+
+        let result = inline_with_threshold(rec, &func_map, DEFAULT_INLINE_THRESHOLD);
+
+        // Should not have grown: still 1 block, still 1 Call to rec.
+        assert_eq!(result.blocks.len(), 1, "recursive call must not be inlined");
+        let call_count = result
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "rec"))
+            .count();
+        assert_eq!(call_count, 1, "recursive call must be preserved exactly once");
+    }
+
+    #[test]
+    fn wave25_inline_threshold_respected() {
+        // Callee with 8 Add instructions — cost = 8*1 + 2*1 arg - 3*1 const
+        // = 7. With threshold=5 it should NOT be inlined (7 > 5); with
+        // threshold=40 it should be.
+        let mut callee = IRFunction::new("eight_adds");
+        callee.params = vec![IRValue::Register(0)];
+        callee.param_types = vec![IRType::I64];
+        let mut prev = IRValue::Register(0);
+        for i in 1..=8u32 {
+            callee.blocks[0].instructions.push(IRInstr::Add {
+                dst: IRValue::Register(i),
+                lhs: prev.clone(),
+                rhs: IRValue::Immediate(1),
+                ty: None,
+            });
+            prev = IRValue::Register(i);
+        }
+        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(8)]);
+
+        let mut make_caller = || {
+            let mut c = IRFunction::new("caller");
+            c.blocks[0].instructions = vec![IRInstr::Call {
+                dst: Some(IRValue::Register(0)),
+                func: "eight_adds".to_string(),
+                args: vec![IRValue::Immediate(0)],
+                is_extern: false,
+            }];
+            c.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+            c
+        };
+
+        let callee_lo = callee.clone();
+        let map_lo: HashMap<String, &IRFunction> =
+            [("eight_adds".to_string(), &callee_lo)].into_iter().collect();
+        let r_lo = inline_with_threshold(make_caller(), &map_lo, 5);
+        let calls_lo = r_lo
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "eight_adds"))
+            .count();
+        assert_eq!(calls_lo, 1, "threshold=5 should NOT inline eight_adds (cost 7)");
+
+        let callee_hi = callee.clone();
+        let map_hi: HashMap<String, &IRFunction> =
+            [("eight_adds".to_string(), &callee_hi)].into_iter().collect();
+        let r_hi = inline_with_threshold(make_caller(), &map_hi, 40);
+        let calls_hi = r_hi
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "eight_adds"))
+            .count();
+        assert_eq!(calls_hi, 0, "threshold=40 should inline eight_adds");
     }
 }
