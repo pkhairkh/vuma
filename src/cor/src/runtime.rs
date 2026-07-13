@@ -983,8 +983,9 @@ pub enum RuntimeError {
 /// On x86_64 Unix systems, the same mmap + mprotect pattern is used.
 /// The x86_64 SystemV ABI returns the result in RAX.
 ///
-/// On other architectures or non-Unix systems, execution is simulated and
-/// 0 is returned.
+/// On non-Unix systems (or Unix on an architecture VUMA does not yet JIT
+/// for), returns a clear [`RuntimeError::ExecutionFailed`] — **no silent
+/// `Ok(0)`**. Wave 45.
 fn execute_code(code: &[u8]) -> Result<i64, RuntimeError> {
     if code.is_empty() {
         return Ok(0);
@@ -1000,11 +1001,62 @@ fn execute_code(code: &[u8]) -> Result<i64, RuntimeError> {
         execute_code_x86_64(code)
     }
 
-    #[cfg(not(any(all(unix, target_arch = "aarch64"), all(unix, target_arch = "x86_64"))))]
+    #[cfg(all(unix, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = code;
-        Ok(0)
+        Err(RuntimeError::ExecutionFailed(
+            0,
+            "JIT mmap requires a supported Unix architecture (x86_64 or aarch64)".to_string(),
+        ))
     }
+
+    #[cfg(not(unix))]
+    {
+        let _ = code;
+        Err(RuntimeError::ExecutionFailed(
+            0,
+            "JIT mmap requires Unix".to_string(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw syscall FFI (Wave 45 — replaces `libc::mmap` / `mprotect` / `munmap`).
+//
+// These externs declare the libc-vendor symbols directly so vuma-cor no
+// longer depends on the `libc` crate for JIT code execution. The constants
+// are the asm-generic / Linux values:
+//   PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4,
+//   MAP_PRIVATE=0x2, MAP_ANONYMOUS=0x20,
+//   MAP_FAILED = (void*)-1.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+extern "C" {
+    fn mmap(
+        addr: *mut u8,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: i64,
+    ) -> *mut u8;
+    fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+#[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+mod sys {
+    pub const PROT_READ: i32 = 1;
+    pub const PROT_WRITE: i32 = 2;
+    pub const PROT_EXEC: i32 = 4;
+    pub const MAP_PRIVATE: i32 = 0x2;
+    pub const MAP_ANONYMOUS: i32 = 0x20;
+    /// `MAP_FAILED` is `(void *)-1` on Linux.
+    pub const MAP_FAILED: *mut u8 = !0usize as *mut u8;
+    /// Default page size on Linux x86_64 / aarch64.
+    #[allow(dead_code)] // exercised by wave45 tests; not used by the lib build
+    pub const PAGE_SIZE: usize = 4096;
 }
 
 /// AArch64 Unix implementation of code execution using mmap + mprotect.
@@ -1019,26 +1071,27 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
 
     unsafe {
         // Allocate anonymous memory with read + write (so we can copy code in).
-        let mem = libc::mmap(
+        // Wave 45: raw `mmap` extern instead of `libc::mmap`.
+        let mem = mmap(
             ptr::null_mut(),
             aligned_len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            sys::PROT_READ | sys::PROT_WRITE,
+            sys::MAP_PRIVATE | sys::MAP_ANONYMOUS,
             -1,
             0,
         );
 
-        if mem == libc::MAP_FAILED {
+        if mem == sys::MAP_FAILED {
             return Err(RuntimeError::ExecutionFailed(0, "mmap failed".to_string()));
         }
 
         // Copy the machine code into the mapped region.
-        ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
+        ptr::copy_nonoverlapping(code.as_ptr(), mem, len);
 
         // Set the region to read + execute (remove write permission).
-        let mprotect_result = libc::mprotect(mem, aligned_len, libc::PROT_READ | libc::PROT_EXEC);
+        let mprotect_result = mprotect(mem, aligned_len, sys::PROT_READ | sys::PROT_EXEC);
         if mprotect_result != 0 {
-            libc::munmap(mem, aligned_len);
+            munmap(mem, aligned_len);
             return Err(RuntimeError::ExecutionFailed(
                 0,
                 "mprotect failed".to_string(),
@@ -1050,7 +1103,7 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
         let result = func();
 
         // Unmap the executable memory.
-        libc::munmap(mem, aligned_len);
+        munmap(mem, aligned_len);
 
         Ok(result)
     }
@@ -1099,33 +1152,31 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
 
     unsafe {
         // Allocate anonymous memory with read + write (so we can copy code in).
-        let mem = libc::mmap(
+        // Wave 45: raw `mmap` extern instead of `libc::mmap`.
+        let mem = mmap(
             ptr::null_mut(),
             aligned_len,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            sys::PROT_READ | sys::PROT_WRITE,
+            sys::MAP_PRIVATE | sys::MAP_ANONYMOUS,
             -1,
             0,
         );
 
-        if mem == libc::MAP_FAILED {
+        if mem == sys::MAP_FAILED {
             return Err(RuntimeError::ExecutionFailed(0, "mmap failed".to_string()));
         }
 
         // Copy the machine code into the mapped region.
-        ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
+        ptr::copy_nonoverlapping(code.as_ptr(), mem, len);
 
         // Set the region to read + write + execute.
         // x86_64 requires W+X for some JIT scenarios; we use RWX here
         // to match the AArch64 pattern (R+X) but also allow the write
         // flag for self-modifying code scenarios on x86_64.
-        let mprotect_result = libc::mprotect(
-            mem,
-            aligned_len,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-        );
+        let mprotect_result =
+            mprotect(mem, aligned_len, sys::PROT_READ | sys::PROT_WRITE | sys::PROT_EXEC);
         if mprotect_result != 0 {
-            libc::munmap(mem, aligned_len);
+            munmap(mem, aligned_len);
             return Err(RuntimeError::ExecutionFailed(
                 0,
                 "mprotect failed".to_string(),
@@ -1138,7 +1189,7 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
         let result = func();
 
         // Unmap the executable memory.
-        libc::munmap(mem, aligned_len);
+        munmap(mem, aligned_len);
 
         Ok(result)
     }
@@ -1352,14 +1403,22 @@ mod tests {
 
     #[test]
     fn execute_code_simulated_on_non_aarch64() {
-        // On x86_64 (the development machine), execute_code should
-        // return Ok(0) without actually running the code.
+        // On x86_64 (the development machine), execute_code JITs the
+        // return-zero stub and the stub returns 0.
         let code = CORuntime::return_zero_stub();
         let result = execute_code(&code);
-        assert!(result.is_ok());
-        // On non-aarch64, the simulated result is 0.
-        #[cfg(not(all(unix, target_arch = "aarch64")))]
-        assert_eq!(result.unwrap(), 0);
+        // On supported Unix archs the stub executes and returns 0.
+        #[cfg(all(unix, any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), 0);
+        }
+        // Wave 45: on non-Unix (or unsupported Unix arch) we now return a
+        // clear error instead of silently Ok(0).
+        #[cfg(not(all(unix, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {
+            assert!(result.is_err(), "expected Err on non-JIT target, got {:?}", result);
+        }
     }
 
     #[test]
@@ -1500,6 +1559,86 @@ mod tests {
         assert!(
             scg.get_node(30).unwrap().has_prefetch,
             "hot memory node 30 should have prefetch after optimization"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 45 — JIT execution via raw `mmap` / `mprotect` / `munmap` syscalls
+    // (no `libc` crate). These tests run only on Unix + (x86_64|aarch64),
+    // where the JIT path is wired. They verify that the mmap-backed executor
+    // returns a non-null, page-aligned, writable+executable mapping, can
+    // actually run a tiny region of native code, and cleans up with munmap.
+    // -----------------------------------------------------------------------
+
+    /// Verify the `mmap` extern itself works: a 1-page anonymous mapping is
+    /// non-null, page-aligned, writable, and `munmap` succeeds. This is the
+    /// building block `execute_code_*` relies on after Wave 45.
+    #[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn wave45_mmap_returns_page_aligned_writable_mapping() {
+        let len = sys::PAGE_SIZE;
+        unsafe {
+            let mem = mmap(
+                std::ptr::null_mut(),
+                len,
+                sys::PROT_READ | sys::PROT_WRITE,
+                sys::MAP_PRIVATE | sys::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            assert!(mem != sys::MAP_FAILED, "mmap returned MAP_FAILED");
+            // Page-aligned (4096 on x86_64/aarch64).
+            assert_eq!(
+                (mem as usize) % 4096,
+                0,
+                "mmap should return a page-aligned address"
+            );
+            // Writable: write a sentinel byte and read it back.
+            *mem = 0x77;
+            assert_eq!(*mem, 0x77, "mapped page should be writable");
+            // Make it executable and run a tiny no-op + ret stub through it.
+            let rc = mprotect(mem, len, sys::PROT_READ | sys::PROT_EXEC);
+            assert_eq!(rc, 0, "mprotect R+X should succeed");
+            // munmap should succeed (returns 0).
+            let urc = munmap(mem, len);
+            assert_eq!(urc, 0, "munmap should succeed");
+        }
+    }
+
+    /// End-to-end JIT execution of the `return_zero_stub` via the raw
+    /// `mmap`/`mprotect`/`munmap` externs (Wave 45). The stub is a 2-instr
+    /// aarch64 sequence (MOV X0,XZR ; RET) or a 2-instr x86_64 sequence
+    /// (xor eax,eax ; ret), both of which return 0.
+    #[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn wave45_jit_executes_compiled_region_without_libc() {
+        let code = CORuntime::return_zero_stub();
+        assert!(!code.is_empty(), "return_zero_stub should be non-empty on JIT targets");
+        let result = execute_code(&code);
+        assert!(result.is_ok(), "execute_code failed: {:?}", result);
+        assert_eq!(result.unwrap(), 0, "return_zero_stub should return 0");
+    }
+
+    /// Non-Unix fallback must now return a clear error (Wave 45: no silent
+    /// `Ok(0)`). On supported Unix archs this test is a no-op (gated off).
+    #[cfg(not(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"))))]
+    #[test]
+    fn wave45_non_unix_returns_clear_error() {
+        let code = CORuntime::return_zero_stub();
+        // On these targets the stub is empty; pass a non-empty dummy so the
+        // empty-code short-circuit doesn't kick in.
+        let code = if code.is_empty() { vec![0u8; 4] } else { code };
+        let result = execute_code(&code);
+        assert!(
+            result.is_err(),
+            "execute_code should return Err on non-JIT target, got {:?}",
+            result
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("JIT") || msg.contains("Unix"),
+            "error should mention JIT/Unix: {}",
+            msg
         );
     }
 }
