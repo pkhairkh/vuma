@@ -3809,4 +3809,229 @@ mod tests {
             msg
         );
     }
+
+    // ===================================================================
+    // Wave 13 — IRInstr::Syscall cross-backend conformance test
+    // ===================================================================
+    //
+    // Asserts that every backend emits a **non-empty** encoded instruction
+    // sequence for `IRInstr::Syscall { nr: 1, .. }`.  Wave 11 implemented
+    // Syscall on the 6 tier-1 backends.  Wave 12 is in progress for the
+    // 8 tier-2/3 backends (which currently `unimplemented!("… (Wave 12)")`).
+    // The 4 big-endian / LE wrapper backends automatically inherit from
+    // their parents.
+    //
+    // This test iterates over all 19 BackendKind variants and categorizes
+    // each result:
+    //   - **PASS**: backend emits non-empty encoded bytes for the syscall.
+    //   - **PENDING**: backend panics with "Wave 12" (not yet implemented).
+    //   - **FAIL**: backend panics with an unexpected message, returns an
+    //     error, or emits empty output.
+    //
+    // The test asserts zero FAILs.  PENDING backends are reported but do
+    // not fail the test (they will automatically be promoted to PASS once
+    // Wave 12 lands and removes the `unimplemented!()` arms).
+
+    use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
+    use std::collections::HashSet;
+
+    /// All 19 backend kinds for the Wave 13 syscall conformance sweep.
+    const ALL_19_BACKENDS: &[BackendKind] = &[
+        // Tier-1 (Wave 11 — Syscall implemented)
+        BackendKind::X86_64,
+        BackendKind::AArch64,
+        BackendKind::RiscV64,
+        BackendKind::RiscV32,
+        BackendKind::Arm32,
+        BackendKind::X86_32,
+        // Big-endian / LE wrappers (Wave 13 — inherit from parent)
+        BackendKind::AArch64Be,   // → aarch64  (has Syscall)
+        BackendKind::ArmEb,       // → arm32    (has Syscall)
+        BackendKind::Mips64Be,    // → mips64   (pending Wave 12)
+        BackendKind::PowerPC64LE, // → ppc64    (pending Wave 12)
+        // Tier-2/3 (Wave 12 — pending)
+        BackendKind::LoongArch64,
+        BackendKind::Mips64,
+        BackendKind::PowerPC64,
+        BackendKind::S390X,
+        BackendKind::Sparc64,
+        BackendKind::Alpha,
+        BackendKind::M68k,
+        BackendKind::Hppa,
+        // wasm32 (Wave 11 — emits i32.const -ENOSYS)
+        BackendKind::Wasm32,
+    ];
+
+    /// Build a minimal IR function containing a single `IRInstr::Syscall`
+    /// instruction with `nr: 1` (Linux `__NR_write` on most arches).
+    fn build_syscall_ir_func() -> IRFunction {
+        IRFunction {
+            name: "syscall_conformance".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Syscall {
+                    nr: 1,
+                    args: vec![],
+                    dst: Some(IRValue::Register(0)),
+                }],
+                terminator: IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+                source_line: 0,
+            }],
+            source_file: String::new(),
+        }
+    }
+
+    /// Outcome of attempting Syscall compilation on a single backend.
+    enum SyscallConformance {
+        /// Backend emitted non-empty encoded bytes — conformance met.
+        Pass(usize), // byte count
+        /// Backend panicked with a "Wave 12" message — not yet implemented.
+        Pending(String),
+        /// Backend failed unexpectedly (wrong panic, error, or empty output).
+        Fail(String),
+    }
+
+    /// Attempt to compile `IRInstr::Syscall { nr: 1, .. }` on a single
+    /// backend, catching panics so one backend's failure doesn't abort
+    /// the entire sweep.
+    fn check_syscall_conformance(kind: BackendKind) -> SyscallConformance {
+        let backend = match create_backend(kind) {
+            Ok(b) => b,
+            Err(e) => return SyscallConformance::Fail(format!("create_backend error: {}", e)),
+        };
+        let func = build_syscall_ir_func();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let allocated = backend.allocate_registers(&func)?;
+            backend.encode_function(&allocated)
+        }));
+
+        match result {
+            Ok(Ok(bytes)) => {
+                if bytes.is_empty() {
+                    SyscallConformance::Fail("emitted 0 bytes".to_string())
+                } else {
+                    SyscallConformance::Pass(bytes.len())
+                }
+            }
+            Ok(Err(e)) => SyscallConformance::Fail(format!("returned error: {}", e)),
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("<non-string panic>");
+                if msg.contains("Wave 12") {
+                    SyscallConformance::Pending(msg.to_string())
+                } else {
+                    SyscallConformance::Fail(format!("panic: {}", msg))
+                }
+            }
+        }
+    }
+
+    /// Wave 13 — Cross-backend `IRInstr::Syscall` conformance test.
+    ///
+    /// Iterates over all 19 backends and asserts that each one EITHER
+    /// emits non-empty encoded output for `Syscall { nr: 1, .. }` OR
+    /// panics with a "Wave 12" message (indicating the tier-2/3
+    /// implementation is still pending).  Any other outcome (unexpected
+    /// panic, error, or empty output) fails the test.
+    #[test]
+    fn test_syscall_conformance_all_backends() {
+        let mut pass_count = 0usize;
+        let mut pending_count = 0usize;
+        let mut fail_count = 0usize;
+        let mut failures: Vec<(BackendKind, String)> = Vec::new();
+
+        eprintln!("\n════════ Wave 13: IRInstr::Syscall cross-backend conformance ════════");
+        eprintln!("  {:<16} {:<10} {}", "Backend", "Status", "Detail");
+        eprintln!("  {}", "-".repeat(64));
+
+        for kind in ALL_19_BACKENDS {
+            let name = kind.isa_name();
+            match check_syscall_conformance(*kind) {
+                SyscallConformance::Pass(n) => {
+                    pass_count += 1;
+                    eprintln!("  {:<16} {:<10} {} bytes", name, "PASS", n);
+                }
+                SyscallConformance::Pending(msg) => {
+                    pending_count += 1;
+                    eprintln!("  {:<16} {:<10} {}", name, "PENDING", msg);
+                }
+                SyscallConformance::Fail(msg) => {
+                    fail_count += 1;
+                    failures.push((*kind, msg.clone()));
+                    eprintln!("  {:<16} {:<10} {}", name, "FAIL", msg);
+                }
+            }
+        }
+
+        eprintln!("  {}", "-".repeat(64));
+        eprintln!(
+            "  Summary: {} PASS, {} PENDING (Wave 12), {} FAIL (out of {})",
+            pass_count,
+            pending_count,
+            fail_count,
+            ALL_19_BACKENDS.len()
+        );
+        eprintln!();
+
+        // 1. Zero FAILs — every backend must either emit non-empty output
+        //    or panic with "Wave 12" (pending).
+        assert_eq!(
+            fail_count, 0,
+            "{} backend(s) failed Syscall conformance unexpectedly: {:?}",
+            fail_count, failures
+        );
+
+        // 2. Tier-1 backends + wrappers whose parents have Syscall must
+        //    PASS (not pending).
+        let must_pass: &[BackendKind] = &[
+            BackendKind::X86_64,
+            BackendKind::AArch64,
+            BackendKind::RiscV64,
+            BackendKind::RiscV32,
+            BackendKind::Arm32,
+            BackendKind::X86_32,
+            BackendKind::AArch64Be, // inherits from aarch64
+            BackendKind::ArmEb,     // inherits from arm32
+            BackendKind::Wasm32,    // emits i32.const -ENOSYS
+        ];
+        for kind in must_pass {
+            match check_syscall_conformance(*kind) {
+                SyscallConformance::Pass(n) => {
+                    assert!(
+                        n > 0,
+                        "backend {:?} must emit non-empty syscall output (got 0 bytes)",
+                        kind
+                    );
+                }
+                SyscallConformance::Pending(msg) => {
+                    panic!("backend {:?} must PASS but got PENDING: {}", kind, msg);
+                }
+                SyscallConformance::Fail(msg) => {
+                    panic!("backend {:?} must PASS but got FAIL: {}", kind, msg);
+                }
+            }
+        }
+
+        // 3. Wrapper backends whose parents are tier-2/3 must EITHER pass
+        //    or be pending.  They must NOT fail.
+        for kind in &[BackendKind::Mips64Be, BackendKind::PowerPC64LE] {
+            match check_syscall_conformance(*kind) {
+                SyscallConformance::Pass(_) | SyscallConformance::Pending(_) => { /* ok */ }
+                SyscallConformance::Fail(msg) => {
+                    panic!("wrapper backend {:?} must pass or be pending but failed: {}", kind, msg);
+                }
+            }
+        }
+    }
 }

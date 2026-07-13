@@ -13,6 +13,24 @@
 //! (`e_flags = 0x2`) and `EM_PPC64` (21) machine type are identical
 //! between the two; only the byte order differs.
 //!
+//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//!
+//! `IRInstr::Syscall` emission is **automatically inherited** from the
+//! parent `PPC64Backend`. This backend delegates `allocate_registers`
+//! to `self.inner.allocate_registers(func)`, which calls the parent's
+//! instruction selector. Once Wave 12 implements the parent's
+//! `IRInstr::Syscall { nr, args, dst }` arm (emitting `LI R0, nr; SC`),
+//! this wrapper will automatically produce the same instructions —
+//! `encode_function` then byte-swaps each 4-byte word from BE to LE so
+//! `qemu-ppc64le` fetches the correct little-endian instruction words.
+//!
+//! **Current status:** The parent `ppc64` backend has
+//! `IRInstr::Syscall { .. } => unimplemented!("… (Wave 12)")` at
+//! `ppc64/mod.rs:4096` and `ppc64/mod.rs:5744`. Until Wave 12 lands,
+//! `allocate_registers` will panic on `IRInstr::Syscall`. The conformance
+//! test in `src/tests/src/cross_backend.rs` uses `catch_unwind` to
+//! gracefully report this as "pending Wave 12" rather than failing.
+//!
 //! ## Approach
 //!
 //! Rather than duplicate the entire ~7,400-line PPC64 backend, this module
@@ -404,5 +422,75 @@ mod tests {
         // Swap again to recover the original.
         swap_instruction_words(&mut bytes);
         assert_eq!(bytes, vec![0x4E, 0x80, 0x00, 0x20]);
+    }
+
+    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }`
+    /// inheritance from the parent `PPC64Backend` works.  Because Wave 12
+    /// has not yet implemented Syscall on the parent ppc64 backend, this
+    /// test uses `catch_unwind` and asserts that the result is EITHER
+    /// non-empty encoded output (Wave 12 landed) OR a panic containing
+    /// "Wave 12" (still pending).  Once Wave 12 lands, the test will
+    /// automatically require non-empty output.
+    #[test]
+    fn test_syscall_inherited_from_ppc64() {
+        use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
+        use std::collections::HashSet;
+        use std::panic;
+
+        let backend = PPC64LEBackend::new();
+        let func = IRFunction {
+            name: "syscall_test".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Syscall {
+                    nr: 1, // __NR_write on PPC64 Linux
+                    args: vec![],
+                    dst: Some(IRValue::Register(0)),
+                }],
+                terminator: IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+                source_line: 0,
+            }],
+            source_file: String::new(),
+        };
+
+        // Attempt allocation + encoding, catching the Wave 12 panic.
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            let allocated = backend.allocate_registers(&func)?;
+            backend.encode_function(&allocated)
+        }));
+
+        match result {
+            Ok(Ok(bytes)) => {
+                assert!(
+                    !bytes.is_empty(),
+                    "ppc64le must inherit non-empty syscall emission from ppc64"
+                );
+            }
+            Ok(Err(e)) => {
+                panic!(
+                    "ppc64le allocate_registers/encode_function returned error (not Wave 12 panic): {}",
+                    e
+                );
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("<non-string panic>");
+                assert!(
+                    msg.contains("Wave 12"),
+                    "ppc64le panicked with unexpected message (expected 'Wave 12' pending): {}",
+                    msg
+                );
+            }
+        }
     }
 }
