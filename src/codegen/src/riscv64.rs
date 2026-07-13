@@ -2808,13 +2808,14 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 /// - `__vuma_print_newline`: Print a newline character to stdout.
 ///
 /// All functions follow the LP64D calling convention.
-fn build_riscv64_runtime() -> Vec<u8> {
+fn build_riscv64_runtime() -> (Vec<u8>, usize, usize, usize) {
     let mut code = Vec::new();
 
     // ── __vuma_print_hex ──
     // Input: a0 = 64-bit value to print as 8 hex digits
     // Clobbers: t0, t1, t2, t3, a7
     // Stack frame: 32 bytes (save ra + s0 + buffer)
+    let hex_offset = 0usize;
 
     // Prologue
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode());
@@ -2911,6 +2912,7 @@ fn build_riscv64_runtime() -> Vec<u8> {
     // ── __vuma_print_int ──
     // Input: a0 = 64-bit signed integer to print as decimal
     // Strategy: divide by 10, store digits, reverse, write.
+    let int_offset = code.len();
 
     // Prologue
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -64 }.encode());
@@ -3042,6 +3044,7 @@ fn build_riscv64_runtime() -> Vec<u8> {
 
     // ── __vuma_print_newline ──
     // Simple: write '\n' to stdout
+    let newline_offset = code.len();
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
     code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 10 }.encode()); // '\n'
     code.extend(Instruction::Sb { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
@@ -3053,7 +3056,7 @@ fn build_riscv64_runtime() -> Vec<u8> {
     code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
     code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
 
-    code
+    (code, hex_offset, int_offset, newline_offset)
 }
 
 // ===========================================================================
@@ -6102,7 +6105,7 @@ impl Backend for RiscV64Backend {
         let header_size: usize = start_stub_size + ffi_stub_size;
 
         // ── Build runtime I/O code ──
-        let runtime_code = build_riscv64_runtime();
+        let (runtime_code, rt_hex_off, rt_int_off, rt_newline_off) = build_riscv64_runtime();
 
         // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
         // __vuma_alloc(size in a0) -> a0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
@@ -6420,20 +6423,24 @@ impl Backend for RiscV64Backend {
         }
 
         // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
-        // The runtime blob is a single contiguous block; the three entry
-        // symbols all share the start of the blob (the dispatcher selects
-        // based on a0/a7 conventions).
+        // The runtime blob is a single contiguous block containing three
+        // independent entry points laid out sequentially: hex first, then
+        // int, then newline.  Each registered symbol points at its own
+        // entry-point offset within the blob.
         let runtime_offsets_start = current_offset;
-        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
-        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
-        func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
-        // Bare-name alias so user code can call print_newline() directly.
-        // (print_int / print_hex bare aliases are handled separately — see
-        // Wave 2. print_newline is safe to register because its runtime
-        // dispatcher entry doesn't depend on argument registers being set.)
-        func_offsets.insert("print_newline".to_string(), runtime_offsets_start);
-        // Note: bare-name print_int/print_hex aliases are NOT registered here.
-        // test_print tests pass with print_int as an unresolved extern (no-op).
+        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start + rt_hex_off);
+        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start + rt_int_off);
+        func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start + rt_newline_off);
+        // Bare-name aliases: print_int / print_hex / print_newline point at
+        // the same runtime entry points as their __vuma_* counterparts so
+        // user code using the POSIX-friendly bare names resolves to the real
+        // decimal / hex / newline conversion routines instead of becoming
+        // no-op unresolved externs.  Each runtime entry point saves/restores
+        // ra and s0 and only uses caller-saved temporaries (t0-t6, a7) which
+        // the VUMA calling convention does not keep live across extern calls.
+        func_offsets.insert("print_hex".to_string(), runtime_offsets_start + rt_hex_off);
+        func_offsets.insert("print_int".to_string(), runtime_offsets_start + rt_int_off);
+        func_offsets.insert("print_newline".to_string(), runtime_offsets_start + rt_newline_off);
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.

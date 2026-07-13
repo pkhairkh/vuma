@@ -1753,8 +1753,11 @@ impl Backend for AlphaBackend {
             let beq_disp = ((after_dash as i64) - (beq_skip_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, beq_skip_pos, 0x39, Gpr::R5, beq_disp as i32);
 
-            // print_int stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub restored — calls now resolve to the real
+            // decimal-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub saves/restores SP (R30)
+            // and only clobbers caller-saved scratch registers (R0-R10).
+            syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // ── print_hex(n) → void — hex conversion + write(1, buf, len)
@@ -1814,8 +1817,11 @@ impl Backend for AlphaBackend {
             let bne_d = ((hx_loop as i64) - (bne_hx_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, bne_hx_pos, 0x3D, Gpr::R2, bne_d as i32);
 
-            // print_hex stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub restored — calls now resolve to the real
+            // hex-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub saves/restores SP (R30)
+            // and only clobbers caller-saved scratch registers (R0-R10).
+            syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // ── print_newline() → void — write '\n' to stdout ──
