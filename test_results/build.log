@@ -1,3 +1,4 @@
+   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
 warning: unnecessary parentheses around `let` scrutinee expression
     --> src/scg/src/transform.rs:2317:34
      |
@@ -16,63 +17,10 @@ help: remove these parentheses
 2320 ~                 } {
      |
 
-warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
-warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
-  --> src/ive/src/modular.rs:16:43
-   |
-16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
-   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused import: `NodeType`
-  --> src/ive/src/query.rs:17:43
-   |
-17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
-   |                                           ^^^^^^^^
-
-warning: unused variable: `summaries`
-   --> src/ive/src/modular.rs:336:5
-    |
-336 |     summaries: &HashMap<String, FunctionSummary>,
-    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: field `consistent` is never read
-  --> src/ive/src/query.rs:37:5
-   |
-31 | pub struct QuerySystem {
-   |            ----------- field in this struct
-...
-37 |     consistent: bool,
-   |     ^^^^^^^^^^
-   |
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
-warning: unused variable: `deref_inner`
-    --> src/parser/src/to_scg.rs:2959:40
-     |
-2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
-     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
-     |
-     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2961:22
-     |
-2961 |                 for (struct_name, layout) in &self.struct_table {
-     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: unused variable: `struct_name`
-    --> src/parser/src/to_scg.rs:2971:18
-     |
-2971 |             for (struct_name, layout) in &self.struct_table {
-     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
-
-warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
+   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
+   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
 warning: unused import: `CastKind`
   --> src/codegen/src/alpha.rs:46:28
    |
@@ -96,9 +44,9 @@ warning: unused imports: `CallNode`, `ScgType`, and `SwitchArm`
    |                   ^^^^^^^  ^^^^^^^^^
 
 warning: unused import: `RewriteRule`
-    --> src/codegen/src/opt.rs:1807:40
+    --> src/codegen/src/opt.rs:1812:40
      |
-1807 |     use crate::egraph::{EGraph, ENode, RewriteRule, standard_rules};
+1812 |     use crate::egraph::{EGraph, ENode, RewriteRule, standard_rules};
      |                                        ^^^^^^^^^^^
 
 warning: unused import: `std::collections::HashSet`
@@ -183,6 +131,61 @@ warning: unused import: `CmpKind`
 25 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
    |                                      ^^^^^^^
 
+warning: unused variable: `deref_inner`
+    --> src/parser/src/to_scg.rs:3048:40
+     |
+3048 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:3050:22
+     |
+3050 |                 for (struct_name, layout) in &self.struct_table {
+     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:3060:18
+     |
+3060 |             for (struct_name, layout) in &self.struct_table {
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
+warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
+  --> src/ive/src/modular.rs:16:43
+   |
+16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
+   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NodeType`
+  --> src/ive/src/query.rs:17:43
+   |
+17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
+   |                                           ^^^^^^^^
+
+warning: unused variable: `summaries`
+   --> src/ive/src/modular.rs:336:5
+    |
+336 |     summaries: &HashMap<String, FunctionSummary>,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `consistent` is never read
+  --> src/ive/src/query.rs:37:5
+   |
+31 | pub struct QuerySystem {
+   |            ----------- field in this struct
+...
+37 |     consistent: bool,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
 warning: unused variable: `data_offset`
     --> src/codegen/src/arm32/mod.rs:2308:9
      |
@@ -198,9 +201,9 @@ warning: unused variable: `s1`
     |         ^^ help: if this is intentional, prefix it with an underscore: `_s1`
 
 warning: unused variable: `beq_disp`
-    --> src/codegen/src/alpha.rs:1825:17
+    --> src/codegen/src/alpha.rs:1893:17
      |
-1825 |             let beq_disp = ((store_offset as i64) - 4 - (beq_alpha_pos as i64) - 4) / 4;
+1893 |             let beq_disp = ((store_offset as i64) - 4 - (beq_alpha_pos as i64) - 4) / 4;
      |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_beq_disp`
 
 warning: unused variable: `word`
@@ -252,45 +255,45 @@ warning: unused variable: `dst`
      |                                          ^^^ help: try ignoring the field: `dst: _`
 
 warning: unused variable: `lhs`
-    --> src/codegen/src/hppa.rs:1575:42
+    --> src/codegen/src/hppa.rs:1574:42
      |
-1575 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1574 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                          ^^^ help: try ignoring the field: `lhs: _`
 
 warning: unused variable: `rhs`
-    --> src/codegen/src/hppa.rs:1575:47
+    --> src/codegen/src/hppa.rs:1574:47
      |
-1575 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+1574 |                     IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
      |                                               ^^^ help: try ignoring the field: `rhs: _`
 
 warning: unused variable: `load_instr`
-    --> src/codegen/src/hppa.rs:1582:29
+    --> src/codegen/src/hppa.rs:1581:29
      |
-1582 |                         let load_instr = IRInstr::Load {
+1581 |                         let load_instr = IRInstr::Load {
      |                             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_instr`
 
 warning: unused variable: `store_instr`
-    --> src/codegen/src/hppa.rs:1593:29
+    --> src/codegen/src/hppa.rs:1592:29
      |
-1593 |                         let store_instr = IRInstr::Store {
+1592 |                         let store_instr = IRInstr::Store {
      |                             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_store_instr`
 
 warning: unused variable: `start_stub_size`
-    --> src/codegen/src/hppa.rs:1875:13
+    --> src/codegen/src/hppa.rs:1909:13
      |
-1875 |         let start_stub_size = start_stub.len();
+1909 |         let start_stub_size = start_stub.len();
      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_start_stub_size`
 
 warning: unused variable: `abs_offset`
-    --> src/codegen/src/hppa.rs:2267:17
+    --> src/codegen/src/hppa.rs:2391:17
      |
-2267 |             let abs_offset = start_call_offset as i64;
+2391 |             let abs_offset = start_call_offset as i64;
      |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_abs_offset`
 
 warning: unused variable: `call_offset`
-    --> src/codegen/src/hppa.rs:2302:14
+    --> src/codegen/src/hppa.rs:2426:14
      |
-2302 |         for (call_offset, target_offset) in &trampolines {
+2426 |         for (call_offset, target_offset) in &trampolines {
      |              ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_call_offset`
 
 warning: unused variable: `data_offset`
@@ -300,9 +303,9 @@ warning: unused variable: `data_offset`
      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/backend.rs:3113:13
+    --> src/codegen/src/backend.rs:3269:13
      |
-3113 |         let mut external_symbols: Vec<String> = Vec::new();
+3269 |         let mut external_symbols: Vec<String> = Vec::new();
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
@@ -350,20 +353,21 @@ warning: unused variable: `immediate_scratch_used`
     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_immediate_scratch_used`
 
 warning: value assigned to `external_symbols` is never read
-    --> src/codegen/src/emit.rs:4209:45
+    --> src/codegen/src/emit.rs:4243:45
      |
-4209 |     let mut external_symbols: Vec<String> = Vec::new();
+4243 |     let mut external_symbols: Vec<String> = Vec::new();
      |                                             ^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `tt`
-    --> src/codegen/src/ir.rs:1691:37
+    --> src/codegen/src/ir.rs:1727:37
      |
-1691 |                     (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+1727 |                     (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
      |                                     ^^ help: if this is intentional, prefix it with an underscore: `_tt`
 
+warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
 warning: unused variable: `ty`
     --> src/codegen/src/loongarch64/stack_slot_isel.rs:1759:68
      |
@@ -371,11 +375,12 @@ warning: unused variable: `ty`
      |                                                                    ^^ help: try ignoring the field: `ty: _`
 
 warning: unused variable: `bnez_off`
-    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1924:25
+    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1947:25
      |
-1924 |                     let bnez_off = byte_offset + code.len();
+1947 |                     let bnez_off = byte_offset + code.len();
      |                         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bnez_off`
 
+warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
 warning: unused variable: `loop_start`
     --> src/codegen/src/mips64/mod.rs:3090:33
      |
@@ -395,59 +400,59 @@ warning: unused variable: `loop_start`
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
 
 warning: variable does not need to be mutable
-   --> src/codegen/src/opt.rs:930:5
+   --> src/codegen/src/opt.rs:935:5
     |
-930 |     mut func: IRFunction,
+935 |     mut func: IRFunction,
     |     ----^^^^
     |     |
     |     help: remove this `mut`
 
 warning: unused variable: `threshold`
-   --> src/codegen/src/opt.rs:940:5
+   --> src/codegen/src/opt.rs:945:5
     |
-940 |     threshold: u32,
+945 |     threshold: u32,
     |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_threshold`
 
 warning: unused variable: `val`
-    --> src/codegen/src/opt.rs:1041:30
+    --> src/codegen/src/opt.rs:1046:30
      |
-1041 |                         for (val, label) in incoming.iter_mut() {
+1046 |                         for (val, label) in incoming.iter_mut() {
      |                              ^^^ help: if this is intentional, prefix it with an underscore: `_val`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/opt.rs:1341:26
+    --> src/codegen/src/opt.rs:1346:26
      |
-1341 | pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
+1346 | pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
      |                          ----^^^^^^^
      |                          |
      |                          help: remove this `mut`
 
 warning: unused variable: `func_refs`
-    --> src/codegen/src/opt.rs:1395:9
+    --> src/codegen/src/opt.rs:1400:9
      |
-1395 |     let func_refs: HashMap<String, &IRFunction> =
+1400 |     let func_refs: HashMap<String, &IRFunction> =
      |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_func_refs`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/opt.rs:1794:28
+    --> src/codegen/src/opt.rs:1799:28
      |
-1794 | pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
+1799 | pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
      |                            ----^^^^
      |                            |
      |                            help: remove this `mut`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/opt.rs:2023:36
+    --> src/codegen/src/opt.rs:2028:36
      |
-2023 | pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> (IRFunction, HashMap<u32, u32>) {
+2028 | pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> (IRFunction, HashMap<u32, u32>) {
      |                                    ----^^^^
      |                                    |
      |                                    help: remove this `mut`
 
 warning: unused variable: `store_val_i`
-    --> src/codegen/src/opt.rs:2217:32
+    --> src/codegen/src/opt.rs:2222:32
      |
-2217 |             let (store_addr_i, store_val_i) = match &block.instructions[i] {
+2222 |             let (store_addr_i, store_val_i) = match &block.instructions[i] {
      |                                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_store_val_i`
 
 warning: unused variable: `m`
@@ -469,37 +474,37 @@ warning: unused variable: `out`
     |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
 
 warning: unused variable: `stwbrx`
-    --> src/codegen/src/ppc64/mod.rs:6034:13
+    --> src/codegen/src/ppc64/mod.rs:6062:13
      |
-6034 |         let stwbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+6062 |         let stwbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
      |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stwbrx`
 
 warning: unused variable: `stdbrx`
-    --> src/codegen/src/ppc64/mod.rs:6045:13
+    --> src/codegen/src/ppc64/mod.rs:6073:13
      |
-6045 |         let stdbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+6073 |         let stdbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
      |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stdbrx`
 
 warning: value assigned to `p` is never read
-   --> src/codegen/src/ppc64le.rs:175:23
+   --> src/codegen/src/ppc64le.rs:193:23
     |
-175 |     swap_u16(elf, p); p += 2; // e_shstrndx
+193 |     swap_u16(elf, p); p += 2; // e_shstrndx
     |                       ^^^^^^
     |
     = help: maybe it is overwritten before being read?
 
 warning: value assigned to `q` is never read
-   --> src/codegen/src/ppc64le.rs:209:27
+   --> src/codegen/src/ppc64le.rs:227:27
     |
-209 |         swap_u64(elf, q); q += 8; // p_align
+227 |         swap_u64(elf, q); q += 8; // p_align
     |                           ^^^^^^
     |
     = help: maybe it is overwritten before being read?
 
 warning: value assigned to `q` is never read
-   --> src/codegen/src/ppc64le.rs:245:27
+   --> src/codegen/src/ppc64le.rs:263:27
     |
-245 |         swap_u64(elf, q); q += 8; // sh_entsize
+263 |         swap_u64(elf, q); q += 8; // sh_entsize
     |                           ^^^^^^
     |
     = help: maybe it is overwritten before being read?
@@ -607,9 +612,9 @@ warning: unused variable: `rd_reg`
      |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unused variable: `rd_reg`
-    --> src/codegen/src/riscv64.rs:6574:29
+    --> src/codegen/src/riscv64.rs:6763:29
      |
-6574 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+6763 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
      |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
 
 warning: unreachable pattern
@@ -999,27 +1004,27 @@ warning: unreachable pattern
      |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
 
 warning: unused variable: `while_cond`
-    --> src/codegen/src/scg_to_ir.rs:1402:9
+    --> src/codegen/src/scg_to_ir.rs:1424:9
      |
-1402 |         while_cond: &Option<String>,
+1424 |         while_cond: &Option<String>,
      |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_while_cond`
 
 warning: unused variable: `pre_vreg`
-    --> src/codegen/src/scg_to_ir.rs:1790:36
+    --> src/codegen/src/scg_to_ir.rs:1812:36
      |
-1790 |                         for (name, pre_vreg, phi_vreg) in &phi_info {
+1812 |                         for (name, pre_vreg, phi_vreg) in &phi_info {
      |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_pre_vreg`
 
 warning: unused variable: `d`
-    --> src/codegen/src/scg_to_ir.rs:2207:22
+    --> src/codegen/src/scg_to_ir.rs:2229:22
      |
-2207 |                 for (d, s) in copies.iter_mut() {
+2229 |                 for (d, s) in copies.iter_mut() {
      |                      ^ help: if this is intentional, prefix it with an underscore: `_d`
 
 warning: unused variable: `ty`
-    --> src/codegen/src/scg_to_ir.rs:3942:74
+    --> src/codegen/src/scg_to_ir.rs:4011:74
      |
-3942 |             ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
+4011 |             ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
      |                                                                          ^^ help: try ignoring the field: `ty: _`
 
 warning: unused variable: `phi_map`
@@ -1035,29 +1040,29 @@ warning: unused variable: `blk_idx`
      |          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_blk_idx`
 
 warning: unused variable: `bne_off`
-    --> src/codegen/src/sparc64.rs:3401:17
+    --> src/codegen/src/sparc64.rs:3421:17
      |
-3401 |             let bne_off = code.len();
+3421 |             let bne_off = code.len();
      |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bne_off`
 
 warning: value assigned to `stub_offset` is never read
-    --> src/codegen/src/sparc64.rs:4791:9
+    --> src/codegen/src/sparc64.rs:4894:9
      |
-4791 |         stub_offset += print_hex_stub.len();
+4894 |         stub_offset += print_hex_stub.len();
      |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
 
 warning: unused variable: `vuma_read_func_idx`
-    --> src/codegen/src/wasm32/mod.rs:3982:13
+    --> src/codegen/src/wasm32/mod.rs:4198:13
      |
-3982 |         let vuma_read_func_idx = module.add_function(read_write_type_idx);
+4198 |         let vuma_read_func_idx = module.add_function(read_write_type_idx);
      |             ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vuma_read_func_idx`
 
 warning: unused variable: `vuma_write_func_idx`
-    --> src/codegen/src/wasm32/mod.rs:3984:13
+    --> src/codegen/src/wasm32/mod.rs:4200:13
      |
-3984 |         let vuma_write_func_idx = module.add_function(read_write_type_idx);
+4200 |         let vuma_write_func_idx = module.add_function(read_write_type_idx);
      |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vuma_write_func_idx`
 
 warning: constant `DP_RSC` is never used
@@ -1092,27 +1097,27 @@ warning: fields `is_unconditional` and `condition` are never read
      |             ^^^^^^^^^
 
 warning: function `encode_vcvt_f64_u32` is never used
-    --> src/codegen/src/arm32/mod.rs:8602:4
+    --> src/codegen/src/arm32/mod.rs:8740:4
      |
-8602 | fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
+8740 | fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
      |    ^^^^^^^^^^^^^^^^^^^
 
 warning: function `encode_vcvt_f64_s32` is never used
-    --> src/codegen/src/arm32/mod.rs:8629:4
+    --> src/codegen/src/arm32/mod.rs:8767:4
      |
-8629 | fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
+8767 | fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
      |    ^^^^^^^^^^^^^^^^^^^
 
 warning: function `encode_vcvt_u32_f64` is never used
-    --> src/codegen/src/arm32/mod.rs:8656:4
+    --> src/codegen/src/arm32/mod.rs:8794:4
      |
-8656 | fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
+8794 | fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
      |    ^^^^^^^^^^^^^^^^^^^
 
 warning: function `encode_vcvt_s32_f64` is never used
-    --> src/codegen/src/arm32/mod.rs:8683:4
+    --> src/codegen/src/arm32/mod.rs:8821:4
      |
-8683 | fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
+8821 | fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
      |    ^^^^^^^^^^^^^^^^^^^
 
 warning: function `sign_extend_12` is never used
@@ -1122,9 +1127,9 @@ warning: function `sign_extend_12` is never used
    |    ^^^^^^^^^^^^^^
 
 warning: function `swap_u64` is never used
-  --> src/codegen/src/armeb.rs:29:4
+  --> src/codegen/src/armeb.rs:43:4
    |
-29 | fn swap_u64(buf: &mut [u8], off: usize) {
+43 | fn swap_u64(buf: &mut [u8], off: usize) {
    |    ^^^^^^^^
 
 warning: constant `SP` is never used
@@ -1505,9 +1510,9 @@ warning: function `loongarch64_compute_frame_size` is never used
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `ELF_PAGE_SIZE` is never used
-    --> src/codegen/src/loongarch64/mod.rs:3031:15
+    --> src/codegen/src/loongarch64/mod.rs:3183:15
      |
-3031 |         const ELF_PAGE_SIZE: u64 = 0x10000;
+3183 |         const ELF_PAGE_SIZE: u64 = 0x10000;
      |               ^^^^^^^^^^^^^
 
 warning: constant `WORD_BREAK` is never used
@@ -1619,33 +1624,33 @@ warning: function `ss_sd_typed` is never used
      |        ^^^^^^^^^^^
 
 warning: function `lower_ir_instr` is never used
-    --> src/codegen/src/mips64/mod.rs:3968:4
+    --> src/codegen/src/mips64/mod.rs:3994:4
      |
-3968 | fn lower_ir_instr(
+3994 | fn lower_ir_instr(
      |    ^^^^^^^^^^^^^^
 
 warning: constant `PAGE_SIZE` is never used
-    --> src/codegen/src/mips64/mod.rs:4966:15
+    --> src/codegen/src/mips64/mod.rs:4992:15
      |
-4966 |         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
+4992 |         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
      |               ^^^^^^^^^
 
 warning: function `inline_cost` is never used
-   --> src/codegen/src/opt.rs:875:4
+   --> src/codegen/src/opt.rs:880:4
     |
-875 | fn inline_cost(instr: &IRInstr) -> u32 {
+880 | fn inline_cost(instr: &IRInstr) -> u32 {
     |    ^^^^^^^^^^^
 
 warning: function `function_inline_cost` is never used
-   --> src/codegen/src/opt.rs:906:4
+   --> src/codegen/src/opt.rs:911:4
     |
-906 | fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
+911 | fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
     |    ^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `INLINE_THRESHOLD_O3` is never used
-   --> src/codegen/src/opt.rs:927:7
+   --> src/codegen/src/opt.rs:932:7
     |
-927 | const INLINE_THRESHOLD_O3: u32 = 20;
+932 | const INLINE_THRESHOLD_O3: u32 = 20;
     |       ^^^^^^^^^^^^^^^^^^^
 
 warning: field `is_le` is never read
@@ -1724,63 +1729,63 @@ warning: function `self_is_callee_saved` is never used
      |    ^^^^^^^^^^^^^^^^^^^^
 
 warning: function `riscv64_compute_frame_size` is never used
-    --> src/codegen/src/riscv64.rs:3089:4
+    --> src/codegen/src/riscv64.rs:3092:4
      |
-3089 | fn riscv64_compute_frame_size(func: &IRFunction) -> usize {
+3092 | fn riscv64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `ALLOCATABLE_GPRS` is never used
-    --> src/codegen/src/riscv64.rs:3107:7
+    --> src/codegen/src/riscv64.rs:3110:7
      |
-3107 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+3110 | const ALLOCATABLE_GPRS: &[Gpr] = &[
      |       ^^^^^^^^^^^^^^^^
 
 warning: function `map_vreg_to_gpr` is never used
-    --> src/codegen/src/riscv64.rs:3145:4
+    --> src/codegen/src/riscv64.rs:3148:4
      |
-3145 | fn map_vreg_to_gpr(
+3148 | fn map_vreg_to_gpr(
      |    ^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/riscv64.rs:3188:4
+    --> src/codegen/src/riscv64.rs:3191:4
      |
-3188 | fn resolve_gpr(
+3191 | fn resolve_gpr(
      |    ^^^^^^^^^^^
 
 warning: function `collect_vreg_ids` is never used
-    --> src/codegen/src/riscv64.rs:4514:4
+    --> src/codegen/src/riscv64.rs:4517:4
      |
-4514 | fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
+4517 | fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
      |    ^^^^^^^^^^^^^^^^
 
 warning: function `riscv32_compute_frame_size` is never used
-    --> src/codegen/src/riscv32.rs:2982:4
+    --> src/codegen/src/riscv32.rs:2985:4
      |
-2982 | fn riscv32_compute_frame_size(func: &IRFunction) -> usize {
+2985 | fn riscv32_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: constant `ALLOCATABLE_GPRS` is never used
-    --> src/codegen/src/riscv32.rs:3000:7
+    --> src/codegen/src/riscv32.rs:3003:7
      |
-3000 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+3003 | const ALLOCATABLE_GPRS: &[Gpr] = &[
      |       ^^^^^^^^^^^^^^^^
 
 warning: function `map_vreg_to_gpr` is never used
-    --> src/codegen/src/riscv32.rs:3038:4
+    --> src/codegen/src/riscv32.rs:3041:4
      |
-3038 | fn map_vreg_to_gpr(
+3041 | fn map_vreg_to_gpr(
      |    ^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/riscv32.rs:3081:4
+    --> src/codegen/src/riscv32.rs:3084:4
      |
-3081 | fn resolve_gpr(
+3084 | fn resolve_gpr(
      |    ^^^^^^^^^^^
 
 warning: function `collect_vreg_ids` is never used
-    --> src/codegen/src/riscv32.rs:4407:4
+    --> src/codegen/src/riscv32.rs:4410:4
      |
-4407 | fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
+4410 | fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
      |    ^^^^^^^^^^^^^^^^
 
 warning: constant `S6` is never used
@@ -2028,313 +2033,55 @@ warning: function `ss_st_typed` is never used
 1640 | fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
      |    ^^^^^^^^^^^
 
-warning: constant `VUMA_STAT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1400:7
-     |
-1400 | const VUMA_STAT_IDX: u32 = 15;       // (path: i32, buf: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_FSTAT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1401:7
-     |
-1401 | const VUMA_FSTAT_IDX: u32 = 16;      // (fd: i32, buf: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_LSTAT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1402:7
-     |
-1402 | const VUMA_LSTAT_IDX: u32 = 17;      // (path: i32, buf: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_GETCWD_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1403:7
-     |
-1403 | const VUMA_GETCWD_IDX: u32 = 18;     // (buf: i32, size: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_UNLINK_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1404:7
-     |
-1404 | const VUMA_UNLINK_IDX: u32 = 19;     // (path: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_GETPID_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1405:7
-     |
-1405 | const VUMA_GETPID_IDX: u32 = 20;     // () -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_KILL_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1406:7
-     |
-1406 | const VUMA_KILL_IDX: u32 = 21;       // (pid: i32, sig: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_ALARM_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1407:7
-     |
-1407 | const VUMA_ALARM_IDX: u32 = 22;      // (seconds: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_CHDIR_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1408:7
-     |
-1408 | const VUMA_CHDIR_IDX: u32 = 23;      // (path: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_FCHDIR_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1409:7
-     |
-1409 | const VUMA_FCHDIR_IDX: u32 = 24;     // N/A — placeholder
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_IOCTL_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1410:7
-     |
-1410 | const VUMA_IOCTL_IDX: u32 = 25;      // (fd: i32, req: i32, arg: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_FCNTL_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1411:7
-     |
-1411 | const VUMA_FCNTL_IDX: u32 = 26;      // (fd: i32, cmd: i32, arg: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_SOCKET_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1412:7
-     |
-1412 | const VUMA_SOCKET_IDX: u32 = 27;     // (domain: i32, ty: i32, proto: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_CONNECT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1413:7
-     |
-1413 | const VUMA_CONNECT_IDX: u32 = 28;    // (fd: i32, addr: i32, len: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_BIND_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1414:7
-     |
-1414 | const VUMA_BIND_IDX: u32 = 29;       // (fd: i32, addr: i32, len: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_LISTEN_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1415:7
-     |
-1415 | const VUMA_LISTEN_IDX: u32 = 30;     // (fd: i32, backlog: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_ACCEPT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1416:7
-     |
-1416 | const VUMA_ACCEPT_IDX: u32 = 31;     // (fd: i32, addr: i32, len_ptr: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_SEND_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1417:7
-     |
-1417 | const VUMA_SEND_IDX: u32 = 32;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_RECV_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1418:7
-     |
-1418 | const VUMA_RECV_IDX: u32 = 33;       // (fd: i32, buf: i32, len: i32, flags: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_SENDTO_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1419:7
-     |
-1419 | const VUMA_SENDTO_IDX: u32 = 34;     // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_RECVFROM_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1420:7
-     |
-1420 | const VUMA_RECVFROM_IDX: u32 = 35;   // (fd: i32, buf: i32, len: i32, flags: i32, addr: i32, alen_ptr: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_SHUTDOWN_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1421:7
-     |
-1421 | const VUMA_SHUTDOWN_IDX: u32 = 36;   // (fd: i32, how: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_SETSOCKOPT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1422:7
-     |
-1422 | const VUMA_SETSOCKOPT_IDX: u32 = 37; // (fd: i32, lvl: i32, opt: i32, val: i32, len: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_DUP_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1423:7
-     |
-1423 | const VUMA_DUP_IDX: u32 = 38;        // (fd: i32) -> i32
-     |       ^^^^^^^^^^^^
-
-warning: constant `VUMA_DUP3_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1424:7
-     |
-1424 | const VUMA_DUP3_IDX: u32 = 39;       // (oldfd: i32, newfd: i32, flags: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_POLL_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1425:7
-     |
-1425 | const VUMA_POLL_IDX: u32 = 40;       // (fds: i32, nfds: i32, timeout: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_NANOSLEEP_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1426:7
-     |
-1426 | const VUMA_NANOSLEEP_IDX: u32 = 41;  // (req: i32, rem: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_FUTEX_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1427:7
-     |
-1427 | const VUMA_FUTEX_IDX: u32 = 42;      // (uaddr: i32, op: i32, val: i32, to: i32, uaddr2: i32, val3: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_EPOLL_CREATE1_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1428:7
-     |
-1428 | const VUMA_EPOLL_CREATE1_IDX: u32 = 43; // (flags: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_EPOLL_CTL_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1429:7
-     |
-1429 | const VUMA_EPOLL_CTL_IDX: u32 = 44;  // (epfd: i32, op: i32, fd: i32, event: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_EPOLL_WAIT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1430:7
-     |
-1430 | const VUMA_EPOLL_WAIT_IDX: u32 = 45; // (epfd: i32, events: i32, maxevents: i32, timeout: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_CLONE_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1431:7
-     |
-1431 | const VUMA_CLONE_IDX: u32 = 46;      // (flags: i32, stack: i32, ptid: i32, ctid: i32, tls: i32) -> i32
-     |       ^^^^^^^^^^^^^^
-
-warning: constant `VUMA_SIGACTION_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1432:7
-     |
-1432 | const VUMA_SIGACTION_IDX: u32 = 47;  // (signum: i32, act: i32, oldact: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_RT_SIGPROC_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1433:7
-     |
-1433 | const VUMA_RT_SIGPROC_IDX: u32 = 48; // (how: i32, set: i32, oldset: i32, sigsetsize: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_RT_SIGRETURN_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1434:7
-     |
-1434 | const VUMA_RT_SIGRETURN_IDX: u32 = 49; // () -> i32
-     |       ^^^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_GETTIMEOFDAY_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1435:7
-     |
-1435 | const VUMA_GETTIMEOFDAY_IDX: u32 = 50; // (tv: i32, tz: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_MPROTECT_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1436:7
-     |
-1436 | const VUMA_MPROTECT_IDX: u32 = 51;   // (addr: i32, len: i32, prot: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_BRK_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1437:7
-     |
-1437 | const VUMA_BRK_IDX: u32 = 52;        // (addr: i32) -> i32
-     |       ^^^^^^^^^^^^
-
-warning: constant `VUMA_OPEN_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1438:7
-     |
-1438 | const VUMA_OPEN_IDX: u32 = 53;       // (path: i32, flags: i32, mode: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_MMAP_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1439:7
-     |
-1439 | const VUMA_MMAP_IDX: u32 = 54;       // (addr: i32, len: i32, prot: i32, flags: i32, fd: i32, off: i32) -> i32
-     |       ^^^^^^^^^^^^^
-
-warning: constant `VUMA_MUNMAP_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1440:7
-     |
-1440 | const VUMA_MUNMAP_IDX: u32 = 55;     // (addr: i32, len: i32) -> i32
-     |       ^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_EXIT_GROUP_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1441:7
-     |
-1441 | const VUMA_EXIT_GROUP_IDX: u32 = 56; // (code: i32) -> i32
-     |       ^^^^^^^^^^^^^^^^^^^
-
-warning: constant `VUMA_LSEEK_IDX` is never used
-    --> src/codegen/src/wasm32/mod.rs:1442:7
-     |
-1442 | const VUMA_LSEEK_IDX: u32 = 57;      // placeholder — lseek uses WASI fd_seek
-     |       ^^^^^^^^^^^^^^
-
 warning: function `skip_leb128` is never used
-    --> src/codegen/src/wasm32/mod.rs:1781:4
+    --> src/codegen/src/wasm32/mod.rs:1807:4
      |
-1781 | fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+1807 | fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
      |    ^^^^^^^^^^^
 
 warning: function `skip_signed_leb128` is never used
-    --> src/codegen/src/wasm32/mod.rs:1793:4
+    --> src/codegen/src/wasm32/mod.rs:1819:4
      |
-1793 | fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+1819 | fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
      |    ^^^^^^^^^^^^^^^^^^
 
 warning: function `skip_one_instruction` is never used
-    --> src/codegen/src/wasm32/mod.rs:1824:4
+    --> src/codegen/src/wasm32/mod.rs:1850:4
      |
-1824 | fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
+1850 | fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
      |    ^^^^^^^^^^^^^^^^^^^^
 
 warning: field `block_labels` is never read
-    --> src/codegen/src/wasm32/mod.rs:1955:5
+    --> src/codegen/src/wasm32/mod.rs:1981:5
      |
-1945 | struct LoweringContext {
+1971 | struct LoweringContext {
      |        --------------- field in this struct
 ...
-1955 |     block_labels: HashMap<String, u32>,
+1981 |     block_labels: HashMap<String, u32>,
      |     ^^^^^^^^^^^^
 
 warning: function `lower_terminator` is never used
-    --> src/codegen/src/wasm32/mod.rs:3573:4
+    --> src/codegen/src/wasm32/mod.rs:3624:4
      |
-3573 | fn lower_terminator(
+3624 | fn lower_terminator(
      |    ^^^^^^^^^^^^^^^^
 
 warning: function `x86_64_compute_frame_size` is never used
-    --> src/codegen/src/x86_64/mod.rs:3242:4
+    --> src/codegen/src/x86_64/mod.rs:3306:4
      |
-3242 | fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
+3306 | fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/x86_64/mod.rs:3268:4
+    --> src/codegen/src/x86_64/mod.rs:3332:4
      |
-3268 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+3332 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
      |    ^^^^^^^^^^^
 
 warning: function `emit_cmp_setcc` is never used
-    --> src/codegen/src/x86_64/mod.rs:3327:4
+    --> src/codegen/src/x86_64/mod.rs:3391:4
      |
-3327 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+3391 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
      |    ^^^^^^^^^^^^^^
 
 warning: function `rex_prefix` is never used
@@ -2344,21 +2091,21 @@ warning: function `rex_prefix` is never used
     |    ^^^^^^^^^^
 
 warning: function `x86_32_compute_frame_size` is never used
-    --> src/codegen/src/x86_32/mod.rs:2991:4
+    --> src/codegen/src/x86_32/mod.rs:3128:4
      |
-2991 | fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
+3128 | fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `resolve_gpr` is never used
-    --> src/codegen/src/x86_32/mod.rs:3017:4
+    --> src/codegen/src/x86_32/mod.rs:3154:4
      |
-3017 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+3154 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
      |    ^^^^^^^^^^^
 
 warning: function `emit_cmp_setcc` is never used
-    --> src/codegen/src/x86_32/mod.rs:3076:4
+    --> src/codegen/src/x86_32/mod.rs:3213:4
      |
-3076 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+3213 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
      |    ^^^^^^^^^^^^^^
 
 warning: unused bitwise operation that must be used
@@ -2387,7 +2134,6 @@ warning: field `config` is never read
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
   --> src/pipeline.rs:76:39
@@ -2403,6 +2149,7 @@ warning: unused import: `serde::de::Error`
 738 |     use serde::de::Error;
     |         ^^^^^^^^^^^^^^^^
 
+warning: `vuma-cor` (lib) generated 1 warning
 warning: variable does not need to be mutable
     --> src/pipeline.rs:1923:25
      |
@@ -2422,58 +2169,58 @@ warning: unused variable: `arm_bodies`
      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: unreachable pattern
-    --> src/pipeline.rs:4666:9
+    --> src/pipeline.rs:4685:9
      |
-4665 |         "shr.a" | "shr.l" | ">>" => return Some(IrBinOpKind::ShrA),
+4684 |         "shr.a" | "shr.l" | ">>" => return Some(IrBinOpKind::ShrA),
      |         ------------------------ matches all the relevant values
-4666 |         "shr.a" => return Some(IrBinOpKind::ShrA),
+4685 |         "shr.a" => return Some(IrBinOpKind::ShrA),
      |         ^^^^^^^ no value can reach this
      |
      = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `name`
-    --> src/pipeline.rs:4977:10
+    --> src/pipeline.rs:5028:10
      |
-4977 |     for (name, result) in par_results {
+5028 |     for (name, result) in par_results {
      |          ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
 
 warning: value assigned to `last_completed` is never read
-    --> src/pipeline.rs:5207:5
+    --> src/pipeline.rs:5258:5
      |
-5207 |     last_completed = Some(PipelineStage::AstToScg);
+5258 |     last_completed = Some(PipelineStage::AstToScg);
      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
 warning: value assigned to `last_completed` is never read
-    --> src/pipeline.rs:5220:5
+    --> src/pipeline.rs:5271:5
      |
-5220 |     last_completed = Some(PipelineStage::ScgValidation);
+5271 |     last_completed = Some(PipelineStage::ScgValidation);
      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
 
 warning: value assigned to `last_completed` is never read
-    --> src/pipeline.rs:5234:5
+    --> src/pipeline.rs:5285:5
      |
-5234 |     last_completed = Some(PipelineStage::BdInference);
+5285 |     last_completed = Some(PipelineStage::BdInference);
      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
 
 warning: value assigned to `last_completed` is never read
-    --> src/pipeline.rs:5294:5
+    --> src/pipeline.rs:5345:5
      |
-5294 |     last_completed = Some(PipelineStage::IveVerification);
+5345 |     last_completed = Some(PipelineStage::IveVerification);
      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
 
 warning: value assigned to `last_completed` is never read
-    --> src/pipeline.rs:5443:5
+    --> src/pipeline.rs:5533:5
      |
-5443 |     last_completed = Some(PipelineStage::CodeEmission);
+5533 |     last_completed = Some(PipelineStage::CodeEmission);
      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
@@ -2514,33 +2261,33 @@ warning: function `convert_node_to_statement` is never used
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `get_store_type_from_value` is never used
-    --> src/pipeline.rs:2700:4
+    --> src/pipeline.rs:2719:4
      |
-2700 | fn get_store_type_from_value(
+2719 | fn get_store_type_from_value(
      |    ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `is_expr_unsigned` is never used
-    --> src/pipeline.rs:3469:4
+    --> src/pipeline.rs:3488:4
      |
-3469 | fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
+3488 | fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
      |    ^^^^^^^^^^^^^^^^
 
 warning: function `find_original_let_def` is never used
-    --> src/pipeline.rs:3931:4
+    --> src/pipeline.rs:3950:4
      |
-3931 | fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
+3950 | fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
      |    ^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `improve_expr` is never used
-    --> src/pipeline.rs:4404:4
+    --> src/pipeline.rs:4423:4
      |
-4404 | fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
+4423 | fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
      |    ^^^^^^^^^^^^
 
 warning: function `parse_binop` is never used
-    --> src/pipeline.rs:4652:4
+    --> src/pipeline.rs:4671:4
      |
-4652 | fn parse_binop(op: &str) -> Option<IrBinOpKind> {
+4671 | fn parse_binop(op: &str) -> Option<IrBinOpKind> {
      |    ^^^^^^^^^^^
 
 warning: missing documentation for a macro
@@ -2574,11 +2321,11 @@ warning: missing documentation for a macro
     | ^^^^^^^^^^^^^^^^^^^^^^
 
 warning: missing documentation for a function
-    --> src/pipeline.rs:7331:1
+    --> src/pipeline.rs:7486:1
      |
-7331 | pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+7486 | pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
      | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 26 warnings (run `cargo fix --lib -p vuma` to apply 4 suggestions)
-warning: `vuma-codegen` (lib) generated 349 warnings (run `cargo fix --lib -p vuma-codegen` to apply 97 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 31.72s
+warning: `vuma-codegen` (lib) generated 306 warnings (run `cargo fix --lib -p vuma-codegen` to apply 97 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 1m 44s
