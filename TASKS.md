@@ -260,12 +260,12 @@
 
 > 1,521 LOC parallel BD solver + `verify_all_hardened` family never invoked.
 
-- [ ] **[IVE]** Verify zero production callers of `BDConstraintSolver` in `src/ive/src/bd_solver.rs`.
-- [ ] **[IVE-DEL]** Delete `src/ive/src/bd_solver.rs` (1,521 LOC).
-- [ ] **[IVE-DEL]** Delete `verify_all_hardened` + `check_capability_flow` + `check_aliasing_integrity` + `validate_derivation_chain` from `src/ive/src/verification.rs`.
-- [ ] **[IVE-DEL]** Delete `compute_path_sensitive_liveness` from `src/ive/src/liveness.rs:1430` (unused in production).
-- [ ] **[IVE]** Update `src/ive/src/lib.rs` re-exports.
-- [ ] **[TEST]** Remove or migrate tests that referenced the deleted code.
+- [x] **[IVE]** Verify zero production callers of `BDConstraintSolver` in `src/ive/src/bd_solver.rs`. — **VERIFIED**: `rg "BDConstraintSolver"` across the entire `src/` tree returns matches only inside `bd_solver.rs` itself (struct definition, impl blocks, and 23 inline `#[test]` functions). The `bd_solver` module is declared in `lib.rs:48` but never `use`d by any other module. The `BDConstraint` enum in `bd_solver.rs` is a distinct type from `vuma_bd::BDConstraint` (different crate, different fields) — no cross-crate dependency.
+- [x] **[IVE-DEL]** Delete `src/ive/src/bd_solver.rs` (1,521 LOC). — **DONE**: `rm src/ive/src/bd_solver.rs` (1,521 lines + 23 inline tests deleted).
+- [x] **[IVE-DEL]** Delete `verify_all_hardened` + `check_capability_flow` + `check_aliasing_integrity` + `validate_derivation_chain` from `src/ive/src/verification.rs`. — **DONE**: Deleted the entire "Hardened Invariant Checks" section (lines 862-1201, 340 LOC) including the `HardenedViolation` struct, its `Display` impl, and all 4 functions. Cleaned up the now-unused imports `BatchedViolations`, `InvariantViolation`, `Severity` (from `crate::result`) and `CapD`, `Capability` (from `vuma_bd::capd`) — `VerificationResult` and `BD` are still used and retained. `rg "verify_all_hardened|check_capability_flow|check_aliasing_integrity|validate_derivation_chain|HardenedViolation"` returns zero matches in `src/`.
+- [x] **[IVE-DEL]** Delete `compute_path_sensitive_liveness` from `src/ive/src/liveness.rs:1430` (unused in production). — **DONE**: Deleted the "Path-sensitive liveness with meet at join points" section (lines 1407-1540, 134 LOC) including the section header comment and the `compute_path_sensitive_liveness` function. `rg "compute_path_sensitive_liveness"` returns zero matches in `src/`. No imports became unused (the function used fully-qualified `hashbrown::HashMap`/`hashbrown::HashSet` paths, not imported names).
+- [x] **[IVE]** Update `src/ive/src/lib.rs` re-exports. — **DONE**: Removed `pub mod bd_solver;` declaration (line 48) and the corresponding `- [\`bd_solver\`] — BD fixpoint constraint solver.` line from the module-layout doc comment (line 26). No re-exports of `BDConstraintSolver`/`BDConstraint` existed in the `pub use` block, so no re-export cleanup was needed. The remaining `pub mod` declarations and `pub use` re-exports are unchanged.
+- [x] **[TEST]** Remove or migrate tests that referenced the deleted code. — **DONE**: The 23 `#[test]` functions in `bd_solver.rs` tested `BDConstraintSolver` directly and were deleted with the file (cannot be migrated — the code under test no longer exists). The tests in `verification.rs` (8 tests) and `liveness.rs` do not reference any of the deleted functions (`verify_all_hardened`, `check_capability_flow`, `check_aliasing_integrity`, `validate_derivation_chain`, `compute_path_sensitive_liveness`) — verified via `rg`. IVE test count: 237 → 214 (−23, exactly the deleted `bd_solver.rs` tests). Zero test regressions.
 
 ---
 
