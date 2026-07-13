@@ -2073,8 +2073,11 @@ impl Backend for HppaBackend {
             code[br_start_pos..br_start_pos+4].copy_from_slice(&encode_bl(br_disp));
             let divblt_disp = ((divdone_offset as i64) - (divblt_pos as i64 + 8)) as i32;
             code[divblt_pos..divblt_pos+4].copy_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, divblt_disp));
-            // print_int stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub restored — calls now resolve to the real
+            // decimal-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub saves/restores SP (R30)
+            // and only clobbers caller-saved scratch registers.
+            syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // print_hex(n) → void — write hex representation to stdout.
@@ -2112,8 +2115,11 @@ impl Backend for HppaBackend {
             code.extend_from_slice(&encode_ldo(R30, 48, R30));
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
-            // print_hex stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub restored — calls now resolve to the real
+            // hex-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub saves/restores SP (R30)
+            // and only clobbers caller-saved scratch registers.
+            syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // ── print_newline() → void — write '\n' to stdout ──

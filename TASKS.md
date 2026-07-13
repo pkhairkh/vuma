@@ -53,13 +53,13 @@
 
 > One task per backend. Each touches only that backend's stub table.
 
-- [ ] **[BE-aarch64]** Restore `print_int`/`print_hex` stubs (currently commented out as no-op). `src/codegen/src/backend.rs:2724-2728`
-- [ ] **[BE-s390x]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/s390x.rs:2656,2750`
-- [ ] **[BE-alpha]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/alpha.rs:1776,1837`
-- [ ] **[BE-hppa]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/hppa.rs:2077,2116`
-- [ ] **[BE-m68k]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/m68k.rs:2171,2256`
-- [ ] **[BE-riscv32]** Register bare `print_int`/`print_hex` (currently only `__vuma_*`). `src/codegen/src/riscv32.rs`
-- [ ] **[BE-riscv64]** Register bare `print_int`/`print_hex`. `src/codegen/src/riscv64.rs:6431`
+- [x] **[BE-aarch64]** Restore `print_int`/`print_hex` stubs (currently commented out as no-op). `src/codegen/src/backend.rs:2724-2728` — registered bare-name `print_int`/`print_hex` aliases pointing at the existing `__vuma_print_*` runtime offsets (`rt_int_off`/`rt_hex_off`). The runtime prologue/epilogue already saves/restores every caller-saved register it touches (X1, X2, X3, X8, X9, X10), so the previous "clobbers locals" concern is moot.
+- [x] **[BE-s390x]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/s390x.rs:2656,2750` — uncommented the `syscall_stubs.push(("print_int", code))` and `("print_hex", code))` lines; the full decimal/hex conversion stub code was already present and well-formed. The `__vuma_print_int`/`__vuma_print_hex` aliases (line 2787-2788) now correctly resolve to the same offsets.
+- [x] **[BE-alpha]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/alpha.rs:1776,1837` — uncommented both `syscall_stubs.push` lines; stub code uses proper `patch_alpha_branch` helpers and balanced `SP -= 32`/`SP += 32; RET` frame.
+- [x] **[BE-hppa]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/hppa.rs:2077,2116` — uncommented both pushes; stubs use balanced `R30 -= 48`/`R30 += 48; BV R2(R0)` frames.
+- [x] **[BE-m68k]** Restore `print_int`/`print_hex` stubs. `src/codegen/src/m68k.rs:2171,2256` — uncommented both pushes; stubs use `LINK A6, #-N`/`UNLK A6; RTS` frames and save/restore D3-D7 via MOVEM. The `__vuma_print_*` aliases (line 2313-2314) now correctly resolve.
+- [x] **[BE-riscv32]** Register bare `print_int`/`print_hex` (currently only `__vuma_*`). `src/codegen/src/riscv32.rs` — refactored `build_riscv32_runtime` to return `(Vec<u8>, hex_off, int_off, newline_off)` and registered both `__vuma_*` and bare `print_int`/`print_hex` at their correct per-function offsets (fixing a dormant bug where all three symbols previously aliased to offset 0).
+- [x] **[BE-riscv64]** Register bare `print_int`/`print_hex`. `src/codegen/src/riscv64.rs:6431` — same refactor as riscv32: `build_riscv64_runtime` now returns offsets, and bare `print_int`/`print_hex` are registered at the correct `rt_int_off`/`rt_hex_off` within the runtime blob.
 
 ---
 
