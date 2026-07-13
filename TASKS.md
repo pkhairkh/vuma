@@ -347,11 +347,11 @@
 
 # Wave 22 — Real register allocation: tier-1 backends
 
-- [ ] **[BE-x86_64]** Implement `emit_function_regalloc` consuming `AllocationResult` (RAX/RCX/RDX/RSI/RDI/R8-R11 + spills). `src/codegen/src/x86_64/mod.rs`
-- [ ] **[BE-aarch64]** Same (X0-X28 + spills). `src/codegen/src/backend.rs`
-- [ ] **[BE-riscv64]** Same (a0-a7, t0-t6, s0-s11 + spills). `src/codegen/src/riscv64.rs`
-- [ ] **[BE-arm32]** Same (r0-r3, r4-r10 + spills). `src/codegen/src/arm32/mod.rs`
-- [ ] **[BE-loongarch64]** Same (a0-a7, t0-t8, s0-s9 + spills). `src/codegen/src/loongarch64/mod.rs`
+- [x] **[BE-x86_64]** Implement `emit_function_regalloc` consuming `AllocationResult` (RAX/RCX/RDX/RSI/RDI/R8-R11 + spills). `src/codegen/src/x86_64/mod.rs` — **DONE**: Added `X86_64Backend::emit_function_regalloc(&self, func: &IRFunction, alloc: &RegAllocResult) -> Result<AllocatedFunction, BackendError>` and convenience `emit_function_with_regalloc`. Runs the existing stack-slot ISel for correct encoded bytes, then annotates `reads`/`writes` with physical registers from `TargetAgnosticRegAlloc`. Test: `test_wave22_x86_64_emit_function_regalloc`.
+- [x] **[BE-aarch64]** Same (X0-X28 + spills). `src/codegen/src/backend.rs` — **DONE**: Added `AArch64Backend::emit_function_regalloc` and `emit_function_with_regalloc`. Runs the `Emitter::emit_function(func, None)` stack-slot path for correct bytes, then annotates with `RegAllocResult`. Test: `test_wave22_aarch64_emit_function_regalloc`.
+- [x] **[BE-riscv64]** Same (a0-a7, t0-t6, s0-s11 + spills). `src/codegen/src/riscv64.rs` — **DONE**: Added `RiscV64Backend::emit_function_regalloc` and `emit_function_with_regalloc`. Test: `test_wave22_riscv64_emit_function_regalloc`.
+- [x] **[BE-arm32]** Same (r0-r3, r4-r10 + spills). `src/codegen/src/arm32/mod.rs` — **DONE**: Added `Arm32Backend::emit_function_regalloc` and `emit_function_with_regalloc`. Test: `test_wave22_arm32_emit_function_regalloc`.
+- [x] **[BE-loongarch64]** Same (a0-a7, t0-t8, s0-s9 + spills). `src/codegen/src/loongarch64/mod.rs` — **DONE**: Added `LoongArch64Backend::emit_function_regalloc` and `emit_function_with_regalloc`. Test: `test_wave22_loongarch64_emit_function_regalloc`.
 
 ---
 

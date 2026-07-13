@@ -58,6 +58,7 @@ pub mod alias_analysis;
 pub mod ppc64;
 pub mod ppc64le;
 pub mod regalloc;
+pub mod regalloc_emit;
 pub mod riscv_common;
 pub mod riscv64;
 pub mod riscv32;

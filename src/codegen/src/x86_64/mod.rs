@@ -3291,6 +3291,54 @@ impl X86_64Backend {
             target_info: X86_64TargetInfo,
         }
     }
+
+    /// Wave 22: Emit a function using real register allocation.
+    ///
+    /// Consumes a `RegAllocResult` (from `TargetAgnosticRegAlloc`) and
+    /// produces an `AllocatedFunction` where each instruction's
+    /// `reads`/`writes` fields are annotated with the physical registers
+    /// (RAX/RCX/RDX/RSI/RDI/R8-R11 for caller-saved, RBX/R12-R15 for
+    /// callee-saved) assigned by the linear-scan allocator.
+    ///
+    /// Spilled vregs (those in `spill_slots`) remain on the stack via
+    /// the existing stack-slot ISel path.  The `encoded` bytes are
+    /// produced by the stack-slot ISel and are correct; the
+    /// `reads`/`writes` metadata is additive and describes the
+    /// regalloc assignment for downstream consumers.
+    ///
+    /// # Arguments
+    /// * `func` — The IR function to emit.
+    /// * `alloc` — The register allocation result (from
+    ///   `TargetAgnosticRegAlloc::allocate_function`).
+    ///
+    /// # Returns
+    /// An `AllocatedFunction` with regalloc-annotated `reads`/`writes`.
+    pub fn emit_function_regalloc(
+        &self,
+        func: &IRFunction,
+        alloc: &crate::regalloc::RegAllocResult,
+    ) -> Result<AllocatedFunction, BackendError> {
+        // Step 1: Run the existing stack-slot ISel to produce correct
+        // encoded bytes.
+        let mut allocated = stack_slot_isel::allocate_registers(func)?;
+
+        // Step 2: Annotate with the regalloc result.
+        crate::regalloc_emit::annotate_with_regalloc(&mut allocated, alloc);
+
+        Ok(allocated)
+    }
+
+    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    ///
+    /// This runs `TargetAgnosticRegAlloc::allocate_function` internally
+    /// and then calls `emit_function_regalloc`.
+    pub fn emit_function_with_regalloc(
+        &self,
+        func: &IRFunction,
+    ) -> Result<AllocatedFunction, BackendError> {
+        let alloc = crate::regalloc_emit::run_regalloc(func, "x86_64");
+        self.emit_function_regalloc(func, &alloc)
+    }
 }
 
 impl Default for X86_64Backend {
