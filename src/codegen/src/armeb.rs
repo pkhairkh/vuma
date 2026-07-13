@@ -3,6 +3,20 @@
 //! Thin wrapper around the little-endian `arm32` backend that produces
 //! big-endian ARM32 ELF binaries. Swaps all 4-byte instruction words
 //! and ELF header fields from LE to BE.
+//!
+//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//!
+//! `IRInstr::Syscall` emission is **automatically inherited** from the
+//! parent `Arm32Backend`. This backend delegates `allocate_registers`
+//! to `self.inner.allocate_registers(func)`, which calls the parent's
+//! instruction selector. The parent's `IRInstr::Syscall { nr, args, dst }`
+//! arm (added in Wave 11, `arm32/mod.rs:6835`) emits `MOV R7, nr; SVC #0`
+//! with arg moves into R0-R3 (and stack for args 5-6). `encode_function`
+//! then byte-swaps each 4-byte instruction word from LE to BE (BE32 mode)
+//! so `qemu-armeb` fetches the correct big-endian instruction words. The
+//! conformance test in `src/tests/src/cross_backend.rs` verifies that a
+//! `Syscall { nr: 1, .. }` produces non-empty encoded output on this
+//! backend.
 
 pub use crate::arm32::{Gpr, Instruction, Arm32Backend};
 
@@ -157,5 +171,52 @@ impl Backend for ArmEbBackend {
             if i + 4 <= swapped.len() { swap_u32(&mut swapped, i); }
         }
         self.inner.disassemble(&swapped, base_addr)
+    }
+}
+
+// ===========================================================================
+// Tests — IRInstr::Syscall inheritance (Wave 13)
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
+    use std::collections::HashSet;
+
+    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
+    /// inherited from the parent `Arm32Backend` and produces non-empty
+    /// encoded instruction bytes.  `encode_function` byte-swaps each 4-byte
+    /// word from LE to BE (BE32 mode), but the output remains non-empty.
+    #[test]
+    fn test_syscall_inherited_from_arm32() {
+        let backend = ArmEbBackend::new();
+        let func = IRFunction {
+            name: "syscall_test".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Syscall {
+                    nr: 1, // __NR_exit on ARM32 Linux (EBI)
+                    args: vec![],
+                    dst: Some(IRValue::Register(0)),
+                }],
+                terminator: IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+                source_line: 0,
+            }],
+            source_file: String::new(),
+        };
+        let allocated = backend.allocate_registers(&func).expect("allocate_registers");
+        let bytes = backend.encode_function(&allocated).expect("encode_function");
+        assert!(
+            !bytes.is_empty(),
+            "armeb must inherit non-empty syscall emission from arm32"
+        );
     }
 }

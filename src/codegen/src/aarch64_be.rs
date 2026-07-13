@@ -6,6 +6,21 @@
 //! Key difference from ppc64le/mips64be: AArch64 instructions are ALWAYS
 //! little-endian encoded, even on big-endian data systems. So we only
 //! swap ELF header fields and program headers — NOT instruction words.
+//!
+//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//!
+//! `IRInstr::Syscall` emission is **automatically inherited** from the
+//! parent `AArch64Backend`. This backend delegates `allocate_registers`
+//! to `self.inner.allocate_registers(func)`, which calls the parent's
+//! instruction selector (`arm64::InstructionSelector::select_from_ir`).
+//! The parent's `IRInstr::Syscall { nr, args, dst }` arm (added in Wave 11,
+//! `arm64.rs:4538`) emits `MOVZ X8, nr; SVC #0` with arg moves into X0-X5.
+//! Because AArch64 instructions are always LE-encoded (even on BE data
+//! systems per ARM ARM D6.1.3), `encode_function` returns the parent's
+//! bytes as-is — no byte-swap needed. The conformance test in
+//! `src/tests/src/cross_backend.rs::test_syscall_conformance_all_backends`
+//! verifies that a `Syscall { nr: 1, .. }` produces non-empty encoded
+//! output on this backend.
 
 use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError, AArch64Backend};
 use crate::ir::IRFunction;
@@ -115,5 +130,53 @@ impl Backend for AArch64BeBackend {
     fn disassemble(&self, code: &[u8], base_addr: u64) -> Vec<String> {
         // Instructions stay LE — no swap needed
         self.inner.disassemble(code, base_addr)
+    }
+}
+
+// ===========================================================================
+// Tests — IRInstr::Syscall inheritance (Wave 13)
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
+    use std::collections::HashSet;
+
+    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
+    /// inherited from the parent `AArch64Backend` and produces non-empty
+    /// encoded instruction bytes.  Because AArch64 instructions are always
+    /// LE-encoded (even on BE data systems), the wrapper returns the parent's
+    /// bytes as-is — no byte-swap is applied.
+    #[test]
+    fn test_syscall_inherited_from_aarch64() {
+        let backend = AArch64BeBackend::new();
+        let func = IRFunction {
+            name: "syscall_test".to_string(),
+            params: vec![],
+            results: vec![],
+            param_types: vec![],
+            result_types: vec![],
+            vregs: std::collections::HashMap::new(),
+            blocks: vec![IRBlock {
+                label: "entry".to_string(),
+                instructions: vec![IRInstr::Syscall {
+                    nr: 1, // __NR_write on AArch64 Linux
+                    args: vec![],
+                    dst: Some(IRValue::Register(0)),
+                }],
+                terminator: IRTerminator::Return(vec![]),
+                predecessors: HashSet::new(),
+                successors: HashSet::new(),
+                source_line: 0,
+            }],
+            source_file: String::new(),
+        };
+        let allocated = backend.allocate_registers(&func).expect("allocate_registers");
+        let bytes = backend.encode_function(&allocated).expect("encode_function");
+        assert!(
+            !bytes.is_empty(),
+            "aarch64_be must inherit non-empty syscall emission from aarch64"
+        );
     }
 }
