@@ -40,10 +40,24 @@ struct Cli {
     opt_level: OptLevelArg,
 
     /// Verification level (overrides subcommand default).
-    /// Use `--verification none` to bypass verification (equivalent to
-    /// `--allow-unverified`). Default is `normal` (strict).
+    /// Default is `normal` (strict — all five invariants run).
+    /// `--verification none` is NO LONGER accepted; use `--no-verify`
+    /// to explicitly bypass verification (Wave 19 escape-hatch closure).
     #[arg(long, global = true, value_enum, default_value = "normal")]
     verification: VerificationArg,
+
+    /// Explicitly skip all verification (escape hatch).
+    /// This is the ONLY way to bypass verification. A compile-time
+    /// warning is emitted when this flag is used. (Wave 19)
+    #[arg(long = "no-verify", global = true)]
+    no_verify: bool,
+
+    /// Strict verification: treat `Inconclusive` verdicts as compilation-
+    /// blocking errors (Wave 19). By default `Inconclusive` (unverified
+    /// but no proven violation) is allowed; `--strict-verification` makes
+    /// it a hard error.
+    #[arg(long = "strict-verification", global = true)]
+    strict_verification: bool,
 
     /// Include debug info in output (alias: --debug-info)
     #[arg(long, global = true, visible_alias = "debug-info")]
@@ -115,10 +129,13 @@ impl From<OptLevelArg> for OptLevel {
 }
 
 /// Verification level CLI argument.
+///
+/// `None` is intentionally NOT a CLI value (Wave 19): the only way to
+/// bypass verification is the explicit `--no-verify` flag, which emits a
+/// compile-time warning. This prevents users from silently disabling
+/// verification via `--verification none`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum VerificationArg {
-    #[value(name = "none")]
-    None,
     #[value(name = "quick")]
     Quick,
     #[value(name = "normal")]
@@ -130,7 +147,6 @@ enum VerificationArg {
 impl From<VerificationArg> for VerificationLevel {
     fn from(val: VerificationArg) -> Self {
         match val {
-            VerificationArg::None => VerificationLevel::None,
             VerificationArg::Quick => VerificationLevel::Quick,
             VerificationArg::Normal => VerificationLevel::Normal,
             VerificationArg::Exhaustive => VerificationLevel::Exhaustive,
@@ -423,10 +439,24 @@ fn read_source(path: &PathBuf) -> Result<String, String> {
 
 /// Build a `CompileConfig` from the global CLI flags.
 fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
+    // Wave 19: `--no-verify` is the ONLY way to bypass verification.
+    // Emit a compile-time warning so the bypass is never silent.
+    let verification_level = if cli.no_verify {
+        eprintln!(
+            "warning: --no-verify bypasses all IVE verification. \
+             Memory-safety violations will NOT be detected. \
+             Use only for debugging/testing."
+        );
+        VerificationLevel::None
+    } else {
+        VerificationLevel::from(cli.verification)
+    };
+
     CompileConfig {
         target,
         opt_level: OptLevel::from(cli.opt_level),
-        verification_level: VerificationLevel::from(cli.verification),
+        verification_level,
+        strict_verification: cli.strict_verification,
         debug_info: cli.debug,
         section_headers: cli.sections,
         runtime_bounds_checks: cli.safe,

@@ -94,18 +94,60 @@ impl VerificationInput {
 pub struct VerificationEngine {
     /// Whether to emit detailed diagnostic logging.
     verbose: bool,
+    /// (Wave 19) Maximum number of paths explored by the liveness verifier
+    /// before giving up (default 64). Configurable via `CompileConfig`.
+    max_paths: usize,
+    /// (Wave 19) Maximum path length explored by the cleanup verifier
+    /// before giving up (default 256). Configurable via `CompileConfig`.
+    max_path_length: usize,
+}
+
+impl Clone for VerificationEngine {
+    fn clone(&self) -> Self {
+        Self {
+            verbose: self.verbose,
+            max_paths: self.max_paths,
+            max_path_length: self.max_path_length,
+        }
+    }
 }
 
 impl VerificationEngine {
     /// Construct a new verification engine.
     pub fn new() -> Self {
-        Self { verbose: false }
+        Self {
+            verbose: false,
+            max_paths: 64,
+            max_path_length: 256,
+        }
     }
 
     /// Enable verbose diagnostic output.
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
+    }
+
+    /// (Wave 19) Set the maximum number of paths for the liveness verifier.
+    pub fn with_max_paths(mut self, max_paths: usize) -> Self {
+        self.max_paths = max_paths;
+        self
+    }
+
+    /// (Wave 19) Set the maximum path length for the cleanup verifier.
+    pub fn with_max_path_length(mut self, max_path_length: usize) -> Self {
+        self.max_path_length = max_path_length;
+        self
+    }
+
+    /// (Wave 19) Accessor for the liveness path limit.
+    pub fn max_paths(&self) -> usize {
+        self.max_paths
+    }
+
+    /// (Wave 19) Accessor for the cleanup path-length limit.
+    pub fn max_path_length(&self) -> usize {
+        self.max_path_length
     }
 
     /// Verify the **liveness** invariant: every requested resource will
@@ -120,7 +162,9 @@ impl VerificationEngine {
     /// - Message completeness verification
     pub fn verify_liveness(&self, input: &VerificationInput) -> VerificationResult {
         let liveness_input = self.extract_liveness_input(&input.scg);
-        let mut verifier = LivenessVerifier::new().with_verbose(self.verbose);
+        let mut verifier = LivenessVerifier::new()
+            .with_verbose(self.verbose)
+            .with_max_paths(self.max_paths);
         let result = verifier.verify(&liveness_input);
         result.into_verification_result()
     }
@@ -185,7 +229,9 @@ impl VerificationEngine {
     /// - Use-after-free detection
     pub fn verify_cleanup(&self, input: &VerificationInput) -> VerificationResult {
         let cleanup_graph = self.extract_cleanup_graph(&input.scg);
-        let verifier = CleanupVerifier::new().with_verbose(self.verbose);
+        let verifier = CleanupVerifier::new()
+            .with_verbose(self.verbose)
+            .with_max_path_length(self.max_path_length);
         let report = verifier.verify(&cleanup_graph);
         report.to_verification_result()
     }
@@ -232,6 +278,17 @@ impl VerificationEngine {
                             point: PointId(node.id.as_u64()),
                             thread: ThreadId(0),
                         });
+                        // (Wave 19) Mark top-level `region` allocations as
+                        // static-lifetime so the liveness leak detector skips
+                        // them (spec §5.4). An allocation is static-lifetime
+                        // if it has no incoming ControlFlow edge (not
+                        // reachable from any function's entry point).
+                        let has_ctrlflow_pred = scg.edges().any(|e| {
+                            e.target == node.id && matches!(e.kind, EdgeKind::ControlFlow)
+                        });
+                        if !has_ctrlflow_pred {
+                            input.static_lifetime_resources.insert(rid);
+                        }
                     }
                 }
                 NodeType::Deallocation => {
@@ -838,6 +895,13 @@ impl VerificationEngine {
             if node.node_type != NodeType::Allocation {
                 continue;
             }
+            // (Wave 19) An allocation is static-lifetime if it has no
+            // incoming ControlFlow edge — i.e., it is not reachable from
+            // any function's entry point. This covers top-level `region`
+            // declarations (spec §5.4 "Global scope / Static lifetime").
+            // Allocations inside function control flow still have an
+            // incoming ControlFlow edge and remain subject to the leak
+            // invariant.
             let has_ctrlflow_pred = scg.edges().any(|e| {
                 e.target == node.id && matches!(e.kind, EdgeKind::ControlFlow)
             });

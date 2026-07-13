@@ -200,6 +200,11 @@ pub struct LivenessInput {
     /// represents the function exiting, and the caller is responsible
     /// for cleanup.
     pub function_returns: hashbrown::HashSet<PointId>,
+    /// (Wave 19) Resources with static lifetime (top-level `region`
+    /// allocations per spec §5.4). These are intentionally never
+    /// deallocated — they live until program shutdown — and must NOT
+    /// be flagged as leaks.
+    pub static_lifetime_resources: hashbrown::HashSet<ResourceId>,
 }
 
 impl LivenessInput {
@@ -947,6 +952,14 @@ impl LivenessVerifier {
             let alloc_point = alloc_event.point;
             let kind = alloc_event.kind;
             let thread = alloc_event.thread;
+
+            // (Wave 19) Skip static-lifetime resources (top-level `region`
+            // allocations per spec §5.4). These are intentionally never
+            // deallocated — they live until program shutdown — and must
+            // NOT be flagged as leaks.
+            if input.static_lifetime_resources.contains(&resource) {
+                continue;
+            }
 
             let deallocs = input.deallocations_for(resource);
 

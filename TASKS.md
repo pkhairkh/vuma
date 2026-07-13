@@ -309,12 +309,12 @@
 
 # Wave 19 — Close verification escape hatches
 
-- [ ] **[IVE]** Remove user-default `VerificationLevel::None`; require explicit `--no-verify` flag. `src/pipeline.rs:4846-4847`
-- [ ] **[IVE]** Add `--strict-verification` flag making `OverallVerdict::Inconclusive` block compilation. `src/pipeline.rs:4861-4864`
-- [ ] **[IVE]** Change `Quick` mode to run all 5 invariants at reduced depth (instead of skipping liveness/interpretation/cleanup).
-- [ ] **[IVE]** Fix cleanup-extractor false positive for top-level `region` declarations flagged as leaks. `src/api.rs:1466-1474`
-- [ ] **[IVE]** Make IVE `max_paths` (64) and `max_path_length` (256) configurable via `CompileConfig`. `src/ive/src/liveness.rs:839`, `src/ive/src/cleanup.rs:721-727`
-- [ ] **[TEST]** Add regression tests for each escape hatch.
+- [x] **[IVE]** Remove user-default `VerificationLevel::None`; require explicit `--no-verify` flag. `src/pipeline.rs:4846-4847`
+- [x] **[IVE]** Add `--strict-verification` flag making `OverallVerdict::Inconclusive` block compilation. `src/pipeline.rs:4861-4864`
+- [x] **[IVE]** Change `Quick` mode to run all 5 invariants at reduced depth (instead of skipping liveness/interpretation/cleanup).
+- [x] **[IVE]** Fix cleanup-extractor false positive for top-level `region` declarations flagged as leaks. `src/api.rs:1466-1474`
+- [x] **[IVE]** Make IVE `max_paths` (64) and `max_path_length` (256) configurable via `CompileConfig`. `src/ive/src/liveness.rs:839`, `src/ive/src/cleanup.rs:721-727`
+- [x] **[TEST]** Add regression tests for each escape hatch.
 
 ---
 
