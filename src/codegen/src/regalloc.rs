@@ -432,6 +432,9 @@ impl LiveInterval {
 /// generation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AllocationResult {
+    /// (Wave 21) Name of the function this result applies to.
+    /// Used by the emit path to match AllocationResults to IRFunctions.
+    pub function_name: String,
     /// Mapping from virtual register ID to physical register.
     pub vreg_to_preg: HashMap<IRValueId, PhysReg>,
     /// Mapping from virtual register ID to spill slot index.
@@ -458,6 +461,7 @@ impl AllocationResult {
     /// Create an empty allocation result.
     pub fn new() -> Self {
         Self {
+            function_name: String::new(),
             vreg_to_preg: HashMap::new(),
             spill_slots: HashMap::new(),
             total_spill_slots: 0,
@@ -1139,7 +1143,9 @@ impl LinearScanAllocator {
                 .then_with(|| b.end.cmp(&a.end))
         });
 
-        self.allocate_intervals(&intervals, &call_positions)
+        let mut result = self.allocate_intervals(&intervals, &call_positions)?;
+        result.function_name = func.name.clone();
+        Ok(result)
     }
 
     /// Run linear-scan register allocation on a single function with
@@ -1157,7 +1163,9 @@ impl LinearScanAllocator {
 
         intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
-        self.allocate_intervals(&intervals, &call_positions)
+        let mut result = self.allocate_intervals(&intervals, &call_positions)?;
+        result.function_name = func.name.clone();
+        Ok(result)
     }
 
     /// Core linear-scan algorithm over sorted intervals.

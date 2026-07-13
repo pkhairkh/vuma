@@ -405,7 +405,7 @@ fn test_full_pipeline_compile_to_elf() {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(&cg_scg).expect("IR building should succeed");
     let config = EmitConfig::linux_elf();
-    let elf_bytes = emit_elf(&ir_program.functions, &ir_program.data_sections, &config)
+    let elf_bytes = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
         .expect("ELF emission should succeed");
 
     // Validate the ELF binary
