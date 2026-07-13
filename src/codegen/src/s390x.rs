@@ -2419,6 +2419,18 @@ impl Backend for S390XBackend {
                 ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
                 ("preadv", 328), ("pwritev", 329),
                 ("fchdir", 133), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (s390 unistd.h) ──
+                // s390x has 5 reg args (R2-R6); all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(323), signalfd→signalfd4(322) = modern variants.
+                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
+                ("mincore", 218), ("madvise", 219), ("msync", 144), ("mremap", 163),
+                ("getrlimit", 191), ("setrlimit", 75), ("prlimit64", 334),
+                ("getrusage", 77), ("times", 43),
+                ("getrandom", 349),
+                ("eventfd", 323), ("timerfd_create", 319), ("timerfd_settime", 320),
+                ("timerfd_gettime", 321), ("signalfd", 322),
+                ("inotify_init1", 324), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

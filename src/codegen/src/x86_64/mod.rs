@@ -2892,6 +2892,18 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("preadv", 295), ("pwritev", 296),
         // Family 7: cwd/root (getcwd=79/chdir=80 already above)
         ("fchdir", 81), ("chroot", 161),
+        // ── Wave 9: POSIX system & advanced syscalls (x86_64 syscall_64.tbl) ──
+        // All take ≤5 args; x86_64 has 6 reg args → simple_stub.
+        // eventfd→eventfd2(290), signalfd→signalfd4(289) = modern flag-accepting variants.
+        ("mlock", 149), ("munlock", 150), ("mlockall", 151), ("munlockall", 152),
+        ("mincore", 27), ("madvise", 28), ("msync", 26), ("mremap", 25),
+        ("getrlimit", 97), ("setrlimit", 160), ("prlimit64", 302),
+        ("getrusage", 98), ("times", 100),
+        ("getrandom", 318),
+        ("eventfd", 290), ("timerfd_create", 283), ("timerfd_settime", 286),
+        ("timerfd_gettime", 287), ("signalfd", 289),
+        ("inotify_init1", 294), ("inotify_add_watch", 254), ("inotify_rm_watch", 255),
+        ("ptrace", 101),
     ] {
         stubs.push((name.to_string(), simple_stub(num)));
     }

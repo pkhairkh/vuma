@@ -7227,7 +7227,9 @@ impl Backend for Arm32Backend {
                 ("sigaction", 67), ("pipe", 42), ("dup2", 63),
                 ("fork", 2), ("execve", 11), ("wait4", 114),
                 ("clone", 120),
-                ("socket", 281), ("epoll_create1", 356),
+                ("socket", 281),
+                // [wave 9 fix] epoll_create1 corrected 356→357 (356 is eventfd2 on arm).
+                ("epoll_create1", 357),
                 ("epoll_ctl", 251), ("epoll_wait", 252),
                 // ── W6: additional POSIX syscall stubs ──
                 ("lseek", 19), ("stat", 106), ("fstat", 108),
@@ -7276,6 +7278,19 @@ impl Backend for Arm32Backend {
                 ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
                 ("preadv", 361), ("pwritev", 362),
                 ("fchdir", 133), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (arm unistd.h) ──
+                // ARM EABI has 4 reg args (R0-R3); all these take ≤4 args →
+                // simple_stub. eventfd→eventfd2(356), signalfd→signalfd4(355).
+                // mremap (5 args) is registered below via six_arg_stub.
+                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
+                ("mincore", 219), ("madvise", 220), ("msync", 144),
+                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 369),
+                ("getrusage", 77), ("times", 43),
+                ("getrandom", 384),
+                ("eventfd", 356), ("timerfd_create", 350), ("timerfd_settime", 353),
+                ("timerfd_gettime", 354), ("signalfd", 355),
+                ("inotify_init1", 360), ("inotify_add_watch", 317), ("inotify_rm_watch", 318),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -7287,6 +7302,11 @@ impl Backend for Arm32Backend {
             // is safe.
             stubs.push(("linkat".to_string(), six_arg_stub(330)));
             stubs.push(("fchownat".to_string(), six_arg_stub(325)));
+
+            // ── Wave 9: mremap (5 args: old_addr, old_size, new_size, flags, new_addr) ──
+            // Uses six_arg_stub to load arg5 (new_address) from the caller's
+            // stack into R4; R5 (arg6) is garbage and ignored by the 5-arg syscall.
+            stubs.push(("mremap".to_string(), six_arg_stub(163)));
 
             // rt_sigreturn (173) — special: no args, never returns.
             // The kernel restores the saved signal context from the stack

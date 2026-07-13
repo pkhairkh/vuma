@@ -1882,9 +1882,12 @@ impl Backend for M68kBackend {
                 ("recvfrom", 350),
                 ("clone", 120),
                 ("fork", 2),
-                ("epoll_create1", 449),
-                ("epoll_ctl", 424),
-                ("epoll_wait", 425),
+                // [wave 9 fix] epoll numbers corrected from kernel m68k syscall.tbl:
+                //   old (wrong): 449/424/425 (those are inotify_init1/pidfd_send_signal/io_uring_setup)
+                //   correct:      325/250/251
+                ("epoll_create1", 325),
+                ("epoll_ctl", 250),
+                ("epoll_wait", 251),
                 ("dup3", 431),
                 // ── Additional POSIX syscall stubs (stat family, getcwd,
                 // recv/send direct syscalls) ──
@@ -1912,6 +1915,18 @@ impl Backend for M68kBackend {
                 ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
                 ("preadv", 329), ("pwritev", 330),
                 ("fchdir", 133), ("chroot", 61),
+                // ── Wave 9: POSIX system & advanced syscalls (m68k unistd.h) ──
+                // m68k has 5 reg args (D1-D5); all take ≤5 args → simple_stub.
+                // eventfd→eventfd2(324), signalfd→signalfd4(323) = modern variants.
+                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
+                ("mincore", 237), ("madvise", 238), ("msync", 144), ("mremap", 163),
+                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 339),
+                ("getrusage", 77), ("times", 43),
+                ("getrandom", 352),
+                ("eventfd", 324), ("timerfd_create", 318), ("timerfd_settime", 321),
+                ("timerfd_gettime", 322), ("signalfd", 323),
+                ("inotify_init1", 328), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
+                ("ptrace", 26),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

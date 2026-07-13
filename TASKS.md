@@ -158,13 +158,24 @@
 
 # Wave 9 — Missing POSIX syscalls: system & advanced (all backends)
 
-- [ ] **[BE-all]** Add `mlock`/`munlock`/`mlockall`/`munlockall`/`mincore`/`madvise`.
-- [ ] **[BE-all]** Add `getrlimit`/`setrlimit`/`prlimit64`/`getrusage`/`times`/`umask`.
-- [ ] **[BE-all]** Add `getrandom` (replace silent fallback on non-wasm).
-- [ ] **[BE-all]** Add `eventfd`/`timerfd_create`/`timerfd_settime`/`timerfd_gettime`/`signalfd`.
-- [ ] **[BE-all]** Add `epoll_create1`/`epoll_ctl`/`epoll_wait` (verify sparc64 numbers).
-- [ ] **[BE-all]** Add `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`.
-- [ ] **[BE-all]** Add `ptrace`/`madvise`/`msync`/`mremap`/`munlock`.
+- [x] **[BE-all]** Add `mlock`/`munlock`/`mlockall`/`munlockall`/`mincore`/`madvise`. — DONE on all 14 ELF backends. Per-arch numbers verified against kernel `syscall.tbl` (e.g. sparc mlock=237/mincore=78/madvise=75, alpha mlock=314/mincore=375, ppc mincore=206/madvise=205, parisc mincore=72/madvise=119, mips n64 mlock=5146/mincore=5026/madvise=5027). `mlockall`(1 arg)/`munlockall`(0 args) included.
+- [x] **[BE-all]** Add `getrlimit`/`setrlimit`/`prlimit64`/`getrusage`/`times`/`umask`. — `umask` already added in wave 7; `getrlimit`/`setrlimit`/`prlimit64`/`getrusage`/`times` ADDED to all 14 ELF backends. Per-arch divergences verified (s390 getrlimit=191, sparc getrlimit=144/getrusage=117, alpha getrlimit=144/getrusage=364/times=323, mips n64 getrlimit=5095/getrusage=5096/times=5098).
+- [x] **[BE-all]** Add `getrandom` (replace silent fallback on non-wasm). — DONE on all 14 ELF backends. Per-arch numbers verified (x86_64=318, i386=355, arm=384, m68k=352, ppc=359, s390=349, sparc=347, alpha=511, parisc=339, mips n64=5313, generic=278). wasm32 already has `getrandom` via WASI `random_get` host import (wave 5). The "silent fallback" referred to was the wasm32 unknown-extern stub (now -ENOSYS per wave 5); on ELF backends there was no prior getrandom stub at all — now registered with the real `__NR_getrandom`.
+- [x] **[BE-all]** Add `eventfd`/`timerfd_create`/`timerfd_settime`/`timerfd_gettime`/`signalfd`. — DONE on all 14 ELF backends. `eventfd` is registered as the `eventfd2` syscall (the modern flag-accepting variant; the legacy `eventfd` syscall was removed on the generic ABI and deprecated elsewhere). `signalfd` is registered as `signalfd4` (same rationale). Per-arch numbers verified (e.g. sparc eventfd2=318/signalfd4=317/timerfd_create=312, alpha eventfd2=485/signalfd4=484/timerfd_create=481, mips n64 eventfd2=5284/timerfd_create=5280).
+- [x] **[BE-all]** Add `epoll_create1`/`epoll_ctl`/`epoll_wait` (verify sparc64 numbers). — VERIFIED + BUGS FIXED. All 14 ELF backends already had epoll registered, but 5 backends had WRONG numbers (verified against kernel `syscall.tbl`):
+  - **sparc64**: `epoll_ctl` was 294 (actually `readlinkat`!) and `epoll_wait` was 295 (actually `fchmodat`!) — a prior commit wrongly "fixed" them from 194/195 claiming a collision with connect/getsockname (connect=98, getsockname=150 — no collision). Corrected back to 194/195. The 294/295 values had been duplicating wave-7's readlinkat/fchmodat entries, meaning epoll_ctl was actually calling readlinkat and epoll_wait was calling fchmodat.
+  - **m68k**: all three were 449/424/425 (actually inotify_init1/pidfd_send_signal/io_uring_setup) — corrected to 325/250/251.
+  - **alpha**: all three were 449/424/425 (actually migrate_pages/tgkill/stat64) — corrected to 486/408/409.
+  - **hppa (parisc)**: all three were 449/424/425 (copy-pasted from m68k) — corrected to 311/225/226.
+  - **arm32**: `epoll_create1` was 356 (actually `eventfd2`) — corrected to 357.
+  - **x86_32**: epoll_ctl comment said "syscall 253" but code correctly used 255 — fixed the comment.
+  - Remaining backends (x86_64, ppc64, s390x, mips64, all 4 generic) verified correct.
+- [x] **[BE-all]** Add `inotify_init1`/`inotify_add_watch`/`inotify_rm_watch`. — DONE on all 14 ELF backends. Per-arch numbers verified (e.g. sparc inotify_add_watch=152/inotify_rm_watch=156, alpha inotify_add_watch=445, mips n64 inotify_init1=5288/inotify_add_watch=5244).
+- [x] **[BE-all]** Add `ptrace`/`madvise`/`msync`/`mremap`/`munlock`. — DONE on all 14 ELF backends. `madvise`/`munlock` already added in family 1 (deduplicated — no duplicate registration). `ptrace`/`msync`/`mremap` added. `mremap` is the only 5-arg wave-9 syscall: on arm32 it uses `six_arg_stub` (loads arg5 `new_address` from caller stack); on x86_32 it uses the `syscall_stub(num,5)` 5-arg path; on all other arches (≥5 reg args) it's a simple_stub. Per-arch msync/mremap verified (sparc msync=65/mremap=250, alpha msync=217/mremap=341, mips n64 msync=5025/mremap=5024, generic msync=227/mremap=216).
+
+> **wasm32 note:** wave-9 syscalls are not mapped to `vuma.*` host imports on wasm32 (WASI preview1 has no equivalents for mlock/rlimit/eventfd/inotify/ptrace/etc.). They resolve to wasm32's unknown-extern fallback stub (returns `-ENOSYS` per wave 5). wasm32 was not edited to avoid conflicting with the in-progress wave-5/wave-8 wasm32 work.
+
+> **Verification:** `cargo check -p vuma-codegen` → 0 errors. `cargo test -p vuma-codegen --lib` → 779 passed / 15 failed, IDENTICAL to the pre-wave-9 baseline (same 15 pre-existing failures in loongarch64/scg_to_ir/wasm32/x86_32-elf/x86_64-isel, none touching wave-9 stubs). All per-arch syscall numbers were extracted from the authoritative kernel `arch/*/kernel/syscalls/syscall.tbl` files (fetched from torvalds/linux).
 
 ---
 
