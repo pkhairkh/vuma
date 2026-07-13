@@ -3868,15 +3868,15 @@ impl Backend for Sparc64Backend {
         //
         // __vuma_alloc(size in %o0) -> %o0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
         //                                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-        //   __NR_mmap (sparc64) = 115
+        //   __NR_mmap (sparc64) = 71
         // __vuma_free(addr in %o0) -> munmap(addr, 0)
-        //   __NR_munmap (sparc64) = 117
+        //   __NR_munmap (sparc64) = 73
         //
         // Linux sparc64 syscall numbers:
-        //   exit=1, read=3, write=4, open=5, close=6, mmap=115, munmap=117,
-        //   rt_sigaction=109, pipe=42, dup2=63, alarm=27, getpid=20,
-        //   socket=189, clone=217, fork=2, execve=11, wait4=7,
-        //   exit_group=220, ...
+        //   exit=1, read=3, write=4, open=5, close=6, mmap=71, munmap=73,
+        //   rt_sigaction=102, pipe=42, dup2=90, alarm=27, getpid=20,
+        //   socket=97, clone=217, fork=2, execve=59, wait4=7,
+        //   exit_group=188, ...
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
@@ -3935,12 +3935,12 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            // OR %g0, 115, %g1  (sys_mmap)
+            // OR %g0, 71, %g1  (sys_mmap)
             code.extend_from_slice(
                 &Instruction::OrImm {
                     rd: Gpr::G1,
                     rs1: Gpr::G0,
-                    imm: 115,
+                    imm: 71,
                 }
                 .encode(),
             );
@@ -4015,30 +4015,30 @@ impl Backend for Sparc64Backend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                ("mmap", 115),
-                ("munmap", 117),
+                ("mmap", 71),
+                ("munmap", 73),
                 ("exit", 1),
                 ("alarm", 27),
                 ("getpid", 20),
-                ("socket", 189),
-                ("execve", 11),
+                ("socket", 97),
+                ("execve", 59),
                 ("wait4", 7),
-                ("dup2", 63),
+                ("dup2", 90),
                 ("fork", 2),
                 ("unlink", 10),
-                ("exit_group", 220),
+                ("exit_group", 188),
                 ("lseek", 19),
                 ("kill", 37),
                 ("chdir", 12),
                 ("dup", 41),
                 ("ioctl", 54),
-                ("fcntl", 55),
+                ("fcntl", 92),
                 ("futex", 142),
-                ("poll", 93),
-                ("nanosleep", 101),
-                ("mprotect", 125),
+                ("poll", 153),
+                ("nanosleep", 249),
+                ("mprotect", 74),
                 ("brk", 17),
-                ("clock_gettime", 113),
+                ("clock_gettime", 257),
                 ("gettimeofday", 116),
                 ("rt_sigprocmask", 103),
                 // Socket syscalls — SPARC uses its own direct-call numbers
@@ -4047,16 +4047,16 @@ impl Backend for Sparc64Backend {
                 //  198 recvfrom, 199 sendmsg, 200 recvmsg, 201 shutdown,
                 //  202 setsockopt, 203 getsockopt). The previous table used
                 // generic-ABI numbers which invoked the wrong kernel function.
-                ("connect", 194),
-                ("bind", 191),
-                ("listen", 192),
-                ("accept", 193),
-                ("setsockopt", 202),
-                ("shutdown", 201),
-                ("dup3", 287),
-                ("recvfrom", 198),
-                ("sendto", 197),
-                ("epoll_create1", 293),
+                ("connect", 98),
+                ("bind", 353),
+                ("listen", 354),
+                ("accept", 99),
+                ("setsockopt", 355),
+                ("shutdown", 134),
+                ("dup3", 320),
+                ("recvfrom", 125),
+                ("sendto", 133),
+                ("epoll_create1", 319),
                 // NOTE: epoll_ctl/epoll_wait previously used 194/195 which
                 // collide with connect/getsockname on SPARC. The correct
                 // SPARC64 epoll syscall numbers are 294 (epoll_ctl) and
@@ -4069,7 +4069,7 @@ impl Backend for Sparc64Backend {
                 // SPARC64 stat family uses old syscall numbers (oldstat=38,
                 // oldlstat=68, oldfstat=91).  QEMU translates the old struct
                 // stat to the host's native struct stat.
-                ("stat", 38), ("lstat", 68), ("fstat", 91),
+                ("stat", 38), ("lstat", 40), ("fstat", 62),
                 ("getcwd", 119),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
@@ -4078,7 +4078,7 @@ impl Backend for Sparc64Backend {
         };
 
         // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
-        // rt_sigaction syscall # = 109 on SPARC64. VUMA declares 3 args
+        // rt_sigaction syscall # = 102 on SPARC64. VUMA declares 3 args
         // (signum, act, oldact); the kernel requires a 4th arg (sigsetsize=8)
         // in %o3. We set %o3=8 before the syscall.
         let sigaction_stub: Vec<u8> = {
@@ -4092,12 +4092,12 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            // OR %g0, 109, %g1  (sys_rt_sigaction)
+            // OR %g0, 102, %g1  (sys_rt_sigaction)
             code.extend_from_slice(
                 &Instruction::OrImm {
                     rd: Gpr::G1,
                     rs1: Gpr::G0,
-                    imm: 109,
+                    imm: 102,
                 }
                 .encode(),
             );
@@ -4151,11 +4151,11 @@ impl Backend for Sparc64Backend {
             syscall_stubs.push(("pipe".to_string(), code));
         }
 
-        // ── rt_sigreturn (175) — special: no args, never returns ──
+        // ── rt_sigreturn (101) — special: no args, never returns ──
         {
             let mut code = Vec::new();
             code.extend_from_slice(
-                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 175 }.encode(),
+                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 101 }.encode(),
             );
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
             // Safety trap in case the kernel ever returns (it shouldn't).
