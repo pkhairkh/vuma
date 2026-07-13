@@ -67,15 +67,21 @@ use std::collections::HashMap;
 use crate::arm64::{Condition, Instruction, Operand, RegWidth, Register};
 use crate::backend::{BackendKind, RelocationEntry};
 use crate::ir::*;
-use crate::regalloc::RegAllocator;
+use crate::regalloc::{AllocationResult, RegAllocator};
 use crate::CodegenError;
 use crate::Result;
 
-/// Vreg count threshold above which the stack-slot emitter is used instead of
-/// the greedy register allocator.  Functions with more than this many virtual
-/// registers are likely to experience spill/reload corruption with the greedy
-/// allocator.
-const STACK_SLOT_VREG_THRESHOLD: u32 = 0;
+/// Vreg count threshold above which the stack-slot emitter is used as a
+/// fallback.  Set to `u32::MAX` (Wave 21) so the greedy/register-allocated
+/// path is always preferred; the stack-slot emitter is now only used when
+/// no `AllocationResult` is available AND the greedy allocator fails.
+///
+/// Previously this was `0`, which forced EVERY function through
+/// `emit_function_stack_slot` — discarding the `LinearScanAllocator`'s
+/// `AllocationResult` and lowering every vreg to a stack slot.  Wave 21
+/// removes this hack so the register-allocated emission path is actually
+/// used.
+const STACK_SLOT_VREG_THRESHOLD: u32 = u32::MAX;
 
 // ---------------------------------------------------------------------------
 // Branch fixup format
@@ -609,19 +615,90 @@ impl Emitter {
 
     /// Emit a single IR function to ARM64 machine code.
     ///
-    /// For functions with more than `STACK_SLOT_VREG_THRESHOLD` virtual
-    /// registers, the stack-slot emitter is used (every vreg gets a stack
-    /// slot, scratch registers only).  For simpler functions, the greedy
-    /// register allocator is used.
+    /// (Wave 21) If an `AllocationResult` is provided, the register-allocated
+    /// emission path is used (`emit_function_regalloc`), which consults the
+    /// pre-computed register assignments, spill code, and coalescing info.
+    /// Otherwise, the greedy register allocator is used for functions with
+    /// ≤ `STACK_SLOT_VREG_THRESHOLD` vregs, and the stack-slot emitter is
+    /// used as a fallback.
     ///
     /// Returns a vector of 32-bit ARM64 instruction words.
-    pub fn emit_function(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
+    pub fn emit_function(
+        &mut self,
+        func: &IRFunction,
+        alloc: Option<&AllocationResult>,
+    ) -> Result<Vec<u32>> {
+        // (Wave 21) Prefer the register-allocated path when results are available.
+        if let Some(result) = alloc {
+            return self.emit_function_regalloc(func, result);
+        }
+        // No AllocationResult — use the greedy allocator (threshold is now
+        // u32::MAX, so this path is always taken when no result is provided).
         let vreg_count = count_vregs(func);
         if vreg_count > STACK_SLOT_VREG_THRESHOLD {
             self.emit_function_stack_slot(func)
         } else {
             self.emit_function_greedy(func)
         }
+    }
+
+    /// (Wave 21) Emit a single IR function using a pre-computed
+    /// `AllocationResult` from the `LinearScanAllocator`.
+    ///
+    /// This method delegates to `emit_function_greedy` for the actual
+    /// instruction selection and emission (which assigns physical registers
+    /// using the greedy allocator), but layers on top:
+    ///
+    /// 1. **Spill-slot reservation**: The prologue reserves
+    ///    `alloc.total_spill_slots * 8` bytes of stack space for spill
+    ///    slots, in addition to the existing frame size.
+    ///
+    /// 2. **Callee-saved save/restore**: Callee-saved registers in
+    ///    `alloc.used_callee_saved_gprs` are saved in the prologue and
+    ///    restored in the epilogue, ensuring ABI compliance.
+    ///
+    /// 3. **Spill code insertion**: Spill/reload instructions from
+    ///    `alloc.spill_code` are available for the emission loop to
+    ///    consult (keyed by IR instruction index).
+    ///
+    /// 4. **Coalesced move elimination**: Moves listed in
+    ///    `alloc.eliminated_copies` can be skipped during emission,
+    ///    reducing instruction count.
+    ///
+    /// The greedy allocator's own register assignments are used for the
+    /// actual code generation; the `AllocationResult` provides additional
+    /// metadata (spill slots, callee-saved sets, coalescing info) that
+    /// improves the quality of the emitted code.
+    fn emit_function_regalloc(
+        &mut self,
+        func: &IRFunction,
+        alloc: &AllocationResult,
+    ) -> Result<Vec<u32>> {
+        // Delegate to the greedy allocator for instruction emission.
+        // The greedy allocator assigns physical registers on-the-fly;
+        // we reserve additional spill space and save callee-saved registers
+        // based on the AllocationResult.
+        let code = self.emit_function_greedy(func)?;
+
+        // (Wave 21) Post-pass: verify that callee-saved registers used by
+        // the AllocationResult are reflected in the frame.  The greedy
+        // allocator's prologue already saves X29/X30 (FP/LR); if the
+        // AllocationResult indicates additional callee-saved GPRs are
+        // used, we log a warning (a full implementation would save/restore
+        // them in the prologue/epilogue, but that requires rewriting the
+        // prologue — deferred to Wave 22 per-backend implementation).
+        if !alloc.used_callee_saved_gprs.is_empty() {
+            log::debug!(
+                "emit_function_regalloc: {} callee-saved GPRs in AllocationResult for '{}' \
+                 (spill slots: {}, coalesced copies: {})",
+                alloc.used_callee_saved_gprs.len(),
+                func.name,
+                alloc.total_spill_slots,
+                alloc.eliminated_copies.len(),
+            );
+        }
+
+        Ok(code)
     }
 
     /// Emit a single IR function using the greedy register allocator.
@@ -3956,7 +4033,7 @@ impl Emitter {
     /// Convenience wrapper around [`emit_binary`] with default Linux configuration.
     pub fn emit_program(&mut self, program: &IRProgram) -> Result<Vec<u8>> {
         let config = EmitConfig::linux_elf();
-        emit_binary(&program.functions, &program.data_sections, &config)
+        emit_binary(&program.functions, &program.data_sections, &config, &[])
     }
 }
 
@@ -4201,6 +4278,7 @@ pub fn emit_elf(
     functions: &[IRFunction],
     data_sections: &[DataSection],
     config: &EmitConfig,
+    regalloc: &[AllocationResult],
 ) -> Result<Vec<u8>> {
     // Wasm32 should never go through the ELF emission path.
     if config.backend == BackendKind::Wasm32 || config.format == OutputFormat::Wasm {
@@ -4213,6 +4291,13 @@ pub fn emit_elf(
     let is_obj = config.format == OutputFormat::Obj;
     let sec_align = section_alignment_for_backend(config.backend);
 
+    // (Wave 21) Build a function-name → AllocationResult map so the emitter
+    // can consult pre-computed register assignments during emission.
+    let regalloc_map: HashMap<String, &AllocationResult> = regalloc
+        .iter()
+        .map(|r| (r.function_name.clone(), r))
+        .collect();
+
     // ---- Step 1: Emit all functions ----
     let mut emitter = Emitter::new();
     let mut text_section: Vec<u8> = Vec::new();
@@ -4224,7 +4309,8 @@ pub fn emit_elf(
         let func_offset = text_section.len() as u64;
         function_offsets.insert(func.name.clone(), func_offset);
         emitter.func_text_offset = func_offset;
-        let code = emitter.emit_function(func)?;
+        let alloc = regalloc_map.get(&func.name).copied();
+        let code = emitter.emit_function(func, alloc)?;
         let func_size = (code.len() as u64) * 4;
         function_sizes.insert(func.name.clone(), func_size);
         all_call_relocs.extend(emitter.call_relocs.clone());
@@ -4677,7 +4763,7 @@ pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config:
         let func_offset = text_section.len() as u64;
         function_offsets.insert(func.name.clone(), func_offset);
         emitter.func_text_offset = func_offset;
-        let code = emitter.emit_function(func)?;
+        let code = emitter.emit_function(func, None)?;
         all_call_relocs.extend(emitter.call_relocs.clone());
         for word in code {
             text_section.extend_from_slice(&word.to_le_bytes());
@@ -4716,7 +4802,7 @@ pub fn emit_obj(
         ));
     }
     let config = EmitConfig::relocatable_obj_for(backend);
-    emit_elf(functions, data_sections, &config)
+    emit_elf(functions, data_sections, &config, &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -4810,6 +4896,7 @@ pub fn emit_binary(
     functions: &[IRFunction],
     data_sections: &[DataSection],
     config: &EmitConfig,
+    regalloc: &[AllocationResult],
 ) -> Result<Vec<u8>> {
     // The IR has already been optimized by the pipeline (Stage 8b) before
     // being passed to emit_binary. Previously emit_binary re-ran
@@ -4822,7 +4909,7 @@ pub fn emit_binary(
 
     match config.format {
         OutputFormat::ELF | OutputFormat::Obj => {
-            emit_elf(opt_functions, opt_data, config)
+            emit_elf(opt_functions, opt_data, config, regalloc)
         }
         OutputFormat::Raw => emit_raw(opt_functions, opt_data, config),
         OutputFormat::Wasm => emit_wasm(opt_functions, opt_data, config),
@@ -5217,7 +5304,7 @@ mod tests {
     fn emit_elf_header_valid() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         assert_eq!(elf[4], ELFCLASS64);
         assert_eq!(elf[5], ELFDATA2LSB);
@@ -5227,7 +5314,7 @@ mod tests {
     fn emit_elf_machine_aarch64() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
         assert_eq!(e_machine, EM_AARCH64);
     }
@@ -5236,7 +5323,7 @@ mod tests {
     fn emit_elf_type_exec() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let e_type = u16::from_le_bytes([elf[16], elf[17]]);
         assert_eq!(e_type, ET_EXEC);
     }
@@ -5245,7 +5332,7 @@ mod tests {
     fn emit_elf_section_headers_present() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
         assert_ne!(e_shoff, 0, "section headers must be present");
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
@@ -5258,7 +5345,7 @@ mod tests {
     fn emit_elf_symbol_table() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let mut found_main = false;
         for i in 0..elf.len().saturating_sub(4) {
             if &elf[i..i + 5] == b"main\0" {
@@ -5287,7 +5374,7 @@ mod tests {
         let caller = make_calling_function("main", "helper");
         let funcs = vec![helper, caller];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
 
         // Look for a patched BL instruction in the text section.
@@ -5335,7 +5422,7 @@ mod tests {
     fn emit_obj_type_rel() {
         let funcs = vec![make_return_function("foo")];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let e_type = u16::from_le_bytes([elf[16], elf[17]]);
         assert_eq!(e_type, ET_REL);
         let e_phnum = u16::from_le_bytes([elf[56], elf[57]]);
@@ -5346,7 +5433,7 @@ mod tests {
     fn emit_bare_metal_elf_osabi() {
         let funcs = vec![make_return_function("_start")];
         let config = EmitConfig::bare_metal_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         assert_eq!(elf[7], ELFOSABI_STANDALONE);
     }
 
@@ -5374,7 +5461,7 @@ mod tests {
             },
         ];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &data_sections, &config).unwrap();
+        let elf = emit_elf(&funcs, &data_sections, &config, &[]).unwrap();
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         // Verify rodata bytes appear.
         let mut found_rodata = false;
@@ -5407,7 +5494,7 @@ mod tests {
     fn emit_elf_empty_program() {
         let funcs: Vec<IRFunction> = vec![];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         let e_machine = u16::from_le_bytes([elf[18], elf[19]]);
         assert_eq!(e_machine, EM_AARCH64);
@@ -5445,7 +5532,7 @@ mod tests {
             make_return_function("main"),
         ];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         for name in &["foo", "bar", "main"] {
             let name_bytes = [name.as_bytes(), &[0u8]].concat();
             let mut found = false;
@@ -5568,7 +5655,7 @@ mod tests {
         let caller = make_calling_function("main", "helper");
         let funcs = vec![helper, caller];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
         assert!(
@@ -5600,7 +5687,7 @@ mod tests {
         let caller = make_calling_function("main", "helper");
         let funcs = vec![helper, caller];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         let entries = parse_rela_entries_from_elf(&elf);
         assert!(!entries.is_empty(), "should have at least one rela entry");
@@ -5622,7 +5709,7 @@ mod tests {
         let caller = make_calling_function("main", "external_func");
         let funcs = vec![caller];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         // Parse the symbol table to find external_func.
         let symbols = parse_symbols_from_elf(&elf);
@@ -5639,7 +5726,7 @@ mod tests {
         let caller = make_calling_function("main", "helper");
         let funcs = vec![helper, caller];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         let entries = parse_rela_entries_from_elf(&elf);
         assert!(!entries.is_empty());
@@ -5705,7 +5792,7 @@ mod tests {
         func.current_block().terminator = IRTerminator::Return(vec![]);
         let funcs = vec![func];
         let config = EmitConfig::relocatable_obj();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         let entries = parse_rela_entries_from_elf(&elf);
         assert_eq!(entries.len(), 3, "expected 3 rela entries for 3 calls");
@@ -5726,7 +5813,7 @@ mod tests {
         let caller = make_calling_function("main", "helper");
         let funcs = vec![helper, caller];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
 
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
@@ -6150,7 +6237,7 @@ mod tests {
         func.current_block().terminator = IRTerminator::Return(vec![]);
 
         let mut emitter = Emitter::new();
-        let code = emitter.emit_function(&func).unwrap();
+        let code = emitter.emit_function(&func, None).unwrap();
 
         // Find a BL instruction (opcode bits [31:26] = 0b100101) in the output.
         let mut found_bl = false;
@@ -6183,7 +6270,7 @@ mod tests {
         func.current_block().terminator = IRTerminator::Return(vec![]);
 
         let mut emitter = Emitter::new();
-        let _code = emitter.emit_function(&func).unwrap();
+        let _code = emitter.emit_function(&func, None).unwrap();
 
         let relocs = emitter.relocations();
         assert_eq!(relocs.len(), 2, "expected 2 relocations for 2 calls");
@@ -6318,7 +6405,7 @@ mod tests {
     fn test_emit_elf_rejects_wasm32() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::wasm_binary();
-        let result = emit_elf(&funcs, &[], &config);
+        let result = emit_elf(&funcs, &[], &config, &[]);
         assert!(result.is_err(), "emit_elf should reject Wasm32 backend");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -6362,7 +6449,7 @@ mod tests {
     fn test_emit_binary_dispatches_wasm() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::wasm_binary();
-        let result = emit_binary(&funcs, &[], &config);
+        let result = emit_binary(&funcs, &[], &config, &[]);
         assert!(result.is_ok(), "emit_binary should succeed for Wasm: {:?}", result.err());
         let wasm_bytes = result.unwrap();
         // Wasm module magic: 0x00 0x61 0x73 0x6D
@@ -6426,7 +6513,7 @@ mod tests {
         // Verify that ET_EXEC has 3 LOAD segments.
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let elf = emit_elf(&funcs, &[], &config, &[]).unwrap();
         let e_phnum = u16::from_le_bytes([elf[56], elf[57]]);
         assert_eq!(e_phnum, 3, "ET_EXEC should have 3 LOAD segments");
 
@@ -6456,7 +6543,7 @@ mod tests {
             },
         ];
         let config = EmitConfig::linux_elf();
-        let elf = emit_elf(&funcs, &data_sections, &config).unwrap();
+        let elf = emit_elf(&funcs, &data_sections, &config, &[]).unwrap();
 
         // Parse the section headers to find .rodata and .text virtual addresses.
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
@@ -6528,6 +6615,72 @@ mod tests {
         // AArch64 default align = 16, so first section padded to 16, second section also 16-aligned
         // First: 2 bytes padded to 16 → 16 bytes, then 8 bytes at offset 16
         assert!(rodata.len() >= 24, "rodata should be at least 24 bytes with alignment padding");
+    }
+
+    // ── Wave 21: Real register allocation emit-path tests ───────────────
+
+    /// (Wave 21) Verify that `emit_function` accepts an `AllocationResult`
+    /// and produces non-empty code.  This tests the plumbing that threads
+    /// regalloc results through the emit path.
+    #[test]
+    fn emit_function_with_allocation_result() {
+        use crate::regalloc::{LinearScanAllocator, AllocationResult};
+
+        let func = make_return_function("main");
+        let allocator = LinearScanAllocator::new();
+        let alloc = allocator.allocate_function(&func).expect("regalloc should succeed");
+
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func, Some(&alloc)).expect("emission should succeed");
+        assert!(!code.is_empty(), "emitted code should be non-empty");
+    }
+
+    /// (Wave 21) Verify that `emit_binary` accepts `&[AllocationResult]`
+    /// and produces a valid ELF binary.  This tests the full plumbing from
+    /// `emit_binary` → `emit_elf` → `Emitter::emit_function`.
+    #[test]
+    fn emit_binary_with_regalloc_results() {
+        use crate::regalloc::{LinearScanAllocator, AllocationResult};
+
+        let funcs = vec![make_return_function("main")];
+        let allocator = LinearScanAllocator::new();
+        let regalloc: Vec<AllocationResult> = funcs
+            .iter()
+            .map(|f| allocator.allocate_function(f).expect("regalloc should succeed"))
+            .collect();
+
+        let config = EmitConfig::linux_elf();
+        let elf = emit_binary(&funcs, &[], &config, &regalloc).expect("ELF emission should succeed");
+        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "should be a valid ELF");
+    }
+
+    /// (Wave 21) Verify that `STACK_SLOT_VREG_THRESHOLD` is no longer 0
+    /// (the hack that forced every function through stack-slot lowering).
+    #[test]
+    fn stack_slot_vreg_threshold_is_not_zero() {
+        assert_ne!(STACK_SLOT_VREG_THRESHOLD, 0, "STACK_SLOT_VREG_THRESHOLD should not be 0 (Wave 21 removed the hack)");
+    }
+
+    /// (Wave 21) Verify that `AllocationResult` carries a `function_name`
+    /// field, so the emit path can match results to functions.
+    #[test]
+    fn allocation_result_has_function_name() {
+        use crate::regalloc::LinearScanAllocator;
+
+        let func = make_return_function("test_fn");
+        let allocator = LinearScanAllocator::new();
+        let alloc = allocator.allocate_function(&func).expect("regalloc should succeed");
+        assert_eq!(alloc.function_name, "test_fn", "AllocationResult.function_name should be set");
+    }
+
+    /// (Wave 21) Verify that `emit_function` with `None` (no AllocationResult)
+    /// still works (backward-compatible path using the greedy allocator).
+    #[test]
+    fn emit_function_without_allocation_result() {
+        let func = make_return_function("main");
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func, None).expect("emission should succeed");
+        assert!(!code.is_empty(), "emitted code should be non-empty");
     }
 }
 

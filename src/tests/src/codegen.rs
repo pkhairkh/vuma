@@ -45,7 +45,7 @@ fn compile_scg(scg: &Scg) -> (IRProgram, Vec<u32>) {
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let mut emitter = Emitter::new();
     let code_words = emitter
-        .emit_function(&ir_program.functions[0])
+        .emit_function(&ir_program.functions[0], None)
         .expect("Emission should succeed");
     (ir_program, code_words)
 }
@@ -54,7 +54,7 @@ fn compile_scg(scg: &Scg) -> (IRProgram, Vec<u32>) {
 fn compile_to_elf(scg: &Scg, config: &EmitConfig) -> Vec<u8> {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
-    emit_elf(&ir_program.functions, &ir_program.data_sections, config)
+    emit_elf(&ir_program.functions, &ir_program.data_sections, config, &[])
         .expect("ELF emission should succeed")
 }
 

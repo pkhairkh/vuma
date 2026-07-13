@@ -5204,6 +5204,7 @@ pub fn compile_with_path(
         &ir_program.functions,
         &ir_program.data_sections,
         &emit_config,
+        &regalloc_results,
     ) {
         Ok(binary) => binary,
         Err(e) => {
@@ -5689,6 +5690,7 @@ pub fn compile_with_recovery(
         &ir_program.functions,
         &ir_program.data_sections,
         &emit_config,
+        &regalloc_results,
     ) {
         Ok(binary) => binary,
         Err(e) => {
