@@ -545,6 +545,171 @@ impl RegDesc {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RegisterClass (Wave 24)
+// ---------------------------------------------------------------------------
+
+/// A summary view of one register class on a target, extracted from a
+/// [`TargetDesc`].
+///
+/// (Wave 24) The target-agnostic register allocator
+/// ([`crate::regalloc::TargetAgnosticRegAlloc`]) needs a per-class view of
+/// the register file that exposes:
+/// - which registers are allocatable,
+/// - how many are caller-saved vs callee-saved,
+/// - the register width (for spill-slot sizing), and
+/// - a per-class move cost (for the coalescing heuristic).
+///
+/// `RegisterClass` is that view.  It is derived from `TargetDesc::registers`
+/// by [`TargetDesc::register_classes`].
+///
+/// Note: this is distinct from the [`RegClass`] enum, which merely *tags*
+/// a register with its class (GPR / SIMD-FP / Condition / Special).
+/// `RegisterClass` aggregates information about *all* registers sharing
+/// that tag.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RegisterClass {
+    /// Human-readable class name (e.g. `"GPR"`, `"FPR"`, `"Vec"`, `"Condition"`).
+    pub name: &'static str,
+    /// The register-class enum value this summary describes.
+    pub class: RegClass,
+    /// Width of each register in this class, in bytes.
+    /// GPR width is the target's `pointer_width`; SIMD/FP width is 16
+    /// (128-bit) for all currently-modeled ISAs; Condition/Special default
+    /// to 4 (32-bit condition register / TOC slot).
+    pub width_bytes: usize,
+    /// Total number of registers in this class (allocatable + reserved).
+    pub total_count: usize,
+    /// Number of allocatable registers in this class
+    /// (`RegDesc::is_allocatable == true`).
+    pub allocatable_count: usize,
+    /// Number of allocatable callee-saved registers in this class.
+    pub callee_saved_count: usize,
+    /// Number of allocatable caller-saved registers in this class
+    /// (allocatable registers that are not callee-saved).
+    pub caller_saved_count: usize,
+    /// Cost of a register-to-register move within this class, in arbitrary
+    /// "latency units" (1 = cheapest).  Used by the coalescing heuristic
+    /// to decide whether eliminating a copy is worthwhile: cheaper moves
+    /// justify more aggressive coalescing.
+    pub move_cost: u32,
+}
+
+impl RegisterClass {
+    /// Returns `true` if this class has at least one allocatable register.
+    pub fn has_allocatable(&self) -> bool {
+        self.allocatable_count > 0
+    }
+}
+
+impl TargetDesc {
+    /// Returns a [`RegisterClass`] summary for each register class present
+    /// in this target's register file (one entry per distinct `RegClass`
+    /// value actually used by some `RegDesc`).
+    ///
+    /// (Wave 24) The summaries are computed by scanning
+    /// `self.registers` and grouping by `RegDesc::class`.  The `move_cost`
+    /// for each class is taken from [`TargetDesc::move_cost`].
+    pub fn register_classes(&self) -> Vec<RegisterClass> {
+        // Collect the set of classes actually present, in a deterministic
+        // order (the order RegClass variants are declared in backend.rs).
+        let mut classes_present: Vec<RegClass> = Vec::new();
+        for reg in &self.registers {
+            if !classes_present.contains(&reg.class) {
+                classes_present.push(reg.class);
+            }
+        }
+
+        classes_present
+            .into_iter()
+            .map(|class| {
+                let in_class: Vec<&RegDesc> =
+                    self.registers.iter().filter(|r| r.class == class).collect();
+                let total_count = in_class.len();
+                let allocatable_count =
+                    in_class.iter().filter(|r| r.is_allocatable).count();
+                let callee_saved_count = in_class
+                    .iter()
+                    .filter(|r| r.is_allocatable && r.is_callee_saved)
+                    .count();
+                let caller_saved_count = in_class
+                    .iter()
+                    .filter(|r| r.is_allocatable && !r.is_callee_saved)
+                    .count();
+                let width_bytes = Self::class_width(self.pointer_width, class);
+                RegisterClass {
+                    name: Self::class_name(class),
+                    class,
+                    width_bytes,
+                    total_count,
+                    allocatable_count,
+                    callee_saved_count,
+                    caller_saved_count,
+                    move_cost: self.move_cost(class),
+                }
+            })
+            .collect()
+    }
+
+    /// Returns the allocatable register descriptors for a given class.
+    ///
+    /// (Wave 24) Convenience accessor used by the target-agnostic
+    /// allocator's pool-construction code.
+    pub fn allocatable_regs(&self, class: RegClass) -> Vec<&RegDesc> {
+        self.registers
+            .iter()
+            .filter(|r| r.class == class && r.is_allocatable)
+            .collect()
+    }
+
+    /// Returns the move cost (in arbitrary "latency units") for a
+    /// register-to-register move within the given class on this target.
+    ///
+    /// (Wave 24) Defaults are conservative and ISA-agnostic:
+    /// - `Gpr` → 1 (single-cycle `mov` / `orr` on all modeled ISAs)
+    /// - `SimdFp` → 1 (single-cycle `vmov` / `movaps` / `fmv`)
+    /// - `Condition` → 2 (CR-field ops on PPC are 2-cycle)
+    /// - `Special` → 4 (TOC ops are heavier)
+    ///
+    /// Individual targets can override this in the future by storing a
+    /// per-class cost table in `TargetDesc`; for now, the defaults are
+    /// computed from the class.
+    pub fn move_cost(&self, class: RegClass) -> u32 {
+        match class {
+            RegClass::Gpr => 1,
+            RegClass::SimdFp => 1,
+            RegClass::Condition => 2,
+            RegClass::Special => 4,
+        }
+    }
+
+    /// Human-readable name for a `RegClass` variant.
+    fn class_name(class: RegClass) -> &'static str {
+        match class {
+            RegClass::Gpr => "GPR",
+            RegClass::SimdFp => "FPR",
+            RegClass::Condition => "Condition",
+            RegClass::Special => "Special",
+        }
+    }
+
+    /// Default register width (in bytes) for a class on a target with the
+    /// given pointer width.
+    fn class_width(pointer_width: usize, class: RegClass) -> usize {
+        match class {
+            // GPRs are pointer-width on every modeled ISA.
+            RegClass::Gpr => pointer_width,
+            // SIMD/FP registers are 128-bit (16 bytes) on every modeled
+            // ISA with SIMD (AArch64 V regs, x86_64 XMM, RISC-V V, etc.).
+            RegClass::SimdFp => 16,
+            // Condition registers (PPC CR fields) are 32-bit.
+            RegClass::Condition => 4,
+            // Special registers (TOC, etc.) are pointer-width.
+            RegClass::Special => pointer_width,
+        }
+    }
+}
+
 /// Description of a calling convention.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallingConventionDesc {
@@ -2056,5 +2221,168 @@ mod tests {
             "Wasm32 should have exactly one pseudo-register"
         );
         assert_eq!(wasm.registers[0].name, "stack");
+    }
+
+    // ====================================================================
+    // Wave 24 tests — RegisterClass + TargetDesc modeling
+    // ====================================================================
+
+    /// (Wave 24, sub-task 3) `TargetDesc::register_classes()` returns a
+    /// `RegisterClass` summary for each class present in the target's
+    /// register file.  Verify the counts and metadata for x86_64.
+    #[test]
+    fn wave24_x86_64_register_class_summary() {
+        let registry = TargetDescRegistry::new();
+        let x86 = registry.get("x86_64").expect("x86_64 in registry");
+
+        let classes = x86.register_classes();
+        // x86_64 has GPR and SimdFp classes (no Condition/Special).
+        assert!(
+            classes.iter().any(|c| c.class == RegClass::Gpr),
+            "x86_64 should have a GPR class"
+        );
+        assert!(
+            classes.iter().any(|c| c.class == RegClass::SimdFp),
+            "x86_64 should have a SimdFp class"
+        );
+
+        let gpr = classes
+            .iter()
+            .find(|c| c.class == RegClass::Gpr)
+            .expect("GPR class present");
+        assert_eq!(gpr.name, "GPR");
+        // x86_64 GPRs: RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8-R15 = 16
+        assert_eq!(gpr.total_count, 16, "x86_64 should have 16 GPRs total");
+        // RSP is non-allocatable; the other 15 are allocatable.
+        assert_eq!(
+            gpr.allocatable_count, 15,
+            "x86_64 should have 15 allocatable GPRs"
+        );
+        // Callee-saved allocatable: RBX, RBP, R12-R15 = 6.
+        assert_eq!(
+            gpr.callee_saved_count, 6,
+            "x86_64 should have 6 callee-saved allocatable GPRs (RBX, RBP, R12-R15)"
+        );
+        // Caller-saved allocatable: RAX, RCX, RDX, RSI, RDI, R8-R11 = 9.
+        assert_eq!(
+            gpr.caller_saved_count, 9,
+            "x86_64 should have 9 caller-saved allocatable GPRs"
+        );
+        // GPR width = pointer width = 8 bytes on x86_64.
+        assert_eq!(gpr.width_bytes, 8, "x86_64 GPR width should be 8 bytes");
+        // GPR move cost = 1 (single-cycle mov).
+        assert_eq!(gpr.move_cost, 1, "x86_64 GPR move cost should be 1");
+        assert!(gpr.has_allocatable());
+
+        let fpr = classes
+            .iter()
+            .find(|c| c.class == RegClass::SimdFp)
+            .expect("SimdFp class present");
+        assert_eq!(fpr.name, "FPR");
+        // x86_64 XMM0-XMM15 = 16 SIMD regs, all allocatable, all caller-saved.
+        assert_eq!(fpr.total_count, 16, "x86_64 should have 16 SIMD regs");
+        assert_eq!(fpr.allocatable_count, 16);
+        assert_eq!(fpr.callee_saved_count, 0, "x86_64 has no callee-saved SIMD");
+        assert_eq!(fpr.caller_saved_count, 16);
+        // SIMD/FP width = 16 bytes (128-bit XMM).
+        assert_eq!(fpr.width_bytes, 16, "x86_64 FPR width should be 16 bytes");
+        assert_eq!(fpr.move_cost, 1);
+    }
+
+    /// (Wave 24, sub-task 3) `TargetDesc::allocatable_regs(class)` filters
+    /// the register file to allocatable regs of the given class.
+    #[test]
+    fn wave24_allocatable_regs_filter() {
+        let registry = TargetDescRegistry::new();
+        let x86 = registry.get("x86_64").unwrap();
+
+        let gprs = x86.allocatable_regs(RegClass::Gpr);
+        // 15 allocatable GPRs (all except RSP).
+        assert_eq!(gprs.len(), 15);
+        // RSP should NOT be in the allocatable list.
+        assert!(
+            !gprs.iter().any(|r| r.is_stack_pointer),
+            "RSP should not be allocatable"
+        );
+        // RBX should be present and callee-saved.
+        assert!(
+            gprs.iter().any(|r| r.name == "RBX" && r.is_callee_saved),
+            "RBX should be an allocatable callee-saved GPR"
+        );
+
+        let fprs = x86.allocatable_regs(RegClass::SimdFp);
+        assert_eq!(fprs.len(), 16, "all 16 XMM regs should be allocatable");
+
+        // Condition and Special classes are empty for x86_64.
+        assert!(x86.allocatable_regs(RegClass::Condition).is_empty());
+        assert!(x86.allocatable_regs(RegClass::Special).is_empty());
+    }
+
+    /// (Wave 24, sub-task 3) `TargetDesc::move_cost(class)` returns sane
+    /// per-class move costs.  Verify the defaults and that they're
+    /// consistent with what `register_classes()` reports.
+    #[test]
+    fn wave24_move_cost_defaults() {
+        let registry = TargetDescRegistry::new();
+        let x86 = registry.get("x86_64").unwrap();
+
+        // Default move costs: GPR=1, SIMD=1, Condition=2, Special=4.
+        assert_eq!(x86.move_cost(RegClass::Gpr), 1);
+        assert_eq!(x86.move_cost(RegClass::SimdFp), 1);
+        assert_eq!(x86.move_cost(RegClass::Condition), 2);
+        assert_eq!(x86.move_cost(RegClass::Special), 4);
+
+        // The move cost returned by `register_classes()` must match
+        // `move_cost()` for each class.
+        for rc in x86.register_classes() {
+            assert_eq!(
+                rc.move_cost,
+                x86.move_cost(rc.class),
+                "register_classes move_cost mismatch for {:?}",
+                rc.class
+            );
+        }
+    }
+
+    /// (Wave 24, sub-task 3) Every ISA in the registry should produce a
+    /// non-empty `register_classes()` list, and the counts should be
+    /// self-consistent (allocatable == caller + callee; total >= allocatable).
+    #[test]
+    fn wave24_register_class_consistency_all_isas() {
+        let registry = TargetDescRegistry::new();
+        for name in registry.isa_names() {
+            let desc = registry.get(name).unwrap();
+            let classes = desc.register_classes();
+            assert!(
+                !classes.is_empty(),
+                "[{}] register_classes() should be non-empty",
+                name
+            );
+            for rc in &classes {
+                assert_eq!(
+                    rc.allocatable_count,
+                    rc.caller_saved_count + rc.callee_saved_count,
+                    "[{}] {:?}: allocatable != caller + callee",
+                    name,
+                    rc.class
+                );
+                assert!(
+                    rc.total_count >= rc.allocatable_count,
+                    "[{}] {:?}: total < allocatable",
+                    name,
+                    rc.class
+                );
+                // wasm32 has zero allocatable regs — `has_allocatable()`
+                // should return false for it; all others should have at
+                // least one allocatable class.
+                if name == "wasm32" {
+                    assert!(
+                        !rc.has_allocatable(),
+                        "[{}] wasm32 should have no allocatable regs",
+                        name
+                    );
+                }
+            }
+        }
     }
 }
