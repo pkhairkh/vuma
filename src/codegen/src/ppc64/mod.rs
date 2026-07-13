@@ -6104,6 +6104,22 @@ impl Backend for PPC64Backend {
                 // no byte-swapping is needed in the stub — the kernel and the
                 // program agree on byte order.
                 ("pipe", 42), ("execve", 11),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (ppc unistd.h) ──
+                // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
+                // ppc's chown=181 is already the 32-bit-uid variant (ppc never
+                // had a separate chown32); fchown=95 likewise. pread64=179.
+                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
+                ("link", 9), ("symlink", 83), ("readlink", 85),
+                ("chmod", 15), ("chown", 181), ("umask", 60),
+                ("fchmod", 94), ("fchown", 95),
+                ("openat", 286), ("unlinkat", 292), ("renameat", 293),
+                ("linkat", 294), ("symlinkat", 295), ("readlinkat", 296),
+                ("fchmodat", 297), ("faccessat", 298), ("fchownat", 289),
+                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
+                ("sync", 36), ("syncfs", 348),
+                ("pread", 179), ("pwrite", 180), ("readv", 145), ("writev", 146),
+                ("preadv", 320), ("pwritev", 321),
+                ("fchdir", 133), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

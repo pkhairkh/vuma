@@ -4101,6 +4101,24 @@ impl Backend for Sparc64Backend {
                 // stat to the host's native struct stat.
                 ("stat", 38), ("lstat", 40), ("fstat", 62),
                 ("getcwd", 119),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (sparc unistd.h) ──
+                // sparc64 has 6 reg args (o0-o5); all these take ≤5 args → simple_stub.
+                // sparc's chown=13/fchown=123 are the 16-bit-uid variants, so we
+                // expose the modern 32-bit ones: chown32=35, fchown32=32. Many
+                // sparc numbers differ from the "common" table (mkdir=136,
+                // symlink=57, fchmod=124, fsync=95, pread64=67, fdatasync=253).
+                ("mkdir", 136), ("rmdir", 137), ("rename", 128),
+                ("link", 9), ("symlink", 57), ("readlink", 58),
+                ("chmod", 15), ("chown", 35), ("umask", 60),
+                ("fchmod", 124), ("fchown", 32),
+                ("openat", 284), ("unlinkat", 290), ("renameat", 291),
+                ("linkat", 292), ("symlinkat", 293), ("readlinkat", 294),
+                ("fchmodat", 295), ("faccessat", 296), ("fchownat", 287),
+                ("ftruncate", 130), ("fsync", 95), ("fdatasync", 253),
+                ("sync", 36), ("syncfs", 335),
+                ("pread", 67), ("pwrite", 68), ("readv", 120), ("writev", 121),
+                ("preadv", 324), ("pwritev", 325),
+                ("fchdir", 176), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

@@ -2803,6 +2803,21 @@ impl Backend for AArch64Backend {
                 ("recvfrom", 207), ("sendto", 206),
                 // NOTE: stat/lstat/poll do not exist on the AArch64 generic
                 // ABI. They are provided as newfstatat/ppoll shims below.
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
+                // AArch64 has 8 register args (X0-X7); all these take ≤5 args,
+                // so the simple "mov x8,#num; svc; ret" stub suffices. Numbers
+                // from asm-generic/unistd.h. The plain mkdir/rmdir/rename/link/
+                // symlink/readlink/chmod/chown names do NOT exist on the generic
+                // ABI and are provided as *at wrappers below.
+                ("umask", 166), ("fchmod", 52), ("fchown", 55),
+                ("openat", 56), ("unlinkat", 35), ("renameat", 38),
+                ("linkat", 37), ("symlinkat", 36), ("readlinkat", 78),
+                ("faccessat", 48), ("fchmodat", 53), ("fchownat", 54),
+                ("ftruncate", 46), ("fsync", 82), ("fdatasync", 83),
+                ("sync", 81), ("syncfs", 306),
+                ("pread", 67), ("pwrite", 68), ("readv", 65), ("writev", 66),
+                ("preadv", 69), ("pwritev", 70),
+                ("fchdir", 50), ("chroot", 51),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));
@@ -3018,6 +3033,108 @@ impl Backend for AArch64Backend {
                 .flat_map(|w| w.to_le_bytes())
                 .collect();
                 stubs.push(("strcmp".to_string(), code));
+            }
+
+            // ── Wave 7 wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
+            // AArch64 (asm-generic) removed the legacy mkdir/rmdir/rename/link/
+            // symlink/readlink/chmod/chown syscalls; they exist only as the *at
+            // variants. We expose the plain names by inserting AT_FDCWD=-100
+            // (= ~99 via MOVN) and shifting the caller's args. AT_REMOVEDIR=0x200.
+
+            // mkdir(path, mode) → mkdirat(AT_FDCWD, path, mode)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(2, 1));    // X2 = mode
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(34));      // mkdirat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("mkdir".to_string(), code));
+            }
+            // rmdir(path) → unlinkat(AT_FDCWD, path, AT_REMOVEDIR=0x200)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(2, 0x200));// X2 = AT_REMOVEDIR
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(35));      // unlinkat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("rmdir".to_string(), code));
+            }
+            // rename(old, new) → renameat(AT_FDCWD, old, AT_FDCWD, new)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(3, 1));    // X3 = new
+                code.extend_from_slice(&movn_reg(2, 99));  // X2 = AT_FDCWD
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = old
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(38));      // renameat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("rename".to_string(), code));
+            }
+            // link(old, new) → linkat(AT_FDCWD, old, AT_FDCWD, new, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(4, 0));   // X4 = 0 (flags)
+                code.extend_from_slice(&mov_reg(3, 1));    // X3 = new
+                code.extend_from_slice(&movn_reg(2, 99));  // X2 = AT_FDCWD
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = old
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(37));      // linkat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("link".to_string(), code));
+            }
+            // symlink(target, linkpath) → symlinkat(target, AT_FDCWD, linkpath)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(2, 1));    // X2 = linkpath
+                code.extend_from_slice(&movn_reg(1, 99));  // X1 = AT_FDCWD
+                // X0 = target (unchanged)
+                code.extend_from_slice(&movz_x8(36));      // symlinkat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("symlink".to_string(), code));
+            }
+            // readlink(path, buf, siz) → readlinkat(AT_FDCWD, path, buf, siz)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(3, 2));    // X3 = siz
+                code.extend_from_slice(&mov_reg(2, 1));    // X2 = buf
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(78));      // readlinkat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("readlink".to_string(), code));
+            }
+            // chmod(path, mode) → fchmodat(AT_FDCWD, path, mode, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(3, 0));   // X3 = 0 (flags)
+                code.extend_from_slice(&mov_reg(2, 1));    // X2 = mode
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(53));      // fchmodat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("chmod".to_string(), code));
+            }
+            // chown(path, owner, group) → fchownat(AT_FDCWD, path, owner, group, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(4, 0));   // X4 = 0 (flags)
+                code.extend_from_slice(&mov_reg(3, 2));    // X3 = group
+                code.extend_from_slice(&mov_reg(2, 1));    // X2 = owner
+                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(54));      // fchownat
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("chown".to_string(), code));
             }
 
             stubs

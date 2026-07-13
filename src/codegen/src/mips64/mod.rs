@@ -5102,6 +5102,25 @@ impl Backend for Mips64Backend {
                 // ── Phase 8: additional syscalls for full parity ──
                 ("dup3", 5286), ("lstat", 5107),
                 ("recvfrom", 5207), ("sendto", 5206),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (mips n64 unistd) ──
+                // MIPS n64 uses a 5000 base offset (__NR_Linux=5000), so every
+                // number below is 5000 + the asm offset. mips64 has 8 reg args
+                // ($a0-$a7); all take ≤5 args → simple_stub. mips n64 chown=90/
+                // fchown=91 are the modern 32-bit variants (mips64 is 64-bit,
+                // no 16-bit split). Numbers differ greatly from other arches
+                // (mkdir=5081, pread64=5016, sync=5157, chroot=5156).
+                ("mkdir", 5081), ("rmdir", 5082), ("rename", 5080),
+                ("link", 5084), ("symlink", 5086), ("readlink", 5087),
+                ("chmod", 5088), ("chown", 5090), ("umask", 5093),
+                ("fchmod", 5089), ("fchown", 5091),
+                ("openat", 5247), ("unlinkat", 5253), ("renameat", 5254),
+                ("linkat", 5255), ("symlinkat", 5256), ("readlinkat", 5257),
+                ("fchmodat", 5258), ("faccessat", 5259), ("fchownat", 5250),
+                ("ftruncate", 5075), ("fsync", 5072), ("fdatasync", 5073),
+                ("sync", 5157), ("syncfs", 5301),
+                ("pread", 5016), ("pwrite", 5017), ("readv", 5018), ("writev", 5019),
+                ("preadv", 5289), ("pwritev", 5290),
+                ("fchdir", 5079), ("chroot", 5156),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

@@ -1591,6 +1591,24 @@ impl Backend for AlphaBackend {
                 // host's struct stat, so these work correctly under qemu-alpha.
                 ("stat", 18), ("lstat", 68), ("fstat", 91),
                 ("getcwd", 367),
+                // ── Wave 7: POSIX file-metadata & I/O syscalls (alpha unistd.h) ──
+                // alpha has 6 reg args (R16-R21); all take ≤5 args → simple_stub.
+                // alpha is 64-bit-native: chown=16/fchown=123 ARE the modern
+                // sys_chown/sys_fchown (alpha never had a 16-bit-uid split, so
+                // no chown32). Alpha numbers differ wildly from other arches
+                // (openat=450, syncfs=500, pread64=349, fdatasync=447, fchdir=13).
+                ("mkdir", 136), ("rmdir", 137), ("rename", 128),
+                ("link", 9), ("symlink", 57), ("readlink", 58),
+                ("chmod", 15), ("chown", 16), ("umask", 60),
+                ("fchmod", 124), ("fchown", 123),
+                ("openat", 450), ("unlinkat", 456), ("renameat", 457),
+                ("linkat", 458), ("symlinkat", 459), ("readlinkat", 460),
+                ("fchmodat", 461), ("faccessat", 462), ("fchownat", 453),
+                ("ftruncate", 130), ("fsync", 95), ("fdatasync", 447),
+                ("sync", 36), ("syncfs", 500),
+                ("pread", 349), ("pwrite", 350), ("readv", 120), ("writev", 121),
+                ("preadv", 490), ("pwritev", 491),
+                ("fchdir", 13), ("chroot", 61),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
