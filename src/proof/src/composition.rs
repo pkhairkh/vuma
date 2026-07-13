@@ -50,6 +50,62 @@ pub struct UnresolvedAssumption {
     pub checked_invariants: Vec<InvariantName>,
 }
 
+/// A fact or assumption paired with its optional structured `Judgment`.
+///
+/// Used internally by [`ProofBundle::verify_cross_invariant_consistency`]
+/// to perform structural matching (Wave 17 refactor).  When `judgment` is
+/// `Some`, matching is done by `Judgment` equality; when `None`, matching
+/// falls back to substring comparison on `statement`.
+#[derive(Debug, Clone)]
+struct FactWithJudgment {
+    /// The human-readable statement string.
+    statement: String,
+    /// The optional structured judgment.
+    judgment: Option<crate::judgment::Judgment>,
+}
+
+impl FactWithJudgment {
+    /// Construct from a `Fact` (extracts statement + judgment).
+    fn from_fact(f: &crate::proof::Fact) -> Self {
+        Self {
+            statement: f.statement.clone(),
+            judgment: f.judgment.clone(),
+        }
+    }
+
+    /// Construct from a `Judgment` (statement is derived via `to_statement`).
+    fn from_judgment(j: &crate::judgment::Judgment) -> Self {
+        Self {
+            statement: j.to_statement(),
+            judgment: Some(j.clone()),
+        }
+    }
+}
+
+/// Determine whether a fact `fact` discharges an `assumption`.
+///
+/// **Structural match (preferred):** when both carry `Judgment` objects,
+/// they discharge if the judgments are equal.  This is precise: e.g. an
+/// assumption `Judgment::Allocated { region: RegionId(1) }` is discharged
+/// only by a fact with the identical `Allocated { region: RegionId(1) }`
+/// judgment, not by a fact about `RegionId(2)`.
+///
+/// **String fallback (backward-compat):** when either side lacks a
+/// judgment, fall back to bidirectional substring containment — the old
+/// behavior.  This keeps the refactor backward-compatible with any proof
+/// objects that were constructed without structured judgments.
+fn discharge_match(fact: &FactWithJudgment, assumption: &FactWithJudgment) -> bool {
+    // Structural match: both have judgments → compare by equality.
+    if let (Some(fj), Some(aj)) = (&fact.judgment, &assumption.judgment) {
+        return fj == aj;
+    }
+
+    // String fallback: bidirectional substring containment (pre-Wave-17
+    // behavior, kept for backward compatibility with bare-string facts).
+    fact.statement.contains(&assumption.statement)
+        || assumption.statement.contains(&fact.statement)
+}
+
 impl ProofBundle {
     /// Create an empty bundle with no proofs.
     pub fn new() -> Self {
@@ -105,26 +161,42 @@ impl ProofBundle {
     /// Check cross-invariant consistency: verify that assumptions
     /// in one proof are discharged by conclusions in another.
     ///
+    /// **Wave 17 refactor:** Previously this method used fragile string
+    /// `contains` matching (`stmt.contains(&assumption) || assumption.contains(stmt)`)
+    /// which produced both false positives (an assumption about "region 1 is
+    /// live" would be "discharged" by any fact mentioning "region 1 is live
+    /// at PP 5") and false negatives (an assumption phrased as "region#1 is
+    /// allocated" would not match a fact phrased as "region region#1 is
+    /// allocated").  The new implementation performs **structural `Judgment`
+    /// matching**: each assumption and each fact carries an optional
+    /// `Judgment` object; when both are present, matching is done by
+    /// structural equality on the `Judgment` variant and its typed fields.
+    /// String matching is only used as a fallback for facts/assumptions that
+    /// still carry bare string statements (no structured judgment).
+    ///
     /// For each proof in the bundle, the method extracts assumptions from the
     /// proof goal's context. It then checks whether any *other* proof's facts
-    /// contain a statement that matches (contains) the assumption text. If no
-    /// discharging fact is found, the assumption is recorded as unresolved.
+    /// contain a `Judgment` that discharges the assumption. If no discharging
+    /// fact is found, the assumption is recorded as unresolved.
     ///
     /// Returns a list of unresolved assumptions.
     pub fn verify_cross_invariant_consistency(&self) -> Vec<UnresolvedAssumption> {
         let mut unresolved = Vec::new();
 
-        // Collect all fact statements from each invariant, keyed by invariant name.
-        let all_invariant_facts: Vec<(InvariantName, Vec<String>)> =
-            self.collect_all_fact_statements();
+        // Collect all facts (with their optional Judgments) from each
+        // invariant, keyed by invariant name.
+        let all_invariant_facts: Vec<(InvariantName, Vec<FactWithJudgment>)> =
+            self.collect_all_facts_with_judgments();
 
-        // For each invariant that has a proof, extract its assumptions and check
-        // if they are discharged by facts from other invariants.
-        let assumption_sources: Vec<(InvariantName, Vec<String>)> = self.collect_all_assumptions();
+        // For each invariant that has a proof, extract its assumptions (with
+        // their optional Judgments) and check if they are discharged by facts
+        // from other invariants.
+        let assumption_sources: Vec<(InvariantName, Vec<FactWithJudgment>)> =
+            self.collect_all_assumptions_with_judgments();
 
         for (source_invariant, assumptions) in assumption_sources {
-            // Collect fact statements from all *other* invariants.
-            let other_fact_strings: Vec<(InvariantName, &Vec<String>)> = all_invariant_facts
+            // Collect facts from all *other* invariants.
+            let other_facts: Vec<(InvariantName, &Vec<FactWithJudgment>)> = all_invariant_facts
                 .iter()
                 .filter(|(inv, _)| *inv != source_invariant)
                 .map(|(inv, facts)| (*inv, facts))
@@ -132,12 +204,14 @@ impl ProofBundle {
 
             for assumption in assumptions {
                 let mut checked: Vec<InvariantName> =
-                    other_fact_strings.iter().map(|(inv, _)| *inv).collect();
+                    other_facts.iter().map(|(inv, _)| *inv).collect();
 
-                let discharged = other_fact_strings.iter().any(|(_, facts)| {
-                    facts
-                        .iter()
-                        .any(|stmt| stmt.contains(&assumption) || assumption.contains(stmt))
+                // Structural discharge: an assumption is discharged by a fact
+                // when their Judgments are equal, OR (fallback) when the
+                // assumption's string is a substring of the fact's string or
+                // vice versa.
+                let discharged = other_facts.iter().any(|(_, facts)| {
+                    facts.iter().any(|fact| discharge_match(fact, &assumption))
                 });
 
                 if !discharged {
@@ -146,7 +220,7 @@ impl ProofBundle {
                     checked.retain(|inv| seen.insert(*inv));
                     unresolved.push(UnresolvedAssumption {
                         source_invariant,
-                        assumption,
+                        assumption: assumption.statement,
                         checked_invariants: checked,
                     });
                 }
@@ -177,40 +251,47 @@ impl ProofBundle {
         }
     }
 
-    /// Collect all fact statement strings from every proof in the bundle.
+    // -----------------------------------------------------------------------
+    // Wave 17: structured Judgment collectors (for cross-invariant matching)
+    // -----------------------------------------------------------------------
+
+    /// Collect all facts (with their optional `Judgment` objects) from every
+    /// proof in the bundle, keyed by invariant name.
     ///
-    /// For proof types that contain sub-proofs (e.g. LivenessProof has
-    /// `access_proofs` and `freed_proofs`), facts from those sub-proofs are
-    /// included as well.
-    fn collect_all_fact_statements(&self) -> Vec<(InvariantName, Vec<String>)> {
+    /// This is the structured-Judgment counterpart to
+    /// [`collect_all_fact_statements`](Self::collect_all_fact_statements).
+    /// It walks the same proof structure but preserves the `Fact::judgment`
+    /// field so that [`verify_cross_invariant_consistency`] can perform
+    /// structural matching instead of string `contains`.
+    fn collect_all_facts_with_judgments(&self) -> Vec<(InvariantName, Vec<FactWithJudgment>)> {
         let mut result = Vec::new();
 
         // Liveness
         if let Some(ref lp) = self.liveness {
-            let mut facts = Self::fact_statements_from_proof(&lp.proof);
+            let mut facts = Self::facts_with_judgments_from_proof(&lp.proof);
             for (_, sub_proof) in &lp.access_proofs {
-                facts.extend(Self::fact_statements_from_proof(sub_proof));
+                facts.extend(Self::facts_with_judgments_from_proof(sub_proof));
             }
             for freed in &lp.freed_proofs {
-                facts.extend(Self::fact_statements_from_proof(&freed.proof));
+                facts.extend(Self::facts_with_judgments_from_proof(&freed.proof));
             }
             if let Some(ref dp) = lp.deadlock_proof {
-                facts.extend(Self::fact_statements_from_proof(&dp.proof));
+                facts.extend(Self::facts_with_judgments_from_proof(&dp.proof));
             }
             result.push((InvariantName::Liveness, facts));
         }
 
         // Exclusivity
         if let Some(ref ep) = self.exclusivity {
-            let mut facts = Self::fact_statements_from_proof(&ep.proof);
+            let mut facts = Self::facts_with_judgments_from_proof(&ep.proof);
             for (_, _, sub) in &ep.sub_proofs {
                 match sub {
                     crate::exclusivity_proofs::ExclusivitySubProof::NoConflict => {}
                     crate::exclusivity_proofs::ExclusivitySubProof::NoAlias(na) => {
-                        facts.extend(Self::fact_statements_from_proof(&na.proof));
+                        facts.extend(Self::facts_with_judgments_from_proof(&na.proof));
                     }
                     crate::exclusivity_proofs::ExclusivitySubProof::Synchronized(sp) => {
-                        facts.extend(Self::fact_statements_from_proof(&sp.proof));
+                        facts.extend(Self::facts_with_judgments_from_proof(&sp.proof));
                     }
                 }
             }
@@ -219,24 +300,24 @@ impl ProofBundle {
 
         // Cleanup
         if let Some(ref cp) = self.cleanup {
-            let facts = Self::fact_statements_from_proof(&cp.proof);
+            let facts = Self::facts_with_judgments_from_proof(&cp.proof);
             result.push((InvariantName::Cleanup, facts));
         }
 
         // Origin
         if let Some(ref op) = self.origin {
-            let facts = Self::fact_statements_from_proof(&op.proof);
+            let facts = Self::facts_with_judgments_from_proof(&op.proof);
             result.push((InvariantName::Origin, facts));
         }
 
         // Interpretation
         if let Some(ref ip) = self.interpretation {
-            let mut facts = Self::fact_statements_from_proof(&ip.proof);
+            let mut facts = Self::facts_with_judgments_from_proof(&ip.proof);
             for bd in &ip.bd_compatibility_proofs {
-                facts.extend(Self::fact_statements_from_proof(&bd.proof));
+                facts.extend(Self::facts_with_judgments_from_proof(&bd.proof));
             }
             for ri in &ip.reinterpretation_safety_proofs {
-                facts.extend(Self::fact_statements_from_proof(&ri.proof));
+                facts.extend(Self::facts_with_judgments_from_proof(&ri.proof));
             }
             result.push((InvariantName::Interpretation, facts));
         }
@@ -244,59 +325,66 @@ impl ProofBundle {
         result
     }
 
-    /// Extract all fact statement strings from a [`Proof`] object.
-    fn fact_statements_from_proof(proof: &Proof) -> Vec<String> {
+    /// Extract all facts (as `FactWithJudgment`) from a [`Proof`] object.
+    fn facts_with_judgments_from_proof(proof: &Proof) -> Vec<FactWithJudgment> {
         proof
             .all_facts()
             .iter()
-            .map(|f| f.statement.clone())
+            .map(|f| FactWithJudgment::from_fact(*f))
             .collect()
     }
 
-    /// Collect assumptions from each proof's goal context.
+    /// Collect assumptions (with their `Judgment` objects) from each proof's
+    /// goal context.
     ///
+    /// This is the structured-Judgment counterpart to
+    /// [`collect_all_assumptions`](Self::collect_all_assumptions).
     /// Assumptions come from `proof.goal.context.assumptions`, which is a
-    /// `Vec<Judgment>`. Each judgment is converted to a statement string via
-    /// [`Judgment::to_statement`].
-    fn collect_all_assumptions(&self) -> Vec<(InvariantName, Vec<String>)> {
+    /// `Vec<Judgment>`; each `Judgment` is wrapped in a `FactWithJudgment`
+    /// so [`verify_cross_invariant_consistency`] can match structurally.
+    fn collect_all_assumptions_with_judgments(
+        &self,
+    ) -> Vec<(InvariantName, Vec<FactWithJudgment>)> {
         let mut result = Vec::new();
 
         if let Some(ref lp) = self.liveness {
-            let assumptions = Self::assumptions_from_proof(&lp.proof);
+            let assumptions = Self::assumptions_with_judgments_from_proof(&lp.proof);
             result.push((InvariantName::Liveness, assumptions));
         }
 
         if let Some(ref ep) = self.exclusivity {
-            let assumptions = Self::assumptions_from_proof(&ep.proof);
+            let assumptions = Self::assumptions_with_judgments_from_proof(&ep.proof);
             result.push((InvariantName::Exclusivity, assumptions));
         }
 
         if let Some(ref cp) = self.cleanup {
-            let assumptions = Self::assumptions_from_proof(&cp.proof);
+            let assumptions = Self::assumptions_with_judgments_from_proof(&cp.proof);
             result.push((InvariantName::Cleanup, assumptions));
         }
 
         if let Some(ref op) = self.origin {
-            let assumptions = Self::assumptions_from_proof(&op.proof);
+            let assumptions = Self::assumptions_with_judgments_from_proof(&op.proof);
             result.push((InvariantName::Origin, assumptions));
         }
 
         if let Some(ref ip) = self.interpretation {
-            let assumptions = Self::assumptions_from_proof(&ip.proof);
+            let assumptions = Self::assumptions_with_judgments_from_proof(&ip.proof);
             result.push((InvariantName::Interpretation, assumptions));
         }
 
         result
     }
 
-    /// Extract assumption strings from a proof's goal context.
-    fn assumptions_from_proof(proof: &Proof) -> Vec<String> {
+    /// Extract assumptions (as `FactWithJudgment`) from a proof's goal
+    /// context.  Each `Judgment` in `goal.context.assumptions` is wrapped
+    /// in a `FactWithJudgment`.
+    fn assumptions_with_judgments_from_proof(proof: &Proof) -> Vec<FactWithJudgment> {
         proof
             .goal
             .context
             .assumptions
             .iter()
-            .map(|j| j.to_statement())
+            .map(FactWithJudgment::from_judgment)
             .collect()
     }
 }
@@ -426,6 +514,89 @@ mod tests {
         assert!(
             !live_unresolved,
             "assumption about region#1 being live should be discharged by liveness proof"
+        );
+    }
+
+    /// Wave 17: structural `Judgment` matching in
+    /// `verify_cross_invariant_consistency`.
+    ///
+    /// When the liveness proof contains a fact with a structured
+    /// `Judgment::Live { region: RegionId(1) }` and the origin proof's
+    /// assumption is the same structured `Judgment::Live { region:
+    /// RegionId(1) }`, the structural matcher should discharge the
+    /// assumption (no string `contains` needed).  Conversely, an
+    /// assumption `Judgment::Live { region: RegionId(2) }` should NOT
+    /// be discharged by a fact `Judgment::Live { region: RegionId(1) }`
+    /// — the structural match is region-specific.
+    #[test]
+    fn test_structural_judgment_matching_discharges() {
+        use crate::judgment::Judgment;
+
+        // Liveness proof with a structured Live{region=1} fact.
+        let mut liveness_proof = Proof::new(Goal::new(
+            InvariantName::Liveness,
+            Target::Region(RegionId(1)),
+            ProofContext::new("test::structural::liveness"),
+        ));
+        liveness_proof.add_step(ProofStep::Assume {
+            fact: Fact::axiom_j(1, Judgment::Allocated { region: RegionId(1) }),
+        });
+        liveness_proof.add_step(ProofStep::Infer {
+            from: vec![1],
+            rule: InferenceRule::LivenessIntro,
+            conclusion: Fact::derived_j(2, Judgment::Live { region: RegionId(1) }),
+        });
+        liveness_proof.conclude(Conclusion::Proven);
+        let liveness = LivenessProof {
+            proof: liveness_proof,
+            access_proofs: Vec::new(),
+            freed_proofs: Vec::new(),
+            deadlock_proof: None,
+            ordering: None,
+            tactic: LivenessTactic::PathEnumeration,
+        };
+
+        // Origin proof that assumes Live{region=1} (should be discharged)
+        // and Live{region=2} (should NOT be discharged — different region).
+        let origin_proof = Proof::new(Goal::new(
+            InvariantName::Origin,
+            Target::FullProgram,
+            ProofContext::new("test::structural::origin")
+                .with_judgment_assumption(Judgment::Live { region: RegionId(1) })
+                .with_judgment_assumption(Judgment::Live { region: RegionId(2) }),
+        ));
+        let origin = OriginProof {
+            proof: origin_proof,
+            verified_regions: Vec::new(),
+            checked_chains: Vec::new(),
+        };
+
+        let bundle = ProofBundle {
+            liveness: Some(liveness),
+            exclusivity: None,
+            cleanup: None,
+            origin: Some(origin),
+            interpretation: None,
+        };
+
+        let unresolved = bundle.verify_cross_invariant_consistency();
+
+        // Live{region=1} should be discharged by the liveness fact.
+        let live1_unresolved = unresolved.iter().any(|u| {
+            u.assumption.contains("region#1 is live")
+        });
+        assert!(
+            !live1_unresolved,
+            "Live{{region=1}} assumption should be discharged structurally"
+        );
+
+        // Live{region=2} should NOT be discharged (different region).
+        let live2_unresolved = unresolved.iter().any(|u| {
+            u.assumption.contains("region#2 is live")
+        });
+        assert!(
+            live2_unresolved,
+            "Live{{region=2}} assumption should NOT be discharged (different region)"
         );
     }
 

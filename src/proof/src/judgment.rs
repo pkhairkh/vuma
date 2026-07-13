@@ -218,6 +218,19 @@ pub enum Judgment {
         to_capd: CapDKind,
     },
 
+    /// Two behavioral descriptors (RepDs) are compatible for a write-read
+    /// pair: a value written under one RepD can be safely read under the
+    /// other.  Used by the `prove_interpretation` tactic (Wave 17) to
+    /// discharge the interpretation invariant's BD-compatibility premise.
+    InterpretationCompatible {
+        /// The identifier of the write's RepD.
+        write_repd: u64,
+        /// The identifier of the read's RepD.
+        read_repd: u64,
+        /// The access address at which the reinterpretation occurs.
+        address: u64,
+    },
+
     /// Event A is ordered before event B in the happens-before relation.
     TemporalOrder {
         /// The earlier event.
@@ -288,6 +301,14 @@ impl Judgment {
             } => format!(
                 "cast is valid: preserves CapD for {}: {} -> {}",
                 resource, from_capd, to_capd
+            ),
+            Judgment::InterpretationCompatible {
+                write_repd,
+                read_repd,
+                address,
+            } => format!(
+                "BDs compatible at 0x{:x}: write RepD {} ⊑ read RepD {}",
+                address, write_repd, read_repd
             ),
             Judgment::TemporalOrder { event_a, event_b } => {
                 format!("{} happens before {}", event_a, event_b)
@@ -374,6 +395,19 @@ mod tests {
         assert_eq!(
             j.to_statement(),
             "cast is valid: preserves CapD for resource#2: readwrite -> read"
+        );
+    }
+
+    #[test]
+    fn test_interpretation_compatible_statement() {
+        let j = Judgment::InterpretationCompatible {
+            write_repd: 1,
+            read_repd: 2,
+            address: 0x1000,
+        };
+        assert_eq!(
+            j.to_statement(),
+            "BDs compatible at 0x1000: write RepD 1 ⊑ read RepD 2"
         );
     }
 

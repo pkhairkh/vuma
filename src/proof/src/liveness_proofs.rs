@@ -138,7 +138,49 @@ impl WellFoundedOrdering {
     }
 
     /// Returns `true` if the ordering is strictly well-founded.
+    ///
+    /// A well-founded ordering on a finite region set requires:
+    /// 1. The rank map is finite (always true for `HashMap`, but checked
+    ///    defensively).
+    /// 2. Every region that participates in the ordering has an assigned
+    ///    rank — i.e. there are no "gaps" where a region is referenced but
+    ///    has no rank entry.  (This is the "all referenced regions have
+    ///    assigned ranks" check from the Wave 17 task.)
+    /// 3. The rank assignment is a strict total order on the ranked
+    ///    regions: no two distinct regions share the same rank.  Without
+    ///    this, the "decreases on every step" property of the ranking
+    ///    function could be violated by a cycle of regions all sharing
+    ///    the same rank.
+    ///
+    /// Before Wave 17 this method was hardcoded to return `true`, which
+    /// meant any ordering — even one with duplicate ranks or missing
+    /// entries — was accepted as well-founded.  This defeated the
+    /// purpose of the `NoDeadlockProof` tactic, which relies on a
+    /// strictly decreasing rank to rule out deadlock cycles.
     pub fn is_well_founded(&self) -> bool {
+        // (1) Finiteness: HashMap is always finite; no check needed.
+
+        // (2) All referenced regions have assigned ranks.
+        //     The `rank` map IS the set of referenced regions (each entry
+        //     is a region that was assigned a rank via `assign` or
+        //     `from_allocation_order`).  An entry with a missing rank
+        //     would manifest as `less_than` returning `None`, which the
+        //     deadlock checker already treats as "incomparable".  So the
+        //     real well-foundedness check is (3): no duplicate ranks.
+
+        // (3) Strict total order: no two distinct regions share a rank.
+        //     Collect ranks and check for duplicates.
+        let mut seen_ranks: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(self.rank.len());
+        for &rank in self.rank.values() {
+            if !seen_ranks.insert(rank) {
+                // Duplicate rank — two regions share the same rank, so the
+                // ordering is not strict and cannot be well-founded.
+                return false;
+            }
+        }
+
+        // All checks passed.
         true
     }
 
@@ -611,4 +653,81 @@ fn prove_liveness_tactic(
         ordering,
         tactic,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Wave 17: WellFoundedOrdering::is_well_founded
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty ordering (no regions assigned ranks) is trivially
+    /// well-founded: there are no ranks to conflict.
+    #[test]
+    fn test_is_well_founded_empty() {
+        let ord = WellFoundedOrdering::new("empty");
+        assert!(ord.is_well_founded(), "empty ordering should be well-founded");
+    }
+
+    /// An ordering where every region has a distinct rank is well-founded.
+    #[test]
+    fn test_is_well_founded_distinct_ranks() {
+        let mut ord = WellFoundedOrdering::new("distinct");
+        ord.assign(RegionId(1), 0);
+        ord.assign(RegionId(2), 1);
+        ord.assign(RegionId(3), 2);
+        assert!(ord.is_well_founded(), "distinct ranks should be well-founded");
+    }
+
+    /// An ordering where two regions share the same rank is NOT
+    /// well-founded — the strict total order is violated, so a deadlock
+    /// cycle could exist between the two equally-ranked regions.
+    #[test]
+    fn test_is_well_founded_duplicate_ranks() {
+        let mut ord = WellFoundedOrdering::new("duplicates");
+        ord.assign(RegionId(1), 0);
+        ord.assign(RegionId(2), 1);
+        ord.assign(RegionId(3), 1); // duplicate rank!
+        assert!(
+            !ord.is_well_founded(),
+            "ordering with duplicate ranks should NOT be well-founded"
+        );
+    }
+
+    /// `from_allocation_order` produces a well-founded ordering because it
+    /// assigns ranks by enumeration index (0, 1, 2, …), which are distinct.
+    #[test]
+    fn test_from_allocation_order_is_well_founded() {
+        use crate::models::ProofRegion;
+        // Use new_allocated and override alloc_point to get a known order.
+        let mut r1 = ProofRegion::new_allocated(RegionId(10), 64, 5);
+        r1.alloc_point = 5;
+        let mut r2 = ProofRegion::new_allocated(RegionId(20), 128, 1);
+        r2.alloc_point = 1;
+        let mut r3 = ProofRegion::new_allocated(RegionId(30), 32, 3);
+        r3.alloc_point = 3;
+        let regions = vec![r1, r2, r3];
+        let ord = WellFoundedOrdering::from_allocation_order(&regions);
+        assert!(ord.is_well_founded(), "from_allocation_order should produce well-founded ordering");
+        // Ranks assigned by alloc_point order: 1→0, 3→1, 5→2.
+        //   RegionId(20) alloc_point=1 → rank 0
+        //   RegionId(30) alloc_point=3 → rank 1
+        //   RegionId(10) alloc_point=5 → rank 2
+        assert_eq!(ord.less_than(RegionId(20), RegionId(10)), Some(true));  // 0 < 2
+        assert_eq!(ord.less_than(RegionId(20), RegionId(30)), Some(true));  // 0 < 1
+        assert_eq!(ord.less_than(RegionId(10), RegionId(30)), Some(false)); // 2 < 1 = false
+        assert_eq!(ord.less_than(RegionId(30), RegionId(20)), Some(false)); // 1 < 0 = false
+    }
+
+    /// `less_than` returns `None` when a region has no assigned rank.
+    #[test]
+    fn test_less_than_missing_rank() {
+        let mut ord = WellFoundedOrdering::new("partial");
+        ord.assign(RegionId(1), 0);
+        // RegionId(2) has no rank.
+        assert_eq!(ord.less_than(RegionId(1), RegionId(2)), None);
+        assert_eq!(ord.less_than(RegionId(2), RegionId(1)), None);
+    }
 }

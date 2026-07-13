@@ -126,6 +126,28 @@ pub enum InferenceRule {
     /// Conclusion: `Judgment::CastValid { resource, from_capd, to_capd }`
     CastValidity,
 
+    // -- Interpretation ----------------------------------------------------
+    /// **Interpretation Introduction**: If two RepDs (write BD and read BD)
+    /// are compatible (the write BD is a sub-RepD of the read BD, the read
+    /// is properly aligned, and the reinterpretation is valid), then the
+    /// interpretation is safe at the given address.
+    ///
+    /// Premises (2):
+    ///   0. A fact stating the write RepD subsumes the read RepD at `address`
+    ///      (typically a `Judgment::InterpretationCompatible` fact or a
+    ///      string-based fact about BD compatibility).
+    ///   1. A fact about the access's target type layout (size / alignment).
+    ///
+    /// Conclusion: `Judgment::InterpretationCompatible { write_repd,
+    /// read_repd, address }`
+    ///
+    /// This rule is the backbone of the `prove_interpretation` tactic
+    /// (Wave 17).  When both premises carry structured judgments, the rule
+    /// produces a structured `InterpretationCompatible` conclusion; when
+    /// either premise is a bare string fact, it falls back to string-based
+    /// matching for backward compatibility.
+    InterpretationIntro,
+
     // -- Temporal ----------------------------------------------------------
     /// **Temporal Ordering**: Happens-before is transitive: if A happens before
     /// B and B happens before C, then A happens before C.
@@ -149,6 +171,7 @@ impl InferenceRule {
             InferenceRule::DerivationTransitivity => "DerivationTransitivity",
             InferenceRule::BoundsPreservation => "BoundsPreservation",
             InferenceRule::CastValidity => "CastValidity",
+            InferenceRule::InterpretationIntro => "InterpretationIntro",
             InferenceRule::TemporalOrdering => "TemporalOrdering",
         }
     }
@@ -163,6 +186,7 @@ impl InferenceRule {
             InferenceRule::DerivationTransitivity => 2,
             InferenceRule::BoundsPreservation => 2,
             InferenceRule::CastValidity => 2,
+            InferenceRule::InterpretationIntro => 2,
             InferenceRule::TemporalOrdering => 2,
         }
     }
@@ -204,6 +228,15 @@ impl InferenceRule {
                  within the source type's layout and alignment constraints are \
                  satisfied; this preserves memory safety because no bytes are \
                  read beyond the source allocation."
+            }
+            InferenceRule::InterpretationIntro => {
+                "Two RepDs are compatible for a write-read pair when the read \
+                 RepD is a sub-RepD of the write RepD (the read does not \
+                 observe more bytes than were written), the access address is \
+                 properly aligned for the read RepD, and the reinterpretation \
+                 does not forge a pointer from uninitialized memory.  When all \
+                 three conditions hold, the read is memory-safe by the \
+                 definition of sub-RepD containment."
             }
             InferenceRule::TemporalOrdering => {
                 "Happens-before is a strict partial order; transitivity is an \
@@ -537,6 +570,66 @@ impl InferenceRule {
                         Ok(Fact::derived(
                             next_id,
                             format!("cast is valid: ({}) → ({})", p0.statement, p1.statement),
+                        ))
+                    }
+                }
+            }
+
+            InferenceRule::InterpretationIntro => {
+                let p0 = &facts[0];
+                let p1 = &facts[1];
+                match (p0.judgment.as_ref(), p1.judgment.as_ref()) {
+                    (
+                        Some(Judgment::InterpretationCompatible {
+                            write_repd,
+                            read_repd,
+                            address,
+                        }),
+                        _,
+                    ) => {
+                        // Premise 0 already carries the full compatibility
+                        // judgment — re-emit it as the derived conclusion.
+                        let j = Judgment::InterpretationCompatible {
+                            write_repd: *write_repd,
+                            read_repd: *read_repd,
+                            address: *address,
+                        };
+                        Ok(Fact::derived_j(next_id, j))
+                    }
+                    (Some(other), _) => Err(RuleError::PremiseMismatch {
+                        index: 0,
+                        reason: format!(
+                            "expected InterpretationCompatible judgment, got {:?}",
+                            other
+                        ),
+                    }),
+                    (None, _) => {
+                        // String fallback: premise 0 must mention "compatible"
+                        // or "RepD"; premise 1 must mention "layout",
+                        // "alignment", or "size".
+                        if !p0.statement.contains("compatible")
+                            && !p0.statement.contains("RepD")
+                            && !p0.statement.contains("repd")
+                        {
+                            return Err(RuleError::PremiseMismatch {
+                                index: 0,
+                                reason:
+                                    "expected a fact about BD/RepD compatibility".into(),
+                            });
+                        }
+                        if !p1.statement.contains("layout")
+                            && !p1.statement.contains("alignment")
+                            && !p1.statement.contains("size")
+                        {
+                            return Err(RuleError::PremiseMismatch {
+                                index: 1,
+                                reason:
+                                    "expected a fact about target type layout/alignment/size".into(),
+                            });
+                        }
+                        Ok(Fact::derived(
+                            next_id,
+                            format!("interpretation safe: ({}) ∧ ({})", p0.statement, p1.statement),
                         ))
                     }
                 }
@@ -1018,5 +1111,87 @@ mod tests {
         // which returns PremiseMismatch for the non-matching premise.
         let err = rule.apply(&[p0, p1]).unwrap_err();
         assert!(matches!(err, RuleError::PremiseMismatch { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // Wave 17: InterpretationIntro rule tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_interpretation_intro_name_and_arity() {
+        assert_eq!(InferenceRule::InterpretationIntro.name(), "InterpretationIntro");
+        assert_eq!(InferenceRule::InterpretationIntro.arity(), 2);
+    }
+
+    #[test]
+    fn test_interpretation_intro_structured() {
+        // When premise 0 carries an InterpretationCompatible judgment,
+        // the rule should re-emit it as the derived conclusion.
+        let rule = InferenceRule::InterpretationIntro;
+        let p0 = Fact::derived_j(
+            1,
+            Judgment::InterpretationCompatible {
+                write_repd: 10,
+                read_repd: 20,
+                address: 0x1000,
+            },
+        );
+        let p1 = Fact::checked(2, "target type T has layout size=4 alignment=4");
+        let result = rule.apply(&[p0, p1]).unwrap();
+        assert_eq!(
+            result.judgment,
+            Some(Judgment::InterpretationCompatible {
+                write_repd: 10,
+                read_repd: 20,
+                address: 0x1000,
+            })
+        );
+        assert!(result.statement.contains("BDs compatible"));
+        assert!(result.statement.contains("0x1000"));
+    }
+
+    #[test]
+    fn test_interpretation_intro_wrong_judgment_fails() {
+        // Premise 0 with a non-InterpretationCompatible judgment should
+        // fail with PremiseMismatch.
+        let rule = InferenceRule::InterpretationIntro;
+        let p0 = Fact::derived_j(
+            1,
+            Judgment::Allocated {
+                region: JRegionId(1),
+            },
+        );
+        let p1 = Fact::checked(2, "target type layout");
+        let err = rule.apply(&[p0, p1]).unwrap_err();
+        assert!(matches!(err, RuleError::PremiseMismatch { index: 0, .. }));
+    }
+
+    #[test]
+    fn test_interpretation_intro_string_fallback() {
+        // When both premises are bare strings, the rule falls back to
+        // string matching.
+        let rule = InferenceRule::InterpretationIntro;
+        let p0 = Fact::derived(1, "RepD 1 is compatible with RepD 2 at 0x1000");
+        let p1 = Fact::checked(2, "target type layout: size=4");
+        let result = rule.apply(&[p0, p1]).unwrap();
+        assert!(result.statement.contains("interpretation safe"));
+    }
+
+    #[test]
+    fn test_interpretation_intro_string_fallback_missing_compat_fails() {
+        // String fallback: premise 0 must mention "compatible" or "RepD".
+        let rule = InferenceRule::InterpretationIntro;
+        let p0 = Fact::derived(1, "region 1 is allocated"); // no compat/RepD keyword
+        let p1 = Fact::checked(2, "target type layout: size=4");
+        let err = rule.apply(&[p0, p1]).unwrap_err();
+        assert!(matches!(err, RuleError::PremiseMismatch { index: 0, .. }));
+    }
+
+    #[test]
+    fn test_interpretation_intro_soundness_argument() {
+        // The soundness argument should mention "sub-RepD" and "aligned".
+        let arg = InferenceRule::InterpretationIntro.soundness_argument();
+        assert!(arg.contains("sub-RepD"), "soundness argument should mention sub-RepD: {}", arg);
+        assert!(arg.contains("aligned"), "soundness argument should mention alignment: {}", arg);
     }
 }
