@@ -1775,19 +1775,21 @@ mod tests {
         assert!(result.diagnostics.is_empty(), "No diagnostics expected");
     }
 
-    /// NOTE: `verification_level` is set to `None` for the same reason
-    /// as `pipeline::tests::test_compile_simple_allocation` — the IVE
-    /// cleanup-graph extractor has a false positive on top-level
-    /// `region` declarations (the Allocation node has no ControlFlow
-    /// edges, only Derivation, which is excluded from the cleanup
-    /// graph, so it is flagged as a leak).  This test exercises the
-    /// `VumaCompiler` API compile path, not verification, so disabling
-    /// verification preserves the test's intent.  See Task 2-a report
-    /// in worklog.md for the full IVE false-positive analysis.
+    /// Wave 20: This test exercises the `VumaCompiler` API compile path.
+    /// `verification_level` is set to `None` because the IVE cleanup
+    /// invariant has a known false-positive on top-level `region`
+    /// declarations in certain SCG configurations (the `mark_static_lifetime`
+    /// fix in `verification.rs:820-849` handles the simple case but not
+    /// all variants).  Wave 20's memory-safety blocking pass
+    /// (`analyze_with_scg_liveness`) is kept enabled (via the default
+    /// `memory_safety: true`) to verify it does NOT flag this program.
     #[test]
     fn test_compile_with_allocation() {
         let compiler = VumaCompiler::with_config(CompileConfig {
             verification_level: VerificationLevel::None,
+            // memory_safety defaults to true (Wave 20).  We keep it
+            // enabled to verify the analyzer does NOT flag the top-level
+            // `region` as a leak.
             ..CompileConfig::default()
         });
         let source = r#"
@@ -1798,7 +1800,7 @@ mod tests {
             }
         "#;
         let result = compiler.compile(source);
-        assert!(result.success, "Compilation should succeed");
+        assert!(result.success, "Compilation should succeed: {:?}", result.diagnostics);
         let scg = result.scg.unwrap();
         assert!(scg.total_nodes > 0, "SCG should have nodes");
     }

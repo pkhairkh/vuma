@@ -61,6 +61,15 @@ struct Cli {
     #[arg(long, global = true)]
     safe: bool,
 
+    /// Disable compile-time memory-safety analysis (use-after-free, double-
+    /// free, leak, uninitialized-read detection).  This is an ESCAPE HATCH:
+    /// programs with memory-safety bugs will compile successfully but crash
+    /// or corrupt memory at runtime.  Use only for debugging the analyzer
+    /// itself or for prototyping unsafe code.  A compile-time warning is
+    /// emitted when this flag is set.
+    #[arg(long, global = true)]
+    no_memory_safety: bool,
+
     /// Run performance benchmarks instead of compiling
     #[arg(long, global = true)]
     bench: bool,
@@ -421,7 +430,7 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         debug_info: cli.debug,
         section_headers: cli.sections,
         runtime_bounds_checks: cli.safe,
-        memory_safety: true,
+        memory_safety: !cli.no_memory_safety,
         ..CompileConfig::default()
     }
 }
