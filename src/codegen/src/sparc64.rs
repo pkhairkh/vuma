@@ -1861,14 +1861,49 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
     let mut relocations: Vec<RelocationEntry> = Vec::new();
 
     // SAVE %sp, -frame_size, %sp (allocate register window + stack frame)
-    code.extend_from_slice(
-        &Instruction::Save {
-            rd: Gpr::O6,
-            rs1: Gpr::O6,
-            imm: -(frame_size as i32),
-        }
-        .encode(),
-    );
+    //
+    // SPARC V9 SAVE supports a 13-bit signed immediate (-4096..4095).  For
+    // frame sizes outside this range (which happens in functions with many
+    // SSA-renamed virtual registers, e.g. parent_mode in self_exec.vuma),
+    // we materialise the negative frame size in %g1 via SETHI+OR and use
+    // the register-form SAVE: `save %sp, %g1, %sp`.
+    let neg_frame = -(frame_size as i32);
+    if neg_frame >= -4095 && neg_frame <= 4095 {
+        code.extend_from_slice(
+            &Instruction::Save {
+                rd: Gpr::O6,
+                rs1: Gpr::O6,
+                imm: neg_frame,
+            }
+            .encode(),
+        );
+    } else {
+        // SETHI %hi(neg_frame), %g1  — sets bits 31-10, clears 63-32 and 9-0
+        let hi = ((neg_frame as u32) >> 10) & 0x3F_FFFF;
+        code.extend_from_slice(&encode_sethi(Gpr::G1, hi));
+        // OR %g1, %lo(neg_frame), %g1  — sets bits 9-0
+        code.extend_from_slice(
+            &Instruction::OrImm {
+                rd: Gpr::G1,
+                rs1: Gpr::G1,
+                imm: neg_frame & 0x3FF,
+            }
+            .encode(),
+        );
+        // SRA %g1, 0, %g1 — sign-extend 32-bit value to 64-bit
+        // (SETHI+OR produces a zero-extended 32-bit value, but SAVE needs
+        // a 64-bit negative value to move %sp downward on the 64-bit stack.)
+        code.extend_from_slice(
+            &Instruction::SraImm {
+                rd: Gpr::G1,
+                rs1: Gpr::G1,
+                imm: 0,
+            }
+            .encode(),
+        );
+        // SAVE %sp, %g1, %sp  (register form — i=0)
+        code.extend_from_slice(&encode_fmt3_rr(OPC_FORMAT3, Gpr::O6, OP3_SAVE, Gpr::O6, Gpr::G1));
+    }
 
     // Store incoming args (%i0-%i5) to their stack slots.
     // After SAVE, the caller's %o0-%o5 become the callee's %i0-%i5.
@@ -3946,6 +3981,10 @@ impl Backend for Sparc64Backend {
         // ── POSIX syscall stubs ──────────────────────────────────────
         // Simple stubs: OR %g0, #num, %g1; TA 0x6d; JMPL %i7+8; RESTORE
         let simple_stub = |num: i32| -> Vec<u8> {
+            // Leaf function — no SAVE/RESTORE.  Returns via JMPL %o7+8 (the
+            // CALL instruction's return address) with NOP in the delay slot.
+            // Using %i7+8/RESTORE here would return to the caller's caller
+            // because the stub does not allocate its own register window.
             let mut code = Vec::new();
             code.extend_from_slice(
                 &Instruction::OrImm {
@@ -3959,19 +3998,12 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(
                 &Instruction::Jmpl {
                     rd: Gpr::G0,
-                    rs1: Gpr::I7,
+                    rs1: Gpr::O7,
                     imm: 8,
                 }
                 .encode(),
             );
-            code.extend_from_slice(
-                &Instruction::Restore {
-                    rd: Gpr::G0,
-                    rs1: Gpr::G0,
-                    imm: 0,
-                }
-                .encode(),
-            );
+            code.extend_from_slice(&encode_nop());
             code
         };
 
@@ -4073,19 +4105,12 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(
                 &Instruction::Jmpl {
                     rd: Gpr::G0,
-                    rs1: Gpr::I7,
+                    rs1: Gpr::O7,
                     imm: 8,
                 }
                 .encode(),
             );
-            code.extend_from_slice(
-                &Instruction::Restore {
-                    rd: Gpr::G0,
-                    rs1: Gpr::G0,
-                    imm: 0,
-                }
-                .encode(),
-            );
+            code.extend_from_slice(&encode_nop());
             code
         };
         let mut syscall_stubs = syscall_stubs;
@@ -4117,14 +4142,12 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(
                 &Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 0 }.encode(),
             );
-            // JMPL %i7+8, %g0 (return)
+            // JMPL %o7+8, %g0 (return — leaf function, no SAVE/RESTORE)
             code.extend_from_slice(
-                &Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode(),
+                &Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode(),
             );
-            // RESTORE (delay slot)
-            code.extend_from_slice(
-                &Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode(),
-            );
+            // NOP (delay slot)
+            code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("pipe".to_string(), code));
         }
 
@@ -4147,8 +4170,8 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O3, rs1: Gpr::G0, imm: 0 }.encode()); // rusage=NULL
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 7 }.encode());  // sys_wait4
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
-            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("waitpid".to_string(), code));
         }
 
@@ -4160,8 +4183,8 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode()); // addrlen=NULL
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 198 }.encode()); // sys_recvfrom
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
-            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("recv".to_string(), code));
         }
 
@@ -4172,8 +4195,8 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode());
             code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 197 }.encode()); // sys_sendto
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
-            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("send".to_string(), code));
         }
 
@@ -4198,8 +4221,8 @@ impl Backend for Sparc64Backend {
             code.extend_from_slice(&nop); // delay slot
             // done:
             code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::O4, rs2: Gpr::G0 }.encode()); // %o0 = %o4
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::I7, imm: 8 }.encode());
-            code.extend_from_slice(&Instruction::Restore { rd: Gpr::G0, rs1: Gpr::G0, imm: 0 }.encode());
+            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("strcmp".to_string(), code));
         }
 
@@ -4768,9 +4791,11 @@ impl Backend for Sparc64Backend {
         stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
-        // QEMU-sparc64 provides a misaligned initial SP. The real stack
-        // pointer (with V9 bias of 2047) is at SP+2047, which IS aligned.
-        // argc is at [SP+2047], argv = SP+2047+8.
+        // QEMU-sparc64 sets %sp = start_stack - 16*sizeof(abi_ulong) - STACK_BIAS
+        //               = start_stack - 128 - 2047
+        //               = start_stack - 2175
+        // where [start_stack] = argc (64-bit), [start_stack+8] = argv[0] ptr.
+        // Therefore argc is at [%sp + 2175] and argv at [%sp + 2183].
         // Use %g2 (global, preserved across SAVE) to hold original SP.
         let mut start_stub = Vec::with_capacity(start_stub_size);
         // MOV %sp, %g2 — save original SP in global register
@@ -4795,22 +4820,22 @@ impl Backend for Sparc64Backend {
             }
             .encode(),
         );
-        // LDUW [%g2+2047], %o0 — load argc from [original_SP + 2047]
-        // 2047 = 0x7FF. original_SP + 2047 is 16-byte aligned (V9 bias).
+        // LDX [%g2+2175], %o0 — load argc (64-bit)
+        // 2175 = 2047 (STACK_BIAS) + 128 (16 * sizeof(abi_ulong)).
         start_stub.extend_from_slice(
-            &Instruction::Lduw {
+            &Instruction::Ldx {
                 rd: Gpr::O0,
                 rs1: Gpr::G2,
-                imm: 2047,
+                imm: 2175,
             }
             .encode(),
         );
-        // ADD %g2, 2055, %o1 — argv = original_SP + 2047 + 8 = %g2 + 2055
+        // ADD %g2, 2183, %o1 — argv = original_SP + 2175 + 8 = %g2 + 2183
         start_stub.extend_from_slice(
             &Instruction::AddImm {
                 rd: Gpr::O1,
                 rs1: Gpr::G2,
-                imm: 2055,
+                imm: 2183,
             }
             .encode(),
         );
