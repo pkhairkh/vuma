@@ -61,8 +61,9 @@
 //! Within a function body, SCG statements are lowered in their declared
 //! order.  For graph-based SCGs (from the `vuma-scg` crate), the
 //! [`IRBuilder::build`] method walks the SCG in topological order
-//! using petgraph's `toposort`, ensuring that data-flow dependencies are
-//! respected.
+//! (using `vuma_scg::digraph::toposort` on the hand-written `DiGraph`
+//! that backs the SCG — see Wave 39 of the VUMA remediation plan),
+//! ensuring that data-flow dependencies are respected.
 
 use crate::ir::*;
 use crate::Result;
