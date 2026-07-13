@@ -419,6 +419,56 @@ impl LiveInterval {
         let len = self.len().max(1);
         self.spill_weight() / len
     }
+
+    /// Pressure-aware spill weight (Wave 24).
+    ///
+    /// Returns this interval's `spill_weight()` adjusted for the current
+    /// register pressure.  When `current_pressure` (the number of
+    /// simultaneously-live intervals of the same class) exceeds the number
+    /// of available physical registers, this interval's effective weight is
+    /// *reduced* by dividing it by the overflow amount.  This makes the
+    /// interval look "less deserving" of a register, biasing the spill
+    /// heuristic toward spilling the current interval rather than evicting
+    /// an active one (which would simply defer the spill to a later point
+    /// and increase total spill code).
+    ///
+    /// When pressure is at or below the register count, this returns the
+    /// plain `spill_weight()` (no adjustment).
+    ///
+    /// See `LinearScanAllocator::spill_gpr` / `spill_simd` for the call
+    /// site that uses this.
+    pub fn spill_weight_with_pressure(
+        &self,
+        current_pressure: u32,
+        available_regs: u32,
+    ) -> u32 {
+        let base = self.spill_weight();
+        if current_pressure > available_regs {
+            // Overflow = how many intervals beyond the register count are
+            // simultaneously live.  +1 avoids divide-by-zero when
+            // pressure == available_regs (which the `>` already guards, but
+            // be defensive).
+            let overflow = (current_pressure - available_regs).max(1);
+            // Use saturating division: weight is at least 1, so this never
+            // returns 0 (which would make the interval "infinitely
+            // spillable" and could cause infinite loops).
+            (base / (overflow + 1)).max(1)
+        } else {
+            base
+        }
+    }
+
+    /// Pressure-aware weight per unit length (Wave 24).
+    ///
+    /// Convenience wrapper: `spill_weight_with_pressure(p, r) / len`.
+    pub fn weight_per_length_with_pressure(
+        &self,
+        current_pressure: u32,
+        available_regs: u32,
+    ) -> u32 {
+        let len = self.len().max(1);
+        self.spill_weight_with_pressure(current_pressure, available_regs) / len
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1289,17 +1339,32 @@ impl LinearScanAllocator {
         }
 
         // No free register — need to spill/evict.
-        Self::spill_gpr(interval, active, next_spill_idx, result)
+        // (Wave 24) Pass the available register count so the spill
+        // heuristic can factor in current live-range pressure.
+        Self::spill_gpr(
+            interval,
+            active,
+            next_spill_idx,
+            result,
+            self.gpr_count() as u32,
+        )
     }
 
     /// Spill logic for GPRs — evict the active interval with the lowest
     /// spill weight per length, or spill the current one if it has the
     /// lowest weight.
+    ///
+    /// (Wave 24) `available_regs` is the size of the allocatable GPR pool.
+    /// It's used by the pressure-aware spill-weight heuristic
+    /// ([`LiveInterval::spill_weight_with_pressure`]) to decide whether to
+    /// bias toward spilling the current interval (when pressure exceeds
+    /// the register count) or toward evicting an active one.
     fn spill_gpr(
         interval: &LiveInterval,
         active: &mut Vec<(IRValueId, Register, u32, u32)>,
         next_spill_idx: &mut u32,
         result: &mut AllocationResult,
+        available_regs: u32,
     ) -> Result<Option<Register>> {
         if active.is_empty() {
             // Spill the current interval entirely.
@@ -1329,7 +1394,15 @@ impl LinearScanAllocator {
             .unwrap();
 
         let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
-        let current_weight = interval.weight_per_length();
+        // (Wave 24) Pressure-aware spill weight: when the number of
+        // simultaneously-live intervals (active + the one being allocated
+        // now) exceeds the register count, the current interval's effective
+        // weight is reduced.  This biases toward spilling the current
+        // interval rather than evicting an active one (which would just
+        // defer the spill and increase total spill code).
+        let current_pressure = active.len() as u32 + 1; // +1 for `interval`
+        let current_weight =
+            interval.weight_per_length_with_pressure(current_pressure, available_regs);
 
         // If the current interval has lower weight than the best eviction
         // candidate, spill the current interval instead.
@@ -1401,15 +1474,28 @@ impl LinearScanAllocator {
         }
 
         // No free register — spill.
-        Self::spill_simd(interval, active, next_spill_idx, result)
+        // (Wave 24) Pass the available register count for pressure-aware
+        // spill heuristic.
+        Self::spill_simd(
+            interval,
+            active,
+            next_spill_idx,
+            result,
+            self.simd_count() as u32,
+        )
     }
 
     /// Spill logic for SIMD/FP registers with weight-based eviction.
+    ///
+    /// (Wave 24) `available_regs` is the size of the allocatable SIMD/FP
+    /// pool; see [`LinearScanAllocator::spill_gpr`] for the pressure-aware
+    /// heuristic description.
     fn spill_simd(
         interval: &LiveInterval,
         active: &mut Vec<(IRValueId, SimdFpRegister, u32, u32)>,
         next_spill_idx: &mut u32,
         result: &mut AllocationResult,
+        available_regs: u32,
     ) -> Result<Option<SimdFpRegister>> {
         if active.is_empty() {
             let slot_idx = *next_spill_idx;
@@ -1431,7 +1517,10 @@ impl LinearScanAllocator {
             .unwrap();
 
         let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
-        let current_weight = interval.weight_per_length();
+        // (Wave 24) Pressure-aware spill weight (see `spill_gpr`).
+        let current_pressure = active.len() as u32 + 1; // +1 for `interval`
+        let current_weight =
+            interval.weight_per_length_with_pressure(current_pressure, available_regs);
 
         if current_weight <= evict_weight {
             let slot_idx = *next_spill_idx;
@@ -1619,6 +1708,203 @@ impl LinearScanAllocator {
         }
         Ok(results)
     }
+
+    /// Post-allocation copy coalescing pass (Wave 24).
+    ///
+    /// This is a complementary pass to the conservative pre-allocation
+    /// coalescing in [`LiveRangeComputer::coalesce_intervals`].  Whereas
+    /// the pre-allocation pass merges intervals connected by a copy *only
+    /// when their combined range doesn't interfere with any other
+    /// interval*, this post-allocation pass handles the case where two
+    /// intervals connected by a copy were assigned *different* physical
+    /// registers by the linear scan, but could still share a register
+    /// because the source dies at the copy point.
+    ///
+    /// ## Algorithm
+    ///
+    /// For each copy instruction (`Cast::BitCast` with two register
+    /// operands) in the function:
+    ///
+    /// 1. If `src` and `dst` are both assigned physical registers (i.e.,
+    ///    neither is spilled):
+    ///    - If they're already the same register, record the eliminated
+    ///      copy and move on.
+    ///    - Otherwise, check if it's safe to coalesce:
+    ///      - `src`'s last use position is exactly the copy position
+    ///        (meaning `src` dies at the copy — its register is free
+    ///        immediately afterwards).
+    ///      - No other live interval of the same register class that is
+    ///        assigned to `src`'s physical register overlaps with `dst`'s
+    ///        interval (which would create a conflict).
+    /// 2. If safe, reassign `dst`'s physical register to `src`'s, update
+    ///    the callee-saved sets, record the coalescing in
+    ///    `coalesced_map`, and append `(src, src_preg)` to
+    ///    `eliminated_copies` (signaling the emitter can drop the mov).
+    ///
+    /// ## Returns
+    ///
+    /// The number of copies successfully eliminated (i.e., the number of
+    /// physical-register reassignments performed).  Already-coalesced
+    /// copies (where `src` and `dst` already shared a register) are not
+    /// counted toward the return value but are still recorded in
+    /// `eliminated_copies` for the emitter's benefit.
+    ///
+    /// ## Example
+    ///
+    /// ```ignore
+    /// let alloc = LinearScanAllocator::new();
+    /// let mut result = alloc.allocate_function(&func)?;
+    /// let eliminated = alloc.coalesce_copies_post_alloc(&func, &mut result);
+    /// assert!(eliminated > 0, "expected at least one copy to be coalesced");
+    /// ```
+    pub fn coalesce_copies_post_alloc(
+        &self,
+        func: &IRFunction,
+        result: &mut AllocationResult,
+    ) -> usize {
+        // (Borrow-check note) We clone the live intervals into a local
+        // `Vec` so that the immutable borrows used for interference checks
+        // don't conflict with the mutable borrows of `result` performed
+        // during coalescing.  The clone is cheap relative to the rest of
+        // allocation and only happens once per function.
+        let intervals: Vec<LiveInterval> = result.live_intervals.clone();
+        let interval_map: HashMap<IRValueId, &LiveInterval> =
+            intervals.iter().map(|iv| (iv.vreg, iv)).collect();
+
+        let mut eliminated = 0usize;
+        let mut pos: u32 = 0;
+
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Cast {
+                    kind: crate::ir::CastKind::BitCast,
+                    dst: IRValue::Register(dst_id),
+                    src: IRValue::Register(src_id),
+                    ..
+                } = instr
+                {
+                    let src_id = *src_id;
+                    let dst_id = *dst_id;
+
+                    let (Some(src_preg), Some(dst_preg)) =
+                        (result.get_phys_reg(src_id), result.get_phys_reg(dst_id))
+                    else {
+                        pos += 2;
+                        continue;
+                    };
+
+                    // Already coalesced (same phys reg) — record and move on.
+                    if src_preg == dst_preg {
+                        result.eliminated_copies.push((src_id, src_preg));
+                        pos += 2;
+                        continue;
+                    }
+
+                    // Need interval info for both src and dst.
+                    let (Some(src_iv), Some(dst_iv)) =
+                        (interval_map.get(&src_id).copied(), interval_map.get(&dst_id).copied())
+                    else {
+                        pos += 2;
+                        continue;
+                    };
+
+                    // Classes must match (GPR↔GPR, SIMD↔SIMD).
+                    if src_iv.class != dst_iv.class {
+                        pos += 2;
+                        continue;
+                    }
+
+                    // Safety check 1: src must die at the copy position.
+                    // This is the "src dies at copy" condition that makes
+                    // coalescing safe — src's register becomes free
+                    // immediately after the copy, so dst can reuse it
+                    // without clobbering any live value.
+                    let src_last_use = src_iv.use_positions.iter().copied().max();
+                    if src_last_use != Some(pos) {
+                        pos += 2;
+                        continue;
+                    }
+
+                    // Safety check 2: no OTHER live interval of the same
+                    // class assigned to src's phys reg may overlap with
+                    // dst's interval.  (dst would conflict with it.)
+                    //
+                    // We use *strict* overlap (boundary positions don't
+                    // count as conflicts): if `other` is defined at the
+                    // exact position `dst_iv` ends (or vice versa), the
+                    // boundary is safe because the dying interval's value
+                    // is read before the new interval's value is written
+                    // (read-before-write semantics).  This matches the
+                    // standard half-open-interval interference rule used
+                    // by production register allocators.
+                    //
+                    // We iterate over the local `intervals` clone (not
+                    // `result.live_intervals`) to avoid borrowing `result`
+                    // immutably here.
+                    let safe = intervals.iter().all(|other| {
+                        if other.class != dst_iv.class {
+                            return true;
+                        }
+                        if other.vreg == src_id || other.vreg == dst_id {
+                            return true;
+                        }
+                        let Some(other_preg) = result.get_phys_reg(other.vreg) else {
+                            return true; // spilled — no conflict.
+                        };
+                        if other_preg != src_preg {
+                            return true;
+                        }
+                        // Strict overlap: [a_s, a_e] and [b_s, b_e] strictly
+                        // overlap iff a_s < b_e && b_s < a_e.
+                        !(other.start < dst_iv.end && dst_iv.start < other.end)
+                    });
+
+                    if !safe {
+                        pos += 2;
+                        continue;
+                    }
+
+                    // Reassign dst's phys reg to src's.
+                    // Remove dst_preg from callee-saved tracking (it may
+                    // no longer be used after this reassignment).
+                    match dst_preg {
+                        PhysReg::Gpr(r) => {
+                            result.used_callee_saved_gprs.remove(&r);
+                        }
+                        PhysReg::SimdFp(r) => {
+                            result.used_callee_saved_simd.remove(&r);
+                        }
+                    }
+                    // Insert the new assignment.
+                    result.vreg_to_preg.insert(dst_id, src_preg);
+                    // Add src_preg to callee-saved tracking if it's
+                    // callee-saved (dst now uses it).
+                    match src_preg {
+                        PhysReg::Gpr(r) => {
+                            if r.is_callee_saved() {
+                                result.used_callee_saved_gprs.insert(r);
+                            }
+                        }
+                        PhysReg::SimdFp(r) => {
+                            if r.is_callee_saved() {
+                                result.used_callee_saved_simd.insert(r);
+                            }
+                        }
+                    }
+
+                    // Record the coalescing in the coalescing map (dst → src)
+                    // and in the eliminated_copies list.
+                    result.record_coalescing(dst_id, src_id);
+                    result.eliminated_copies.push((src_id, src_preg));
+                    eliminated += 1;
+                }
+                pos += 2;
+            }
+            pos += 2; // terminator slot
+        }
+
+        eliminated
+    }
 }
 
 impl Default for LinearScanAllocator {
@@ -1630,6 +1916,20 @@ impl Default for LinearScanAllocator {
 // ═══════════════════════════════════════════════════════════════════════════
 // Legacy RegAllocator (kept for backward compatibility with emit.rs)
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// Wave 24 decision: KEEP (do not delete).
+//
+// Despite the task description suggesting this was "gated out by
+// `STACK_SLOT_VREG_THRESHOLD=0`", that hack was removed in Wave 21
+// (`STACK_SLOT_VREG_THRESHOLD` is now `u32::MAX` in `emit.rs`).  The
+// legacy greedy allocator is still actively used by `codegen::emit::Emitter`
+// (see `emit.rs:570` — `reg_alloc: RegAllocator` field, constructed in
+// `Emitter::new` at `emit.rs:599`) for the non-register-allocated emit
+// path.  Deleting it would break the greedy emitter; refactoring it to
+// share code with `LinearScanAllocator` is not worthwhile because the
+// greedy path is a fallback (the `LinearScanAllocator` path is preferred
+// whenever an `AllocationResult` is provided).  We keep it as-is and
+// document the situation here.
 
 /// A simple greedy register allocator.
 ///
@@ -2074,6 +2374,28 @@ impl TargetAgnosticRegAlloc {
     ///
     /// Returns a `RegAllocResult` mapping virtual registers to physical
     /// registers, with spill slot assignments for evicted intervals.
+    ///
+    /// (Wave 24) This is the entry point backends without a custom
+    /// allocator should call.  The convenience wrapper
+    /// [`crate::regalloc_emit::run_regalloc`] looks up the `TargetDesc`
+    /// for an ISA name from the [`crate::target_desc::TargetDescRegistry`]
+    /// and calls this method; backends that already have a `TargetDesc`
+    /// can call `TargetAgnosticRegAlloc::new(&target).allocate_function(&func)`
+    /// directly.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use crate::regalloc::TargetAgnosticRegAlloc;
+    /// use crate::target_desc::TargetDescRegistry;
+    ///
+    /// let registry = TargetDescRegistry::new();
+    /// let target = registry.get("x86_64").expect("x86_64 in registry");
+    /// let alloc = TargetAgnosticRegAlloc::new(target);
+    /// let result = alloc.allocate_function(&func)
+    ///     .expect("regalloc should not fail on a well-formed function");
+    /// // `result.vreg_to_preg` now maps each vreg → PhysicalReg.
+    /// ```
     pub fn allocate_function(
         &self,
         func: &IRFunction,
@@ -4071,7 +4393,7 @@ impl LivenessAnalysis {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(any())] // Disabled: broken tests need fixing
+#[cfg(test)] // Wave 24: re-enabled (was #[cfg(any())] — broken tests fixed).
 mod tests {
     use super::*;
     use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator};
@@ -4083,7 +4405,8 @@ mod tests {
         let mut alloc = RegAllocator::new();
         let r0 = alloc.allocate(0).unwrap();
         let r1 = alloc.allocate(1).unwrap();
-        assert_ne!(r0, r1);
+        // Wave 24: compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
+        assert_ne!(r0.reg, r1.reg);
     }
 
     #[test]
@@ -4092,7 +4415,8 @@ mod tests {
         let r0 = alloc.allocate(0).unwrap();
         alloc.free(0);
         let r1 = alloc.allocate(1).unwrap();
-        assert_eq!(r0, r1);
+        // Wave 24: compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
+        assert_eq!(r0.reg, r1.reg);
     }
 
     #[test]
@@ -4124,6 +4448,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4147,6 +4472,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4185,6 +4511,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -4211,6 +4538,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();
@@ -4246,6 +4574,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
 
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -4272,6 +4601,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         // v2 = v1 + 1  (v1 is used, v2 is defined; v0 is dead)
         block.push(IRInstr::BinOp {
@@ -4279,6 +4609,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         // Only v2 is returned — v0 and v1 are dead here.
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -4307,6 +4638,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -4334,6 +4666,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -4348,6 +4681,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(0),
+            ty: None,
         });
         then_block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4358,6 +4692,7 @@ mod tests {
             dst: IRValue::Register(3),
             lhs: IRValue::Register(1),
             rhs: IRValue::Register(0),
+            ty: None,
         });
         else_block.terminator = IRTerminator::Return(vec![IRValue::Register(3)]);
 
@@ -4436,6 +4771,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block1.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func1);
@@ -4450,6 +4786,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block2.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
         program.functions.push(func2);
@@ -4485,6 +4822,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4528,6 +4866,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=35u32).map(IRValue::Register).collect();
@@ -4571,6 +4910,7 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4666,6 +5006,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block1.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func1);
@@ -4679,6 +5020,7 @@ mod tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
+            ty: None,
         });
         block2.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
         program.functions.push(func2);
@@ -4718,6 +5060,7 @@ mod tests {
                 dst: IRValue::Register(i + 1),
                 lhs: IRValue::Register(i),
                 rhs: IRValue::Immediate(1),
+                ty: None,
             });
         }
         let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();
@@ -4757,6 +5100,237 @@ mod tests {
         assert!(!callee_gpr.is_caller_saved());
         assert!(caller_simd.is_caller_saved());
         assert!(callee_simd.is_callee_saved());
+    }
+
+    // ====================================================================
+    // Wave 24 tests
+    // ====================================================================
+
+    /// (Wave 24, sub-task 2) `TargetAgnosticRegAlloc::allocate_function`
+    /// can be called directly with a `TargetDesc` from the registry and
+    /// produces a non-empty `RegAllocResult` for a simple function.
+    #[test]
+    fn wave24_target_agnostic_allocate_function_direct_call() {
+        use crate::regalloc::TargetAgnosticRegAlloc;
+        use crate::target_desc::TargetDescRegistry;
+
+        let mut func = crate::ir::IRFunction::new("wave24_simple");
+        func.params.push(IRValue::Register(0));
+        func.params.push(IRValue::Register(1));
+        let block = func.current_block();
+        block.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: None,
+        });
+        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        // Look up the x86_64 target description.
+        let registry = TargetDescRegistry::new();
+        let target = registry
+            .get("x86_64")
+            .expect("x86_64 must be in the TargetDescRegistry");
+
+        // Construct the allocator directly (no `regalloc_emit::run_regalloc`
+        // wrapper) and call `allocate_function` — this is the path a
+        // backend without a custom allocator would take.
+        let alloc = TargetAgnosticRegAlloc::new(target);
+        assert_eq!(alloc.isa_name(), "x86_64");
+        // x86_64 has 15 allocatable GPRs (RAX, RCX, RDX, RBX, RBP, RSI,
+        // RDI, R8-R15 — RSP is reserved) and 16 XMM regs.
+        assert!(alloc.gpr_count() >= 14, "x86_64 should have >=14 GPRs");
+        assert!(alloc.fp_count() >= 16, "x86_64 should have >=16 FP regs");
+
+        let result = alloc.allocate_function(&func).expect(
+            "target-agnostic allocate_function should succeed on a well-formed function",
+        );
+
+        // All three vregs should be assigned a physical register (3 vregs
+        // << 14 GPRs, so no spills expected).
+        assert!(
+            result.get_phys_reg(0).is_some(),
+            "vreg 0 should have a physical register assigned"
+        );
+        assert!(
+            result.get_phys_reg(1).is_some(),
+            "vreg 1 should have a physical register assigned"
+        );
+        assert!(
+            result.get_phys_reg(2).is_some(),
+            "vreg 2 should have a physical register assigned"
+        );
+        assert!(
+            result.spill_slots.is_empty(),
+            "no spills expected with only 3 live vregs"
+        );
+    }
+
+    /// (Wave 24, sub-task 5) Pressure-aware spill weight: when pressure
+    /// exceeds the available register count, the effective weight should
+    /// be lower than the base weight (making the interval more attractive
+    /// to spill).  When pressure is at or below the register count, the
+    /// weight should equal the base.
+    #[test]
+    fn wave24_pressure_aware_spill_weight() {
+        let mut iv = LiveInterval::new(0, RegClass::Gpr, 0, 10);
+        iv.use_positions = vec![1, 2, 3, 4, 5];
+        iv.def_positions = vec![0];
+        iv.loop_depth = 0;
+        iv.crosses_call = false;
+
+        let base = iv.spill_weight();
+        assert!(base > 0, "base spill weight should be positive");
+
+        // Pressure at register count: no adjustment.
+        let w_at = iv.spill_weight_with_pressure(10, 10);
+        assert_eq!(w_at, base, "pressure == regs → no adjustment");
+
+        // Pressure below register count: no adjustment.
+        let w_below = iv.spill_weight_with_pressure(5, 10);
+        assert_eq!(w_below, base, "pressure < regs → no adjustment");
+
+        // Pressure above register count: weight should be reduced.
+        let w_above = iv.spill_weight_with_pressure(11, 10);
+        assert!(
+            w_above < base,
+            "pressure > regs should reduce weight (base={}, adjusted={})",
+            base,
+            w_above
+        );
+        assert!(w_above >= 1, "adjusted weight should never be 0");
+
+        // Higher pressure → lower weight (monotonic).
+        let w_higher = iv.spill_weight_with_pressure(20, 10);
+        assert!(
+            w_higher <= w_above,
+            "higher pressure should not increase weight (w_above={}, w_higher={})",
+            w_above,
+            w_higher
+        );
+    }
+
+    /// (Wave 24, sub-task 4) Post-allocation copy coalescing: a
+    /// `Cast::BitCast` copy where `src` dies at the copy should be
+    /// coalesced (src and dst end up sharing a physical register) when
+    /// the post-allocation pass runs.
+    #[test]
+    fn wave24_coalesce_copies_post_alloc_basic() {
+        // Function:
+        //   v0 = param
+        //   v1 = bitcast v0   <-- copy; v0 dies here
+        //   v2 = v1 + 1
+        //   return v2
+        //
+        // After allocation, v0 and v1 may end up in different phys regs
+        // (the pre-allocation coalescing in LiveRangeComputer may or may
+        // not merge them depending on interference).  The post-allocation
+        // pass should at minimum record the eliminated copy if they're
+        // already the same, or coalesce them if safe.
+        let mut func = crate::ir::IRFunction::new("wave24_coalesce_basic");
+        func.params.push(IRValue::Register(0));
+        let block = func.current_block();
+        block.push(IRInstr::Cast {
+            kind: CastKind::BitCast,
+            dst: IRValue::Register(1),
+            src: IRValue::Register(0),
+            from_ty: None,
+            to_ty: None,
+        });
+        block.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let alloc = LinearScanAllocator::new();
+        let mut result = alloc.allocate_function(&func).unwrap();
+
+        // Run the post-allocation coalescing pass.
+        let eliminated = alloc.coalesce_copies_post_alloc(&func, &mut result);
+
+        // v0 dies at the bitcast (its last use is the bitcast itself), so
+        // coalescing v0 and v1 should be safe.  Either the pre-allocation
+        // pass already merged them (eliminated == 0 but
+        // eliminated_copies is non-empty) or the post-allocation pass
+        // performed the reassignment (eliminated >= 1).
+        assert!(
+            !result.eliminated_copies.is_empty(),
+            "expected at least one eliminated copy (pre or post alloc); \
+             eliminated={}, copies={:?}",
+            eliminated,
+            result.eliminated_copies
+        );
+
+        // After coalescing, v0 and v1 should resolve to the same phys reg
+        // (or v1 should at least follow the coalescing chain back to v0).
+        let p0 = result.get_phys_reg(0);
+        let p1 = result.get_phys_reg(1);
+        assert!(
+            p0.is_some() && p1.is_some(),
+            "both v0 and v1 should have phys regs after coalescing"
+        );
+        assert_eq!(
+            p0, p1,
+            "v0 and v1 should share a phys reg after coalescing (p0={:?}, p1={:?})",
+            p0, p1
+        );
+    }
+
+    /// (Wave 24, sub-task 4) Post-allocation coalescing must NOT coalesce
+    /// when `src` is still live after the copy (src's last use is NOT at
+    /// the copy position).  In that case the copy is left in place.
+    #[test]
+    fn wave24_coalesce_copies_post_alloc_no_coalesce_when_src_live() {
+        // Function:
+        //   v0 = param
+        //   v1 = bitcast v0   <-- copy; v0 is STILL live (used in the add)
+        //   v2 = v0 + v1
+        //   return v2
+        //
+        // Here v0 is used in the add AFTER the bitcast, so v0's last use
+        // is NOT at the copy.  The post-allocation pass must not coalesce.
+        let mut func = crate::ir::IRFunction::new("wave24_coalesce_no_merge");
+        func.params.push(IRValue::Register(0));
+        let block = func.current_block();
+        block.push(IRInstr::Cast {
+            kind: CastKind::BitCast,
+            dst: IRValue::Register(1),
+            src: IRValue::Register(0),
+            from_ty: None,
+            to_ty: None,
+        });
+        block.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: None,
+        });
+        block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let alloc = LinearScanAllocator::new();
+        let mut result = alloc.allocate_function(&func).unwrap();
+        let eliminated = alloc.coalesce_copies_post_alloc(&func, &mut result);
+
+        // Since src (v0) is live after the copy, the post-allocation pass
+        // should not have performed a reassignment.  `eliminated` counts
+        // only reassignments (not already-coalesced copies).
+        assert_eq!(
+            eliminated, 0,
+            "post-alloc pass should not coalesce when src is live after copy"
+        );
+
+        // If pre-allocation coalescing merged v0 and v1 (which IS safe
+        // here because they're both alive simultaneously but share bits
+        // via bitcast — that's the existing LiveRangeComputer behavior),
+        // eliminated_copies may still be non-empty (recording the
+        // already-coalesced copy).  We only assert the post-alloc pass
+        // didn't ADD any new reassignments.
     }
 }
 
