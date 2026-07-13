@@ -6368,6 +6368,16 @@ impl Backend for RiscV32Backend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
 
             // Simple stubs (args already in correct registers a0-a5):
+            // [wave 6 — mmap ABI normalization, verified] RV32 uses the generic
+            // sys_mmap (222) — the DIRECT 6-arg form, with `offset` in BYTES
+            // (rv32 has NO mmap2; the generic sys_mmap does byte→page
+            // conversion in-kernel). The simple_stub passes the caller's
+            // a0-a5 straight through (no rearrangement, no >>12), exactly
+            // like __vuma_alloc (which sets a5=0 then `LI a7,222; ECALL`).
+            // Both use the SAME offset unit (bytes, via a5), satisfying the
+            // wave-6 "same offset-unit handling as __vuma_alloc" requirement.
+            // RV32 passes 8 args in a0-a7 (see Gpr::arg_register), so all 6
+            // mmap args fit in registers — no stack-arg plumbing needed.
             for (name, num) in [
                 ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
                 ("munmap", 215), ("exit", 93), ("getpid", 172),

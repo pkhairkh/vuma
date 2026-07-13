@@ -2883,6 +2883,19 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
 
     // mmap(addr, length, prot, flags, fd, offset) -> void*  [syscall 9]
     // Need to move 4th arg from RCX -> R10 before syscall
+    //
+    // [wave 6 — mmap ABI normalization, verified] x86_64's sys_mmap (9) is the
+    // DIRECT 6-arg form: (addr, len, prot, flags, fd, offset) in
+    //   RDI, RSI, RDX, R10, R8, R9   (kernel syscall ABI)
+    // with `offset` in BYTES (x86_64 has no mmap2; sys_mmap does the
+    // byte→page conversion in-kernel). The only fixup needed is moving arg4
+    // (flags) from the SysV RCX to the syscall-ABI R10 — the other 5 args are
+    // already in the correct registers. This matches __vuma_alloc (which sets
+    // up RDI/RSI/RDX/R10/R8/R9 then `MOV EAX,9; syscall`): both use the SAME
+    // offset unit (bytes, via R9), satisfying the wave-6 "same offset-unit
+    // handling as __vuma_alloc" requirement. x86_64 passes 6 args in
+    // RDI/RSI/RDX/RCX/R8/R9 (see Gpr::arg_register), so all 6 mmap args fit in
+    // registers — no stack-arg plumbing needed.
     {
         let mut code = Vec::new();
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));   // sys_mmap
