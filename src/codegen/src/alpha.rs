@@ -1610,32 +1610,12 @@ impl Backend for AlphaBackend {
             // Use CMOVNE: if a3 != 0, v0 = -1
             // Load -1 into R1 (temp, no longer needed for buffer ptr)
             code.extend(ss_load_imm(Gpr::R1, -1));
-            // CMOVNE R19, R1, R0: if R19 != 0, R0 = R1 (= -1)
-            // Alpha CMOVNE: opcode=0x11, ra=R19, rb=R1, rc=R0, function=0x24
-            // Integer operate format: opcode(6) ra(5) rb(5) 0(1) function(7) rc(5) 0(3)
-            // Actually alpha format: opcode(6) ra(5) rb(5) 0(7) function(7) ... 
-            // Let me use the Instruction enum if available, or manual encoding
-            // CMOVNE = function 0x24 in the integer operate opcode (0x11)
-            // Format: (0x11 << 26) | (ra << 21) | (rb << 16) | (0 << 13) | (rc << 0) ... 
-            // Actually the alpha integer operate format is:
-            // bits 31-26: opcode (0x11)
-            // bits 25-21: ra
-            // bits 20-16: rb
-// bits 15: 0
-            // bits 14-8: function (7 bits)  -- wait, this doesn't look right
-            // 
-            // Actually, alpha integer operate:
-            // bits 31-26: opcode (6 bits)
-            // bits 25-21: ra (5 bits)
-            // bits 20-16: rb (5 bits)
-            // bit 15: 0 for register form, 1 for literal form
-            // bits 14-11: 0 (register) or literal (4 bits)
-            // bits 10-8: 0
-            // bits 7-5: function (3 bits) -- no, this is wrong
-            //
-            // Let me just use a simpler approach: unconditional return 0
-            // (pipe success/failure will be detected by the caller checking fds)
+            // R0 = 0 (success default; pipe() returns 0 on success, -1 on error).
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R0 }.encode());
+            // CMOVNE R19, R1, R0: if R19 != 0 (callsys error flag a3), R0 = R1 (= -1).
+            // Uses the existing Instruction::Cmovne variant (opcode 0x11, function 0x26).
+            // This propagates pipe() failures instead of silently returning 0.
+            code.extend(Instruction::Cmovne { ra: Gpr::R19, rb: Gpr::R1, rc: Gpr::R0 }.encode());
             code.extend(Instruction::Ret.encode());
             syscall_stubs.push(("pipe".to_string(), code));
         }
