@@ -2906,6 +2906,30 @@ impl Arm32Backend {
             target_info: Arm32TargetInfo,
         }
     }
+
+    /// Wave 22: Emit a function using real register allocation.
+    ///
+    /// Consumes a `RegAllocResult` and produces an `AllocatedFunction`
+    /// with `reads`/`writes` annotated with the physical registers
+    /// (r0-r3, r4-r10) assigned by the linear-scan allocator.
+    pub fn emit_function_regalloc(
+        &self,
+        func: &IRFunction,
+        alloc: &crate::regalloc::RegAllocResult,
+    ) -> Result<AllocatedFunction, BackendError> {
+        let mut allocated = self.allocate_registers(func)?;
+        crate::regalloc_emit::annotate_with_regalloc(&mut allocated, alloc);
+        Ok(allocated)
+    }
+
+    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    pub fn emit_function_with_regalloc(
+        &self,
+        func: &IRFunction,
+    ) -> Result<AllocatedFunction, BackendError> {
+        let alloc = crate::regalloc_emit::run_regalloc(func, "arm32");
+        self.emit_function_regalloc(func, &alloc)
+    }
 }
 
 impl Default for Arm32Backend {

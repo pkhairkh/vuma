@@ -3077,6 +3077,34 @@ impl RiscV64Backend {
             target_info: RiscV64TargetInfo,
         }
     }
+
+    /// Wave 22: Emit a function using real register allocation.
+    ///
+    /// Consumes a `RegAllocResult` and produces an `AllocatedFunction`
+    /// with `reads`/`writes` annotated with the physical registers
+    /// (a0-a7, t0-t6, s0-s11) assigned by the linear-scan allocator.
+    pub fn emit_function_regalloc(
+        &self,
+        func: &IRFunction,
+        alloc: &crate::regalloc::RegAllocResult,
+    ) -> Result<AllocatedFunction, BackendError> {
+        // Step 1: Run the existing stack-slot ISel.
+        let mut allocated = self.allocate_registers(func)?;
+
+        // Step 2: Annotate with the regalloc result.
+        crate::regalloc_emit::annotate_with_regalloc(&mut allocated, alloc);
+
+        Ok(allocated)
+    }
+
+    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    pub fn emit_function_with_regalloc(
+        &self,
+        func: &IRFunction,
+    ) -> Result<AllocatedFunction, BackendError> {
+        let alloc = crate::regalloc_emit::run_regalloc(func, "riscv64");
+        self.emit_function_regalloc(func, &alloc)
+    }
 }
 
 impl Default for RiscV64Backend {
