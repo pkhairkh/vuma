@@ -366,18 +366,27 @@ def main():
     # vuma_read(fd, buf_ptr, count) → nbytes
     # Uses os.read() directly — works with pipe fds that WASI fd_read
     # doesn't support (WASI only manages its own pre-opened fds).
+    # Also writes return value to mem[0] for the codegen.
     def vuma_read(fd, buf_ptr, count):
         try:
             data = os.read(fd, count)
             mem = get_mem()
             if mem is not None:
                 mem.write(store, data, buf_ptr)
+                mem.write(store, struct.pack('<i', len(data)), 0)
             return len(data)
         except OSError:
+            mem = get_mem()
+            if mem is not None:
+                mem.write(store, struct.pack('<i', -1), 0)
             return -1
 
     # vuma_write(fd, buf_ptr, count) → nbytes
     # Uses os.write() directly — works with pipe fds.
+    # CRITICAL: The wasm32 codegen expects extern function return values
+    # at memory address 0 (mem[0]). But wasmtime host functions return
+    # values on the wasm stack. The codegen loads from mem[0] after
+    # the call, so we must ALSO write the result to mem[0].
     def vuma_write(fd, buf_ptr, count):
         try:
             mem = get_mem()
@@ -385,8 +394,14 @@ def main():
                 data = mem.read(store, buf_ptr, buf_ptr + count)
             else:
                 data = b''
-            return os.write(fd, data)
+            n = os.write(fd, data)
+            # Store return value at mem[0] for the codegen to load
+            if mem is not None:
+                mem.write(store, struct.pack('<i', n), 0)
+            return n
         except OSError:
+            if mem is not None:
+                mem.write(store, struct.pack('<i', -1), 0)
             return -1
 
     # vuma_close(fd) → 0 on success, -1 on error
