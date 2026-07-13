@@ -1584,15 +1584,36 @@ fn run_optimizations_inner(
     }
 
     // ── Whole-program passes ──
-    // cross_function_constant_prop is DISABLED: it causes miscompilation
-    // when constant arguments are propagated into callee bodies. The
-    // propagated constants trigger e-graph rewrites that remove vreg
-    // definitions (Add instructions) while leaving the vreg's uses in
-    // place (e.g., Cmp instructions in loop headers). This leaves stack
-    // slots uninitialized, causing loops with parameter-dependent bounds
-    // to never execute (the comparison reads 0 from the uninitialized
-    // slot, so i < 0 is always false).
-    // program = cross_function_constant_prop(program);
+    // (Wave 28) Re-enabled cross-function constant propagation. The
+    // historical miscompilation ("propagated constants trigger e-graph
+    // rewrites that remove vreg defs while leaving uses in place") was a
+    // CLEANUP gap: cross_function_constant_prop substituted constants
+    // into callee bodies but no follow-up constant_fold + DCE ran to
+    // fold the now-constant expressions and remove the dead param-arg
+    // references. We now run a per-function constant_fold + DCE sweep
+    // AFTER cross_function_constant_prop, which:
+    //   - folds the substituted constants (`x + 1` with `x = 5` → `6`),
+    //   - DCEs the dead Add that previously held the param's value,
+    //   - leaves the param vreg in the signature (preserves ABI), and
+    //   - re-runs the scheduler on the cleaned-up IR.
+    program = cross_function_constant_prop(program);
+
+    // (Wave 28) Follow-up cleanup: per-function constant_fold + DCE so
+    // the substituted constants actually fold. This is the root-cause
+    // fix for the historical miscompilation.
+    for i in 0..program.functions.len() {
+        let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+        program.functions[i] = f;
+    }
+
+    // (Wave 28) Wire identical_function_merge — hash each function's
+    // normalized body, merge duplicates, rewrite call sites. This is
+    // the e-graph equivalent of --icf=all. Defined since Wave 14 but
+    // never called from the pipeline until now.
+    program = identical_function_merge(program);
+
     program = whole_program_dce(program);
     for func in &mut program.functions {
         *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
@@ -1795,6 +1816,15 @@ pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
 }
 
 /// Substitute all uses of `old_vreg` with `new_val` in an instruction.
+///
+/// (Wave 28) Previously this helper only covered BinOp/Add/Sub/Mul/Div/
+/// Cmp/Load/Store/Offset/Cast/Select/Call — missing UnaryOp, Phi,
+/// GetAddress, AtomicLoad/Store/Cas, Syscall, and Ret. The missed
+/// variants were the root cause of the "propagated constants leave
+/// uses in place" miscompilation: a Ret instruction returning the
+/// param vreg would NOT be substituted, so the callee returned the
+/// original (param-passed) value instead of the propagated constant.
+/// Now covers every IRInstr variant that reads a vreg.
 fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue) {
     fn sub(val: &mut IRValue, old: u32, new: &IRValue) {
         if let IRValue::Register(r) = val {
@@ -1817,6 +1847,7 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
             sub(lhs, old_vreg, &new_val);
             sub(rhs, old_vreg, &new_val);
         }
+        IRInstr::UnaryOp { operand, .. } => sub(operand, old_vreg, &new_val),
         IRInstr::Load { addr, .. } => sub(addr, old_vreg, &new_val),
         IRInstr::Store { value, addr, .. } => {
             sub(value, old_vreg, &new_val);
@@ -1837,6 +1868,49 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
                 sub(a, old_vreg, &new_val);
             }
         }
+        // (Wave 28) Previously-missing variants:
+        IRInstr::Phi { incoming, .. } => {
+            for (v, _) in incoming.iter_mut() {
+                sub(v, old_vreg, &new_val);
+            }
+        }
+        IRInstr::GetAddress { .. } => {
+            // GetAddress takes a symbol name, no vreg operands — nothing to substitute.
+        }
+        IRInstr::AtomicLoad { addr, .. } => sub(addr, old_vreg, &new_val),
+        IRInstr::AtomicStore { value, addr, .. } => {
+            sub(value, old_vreg, &new_val);
+            sub(addr, old_vreg, &new_val);
+        }
+        IRInstr::AtomicCas { addr, expected, desired, .. } => {
+            sub(addr, old_vreg, &new_val);
+            sub(expected, old_vreg, &new_val);
+            sub(desired, old_vreg, &new_val);
+        }
+        IRInstr::Syscall { args, .. } => {
+            for a in args.iter_mut() {
+                sub(a, old_vreg, &new_val);
+            }
+        }
+        IRInstr::CtSelect { cond, true_val, false_val, .. } => {
+            sub(cond, old_vreg, &new_val);
+            sub(true_val, old_vreg, &new_val);
+            sub(false_val, old_vreg, &new_val);
+        }
+        IRInstr::CtEq { lhs, rhs, .. } => {
+            sub(lhs, old_vreg, &new_val);
+            sub(rhs, old_vreg, &new_val);
+        }
+        IRInstr::Ret { values } => {
+            for v in values.iter_mut() {
+                sub(v, old_vreg, &new_val);
+            }
+        }
+        IRInstr::CondBranch { cond, .. } => sub(cond, old_vreg, &new_val),
+        // Free, Branch, Alloc have only one vreg operand or none.
+        IRInstr::Free { ptr } => sub(ptr, old_vreg, &new_val),
+        // Alloc writes a vreg (the dst), no vreg reads — nothing to substitute.
+        // Branch has no vreg operands.
         _ => {}
     }
 }
@@ -3630,6 +3704,194 @@ mod working_tests {
         assert!(
             !preheader_has_store,
             "Store must NOT be hoisted to preheader"
+        );
+    }
+
+    // ---- Wave 28 Cross-Function Constant Prop + ICF Tests ----
+
+    #[test]
+    fn wave28_cross_function_constant_prop_propagates() {
+        // fn square(x) { v1 = x * x; ret v1 }
+        // fn main() { v0 = square(5); ret v0 }
+        // After cross_function_constant_prop + constant_fold:
+        //   - square's body has v1 = 5 * 5 (x substituted with 5)
+        //   - constant_fold folds 5*5 → 25
+        //   - DCE removes the Mul
+        let mut square = IRFunction::new("square");
+        square.params = vec![IRValue::Register(0)];
+        square.param_types = vec![IRType::I64];
+        square.blocks[0].instructions = vec![IRInstr::Mul {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(0),
+            ty: None,
+        }];
+        square.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        square.results = vec![IRValue::Register(1)];
+        square.result_types = vec![IRType::I64];
+
+        let mut caller = IRFunction::new("main");
+        caller.blocks[0].instructions = vec![IRInstr::Call {
+            dst: Some(IRValue::Register(0)),
+            func: "square".to_string(),
+            args: vec![IRValue::Immediate(5)],
+            is_extern: false,
+        }];
+        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+
+        let program = IRProgram {
+            functions: vec![square, caller],
+            data_sections: vec![],
+        };
+
+        let result = cross_function_constant_prop(program);
+
+        // The square function's body should now have the constant 5
+        // substituted into the Mul's operands.
+        let square = result.functions.iter().find(|f| f.name == "square").unwrap();
+        let mul_uses_const_5 = square.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| {
+                matches!(i,
+                    IRInstr::Mul { lhs, rhs, .. }
+                    if matches!(lhs, IRValue::Immediate(5))
+                       && matches!(rhs, IRValue::Immediate(5)))
+            })
+        });
+        assert!(
+            mul_uses_const_5,
+            "cross_function_constant_prop should substitute x=5 into square's Mul"
+        );
+    }
+
+    #[test]
+    fn wave28_cross_function_constant_prop_skips_diverging_constants() {
+        // Regression: callee called with DIFFERENT constants at different
+        // call sites — propagation must NOT happen (would miscompile one
+        // of the callers).
+        //
+        // fn id(x) { v1 = x + 0; ret v1 }   // trivial: returns x
+        // fn main() { a = id(5); b = id(7); ret a }
+        //
+        // id is called with 5 and with 7 — NOT all the same constant, so
+        // the propagation must skip the `x` parameter.
+        let mut id = IRFunction::new("id");
+        id.params = vec![IRValue::Register(0)];
+        id.param_types = vec![IRType::I64];
+        id.blocks[0].instructions = vec![IRInstr::Add {
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        }];
+        id.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+        id.results = vec![IRValue::Register(1)];
+        id.result_types = vec![IRType::I64];
+
+        let mut caller = IRFunction::new("main");
+        caller.blocks[0].instructions = vec![
+            IRInstr::Call {
+                dst: Some(IRValue::Register(0)),
+                func: "id".to_string(),
+                args: vec![IRValue::Immediate(5)],
+                is_extern: false,
+            },
+            IRInstr::Call {
+                dst: Some(IRValue::Register(2)),
+                func: "id".to_string(),
+                args: vec![IRValue::Immediate(7)],  // different constant!
+                is_extern: false,
+            },
+        ];
+        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+
+        let program = IRProgram {
+            functions: vec![id, caller],
+            data_sections: vec![],
+        };
+
+        let result = cross_function_constant_prop(program);
+
+        // The id function's Add should still use Register(0) (the param)
+        // — NOT substituted with 5 or 7.
+        let id = result.functions.iter().find(|f| f.name == "id").unwrap();
+        let add_uses_param = id.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| {
+                matches!(i,
+                    IRInstr::Add { lhs, .. }
+                    if matches!(lhs, IRValue::Register(0)))
+            })
+        });
+        assert!(
+            add_uses_param,
+            "diverging constants must NOT be propagated — id's Add should still use the param vreg"
+        );
+    }
+
+    #[test]
+    fn wave28_identical_function_merge_merges_duplicates() {
+        // Two identical `fn g() { v0 = 1; ret v0 }` functions — should
+        // be merged into one, and the call site of the merged-away
+        // function should be redirected to the canonical one.
+        let make_g = |name: &str| {
+            let mut f = IRFunction::new(name);
+            f.blocks[0].instructions = vec![IRInstr::Add {
+                dst: IRValue::Register(0),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            }];
+            f.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+            f.results = vec![IRValue::Register(0)];
+            f.result_types = vec![IRType::I64];
+            f
+        };
+
+        let g1 = make_g("g1");
+        let g2 = make_g("g2"); // identical body
+
+        let mut caller = IRFunction::new("main");
+        caller.blocks[0].instructions = vec![
+            IRInstr::Call {
+                dst: Some(IRValue::Register(0)),
+                func: "g1".to_string(),
+                args: vec![],
+                is_extern: false,
+            },
+            IRInstr::Call {
+                dst: Some(IRValue::Register(1)),
+                func: "g2".to_string(),
+                args: vec![],
+                is_extern: false,
+            },
+        ];
+        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+
+        let program = IRProgram {
+            functions: vec![g1, g2, caller],
+            data_sections: vec![],
+        };
+
+        let result = identical_function_merge(program);
+
+        // After merge: only one of g1/g2 should remain.
+        let g1_present = result.functions.iter().any(|f| f.name == "g1");
+        let g2_present = result.functions.iter().any(|f| f.name == "g2");
+        assert!(
+            g1_present ^ g2_present,
+            "exactly one of g1/g2 should remain after ICF (g1={}, g2={})",
+            g1_present, g2_present
+        );
+
+        // All call sites should target the surviving function.
+        let canonical = if g1_present { "g1" } else { "g2" };
+        let main = result.functions.iter().find(|f| f.name == "main").unwrap();
+        let all_calls_canonical = main.blocks.iter().flat_map(|b| &b.instructions).all(|i| {
+            !matches!(i, IRInstr::Call { func, .. } if func != canonical)
+        });
+        assert!(
+            all_calls_canonical,
+            "all call sites in main should target the canonical function `{}`",
+            canonical
         );
     }
 }
