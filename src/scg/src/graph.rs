@@ -1,16 +1,20 @@
 //! SCG Graph Structure
 //!
-//! This module defines the core `SCG` graph type, which wraps a
-//! `petgraph::DiGraph` and provides high-level operations for
-//! constructing, querying, and manipulating the Semantic Computation Graph.
+//! This module defines the core `SCG` graph type, which wraps a hand-written
+//! [`crate::digraph::DiGraph`] (linked-list adjacency; see `digraph.rs`) and
+//! provides high-level operations for constructing, querying, and manipulating
+//! the Semantic Computation Graph.
+//!
+//! The graph algorithms `toposort`, `tarjan_scc`, and `has_path_connecting`
+//! are also implemented in [`crate::digraph`] — this module no longer reaches
+//! into `petgraph`.
 
 use hashbrown::HashMap;
 use indexmap::IndexSet;
-use petgraph::algo::{has_path_connecting, toposort, tarjan_scc};
-use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
-use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 
+use crate::digraph::{
+    has_path_connecting, tarjan_scc, toposort, DiGraph, Direction, EdgeIndex, NodeIndex,
+};
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::node::{NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
 use crate::region::{RegionId, SCGRegion};
@@ -110,27 +114,28 @@ impl ValidationResult {
 /// The Semantic Computation Graph.
 ///
 /// `SCG` is the central data structure of the SCG module. It wraps a
-/// `petgraph::DiGraph` and maintains bidirectional mappings between
-/// external `NodeId`/`EdgeId` identifiers and petgraph's internal indices.
+/// hand-written [`crate::digraph::DiGraph`] and maintains bidirectional
+/// mappings between external `NodeId`/`EdgeId` identifiers and the graph's
+/// internal `NodeIndex`/`EdgeIndex` handles.
 ///
 /// # Type Parameters
 /// The graph stores `NodeData` as node weights and `EdgeData` as edge weights.
 ///
 /// # Invariants
-/// - Every `NodeId` maps to exactly one petgraph `NodeIndex`, and vice versa.
-/// - Every `EdgeId` maps to exactly one petgraph `EdgeIndex`, and vice versa.
+/// - Every `NodeId` maps to exactly one `NodeIndex`, and vice versa.
+/// - Every `EdgeId` maps to exactly one `EdgeIndex`, and vice versa.
 /// - All edges connect nodes that exist in the graph.
 #[derive(Debug, Clone)]
 pub struct SCG {
     /// The underlying directed graph.
     graph: DiGraph<NodeData, EdgeData>,
-    /// Mapping from external `NodeId` to petgraph `NodeIndex`.
+    /// Mapping from external `NodeId` to internal `NodeIndex`.
     node_id_to_index: HashMap<NodeId, NodeIndex>,
-    /// Mapping from petgraph `NodeIndex` to external `NodeId`.
+    /// Mapping from internal `NodeIndex` to external `NodeId`.
     node_index_to_id: HashMap<NodeIndex, NodeId>,
-    /// Mapping from external `EdgeId` to petgraph `EdgeIndex`.
+    /// Mapping from external `EdgeId` to internal `EdgeIndex`.
     edge_id_to_index: HashMap<EdgeId, EdgeIndex>,
-    /// Mapping from petgraph `EdgeIndex` to external `EdgeId`.
+    /// Mapping from internal `EdgeIndex` to external `EdgeId`.
     edge_index_to_id: HashMap<EdgeIndex, EdgeId>,
     /// Regions defined within this SCG.
     regions: HashMap<RegionId, SCGRegion>,
@@ -251,7 +256,9 @@ impl SCG {
         self.node_index_to_id.remove(&idx);
         let data = self.graph.remove_node(idx).expect("node index was valid");
 
-        // Rebuild index mappings since petgraph shifts indices on removal
+        // Rebuild index mappings after node removal (harmless no-op for the
+        // stable-index DiGraph, but kept for parity with the previous
+        // petgraph-backed implementation).
         self.rebuild_index_mappings();
 
         Ok(data)
@@ -371,8 +378,9 @@ impl SCG {
         self.edge_index_to_id.remove(&eidx);
         let data = self.graph.remove_edge(eidx).expect("edge index was valid");
 
-        // Note: edge removal in petgraph does not shift node indices,
-        // but it does shift edge indices. We need to rebuild edge mappings.
+        // Note: the hand-written DiGraph uses tombstone slots, so edge
+        // removal does not shift any indices. We rebuild edge mappings anyway
+        // for parity with the previous petgraph-backed implementation.
         self.rebuild_edge_mappings();
 
         Ok(data)
@@ -563,7 +571,6 @@ impl SCG {
             &self.graph,
             source_idx,
             target_idx,
-            None,
         ))
     }
 
@@ -572,7 +579,7 @@ impl SCG {
     /// Returns an error if the graph contains a cycle.
     pub fn topological_sort(&self) -> Result<Vec<NodeId>, SCGError> {
         let sorted: Vec<NodeIndex> =
-            toposort(&self.graph, None).map_err(|_| SCGError::CycleDetected)?;
+            toposort(&self.graph).map_err(|_| SCGError::CycleDetected)?;
         let result: Vec<NodeId> = sorted
             .into_iter()
             .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
@@ -612,9 +619,9 @@ impl SCG {
 
     /// Returns true if the graph contains any cycles.
     ///
-    /// Uses petgraph's `toposort` — if it fails, the graph has a cycle.
+    /// Uses `crate::digraph::toposort` — if it fails, the graph has a cycle.
     pub fn has_cycles(&self) -> bool {
-        toposort(&self.graph, None).is_err()
+        toposort(&self.graph).is_err()
     }
 
     // ── Region Operations ──────────────────────────────────────────
@@ -843,8 +850,10 @@ impl SCG {
 
     /// Rebuilds both node and edge index mappings after a node removal.
     ///
-    /// When petgraph removes a node, it may swap the last node into the
-    /// removed slot, invalidating existing `NodeIndex` mappings.
+    /// The hand-written `DiGraph` uses tombstone slots, so node `NodeIndex`es
+    /// are actually stable across removals — but rebuilding is cheap and keeps
+    /// the mappings in lock-step with the live node set, so we keep the
+    /// helper for clarity and forward-compatibility.
     fn rebuild_index_mappings(&mut self) {
         self.node_id_to_index.clear();
         self.node_index_to_id.clear();
@@ -1202,5 +1211,109 @@ mod tests {
         scg.add_region(region);
         assert_eq!(scg.region_count(), 1);
         assert!(scg.get_region(RegionId::new(1)).is_some());
+    }
+
+    /// Wave 39 regression: the SCG storage now wraps the hand-written
+    /// `crate::digraph::DiGraph` instead of `petgraph::DiGraph`. This test
+    /// exercises the 17 storage-method surface end-to-end through the SCG API
+    /// to confirm the swap is transparent: add/remove node, add/remove edge,
+    /// node/edge weight access, node/edge counts, node/edge id iteration,
+    /// successors/predecessors (neighbors_directed), find_path
+    /// (has_path_connecting), topological_sort (toposort),
+    /// topological_sort_with_cycles (tarjan_scc), and has_cycles.
+    #[test]
+    fn wave39_scg_backed_by_handwritten_digraph() {
+        let mut scg = SCG::new();
+
+        // add_node x4 (storage: DiGraph::add_node).
+        let mk = |label: &str| {
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other(label.to_string()),
+                result_type: None,
+                tail_call: false,
+            })
+        };
+        let n1 = scg.add_node(NodeType::Computation, mk("a"), make_program_point());
+        let n2 = scg.add_node(NodeType::Computation, mk("b"), make_program_point());
+        let n3 = scg.add_node(NodeType::Computation, mk("c"), make_program_point());
+        let n4 = scg.add_node(NodeType::Computation, mk("d"), make_program_point());
+
+        // add_edge x4 (storage: DiGraph::add_edge).
+        let _e12 = scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+        let _e23 = scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
+        let _e34 = scg.add_edge(n3, n4, EdgeKind::DataFlow).unwrap();
+        // Cross edge n2 → n4.
+        let e24 = scg.add_edge(n2, n4, EdgeKind::DataFlow).unwrap();
+
+        // node_count / edge_count.
+        assert_eq!(scg.node_count(), 4);
+        assert_eq!(scg.edge_count(), 4);
+
+        // node_weight / edge_weight access through SCG wrappers.
+        assert_eq!(scg.get_node(n2).unwrap().id, n2);
+        assert_eq!(scg.get_edge(e24).unwrap().source, n2);
+        assert_eq!(scg.get_edge(e24).unwrap().target, n4);
+
+        // node_ids / edge_ids iteration (storage: node_indices / edge_indices).
+        assert_eq!(scg.node_ids().count(), 4);
+        assert_eq!(scg.edge_ids().count(), 4);
+
+        // successors / predecessors (storage: neighbors_directed).
+        let succs_n2 = scg.successors(n2).unwrap();
+        assert_eq!(succs_n2.len(), 2);
+        assert!(succs_n2.contains(&n3) && succs_n2.contains(&n4));
+        let preds_n4 = scg.predecessors(n4).unwrap();
+        assert_eq!(preds_n4.len(), 2);
+        assert!(preds_n4.contains(&n2) && preds_n4.contains(&n3));
+
+        // find_path (storage: has_path_connecting, BFS).
+        assert_eq!(scg.find_path(n1, n4), Some(true));
+        assert_eq!(scg.find_path(n4, n1), Some(false));
+        assert_eq!(scg.find_path(n1, n1), Some(true));
+
+        // topological_sort (storage: toposort, Kahn) — acyclic graph.
+        let topo = scg.topological_sort().unwrap();
+        assert_eq!(topo.len(), 4);
+        let pos = |id| topo.iter().position(|&x| x == id).unwrap();
+        assert!(pos(n1) < pos(n2));
+        assert!(pos(n2) < pos(n3));
+        assert!(pos(n3) < pos(n4));
+
+        // has_cycles — currently acyclic.
+        assert!(!scg.has_cycles());
+
+        // Introduce a cycle (n4 → n2) to exercise tarjan_scc + cyclic path.
+        scg.add_edge(n4, n2, EdgeKind::DataFlow).unwrap();
+
+        // toposort must now fail.
+        assert!(matches!(scg.topological_sort(), Err(SCGError::CycleDetected)));
+        assert!(scg.has_cycles());
+
+        // topological_sort_with_cycles must still return all 4 nodes (storage:
+        // tarjan_scc groups the {n2,n3,n4} cycle, n1 stays singleton).
+        let cyclic_topo = scg.topological_sort_with_cycles();
+        assert_eq!(cyclic_topo.len(), 4);
+        assert!(cyclic_topo.contains(&n1));
+        assert!(cyclic_topo.contains(&n2));
+        assert!(cyclic_topo.contains(&n3));
+        assert!(cyclic_topo.contains(&n4));
+        // n1 must precede the cycle (n1 has no predecessors).
+        let p1 = cyclic_topo.iter().position(|&x| x == n1).unwrap();
+        let p2 = cyclic_topo.iter().position(|&x| x == n2).unwrap();
+        assert!(p1 < p2);
+
+        // remove_edge (storage: DiGraph::remove_edge) — drop the back-edge.
+        assert!(scg.remove_edge(e24).is_ok());
+        assert_eq!(scg.edge_count(), 4); // added one, removed one
+        assert!(scg.get_edge(e24).is_none());
+
+        // remove_node cascades edge removal (storage: DiGraph::remove_node).
+        let removed = scg.remove_node(n2).unwrap();
+        assert_eq!(removed.id, n2);
+        assert!(scg.get_node(n2).is_none());
+        // n2 had out-edges e23, e24(removed) and in-edge e12, plus the back-edge n4→n2.
+        // All those should be gone now.
+        assert_eq!(scg.edge_count(), 1); // only e34 (n3→n4) remains
+        assert_eq!(scg.node_count(), 3);
     }
 }
