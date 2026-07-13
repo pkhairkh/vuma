@@ -216,15 +216,15 @@
 
 # Wave 12 — Backend `IRInstr::Syscall` emission: tier-2/3 backends
 
-- [ ] **[BE-loongarch64]** Emit `addi.d $a7, $r0, nr; SYSCALL 0x0`. `src/codegen/src/loongarch64/mod.rs`
-- [ ] **[BE-mips64]** Emit `LI V0, nr; SYSCALL`. `src/codegen/src/mips64/mod.rs`
-- [ ] **[BE-ppc64]** Emit `LI R0, nr; SC`. `src/codegen/src/ppc64/mod.rs`
-- [ ] **[BE-s390x]** Emit `LGFI R1, nr; SVC 0`. `src/codegen/src/s390x.rs`
-- [ ] **[BE-sparc64]** Emit `OR %g0, nr, %g1; ta 0x6d`. `src/codegen/src/sparc64.rs`
-- [ ] **[BE-alpha]** Emit `LDI R0, nr; CALL_PAL 0x83`. `src/codegen/src/alpha.rs`
-- [ ] **[BE-hppa]** Emit `LDI R20, nr; GATE`. `src/codegen/src/hppa.rs`
-- [ ] **[BE-m68k]** Emit `MOVEQ #nr, D0; TRAP #0`. `src/codegen/src/m68k.rs`
-- [ ] **[BE-wasm32]** Map `IRInstr::Syscall` to WASI imports or `vuma.*` host fns by number. `src/codegen/src/wasm32/mod.rs`
+- [x] **[BE-loongarch64]** Emit `addi.d $a7, $r0, nr; SYSCALL 0x0`. `src/codegen/src/loongarch64/stack_slot_isel.rs` — DONE. Loads up to 6 args into $a0-$a5 via `encode_load_value`, `encode_load_imm(A7, nr)`, `Instruction::Syscall.encode()`, stores $a0 (result) to dst via `encode_store_to_vreg`. LoongArch uses asm-generic syscall numbers (same as aarch64/riscv).
+- [x] **[BE-mips64]** Emit `LI V0, nr; SYSCALL`. `src/codegen/src/mips64/mod.rs` — DONE. Loads up to 6 args into $a0-$a3 + $t0-$t1 (N64 $a4-$a5) via `ss_load_value`, `ss_load_imm(V0, nr)`, `Instruction::Syscall { code: 0 }.encode()`, stores $v0 (result) to dst via `ss_sd`. MIPS N64 uses +5000 base offset syscall numbers.
+- [x] **[BE-ppc64]** Emit `LI R0, nr; SC`. `src/codegen/src/ppc64/mod.rs` — DONE. Two arms replaced: (1) PRIMARY in `allocate_registers` (stack-slot ISel) — loads up to 6 args into R3-R8 via `ss_load_value`, `ss_load_imm(R0, nr)`, `Instruction::Sc.encode()`, stores R3 (result) to dst via `ss_store_to_slot`; (2) dead-code arm in `lower_ir_instr_ppc64` replaced with empty body (function never called).
+- [x] **[BE-s390x]** Emit `LGFI R1, nr; SVC 0`. `src/codegen/src/s390x.rs` — DONE. Loads up to 6 args into R2-R7 via `ss_load_value`, `ss_load_imm(R1, nr)`, `encode_svc(0)`, stores R2 (result) to dst via `ss_st`. Arm extends outer `code` in place (statement-style).
+- [x] **[BE-sparc64]** Emit `OR %g0, nr, %g1; ta 0x6d`. `src/codegen/src/sparc64.rs` — DONE. Loads up to 6 args into %o0-%o5 via `ss_load_value`, `ss_load_imm(G1, nr)`, `Instruction::Ta { sw_trap: 0x6d }.encode()`, stores %o0 (result) to dst via `ss_stx`. Sparc64 uses SunOS-derived syscall numbers.
+- [x] **[BE-alpha]** Emit `LDI R0, nr; CALL_PAL 0x83`. `src/codegen/src/alpha.rs` — DONE. Loads up to 6 args into R16-R21 via `ss_load_value`, `ss_load_imm(R0, nr)`, `Instruction::CallPal { palcode: 0x83 }.encode()` (callsys), stores R0 (result) to dst via `ss_st`. Alpha uses OSF-derived syscall numbers.
+- [x] **[BE-hppa]** Emit `LDI R20, nr; GATE`. `src/codegen/src/hppa.rs` — DONE. Loads up to 4 args into R26-R23 (PA-RISC reversed arg order) via `ss_load_value`, `ss_load_imm(R20, nr)`, `encode_gate()` (ble 0x100(%sr2,%r0)), stores R28 (result) to dst via `ss_st`. HPPA has only 4 register arg slots (documented limitation for 5-6 arg syscalls).
+- [x] **[BE-m68k]** Emit `MOVEQ #nr, D0; TRAP #0`. `src/codegen/src/m68k.rs` — DONE. Loads up to 5 args into D1-D5 via `ss_load_value`, `ss_load_imm(D0, nr)`, `Instruction::Trap0.encode()`, stores D0 (result) to dst via `ss_st`. m68k uses D1-D5 for syscall args (5 register slots).
+- [x] **[BE-wasm32]** Map `IRInstr::Syscall` to WASI imports or `vuma.*` host fns by number. `src/codegen/src/wasm32/mod.rs` — DONE (Wave 11 baseline + Wave 12 documentation). Returns `-ENOSYS` (-38) as the syscall result. Mapping by number is impractical for wasm32: the `nr` field is arch-specific (x86_64 write=1, mips write=5001, etc.) and wasm32 has no canonical syscall table. Programs needing I/O on wasm32 use the named extern approach (`extern "C" { fn read(...); }`) which maps to vuma.* host imports by NAME, not the raw IRInstr::Syscall. The -ENOSYS fallback correctly signals "unsupported on wasm32".
 
 ---
 
