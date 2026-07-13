@@ -142,8 +142,14 @@ pub enum VerificationLevel {
     /// Normal: all five invariant checks.
     #[default]
     Normal,
-    /// Exhaustive: all checks + formal proof attempts.
+    /// Exhaustive: all checks + formal proof attempts + interprocedural.
     Exhaustive,
+    /// (Wave 16) Modular: core 5 + modular per-function verification.
+    Modular,
+    /// (Wave 16) ConstantTime: core 5 + constant-time (6th invariant).
+    ConstantTime,
+    /// (Wave 16) Hardened: all 6 invariants + interprocedural + modular.
+    Hardened,
 }
 
 impl fmt::Display for VerificationLevel {
@@ -153,6 +159,9 @@ impl fmt::Display for VerificationLevel {
             VerificationLevel::Quick => write!(f, "quick"),
             VerificationLevel::Normal => write!(f, "normal"),
             VerificationLevel::Exhaustive => write!(f, "exhaustive"),
+            VerificationLevel::Modular => write!(f, "modular"),
+            VerificationLevel::ConstantTime => write!(f, "constant-time"),
+            VerificationLevel::Hardened => write!(f, "hardened"),
         }
     }
 }
@@ -4868,6 +4877,9 @@ pub fn compile_with_path(
             VerificationLevel::Quick => IveVerificationLevel::Quick,
             VerificationLevel::Normal => IveVerificationLevel::Normal,
             VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::Modular => IveVerificationLevel::Modular,
+            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
+            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
@@ -5306,6 +5318,9 @@ pub fn compile_with_recovery(
             VerificationLevel::Quick => IveVerificationLevel::Quick,
             VerificationLevel::Normal => IveVerificationLevel::Normal,
             VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::Modular => IveVerificationLevel::Modular,
+            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
+            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
