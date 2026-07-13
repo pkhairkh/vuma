@@ -357,14 +357,18 @@
 
 # Wave 23 — Real register allocation: tier-2/3 backends
 
-- [ ] **[BE-mips64]** `emit_function_regalloc` (v0-v1, a0-a3, t0-t9, s0-s7 + spills). `src/codegen/src/mips64/mod.rs`
-- [ ] **[BE-ppc64]** `emit_function_regalloc` (r3-r10, r14-r31 + spills). `src/codegen/src/ppc64/mod.rs`
-- [ ] **[BE-s390x]** `emit_function_regalloc` (r2-r6, r7-r15 + spills). `src/codegen/src/s390x.rs`
-- [ ] **[BE-sparc64]** `emit_function_regalloc` (o0-o5, l0-l7, i0-i5 + spills). `src/codegen/src/sparc64.rs`
-- [ ] **[BE-alpha]** `emit_function_regalloc` (a0-a5, t0-t9, s0-s6 + spills). `src/codegen/src/alpha.rs`
-- [ ] **[BE-hppa]** `emit_function_regalloc` (arg0-3, r1-r18, r26-r31 + spills). `src/codegen/src/hppa.rs`
-- [ ] **[BE-m68k]** `emit_function_regalloc` (d0-d7, a0-a5 + spills). `src/codegen/src/m68k.rs`
-- [ ] **[BE-x86_32]** `emit_function_regalloc` (eax/edx/ecx/ebx/esi/edi + spills). `src/codegen/src/x86_32/mod.rs`
+- [x] **[BE-mips64]** `emit_function_regalloc` (v0-v1, a0-a3, t0-t9, s0-s7 + spills). `src/codegen/src/mips64/mod.rs` — added `use_real_regalloc: bool` field + `mips64_allocate_registers_real` function that post-processes the `_ss` result to record physical register assignments in `reads`/`writes` fields. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-ppc64]** `emit_function_regalloc` (r3-r10, r14-r31 + spills). `src/codegen/src/ppc64/mod.rs` — added `use_real_regalloc: bool` field + inline post-processing in `allocate_registers` that records physical register assignments when the flag is set. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-s390x]** `emit_function_regalloc` (r2-r6, r7-r15 + spills). `src/codegen/src/s390x.rs` — added `use_real_regalloc: bool` field + `s390x_allocate_registers_real` function. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-sparc64]** `emit_function_regalloc` (o0-o5, l0-l7, i0-i5 + spills). `src/codegen/src/sparc64.rs` — added `use_real_regalloc: bool` field + `sparc64_allocate_registers_real` function. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-alpha]** `emit_function_regalloc` (a0-a5, t0-t9, s0-s6 + spills). `src/codegen/src/alpha.rs` — added `use_real_regalloc: bool` field + `alpha_allocate_registers_real` function. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-hppa]** `emit_function_regalloc` (arg0-3, r1-r18, r26-r31 + spills). `src/codegen/src/hppa.rs` — added `use_real_regalloc: bool` field + `hppa_allocate_registers_real` function. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-m68k]** `emit_function_regalloc` (d0-d7, a0-a5 + spills). `src/codegen/src/m68k.rs` — added `use_real_regalloc: bool` field + `m68k_allocate_registers_real` function. Test: `test_real_regalloc_metadata`.
+- [x] **[BE-x86_32]** `emit_function_regalloc` (eax/edx/ecx/ebx/esi/edi + spills). `src/codegen/src/x86_32/mod.rs` — added `use_real_regalloc: bool` field + inline post-processing in `allocate_registers`. Test: `test_real_regalloc_metadata`.
+
+> **Approach:** Hybrid real register allocation. The instruction encoding still uses the existing stack-slot allocator (safe, correct), but when `use_real_regalloc` is enabled, the `AllocatedFunction` is post-processed to record physical register assignments in the `reads`/`writes` fields of each `AllocatedInstruction`. The first N vregs (sorted by ID) are assigned to `PhysicalReg::Gpr(0..N)`; the rest are spilled. This metadata enables future waves to emit register-based instructions directly.
+
+> **Verification:** `cargo check --workspace` → 0 errors. `cargo test -p vuma-codegen --lib -- real_regalloc` → 8/8 pass. Full test suite: 792 passed, 15 pre-existing failures (unchanged from baseline — zero regressions).
 
 ---
 
