@@ -1927,6 +1927,27 @@ impl Backend for M68kBackend {
                 ("timerfd_gettime", 322), ("signalfd", 323),
                 ("inotify_init1", 328), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
                 ("ptrace", 26),
+                // ── Wave 8: POSIX process & identity syscalls (m68k syscall.tbl) ──
+                // m68k has a uid16 split — use modern *32 variants (199-214) per
+                // Wave 7 precedent (chown32). All take ≤5 args; m68k has 5 reg
+                // args (d1-d5) → simple_stub for all.
+                // Family 1: identity (*32 variants)
+                ("getuid", 199), ("geteuid", 201), ("getgid", 200), ("getegid", 202),
+                ("setuid", 213), ("setgid", 214), ("setresuid", 208), ("setresgid", 210),
+                // Family 2: process group (getpid already present)
+                ("getppid", 64), ("getsid", 147), ("setsid", 66),
+                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                // Family 3: clone/wait (clone/wait4 already present)
+                ("vfork", 190), ("clone3", 435), ("waitid", 277),
+                // Family 4: exec/exit (execve/exit_group already present)
+                ("execveat", 355),
+                // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
+                // already present)
+                ("tgkill", 265), ("tkill", 222),
+                // Family 6: directory read (readdir=89 is sys_old_readdir, deprecated)
+                ("getdents64", 220), ("getdents", 141), ("readdir", 89),
+                // Family 7: system (arch_prctl is x86_64-only)
+                ("prctl", 172), ("uname", 122), ("sysinfo", 116),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
