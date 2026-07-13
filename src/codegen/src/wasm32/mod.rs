@@ -3405,11 +3405,20 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
         IRInstr::Syscall { nr, args, dst } => {
-            // Wave 11: wasm32 has no direct syscall instruction. Map the
-            // first-class IRInstr::Syscall to the existing vuma.* host-import
-            // mechanism if a matching name is known, otherwise return -ENOSYS.
-            // For now, emit i32.const -38 (ENOSYS) as the result, matching the
-            // wave-5 unknown-extern fallback behavior.
+            // Wave 12: wasm32 has no direct syscall instruction and no canonical
+            // syscall number table. The `nr` field is arch-specific (e.g. x86_64
+            // write=1, mips write=5001, etc.), so mapping it to vuma.* host
+            // imports by number would be fragile and wrong for programs targeting
+            // different arches.
+            //
+            // Programs that need I/O on wasm32 should use the named extern
+            // approach (`extern "C" { fn read(...); }`) which maps to the
+            // vuma.* host imports by NAME (not number), not the raw
+            // IRInstr::Syscall which carries an arch-specific number.
+            //
+            // We return -ENOSYS (-38), matching the wave-5 unknown-extern
+            // fallback behavior. This lets callers detect the syscall is
+            // unsupported on wasm32.
             let _ = (nr, args);
             if let Some(d) = dst {
                 if let IRValue::Register(id) = d {

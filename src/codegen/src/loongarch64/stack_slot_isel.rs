@@ -1874,8 +1874,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Phi { .. } => {
                     Vec::new()
                 }
-                IRInstr::Syscall { .. } => {
-                    unimplemented!("IRInstr::Syscall not yet implemented for loongarch64 (Wave 12)");
+                IRInstr::Syscall { nr, args, dst } => {
+                    // LoongArch64 Linux syscall: args in $a0-$a5, nr in $a7,
+                    // `syscall 0x0`, result in $a0.
+                    let mut code = Vec::new();
+                    let syscall_arg_regs =
+                        [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                    let num_reg_args = args.len().min(syscall_arg_regs.len());
+                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                        code.extend(encode_load_value(
+                            arg, syscall_arg_regs[i], fp, &vreg_slots,
+                        ));
+                    }
+                    // LI $a7, nr
+                    code.extend(encode_load_imm(Gpr::A7, *nr as i64));
+                    // SYSCALL 0x0
+                    code.extend_from_slice(&Instruction::Syscall.encode());
+                    // Store result ($a0) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        code.extend(encode_store_to_vreg(Gpr::A0, dst_id, fp, &vreg_slots));
+                    }
+                    code
                 }
             };
 

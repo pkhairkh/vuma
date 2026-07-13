@@ -1641,8 +1641,25 @@ impl Backend for HppaBackend {
                         let skip_patched = (skip_word & !0x1FFF) | encode_cmpb_disp(skip_disp);
                         code[skip_off..skip_off + 4].copy_from_slice(&skip_patched.to_be_bytes());
                     }
-                    IRInstr::Syscall { .. } => {
-                        unimplemented!("IRInstr::Syscall not yet implemented for hppa (Wave 12)");
+                    IRInstr::Syscall { nr, args, dst } => {
+                        // hppa Linux syscall: args in R26-R23 (reversed),
+                        // nr in R20, `gate` (ble 0x100(%sr2,%r0)), result in R28.
+                        // HPPA has only 4 register arg slots (R26-R23).
+                        let syscall_arg_regs = [R26, R25, R24, R23];
+                        let num_reg_args = args.len().min(syscall_arg_regs.len());
+                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                            code.extend(ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]));
+                        }
+                        // LDI R20, nr
+                        code.extend(ss_load_imm(R20, *nr as i64));
+                        // GATE (ble 0x100(%sr2,%r0))
+                        code.extend_from_slice(&encode_gate());
+                        // Store result (R28) to dst's stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_st(R28, dst_off));
+                        }
                     }
                 }
             }
