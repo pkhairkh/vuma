@@ -3104,6 +3104,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
 /// x86_32 code generation backend (SystemV ABI).
 pub struct X86_32Backend {
     target_info: X86_32TargetInfo,
+    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    pub use_real_regalloc: bool,
 }
 
 impl X86_32Backend {
@@ -3111,6 +3113,7 @@ impl X86_32Backend {
     pub fn new() -> Self {
         Self {
             target_info: X86_32TargetInfo,
+            use_real_regalloc: false,
         }
     }
 }
@@ -3226,7 +3229,48 @@ impl Backend for X86_32Backend {
 
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        stack_slot_isel::allocate_registers(func)
+        let mut allocated = stack_slot_isel::allocate_registers(func)?;
+
+        // Wave 23: If real register allocation is enabled, post-process the
+        // AllocatedFunction to record physical register assignments.
+        if self.use_real_regalloc {
+            let max_real_regs = 6u32; // EAX, ECX, EDX, EBX, ESI, EDI
+            let mut all_vreg_ids: Vec<u32> = Vec::new();
+            for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+            for param in &func.params {
+                if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+            }
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    for id in instr.defined_regs() { all_vreg_ids.push(id); }
+                    for id in instr.used_regs() { all_vreg_ids.push(id); }
+                }
+            }
+            all_vreg_ids.sort();
+            all_vreg_ids.dedup();
+
+            for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
+                if (i as u32) < max_real_regs {
+                    let preg = crate::backend::PhysicalReg::new(
+                        crate::backend::RegClass::Gpr,
+                        i as u32,
+                    );
+                    for block in &mut allocated.blocks {
+                        for instr in &mut block.instructions {
+                            if !instr.writes.contains(&preg) {
+                                instr.writes.push(preg);
+                            }
+                            if !instr.reads.contains(&preg) {
+                                instr.reads.push(preg);
+                            }
+                        }
+                    }
+                }
+            }
+            allocated.spill_slots = all_vreg_ids.len().saturating_sub(max_real_regs as usize);
+        }
+
+        Ok(allocated)
     }
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
         let mut bytes = Vec::new();
@@ -4552,6 +4596,43 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("add"), "Expected add, got: {}", lines[0]);
         assert!(lines[1].contains("sub"), "Expected sub, got: {}", lines[1]);
+    }
+
+    #[test]
+    fn test_real_regalloc_metadata() {
+        use crate::ir::{VirtualRegister, IRFunction, IRInstr, IRValue};
+        use crate::backend::Backend;
+
+        let mut func = IRFunction::new("test_real_regalloc".to_string());
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.vregs.insert(2, VirtualRegister::anonymous(2));
+        func.blocks[0].instructions.push(IRInstr::Add {
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: None,
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        // Stack-slot mode (default): reads/writes should be empty.
+        let backend = X86_32Backend::new();
+        let result_ss = backend.allocate_registers(&func);
+        assert!(result_ss.is_ok(), "stack-slot allocation should succeed");
+        let ss_func = result_ss.unwrap();
+        let ss_has_regs = ss_func.blocks.iter()
+            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
+        assert!(!ss_has_regs, "stack-slot mode should not record physical registers");
+
+        // Real regalloc mode: reads/writes should be populated.
+        let mut backend = X86_32Backend::new();
+        backend.use_real_regalloc = true;
+        let result_real = backend.allocate_registers(&func);
+        assert!(result_real.is_ok(), "real regalloc should succeed");
+        let real_func = result_real.unwrap();
+        let has_real_regs = real_func.blocks.iter()
+            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
+        assert!(has_real_regs, "real regalloc should record physical register assignments");
     }
 }
 pub mod disasm;
