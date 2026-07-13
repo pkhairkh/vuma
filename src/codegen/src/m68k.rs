@@ -2180,8 +2180,12 @@ impl Backend for M68kBackend {
             // RTS
             code.extend(Instruction::Rts.encode());
 
-            // print_int stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_int".to_string(), code));
+            // print_int stub restored — calls now resolve to the real
+            // decimal-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub uses LINK/UNLK A6 for
+            // the frame and saves/restores D3-D7 via MOVEM so it only
+            // clobbers caller-saved scratch registers (D0-D2, A0-A1).
+            syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // ── print_hex(D1 = 32-bit value) — runtime helper ──
@@ -2265,8 +2269,12 @@ impl Backend for M68kBackend {
             // RTS
             code.extend(Instruction::Rts.encode());
 
-            // print_hex stub removed — calls resolve as unresolved externs (no-op)
-            // syscall_stubs.push(("print_hex".to_string(), code));
+            // print_hex stub restored — calls now resolve to the real
+            // hex-conversion runtime helper above instead of becoming
+            // no-op unresolved externs.  The stub uses LINK/UNLK A6 for
+            // the frame and saves/restores D3-D7 via MOVEM so it only
+            // clobbers caller-saved scratch registers (D0-D2, A0-A1).
+            syscall_stubs.push(("print_hex".to_string(), code));
         }
 
         // ── print_newline() → void — write '\n' to stdout ──
