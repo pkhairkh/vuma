@@ -246,13 +246,13 @@
 > 5,880 LOC of orphaned MSG-based verifiers never called outside their own
 > `#[cfg(test)]`. Confirm zero production callers, then delete.
 
-- [ ] **[IVE]** Verify zero production callers of `check_liveness`/`check_exclusivity`/`check_origin`/`check_interpretation`/`check_cleanup` in `src/vuma/src/`.
-- [ ] **[IVE-DEL]** Delete `src/vuma/src/invariant_liveness.rs` (1,105 LOC).
-- [ ] **[IVE-DEL]** Delete `src/vuma/src/invariant_exclusivity.rs` (1,101 LOC).
-- [ ] **[IVE-DEL]** Delete `src/vuma/src/invariant_origin.rs` (905 LOC).
-- [ ] **[IVE-DEL]** Delete `src/vuma/src/invariant_interpretation.rs` (1,632 LOC).
-- [ ] **[IVE-DEL]** Delete `src/vuma/src/invariant_cleanup.rs` (1,137 LOC).
-- [ ] **[IVE-DEL]** Remove module declarations from `src/vuma/src/lib.rs:55-59`. Audit MSG (`src/vuma/src/msg.rs`) — if only the deleted invariant_* used it, delete MSG too.
+- [x] **[IVE]** Verify zero production callers of `check_liveness`/`check_exclusivity`/`check_origin`/`check_interpretation`/`check_cleanup` in `src/vuma/src/`. — VERIFIED: grep across all `src/**/*.rs` (excluding the invariant_* files themselves and docs) found zero references. The functions are only called from their own `#[cfg(test)]` blocks. No production code in pipeline.rs, api.rs, repl.rs, or any other crate references the invariant_* modules.
+- [x] **[IVE-DEL]** Delete `src/vuma/src/invariant_liveness.rs` (1,105 LOC).
+- [x] **[IVE-DEL]** Delete `src/vuma/src/invariant_exclusivity.rs` (1,101 LOC).
+- [x] **[IVE-DEL]** Delete `src/vuma/src/invariant_origin.rs` (905 LOC).
+- [x] **[IVE-DEL]** Delete `src/vuma/src/invariant_interpretation.rs` (1,632 LOC).
+- [x] **[IVE-DEL]** Delete `src/vuma/src/invariant_cleanup.rs` (1,137 LOC).
+- [x] **[IVE-DEL]** Remove module declarations from `src/vuma/src/lib.rs:55-59`. — DONE. MSG (`src/vuma/src/msg.rs`) is NOT deleted — it's used by repl.rs, msg_builder.rs, scg_to_msg.rs, access_analysis.rs, msg_incremental.rs, and lib.rs itself. Only the 5 invariant_* files were dead; MSG is live infrastructure.
 
 ---
 
