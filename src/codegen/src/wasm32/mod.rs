@@ -2779,7 +2779,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // Known void functions don't return a value.
             let void_functions = ["print_int", "print_hex", "print_newline",
                 "__vuma_print_int", "__vuma_print_hex", "__vuma_print_newline",
-                "write", "exit", "free", "__vuma_dealloc", "__vuma_free"];
+                "exit", "free", "__vuma_dealloc", "__vuma_free"];
             // A call is void if the function is in the void_functions list
             // OR if the IR Call instruction has dst=None (no return value).
             // This is critical: user-defined void functions like sha256_transform
