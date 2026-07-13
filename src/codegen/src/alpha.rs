@@ -1504,15 +1504,22 @@ impl Backend for AlphaBackend {
         // ── __vuma_alloc / __vuma_free syscall stubs ──
         // Linux alpha syscall convention: syscall # in V0 (R0), args in A0-A5 (R16-R21),
         // return in V0.  Invoke via CALL_PAL 0x83 (callsys).
-        //   __NR_mmap (alpha) = 90? Actually alpha uses different syscall numbers.
-        //   Linux alpha syscall numbers (from asm/unistd.h):
-        //     exit=1, read=3, write=4, open=5, close=6, mmap=90? — actually mmap on alpha is 90.
-        //     Wait, alpha has its own syscall numbers. Let me use:
-        //     __NR_exit = 1, __NR_read = 3, __NR_write = 4, __NR_open = 5, __NR_close = 6,
-        //     __NR_mmap = 90 (yes, same as m68k), __NR_munmap = 91, __NR_brk = 17,
+        //   Alpha has its OWN syscall table (NOT shared with m68k/x86). Key numbers
+        //   from arch/alpha/include/uapi/asm/unistd.h:
+        //     __NR_exit = 1, __NR_read = 3, __NR_write = 4, __NR_open = 5,
+        //     __NR_close = 6, __NR_mmap = 113, __NR_munmap = 111, __NR_brk = 17,
         //     __NR_mprotect = 50, etc.
-        //   (Note: alpha mmap uses 6 args including offset, but Linux alpha historically used
-        //    mmap2-style or direct.  We use the simple form.)
+        //   [wave 6 — mmap ABI normalization, verified] alpha's __NR_mmap (113) is
+        //   the DIRECT 6-arg form: (addr, len, prot, flags, fd, offset) all passed
+        //   in R16-R21, with `offset` in BYTES (alpha has no mmap2; the generic
+        //   sys_mmap handles byte→page conversion in-kernel). Both __vuma_alloc
+        //   (which sets R21=0) and the bare `mmap` simple_stub pass the caller's
+        //   R16-R21 straight through with the SAME offset unit (bytes, via R21),
+        //   satisfying the wave-6 "same offset-unit handling as __vuma_alloc"
+        //   requirement. Alpha passes 6 args in R16-R21, so no stack-arg plumbing
+        //   is needed. (NOTE: an earlier draft of this comment incorrectly stated
+        //   __NR_mmap=90; that was wrong — alpha mmap is 113. 90 is `osf_old_mmap`
+        //   / dup2 on alpha, NOT the modern mmap.)
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
@@ -1533,7 +1540,7 @@ impl Backend for AlphaBackend {
             code.extend(Instruction::Lda { ra: Gpr::R20, disp: -1, rb: ZERO }.encode());
             // R21 = 0 (offset)
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R21 }.encode());
-            // R0 = 113 (alpha __NR_mmap — alpha has its own syscall table, NOT 90)
+            // R0 = 113 (alpha __NR_mmap — direct 6-arg, offset in bytes via R21=0)
             code.extend(ss_load_imm(Gpr::R0, 113));
             // CALL_PAL 0x83
             code.extend(Instruction::CallPal { palcode: 0x83 }.encode());

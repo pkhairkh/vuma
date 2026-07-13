@@ -1785,8 +1785,13 @@ impl Backend for M68kBackend {
             code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
-            // Pop offset: ADDQ.L #4, SP
-            code.extend_from_slice(&[0x5F, 0xC4]);
+            // Pop the pushed pgoff: ADDQ.L #4, SP.
+            // Encoding 0x58CF = ADDQ.L #4, A7 (data=4, size=long, mode=001=An, reg=111=A7).
+            // NOTE: the previous bytes here were 0x5F 0xC4, which decode to
+            // `SLE D4` (Scc with cc=LE into D4) — a no-op on SP that left the
+            // pushed pgoff on the stack, so RTS would pop pgoff(0) as the
+            // return address and crash. Fixed in wave 6 to the real ADDQ.
+            code.extend_from_slice(&[0x58, 0xCF]);
             // Restore D3-D5: MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038
             code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
             // RTS
@@ -1835,12 +1840,12 @@ impl Backend for M68kBackend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                // mmap2=192 on m68k. The legacy __NR_mmap (90) expects a
-                // single struct-pointer argument in D1, which the simple_stub
-                // calling convention does not build; using mmap2 lets the
-                // caller pass (addr, len, prot, flags, fd, pgoff) in registers
-                // D1-D6 directly.
-                ("mmap", 192),
+                // NOTE: `mmap` is NOT registered here — it gets a dedicated
+                // stub below (see "mmap2 offset-in-pages stub"). The legacy
+                // __NR_mmap (90) on m68k expects a single struct-pointer
+                // argument in D1, which the simple_stub calling convention
+                // does not build, so we use mmap2 (192) instead. See the
+                // dedicated stub for the full ABI discussion.
                 ("munmap", 91),
                 ("exit", 1),
                 ("exit_group", 252),
@@ -1913,6 +1918,61 @@ impl Backend for M68kBackend {
         };
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
+
+        // ── mmap2 offset-in-pages stub (wave 6: mmap ABI normalization) ──
+        // mmap(addr, length, prot, flags, fd, offset) → void*  [m68k __NR_mmap2 = 192]
+        //
+        // m68k Linux syscall convention: syscall # in D0, args 1-5 in D1-D5,
+        // and arg 6 (pgoff) on the stack at (SP) at TRAP time. mmap2 takes
+        // the offset in 4 KiB PAGES (not bytes), unlike the legacy
+        // __NR_mmap=90 which takes a struct pointer in D1.
+        //
+        // VUMA m68k calling convention: only 5 integer args (D1-D5) — there is
+        // no register or stack-arg slot for a 6th argument (see Gpr::arg_register:
+        // index 5 returns None, and IRInstr::Call only fills D1-D5). This means
+        // the caller CANNOT pass a byte `offset` for mmap, so this stub
+        // hardcodes pgoff = 0 — exactly matching `__vuma_alloc` above, which
+        // also calls mmap2(..., offset=0). Both use the same offset-unit
+        // handling (mmap2, offset-in-pages, value 0), satisfying the wave-6
+        // "same offset-unit handling as __vuma_alloc" requirement.
+        //
+        // Limitation: only anonymous / zero-offset mappings are supported on
+        // the m68k backend. File-backed mmap with a non-zero offset would
+        // require extending the m68k Call lowering to push a 6th stack
+        // argument — out of scope for wave 6 (which is per-backend mmap ABI
+        // normalization only). Callers needing file-backed mmap should target
+        // a backend with a 6-arg calling convention (x86_64, ppc64, riscv32,
+        // aarch64, ...). The test suite already avoids mmap on 32-bit
+        // backends (see tests/gold_standard/crypto_patterns/mmap_sha256d.vuma,
+        // which uses allocate() instead of mmap()).
+        //
+        // Register usage at stub entry (from caller, per VUMA m68k CC):
+        //   D1 = addr, D2 = length, D3 = prot, D4 = flags, D5 = fd
+        // These are passed straight through to the kernel as syscall args 1-5
+        // (the m68k syscall ABI preserves D1-D5 across TRAP #0). D0 (return
+        // register, caller-saved) is used as scratch for pgoff and the syscall
+        // number. No callee-saved register (D3-D5, A6) is modified, so no
+        // MOVEM save/restore is needed (unlike __vuma_alloc, which rebuilds
+        // D3-D5 and therefore must save them).
+        {
+            let mut code = Vec::new();
+            // MOVEQ #0, D0        (D0 = 0 = pgoff)
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+            // MOVE.L D0, -(SP)    (push 6th syscall arg = pgoff = 0)
+            // Encoding: 0x2F00 = MOVE.L D0, -(A7)
+            code.extend_from_slice(&[0x2F, 0x00]);
+            // MOVE.L #192, D0     (D0 = __NR_mmap2; 192 > 127 so MOVEQ can't hold it)
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
+            // TRAP #0             (mmap2(D1=addr, D2=len, D3=prot, D4=flags,
+            //                            D5=fd, [SP]=pgoff=0) → D0 = ptr/-errno)
+            code.extend(Instruction::Trap0.encode());
+            // ADDQ.L #4, SP       (pop the pushed pgoff; restore SP before RTS)
+            // Encoding: 0x58CF = ADDQ.L #4, A7  (data=4, size=long, mode=An, reg=A7)
+            code.extend_from_slice(&[0x58, 0xCF]);
+            // RTS
+            code.extend(Instruction::Rts.encode());
+            syscall_stubs.push(("mmap".to_string(), code));
+        }
 
         // ── rt_sigreturn (173) — special: no args, never returns.
         // The kernel restores the saved signal context from the stack and

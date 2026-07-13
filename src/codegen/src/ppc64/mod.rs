@@ -6063,6 +6063,18 @@ impl Backend for PPC64Backend {
             // 373; if shutdown calls fail under QEMU, switch this to 373.)
             for (name, num) in [
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
+                // [wave 6 — mmap ABI normalization, verified] ppc64's legacy
+                // sys_mmap (90) is the DIRECT 6-arg form: (addr, len, prot,
+                // flags, fd, offset) all passed in R3-R8, with `offset` in
+                // BYTES (ppc64 has no mmap2; the kernel's sys_mmap handles the
+                // byte→page conversion internally). The simple_stub passes
+                // the caller's R3-R8 straight through (no rearrangement, no
+                // >>12), which is exactly what __vuma_alloc does too (it sets
+                // up R3-R8 then `LI R0,90; SC`). Both use the SAME offset unit
+                // (bytes, via R8), so the wave-6 "same offset-unit handling as
+                // __vuma_alloc" requirement is satisfied. The VUMA ppc64 CC
+                // passes 8 args in R3-R10 (see Gpr::arg_register), so all 6
+                // mmap args fit in registers — no stack-arg plumbing needed.
                 ("mmap", 90), ("munmap", 91), ("exit", 1), ("alarm", 27),
                 ("getpid", 20), ("socket", 326), ("epoll_create1", 315),
                 ("futex", 221), ("wait4", 114),
