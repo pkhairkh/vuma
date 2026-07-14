@@ -15,6 +15,7 @@ vuma-scg.workspace = true
 vuma-codegen.workspace = true
 serde.workspace = true
 log.workspace = true
+# TODO(wave41): remove after cor/src/runtime.rs thiserror migration (W32-33 owns runtime.rs)
 thiserror.workspace = true
 
 # (Wave 45 followup) `libc` removed — runtime.rs now uses raw `extern "C"`

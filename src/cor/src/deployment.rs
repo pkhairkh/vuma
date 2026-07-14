@@ -891,40 +891,61 @@ impl DeploymentManager {
 // ===========================================================================
 
 /// Errors that can occur during deployment operations.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum DeploymentError {
     /// The specified region was not found in the current plan.
-    #[error("Region {0} not found in deployment plan")]
     RegionNotFound(RegionId),
 
     /// Migration failed because the target is unreachable.
-    #[error("Target unreachable: {0}")]
     TargetUnreachable(String),
 
     /// Migration failed due to a state transfer error.
-    #[error("State transfer failed for region {0}: {1}")]
     StateTransferFailed(RegionId, String),
 
     /// Package checksum validation failed.
-    #[error("Checksum mismatch for region {0}")]
     ChecksumMismatch(RegionId),
 
     /// Hot-swap is not supported on the given target kind.
-    #[error("Hot-swap not supported on target kind: {0}")]
     HotSwapNotSupported(String),
 
     /// No previous version exists to roll back to.
-    #[error("No rollback target available for region {0}")]
     NoRollbackTarget(RegionId),
 
     /// No previous version exists on the target for delta computation.
-    #[error("No previous version for delta deployment of region {0}")]
     NoPreviousVersion(RegionId),
 
     /// Delta application failed.
-    #[error("Delta apply failed for region {0}: {1}")]
     DeltaApplyFailed(RegionId, String),
 }
+
+impl std::fmt::Display for DeploymentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeploymentError::RegionNotFound(r) => {
+                write!(f, "Region {r} not found in deployment plan")
+            }
+            DeploymentError::TargetUnreachable(s) => write!(f, "Target unreachable: {s}"),
+            DeploymentError::StateTransferFailed(r, s) => {
+                write!(f, "State transfer failed for region {r}: {s}")
+            }
+            DeploymentError::ChecksumMismatch(r) => write!(f, "Checksum mismatch for region {r}"),
+            DeploymentError::HotSwapNotSupported(s) => {
+                write!(f, "Hot-swap not supported on target kind: {s}")
+            }
+            DeploymentError::NoRollbackTarget(r) => {
+                write!(f, "No rollback target available for region {r}")
+            }
+            DeploymentError::NoPreviousVersion(r) => {
+                write!(f, "No previous version for delta deployment of region {r}")
+            }
+            DeploymentError::DeltaApplyFailed(r, s) => {
+                write!(f, "Delta apply failed for region {r}: {s}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DeploymentError {}
 
 // ===========================================================================
 // Helpers

@@ -12,7 +12,6 @@
 //!   between two conflicting accesses.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::judgment::RegionId;
 use crate::models::{
@@ -73,35 +72,63 @@ pub fn is_ordered(msg: &ProofMSG, a1: AccessId, a2: AccessId) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Reason why an exclusivity proof failed.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum ProofFailureReason {
-    #[error("data race: access {a1} and access {a2} conflict on region {region} without synchronization")]
     DataRace {
         a1: AccessId,
         a2: AccessId,
         region: RegionId,
     },
 
-    #[error("alias detected: derivations {d1} and {d2} both target region {region}")]
     AliasDetected { d1: u64, d2: u64, region: RegionId },
 
-    #[error("lock graph has cycle involving locks {locks:?}")]
     LockCycle { locks: Vec<LockId> },
 
-    #[error("tactic {tactic} failed: {reason}")]
     TacticFailed { tactic: String, reason: String },
 
-    #[error("no applicable tactic for access pair ({a1}, {a2})")]
     NoApplicableTactic { a1: AccessId, a2: AccessId },
 }
 
+impl std::fmt::Display for ProofFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofFailureReason::DataRace { a1, a2, region } => write!(
+                f,
+                "data race: access {a1} and access {a2} conflict on region {region} without synchronization"
+            ),
+            ProofFailureReason::AliasDetected { d1, d2, region } => write!(
+                f,
+                "alias detected: derivations {d1} and {d2} both target region {region}"
+            ),
+            ProofFailureReason::LockCycle { locks } => {
+                write!(f, "lock graph has cycle involving locks {locks:?}")
+            }
+            ProofFailureReason::TacticFailed { tactic, reason } => {
+                write!(f, "tactic {tactic} failed: {reason}")
+            }
+            ProofFailureReason::NoApplicableTactic { a1, a2 } => {
+                write!(f, "no applicable tactic for access pair ({a1}, {a2})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProofFailureReason {}
+
 /// A proof failure, carrying the reason and an optional counterexample trace.
-#[derive(Debug, Clone, Error)]
-#[error("exclusivity proof failed: {reason}")]
+#[derive(Debug, Clone)]
 pub struct ProofFailure {
     pub reason: ProofFailureReason,
     pub involved_accesses: Vec<AccessId>,
 }
+
+impl std::fmt::Display for ProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exclusivity proof failed: {}", self.reason)
+    }
+}
+
+impl std::error::Error for ProofFailure {}
 
 impl ProofFailure {
     pub fn new(reason: ProofFailureReason) -> Self {

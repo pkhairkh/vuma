@@ -25,7 +25,6 @@
 //!   prove liveness by induction on the structure.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -64,10 +63,9 @@ impl std::fmt::Display for LivenessTactic {
 // ---------------------------------------------------------------------------
 
 /// Reason why a liveness proof attempt failed.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum ProofFailure {
     /// An access targets a region that is not allocated at the access point.
-    #[error("liveness violation: access {access_id} at PP {program_point} targets region {region_id} which is not allocated")]
     UseAfterFree {
         access_id: u64,
         region_id: RegionId,
@@ -75,7 +73,6 @@ pub enum ProofFailure {
     },
 
     /// An access goes out of bounds of the target region.
-    #[error("bounds violation: access {access_id} at PP {program_point} exceeds region {region_id} bounds")]
     OutOfBounds {
         access_id: u64,
         region_id: RegionId,
@@ -83,24 +80,59 @@ pub enum ProofFailure {
     },
 
     /// An allocation is never freed on any path (cleanup-related liveness).
-    #[error("leak: region {region_id} allocated at PP {alloc_point} is never freed")]
     Leak {
         region_id: RegionId,
         alloc_point: u64,
     },
 
     /// A deadlock cycle was detected in the resource graph.
-    #[error("deadlock cycle detected involving regions {regions:?}")]
     DeadlockCycle { regions: Vec<RegionId> },
 
     /// No proof tactic could succeed.
-    #[error("all tactics exhausted: {details}")]
     AllTacticsFailed { details: String },
 
     /// An internal error during proof construction.
-    #[error("internal error: {0}")]
     Internal(String),
 }
+
+impl std::fmt::Display for ProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofFailure::UseAfterFree {
+                access_id,
+                region_id,
+                program_point,
+            } => write!(
+                f,
+                "liveness violation: access {access_id} at PP {program_point} targets region {region_id} which is not allocated"
+            ),
+            ProofFailure::OutOfBounds {
+                access_id,
+                region_id,
+                program_point,
+            } => write!(
+                f,
+                "bounds violation: access {access_id} at PP {program_point} exceeds region {region_id} bounds"
+            ),
+            ProofFailure::Leak {
+                region_id,
+                alloc_point,
+            } => write!(
+                f,
+                "leak: region {region_id} allocated at PP {alloc_point} is never freed"
+            ),
+            ProofFailure::DeadlockCycle { regions } => {
+                write!(f, "deadlock cycle detected involving regions {regions:?}")
+            }
+            ProofFailure::AllTacticsFailed { details } => {
+                write!(f, "all tactics exhausted: {details}")
+            }
+            ProofFailure::Internal(s) => write!(f, "internal error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for ProofFailure {}
 
 // ---------------------------------------------------------------------------
 // WellFoundedOrdering

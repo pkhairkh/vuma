@@ -13,12 +13,35 @@ use crate::origin_proofs::OriginProof;
 use crate::proof::Proof;
 
 /// Serialization error type.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum SerializationError {
-    #[error("JSON serialization failed: {0}")]
-    Serialization(#[from] serde_json::Error),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Serialization(serde_json::Error),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for SerializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SerializationError::Serialization(e) => {
+                write!(f, "JSON serialization failed: {e}")
+            }
+            SerializationError::Io(e) => write!(f, "IO error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SerializationError {}
+
+impl From<serde_json::Error> for SerializationError {
+    fn from(e: serde_json::Error) -> Self {
+        SerializationError::Serialization(e)
+    }
+}
+
+impl From<std::io::Error> for SerializationError {
+    fn from(e: std::io::Error) -> Self {
+        SerializationError::Io(e)
+    }
 }
 
 /// A serializable proof envelope that can hold any proof type.
