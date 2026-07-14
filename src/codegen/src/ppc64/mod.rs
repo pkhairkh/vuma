@@ -1374,13 +1374,22 @@ impl Instruction {
                 // FMUL: A-form, primary=63, frT=ft, frA=fa, frB=0, frC=fb, xo=25, Rc=0.
                 // Hardware reads frC from bits 21:25; bits 16:20 (frB) must be 0.
                 // We build the word directly: rT=ft, rA=fa, rB=0, rC=fb.
-                let word = ((63u32 & 0x3F) << 26)
-                    | ((ft.encoding() & 0x1F) << 21)
-                    | ((fa.encoding() & 0x1F) << 16)
-                    | ((0u32 & 0x1F) << 11)
-                    | ((fb.encoding() & 0x1F) << 6)
-                    | ((25u32 & 0x1F) << 1)
-                    | 0u32;
+                //
+                // (Wave 50) The previous form wrote `((63u32 & 0x3F) << 26)`
+                // and `((0u32 & 0x1F) << 11)` for the PO and frB fields.
+                // Both masks were no-ops: `63 == 0x3F` (so `63 & 0x3F` is
+                // `eq_op`) and `0 & 0x1F` is always zero (`erasing_op`).
+                // The masks are dropped here without changing the encoded
+                // bits — `63` already fits in 6 bits and the frB field is
+                // intentionally zero.  Field-position comments use PPC bit
+                // numbering (bit 0 = MSB).
+                let word = (63u32 << 26)               // PO=63        (PPC bits 0:5)
+                    | ((ft.encoding() & 0x1F) << 21)  // frT=ft       (PPC bits 6:10)
+                    | ((fa.encoding() & 0x1F) << 16)  // frA=fa       (PPC bits 11:15)
+                    | (0u32 << 11)                     // frB=0        (PPC bits 16:20, reserved for FMUL)
+                    | ((fb.encoding() & 0x1F) << 6)   // frC=fb       (PPC bits 21:25)
+                    | ((25u32 & 0x1F) << 1)           // XO=25        (PPC bits 26:30)
+                    | 0u32;                            // Rc=0         (PPC bit 31)
                 encode_word(word)
             }
             Instruction::Fdiv { ft, fa, fb } => {
@@ -6568,11 +6577,20 @@ impl Backend for PPC64Backend {
                             let patched = (existing & 0xFFFF_0000) | (imm & 0xFFFF);
                             all_code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
                         };
-                        patch_imm16(abs_offset + 0 * 4, w0);  // lis
-                        patch_imm16(abs_offset + 1 * 4, w1);  // ori
+                        // Each instruction in the 6-instruction sequence is
+                        // 4 bytes; the byte offsets below are `index * 4` for
+                        // the patched slots [0], [1], [4], [5] (slots [2] and
+                        // [3] carry no immediate and are skipped).
+                        // (Wave 50) the previous `index * 4` form triggered
+                        // `clippy::erasing_op` for `0 * 4` and
+                        // `clippy::identity_op` for `1 * 4`; the byte offsets
+                        // are spelled out directly here, with the slot index
+                        // preserved as a trailing comment for readability.
+                        patch_imm16(abs_offset,       w0);  // [0] lis
+                        patch_imm16(abs_offset + 4,   w1);  // [1] ori
                         // skip [2] li r0, 32 and [3] sldi (no immediate to patch)
-                        patch_imm16(abs_offset + 4 * 4, w4);  // oris
-                        patch_imm16(abs_offset + 5 * 4, w5);  // ori
+                        patch_imm16(abs_offset + 16,  w4);  // [4] oris
+                        patch_imm16(abs_offset + 20,  w5);  // [5] ori
                     } else {
                         // External symbol — leave the placeholder 0 in place.
                         vuma_log!(warn, 
