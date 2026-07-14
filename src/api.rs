@@ -1503,55 +1503,55 @@ fn build_proof_bundle(scg: &vuma_scg::SCG) -> ProofBundle {
     // ── Attempt each proof tactic ──
     let liveness = match prove_liveness(&proof_msg, &proof_scg) {
         Ok(proof) => {
-            log::debug!("prove_liveness succeeded");
+            vuma_log!(debug, "prove_liveness succeeded");
             Some(proof)
         }
         Err(e) => {
-            log::debug!("prove_liveness failed: {}", e);
+            vuma_log!(debug, "prove_liveness failed: {}", e);
             None
         }
     };
 
     let exclusivity = match prove_exclusivity(&proof_msg) {
         Ok(proof) => {
-            log::debug!("prove_exclusivity succeeded");
+            vuma_log!(debug, "prove_exclusivity succeeded");
             Some(proof)
         }
         Err(e) => {
-            log::debug!("prove_exclusivity failed: {}", e);
+            vuma_log!(debug, "prove_exclusivity failed: {}", e);
             None
         }
     };
 
     let cleanup = match prove_cleanup(&proof_msg, &proof_scg) {
         Ok(proof) => {
-            log::debug!("prove_cleanup succeeded");
+            vuma_log!(debug, "prove_cleanup succeeded");
             Some(proof)
         }
         Err(e) => {
-            log::debug!("prove_cleanup failed: {}", e);
+            vuma_log!(debug, "prove_cleanup failed: {}", e);
             None
         }
     };
 
     let origin = match prove_origin(&origin_info) {
         Ok(proof) => {
-            log::debug!("prove_origin succeeded");
+            vuma_log!(debug, "prove_origin succeeded");
             Some(proof)
         }
         Err(e) => {
-            log::debug!("prove_origin failed: {}", e);
+            vuma_log!(debug, "prove_origin failed: {}", e);
             None
         }
     };
 
     let interpretation = match prove_interpretation(&proof_msg) {
         Ok(proof) => {
-            log::debug!("prove_interpretation succeeded");
+            vuma_log!(debug, "prove_interpretation succeeded");
             Some(proof)
         }
         Err(e) => {
-            log::debug!("prove_interpretation failed: {}", e);
+            vuma_log!(debug, "prove_interpretation failed: {}", e);
             None
         }
     };

@@ -323,7 +323,7 @@ pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
 /// load.
 pub fn encode_mov_reg_imm64(dst: Gpr, imm: u64) -> Vec<u8> {
     if imm > 0xFFFF_FFFF {
-        log::warn!(
+        vuma_log!(warn, 
             "encode_mov_reg_imm64: truncating 64-bit immediate {:#x} to low 32 bits \
              ({:#x}) — x86_32 registers cannot hold 64-bit values; \
              the high 32 bits are lost",
@@ -3511,7 +3511,7 @@ impl Backend for X86_32Backend {
                         // External symbol — defer to the system linker.
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
-                        log::debug!(
+                        vuma_log!(debug, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
@@ -3536,7 +3536,7 @@ impl Backend for X86_32Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&(func_addr as u32).to_le_bytes());
                     } else {
-                        log::debug!(
+                        vuma_log!(debug, 
                             "unresolved R_X86_64_64 relocation: symbol '{}' in '{}' at 0x{:X} — deferring to linker",
                             reloc.symbol, func.name, reloc.offset
                         );

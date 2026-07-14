@@ -178,7 +178,7 @@ impl SpeculativeOpt {
     /// fallback until [`check_assumption`] re-validates the assumption (if
     /// ever).
     pub fn deoptimize(&mut self) -> &CompiledRegion {
-        log::warn!(
+        vuma_log!(warn, 
             "Deoptimizing speculative opt: assumption {} invalidated",
             self.assumption.describe()
         );
@@ -383,7 +383,7 @@ impl SpeculativeOptimizer {
             }
         }
         if deopt_count > 0 {
-            log::info!(
+            vuma_log!(info, 
                 "SpeculativeOptimizer: {} deoptimizations triggered",
                 deopt_count
             );
@@ -1295,7 +1295,7 @@ impl SpeculativeExecutor {
         for candidate_id in &failed_ids {
             if let Some(snapshot) = self.snapshots.remove(candidate_id) {
                 let restored = snapshot.restore();
-                log::info!(
+                vuma_log!(info, 
                     "Rollback for candidate {}: restored {} region(s)",
                     candidate_id,
                     restored.len()
@@ -1311,7 +1311,7 @@ impl SpeculativeExecutor {
         }
 
         if rollback_count > 0 {
-            log::warn!(
+            vuma_log!(warn, 
                 "SpeculativeExecutor: {} rollback(s) performed",
                 rollback_count
             );

@@ -573,7 +573,7 @@ impl DeploymentPlanner {
         let old_target = entry.1.clone();
         entry.1 = new_target.clone();
 
-        log::info!(
+        vuma_log!(info, 
             "Migrated region {} from {} to {}",
             region_id,
             old_target,
@@ -585,7 +585,7 @@ impl DeploymentPlanner {
 
     /// Rebalances the deployment plan by re-running the planner logic.
     pub fn rebalance(&mut self, region_ids: &[RegionId], profile: &ProfileData) -> &DeploymentPlan {
-        log::info!(
+        vuma_log!(info, 
             "Rebalancing deployment plan for {} regions",
             region_ids.len()
         );
@@ -742,7 +742,7 @@ impl DeploymentManager {
         // Phase 4: Completed.
         state.phase = HotSwapPhase::Completed;
 
-        log::info!(
+        vuma_log!(info, 
             "Hot-swapped region {} from {} to {} on {}",
             region_id,
             from_version,

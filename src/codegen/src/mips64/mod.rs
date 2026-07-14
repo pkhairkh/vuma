@@ -4782,7 +4782,7 @@ fn lower_ir_instr(
 
         IRInstr::GetAddress { dst, name } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
-            log::warn!("GetAddress for '{}' — emitting 0", name);
+            vuma_log!(warn, "GetAddress for '{}' — emitting 0", name);
             // Placeholder: load address using lui
             let lui = Instruction::Lui {
                 rt: dst_reg,
@@ -4998,7 +4998,7 @@ fn lower_ir_instr(
             // Phi nodes should be eliminated by SSA deconstruction before
             // instruction selection.  Emit a NOP as a safety net.
             if incoming.len() > 1 {
-                log::warn!("Phi with multiple incoming — no-op");
+                vuma_log!(warn, "Phi with multiple incoming — no-op");
             }
             result.push(AllocatedInstruction {
                 opcode: "nop".to_string(),

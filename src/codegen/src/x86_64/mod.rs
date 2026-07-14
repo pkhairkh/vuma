@@ -3833,7 +3833,7 @@ impl Backend for X86_64Backend {
                         // External symbol — but this is an ET_EXEC static ELF
                         // with no linker step. The relocation is left as zero,
                         // which means the call will jump to address 0.
-                        log::warn!(
+                        vuma_log!(warn, 
                             "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
                             reloc.symbol, func.name, reloc.offset
                         );
@@ -3855,7 +3855,7 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 8]
                             .copy_from_slice(&func_addr.to_le_bytes());
                     } else {
-                        log::warn!(
+                        vuma_log!(warn, 
                             "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
                             reloc.symbol, func.name, reloc.offset
                         );

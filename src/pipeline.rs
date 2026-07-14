@@ -4910,7 +4910,7 @@ pub fn compile_with_path(
     let msg = match scg_to_msg(&scg) {
         Ok(msg) => msg,
         Err(_e) => {
-            log::warn!("MSG construction soft-failure (non-fatal): {:?}", _e);
+            vuma_log!(warn, "MSG construction soft-failure (non-fatal): {:?}", _e);
             MSG::new()
         }
     };
@@ -5038,7 +5038,7 @@ pub fn compile_with_path(
                 &liveness, &scg, &ms_config_leaks,
             );
         for lv in &leak_violations {
-            log::warn!("memory-safety (non-blocking): {}", lv);
+            vuma_log!(warn, "memory-safety (non-blocking): {}", lv);
         }
 
         timings.push((
@@ -5046,7 +5046,7 @@ pub fn compile_with_path(
             t.elapsed().as_millis() as u64,
         ));
     } else {
-        log::warn!(
+        vuma_log!(warn, 
             "memory-safety analysis disabled via --no-memory-safety; \
              the emitted binary may contain use-after-free, double-free, \
              or uninitialized-read bugs that would otherwise be caught \
@@ -5078,7 +5078,7 @@ pub fn compile_with_path(
             // SCG, triggering "graph contains a cycle" from DCE/CSE).
             // Instead, log them as warnings and continue.
             if !pass_errors.is_empty() {
-                log::warn!(
+                vuma_log!(warn, 
                     "SCG transform soft-failures (non-fatal): {} errors: {:?}",
                     pass_errors.len(),
                     pass_errors.first()
@@ -5186,7 +5186,7 @@ pub fn compile_with_path(
     if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
-        log::debug!(
+        vuma_log!(debug, 
             "escape+effects: sroa_promoted={} allocs_elided={} pure_fns={}/{}",
             summary.sroa_promoted,
             summary.allocs_elided,
@@ -5277,7 +5277,7 @@ pub fn compile_with_path(
             ..vuma_cor::types::Delta::empty()
         };
         let recompiled = rt.compile_incremental(&delta);
-        log::info!(
+        vuma_log!(info, 
             "cor-init: compiled {} regions incrementally from SCG ({} nodes)",
             recompiled.len(),
             scg.node_count(),
@@ -5489,7 +5489,7 @@ pub fn compile_with_recovery(
         Err(_e) => {
             // MSG construction is a soft-failure analysis IR, NOT used
             // by the canonical codegen path. Log and continue.
-            log::warn!("MSG construction soft-failure (non-fatal): {:?}", _e);
+            vuma_log!(warn, "MSG construction soft-failure (non-fatal): {:?}", _e);
             MSG::new()
         }
     };
@@ -5680,7 +5680,7 @@ pub fn compile_with_recovery(
     if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
-        log::debug!(
+        vuma_log!(debug, 
             "escape+effects (recovery): sroa_promoted={} allocs_elided={} pure_fns={}/{}",
             summary.sroa_promoted,
             summary.allocs_elided,

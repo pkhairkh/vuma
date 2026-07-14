@@ -3242,7 +3242,7 @@ impl Backend for LoongArch64Backend {
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±128MB (26-bit signed * 4)
                         if offset_words < -(1i64 << 25) || offset_words >= (1i64 << 25) {
-                            log::warn!(
+                            vuma_log!(warn, 
                                 "BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
                             );
@@ -3256,7 +3256,7 @@ impl Backend for LoongArch64Backend {
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
@@ -3273,7 +3273,7 @@ impl Backend for LoongArch64Backend {
                     // (lu12i.w + ori + lu32i.d + lu52i.d = 16 bytes) with an
                     // absolute 64-bit address.
                     if abs_offset + 16 > all_code.len() {
-                        log::warn!(
+                        vuma_log!(warn, 
                             "R_LARCH_64 relocation at offset {} overflows code (len {})",
                             abs_offset, all_code.len()
                         );
@@ -3296,7 +3296,7 @@ impl Backend for LoongArch64Backend {
                         // Leave the load-immediate sequence as-is (zero = trap).
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );

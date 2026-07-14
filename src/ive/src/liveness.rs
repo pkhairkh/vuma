@@ -886,13 +886,13 @@ impl LivenessVerifier {
         // Phase 1: Resource leak detection
         let leak_count = self.check_resource_leaks(input, &cfg, &mut result);
         if self.verbose {
-            log::info!("Phase 1 (leak detection): {} leaks found", leak_count);
+            vuma_log!(info, "Phase 1 (leak detection): {} leaks found", leak_count);
         }
 
         // Phase 2: Deadlock detection via SCC
         let deadlock_count = self.check_deadlock(input, &mut result);
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "Phase 2 (deadlock detection): {} deadlock cycles found",
                 deadlock_count
             );
@@ -901,13 +901,13 @@ impl LivenessVerifier {
         // Phase 3: Lock discipline
         let lock_count = self.check_lock_discipline(input, &cfg, &mut result);
         if self.verbose {
-            log::info!("Phase 3 (lock discipline): {} violations found", lock_count);
+            vuma_log!(info, "Phase 3 (lock discipline): {} violations found", lock_count);
         }
 
         // Phase 4: Message completeness
         let msg_count = self.check_message_completeness(input, &cfg, &mut result);
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "Phase 4 (message completeness): {} violations found",
                 msg_count
             );

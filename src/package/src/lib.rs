@@ -19,6 +19,21 @@
 //! vuma pkg add <dep>      — Add a dependency to vuma.pkg
 //! ```
 
+#[macro_use]
+mod vuma_log_w44 {
+    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
+    /// crates. No-op in release builds (format args still type-checked via
+    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
+    /// cross-crate name collisions — each core crate carries its own copy.
+    macro_rules! vuma_log {
+        ($level:ident, $($arg:tt)*) => {{
+            #[cfg(debug_assertions)]
+            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            #[cfg(not(debug_assertions))]
+            { let _ = format_args!($($arg)*); }
+        }};
+    }
+}
 pub mod manifest;
 pub mod registry;
 pub mod resolver;
@@ -158,7 +173,7 @@ pub fn build_package(dir: &std::path::Path) -> PackageResult<()> {
     let manifest = PackageManifest::from_toml(&content)
         .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
 
-    log::info!("Building package {} v{}", manifest.name, manifest.version);
+    vuma_log!(info, "Building package {} v{}", manifest.name, manifest.version);
 
     // Resolve dependencies
     let registry = PackageRegistry::default();
@@ -166,18 +181,18 @@ pub fn build_package(dir: &std::path::Path) -> PackageResult<()> {
     let resolved = resolver.resolve(&manifest)?;
 
     if !resolved.packages.is_empty() {
-        log::info!("Resolved {} dependencies:", resolved.packages.len());
+        vuma_log!(info, "Resolved {} dependencies:", resolved.packages.len());
         for pkg in &resolved.packages {
-            log::info!("  {} v{}", pkg.name, pkg.version);
+            vuma_log!(info, "  {} v{}", pkg.name, pkg.version);
         }
     }
 
     // Build each target
     for target in &manifest.targets {
-        log::info!("Building target: {} ({:?})", target.name, target.kind);
+        vuma_log!(info, "Building target: {} ({:?})", target.name, target.kind);
         let src_path = dir.join(&target.src);
         if !src_path.exists() {
-            log::warn!("Source file not found: {}", src_path.display());
+            vuma_log!(warn, "Source file not found: {}", src_path.display());
         }
         // The actual compilation would be delegated to the main pipeline.
         // For now we just validate the manifest and resolve deps.
