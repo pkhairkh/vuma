@@ -37,7 +37,6 @@ use crate::capd::{CapD, Capability, Condition};
 use crate::context::Context;
 use crate::descriptor::{BDId, BD};
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +47,7 @@ use std::fmt;
 ///
 /// This is the *compile-time* view of usage; it drives capability weakening
 /// and strengthening rules, distinct from the *runtime* [`Context`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UsageContext {
     /// The value is only read (e.g. `let y = x.field`).
     ReadOnly,
@@ -157,7 +156,7 @@ pub type SiteId = u64;
 ///
 /// `UsageSite` captures enough information to determine the [`UsageContext`]
 /// and, consequently, the effective capabilities at that site.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageSite {
     /// Unique identifier for this usage site.
     pub site_id: SiteId,
@@ -275,7 +274,7 @@ pub type RulePriority = i32;
 ///
 /// Rules are applied in priority order (highest first).  The first rule
 /// that matches a usage context determines the transformation applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextRule {
     /// Which usage context this rule applies to.
     pub context: UsageContext,

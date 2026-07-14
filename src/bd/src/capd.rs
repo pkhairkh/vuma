@@ -18,7 +18,6 @@
 
 use crate::context::Context;
 use std::collections::HashSet;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -46,7 +45,7 @@ pub type RegionId = u64;
 // ---------------------------------------------------------------------------
 
 /// A fine-grained capability that may be held on a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
     /// Permission to read the value.
     Read,
@@ -113,7 +112,7 @@ impl fmt::Display for Capability {
 // ---------------------------------------------------------------------------
 
 /// A runtime condition that gates the activation of one or more capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Condition {
     /// Capability is active only during the given phase.
     InPhase(PhaseId),

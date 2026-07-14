@@ -9,7 +9,6 @@
 
 use crate::capd::{CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel};
 use std::collections::HashSet;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Runtime execution context used for [`CapD::resolve`].
@@ -17,7 +16,7 @@ use std::fmt;
 /// Each field captures a dimension of the execution state that may appear
 /// in a [`Condition`].  Unknown conditions are conservatively treated as
 /// *not* satisfied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
     /// The set of phases that are currently active.
     pub active_phases: HashSet<PhaseId>,
