@@ -501,9 +501,10 @@ mod tests {
 
         match result {
             Ok(Ok(bytes)) => {
-                assert!(
-                    !bytes.is_empty(),
-                    "ppc64le must inherit non-empty syscall emission from ppc64"
+                assert_eq!(
+                    bytes.len(),
+                    32,
+                    "wave13: ppc64le should emit exactly 32 bytes for IRInstr::Syscall"
                 );
             }
             Ok(Err(e)) => {
