@@ -11,8 +11,15 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/package/src/manifest.rs:21 (and 9
-# other sites across manifest/registry); migrate to hand-written codec.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 — `PackageManifest` and `RegistryIndex`
+# now use the `toml::Value` API directly (`toml::from_str::<toml::Value>` +
+# hand-written navigation, `toml::to_string_pretty(&toml::Value::Table(...))`)
+# instead of `#[derive(Serialize, Deserialize)]` + `toml::from_str::<T>`.
+# The on-disk TOML format is unchanged. `PackageManifest::from_toml` /
+# `to_toml` now return `Result<_, PackageError>` instead of
+# `Result<_, toml::de::Error>` / `Result<_, toml::ser::Error>` — callers in
+# `lib.rs` and `registry.rs` that previously wrapped the toml error via
+# `.map_err(|e| PackageError::ManifestParse(e.to_string()))` were simplified
+# to use the `?` operator directly.
 toml.workspace = true
 tempfile.workspace = true

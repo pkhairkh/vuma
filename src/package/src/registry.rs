@@ -20,7 +20,6 @@
 
 use crate::manifest::PackageManifest;
 use crate::{PackageError, PackageResult};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +28,7 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 /// The global registry index, mapping package names to available versions.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RegistryIndex {
     /// Map from package name to a list of available version strings.
     pub packages: HashMap<String, Vec<String>>,
@@ -55,6 +54,54 @@ impl RegistryIndex {
             .get(name)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Serialize the index to a TOML string.
+    ///
+    /// Wave 43 serde-migration: previously used `#[derive(Serialize)]` +
+    /// `toml::to_string_pretty(&self)`. Now builds a `toml::Value::Table`
+    /// by hand. The on-disk TOML format is unchanged: a top-level
+    /// `[packages]` table whose keys are package names and whose values are
+    /// arrays of version strings.
+    pub fn to_toml(&self) -> Result<String, PackageError> {
+        let mut packages_table = toml::map::Map::new();
+        // Sort keys for deterministic output
+        let mut sorted: Vec<(&String, &Vec<String>)> = self.packages.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, versions) in sorted {
+            let arr: Vec<toml::Value> = versions
+                .iter()
+                .map(|v| toml::Value::String(v.clone()))
+                .collect();
+            packages_table.insert(name.clone(), toml::Value::Array(arr));
+        }
+        let mut root = toml::map::Map::new();
+        root.insert("packages".to_string(), toml::Value::Table(packages_table));
+        toml::to_string_pretty(&toml::Value::Table(root))
+            .map_err(|e| PackageError::Other(e.to_string()))
+    }
+
+    /// Deserialize the index from a TOML string.
+    ///
+    /// Wave 43 serde-migration: previously used `#[derive(Deserialize)]` +
+    /// `toml::from_str::<Self>`. Now parses into a `toml::Value` first and
+    /// navigates the value tree by hand.
+    pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {
+        let root: toml::Value =
+            toml::from_str(toml_str).map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+        let mut packages = HashMap::new();
+        if let Some(table) = root.get("packages").and_then(|v| v.as_table()) {
+            for (name, val) in table {
+                if let Some(arr) = val.as_array() {
+                    let versions: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    packages.insert(name.clone(), versions);
+                }
+            }
+        }
+        Ok(RegistryIndex { packages })
     }
 }
 
@@ -93,8 +140,7 @@ impl PackageRegistry {
         let index_path = self.root.join("index.toml");
         if !index_path.exists() {
             let index = RegistryIndex::new();
-            let toml_str = toml::to_string_pretty(&index)
-                .map_err(|e| PackageError::Other(e.to_string()))?;
+            let toml_str = index.to_toml()?;
             std::fs::write(&index_path, toml_str)?;
         }
         Ok(())
@@ -107,16 +153,13 @@ impl PackageRegistry {
             return Ok(RegistryIndex::new());
         }
         let content = std::fs::read_to_string(&index_path)?;
-        let index: RegistryIndex = toml::from_str(&content)
-            .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
-        Ok(index)
+        RegistryIndex::from_toml(&content)
     }
 
     /// Write the registry index.
     pub fn write_index(&self, index: &RegistryIndex) -> PackageResult<()> {
         let index_path = self.root.join("index.toml");
-        let toml_str = toml::to_string_pretty(index)
-            .map_err(|e| PackageError::Other(e.to_string()))?;
+        let toml_str = index.to_toml()?;
         std::fs::write(&index_path, toml_str)?;
         Ok(())
     }
@@ -170,7 +213,7 @@ impl PackageRegistry {
             ));
         }
         let content = std::fs::read_to_string(&pkg_path)?;
-        PackageManifest::from_toml(&content).map_err(|e| PackageError::ManifestParse(e.to_string()))
+        PackageManifest::from_toml(&content)
     }
 
     /// Get the source directory for a package in the registry.
@@ -316,8 +359,8 @@ mod tests {
         index.add_version("vuma-std", "0.2.0");
         index.add_version("vuma-crypto", "0.1.0");
 
-        let toml_str = toml::to_string_pretty(&index).unwrap();
-        let parsed: RegistryIndex = toml::from_str(&toml_str).unwrap();
+        let toml_str = index.to_toml().unwrap();
+        let parsed = RegistryIndex::from_toml(&toml_str).unwrap();
         assert_eq!(parsed.get_versions("vuma-std"), &["0.1.0", "0.2.0"]);
         assert_eq!(parsed.get_versions("vuma-crypto"), &["0.1.0"]);
         assert!(parsed.get_versions("nonexistent").is_empty());
