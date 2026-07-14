@@ -744,8 +744,8 @@
   - **AUDIT CAVEAT (Task 5-b):** `irb_build_main` at `womb/lang/ir_builder.vuma:535` lowers AST→IR **directly**, bypassing the SCG built by `scg_construct` (which is now a real linear-chain SCG — see the SCG item above). The pipeline header comment above `scg_construct` documents this explicitly: *"Note: this still lowers AST→IR directly rather than consuming the SCG from step 1; the SCG is built for diagnostic purposes and to make the pipeline shape match the production compiler."* So IR construction exists and is real, but "from SCG" is inaccurate — it's "from AST" with the SCG built as a side artifact. Hooking the SCG into `irb_build_main` (replacing the direct AST walk with an SCG walk) is a future-wave task; the SCG buffer is currently heap-allocated and intentionally not freed (the bootstrap exits after pipeline completion, and the OS reclaims the heap).
 - [x] **[BOOT]** Implement x86_64 codegen (reuse encoders from `womb/lang/codegen.vuma`).
 - [x] **[BOOT]** Implement ELF64 emission (reuse `womb/lang/elf.vuma`).
-- [ ] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
-  - **AUDIT GAP:** Documented unfulfilled contract. `full_lexer.vuma:33-36` explicitly states: *"(The .vuma bootstrap compiler is not yet wired into the Rust test harness — `cargo check` is unaffected. The contract above is the Wave 48 self-host target; a future wave adds the Rust-side test that invokes the compiled `vumac` on hello.vuma and checks a.out's output.)"* No test exists that invokes the bootstrap compiler on `hello.vuma`.
+- [~] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
+  - **AUDIT RESOLVED (Task 7-a):** Multi-module compilation is now wired end-to-end. `pub fn compile_modules(modules: &[(String, String)], config: &CompileConfig) -> Result<CompilationOutput, Vec<VumaError>>` is implemented in `src/pipeline.rs` (alongside `compile` / `compile_with_path` — not replacing them). It (1) parses each `(name, source)` pair independently via `vuma_parser::Parser::parse_program`, (2) merges the ASTs via `merge_module_asts` — concatenating `items` from all modules, detecting duplicate `fn` definitions across modules (returns `VumaError::AstToScg`), and filtering each module's `extern "C" { fn foo(...); }` declarations: if `foo` is defined as a real `fn` in any module, the declaration is stripped (so the merged AST's `extern_fns` set doesn't contain `foo`, and `bridge_ast_to_codegen_scg` treats calls to `foo` as local calls that resolve to the sibling module's `fn` body); empty extern blocks are dropped entirely. The merged AST is then compiled through the direct AST → codegen SCG → IR → regalloc → backend.encode_program path (mirrors `main.rs::compile_to_binary_direct`, the path used by `vuma run --isa <host>`), targeting the host architecture so the emitted ELF runs natively. `VumaCompiler::compile_modules` in `src/api.rs` exposes the same API at the `VumaCompiler` level. A new `vuma link <file1.vuma> <file2.vuma> ... -o <output> [--run] [--isa x86_64]` subcommand in `src/main.rs` reads each named `.vuma` file, passes the `(filename, contents)` tuples to `compile_modules`, writes the resulting ELF to the output path (default `a.out`), `chmod 0o755`, and (if `--run` is set) executes the linked binary. Two tests in `src/tests/src/wave48_self_host.rs` (registered in `src/tests/src/lib.rs`): (1) `test_wave48_compile_modules_simple` — synthetic multi-module program (main.vuma + helper.vuma linked via `extern "C" { fn helper() -> i32; }`); asserts `compile_modules` returns `Ok`, the emitted binary is a non-trivial ELF starting with `\x7fELF`, and executing the ELF on the x86_64 host prints `"42"` on stdout. **PASSING.** (2) `test_wave48_bootstrap_self_host` — the real Wave 48 self-host contract: compile the 5 bootstrap `.vuma` files into a `vumac` ELF, run `./vumac womb/lang/hello.vuma`, then run the emitted `a.out` and assert stdout contains `"42"`. **Currently `#[ignore]`'d** with a documented blocker: the bootstrap source `womb/lang/ir_builder.vuma:593` uses `repd` (a reserved BD-directive keyword in `src/parser/src/parser.rs:1126-1129`, dispatched to `parse_bd_directive` which expects `(` immediately after) as a local variable name (`repd: Address = __vuma_alloc(BD_VREG_CAP);` — the RepD tag array, referenced 7 times in `bd_infer` at lines 593, 597, 611, 612, 615, 617, 621). The production parser fails with `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`. The other 4 bootstrap files (`full_lexer.vuma`, `full_parser.vuma`, `codegen.vuma`, `elf.vuma`) parse cleanly — only `ir_builder.vuma` fails, and only at the single `repd:` declaration site. Two fix paths are documented in the test's doc-comment and in the priority follow-ups below: (a) bootstrap-source rename `repd` → `repd_arr` (7-line change in `ir_builder.vuma`, owned by Wave 48 `[BOOT]`), or (b) parser context-awareness — when `TokenKind::Repd` (or `Bd`/`Capd`/`Reld`) is followed by `:` instead of `(`, treat it as an identifier (let-statement) rather than a BD directive (parser change in `src/parser/src/parser.rs`). `cargo test -p vuma-tests --lib wave48`: 6 passed, 0 failed, 1 ignored. `cargo check --workspace`: 0 errors.
 
 ---
 
@@ -834,7 +834,7 @@ notes. The updated verdict tally below reflects the post-remediation state.
 | Verdict                              | Count | Waves                                                                                                                                                                                                                       |
 | ------------------------------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ✅ VERIFIED (substance matches claim) | 49    | 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 49                                       |
-| ⚠️ PARTIAL (real work + minor gaps)  | 1     | 48 (bootstrap self-host: SCG/BD/IVE now real per Task 5-b; full `vumac`-on-`hello.vuma` execution still blocked by multi-module linking + parser coverage gaps — documented in Task 6-c)                                  |
+| ⚠️ PARTIAL (real work + minor gaps)  | 1     | 48 (bootstrap self-host: SCG/BD/IVE real per Task 5-b; multi-module linking + `compile_modules` API + `vuma link` subcommand delivered per Task 7-a; full `vumac`-on-`hello.vuma` execution still blocked by a parser-coverage gap — `ir_builder.vuma:593` uses `repd` (a reserved BD-directive keyword) as a variable name; documented in Task 7-a)                                  |
 | ❌ STUB-ONLY / MISSING                | 0     | 50 fully resolved: real SHA256d/mmap_sha256d regalloc tests (Task 6-a), real e2e proof test (Task 6-b), strengthened UAF test (Task 6-a), execution harness + cross-backend opt regression (Task 6-b), real self-host milestone test that compiles and runs `hello.vuma` via the production compiler (Task 6-c), CI test job upgraded from advisory to strict (Task 6-d). |
 
 ### Cross-cutting findings
@@ -858,10 +858,16 @@ notes. The updated verdict tally below reflects the post-remediation state.
 
 3. **Stub-labeled-as-done pattern (Waves 48, 50) — RESOLVED.** Wave 48's
    `scg_construct` / `bd_infer` / `ive_verify` are now real implementations
-   (Task 5-b). Wave 50's tests are now real (Tasks 6-a, 6-b, 6-c, 6-d).
-   The only remaining gap is end-to-end execution of the bootstrap `.vuma`
-   files themselves (blocked by multi-module linking + parser coverage gaps,
-   documented in Task 6-c's AUDIT RESOLVED note).
+   (Task 5-b). Wave 48's `[BOOT-SELF]` is now `[~]` (partial) per Task 7-a:
+   the multi-module linking infrastructure (`compile_modules` API + `vuma
+   link` subcommand + AST-merge logic that strips cross-module `extern`
+   declarations when a real `fn` definition exists in a sibling module) is
+   delivered and exercised by `test_wave48_compile_modules_simple`. The
+   full bootstrap self-host test (`test_wave48_bootstrap_self_host`) is
+   `#[ignore]`'d pending a single parser-coverage gap (`repd` keyword
+   collision at `ir_builder.vuma:593`) — see the `[BOOT-SELF]` AUDIT
+   RESOLVED note above. Wave 50's tests are now real (Tasks 6-a, 6-b, 6-c,
+   6-d).
 
 4. **Self-hosting dep removal — RESOLVED.** `indexmap`, `smallvec`,
    `hashbrown`, `petgraph` were already gone. `thiserror` is now fully
@@ -891,10 +897,25 @@ notes. The updated verdict tally below reflects the post-remediation state.
 
 ### Priority follow-up actions (post-remediation)
 
-1. **Wave 48 self-host execution.** Implement multi-module linking in the
-   VUMA runtime so `womb/lang/full_lexer.vuma` + siblings can be linked and
-   invoked as the bootstrap compiler. Alternatively, extend the parser to
-   cover the full `.vuma` syntax used in the bootstrap files.
+1. **Wave 48 self-host execution — `repd` keyword collision.** Task 7-a
+   delivered the multi-module linking infrastructure (`compile_modules` API
+   + `vuma link` subcommand + AST-merge logic); the remaining blocker for
+   the full `[BOOT-SELF]` contract is a single parser-coverage gap.
+   `womb/lang/ir_builder.vuma:593` uses `repd` (a reserved BD-directive
+   keyword in `src/parser/src/parser.rs:1126-1129`, dispatched to
+   `parse_bd_directive` which expects `(` immediately after) as a local
+   variable name (`repd: Address = __vuma_alloc(BD_VREG_CAP);` — the RepD
+   tag array, referenced 7 times in `bd_infer`). The production parser
+   fails with `ParseError { message: "expected '(', found ':'", line:
+   Some(593), column: Some(9) }`. The other 4 bootstrap files parse
+   cleanly. Two fix paths: (a) bootstrap-source rename `repd` →
+   `repd_arr` (7-line change in `ir_builder.vuma`, owned by Wave 48
+   `[BOOT]`), or (b) parser context-awareness — when
+   `TokenKind::Repd` (or `Bd`/`Capd`/`Reld`) is followed by `:` instead
+   of `(`, treat it as an identifier (let-statement) rather than a BD
+   directive (parser change in `src/parser/src/parser.rs`). Once either
+   fix lands, un-ignore `test_wave48_bootstrap_self_host` (remove the
+   `#[ignore]` attribute) and verify it passes end-to-end.
 2. **Wave 43 finish.** Migrate the remaining ~426 `#[derive(Serialize,
    Deserialize)]` sites on non-named types, then remove `serde`/`serde_json`
    from the remaining 8 core crate `Cargo.toml`s (currently only `bd` and
