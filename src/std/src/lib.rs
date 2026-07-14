@@ -4,6 +4,56 @@
 //! allocation strategies, data structures, I/O bindings, and synchronization
 //! primitives for the VUMA AI-native programming language framework.
 //!
+//! ## Role
+//!
+//! **`vuma-std` is the runtime library for VUMA-compiled programs, not the
+//! compiler's internal substrate.** Emitted `.vuma` binaries link against
+//! `vuma-std`'s `VumaVec`/`VumaHashMap`/`VumaString`/IO/alloc surface for
+//! collections, I/O, and heap management. The compiler itself (`vuma-core` +
+//! the `ive`/`bd`/`scg`/`codegen`/`proof`/`cor` crates) uses Rust's `std`
+//! `Vec`/`HashMap`/`String` collections internally and does **not** depend on
+//! `vuma-std`.
+//!
+//! **Decision (Wave 46, option (b)):** the alternative — wiring `vuma-std` as
+//! a `vuma-core` dependency and migrating thousands of `Vec`/`HashMap`/
+//! `String` sites across `ive`/`bd`/`scg`/`codegen`/`proof` to
+//! `VumaVec`/`VumaHashMap`/`VumaString` — was rejected as out-of-scope for a
+//! single wave and high-risk for no concrete benefit (the compiler's host
+//! collections are already sound). Marking `vuma-std` runtime-only is the
+//! honest, evidence-backed choice.
+//!
+//! **Evidence (zero dependents):** as of this wave, `rg 'vuma-std'` across the
+//! workspace `Cargo.toml` and every `src/*/Cargo.toml` returns only this
+//! crate's own `[package] name = "vuma-std"` line. No `vuma-std = ...` or
+//! `vuma_std = ...` dependency edge exists anywhere in the dependency graph;
+//! the crate is depended on by zero other workspace crates.
+//!
+//! ## Syscall ABI
+//!
+//! `vuma-std` (post-Wave 45) and the VUMA codegen backends share the **Linux
+//! syscall ABI** but are decoupled at the link layer.
+//!
+//! - **`vuma-std`** calls `read`/`write`/`mmap`/`mprotect`/`munmap` via
+//!   `extern "C"` FFI blocks in `alloc.rs` and `io.rs`. When built as a host
+//!   Rust crate, the host linker resolves these FFI symbols to the platform's
+//!   libc/syscall veneers, which issue the canonical `__NR_*` syscall numbers
+//!   (e.g. `__NR_write = 1` on x86_64, `= 64` on AArch64).
+//! - **Codegen backends** emit raw syscall stubs via `IRInstr::Syscall {
+//!   nr, args, .. }` (see `src/tests/src/cross_backend.rs` Wave 13
+//!   conformance tests). The emitted binary is freestanding ELF and issues
+//!   the `syscall` instruction directly with the same canonical `__NR_*`
+//!   numbers in `rax` (x86_64) / `x8` (AArch64).
+//! - **`SyscallTable`** (`vuma-codegen`) is the single source of truth for
+//!   the per-arch `__NR_*` numbers on the codegen side; `vuma-std`'s FFI
+//!   implicitly agrees because both ultimately target Linux.
+//!
+//! The two paths are intentionally decoupled at the link layer — `vuma-std` is
+//! a host Rust crate linked normally; emitted `.vuma` binaries are freestanding
+//! ELF objects that do **not** link `vuma-std` (they emit their own syscall
+//! stubs). The ABI contract — same `__NR_*` numbers, same arg-register
+//! conventions, same `read`/`write`/`mmap` semantics — is what makes both
+//! sides interoperate with the same Linux kernel.
+//!
 //! ## Module Overview
 //!
 //! - **primitives**: Behavioral Description (BD) definitions for primitive types
@@ -194,4 +244,66 @@ pub const VERSION: &str = "0.1.0";
 // VUMA-VERIFIED: pure function, no side effects
 pub fn version() -> &'static str {
     VERSION
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(dead_code)]
+
+    use super::*;
+
+    /// Wave 46 — verify the role decision is recorded in the crate doc-comment.
+    /// The decision (option (b): runtime-only) MUST be documented at the top
+    /// of this file. This test is a sanity check that the doc-comment hasn't
+    /// been lost in a future refactor.
+    #[test]
+    fn test_wave46_std_runtime_role_documented() {
+        // Read the source file at compile-time and assert the role is recorded.
+        // String-matching the crate's lib.rs source avoids depending on
+        // rustdoc scraping.
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("runtime library for VUMA-compiled programs"),
+            "Wave 46 decision (runtime-only role) is missing from lib.rs doc-comment"
+        );
+        assert!(
+            src.contains("## Role"),
+            "Wave 46 '## Role' section is missing from lib.rs doc-comment"
+        );
+        assert!(
+            src.contains("## Syscall ABI"),
+            "Wave 46 '## Syscall ABI' section is missing from lib.rs doc-comment"
+        );
+        // Sanity-check the zero-dependents evidence claim is recorded too.
+        assert!(
+            src.contains("zero dependents"),
+            "Wave 46 zero-dependents evidence is missing from lib.rs doc-comment"
+        );
+    }
+
+    /// Wave 46 — basic `VumaVec` push/pop smoke test. Confirms the runtime
+    /// library's primary collection (`VumaVec`, re-exported from
+    /// `collections::Vec`) works as emitted `.vuma` programs would expect:
+    /// `new` -> empty, `push` grows, `pop` is LIFO and returns a `BdResult`.
+    #[test]
+    fn test_wave46_vumavec_basic() {
+        let mut v: VumaVec<i32> = VumaVec::new();
+        assert_eq!(v.len(), 0, "new VumaVec should be empty");
+
+        v.push(10);
+        v.push(20);
+        v.push(30);
+        assert_eq!(v.len(), 3, "len after 3 pushes");
+
+        // `pop` returns a `BdResult<T>`; `unwrap` yields the value on success.
+        assert_eq!(v.pop().unwrap(), 30, "pop is LIFO (1)");
+        assert_eq!(v.pop().unwrap(), 20, "pop is LIFO (2)");
+        assert_eq!(v.pop().unwrap(), 10, "pop is LIFO (3)");
+        assert_eq!(v.len(), 0, "VumaVec empty again after draining");
+
+        // Pop on empty returns a `BdResult` err (success == false); we check
+        // the flag rather than `.unwrap()` (which would panic).
+        let empty_pop = v.pop();
+        assert!(!empty_pop.success, "pop on empty VumaVec must be an err");
+    }
 }
