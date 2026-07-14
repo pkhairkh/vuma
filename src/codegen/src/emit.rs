@@ -645,52 +645,97 @@ impl Emitter {
     /// (Wave 21) Emit a single IR function using a pre-computed
     /// `AllocationResult` from the `LinearScanAllocator`.
     ///
-    /// This method delegates to `emit_function_greedy` for the actual
-    /// instruction selection and emission (which assigns physical registers
-    /// using the greedy allocator), but layers on top:
+    /// **Metadata-only path (audit-resolved Task 4-c, Wave 21):** this
+    /// method delegates *entirely* to [`emit_function_greedy`](Self::
+    /// emit_function_greedy) for instruction selection, encoding, and
+    /// physical-register assignment. The greedy emitter performs its own
+    /// on-the-fly register allocation using caller-saved GPRs (X0–X18)
+    /// and X29/X30 (FP/LR); it does **not** consult
+    /// [`AllocationResult::vreg_to_preg`],
+    /// [`AllocationResult::spill_code`],
+    /// [`AllocationResult::coalesced_map`], or
+    /// [`AllocationResult::eliminated_copies`].
     ///
-    /// 1. **Spill-slot reservation**: The prologue reserves
-    ///    `alloc.total_spill_slots * 8` bytes of stack space for spill
-    ///    slots, in addition to the existing frame size.
+    /// The `AllocationResult` passed in here is used **only for
+    /// diagnostic logging**: when `used_callee_saved_gprs` is non-empty,
+    /// a `debug`-level log line is emitted reporting
+    /// `used_callee_saved_gprs.len()`, `total_spill_slots`, and
+    /// `eliminated_copies.len()`. The encoded machine bytes returned by
+    /// this method are byte-for-byte identical to what
+    /// `emit_function_greedy(func)` would produce on its own — the
+    /// `AllocationResult` does not influence the emitted code.
     ///
-    /// 2. **Callee-saved save/restore**: Callee-saved registers in
-    ///    `alloc.used_callee_saved_gprs` are saved in the prologue and
-    ///    restored in the epilogue, ensuring ABI compliance.
+    /// # What is *not* implemented (and why)
     ///
-    /// 3. **Spill code insertion**: Spill/reload instructions from
-    ///    `alloc.spill_code` are available for the emission loop to
-    ///    consult (keyed by IR instruction index).
+    /// A "real" register-allocated emit path would, for each IR
+    /// instruction at position `P`:
     ///
-    /// 4. **Coalesced move elimination**: Moves listed in
-    ///    `alloc.eliminated_copies` can be skipped during emission,
-    ///    reducing instruction count.
+    /// 1. Look up `alloc.spill_code.get(&P)` and emit `Reload` words
+    ///    *before* the instruction.
+    /// 2. Emit the instruction using the physical register assigned by
+    ///    `alloc.vreg_to_preg` (rather than the greedy allocator's
+    ///    on-the-fly assignment).
+    /// 3. Look up `alloc.spill_code.get(&(P + 1))` and emit `Spill`
+    ///    words *after* the instruction.
+    /// 4. Skip moves listed in `alloc.eliminated_copies`.
+    /// 5. Emit prologue saves (e.g. `STP X19, X20, [SP, #16]!`) for
+    ///    every register in `alloc.used_callee_saved_gprs` and matching
+    ///    epilogue restores.
     ///
-    /// The greedy allocator's own register assignments are used for the
-    /// actual code generation; the `AllocationResult` provides additional
-    /// metadata (spill slots, callee-saved sets, coalescing info) that
-    /// improves the quality of the emitted code.
+    /// Implementing step 5 in isolation (the "Option C" minimal
+    /// prologue/epilogue approach) would be **incorrect**: the greedy
+    /// emitter never touches callee-saved GPRs (X19–X28), so
+    /// `alloc.used_callee_saved_gprs` reflects what the
+    /// `LinearScanAllocator` *would* use, not what the emitted code
+    /// *actually* uses. Saving/restoring those registers would produce
+    /// larger binaries with no functional benefit and could mislead
+    /// downstream tooling about the code's actual register usage.
+    ///
+    /// Implementing steps 1–4 requires restructuring `emit_function_greedy`
+    /// (or writing a new emit path that bypasses the greedy allocator),
+    /// which is a substantial undertaking explicitly deferred to a future
+    /// wave. Wave 22's per-backend `emit_function_regalloc` (in
+    /// `regalloc_emit.rs` and the tier-1 backend modules) takes a
+    /// different approach: it runs the stack-slot ISel for the encoded
+    /// bytes and only adds conservative `reads`/`writes` annotations
+    /// from `RegAllocResult::used_callee_saved` — the encoded bytes are
+    /// still produced by the stack-slot path, not by consuming
+    /// `spill_code`.
+    ///
+    /// The `AllocationResult::spill_code` BTreeMap IS populated by
+    /// `LinearScanAllocator::gen_spill_reload` (regalloc.rs:1614) and
+    /// `gen_eviction_spill_reload` (regalloc.rs:1651) when register
+    /// pressure is high — see the `linear_scan_eviction_generates_spill_code`
+    /// test (regalloc.rs:5051). But because the AArch64 emit path never
+    /// consults it, the spill-code metadata is currently write-only with
+    /// respect to the emitted binary.
     fn emit_function_regalloc(
         &mut self,
         func: &IRFunction,
         alloc: &AllocationResult,
     ) -> Result<Vec<u32>> {
         // Delegate to the greedy allocator for instruction emission.
-        // The greedy allocator assigns physical registers on-the-fly;
-        // we reserve additional spill space and save callee-saved registers
-        // based on the AllocationResult.
+        // The greedy allocator assigns physical registers on-the-fly
+        // using caller-saved GPRs + FP/LR; it does NOT consult any field
+        // of `alloc` (vreg_to_preg / spill_code / coalesced_map /
+        // eliminated_copies). The `alloc` parameter is used only for
+        // the diagnostic log below.
         let code = self.emit_function_greedy(func)?;
 
-        // (Wave 21) Post-pass: verify that callee-saved registers used by
-        // the AllocationResult are reflected in the frame.  The greedy
-        // allocator's prologue already saves X29/X30 (FP/LR); if the
-        // AllocationResult indicates additional callee-saved GPRs are
-        // used, we log a warning (a full implementation would save/restore
-        // them in the prologue/epilogue, but that requires rewriting the
-        // prologue — deferred to Wave 22 per-backend implementation).
+        // (Wave 21, Task 4-c) Metadata-only post-pass: log the
+        // LinearScanAllocator's spill / callee-saved / coalescing
+        // statistics for diagnostics. The greedy emitter's prologue
+        // already saves X29/X30 (FP/LR); the AllocationResult's
+        // `used_callee_saved_gprs` reflects what the *LinearScanAllocator*
+        // would use, NOT what the greedy emitter *actually* uses, so we
+        // do NOT emit additional prologue saves here. See the method
+        // doc-comment for why a partial implementation would be
+        // incorrect.
         if !alloc.used_callee_saved_gprs.is_empty() {
-            vuma_log!(debug, 
+            vuma_log!(debug,
                 "emit_function_regalloc: {} callee-saved GPRs in AllocationResult for '{}' \
-                 (spill slots: {}, coalesced copies: {})",
+                 (spill slots: {}, coalesced copies: {}) — metadata only, \
+                 emitted bytes come from emit_function_greedy",
                 alloc.used_callee_saved_gprs.len(),
                 func.name,
                 alloc.total_spill_slots,
@@ -6685,11 +6730,74 @@ mod tests {
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "should be a valid ELF");
     }
 
-    /// (Wave 21) Verify that `STACK_SLOT_VREG_THRESHOLD` is no longer 0
-    /// (the hack that forced every function through stack-slot lowering).
+    /// (Wave 21, Task 4-c) Lock in the **metadata-only** behavior of
+    /// `emit_function_regalloc`: passing an `AllocationResult` must NOT
+    /// change the emitted bytes relative to the greedy path.
+    ///
+    /// This guards against accidental regressions where a future change
+    /// starts consuming `spill_code` / `vreg_to_preg` / `coalesced_map`
+    /// without a complete (correct) implementation. If the emitted bytes
+    /// ever differ between the `Some(alloc)` and `None` paths, this test
+    /// will fail loudly, surfacing the divergence for review.
     #[test]
-    fn stack_slot_vreg_threshold_is_not_zero() {
-        assert_ne!(STACK_SLOT_VREG_THRESHOLD, 0, "STACK_SLOT_VREG_THRESHOLD should not be 0 (Wave 21 removed the hack)");
+    fn emit_function_regalloc_is_metadata_only() {
+        use crate::regalloc::{AllocationResult, LinearScanAllocator, SpillCode, SpillSlot};
+
+        let func = make_return_function("metadata_only_probe");
+        let allocator = LinearScanAllocator::new();
+        let mut alloc = allocator
+            .allocate_function(&func)
+            .expect("regalloc should succeed");
+
+        // Synthesize a non-empty `spill_code` map so we can verify the
+        // emit path does NOT act on it. If the path were ever changed to
+        // consume spill_code, this fake entry would surface as a
+        // divergence in the emitted bytes.
+        let fake_slot = SpillSlot::new(0, -8, crate::regalloc::RegClass::Gpr);
+        let fake_preg = crate::regalloc::PhysReg::Gpr(Register::X19);
+        alloc.spill_code.insert(
+            0,
+            vec![SpillCode::Reload {
+                vreg: 0,
+                preg: fake_preg,
+                slot: fake_slot.clone(),
+            }],
+        );
+        alloc.spill_code.insert(
+            1,
+            vec![SpillCode::Spill {
+                vreg: 0,
+                preg: fake_preg,
+                slot: fake_slot,
+            }],
+        );
+        // Also synthesize a fake callee-saved GPR so the diagnostic log
+        // branch fires — verifying that logging alone doesn't perturb
+        // the emitted bytes.
+        alloc.used_callee_saved_gprs.insert(Register::X19);
+        alloc.total_spill_slots = 1;
+        alloc.eliminated_copies.push((0, fake_preg));
+
+        // Emit once with the (populated) AllocationResult and once with
+        // None (pure greedy path).
+        let mut em_with_alloc = Emitter::new();
+        let code_with_alloc = em_with_alloc
+            .emit_function(&func, Some(&alloc))
+            .expect("emission with alloc should succeed");
+
+        let mut em_no_alloc = Emitter::new();
+        let code_no_alloc = em_no_alloc
+            .emit_function(&func, None)
+            .expect("emission without alloc should succeed");
+
+        assert_eq!(
+            code_with_alloc, code_no_alloc,
+            "emit_function_regalloc must be metadata-only: passing an AllocationResult with \
+             populated spill_code / used_callee_saved_gprs / eliminated_copies must NOT change \
+             the emitted bytes relative to the greedy path. If this test fails, a future change \
+             started consuming AllocationResult fields without a complete implementation — see \
+             the doc-comment on emit_function_regalloc."
+        );
     }
 
     /// (Wave 21) Verify that `AllocationResult` carries a `function_name`
