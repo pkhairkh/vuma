@@ -34,6 +34,65 @@
 //! DataFlow edge from outside a loop into the loop body does **not** mean
 //! there is a control path that bypasses the loop header. Computing
 //! dominators on the CFG subgraph ensures correct back-edge identification.
+//!
+//! # Relationship to `codegen::regalloc::LoopDetector` (Wave 33 audit)
+//!
+//! There are two `LoopDetector` types in the workspace:
+//!
+//! | Type                          | Crate          | Graph type           | Result type       |
+//! |-------------------------------|----------------|----------------------|-------------------|
+//! | `scg::loop_detection::LoopDetector` | `vuma-scg`     | [`SCG`] (graph IR)   | [`NaturalLoop`]   |
+//! | `codegen::regalloc::LoopDetector`   | `vuma-codegen` | `IRFunction` (CFG of `IRBlock`s) | `regalloc::LoopInfo` |
+//!
+//! They are **functionally similar** (both detect natural loops via
+//! back-edge + dominator analysis) but operate on fundamentally
+//! different IR shapes:
+//!
+//! - The **SCG** version works on the structured-control graph that
+//!   flows from the parser.  Nodes are typed (`Computation`,
+//!   `Control`, `Allocation`, ...), edges carry a `kind`
+//!   (`ControlFlow`, `DataFlow`, `Derivation`, ...), and loops are
+//!   reported as `NaturalLoop` with a `HashSet<NodeId>` body.  It is
+//!   consumed by SCG-level passes like `LoopInvariantCodeMotion`.
+//!
+//! - The **regalloc** version works on the lowered `IRFunction` CFG
+//!   (a `Vec<IRBlock>` with `IRTerminator`s).  Loops are reported as
+//!   `LoopInfo` with a `HashSet<String>` of block labels plus an
+//!   `induction_vars` set.  It is consumed by register allocation
+//!   (live-range splitting, spill-weight heuristics) and the
+//!   scheduler.
+//!
+//! The two types are kept **separate** on purpose:
+//!
+//! 1. **Crate boundary.** `vuma-scg` has no dependency on
+//!    `vuma-codegen`; merging the two `LoopDetector`s would either
+//!    pull `IRFunction` into `vuma-scg` (bad — SCG is a frontend IR)
+//!    or pull `SCG` into `vuma-codegen` (bad — codegen should depend
+//!    on a stable IR, not the frontend graph).
+//!
+//! 2. **Result-type divergence.** `NaturalLoop` carries `NodeId`s and
+//!    `exits: HashSet<NodeId>` (used by SCG passes that rewire the
+//!    graph); `LoopInfo` carries block-label `String`s and an
+//!    `induction_vars: HashSet<IRValueId>` (used by regalloc to weight
+//!    live ranges).  Unifying would require one of the two consumers
+//!    to translate, which is exactly what they already do today via
+//!    the SCG→IR lowering step.
+//!
+//! 3. **Algorithm differences.** The SCG version computes its own
+//!    CFG-only dominator tree (see "Why a Separate Dominator
+//!    Computation?" above) because the SCG mixes DataFlow and
+//!    ControlFlow edges.  The regalloc version works on a pure CFG
+//!    (every `IRBlock` edge is control flow), so it can use a
+//!    simpler dominator computation that doesn't need an edge-kind
+//!    filter.
+//!
+//! **TODO (deferred):** if a future refactor moves loop detection
+//! into a shared `vuma-core` crate that both `vuma-scg` and
+//! `vuma-codegen` depend on, the two `LoopDetector`s could be unified
+//! as a generic `LoopDetector<G: ControlFlowGraph>` with `NaturalLoop`
+//! and `LoopInfo` as two result adaptors.  This is a non-trivial
+//! cross-crate refactor and is **not** done in Wave 33 to avoid
+//! destabilising regalloc.
 
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
