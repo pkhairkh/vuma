@@ -1350,7 +1350,7 @@ fn read_region(reader: &mut BinaryReader, index: usize) -> Result<SCGRegion, Des
 
     let id = RegionId::new(reader.read_u64_le(&ctx())?);
     let node_count = reader.read_u32_le(&format!("{}.node_count", ctx()))? as usize;
-    let mut nodes = hashbrown::HashSet::with_capacity(node_count);
+    let mut nodes = std::collections::HashSet::with_capacity(node_count);
     for j in 0..node_count {
         let nid = NodeId::new(reader.read_u64_le(&format!("{}.nodes[{}]", ctx(), j))?);
         nodes.insert(nid);

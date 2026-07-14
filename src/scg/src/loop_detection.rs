@@ -94,7 +94,7 @@
 //! cross-crate refactor and is **not** done in Wave 33 to avoid
 //! destabilising regalloc.
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::edge::EdgeKind;

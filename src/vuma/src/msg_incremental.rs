@@ -38,7 +38,7 @@ use crate::derivation::{Derivation, DerivationId, DerivationSource};
 use crate::msg::MSG;
 use crate::region::{Region, RegionId, RegionStatus};
 use crate::sync::{SyncEdge, SyncEdgeId};
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------

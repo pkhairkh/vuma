@@ -16,7 +16,7 @@
 //! | `Security`    | Information-flow / boundary constraints             |
 //! | `Liveness`    | The value is guaranteed to eventually be usable     |
 
-use hashbrown::HashSet;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

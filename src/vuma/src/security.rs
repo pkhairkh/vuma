@@ -24,7 +24,7 @@
 use crate::derivation::{Derivation, DerivationId};
 use crate::program_point::{NodeId, ProgramPoint};
 use crate::region::RegionId;
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

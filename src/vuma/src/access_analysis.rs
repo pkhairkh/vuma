@@ -24,7 +24,7 @@ use crate::address::Address;
 use crate::derivation::DerivationId;
 use crate::msg::MSG;
 use crate::region::RegionId;
-use hashbrown::HashMap;
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------

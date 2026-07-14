@@ -18,7 +18,7 @@
 //! queries over inferred regions, supporting optimization decisions about
 //! whether two regions can safely overlap or be merged.
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::edge::EdgeKind;
@@ -93,7 +93,7 @@ pub struct SCGRegion {
     /// The unique identifier of this region.
     pub id: RegionId,
     /// The set of nodes belonging to this region.
-    pub nodes: hashbrown::HashSet<NodeId>,
+    pub nodes: std::collections::HashSet<NodeId>,
     /// The nesting scope level (0 = top-level, higher = more deeply nested).
     pub scope_level: u32,
     /// Whether this region constitutes a security boundary.
@@ -112,7 +112,7 @@ impl SCGRegion {
     pub fn new(id: RegionId, deployment_target: DeploymentTarget) -> Self {
         Self {
             id,
-            nodes: hashbrown::HashSet::new(),
+            nodes: std::collections::HashSet::new(),
             scope_level: 0,
             security_boundary: false,
             deployment_target,
@@ -127,7 +127,7 @@ impl SCGRegion {
     ) -> Self {
         Self {
             id,
-            nodes: hashbrown::HashSet::new(),
+            nodes: std::collections::HashSet::new(),
             scope_level,
             security_boundary: false,
             deployment_target,
@@ -142,7 +142,7 @@ impl SCGRegion {
     ) -> Self {
         Self {
             id,
-            nodes: hashbrown::HashSet::new(),
+            nodes: std::collections::HashSet::new(),
             scope_level: 0,
             security_boundary,
             deployment_target,

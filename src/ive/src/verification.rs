@@ -328,14 +328,14 @@ impl VerificationEngine {
         // interprocedural Call/Return edges (which connect real function
         // definitions) and ControlFlow edges that don't enter/exit
         // FunctionEntry/FunctionReturn nodes.
-        let fn_entry_nodes: hashbrown::HashSet<u64> = scg.nodes()
+        let fn_entry_nodes: std::collections::HashSet<u64> = scg.nodes()
             .filter(|n| matches!(
                 n.node_type,
                 NodeType::Control
             ) && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionEntry))
             .map(|n| n.id.as_u64())
             .collect();
-        let fn_return_nodes: hashbrown::HashSet<u64> = scg.nodes()
+        let fn_return_nodes: std::collections::HashSet<u64> = scg.nodes()
             .filter(|n| matches!(
                 n.node_type,
                 NodeType::Control
@@ -818,12 +818,12 @@ impl VerificationEngine {
         // these create dead-end branches that cause false-positive leak
         // reports. The real control flow is already captured by the
         // sequential ControlFlow chain through the main nodes.
-        let fn_entry_cleanup_ids: hashbrown::HashSet<CleanupNodeId> = scg.nodes()
+        let fn_entry_cleanup_ids: std::collections::HashSet<CleanupNodeId> = scg.nodes()
             .filter(|n| matches!(n.node_type, NodeType::Control)
                 && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionEntry))
             .filter_map(|n| node_map.get(&n.id).copied())
             .collect();
-        let fn_return_cleanup_ids: hashbrown::HashSet<CleanupNodeId> = scg.nodes()
+        let fn_return_cleanup_ids: std::collections::HashSet<CleanupNodeId> = scg.nodes()
             .filter(|n| matches!(n.node_type, NodeType::Control)
                 && matches!(&n.payload, NodePayload::Control(c) if c.kind == vuma_scg::node::ControlKind::FunctionReturn))
             .filter_map(|n| node_map.get(&n.id).copied())

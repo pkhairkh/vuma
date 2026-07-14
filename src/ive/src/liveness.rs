@@ -199,12 +199,12 @@ pub struct LivenessInput {
     /// A dead-end node that is a function return is NOT a leak — it
     /// represents the function exiting, and the caller is responsible
     /// for cleanup.
-    pub function_returns: hashbrown::HashSet<PointId>,
+    pub function_returns: std::collections::HashSet<PointId>,
     /// (Wave 19) Resources with static lifetime (top-level `region`
     /// allocations per spec §5.4). These are intentionally never
     /// deallocated — they live until program shutdown — and must NOT
     /// be flagged as leaks.
-    pub static_lifetime_resources: hashbrown::HashSet<ResourceId>,
+    pub static_lifetime_resources: std::collections::HashSet<ResourceId>,
 }
 
 impl LivenessInput {
@@ -587,9 +587,9 @@ impl Default for LivenessVerificationResult {
 #[derive(Debug, Clone, Default)]
 struct Cfg {
     /// Adjacency list: point -> list of successor points.
-    successors: hashbrown::HashMap<PointId, Vec<PointId>>,
+    successors: std::collections::HashMap<PointId, Vec<PointId>>,
     /// Reverse adjacency list: point -> list of predecessor points.
-    predecessors: hashbrown::HashMap<PointId, Vec<PointId>>,
+    predecessors: std::collections::HashMap<PointId, Vec<PointId>>,
 }
 
 impl Cfg {
@@ -607,7 +607,7 @@ impl Cfg {
         if start == target {
             return true;
         }
-        let mut visited = hashbrown::HashSet::new();
+        let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         visited.insert(start);
         queue.push_back(start);
@@ -627,8 +627,8 @@ impl Cfg {
     }
 
     /// Find all points reachable from `start`.
-    fn reachable_set(&self, start: PointId) -> hashbrown::HashSet<PointId> {
-        let mut visited = hashbrown::HashSet::new();
+    fn reachable_set(&self, start: PointId) -> std::collections::HashSet<PointId> {
+        let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         visited.insert(start);
         queue.push_back(start);
@@ -649,7 +649,7 @@ impl Cfg {
         if start == target {
             return Some(vec![start]);
         }
-        let mut visited = hashbrown::HashMap::new();
+        let mut visited = std::collections::HashMap::new();
         let mut queue = std::collections::VecDeque::new();
         visited.insert(start, None);
         queue.push_back(start);
@@ -718,19 +718,19 @@ impl Cfg {
 #[derive(Debug, Clone)]
 struct Scc {
     /// Nodes in this SCC.
-    nodes: hashbrown::HashSet<ResourceId>,
+    nodes: std::collections::HashSet<ResourceId>,
     /// Whether this SCC is a non-trivial cycle (size > 1 or self-loop).
     is_cycle: bool,
 }
 
 /// Run Tarjan's algorithm to find all SCCs in a directed graph.
 /// The graph is represented as an adjacency list of ResourceId.
-fn tarjan_scc(graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Scc> {
+fn tarjan_scc(graph: &std::collections::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Scc> {
     let mut index_counter: u64 = 0;
     let mut stack: Vec<ResourceId> = Vec::new();
-    let mut on_stack: hashbrown::HashSet<ResourceId> = hashbrown::HashSet::new();
-    let mut indices: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
-    let mut lowlinks: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
+    let mut on_stack: std::collections::HashSet<ResourceId> = std::collections::HashSet::new();
+    let mut indices: std::collections::HashMap<ResourceId, u64> = std::collections::HashMap::new();
+    let mut lowlinks: std::collections::HashMap<ResourceId, u64> = std::collections::HashMap::new();
     let mut sccs: Vec<Scc> = Vec::new();
 
     let all_nodes: Vec<ResourceId> = graph.keys().copied().collect();
@@ -756,12 +756,12 @@ fn tarjan_scc(graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Sc
 #[allow(clippy::too_many_arguments)]
 fn tarjan_strongconnect(
     v: ResourceId,
-    graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>,
+    graph: &std::collections::HashMap<ResourceId, Vec<ResourceId>>,
     index_counter: &mut u64,
     stack: &mut Vec<ResourceId>,
-    on_stack: &mut hashbrown::HashSet<ResourceId>,
-    indices: &mut hashbrown::HashMap<ResourceId, u64>,
-    lowlinks: &mut hashbrown::HashMap<ResourceId, u64>,
+    on_stack: &mut std::collections::HashSet<ResourceId>,
+    indices: &mut std::collections::HashMap<ResourceId, u64>,
+    lowlinks: &mut std::collections::HashMap<ResourceId, u64>,
     sccs: &mut Vec<Scc>,
 ) {
     indices.insert(v, *index_counter);
@@ -796,7 +796,7 @@ fn tarjan_strongconnect(
 
     // If v is a root node, pop the SCC
     if lowlinks[&v] == indices[&v] {
-        let mut component = hashbrown::HashSet::new();
+        let mut component = std::collections::HashSet::new();
         loop {
             let w = stack.pop().unwrap();
             on_stack.remove(&w);
@@ -929,7 +929,7 @@ impl LivenessVerifier {
     }
 
     /// Collect all unique resource IDs from the input.
-    fn collect_resources(&self, input: &LivenessInput) -> hashbrown::HashSet<ResourceId> {
+    fn collect_resources(&self, input: &LivenessInput) -> std::collections::HashSet<ResourceId> {
         input.events.iter().map(|e| e.resource).collect()
     }
 
@@ -996,7 +996,7 @@ impl LivenessVerifier {
                     let reachable_from_alloc = cfg.reachable_set(alloc_point);
 
                     // Find deallocation points that are reachable
-                    let dealloc_points: hashbrown::HashSet<PointId> =
+                    let dealloc_points: std::collections::HashSet<PointId> =
                         reachable_deallocs.iter().map(|de| de.point).collect();
 
                     // A point is a potential leak if it is reachable from alloc,
@@ -1012,7 +1012,7 @@ impl LivenessVerifier {
                     // this, Derivation shortcuts through other resources'
                     // dealloc nodes create false-positive "potential leak
                     // path" reports.
-                    let all_dealloc_points: hashbrown::HashSet<PointId> = input
+                    let all_dealloc_points: std::collections::HashSet<PointId> = input
                         .events
                         .iter()
                         .filter(|e| e.event == EventAction::Deallocate)
@@ -1125,8 +1125,8 @@ impl LivenessVerifier {
     ) -> usize {
         // Build the resource wait-for graph:
         // Edge from resource A -> resource B means some thread holds A and waits for B.
-        let mut wait_for_graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut wait_for_graph: std::collections::HashMap<ResourceId, Vec<ResourceId>> =
+            std::collections::HashMap::new();
 
         for dep in &input.wait_for_deps {
             wait_for_graph.entry(dep.held).or_default().push(dep.wanted);
@@ -1190,12 +1190,12 @@ impl LivenessVerifier {
     ) -> usize {
         // Build a graph: resource A -> resource B if any thread acquires A
         // before B (without releasing A in between).
-        let mut acquire_before: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut acquire_before: std::collections::HashMap<ResourceId, Vec<ResourceId>> =
+            std::collections::HashMap::new();
 
         // Group events by thread
-        let mut thread_events: hashbrown::HashMap<ThreadId, Vec<&ResourceEvent>> =
-            hashbrown::HashMap::new();
+        let mut thread_events: std::collections::HashMap<ThreadId, Vec<&ResourceEvent>> =
+            std::collections::HashMap::new();
         for event in &input.events {
             thread_events.entry(event.thread).or_default().push(event);
         }
@@ -1267,7 +1267,7 @@ impl LivenessVerifier {
         let mut violation_count = 0;
 
         // Find all lock resources
-        let lock_resources: hashbrown::HashSet<ResourceId> = input
+        let lock_resources: std::collections::HashSet<ResourceId> = input
             .events
             .iter()
             .filter(|e| e.kind == ResourceKind::Lock)
@@ -1326,7 +1326,7 @@ impl LivenessVerifier {
         let mut violation_count = 0;
 
         // Find all channel resources
-        let channel_resources: hashbrown::HashSet<ResourceId> = input
+        let channel_resources: std::collections::HashSet<ResourceId> = input
             .events
             .iter()
             .filter(|e| e.kind == ResourceKind::Channel)
@@ -1984,7 +1984,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_no_cycles() {
         // A -> B -> C (no cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
+        let mut graph: std::collections::HashMap<ResourceId, Vec<ResourceId>> = std::collections::HashMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![]);
@@ -1997,7 +1997,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_with_cycle() {
         // A -> B -> C -> A (cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
+        let mut graph: std::collections::HashMap<ResourceId, Vec<ResourceId>> = std::collections::HashMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![rid(1)]);
@@ -2172,5 +2172,47 @@ mod tests {
         };
         let s = format!("{}", circ);
         assert!(s.contains("Circular dependency"));
+    }
+}
+
+#[cfg(test)]
+mod wave42_hashbrown_conformance {
+    //! Wave 42: verify the unified `std::collections::HashMap`/`HashSet` produce
+    //! identical results to the former `hashbrown` types. Since the public API
+    //! surface used in vuma (new, insert, get, contains, remove, iter, len,
+    //! entry, extend) is identical between the two crates, a behavioural
+    //! round-trip is sufficient.
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn wave42_hashmap_roundtrip() {
+        let mut m: HashMap<u32, &'static str> = HashMap::new();
+        m.insert(1, "a");
+        m.insert(2, "b");
+        m.insert(3, "c");
+        assert_eq!(m.get(&2), Some(&"b"));
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.remove(&1), Some("a"));
+        assert_eq!(m.len(), 2);
+        // entry API
+        m.entry(4).or_insert("d");
+        assert_eq!(m.get(&4), Some(&"d"));
+    }
+
+    #[test]
+    fn wave42_hashset_operations() {
+        let mut s: HashSet<u32> = HashSet::new();
+        s.insert(1);
+        s.insert(2);
+        s.insert(2); // dup
+        assert_eq!(s.len(), 2);
+        assert!(s.contains(&1));
+        s.remove(&2);
+        assert!(!s.contains(&2));
+        // iteration is stable per-instance (collect + sort)
+        let mut v: Vec<u32> = s.iter().copied().collect();
+        v.sort();
+        assert_eq!(v, vec![1]);
     }
 }

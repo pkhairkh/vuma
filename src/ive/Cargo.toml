@@ -15,4 +15,3 @@ vuma-bd.workspace = true
 vuma-scg.workspace = true
 serde.workspace = true
 log.workspace = true
-hashbrown.workspace = true

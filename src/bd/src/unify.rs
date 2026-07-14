@@ -38,7 +38,7 @@ use crate::capd::CapD;
 use crate::descriptor::BD;
 use crate::reld::RelD;
 use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep};
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

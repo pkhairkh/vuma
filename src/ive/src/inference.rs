@@ -20,7 +20,7 @@ use crate::constraint::{
     ComplexityConstraint, Constraint, LivenessConstraint, ResourceFlowConstraint,
     SecurityConstraint, TemporalConstraint,
 };
-use hashbrown::HashMap;
+use std::collections::HashMap;
 use std::fmt;
 use vuma_bd::descriptor::BD;
 use vuma_bd::inference::{

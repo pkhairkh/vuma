@@ -28,7 +28,7 @@
 //! Dominators are computed using the Lengauer-Tarjan algorithm, which runs in
 //! near-linear time O(E α(V, E)), where α is the inverse Ackermann function.
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::SCG;
 use crate::node::NodeId;
