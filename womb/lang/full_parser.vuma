@@ -41,24 +41,38 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-// Parser state (32 bytes on heap):
+// Parser state (40 bytes on heap):
 //   0-7:   tokens ptr (u64)
 //   8-11:  pos (u32)
 //   12-15: token count (u32)
 //   16-23: ast arena ptr (u64)
 //   24-27: ast count (u32)
 //   28-31: ast capacity (u32)
+//   32-39: src ptr (u64) — pointer to the raw source bytes (Wave 48)
+//
+// Wave 48 added the src pointer so the parser can compute name hashes
+// (FNV-1a 32-bit) for identifiers, callees, let-bound names, and function
+// names. Without it, the IR builder's symbol table and the codegen's
+// print_int dispatch had nothing to key on.
 
 fn fparser_new(tokens: Address, token_count: u32, ast: Address, ast_cap: u32) -> Address {
-    p = __vuma_alloc(32);
+    p = __vuma_alloc(40);
     store_u64(p, 0, tokens);
     store_u32(p, 8, 0);          // pos
     store_u32(p, 12, token_count);
     store_u64(p, 16, ast);
     store_u32(p, 24, 0);         // ast count (stored at ast+0 too)
     store_u32(p, 28, ast_cap);
+    store_u64(p, 32, 0);         // src ptr — caller must call fparser_set_src
     return p;
 }
+
+// Wave 48: bind the source buffer so the parser can hash identifiers.
+fn fparser_set_src(p: Address, src: Address) {
+    store_u64(p, 32, src);
+}
+
+fn fparser_src(p: Address) -> u64 { return load_u64(p, 32); }
 
 fn fparser_pos(p: Address) -> u32 { return load_u32(p, 8); }
 fn fparser_set_pos(p: Address, pos: u32) { store_u32(p, 8, pos); }
@@ -75,6 +89,39 @@ fn peek_val(p: Address) -> u64 {
     tokens: u64 = fparser_tokens(p);
     pos: u32 = fparser_pos(p);
     return load_u64(tokens, pos * 24 + 12);
+}
+
+// Wave 48: peek the source-span start/len of the current token. The token
+// layout is [type: u32][start: u32][len: u32][value: u64] = 24 bytes, so
+// `start` lives at offset 4 and `len` lives at offset 8 within the token.
+fn peek_start(p: Address) -> u32 {
+    tokens: u64 = fparser_tokens(p);
+    pos: u32 = fparser_pos(p);
+    return load_u32(tokens, pos * 24 + 4);
+}
+
+fn peek_len(p: Address) -> u32 {
+    tokens: u64 = fparser_tokens(p);
+    pos: u32 = fparser_pos(p);
+    return load_u32(tokens, pos * 24 + 8);
+}
+
+// Wave 48: FNV-1a 32-bit name hash over src[start..start+len]. Used to give
+// identifiers a stable u32 handle for the IR builder's symbol table and for
+// the codegen's print_int dispatch (the codegen gets the print_int hash as
+// a parameter at emit time — see codegen_emit).
+//
+// FNV-1a 32-bit: hash = (hash ^ byte) * 0x01000193, with offset_basis 0x811C9DC5.
+fn name_hash(src: Address, start: u32, len: u32) -> u32 {
+    hash: u32 = 2166136261;   // 0x811C9DC5
+    i: u32 = 0;
+    while i < len {
+        c: u32 = *(src + start + i);
+        hash = hash ^ c;
+        hash = hash * 16777619;   // 0x01000193
+        i = i + 1;
+    }
+    return hash;
 }
 
 fn advance(p: Address) {
@@ -150,22 +197,37 @@ fn parse_primary_full(p: Address) -> u32 {
     }
     
     if t == 1 {  // IDENT — variable, function call, or field access
+        // Wave 48: capture the identifier's source span BEFORE advancing so
+        // we can hash the name for the IR builder's symbol table and the
+        // codegen's print_int dispatch.
+        name_start: u32 = peek_start(p);
+        name_len: u32 = peek_len(p);
+        src: u64 = fparser_src(p);
+        name_hash_val: u32 = name_hash(src, name_start, name_len);
         advance(p);
         // Check for function call: ident '(' args ')'
         if peek_type(p) == 61 {  // LPAREN
             advance(p);
             arg_count: u32 = 0;
+            arg0_idx: u32 = 0;
             if peek_type(p) != 62 {  // not RPAREN
                 done: u32 = 0;
                 while done == 0 {
-                    parse_expr_full(p);
+                    arg_idx: u32 = parse_expr_full(p);
+                    // Wave 48: stash the first arg's AST node index in the
+                    // NK_CALL's `val` field (lower 32 bits). Multi-arg calls
+                    // would need a side buffer — TODO, not needed for
+                    // print_int which takes exactly 1 arg.
+                    if arg_count == 0 { arg0_idx = arg_idx; }
                     arg_count = arg_count + 1;
                     if peek_type(p) == 68 { advance(p); }  // COMMA
                     else { done = 1; }
                 }
             }
             expect(p, 62);  // RPAREN
-            return ast_node(p, NK_CALL, 0, 0, arg_count, 0, 0);
+            // NK_CALL: c1 = callee name hash, c3 = arg_count,
+            //          val (lower 32) = arg0 AST node index.
+            return ast_node(p, NK_CALL, name_hash_val, 0, arg_count, arg0_idx, 0);
         }
         // Check for field access: ident '.' ident
         if peek_type(p) == 69 {  // DOT
@@ -174,7 +236,8 @@ fn parse_primary_full(p: Address) -> u32 {
             if peek_type(p) == 1 { advance(p); }
             return ast_node(p, NK_FIELD_ACCESS, 0, 0, 0, 0, 0);
         }
-        return ast_node(p, NK_IDENT, 0, 0, 0, 0, 0);
+        // Variable reference. NK_IDENT: val (lower 32) = name hash.
+        return ast_node(p, NK_IDENT, 0, 0, 0, name_hash_val, 0);
     }
     
     if t == 61 {  // LPAREN — grouped expression
@@ -365,16 +428,42 @@ fn parse_closure(p: Address) -> u32 {
 
 // ── Statement parsing ──
 
+// parse_block_full: parse a { stmt* } block.
+//
+// Wave 48 fix: the old design assumed stmts occupied consecutive arena
+// indices (stmt_start, stmt_start+1, ...). This is WRONG because
+// parse_stmt_full allocates child expression nodes BEFORE the stmt's root
+// node — e.g. for `print_int(42);`, the NK_INT(42) arg is allocated at
+// index N, then NK_CALL at N+1. The next stmt starts at N+2, not N+1.
+// Iterating `stmt_start + i` would visit child nodes as if they were
+// statements, missing real stmts entirely.
+//
+// Fix: allocate a side buffer that records each stmt's ACTUAL node index
+// (returned by parse_stmt_full). Store the buffer's address in NK_BLOCK's
+// `val` field. irb_lower_block reads the buffer to find each stmt.
+//
+// NK_BLOCK layout (Wave 48):
+//   c1  = stmt_start (unused, kept for debugging — the old field)
+//   c2  = stmt_count
+//   val = side buffer ptr (heap-allocated array of u32 stmt indices)
+//
+// The side buffer is never freed (the compiler process exits after one
+// compile; a future wave can add arena-based allocation to reclaim it).
 fn parse_block_full(p: Address) -> u32 {
     expect(p, 63);  // LBRACE
-    stmt_start: u32 = load_u32(fparser_ast(p), 0);
+    stmt_start: u32 = load_u32(fparser_ast(p), 0);  // kept for debugging
+    // Side buffer: 4 bytes per stmt index, max 64 stmts per block = 256 bytes.
+    stmt_indices = __vuma_alloc(256);
     stmt_count: u32 = 0;
     while peek_type(p) != 64 {  // RBRACE
-        parse_stmt_full(p);
+        idx: u32 = parse_stmt_full(p);
+        if stmt_count < 64 {
+            store_u32(stmt_indices, stmt_count * 4, idx);
+        }
         stmt_count = stmt_count + 1;
     }
     expect(p, 64);
-    return ast_node(p, NK_BLOCK, stmt_start, stmt_count, 0, 0, 0);
+    return ast_node(p, NK_BLOCK, stmt_start, stmt_count, 0, stmt_indices, 0);
 }
 
 fn parse_stmt_full(p: Address) -> u32 {
@@ -430,7 +519,16 @@ fn parse_stmt_full(p: Address) -> u32 {
     if t == 11 {
         advance(p);
         // let ident (: type)? = expr
-        if peek_type(p) == 1 { advance(p); }  // ident
+        var_hash: u32 = 0;
+        if peek_type(p) == 1 {
+            // Wave 48: capture the variable name's hash so the IR builder
+            // can insert it into the symbol table.
+            name_start: u32 = peek_start(p);
+            name_len: u32 = peek_len(p);
+            src: u64 = fparser_src(p);
+            var_hash = name_hash(src, name_start, name_len);
+            advance(p);  // ident
+        }
         if peek_type(p) == 70 {  // COLON — type annotation
             advance(p);
             // Skip type name (possibly qualified: A::B::C)
@@ -440,9 +538,10 @@ fn parse_stmt_full(p: Address) -> u32 {
             if peek_type(p) == 48 { advance(p); if peek_type(p) == 1 { advance(p); } if peek_type(p) == 49 { advance(p); } }
         }
         expect(p, 45);  // =
-        expr = parse_expr_full(p);
+        init_expr: u32 = parse_expr_full(p);
         expect(p, 67);  // SEMI
-        return ast_node(p, NK_LET, expr, 0, 0, 0, 0);
+        // NK_LET: c1 = init expr node, val (lower 32) = var name hash.
+        return ast_node(p, NK_LET, init_expr, 0, 0, var_hash, 0);
     }
     
     // Expression statement
@@ -456,7 +555,16 @@ fn parse_stmt_full(p: Address) -> u32 {
 // Parse a function definition
 fn parse_fn_def_full(p: Address) -> u32 {
     advance(p);  // skip 'fn'
-    if peek_type(p) == 1 { advance(p); }  // function name
+    // Wave 48: capture the function name's hash so the IR builder can
+    // locate `main` (the codegen entry point) by hash.
+    fn_hash: u32 = 0;
+    if peek_type(p) == 1 {
+        name_start: u32 = peek_start(p);
+        name_len: u32 = peek_len(p);
+        src: u64 = fparser_src(p);
+        fn_hash = name_hash(src, name_start, name_len);
+        advance(p);  // function name
+    }
     
     // Generic params: <T>
     if peek_type(p) == 48 {  // '<'
@@ -493,7 +601,8 @@ fn parse_fn_def_full(p: Address) -> u32 {
     }
     
     body: u32 = parse_block_full(p);
-    return ast_node(p, NK_FN_DEF, body, 0, param_count, 0, 0);
+    // NK_FN_DEF: c1 = body node, c3 = param_count, val (lower 32) = fn name hash.
+    return ast_node(p, NK_FN_DEF, body, 0, param_count, fn_hash, 0);
 }
 
 // Parse struct definition
@@ -576,4 +685,29 @@ fn parse_program_full(p: Address) -> u32 {
         else { advance(p); }  // skip unknown
     }
     return item_count;
+}
+
+// ============================================================================
+// Wave 48 — public pipeline entry point
+// ============================================================================
+// `parse` is the contract the bootstrap driver (full_lexer.vuma::main) calls.
+// Inputs:
+//   tokens       — heap pointer to the token array (24 bytes per token)
+//   token_count  — number of valid tokens in `tokens`
+//   src          — heap pointer to the raw source bytes (for name hashing)
+//   ast          — heap pointer to the AST arena (caller pre-allocates;
+//                  first 4 bytes hold the live node count, then 40-byte nodes)
+//   ast_cap      — max number of AST nodes the arena can hold
+// Returns:
+//   number of top-level items parsed (fn defs + struct/enum/extern/import decls)
+//
+// The AST arena's first u32 (offset 0) is the live node count; subsequent
+// nodes are 40 bytes each starting at offset 8. The caller reads this count
+// to drive IR lowering.
+fn parse(tokens: Address, token_count: u32, src: Address, ast: Address, ast_cap: u32) -> u32 {
+    p: Address = fparser_new(tokens, token_count, ast, ast_cap);
+    fparser_set_src(p, src);
+    n: u32 = parse_program_full(p);
+    __vuma_free(p, 40);
+    return n;
 }

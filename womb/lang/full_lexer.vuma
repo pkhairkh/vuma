@@ -6,20 +6,34 @@
 // Token layout: [type: u32][start: u32][len: u32][value: u64] = 24 bytes
 //
 // ============================================================================
-// Wave 47 — canonical bootstrap entry point (self-hosted compiler driver)
+// Wave 48 — full bootstrap pipeline (lex → parse → AST → IR → codegen → ELF)
 // ============================================================================
-// This file is the ENTRY POINT of the consolidated self-hosted VUMA compiler.
-// Canonical pipeline (Wave 47):
-//     full_lexer.vuma  →  full_parser.vuma  →  ir_builder.vuma
-//                                                  ↓
-//                                       codegen.vuma  →  elf.vuma
+// This file is the ENTRY POINT of the self-hosted VUMA compiler. Wave 48
+// wires the full pipeline end-to-end:
 //
-// Wave 47 test: run this compiler on womb/lang/hello.vuma; expect exit code 0.
-//   (Conceptual — the .vuma bootstrap compiler is not yet wired into the Rust
-//    test harness. To exercise the Rust-side pipeline on this input instead:
-//      cargo run -- compile womb/lang/hello.vuma
-//    which parses + lowers + codegens the file through the canonical Rust
-//    pipeline. The self-hosted .vuma driver below is the bootstrapping target.)
+//     ┌─ full_lexer.vuma (THIS FILE) ──────────────────────────────┐
+//     │ main():                                                   │
+//     │   1. read womb/lang/hello.vuma into a heap buffer         │
+//     │   2. full_lex()              → token stream               │
+//     │   3. parse()                 → AST arena     [full_parser]│
+//     │   4. scg_construct()         → (stub, skip)  [ir_builder] │
+//     │   5. irb_build_main()        → IR buffer     [ir_builder] │
+//     │   6. bd_infer()              → (stub, i64)   [ir_builder] │
+//     │   7. ive_verify()            → (stub, no-op) [ir_builder] │
+//     │   8. codegen_emit()          → x86_64 bytes  [codegen]    │
+//     │   9. write_elf64()           → a.out         [elf]        │
+//     │  10. exit 0 on success                                    │
+//     └───────────────────────────────────────────────────────────┘
+//
+// Wave 48 self-host test:
+//   $ <rust-vuma-compiler> womb/lang/full_lexer.vuma -o vumac
+//   $ ./vumac                         # reads womb/lang/hello.vuma
+//   $ ./a.out                         # prints "42\n", exits 0
+//
+// (The .vuma bootstrap compiler is not yet wired into the Rust test
+//  harness — `cargo check` is unaffected. The contract above is the
+//  Wave 48 self-host target; a future wave adds the Rust-side test that
+//  invokes the compiled `vumac` on hello.vuma and checks a.out's output.)
 //
 // The main() at the bottom of this file:
 //   1. Opens the source file at INPUT_PATH (TODO: replace with argv[1] — see
@@ -28,7 +42,8 @@
 //   2. Reads the file contents into a heap buffer via the raw `open`/`read`
 //      POSIX syscall stubs (same ABI as W45 std/io).
 //   3. Lexes the buffer with full_lex().
-//   4. Exits 0 on success (token_count > 0), 1 on I/O or lex failure.
+//   4. Drives parse → IR → codegen → ELF (Wave 48 wiring).
+//   5. Writes the resulting ELF to "a.out" and exits 0 on success.
 
 extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
@@ -36,7 +51,11 @@ extern "C" {
     // POSIX syscall stubs (linked by the codegen backend — see W45 std/io and
     // the per-ISA syscall stub tables in src/codegen/*). These replace the
     // hardcoded 47-byte source that lived in the deleted src/bootstrap POC.
-    fn open(path: Address, flags: i32) -> i32;
+    //
+    // Wave 48: `open` now takes a 3rd `mode` arg (required for O_CREAT on
+    // Linux; ignored when O_CREAT is not set, so existing O_RDONLY reads
+    // still work by passing mode=0).
+    fn open(path: Address, flags: i32, mode: i32) -> i32;
     fn read(fd: i32, buf: Address, count: i64) -> i64;
     fn close(fd: i32) -> i32;
     fn write(fd: i32, buf: Address, count: i64) -> i64;
@@ -48,6 +67,28 @@ extern "C" {
     // harmless, but calling them would fail to link until the runtime adds
     // them). main() therefore uses INPUT_PATH as a fixed fallback; once the
     // intrinsics land, replace read_file(INPUT_PATH) with an argv[1] lookup.
+
+    // ── Wave 48: cross-module pipeline entry points ──
+    // Each lives in its own .vuma file; the runtime linker resolves the calls
+    // (same extern "C" model as the POSIX stubs above). The driver calls them
+    // in pipeline order: lex → parse → scg(stub) → ir_build → bd(stub) →
+    // ive(stub) → codegen → elf.
+    //
+    // Why extern "C" and not VUMA imports? The bootstrap's cross-module ABI
+    // is settled at the extern "C" level (it's how the runtime already
+    // resolves __vuma_alloc / open / read / etc.). A VUMA-native `import`
+    // mechanism (with qualified calls like `full_parser::parse(...)`) is a
+    // future runtime change outside Wave 48's file ownership. The extern
+    // declarations below are the contract; the bodies live in the named
+    // .vuma files and are linked at compile time.
+    fn name_hash(src: Address, start: u32, len: u32) -> u32;       // full_parser.vuma
+    fn parse(tokens: Address, token_count: u32, src: Address, ast: Address, ast_cap: u32) -> u32;  // full_parser.vuma
+    fn scg_construct(ast: Address) -> u32;                          // ir_builder.vuma (stub)
+    fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32;  // ir_builder.vuma
+    fn bd_infer(ir_buf: Address) -> u32;                            // ir_builder.vuma (stub)
+    fn ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
+    fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u32) -> u32;  // codegen.vuma
+    fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) -> u32;  // elf.vuma
 }
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
@@ -500,38 +541,207 @@ fn input_path() -> Address {
 // buffer and we return only the length — same pattern as the W45 std/io
 // raw-syscall helpers.) `path` is freed by the caller.
 fn read_file_into(path: Address, buf: Address, cap: i64) -> i64 {
-    fd: i32 = open(path, 0);   // O_RDONLY = 0
+    fd: i32 = open(path, 0, 0);   // O_RDONLY = 0, mode = 0 (ignored)
     if fd < 0 { return -1; }
     n: i64 = read(fd, buf, cap);
     close(fd);
     return n;
 }
 
-// Wave 47 bootstrap entry point.
-//   exit 0  →  source file opened, read, and lexed (≥1 token produced)
-//   exit 1  →  open/read failure or lex produced zero tokens
+// ============================================================================
+// Wave 48 — string-literal helpers + full pipeline driver
+// ============================================================================
+
+// Build the NUL-terminated string "main" in a 5-byte heap buffer.
+// Used to compute main_hash = name_hash("main") so irb_build_main can
+// locate the entry function by hash. Caller frees with __vuma_free(ptr, 5).
+fn main_str() -> Address {
+    p = __vuma_alloc(5);
+    *(p + 0) = 109;  // m
+    *(p + 1) = 97;   // a
+    *(p + 2) = 105;  // i
+    *(p + 3) = 110;  // n
+    *(p + 4) = 0;    // NUL
+    return p;
+}
+
+// Build the NUL-terminated string "print_int" in a 10-byte heap buffer.
+// Used to compute print_int_hash = name_hash("print_int") so codegen_emit
+// can dispatch IR_CALL targets. Caller frees with __vuma_free(ptr, 10).
+fn print_int_str() -> Address {
+    p = __vuma_alloc(10);
+    *(p + 0) = 112;   // p
+    *(p + 1) = 114;   // r
+    *(p + 2) = 105;   // i
+    *(p + 3) = 110;   // n
+    *(p + 4) = 116;   // t
+    *(p + 5) = 95;    // _
+    *(p + 6) = 105;   // i
+    *(p + 7) = 110;   // n
+    *(p + 8) = 116;   // t
+    *(p + 9) = 0;     // NUL
+    return p;
+}
+
+// Build the NUL-terminated string "a.out" in a 6-byte heap buffer.
+// This is the output path for the emitted ELF executable. The caller frees
+// with __vuma_free(ptr, 6). The file is created with mode 0o755 so it's
+// executable after the ELF write completes.
+fn output_path() -> Address {
+    p = __vuma_alloc(6);
+    *(p + 0) = 97;    // a
+    *(p + 1) = 46;    // .
+    *(p + 2) = 111;   // o
+    *(p + 3) = 117;   // u
+    *(p + 4) = 116;   // t
+    *(p + 5) = 0;     // NUL
+    return p;
+}
+
+// Wave 48 bootstrap entry point — full pipeline driver.
+//
+// Exit codes:
+//   0  →  source compiled to a.out successfully (a.out is chmod +x and
+//          runnable; running it should produce the hello.vuma output and
+//          exit with the hello.vuma main()'s return value)
+//   1  →  failure at any pipeline stage (I/O, lex, parse, IR build, codegen,
+//          ELF write)
 //
 // ARGV TODO: once __vuma_argc/__vuma_argv exist, replace `input_path()` with a
 // lookup of argv[1] (read the C string, NUL-terminate, pass to read_file_into).
+// The output path "a.out" could similarly become argv[2] (or a -o flag).
 fn main() -> i32 {
-    cap: i64 = 65536;
+    // ── Pipeline buffer sizes ──
+    // These are conservative upper bounds for the hello.vuma subset. Larger
+    // programs would need growing logic (the parser/IR builder currently
+    // truncate at capacity — see ast_node's `if count >= cap { return count; }`
+    // and irb_emit's `if count >= cap { return; }`).
+    src_cap: i64 = 65536;          // 64 KiB source buffer
+    token_cap: u32 = 512;          // 512 tokens max
+    token_buf_size: i64 = 12288;   // 512 * 24 bytes/token
+    ast_cap: u32 = 256;            // 256 AST nodes max
+    ast_buf_size: i64 = 10248;     // 8 + 256 * 40
+    ir_cap: u32 = 1024;            // 1024 IR instructions max
+    ir_buf_size: i64 = 32776;      // 8 + 1024 * 32
+    code_cap: u32 = 4096;          // 4 KiB code buffer
+    // PRINT_INT_SIZE = 86 (matches codegen.vuma's constant; duplicated here
+    // because VUMA cross-module const imports don't exist yet — the extern
+    // block above covers functions only).
+    print_int_size: u32 = 86;
+
+    // Linux open(2) flags for write mode (O_WRONLY|O_CREAT|O_TRUNC = 577).
+    o_wronly_creat_trunc: i32 = 577;
+    // Mode 0o755 (rwxr-xr-x) so a.out is executable.
+    mode_755: i32 = 493;
+
+    // ── 1. Read source file ──
     path = input_path();
-    buf = __vuma_alloc(cap);
-    src_len: i64 = read_file_into(path, buf, cap);
+    src = __vuma_alloc(src_cap);
+    src_len: i64 = read_file_into(path, src, src_cap);
     __vuma_free(path, 21);
     if src_len < 0 {
-        __vuma_free(buf, cap);
+        __vuma_free(src, src_cap);
+        return 1;
+    }
+    src_len_u32: u32 = src_len & 0xFFFFFFFF;
+
+    // ── 2. Lex (source → token stream) ──
+    tokens = __vuma_alloc(token_buf_size);
+    token_count: u32 = full_lex(src, src_len_u32, tokens, token_cap);
+    if token_count == 0 {
+        __vuma_free(src, src_cap);
+        __vuma_free(tokens, token_buf_size);
         return 1;
     }
 
-    // Token buffer: 512 tokens × 24 bytes = 12288.
-    tokens = __vuma_alloc(12288);
-    token_count: u32 = full_lex(buf, src_len & 0xFFFFFFFF, tokens, 512);
+    // ── 3. Parse (tokens → AST arena) ──
+    //   AST arena layout: [count: u32][8 bytes header][node * count: 40 bytes]
+    //   The parser reads count from offset 0 and writes nodes starting at 8.
+    ast = __vuma_alloc(ast_buf_size);
+    store_u32(ast, 0, 0);   // count = 0
+    item_count: u32 = parse(tokens, token_count, src, ast, ast_cap);
+    if item_count == 0 {
+        __vuma_free(src, src_cap);
+        __vuma_free(tokens, token_buf_size);
+        __vuma_free(ast, ast_buf_size);
+        return 1;
+    }
 
-    // Cleanup.
-    __vuma_free(buf, cap);
-    __vuma_free(tokens, 12288);
+    // ── 4. SCG construction (STUB — bootstrap goes AST→IR direct) ──
+    //   scg_construct is a no-op stub (see ir_builder.vuma). The call is
+    //   here so the pipeline shape is final — a future wave replaces the
+    //   stub body with real SCG construction without touching main().
+    scg_construct(ast);
 
-    if token_count == 0 { return 1; }
+    // ── 5. IR construction (find main by name hash, lower its body) ──
+    //   main_hash = FNV-1a("main"). We build the literal "main" string,
+    //   hash it via name_hash (defined in full_parser.vuma, declared as
+    //   extern above), then free the string.
+    mstr = main_str();
+    main_hash: u32 = name_hash(mstr, 0, 4);
+    __vuma_free(mstr, 5);
+
+    //   IR buffer layout: [count: u32][cap: u32][instr * count: 32 bytes]
+    ir_buf = __vuma_alloc(ir_buf_size);
+    store_u32(ir_buf, 0, 0);       // count = 0
+    store_u32(ir_buf, 4, ir_cap);  // capacity
+    found: u32 = irb_build_main(ast, main_hash, ir_buf);
+    if found == 0 {
+        __vuma_free(src, src_cap);
+        __vuma_free(tokens, token_buf_size);
+        __vuma_free(ast, ast_buf_size);
+        __vuma_free(ir_buf, ir_buf_size);
+        return 1;
+    }
+
+    // ── 6. BD inference (STUB — all values are i64) ──
+    //   bd_infer is a no-op stub (see ir_builder.vuma). Real BD would
+    //   propagate bounded integer ranges forward from literals.
+    bd_infer(ir_buf);
+
+    // ── 7. IVE verification (STUB — no-op) ──
+    //   ive_verify is a no-op stub (see ir_builder.vuma). Real IVE would
+    //   check liveness and remove dead lets.
+    ive_verify(ir_buf);
+
+    // ── 8. x86_64 codegen (IR → machine code) ──
+    //   print_int_hash = FNV-1a("print_int"). codegen_emit uses this to
+    //   dispatch IR_CALL targets: a call whose callee_hash matches
+    //   print_int_hash emits a relative CALL to the print_int routine at
+    //   offset 0 of the code buffer; any other callee is skipped silently
+    //   (real calls are a TODO).
+    pistr = print_int_str();
+    print_int_hash: u32 = name_hash(pistr, 0, 9);
+    __vuma_free(pistr, 10);
+
+    code = __vuma_alloc(code_cap);
+    code_size: u32 = codegen_emit(ir_buf, code, code_cap, print_int_hash);
+
+    // ── 9. ELF64 emission (machine code → a.out) ──
+    //   The ELF entry point is at code offset PRINT_INT_SIZE (= 86), which
+    //   skips the print_int routine and lands on main. See elf.vuma's
+    //   write_elf64 for the entry_offset math.
+    out_path = output_path();
+    out_fd: i32 = open(out_path, o_wronly_creat_trunc, mode_755);
+    __vuma_free(out_path, 6);
+    if out_fd < 0 {
+        __vuma_free(src, src_cap);
+        __vuma_free(tokens, token_buf_size);
+        __vuma_free(ast, ast_buf_size);
+        __vuma_free(ir_buf, ir_buf_size);
+        __vuma_free(code, code_cap);
+        return 1;
+    }
+    success: u32 = write_elf64(code, code_size, out_fd, print_int_size);
+    close(out_fd);
+
+    // ── 10. Cleanup + exit ──
+    __vuma_free(src, src_cap);
+    __vuma_free(tokens, token_buf_size);
+    __vuma_free(ast, ast_buf_size);
+    __vuma_free(ir_buf, ir_buf_size);
+    __vuma_free(code, code_cap);
+
+    if success == 0 { return 1; }
     return 0;
 }

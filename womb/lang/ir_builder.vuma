@@ -194,10 +194,20 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         return rhs_vreg;
     }
     
-    // NK_CALL (5): c1=func_name_hash, c3=arg_count
+    // NK_CALL (5): c1=callee_name_hash, c3=arg_count, val (lower 32)=arg0_node_idx
+    // Wave 48: lower arg0 (the only arg we support in the bootstrap) and
+    // stash its vreg in the IR_CALL's `imm` field (lower 32 bits). The
+    // codegen reads this when emitting the print_int syscall sequence.
     if kind == 5 {
+        arg0_vreg: u32 = 0;
+        if c3 >= 1 {
+            arg0_node: u32 = val & 0xFFFFFFFF;
+            arg0_vreg = irb_lower_expr(b, ast, arg0_node);
+        }
         dst = irb_alloc_vreg(b);
-        irb_emit(b, IR_CALL, dst, c1, c3, 0, 0);
+        // IR_CALL: dst=result vreg, lhs=callee_hash, rhs=arg_count,
+        //          imm (lower 32)=arg0_vreg.
+        irb_emit(b, IR_CALL, dst, c1, c3, arg0_vreg, 0);
         return dst;
     }
     
@@ -224,10 +234,13 @@ fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
         return;
     }
     
-    // NK_LET (11): evaluate init expr, bind to variable
+    // NK_LET (11): c1=init expr node, val (lower 32)=var name hash.
+    // Wave 48: lower the init expression and insert (var_hash → vreg) into
+    // the symbol table so subsequent NK_IDENT lookups resolve to the same vreg.
     if kind == 11 {
         init_vreg: u32 = irb_lower_expr(b, ast, c1);
-        // TODO: bind to symbol table
+        var_hash: u32 = val & 0xFFFFFFFF;
+        irb_sym_insert(b, var_hash, init_vreg);
         return;
     }
     
@@ -264,14 +277,25 @@ fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
     irb_lower_expr(b, ast, node_idx);
 }
 
-// Lower a block (NK_BLOCK: c1=stmt_start, c2=stmt_count)
+// Lower a block.
+// NK_BLOCK layout (Wave 48):
+//   c1  = stmt_start (unused, kept for debugging)
+//   c2  = stmt_count
+//   val = side buffer ptr (heap array of u32 stmt node indices)
+//
+// Wave 48 fix: the old code iterated `stmt_start + i` assuming stmts were
+// at consecutive arena indices. This was wrong (child expr nodes are
+// interleaved), so it visited child nodes as statements and missed real
+// stmts. The parser now records each stmt's actual node index in a side
+// buffer; we read that buffer here.
 fn irb_lower_block(b: Address, ast: u64, node_idx: u32) {
     node_offset: u32 = 8 + node_idx * 40;
-    stmt_start: u32 = load_u32(ast, node_offset + 4);
-    stmt_count: u32 = load_u32(ast, node_offset + 8);
+    stmt_count: u32 = load_u32(ast, node_offset + 8);   // c2 = stmt_count
+    stmt_indices: u64 = load_u64(ast, node_offset + 16); // val = side buffer ptr
     i: u32 = 0;
     while i < stmt_count {
-        irb_lower_stmt(b, ast, stmt_start + i);
+        idx: u32 = load_u32(stmt_indices, i * 4);
+        irb_lower_stmt(b, ast, idx);
         i = i + 1;
     }
 }
@@ -311,4 +335,104 @@ fn irb_free(b: Address) {
     symtab: u64 = load_u64(b, 16);
     __vuma_free(symtab, 4096);
     __vuma_free(b, 32);
+}
+
+// ============================================================================
+// Wave 48 — pipeline entry points + SCG/BD/IVE stubs
+// ============================================================================
+// The bootstrap pipeline (full_lexer.vuma::main) calls these in order:
+//   1. scg_construct(ast)        — STUB: returns 0 (bootstrap skips SCG;
+//                                  AST→IR direct). The production compiler
+//                                  builds an SCG (Scheduled Computation Graph)
+//                                  for loop-carried dependency analysis; the
+//                                  bootstrap's hello.vuma subset has no loops
+//                                  in codegen, so SCG would be a no-op anyway.
+//   2. irb_build_main(ast, main_hash, ir_buf)
+//                                — REAL: walks the AST arena, finds the
+//                                  function whose name hashes to `main_hash`,
+//                                  lowers its body to IR opcodes in `ir_buf`.
+//                                  Returns 1 if main was found, 0 otherwise.
+//   3. bd_infer(ir_buf)          — STUB: returns 1 ("all values are i64").
+//                                  The production BD (Bounded-Domain) inference
+//                                  propagates type bounds forward from
+//                                  literals; the bootstrap treats every vreg
+//                                  as a full i64, which is sound for the
+//                                  integer-only hello.vuma subset.
+//   4. ive_verify(ir_buf)        — STUB: returns 1 ("verified, no changes").
+//                                  The production IVE (Integer Verification
+//                                  Engine) checks liveness (use-before-def)
+//                                  and removes dead lets; the bootstrap trusts
+//                                  the parser to produce well-scoped code and
+//                                  the codegen to handle stray vreg 0 reads
+//                                  defensively (load from [rbp-0] = garbage,
+//                                  but that path is unreachable in hello.vuma).
+//
+// Each stub is honestly labeled. The Wave 48 contract is: a coherent,
+// documented pipeline where every stage's signature is final even if its
+// body is a stub — so subsequent waves can replace stubs with real passes
+// without touching the driver.
+
+// scg_construct: STUB. The bootstrap goes AST→IR directly.
+// Returns 0 (no SCG nodes produced; the bootstrap doesn't allocate an SCG).
+fn scg_construct(ast: Address) -> u32 {
+    // Wave 48 STUB: production SCG construction lives in src/scg/*.rs (the
+    // Rust compiler). The bootstrap skips SCG because (a) hello.vuma has no
+    // loops in codegen and (b) the bootstrap's IR is already linear. Real
+    // SCG construction would build a dependency graph, schedule
+    // loop-carried phis, and feed the scheduled order to irb_build_main.
+    return 0;
+}
+
+// irb_build_main: REAL entry point. Finds `main` in the AST by name hash
+// and lowers its body to IR. The caller pre-allocates `ir_buf` via ir_new()
+// and passes the FNV-1a hash of "main" (computed by name_hash in
+// full_parser.vuma, or by an equivalent helper in the driver).
+//
+// Returns 1 if `main` was found and lowered, 0 otherwise.
+fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32 {
+    b: Address = irb_new(ir_buf);
+    count: u32 = load_u32(ast, 0);
+    i: u32 = 0;
+    found: u32 = 0;
+    while i < count {
+        node_off: u32 = 8 + i * 40;
+        kind: u32 = load_u32(ast, node_off);
+        if kind == 20 {  // NK_FN_DEF
+            fn_hash: u32 = load_u64(ast, node_off + 16) & 0xFFFFFFFF;
+            if fn_hash == main_hash {
+                irb_lower_fn(b, ast, i);
+                found = 1;
+            }
+        }
+        i = i + 1;
+    }
+    irb_free(b);
+    return found;
+}
+
+// bd_infer: STUB. Phase 1 propagation in the production compiler walks the
+// IR forward, inferring bounded integer ranges from literal MOVs and
+// narrowing ALU op results. The bootstrap treats every vreg as a full i64,
+// which is sound (no narrowing = no overflows the codegen doesn't already
+// handle) but loses optimization opportunities. Returns 1 ("inferred:
+// all i64").
+fn bd_infer(ir_buf: Address) -> u32 {
+    // Wave 48 STUB: real BD inference lives in src/bd/*.rs. The bootstrap
+    // documents the deferral here; the signature is final so a future wave
+    // can replace the body with a real forward-propagation pass.
+    return 1;
+}
+
+// ive_verify: STUB. The production IVE pass checks (a) liveness — every
+// vreg used has been defined by a dominating MOV/ALU op — and (b) cleanup
+// — removes lets whose init vreg is never read. The bootstrap trusts the
+// parser to produce well-scoped code (every `let` precedes its uses) and
+// the codegen to defensively handle vreg 0 reads (which would load from
+// [rbp+0] = saved rbp, but that path is unreachable in hello.vuma).
+// Returns 1 ("verified, no changes").
+fn ive_verify(ir_buf: Address) -> u32 {
+    // Wave 48 STUB: real IVE verification lives in src/ive/*.rs. The
+    // bootstrap defers it; the signature is final so a future wave can
+    // replace the body with a real liveness + dead-let-elimination pass.
+    return 1;
 }
