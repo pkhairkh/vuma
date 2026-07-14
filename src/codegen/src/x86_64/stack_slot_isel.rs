@@ -251,7 +251,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // Labels need relocation but load_value doesn't have access
                 // to the relocations vector. Emit a placeholder and log.
                 // This is a known limitation — labels are rare in IR operands.
-                log::warn!("IRValue::Label('{}') in load_value: emitting placeholder 0", name);
+                vuma_log!(warn, "IRValue::Label('{}') in load_value: emitting placeholder 0", name);
                 encode_mov_reg_imm64(scratch, 0)
             }
         }

@@ -302,11 +302,11 @@ impl CORuntime {
     /// A list of region IDs that were (re)compiled.
     pub fn compile_incremental(&mut self, delta: &Delta) -> Vec<RegionId> {
         if delta.is_empty() {
-            log::debug!("compile_incremental: empty delta, nothing to do");
+            vuma_log!(debug, "compile_incremental: empty delta, nothing to do");
             return Vec::new();
         }
 
-        log::info!(
+        vuma_log!(info, 
             "compile_incremental: +{} nodes, -{} nodes, ~{} modified nodes, +{} edges, -{} edges, ~{} modified edges, ~{} region changes",
             delta.added_nodes.len(),
             delta.removed_nodes.len(),
@@ -318,7 +318,7 @@ impl CORuntime {
         );
 
         if !delta.modified_nodes.is_empty() || !delta.modified_edges.is_empty() {
-            log::info!(
+            vuma_log!(info, 
                 "compile_incremental: field-level changes: {} total field changes",
                 delta.total_field_changes(),
             );
@@ -350,7 +350,7 @@ impl CORuntime {
             let region_id = modification.node_id as RegionId;
             // Log the individual field changes for diagnostics.
             for change in &modification.field_changes {
-                log::debug!(
+                vuma_log!(debug, 
                     "compile_incremental: node {} field '{}' changed: {} -> {}",
                     modification.node_id,
                     change.field_name,
@@ -403,7 +403,7 @@ impl CORuntime {
         for modification in &delta.modified_edges {
             let edge_id = modification.edge_id as crate::types::EdgeId;
             for change in &modification.field_changes {
-                log::debug!(
+                vuma_log!(debug, 
                     "compile_incremental: edge {} field '{}' changed: {} -> {}",
                     modification.edge_id,
                     change.field_name,
@@ -451,7 +451,7 @@ impl CORuntime {
         self.profile_data
             .record_access(region as crate::types::NodeId);
 
-        log::trace!(
+        vuma_log!(trace, 
             "execute: region {} ({} code bytes)",
             region,
             compiled.code.len()
@@ -460,7 +460,7 @@ impl CORuntime {
         // Execute the compiled code via memory-mapped execution.
         let code = compiled.code.clone();
         let _result = execute_code(&code)?;
-        log::trace!("execute: region {} returned {}", region, _result);
+        vuma_log!(trace, "execute: region {} returned {}", region, _result);
 
         Ok(())
     }
@@ -476,13 +476,13 @@ impl CORuntime {
     ///
     /// Returns the number of regions that were re-optimized.
     pub fn optimize(&mut self) -> usize {
-        log::debug!("optimize: starting optimization cycle");
+        vuma_log!(debug, "optimize: starting optimization cycle");
 
         // Step 1: Analyze profile data.
         let hot_paths = self.profile_data.get_hot_paths(10).to_vec();
         let suggestions = self.profile_data.suggest_optimizations();
 
-        log::debug!(
+        vuma_log!(debug, 
             "optimize: {} hot paths, {} suggestions",
             hot_paths.len(),
             suggestions.len(),
@@ -521,7 +521,7 @@ impl CORuntime {
             .speculative_optimizer
             .validate_all(most_observed_edge, &contended_regions);
         if deopts > 0 {
-            log::warn!("optimize: {} speculative deoptimizations", deopts);
+            vuma_log!(warn, "optimize: {} speculative deoptimizations", deopts);
         }
 
         // Step 3: Run the full profile-guided optimization pipeline.
@@ -543,7 +543,7 @@ impl CORuntime {
             }
         }
 
-        log::debug!("optimize: re-optimized {} regions", reoptimized);
+        vuma_log!(debug, "optimize: re-optimized {} regions", reoptimized);
         reoptimized
     }
 
@@ -635,7 +635,7 @@ impl CORuntime {
         // optimizer's own state).
         let spec_validation = self.speculative_optimizer.validate_all_speculations();
         if let Err(SpecError::InvalidatedAssumptions(list)) = &spec_validation {
-            log::warn!(
+            vuma_log!(warn, 
                 "optimize_module: {} speculative assumption(s) invalidated: [{}]",
                 list.len(),
                 list.join(", "),
@@ -651,7 +651,7 @@ impl CORuntime {
             optimization_result,
         };
 
-        log::info!(
+        vuma_log!(info, 
             "optimize_module: SCG nodes {}→{}, edges {}→{}, reoptimized {} regions, spec_ok={}",
             summary.scg_node_count_before,
             summary.scg_node_count_after,
@@ -705,7 +705,7 @@ impl CORuntime {
 
         let result = self.optimization_engine.run(scg_mut, &report);
 
-        log::info!(
+        vuma_log!(info, 
             "run_optimization_passes: {} total transformations, estimated speedup {:.3}×",
             result.total_transformations,
             result.estimated_speedup,
@@ -818,7 +818,7 @@ impl CORuntime {
     /// git history; the `node_to_statements` helper has been deleted
     /// entirely (it had no other callers).
     fn compile_region(&self, region_id: RegionId) -> Vec<u8> {
-        log::trace!(
+        vuma_log!(trace, 
             "compile_region: region {} — synthetic stub compilation disabled in Wave 38 \
              (CoR is profiling-only); returning return-zero stub",
             region_id,
@@ -1149,7 +1149,7 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
             || (first_word & 0xFF000000) == 0xD6000000  // BR/BLR/RET
             || (first_word & 0xFF000000) == 0xD5000000; // System/MRS/MSR
         if is_likely_aarch64 {
-            log::debug!("execute_code_x86_64: code appears to be AArch64, skipping execution");
+            vuma_log!(debug, "execute_code_x86_64: code appears to be AArch64, skipping execution");
             return Ok(0);
         }
     }

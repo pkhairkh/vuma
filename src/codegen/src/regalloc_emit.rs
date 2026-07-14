@@ -47,7 +47,7 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
     let target = match registry.get(isa_name) {
         Some(t) => t,
         None => {
-            log::debug!(
+            vuma_log!(debug, 
                 "emit_function_regalloc: target '{}' not in registry, skipping regalloc",
                 isa_name
             );
@@ -58,7 +58,7 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
     match allocator.allocate_function(func) {
         Ok(result) => result,
         Err(e) => {
-            log::debug!(
+            vuma_log!(debug, 
                 "emit_function_regalloc: allocation failed for '{}': {}, using empty result",
                 isa_name,
                 e

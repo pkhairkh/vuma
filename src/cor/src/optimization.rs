@@ -467,7 +467,7 @@ impl OptimizationPass for HotPathInlining {
                     return None;
                 }
                 if node.code_size > self.max_inline_size {
-                    log::debug!(
+                    vuma_log!(debug, 
                         "HotPathInlining: skipping node {} — code_size {} exceeds limit {}",
                         id,
                         node.code_size,
@@ -590,7 +590,7 @@ impl OptimizationPass for HotPathInlining {
         // Ensure speedup is at least 1.0 (no regression).
         result.estimated_speedup = result.estimated_speedup.max(1.0);
 
-        log::info!(
+        vuma_log!(info, 
             "HotPathInlining: {} transformations, estimated speedup {:.3}×",
             result.count(),
             result.estimated_speedup,
@@ -753,7 +753,7 @@ impl OptimizationPass for ColdPathOutline {
         let outline_benefit = (result.count() as f64 * 0.02).min(0.20);
         result.estimated_speedup = 1.0 + outline_benefit;
 
-        log::info!(
+        vuma_log!(info, 
             "ColdPathOutline: {} transformations, estimated speedup {:.3}×",
             result.count(),
             result.estimated_speedup,
@@ -1087,7 +1087,7 @@ impl OptimizationPass for LoopOptimization {
 
         result.estimated_speedup = (unroll_speedup * vec_speedup).max(1.0);
 
-        log::info!(
+        vuma_log!(info, 
             "LoopOptimization: {} transformations, estimated speedup {:.3}×",
             result.count(),
             result.estimated_speedup,
@@ -1236,7 +1236,7 @@ impl OptimizationPass for MemoryOptimization {
         let align_benefit = (align_count as f64 * 0.02).min(0.15);
         result.estimated_speedup = 1.0 + prefetch_benefit + align_benefit;
 
-        log::info!(
+        vuma_log!(info, 
             "MemoryOptimization: {} transformations, estimated speedup {:.3}×",
             result.count(),
             result.estimated_speedup,
@@ -1326,7 +1326,7 @@ impl OptimizationEngine {
         let mut pass_results = Vec::with_capacity(self.passes.len());
 
         for pass in &self.passes {
-            log::debug!("OptimizationEngine: running pass '{}'", pass.name());
+            vuma_log!(debug, "OptimizationEngine: running pass '{}'", pass.name());
             let result = pass.apply(scg, profile);
             pass_results.push(result);
         }

@@ -3703,7 +3703,7 @@ fn lower_ir_instr_ppc64(
             // instructions with the appropriate 16-bit slices of the
             // absolute address. Unknown symbols leave the placeholder 0.
             let lis_offset = (result.len() * 4) as u64; // byte offset of lis within this batch
-            log::warn!(
+            vuma_log!(warn, 
                 "GetAddress for '{}' — emitting 5-instruction placeholder (reloc at func byte {})",
                 name, lis_offset
             );
@@ -5548,7 +5548,7 @@ impl Backend for PPC64Backend {
                         // symbol's absolute 64-bit address. See the
                         // corresponding reg-alloc path for full details.
                         let lis_byte_offset = current_byte_offset + code.len() as u64;
-                        log::warn!(
+                        vuma_log!(warn, 
                             "GetAddress for '{}' — emitting 5-instruction placeholder (reloc at func byte {})",
                             name, lis_byte_offset
                         );
@@ -6475,7 +6475,7 @@ impl Backend for PPC64Backend {
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±32MB (24-bit signed)
                         if offset_words < -(1 << 23) || offset_words >= (1 << 23) {
-                            log::warn!(
+                            vuma_log!(warn, 
                                 "warning: BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
                             );
@@ -6497,7 +6497,7 @@ impl Backend for PPC64Backend {
                         // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
-                        log::debug!(
+                        vuma_log!(debug, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
@@ -6565,7 +6565,7 @@ impl Backend for PPC64Backend {
                         patch_imm16(abs_offset + 5 * 4, w5);  // ori
                     } else {
                         // External symbol — leave the placeholder 0 in place.
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved R_PPC64_ADDR64 relocation: symbol '{}' in '{}' at 0x{:X} — leaving placeholder 0",
                             reloc.symbol, func.name, reloc.offset
                         );

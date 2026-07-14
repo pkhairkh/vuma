@@ -2105,7 +2105,7 @@ impl RegAllocator {
         self.spill_map.insert(vreg_to_spill, slot);
         self.free_regs.push(reg);
 
-        log::debug!(
+        vuma_log!(debug, 
             "spilled vreg {} to stack slot {} (freed {})",
             vreg_to_spill,
             slot,

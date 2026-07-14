@@ -3277,7 +3277,7 @@ impl IRBuilder {
                             .filter(|(_, &v)| v == prev_vreg)
                             .map(|(k, _)| k.clone())
                             .collect();
-                        log::warn!("DEBUG lower_call: updating {} aliases", keys_to_update.len());
+                        vuma_log!(warn, "DEBUG lower_call: updating {} aliases", keys_to_update.len());
                         for key in keys_to_update {
                             names.insert(key, vreg);
                         }

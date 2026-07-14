@@ -1163,7 +1163,7 @@ impl OriginVerifier {
         report.total_accesses = self.accesses.len();
 
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "origin verification: {} derivations, {} accesses, {} violations",
                 report.total_derivations,
                 report.total_accesses,

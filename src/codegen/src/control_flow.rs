@@ -125,7 +125,7 @@ impl SwitchLowerer {
 
         // Wasm targets use the native br_table instruction.
         if !target.has_registers() {
-            log::debug!(
+            vuma_log!(debug, 
                 "SwitchLowerer: {} targets → BrTable (Wasm stack machine)",
                 targets.len()
             );
@@ -136,7 +136,7 @@ impl SwitchLowerer {
 
         // Few targets → linear chain is best (less overhead than table setup).
         if count <= IFELSE_MAX_TARGETS {
-            log::debug!(
+            vuma_log!(debug, 
                 "SwitchLowerer: {} targets → IfElseChain (few targets)",
                 count
             );
@@ -145,12 +145,12 @@ impl SwitchLowerer {
 
         // Check density for jump table eligibility.
         if count >= JUMP_TABLE_MIN_TARGETS && Self::is_dense_range(targets) {
-            log::debug!("SwitchLowerer: {} targets → JumpTable (dense range)", count);
+            vuma_log!(debug, "SwitchLowerer: {} targets → JumpTable (dense range)", count);
             return SwitchStrategy::JumpTable;
         }
 
         // Fall back to binary search.
-        log::debug!(
+        vuma_log!(debug, 
             "SwitchLowerer: {} targets → BinarySearch (sparse range)",
             count
         );
@@ -336,7 +336,7 @@ impl SwitchLowerer {
         }
 
         blocks.push(dispatch_block);
-        log::debug!(
+        vuma_log!(debug, 
             "SwitchLowerer: jump table with range {} ({} blocks)",
             range,
             blocks.len()
@@ -371,7 +371,7 @@ impl SwitchLowerer {
             &mut blocks,
         );
 
-        log::debug!(
+        vuma_log!(debug, 
             "SwitchLowerer: binary search with {} targets ({} blocks)",
             sorted.len(),
             blocks.len()
@@ -523,7 +523,7 @@ impl SwitchLowerer {
             blocks.push(block);
         }
 
-        log::debug!(
+        vuma_log!(debug, 
             "SwitchLowerer: if-else chain with {} targets ({} blocks)",
             targets.len(),
             blocks.len()
@@ -619,7 +619,7 @@ impl TailCallLowerer {
             (Some(dst), [ret_val]) => {
                 // The call result must be directly returned.
                 if dst != ret_val {
-                    log::debug!(
+                    vuma_log!(debug, 
                         "TailCallLowerer: ineligible — call dst {:?} != return val {:?}",
                         dst,
                         ret_val
@@ -629,7 +629,7 @@ impl TailCallLowerer {
             }
             _ => {
                 // Multiple return values or mismatched count.
-                log::debug!(
+                vuma_log!(debug, 
                     "TailCallLowerer: ineligible — return count mismatch (dst={:?}, rets={})",
                     call_dst,
                     return_vals.len()
@@ -642,7 +642,7 @@ impl TailCallLowerer {
         for block in &func.blocks {
             for instr in &block.instructions {
                 if let IRInstr::Alloc { .. } = instr {
-                    log::debug!("TailCallLowerer: ineligible — function has stack allocations");
+                    vuma_log!(debug, "TailCallLowerer: ineligible — function has stack allocations");
                     return false;
                 }
             }
@@ -652,7 +652,7 @@ impl TailCallLowerer {
         // registers). The number of available argument registers depends on
         // the target's calling convention.
         if func.params.len() > max_reg_args {
-            log::debug!(
+            vuma_log!(debug, 
                 "TailCallLowerer: ineligible — caller has {} params (exceeds {} register args for {})",
                 func.params.len(),
                 max_reg_args,
@@ -665,7 +665,7 @@ impl TailCallLowerer {
         // interacts poorly with tail calls).
         for block in &func.blocks {
             if let IRTerminator::Invoke { .. } = &block.terminator {
-                log::debug!(
+                vuma_log!(debug, 
                     "TailCallLowerer: ineligible — function has invoke (exception handling)"
                 );
                 return false;
@@ -678,7 +678,7 @@ impl TailCallLowerer {
         // We don't block eligibility here.
         let _ = target.has_link_register();
 
-        log::debug!("TailCallLowerer: call is eligible for tail call optimization");
+        vuma_log!(debug, "TailCallLowerer: call is eligible for tail call optimization");
         true
     }
 
@@ -711,7 +711,7 @@ impl TailCallLowerer {
         // optimize in the standard way. The caller should have checked
         // eligibility first.
         if args.len() > max_reg_args {
-            log::warn!(
+            vuma_log!(warn, 
                 "TailCallLowerer: {} args exceed {} register capacity for {}; \
                  tail call may not be correct",
                 args.len(),
@@ -773,7 +773,7 @@ impl TailCallLowerer {
             }
         }
 
-        log::debug!(
+        vuma_log!(debug, 
             "TailCallLowerer: lowered tail call to @{} with {} args (target={})",
             func,
             args.len(),
@@ -909,7 +909,7 @@ impl LoopOptimizer {
             }
         }
 
-        log::debug!(
+        vuma_log!(debug, 
             "LoopOptimizer: identified {} loops in @{}",
             loops.len(),
             func.name
@@ -945,7 +945,7 @@ impl LoopOptimizer {
         let trip = match loop_info.trip_count {
             Some(t) => t,
             None => {
-                log::debug!(
+                vuma_log!(debug, 
                     "LoopOptimizer: loop @{} not unrollable — unknown trip count",
                     loop_info.header_block
                 );
@@ -956,7 +956,7 @@ impl LoopOptimizer {
         // Trip count must be at least 2 (unrolling a single-iteration loop
         // is pointless).
         if trip < 2 {
-            log::debug!(
+            vuma_log!(debug, 
                 "LoopOptimizer: loop @{} not unrollable — trip count {} < 2",
                 loop_info.header_block,
                 trip
@@ -972,7 +972,7 @@ impl LoopOptimizer {
         let instr_size = target.instruction_alignment();
         let body_size_estimate = loop_info.body_blocks.len() * instr_size * 4;
         if body_size_estimate > MAX_UNROLL_BODY_SIZE {
-            log::debug!(
+            vuma_log!(debug, 
                 "LoopOptimizer: loop @{} not unrollable — body too large (est. {} bytes, target={})",
                 loop_info.header_block,
                 body_size_estimate,
@@ -992,7 +992,7 @@ impl LoopOptimizer {
             return false;
         }
 
-        log::debug!(
+        vuma_log!(debug, 
             "LoopOptimizer: loop @{} is unrollable (trip={}, factor={})",
             loop_info.header_block,
             trip,
@@ -1146,7 +1146,7 @@ impl LoopOptimizer {
 
         func.blocks = new_blocks;
 
-        log::debug!(
+        vuma_log!(debug, 
             "LoopOptimizer: unrolled loop @{} by factor {} ({} copies)",
             loop_info.header_block,
             factor,
@@ -1176,7 +1176,7 @@ impl LoopOptimizer {
             factor *= 2;
         }
 
-        log::debug!(
+        vuma_log!(debug, 
             "LoopOptimizer: chose unroll factor {} for loop @{} (trip={})",
             best,
             loop_info.header_block,

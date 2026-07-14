@@ -163,7 +163,7 @@ impl Monomorphizer {
                     // No definition found — the call site references an
                     // extern / runtime generic. Leave the call as-is (it
                     // will be resolved at link time).
-                    log::warn!(
+                    vuma_log!(warn, 
                         "Monomorphizer: no definition for generic `{}` \
                          (referenced by call site `{}`); leaving extern",
                         key.func_name,

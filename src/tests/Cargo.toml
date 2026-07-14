@@ -21,7 +21,6 @@ vuma-codegen.workspace = true
 vuma-cor.workspace = true
 vuma = { path = "../.." }
 chrono.workspace = true
-log.workspace = true
 libc.workspace = true
 proptest.workspace = true
 serde.workspace = true
