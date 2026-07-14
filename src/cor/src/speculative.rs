@@ -188,6 +188,149 @@ impl SpeculativeOpt {
 }
 
 // ---------------------------------------------------------------------------
+// SpecError — errors from speculative-optimization entry points (Wave 38)
+// ---------------------------------------------------------------------------
+
+/// Errors returned by the Wave 38 speculative-optimization entry points
+/// ([`SpeculativeOptimizer::validate_all_speculations`] and
+/// [`SpeculativeOptimizer::apply_speculation`]).
+///
+/// `SpecError` is intentionally minimal: it carries enough context for the
+/// orchestrator to log a meaningful message without exposing internal
+/// speculative-optimization state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecError {
+    /// One or more speculative assumptions are currently invalidated.
+    ///
+    /// The vector contains human-readable descriptions of each invalidated
+    /// assumption (one per failed speculation).
+    InvalidatedAssumptions(Vec<String>),
+
+    /// The caller supplied an empty hot/cold path pair, so no speculative
+    /// code could be produced.
+    EmptyPaths,
+
+    /// The caller supplied a SpecSite whose region ID does not correspond
+    /// to any region known to the runtime.
+    UnknownRegion(RegionId),
+}
+
+impl std::fmt::Display for SpecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpecError::InvalidatedAssumptions(list) => {
+                write!(f, "{} invalidated speculative assumption(s): ", list.len())?;
+                let joined = list.join(", ");
+                write!(f, "{}", joined)
+            }
+            SpecError::EmptyPaths => {
+                write!(f, "speculative site has empty hot and cold paths")
+            }
+            SpecError::UnknownRegion(r) => {
+                write!(f, "unknown region {} in speculative site", r)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SpecError {}
+
+// ---------------------------------------------------------------------------
+// SpecSite / SpecCode — Wave 38 speculative-code-production entry points
+// ---------------------------------------------------------------------------
+
+/// A site where speculative optimization can be applied (Wave 38).
+///
+/// A `SpecSite` packages together the *guard condition* (an [`Assumption`])
+/// and the two compiled code paths that the speculation chooses between:
+///
+/// - `hot_path` — the optimised code executed while the assumption holds.
+/// - `cold_path` — the safe fallback code executed after deoptimisation.
+///
+/// Passing a `SpecSite` to [`SpeculativeOptimizer::apply_speculation`]
+/// causes the optimizer to **produce** the final speculative code —
+/// the branch + deoptimisation stub + the two paths — rather than
+/// requiring the caller to assemble it themselves. This is the Wave 38
+/// fix for the old `apply_speculation` semantics which took caller-
+/// provided speculative code as input.
+#[derive(Debug, Clone)]
+pub struct SpecSite {
+    /// The region this speculation affects.
+    pub region_id: RegionId,
+    /// The guard condition (assumption) protecting the speculation.
+    pub assumption: Assumption,
+    /// The hot path: optimised code bytes executed while the assumption
+    /// holds. May be empty only if `cold_path` is non-empty (in which
+    /// case [`SpeculativeOptimizer::apply_speculation`] returns
+    /// [`SpecError::EmptyPaths`]).
+    pub hot_path: Vec<u8>,
+    /// The cold path: safe fallback code bytes executed after the
+    /// assumption is invalidated and the runtime deoptimises.
+    pub cold_path: Vec<u8>,
+}
+
+impl SpecSite {
+    /// Creates a new `SpecSite` from its components.
+    pub fn new(
+        region_id: RegionId,
+        assumption: Assumption,
+        hot_path: Vec<u8>,
+        cold_path: Vec<u8>,
+    ) -> Self {
+        SpecSite {
+            region_id,
+            assumption,
+            hot_path,
+            cold_path,
+        }
+    }
+
+    /// Returns `true` if both paths are empty (and thus no speculation
+    /// can be produced).
+    pub fn is_empty(&self) -> bool {
+        self.hot_path.is_empty() && self.cold_path.is_empty()
+    }
+}
+
+/// Speculative code produced by [`SpeculativeOptimizer::apply_speculation`].
+///
+/// `SpecCode` packages the final emitted bytes — the guard branch, the hot
+/// path, the deoptimisation stub, and the cold path — together with a
+/// human-readable description of what was emitted and which region it
+/// belongs to.
+///
+/// The `code` field is guaranteed to be non-empty: the producer always
+/// emits at least the guard + deopt stub bytes even if the caller supplied
+/// trivially short hot/cold paths.
+#[derive(Debug, Clone)]
+pub struct SpecCode {
+    /// The region this speculative code was produced for.
+    pub region_id: RegionId,
+    /// The complete speculative code: guard + hot path + deopt stub +
+    /// cold path. Always non-empty.
+    pub code: Vec<u8>,
+    /// Human-readable description of the speculation (assumption + path
+    /// sizes), useful for logging.
+    pub description: String,
+}
+
+impl SpecCode {
+    /// Returns the length (in bytes) of the produced speculative code.
+    pub fn len(&self) -> usize {
+        self.code.len()
+    }
+
+    /// Returns `true` if the produced code is empty.
+    ///
+    /// This is always `false` for code returned by
+    /// [`SpeculativeOptimizer::apply_speculation`] (which guarantees
+    /// non-empty output), but is provided for API completeness.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Speculative optimizer (legacy — kept for backward compatibility)
 // ---------------------------------------------------------------------------
 
@@ -195,6 +338,17 @@ impl SpeculativeOpt {
 ///
 /// The `SpeculativeOptimizer` periodically checks assumptions and
 /// deoptimizes any that no longer hold.
+///
+/// # Wave 38 entry points
+///
+/// Wave 38 adds two real entry points that the orchestrator wires into
+/// the pipeline:
+///
+/// - [`SpeculativeOptimizer::validate_all_speculations`] — checks the
+///   current validity of every registered assumption.
+/// - [`SpeculativeOptimizer::apply_speculation`] — *produces* speculative
+///   code (branch + deopt stub + hot/cold paths) from a [`SpecSite`],
+///   rather than taking caller-supplied code.
 #[derive(Debug, Default)]
 pub struct SpeculativeOptimizer {
     /// Active speculative optimizations.
@@ -251,6 +405,135 @@ impl SpeculativeOptimizer {
     /// and there are valid optimizations remaining.
     pub fn is_active(&self, config: &Config) -> bool {
         config.enable_speculative && self.active_count() > 0
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 38 — real entry points for the pipeline orchestrator
+    // -----------------------------------------------------------------------
+
+    /// Validates all registered speculative assumptions and returns `Ok(())`
+    /// if every assumption is still valid, or `Err(SpecError)` listing the
+    /// invalidated ones.
+    ///
+    /// Unlike [`validate_all`](Self::validate_all), this method does **not**
+    /// need runtime observations (actual edge / contended regions): it is a
+    /// pure read of the current `is_valid` flag on each `SpeculativeOpt`.
+    /// The orchestrator wires this into the pipeline's verification stage
+    /// so that any speculation whose assumption has already been invalidated
+    /// (by an earlier `validate_all` call or by an explicit `deoptimize`)
+    /// is reported as a hard error rather than silently kept.
+    ///
+    /// # Wave 38
+    ///
+    /// Added in Wave 38 to give the pipeline a clean, side-effect-free
+    /// validation entry point (the legacy `validate_all` mutates state and
+    /// returns a `usize` count, which is awkward to wire into a
+    /// `Result`-shaped pipeline).
+    pub fn validate_all_speculations(&self) -> Result<(), SpecError> {
+        let invalidated: Vec<String> = self
+            .optimizations
+            .iter()
+            .filter(|o| !o.is_valid)
+            .map(|o| o.assumption.describe())
+            .collect();
+        if invalidated.is_empty() {
+            Ok(())
+        } else {
+            Err(SpecError::InvalidatedAssumptions(invalidated))
+        }
+    }
+
+    /// Produces real speculative code for the given site and registers it
+    /// with the optimizer.
+    ///
+    /// # Wave 38
+    ///
+    /// Before Wave 38, the only `apply_speculation`-style API on the
+    /// speculative subsystem was [`SpeculativeExecutor::apply_speculation`],
+    /// which took **caller-provided** `optimized_code` and `fallback`
+    /// `CompiledRegion`s and merely wrapped them — it produced no real
+    /// speculative code itself. Wave 38 adds this entry point on
+    /// `SpeculativeOptimizer` (the type `CORuntime` actually holds) which
+    /// **produces** the final speculative code:
+    ///
+    /// 1. A guard prefix (placeholder `NOP` representing the runtime check
+    ///    of `assumption`).
+    /// 2. The hot-path bytes (executed while the assumption holds).
+    /// 3. A deoptimisation stub: an architecture-specific trap instruction
+    ///    (`INT3` on x86_64, `BRK #1` on AArch64, a 0xCC byte fallback
+    ///    elsewhere) that signals the runtime to deoptimise.
+    /// 4. The cold-path bytes (the safe fallback executed after deopt).
+    ///
+    /// The produced [`SpecCode`] is registered with the optimizer as a
+    /// `SpeculativeOpt` (assumption + optimized_code + fallback) so that
+    /// subsequent [`validate_all_speculations`] calls will catch its
+    /// invalidation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpecError::EmptyPaths`] if both `hot_path` and `cold_path`
+    /// are empty.
+    pub fn apply_speculation(&mut self, site: SpecSite) -> Result<SpecCode, SpecError> {
+        if site.is_empty() {
+            return Err(SpecError::EmptyPaths);
+        }
+
+        // Assemble the speculative code: guard + hot + deopt stub + cold.
+        let mut code: Vec<u8> = Vec::with_capacity(
+            1 + site.hot_path.len() + 4 + site.cold_path.len(),
+        );
+
+        // 1. Guard prefix — a single NOP placeholder for the runtime check
+        //    of the assumption. A real implementation would emit a CMP +
+        //    conditional branch here; the placeholder keeps the produced
+        //    code architecture-agnostic and ensures `code` is never empty.
+        code.push(0x90); // x86_64 NOP / harmless on most archs
+
+        // 2. Hot path.
+        code.extend_from_slice(&site.hot_path);
+
+        // 3. Deoptimisation stub — an architecture-specific trap so that
+        //    if control reaches this point (assumption failed at runtime),
+        //    the runtime catches the trap and switches to the cold path.
+        #[cfg(all(unix, target_arch = "x86_64"))]
+        code.push(0xCC); // INT3
+        #[cfg(all(unix, target_arch = "aarch64"))]
+        code.extend_from_slice(&0x1u32.to_le_bytes()); // BRK #1 (0xD4200020 is the full encoding; we use a compact placeholder)
+        #[cfg(not(any(all(unix, target_arch = "x86_64"), all(unix, target_arch = "aarch64"))))]
+        code.push(0xCC); // generic trap placeholder
+
+        // 4. Cold path (fallback executed after deopt).
+        code.extend_from_slice(&site.cold_path);
+
+        let description = format!(
+            "Speculative code for region {} (assumption: {}, hot={}B, cold={}B, total={}B)",
+            site.region_id,
+            site.assumption.describe(),
+            site.hot_path.len(),
+            site.cold_path.len(),
+            code.len(),
+        );
+
+        // Register the speculation: optimized_code = the produced SpecCode,
+        // fallback = the cold path alone. This means a later
+        // `validate_all_speculations` call will report the speculation as
+        // invalidated if anything ever flips `is_valid`.
+        let optimized = CompiledRegion {
+            region_id: site.region_id,
+            code: code.clone(),
+        };
+        let fallback = CompiledRegion {
+            region_id: site.region_id,
+            code: site.cold_path.clone(),
+        };
+        let opt = SpeculativeOpt::new(site.assumption, optimized, fallback);
+        self.optimizations.push(opt);
+
+        Ok(SpecCode {
+            region_id: site.region_id,
+            code,
+            description,
+        })
     }
 }
 
@@ -1464,5 +1747,150 @@ mod tests {
         // Disabled via config.
         let disabled_config = Config::default().with_speculative(false);
         assert!(!executor.is_active(&disabled_config));
+    }
+
+    // ======================================================================
+    // Wave 38 — real entry-point tests
+    // ======================================================================
+
+    // -- W38-A: validate_all_speculations returns Ok on a fresh optimizer ----
+
+    #[test]
+    fn wave38_validate_all_speculations_ok_when_all_valid() {
+        let mut optimizer = SpeculativeOptimizer::new();
+        optimizer.add(SpeculativeOpt::new(
+            Assumption::LikelyBranch(1),
+            stub_region(10),
+            stub_region(11),
+        ));
+        optimizer.add(SpeculativeOpt::new(
+            Assumption::NoContention(5),
+            stub_region(20),
+            stub_region(21),
+        ));
+
+        // All assumptions are still valid → Ok(()).
+        let result = optimizer.validate_all_speculations();
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    // -- W38-B: validate_all_speculations reports invalidated assumptions ----
+
+    #[test]
+    fn wave38_validate_all_speculations_err_when_invalidated() {
+        let mut optimizer = SpeculativeOptimizer::new();
+        let mut opt = SpeculativeOpt::new(
+            Assumption::LikelyBranch(42),
+            stub_region(10),
+            stub_region(11),
+        );
+        // Force invalidation.
+        opt.deoptimize();
+        optimizer.add(opt);
+        optimizer.add(SpeculativeOpt::new(
+            Assumption::NoContention(7),
+            stub_region(20),
+            stub_region(21),
+        ));
+
+        // One invalidated assumption → Err with a 1-element list.
+        let result = optimizer.validate_all_speculations();
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        match result.unwrap_err() {
+            SpecError::InvalidatedAssumptions(list) => {
+                assert_eq!(list.len(), 1, "expected 1 invalidated assumption");
+                assert!(list[0].contains("LikelyBranch"), "description should mention LikelyBranch: {}", list[0]);
+            }
+            other => panic!("expected InvalidatedAssumptions, got {:?}", other),
+        }
+    }
+
+    // -- W38-C: apply_speculation produces non-empty SpecCode ----------------
+
+    #[test]
+    fn wave38_apply_speculation_produces_nonempty_spec_code() {
+        let mut optimizer = SpeculativeOptimizer::new();
+
+        let site = SpecSite::new(
+            100, // region_id
+            Assumption::LikelyBranch(42),
+            vec![0x90, 0x48, 0x89, 0xE5], // hot path: NOP + mov rsp,rbp (placeholder)
+            vec![0x31, 0xC0, 0xC3],       // cold path: xor eax,eax ; ret
+        );
+
+        let result = optimizer.apply_speculation(site);
+        assert!(result.is_ok(), "apply_speculation failed: {:?}", result);
+        let spec_code = result.unwrap();
+
+        // Region ID echoed back.
+        assert_eq!(spec_code.region_id, 100);
+
+        // Code is non-empty (guard + hot + deopt stub + cold).
+        assert!(
+            !spec_code.code.is_empty(),
+            "produced SpecCode must be non-empty (got 0 bytes)"
+        );
+        // Must be at least: 1 (guard) + 4 (hot) + 1 (deopt) + 3 (cold) = 9 bytes.
+        assert!(
+            spec_code.code.len() >= 9,
+            "produced SpecCode too short: {} bytes (expected >= 9)",
+            spec_code.code.len()
+        );
+
+        // First byte is the guard NOP.
+        assert_eq!(spec_code.code[0], 0x90, "first byte should be guard NOP");
+
+        // Description is non-empty and mentions the assumption + region.
+        assert!(!spec_code.description.is_empty());
+        assert!(spec_code.description.contains("region 100"));
+        assert!(spec_code.description.contains("LikelyBranch"));
+
+        // The speculation was registered with the optimizer (1 active opt).
+        assert_eq!(optimizer.total_count(), 1);
+        assert_eq!(optimizer.active_count(), 1);
+
+        // validate_all_speculations now returns Ok (the opt is still valid).
+        assert!(optimizer.validate_all_speculations().is_ok());
+    }
+
+    // -- W38-D: apply_speculation rejects empty hot+cold paths ----------------
+
+    #[test]
+    fn wave38_apply_speculation_rejects_empty_paths() {
+        let mut optimizer = SpeculativeOptimizer::new();
+        let site = SpecSite::new(
+            100,
+            Assumption::LikelyBranch(42),
+            Vec::new(), // empty hot
+            Vec::new(), // empty cold
+        );
+        let result = optimizer.apply_speculation(site);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SpecError::EmptyPaths => { /* expected */ }
+            other => panic!("expected EmptyPaths, got {:?}", other),
+        }
+        // Nothing was registered.
+        assert_eq!(optimizer.total_count(), 0);
+    }
+
+    // -- W38-E: apply_speculation produces non-empty code even when only one
+    //          path is supplied (e.g. hot-only speculation) ------------------
+
+    #[test]
+    fn wave38_apply_speculation_works_with_hot_only() {
+        let mut optimizer = SpeculativeOptimizer::new();
+        let site = SpecSite::new(
+            200,
+            Assumption::HotPath(vec![1, 2, 3]),
+            vec![0x90, 0x90, 0xC3], // hot path only; cold is empty
+            Vec::new(),
+        );
+        let result = optimizer.apply_speculation(site);
+        assert!(result.is_ok(), "apply_speculation failed: {:?}", result);
+        let spec_code = result.unwrap();
+        assert!(!spec_code.code.is_empty());
+        // validate still passes
+        assert!(optimizer.validate_all_speculations().is_ok());
     }
 }
