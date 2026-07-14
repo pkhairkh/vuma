@@ -3933,6 +3933,9 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         code.extend(ss_sd(Gpr::V0, dst_off));
                     }
                 }
+                // ── VectorOp (Wave 29) ──
+                // MIPS64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+                IRInstr::VectorOp { .. } => {}
             }
         }
     }

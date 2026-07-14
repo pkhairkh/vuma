@@ -2239,6 +2239,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_pop(Gpr::Rbx));
                     code
                 }
+                // ── VectorOp (Wave 29) ──
+                // x86_32 has no SIMD encoder in the Wave 29 suite (only x86_64
+                // and aarch64 do); emit nothing.
+                IRInstr::VectorOp { .. } => Vec::new(),
             };
 
             if !encoded.is_empty() {

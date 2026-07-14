@@ -6129,6 +6129,10 @@ impl Backend for RiscV32Backend {
                         }
                         code
                     }
+                    // ── VectorOp (Wave 29) ──
+                    // riscv32 (RVV) has no SIMD encoder in the Wave 29 suite;
+                    // emit nothing.
+                    IRInstr::VectorOp { .. } => Vec::new(),
                 };
 
                 if !encoded.is_empty() {
@@ -6189,6 +6193,7 @@ impl Backend for RiscV32Backend {
                         IRInstr::AtomicCas { .. } => "atomic_cas",
                         IRInstr::CtSelect { .. } => "ct_select",
                         IRInstr::CtEq { .. } => "ct_eq",
+                        IRInstr::VectorOp { .. } => "vectorop",
                     };
 
                     // For FP Cast instructions, populate reads/writes with

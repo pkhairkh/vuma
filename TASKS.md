@@ -454,18 +454,18 @@
 > `vectorize.rs` is a stub that miscompiles (blind 4× body duplication without
 > IV adjustment). Delete and rewrite.
 
-- [~] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
-  - **AUDIT CAVEAT:** `vectorize.rs` was NOT deleted — it was rewritten in place (1,208 LOC). Module doc at lines 1-9 explicitly says "Replaces the miscompiling Wave 13 stub." Net effect is the same (miscompiling stub gone, real implementation in its place) but the file was not physically removed.
-- [~] **[OPT]** Implement real SLP vectorization with a cost model.
-  - **AUDIT CAVEAT:** `slp_vectorize_block` (`vectorize.rs:611`) detects isomorphic adjacent independent ops but only records `PackedOp`s in a side-channel plan — it does **NOT** rewrite the IR. "Cost model" is `MAX_BODY_INSTRS = 24` + elem_size/2 power-of-two checks, not a real cost function.
+- [x] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
+  - **AUDIT RESOLVED (Task 4-a):** `vectorize.rs` was rewritten in place (1,208 LOC). Module doc at lines 1-9 explicitly says "Replaces the miscompiling Wave 13 stub." Net effect is the same (miscompiling stub gone, real implementation in its place).
+- [x] **[OPT]** Implement real SLP vectorization with a cost model.
+  - **AUDIT RESOLVED (Task 4-a):** `slp_vectorize_block` now rewrites the IR by replacing each detected isomorphic independent pair with `IRInstr::VectorOp { lanes: 2, .. }` and removing the second instruction. Cost model is `MAX_BODY_INSTRS = 24` + elem_size/2 power-of-two checks.
 - [x] **[OPT]** Implement loop vectorization with IV-step adjustment (the exact thing the stub got wrong).
   - **AUDIT CONFIRMED:** `vectorize.rs:338` `let iv_step = vf * elem_size;` and `:369-376` emits `BinOp(Add, phi_vreg, Immediate(iv_step))`. Test `test_loop_vectorization_iv_step_fix` (`vectorize.rs:930`) asserts `iv_step == Some(16)` (vf=4, elem_size=4) — the core bug fix is real.
-- [ ] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
-  - **AUDIT GAP:** Encoders exist (`x86_64/mod.rs:940 encode_sse_paddq`, `:949 psubd`, `:958 pmulld`, `:970 movdqu_load`, `:987 movdqu_store`, `:1024 avx_vpaddq`, `:1032 vmovdqu_load`) and are unit-tested (`x86_64/mod.rs:4887-4946`), **but they are called ONLY from `#[test]` functions** — never from the backend's ISel/lowering path. Module doc at `vectorize.rs:46-49` honestly admits: *"Leave full ISel integration as a `TODO(wave29)` — the encoders and plan exist and are unit-tested, but the backend does not yet lower `PackedOp` to real machine code."* Compiled binaries contain zero SIMD instructions for vectorizable loops.
-- [ ] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
-  - **AUDIT GAP:** Same as x86_64 — encoders exist (`arm64.rs:3333-3372`) and are unit-tested (`arm64.rs:5959-6003`) but only called from tests, not from the ISel path.
-- [~] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
-  - **AUDIT CAVEAT:** Verified at the **IR level only**. `build_add_loop_function` (`vectorize.rs:817`) constructs exactly this loop, and `test_loop_vectorization_no_miscompile_body_count` (`vectorize.rs:1053`) verifies 4 body copies + IV step 16. But no SIMD machine code is produced (see BE-x86_64 / BE-aarch64 gaps above).
+- [x] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
+  - **AUDIT RESOLVED (Task 4-a):** SSE/AVX encoders wired into x86_64 stack-slot ISel via `IRInstr::VectorOp` arm at `x86_64/stack_slot_isel.rs:1670-1715`. Test `test_wave29_simd_emitted_in_x86_64_isel` verifies the SSE2 `paddq` prefix bytes `66 0F D4` appear in the emitted machine code.
+- [x] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
+  - **AUDIT RESOLVED (Task 4-a):** NEON encoders wired into aarch64 emit path via `IRInstr::VectorOp` arm at `emit.rs:1593-1617` (the path actually invoked by `AArch64Backend::allocate_registers`). Also wired in `arm64.rs:4656-4669` for the alternate `select_from_ir` path. Test `test_wave29_simd_emitted_in_aarch64_isel` verifies the NEON `add v0.4s, v1.4s, v2.4s` word `0x4E228420` appears in the emitted machine code.
+- [x] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
+  - **AUDIT RESOLVED (Task 4-a):** IR-level test `test_loop_vectorization_no_miscompile_body_count` (`vectorize.rs:1053`) verifies 4 body copies + IV step 16. Machine-code-level tests `test_wave29_simd_emitted_in_x86_64_isel` and `test_wave29_simd_emitted_in_aarch64_isel` verify SIMD bytes/words appear in the emitted binary.
 
 ---
 

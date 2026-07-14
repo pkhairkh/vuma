@@ -22,7 +22,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction,
     BackendError, PhysicalReg, RegClass, RelocationEntry,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VectorOpKind};
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
@@ -79,6 +79,9 @@ use super::{
     encode_sub_reg_imm32, encode_sub_reg_reg,
     encode_test_reg_reg,
     encode_xor_reg_imm32, encode_xor_reg_reg,
+    // ── SSE/AVX SIMD encoders (Wave 29 ISel wiring) ──
+    encode_sse_paddq, encode_sse_psubd, encode_sse_pmulld,
+    encode_avx_vpaddq,
 };
 
 // =============================================================================
@@ -1660,6 +1663,53 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
                         code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
+                    code
+                }
+
+                // ── VectorOp (Wave 29) ────────────────────────────────────
+                // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
+                // We invoke the existing SSE/AVX encoders with fixed physical
+                // XMM0/XMM1/XMM2 operands. Full vector-vreg → physical-XMM
+                // register allocation is deferred; the IR-level vregs are
+                // tracked for dataflow (defined_regs/used_regs) but the bytes
+                // come straight from the encoder.
+                //
+                // Selection rules (matching the Wave 29 encoder suite):
+                //   - Add + elem_size=8 → SSE2 `paddq xmm0, xmm1` (66 0F D4 C1)
+                //   - Add + elem_size=4 → AVX `vpaddq xmm0, xmm1, xmm2`
+                //                          (C5 F1 D4 D0 — VEX prefix present)
+                //   - Sub + elem_size=4 → SSE2 `psubd xmm0, xmm1` (66 0F FA C1)
+                //   - Mul + elem_size=4 → SSE4.1 `pmulld xmm0, xmm1`
+                //                          (66 0F 38 40 C1)
+                //   - Any other combination falls back to a NOP (the
+                //     vectorizer only emits Add/Sub/Mul on i32/i64 so this
+                //     branch is unreachable in practice).
+                IRInstr::VectorOp { op, lanes: _, elem_size, dst: _, lhs: _, rhs: _ } => {
+                    instr_opcode = Some(format!("simd_{:?}", op));
+                    let mut code = Vec::new();
+                    match (*op, *elem_size) {
+                        (VectorOpKind::Add, 8) => {
+                            // paddq xmm0, xmm1 — SSE2
+                            code.extend(encode_sse_paddq(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        (VectorOpKind::Add, 4) => {
+                            // vpaddq xmm0, xmm1, xmm2 — AVX (VEX prefix 0xC5)
+                            code.extend(encode_avx_vpaddq(Xmm::Xmm0, Xmm::Xmm1, Xmm::Xmm2));
+                        }
+                        (VectorOpKind::Sub, 4) => {
+                            // psubd xmm0, xmm1 — SSE2
+                            code.extend(encode_sse_psubd(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        (VectorOpKind::Mul, 4) => {
+                            // pmulld xmm0, xmm1 — SSE4.1
+                            code.extend(encode_sse_pmulld(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        _ => {
+                            // Unsupported (op, elem_size) combo — emit nothing.
+                            // The vectorizer only produces the four cases above.
+                            code.extend(encode_nop());
+                        }
                     }
                     code
                 }

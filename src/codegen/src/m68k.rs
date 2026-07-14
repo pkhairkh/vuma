@@ -1490,6 +1490,9 @@ fn emit_instr(
                 code.extend(ss_st(Gpr::D0, dst_off));
             }
         }
+        // ── VectorOp (Wave 29) ──
+        // m68k has no SIMD encoder in the Wave 29 suite; emit nothing.
+        IRInstr::VectorOp { .. } => {}
     }
 }
 

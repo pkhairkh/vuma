@@ -3429,6 +3429,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 }
             }
         }
+        // ── VectorOp (Wave 29) ──
+        // wasm32 has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // The vectorizer still produces the IR; this backend just cannot
+        // lower it to SIMD wasm instructions.
+        IRInstr::VectorOp { .. } => {}
     }
     Ok(())
 }

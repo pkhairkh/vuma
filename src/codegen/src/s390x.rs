@@ -1871,6 +1871,9 @@ fn emit_instr(
                 code.extend(ss_st(Gpr::R2, dst_off));
             }
         }
+        // ── VectorOp (Wave 29) ──
+        // s390x has no SIMD encoder in the Wave 29 suite; emit nothing.
+        IRInstr::VectorOp { .. } => {}
     }
 }
 

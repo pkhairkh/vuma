@@ -201,6 +201,14 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             args: args.iter().map(sv).collect(),
             dst: dst.as_ref().map(sv),
         },
+        IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs } => IRInstr::VectorOp {
+            op: *op,
+            lanes: *lanes,
+            elem_size: *elem_size,
+            dst: sv(dst),
+            lhs: sv(lhs),
+            rhs: sv(rhs),
+        },
     }
 }
 
