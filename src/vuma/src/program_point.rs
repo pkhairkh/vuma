@@ -5,7 +5,6 @@
 //! of provenance tracking in VUMA, enabling the system to trace every memory
 //! operation back to its origin in the source program.
 
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -14,7 +13,7 @@ use std::fmt;
 /// The meaning of a [`NodeId`] is defined by the front-end that feeds data
 /// into VUMA. It is treated as opaque here so that the core remains
 /// front-end-agnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 
 impl Ord for NodeId {
@@ -54,7 +53,7 @@ impl fmt::Display for NodeId {
 /// };
 /// assert_eq!(format!("{}", pp), "main.vu:42:8 [node#107]");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProgramPoint {
     /// Source file path (relative or absolute).
     pub file: String,

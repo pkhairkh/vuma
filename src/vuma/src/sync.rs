@@ -6,11 +6,10 @@
 //! candidate data races.
 
 use crate::access::AccessId;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Unique identifier for a synchronisation edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SyncEdgeId(pub u64);
 
 impl fmt::Display for SyncEdgeId {
@@ -20,7 +19,7 @@ impl fmt::Display for SyncEdgeId {
 }
 
 /// Unique identifier for a lock/mutex.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LockId(pub u64);
 
 impl fmt::Display for LockId {
@@ -30,7 +29,7 @@ impl fmt::Display for LockId {
 }
 
 /// The kind of ordering that a synchronisation edge enforces.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ordering {
     /// `access1` happens-before `access2` (sequential program order, join, etc.).
     HappensBefore,
@@ -56,7 +55,7 @@ impl fmt::Display for Ordering {
 ///
 /// The edge direction is significant: it records that `access1` is ordered
 /// *before* `access2` according to the given [`Ordering`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyncEdge {
     /// Unique identifier for this edge.
     pub id: SyncEdgeId,

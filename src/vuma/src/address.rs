@@ -5,7 +5,6 @@
 //! hex-formatted display so that addresses always appear as `0x`-prefixed
 //! lowercase hexadecimal (e.g. `0x00007f8a3c001000`).
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub};
 
@@ -25,7 +24,7 @@ use std::ops::{Add, AddAssign, Sub};
 /// assert_eq!(ptr, Address::from(0x1040_u64));
 /// assert_eq!(format!("{}", base), "0x0000000000001000");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub u64);
 
 impl Address {
