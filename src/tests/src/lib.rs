@@ -103,6 +103,8 @@ pub mod wave47_bootstrap;
 #[cfg(test)]
 pub mod wave48_bootstrap;
 #[cfg(test)]
+pub mod wave48_self_host;
+#[cfg(test)]
 pub mod wave50;
 
 // Re-export the helper macros from the framework module.
