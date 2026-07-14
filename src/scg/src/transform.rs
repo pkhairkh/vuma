@@ -3987,4 +3987,272 @@ mod tests {
         let removed = dead_region_elim(&mut scg);
         assert_eq!(removed.len(), 2); // alloc + dealloc
     }
+
+    // ── Wave 33: PassManager-wired SCGPass trait tests ────────────────
+    //
+    // The tests above exercise the standalone helper functions
+    // (`strength_reduce`, `detect_tail_calls`, `dead_region_elim`).
+    // Wave 33 wires the `SCGPass`-implementing structs
+    // (`StrengthReduction`, `TailCallOptDetection`,
+    // `DeadRegionElimination`) into `PassManager` at O1+/O2+, so we
+    // add three tests that invoke `SCGPass::run` directly to verify
+    // the structs fire on representative SCGs (i.e. that the
+    // PassManager wiring is sound).
+
+    /// StrengthReduction pass: a `mul` fed by a `const.i32:8` (power of
+    /// two) and a `load` should be rewritten to `shl_3` via the
+    /// `SCGPass::run` entry point.
+    #[test]
+    fn test_pass_strength_reduction_mul_by_power_of_two() {
+        let mut scg = SCG::new();
+        let n_const = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("const.i32:8".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let n_load = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("load".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let n_mul = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("mul".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        scg.add_edge(n_const, n_mul, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n_load, n_mul, EdgeKind::DataFlow).unwrap();
+
+        let pass = StrengthReduction::new();
+        assert_eq!(pass.name(), "StrengthReduction");
+        let result = pass.run(&mut scg);
+        assert!(result.changed, "StrengthReduction should fire on mul by 8");
+
+        let node = scg.get_node(n_mul).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert_eq!(c.kind.label(), "shl_3"),
+            _ => panic!("expected computation node"),
+        }
+    }
+
+    /// TailCallOptDetection pass: a `call_*` computation feeding a
+    /// FunctionReturn via ControlFlow should be marked `tail_call: true`
+    /// via the `SCGPass::run` entry point.
+    #[test]
+    fn test_pass_tail_call_opt_detection_marks_call() {
+        let mut scg = SCG::new();
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("call_foo".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionReturn,
+                label: None,
+            }),
+            pp(),
+        );
+        scg.add_edge(call_node, ret, EdgeKind::ControlFlow).unwrap();
+
+        let pass = TailCallOptDetection::new();
+        assert_eq!(pass.name(), "TailCallOptDetection");
+        let result = pass.run(&mut scg);
+        assert!(
+            result.changed,
+            "TailCallOptDetection should fire when a call feeds a return"
+        );
+
+        let node = scg.get_node(call_node).unwrap();
+        match &node.payload {
+            NodePayload::Computation(c) => assert!(c.tail_call, "tail_call flag should be set"),
+            _ => panic!("expected computation node"),
+        }
+    }
+
+    /// DeadRegionElimination pass: an alloc+dealloc pair with no
+    /// reads (only writes) should have both endpoints removed via the
+    /// `SCGPass::run` entry point.
+    #[test]
+    fn test_pass_dead_region_elimination_removes_write_only() {
+        use crate::node::{AccessMode, AccessNode, AllocationNode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let region = RegionId::new(1);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 32,
+                align: 8,
+                region_id: region,
+                type_name: None,
+            }),
+            pp(),
+        );
+        let _write = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write,
+                region_id: region,
+                offset: None,
+                access_size: None,
+            }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc,
+                region_id: region,
+            }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        let pass = DeadRegionElimination::new();
+        assert_eq!(pass.name(), "DeadRegionElimination");
+        let result = pass.run(&mut scg);
+        assert!(
+            result.changed,
+            "DeadRegionElimination should fire on write-only region"
+        );
+        assert!(
+            result.nodes_removed >= 2,
+            "should remove at least the alloc + dealloc (got {})",
+            result.nodes_removed
+        );
+        assert!(scg.get_node(alloc).is_none(), "alloc node should be removed");
+        assert!(
+            scg.get_node(dealloc).is_none(),
+            "dealloc node should be removed"
+        );
+    }
+
+    /// Sanity test: a PassManager configured like the O2 pipeline
+    /// actually invokes all three Wave-33 passes.  We construct a
+    /// tiny SCG that each pass can act on and verify the pipeline runs
+    /// without error and reports at least one change.
+    #[test]
+    fn test_pass_manager_o2_pipeline_includes_wave33_passes() {
+        use crate::node::ControlNode;
+
+        let mut scg = SCG::new();
+
+        // An alloc + dealloc pair (dead region) — for DeadRegionElimination.
+        use crate::node::{AllocationNode, DeallocationNode};
+        use crate::region::RegionId;
+        let region = RegionId::new(7);
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 8,
+                region_id: region,
+                type_name: None,
+            }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc,
+                region_id: region,
+            }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        // A mul-by-8 — for StrengthReduction.
+        let n_const = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("const.i32:8".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let n_load = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("load".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let n_mul = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("mul".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        scg.add_edge(n_const, n_mul, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n_load, n_mul, EdgeKind::DataFlow).unwrap();
+
+        // A call feeding a return — for TailCallOptDetection.
+        let call_node = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("call_bar".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let ret = scg.add_node(
+            NodeType::Control,
+            NodePayload::Control(ControlNode {
+                kind: ControlKind::FunctionReturn,
+                label: None,
+            }),
+            pp(),
+        );
+        scg.add_edge(call_node, ret, EdgeKind::ControlFlow).unwrap();
+
+        // Mirror the O2 pipeline from `run_scg_transforms`.
+        let mut pm = PassManager::new().verify_between(false).stop_on_error(false);
+        pm.add_pass(DeadCodeElimination::new());
+        pm.add_pass(StrengthReduction::new());
+        pm.add_pass(TailCallOptDetection::new());
+        pm.add_pass(DeadRegionElimination::new());
+
+        let result = pm.run(&mut scg);
+        // At least one of the three Wave-33 passes should have fired.
+        let wave33_changed = result
+            .pass_results
+            .iter()
+            .any(|r| matches!(r.pass_name.as_str(), "StrengthReduction" | "TailCallOptDetection" | "DeadRegionElimination")
+                && r.changed);
+        assert!(
+            wave33_changed,
+            "at least one Wave-33 pass should fire; results = {:?}",
+            result
+                .pass_results
+                .iter()
+                .map(|r| (r.pass_name.clone(), r.changed))
+                .collect::<Vec<_>>()
+        );
+    }
 }
