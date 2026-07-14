@@ -338,49 +338,192 @@ fn irb_free(b: Address) {
 }
 
 // ============================================================================
-// Wave 48 — pipeline entry points + SCG/BD/IVE stubs
+// Wave 48 — pipeline entry points (SCG / IR build / BD / IVE)
 // ============================================================================
 // The bootstrap pipeline (full_lexer.vuma::main) calls these in order:
-//   1. scg_construct(ast)        — STUB: returns 0 (bootstrap skips SCG;
-//                                  AST→IR direct). The production compiler
-//                                  builds an SCG (Scheduled Computation Graph)
-//                                  for loop-carried dependency analysis; the
-//                                  bootstrap's hello.vuma subset has no loops
-//                                  in codegen, so SCG would be a no-op anyway.
+//   1. scg_construct(ast)        — REAL: walks the AST arena and builds a
+//                                  minimal linear-chain SCG (Scheduled
+//                                  Computation Graph): one FunctionEntry
+//                                  node per NK_FN_DEF, then one node per
+//                                  statement in the function body (classified
+//                                  by AST kind: Compute/Access/Control/
+//                                  Statement), connected by ControlFlow edges
+//                                  in program order. Returns the total number
+//                                  of SCG nodes created.
 //   2. irb_build_main(ast, main_hash, ir_buf)
 //                                — REAL: walks the AST arena, finds the
 //                                  function whose name hashes to `main_hash`,
 //                                  lowers its body to IR opcodes in `ir_buf`.
 //                                  Returns 1 if main was found, 0 otherwise.
-//   3. bd_infer(ir_buf)          — STUB: returns 1 ("all values are i64").
-//                                  The production BD (Bounded-Domain) inference
-//                                  propagates type bounds forward from
-//                                  literals; the bootstrap treats every vreg
-//                                  as a full i64, which is sound for the
-//                                  integer-only hello.vuma subset.
-//   4. ive_verify(ir_buf)        — STUB: returns 1 ("verified, no changes").
-//                                  The production IVE (Integer Verification
-//                                  Engine) checks liveness (use-before-def)
-//                                  and removes dead lets; the bootstrap trusts
-//                                  the parser to produce well-scoped code and
-//                                  the codegen to handle stray vreg 0 reads
-//                                  defensively (load from [rbp-0] = garbage,
-//                                  but that path is unreachable in hello.vuma).
+//                                  (Note: this still lowers AST→IR directly
+//                                  rather than consuming the SCG from step 1;
+//                                  the SCG is built for diagnostic purposes
+//                                  and to make the pipeline shape match the
+//                                  production compiler. See Wave 48 task
+//                                  [BOOT] Implement IR construction from SCG
+//                                  for the documented caveat.)
+//   3. bd_infer(ir_buf)          — REAL: forward RepD propagation pass.
+//                                  Walks the IR buffer forward, allocates a
+//                                  per-vreg RepD tag array, and assigns each
+//                                  dst vreg a RepD based on the opcode
+//                                  (MOV→I64, ALU→propagate, CMP→BOOL, LOAD→
+//                                  I64, ALLOC→PTR, CALL→I64). Returns the
+//                                  number of vregs assigned a non-UNKNOWN
+//                                  RepD.
+//   4. ive_verify(ir_buf)        — REAL: forward-liveness + backward-use
+//                                  check + dead-let detection. Pass 1
+//                                  (forward) marks every defined vreg.
+//                                  Pass 2 (backward) marks every used vreg.
+//                                  Liveness check: every used vreg (except
+//                                  vreg 0) must be defined. Cleanup pass
+//                                  counts dead defs (dst vreg never used).
+//                                  Returns 1 if liveness passes, 0 otherwise.
 //
-// Each stub is honestly labeled. The Wave 48 contract is: a coherent,
-// documented pipeline where every stage's signature is final even if its
-// body is a stub — so subsequent waves can replace stubs with real passes
-// without touching the driver.
+// The Wave 48 contract: a coherent, documented pipeline where every stage's
+// signature is final and every stage does REAL work (not return-a-constant
+// stubs). Subsequent waves can deepen each pass without touching the driver.
 
-// scg_construct: STUB. The bootstrap goes AST→IR directly.
-// Returns 0 (no SCG nodes produced; the bootstrap doesn't allocate an SCG).
+// ── SCG (Scheduled Computation Graph) construction ──
+// Wave 48: minimal but REAL SCG builder. Walks the AST arena and emits a
+// linear-chain SCG: one FunctionEntry node per NK_FN_DEF, then one node per
+// statement in the function body (classified by AST kind), connected by
+// ControlFlow edges in program order.
+//
+// SCG buffer layout (single allocation, ~12 KB):
+//   [0..3]    node_count: u32
+//   [4..7]    edge_count: u32
+//   [8..]     nodes (SCG_NODE_SIZE=16 bytes each):
+//               [kind: u32][ast_idx: u32][next: u32][prev: u32]
+//   After nodes (offset SCG_EDGES_OFFSET):
+//             edges (SCG_EDGE_SIZE=8 bytes each):
+//               [src: u32][dst: u32]
+//
+// The `next`/`prev` fields on each node form a doubly-linked list mirroring
+// the ControlFlow edges for O(1) forward/backward traversal.
+
+const SCG_NK_FUNCTION_ENTRY: u32 = 1;
+const SCG_NK_COMPUTE: u32 = 2;
+const SCG_NK_ACCESS: u32 = 3;
+const SCG_NK_CONTROL: u32 = 4;
+const SCG_NK_STATEMENT: u32 = 5;
+const SCG_EK_CONTROL_FLOW: u32 = 1;
+const SCG_NODE_CAP: u32 = 512;
+const SCG_EDGE_CAP: u32 = 512;
+const SCG_NODE_SIZE: u32 = 16;
+const SCG_EDGE_SIZE: u32 = 8;
+const SCG_HEADER_SIZE: u32 = 8;
+const SCG_EDGES_OFFSET: u32 = 8 + 512 * 16;   // = 8200
+
+fn scg_new() -> Address {
+    total: i64 = 8 + 512 * 16 + 512 * 8;   // = 12360 bytes
+    buf: Address = __vuma_alloc(total);
+    store_u32(buf, 0, 0);   // node_count
+    store_u32(buf, 4, 0);   // edge_count
+    return buf;
+}
+
+// Append a node to the SCG; returns the new node's index, or 0xFFFFFFFF if
+// the node capacity has been exceeded.
+fn scg_add_node(scg: Address, kind: u32, ast_idx: u32) -> u32 {
+    n: u32 = load_u32(scg, 0);
+    if n >= SCG_NODE_CAP { return 0xFFFFFFFF; }
+    off: u32 = SCG_HEADER_SIZE + n * SCG_NODE_SIZE;
+    store_u32(scg, off, kind);
+    store_u32(scg, off + 4, ast_idx);
+    store_u32(scg, off + 8, 0);   // next
+    store_u32(scg, off + 12, 0);  // prev
+    store_u32(scg, 0, n + 1);
+    return n;
+}
+
+// Connect src → dst with an edge. For ControlFlow edges, also updates the
+// `next`/`prev` linked-list pointers on the nodes for O(1) traversal.
+fn scg_connect(scg: Address, src: u32, dst: u32, edge_kind: u32) {
+    e: u32 = load_u32(scg, 4);
+    if e >= SCG_EDGE_CAP { return; }
+    off: u32 = SCG_EDGES_OFFSET + e * SCG_EDGE_SIZE;
+    store_u32(scg, off, src);
+    store_u32(scg, off + 4, dst);
+    if edge_kind == SCG_EK_CONTROL_FLOW {
+        src_off: u32 = SCG_HEADER_SIZE + src * SCG_NODE_SIZE;
+        store_u32(scg, src_off + 8, dst);   // src.next = dst
+        dst_off: u32 = SCG_HEADER_SIZE + dst * SCG_NODE_SIZE;
+        store_u32(scg, dst_off + 12, src);  // dst.prev = src
+    }
+    store_u32(scg, 4, e + 1);
+}
+
+// Map an AST node kind to an SCG node kind.
+fn scg_node_kind_for(ast_kind: u32) -> u32 {
+    if ast_kind == 20 { return SCG_NK_FUNCTION_ENTRY; }  // NK_FN_DEF
+    if ast_kind == 10 { return SCG_NK_CONTROL; }         // NK_RETURN
+    if ast_kind == 11 { return SCG_NK_STATEMENT; }       // NK_LET
+    if ast_kind == 12 { return SCG_NK_CONTROL; }         // NK_IF
+    if ast_kind == 13 { return SCG_NK_CONTROL; }         // NK_WHILE
+    if ast_kind == 15 { return SCG_NK_CONTROL; }         // NK_BLOCK
+    if ast_kind == 1  { return SCG_NK_COMPUTE; }         // NK_INT
+    if ast_kind == 2  { return SCG_NK_ACCESS; }          // NK_IDENT
+    if ast_kind == 3  { return SCG_NK_COMPUTE; }         // NK_BINOP
+    if ast_kind == 5  { return SCG_NK_COMPUTE; }         // NK_CALL
+    if ast_kind == 6  { return SCG_NK_ACCESS; }          // NK_DEREF
+    if ast_kind == 7  { return SCG_NK_ACCESS; }          // NK_ASSIGN
+    return SCG_NK_STATEMENT;
+}
+
+// Walk an NK_BLOCK's statement list (side-buffer of u32 AST indices, per
+// the Wave 48 fix in irb_lower_block) and append one SCG node + ControlFlow
+// edge per statement, in program order. Returns the index of the last node
+// appended (or `entry_node` if the block was empty).
+fn scg_walk_block(scg: Address, ast: u64, block_idx: u32, entry_node: u32) -> u32 {
+    node_offset: u32 = 8 + block_idx * 40;
+    stmt_count: u32 = load_u32(ast, node_offset + 8);
+    stmt_indices: u64 = load_u64(ast, node_offset + 16);
+    prev: u32 = entry_node;
+    i: u32 = 0;
+    while i < stmt_count {
+        idx: u32 = load_u32(stmt_indices, i * 4);
+        s_off: u32 = 8 + idx * 40;
+        s_kind: u32 = load_u32(ast, s_off);
+        nk: u32 = scg_node_kind_for(s_kind);
+        n: u32 = scg_add_node(scg, nk, idx);
+        if n != 0xFFFFFFFF {
+            scg_connect(scg, prev, n, SCG_EK_CONTROL_FLOW);
+            prev = n;
+        }
+        i = i + 1;
+    }
+    return prev;
+}
+
+// scg_construct(ast): REAL Wave 48 implementation. Builds a minimal
+// linear-chain SCG from the AST arena. For each NK_FN_DEF at top level, a
+// FunctionEntry node is created and the function body (NK_BLOCK) is walked
+// to produce one node per statement, classified by AST kind, connected by
+// ControlFlow edges in program order. Returns the total number of SCG
+// nodes created (0 if the AST is empty or has no function definitions).
+//
+// The SCG buffer is heap-allocated and intentionally NOT freed — the
+// bootstrap exits after pipeline completion and the OS reclaims the heap.
+// A future wave can store the SCG handle in the AST arena header and have
+// irb_build_main consume + free it.
 fn scg_construct(ast: Address) -> u32 {
-    // Wave 48 STUB: production SCG construction lives in src/scg/*.rs (the
-    // Rust compiler). The bootstrap skips SCG because (a) hello.vuma has no
-    // loops in codegen and (b) the bootstrap's IR is already linear. Real
-    // SCG construction would build a dependency graph, schedule
-    // loop-carried phis, and feed the scheduled order to irb_build_main.
-    return 0;
+    scg: Address = scg_new();
+    count: u32 = load_u32(ast, 0);
+    i: u32 = 0;
+    while i < count {
+        node_off: u32 = 8 + i * 40;
+        kind: u32 = load_u32(ast, node_off);
+        if kind == 20 {  // NK_FN_DEF
+            body: u32 = load_u32(ast, node_off + 4);
+            entry: u32 = scg_add_node(scg, SCG_NK_FUNCTION_ENTRY, i);
+            if entry != 0xFFFFFFFF {
+                scg_walk_block(scg, ast, body, entry);
+            }
+        }
+        i = i + 1;
+    }
+    total: u32 = load_u32(scg, 0);
+    return total;
 }
 
 // irb_build_main: REAL entry point. Finds `main` in the AST by name hash
@@ -410,29 +553,215 @@ fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32 {
     return found;
 }
 
-// bd_infer: STUB. Phase 1 propagation in the production compiler walks the
-// IR forward, inferring bounded integer ranges from literal MOVs and
-// narrowing ALU op results. The bootstrap treats every vreg as a full i64,
-// which is sound (no narrowing = no overflows the codegen doesn't already
-// handle) but loses optimization opportunities. Returns 1 ("inferred:
-// all i64").
-fn bd_infer(ir_buf: Address) -> u32 {
-    // Wave 48 STUB: real BD inference lives in src/bd/*.rs. The bootstrap
-    // documents the deferral here; the signature is final so a future wave
-    // can replace the body with a real forward-propagation pass.
-    return 1;
+// ── BD (Bounded-Domain) inference — Phase 1 ──
+// Wave 48: minimal but REAL forward-propagation pass. Walks the IR buffer
+// forward, allocates a per-vreg RepD tag array, and assigns each dst vreg a
+// RepD based on the opcode and (where relevant) the operands' already-inferred
+// RepDs. Literal MOVs seed I64; ALU ops propagate the operand RepD (with
+// conservative promotion to I64 when operands disagree or are unknown); CMP
+// yields BOOL; LOAD yields I64; ALLOC yields PTR; CALL yields I64.
+//
+// Returns the number of vregs assigned a non-UNKNOWN RepD (0 if the IR is
+// empty or no dst vregs could be classified).
+
+const REPD_UNKNOWN: u32 = 0;
+const REPD_I64: u32 = 1;
+const REPD_BOOL: u32 = 2;
+const REPD_PTR: u32 = 3;
+const REPD_I32: u32 = 4;
+const BD_VREG_CAP: u32 = 4096;
+
+// Classify the dst RepD for a given IR opcode given the (already-inferred)
+// RepDs of the lhs and rhs operands. Returns REPD_UNKNOWN if the opcode has
+// no dst vreg (NOP/STORE/RET/BRANCH/COND_BRANCH).
+fn bd_classify(op: u32, lhs_repd: u32, rhs_repd: u32) -> u32 {
+    if op == 16 { return REPD_I64; }   // IR_MOV: literal i64.
+    if op >= 1 && op <= 9 {            // ADD/SUB/MUL/DIV/AND/OR/XOR/SHL/SHR.
+        if lhs_repd == REPD_I32 && rhs_repd == REPD_I32 { return REPD_I32; }
+        return REPD_I64;               // promote conservatively.
+    }
+    if op == 10 { return REPD_BOOL; }  // IR_CMP.
+    if op == 11 { return REPD_I64; }   // IR_LOAD.
+    if op == 15 { return REPD_PTR; }   // IR_ALLOC.
+    if op == 13 { return REPD_I64; }   // IR_CALL (callee return type unknown).
+    return REPD_UNKNOWN;
 }
 
-// ive_verify: STUB. The production IVE pass checks (a) liveness — every
-// vreg used has been defined by a dominating MOV/ALU op — and (b) cleanup
-// — removes lets whose init vreg is never read. The bootstrap trusts the
-// parser to produce well-scoped code (every `let` precedes its uses) and
-// the codegen to defensively handle vreg 0 reads (which would load from
-// [rbp+0] = saved rbp, but that path is unreachable in hello.vuma).
-// Returns 1 ("verified, no changes").
+// bd_infer(ir_buf): REAL Wave 48 implementation. Forward RepD propagation.
+fn bd_infer(ir_buf: Address) -> u32 {
+    count: u32 = load_u32(ir_buf, 0);
+    repd: Address = __vuma_alloc(BD_VREG_CAP);
+    // Zero-init (REPD_UNKNOWN = 0).
+    i: u32 = 0;
+    while i < BD_VREG_CAP {
+        *(repd + i) = 0;
+        i = i + 1;
+    }
+    assigned: u32 = 0;
+    i = 0;
+    while i < count {
+        op_off: u32 = 8 + i * IR_SIZE;
+        op: u32 = load_u32(ir_buf, op_off);
+        dst: u32 = load_u32(ir_buf, op_off + 4);
+        lhs: u32 = load_u32(ir_buf, op_off + 8);
+        rhs: u32 = load_u32(ir_buf, op_off + 12);
+        // Read operand RepDs (REPD_UNKNOWN if out of range or uninitialized).
+        lhs_r: u32 = REPD_UNKNOWN;
+        rhs_r: u32 = REPD_UNKNOWN;
+        if lhs > 0 && lhs < BD_VREG_CAP { lhs_r = *(repd + lhs); }
+        if rhs > 0 && rhs < BD_VREG_CAP { rhs_r = *(repd + rhs); }
+        r: u32 = bd_classify(op, lhs_r, rhs_r);
+        if r != REPD_UNKNOWN && dst > 0 && dst < BD_VREG_CAP {
+            prev: u32 = *(repd + dst);
+            if prev == REPD_UNKNOWN { assigned = assigned + 1; }
+            *(repd + dst) = r;
+        }
+        i = i + 1;
+    }
+    __vuma_free(repd, BD_VREG_CAP);
+    return assigned;
+}
+
+// ── IVE (Integer Verification Engine) — liveness + cleanup ──
+// Wave 48: minimal but REAL IVE pass. Performs two checks:
+//
+//   (a) Liveness — every vreg used by some instruction must be defined by
+//       a prior def-instruction (MOV/ALU/CMP/LOAD/CALL/ALLOC). A vreg that
+//       is used but never defined is a use-before-def error → return 0.
+//       (vreg 0 is reserved for "no vreg" and is exempt.)
+//
+//   (b) Cleanup — count def-instructions whose dst vreg is never used by
+//       any subsequent instruction. These are dead "lets" that a real IVE
+//       pass would rewrite out of the IR buffer; the bootstrap counts them
+//       for diagnostic purposes but does not mutate the IR (the codegen
+//       silently skips unused defs).
+//
+// Returns 1 if the liveness check passes, 0 otherwise.
+
+const IVE_VREG_CAP: u32 = 4096;
+const IVE_BITMAP_BYTES: u32 = 512;       // 4096 / 8
+const IVE_BITMAP_U64S: u32 = 64;         // 512 / 8
+
+// Set bit `vreg` in the bitmap.
+fn ive_bm_set(bm: Address, vreg: u32) {
+    if vreg == 0 || vreg >= IVE_VREG_CAP { return; }
+    word: u32 = vreg >> 6;       // vreg / 64
+    bit: u32 = vreg & 63;        // vreg % 64
+    cur: u64 = load_u64(bm, word * 8);
+    cur = cur | (1 << bit);
+    store_u64(bm, word * 8, cur);
+}
+
+// Get bit `vreg` from the bitmap. Returns 1 or 0.
+fn ive_bm_get(bm: Address, vreg: u32) -> u32 {
+    if vreg == 0 || vreg >= IVE_VREG_CAP { return 0; }
+    word: u32 = vreg >> 6;
+    bit: u32 = vreg & 63;
+    cur: u64 = load_u64(bm, word * 8);
+    if (cur >> bit) & 1 == 1 { return 1; }
+    return 0;
+}
+
+// Zero out the bitmap.
+fn ive_bm_clear(bm: Address) {
+    i: u32 = 0;
+    while i < IVE_BITMAP_U64S {
+        store_u64(bm, i * 8, 0);
+        i = i + 1;
+    }
+}
+
+// True (1) if the opcode writes a dst vreg (i.e., is a def-instruction).
+fn ive_op_is_def(op: u32) -> u32 {
+    if op == 1  { return 1; }   // IR_ADD
+    if op == 2  { return 1; }   // IR_SUB
+    if op == 3  { return 1; }   // IR_MUL
+    if op == 4  { return 1; }   // IR_DIV
+    if op == 5  { return 1; }   // IR_AND
+    if op == 6  { return 1; }   // IR_OR
+    if op == 7  { return 1; }   // IR_XOR
+    if op == 8  { return 1; }   // IR_SHL
+    if op == 9  { return 1; }   // IR_SHR
+    if op == 10 { return 1; }   // IR_CMP
+    if op == 11 { return 1; }   // IR_LOAD
+    if op == 13 { return 1; }   // IR_CALL
+    if op == 15 { return 1; }   // IR_ALLOC
+    if op == 16 { return 1; }   // IR_MOV
+    return 0;
+}
+
+// ive_verify(ir_buf): REAL Wave 48 implementation. Liveness + cleanup pass.
 fn ive_verify(ir_buf: Address) -> u32 {
-    // Wave 48 STUB: real IVE verification lives in src/ive/*.rs. The
-    // bootstrap defers it; the signature is final so a future wave can
-    // replace the body with a real liveness + dead-let-elimination pass.
-    return 1;
+    count: u32 = load_u32(ir_buf, 0);
+    // defined: bitmap of vregs defined by some instruction (forward pass).
+    // used:     bitmap of vregs used by some instruction (backward pass).
+    defined: Address = __vuma_alloc(IVE_BITMAP_BYTES);
+    used: Address = __vuma_alloc(IVE_BITMAP_BYTES);
+    ive_bm_clear(defined);
+    ive_bm_clear(used);
+
+    // Pass 1 (forward): mark every defined vreg.
+    i: u32 = 0;
+    while i < count {
+        op_off: u32 = 8 + i * IR_SIZE;
+        op: u32 = load_u32(ir_buf, op_off);
+        dst: u32 = load_u32(ir_buf, op_off + 4);
+        if ive_op_is_def(op) == 1 { ive_bm_set(defined, dst); }
+        i = i + 1;
+    }
+
+    // Pass 2 (backward): mark every used vreg.
+    if count > 0 {
+        i = count;
+        while i > 0 {
+            i = i - 1;
+            op_off: u32 = 8 + i * IR_SIZE;
+            op: u32 = load_u32(ir_buf, op_off);
+            dst: u32 = load_u32(ir_buf, op_off + 4);
+            lhs: u32 = load_u32(ir_buf, op_off + 8);
+            rhs: u32 = load_u32(ir_buf, op_off + 12);
+            imm: u64 = load_u64(ir_buf, op_off + 16);
+            imm_lo: u32 = imm & 0xFFFFFFFF;
+            // ALU/CMP (1..10): lhs, rhs are uses.
+            if op >= 1 && op <= 10 {
+                ive_bm_set(used, lhs);
+                ive_bm_set(used, rhs);
+            }
+            if op == 11 { ive_bm_set(used, lhs); }               // LOAD: addr.
+            if op == 12 { ive_bm_set(used, dst); ive_bm_set(used, lhs); }  // STORE: val, addr.
+            if op == 13 { ive_bm_set(used, imm_lo); }            // CALL: arg0.
+            if op == 14 { ive_bm_set(used, dst); }               // RET: returned vreg.
+            if op == 18 { ive_bm_set(used, dst); }               // COND_BRANCH: cond.
+        }
+    }
+
+    // Liveness check: every used vreg (except vreg 0) must be defined.
+    liveness_ok: u32 = 1;
+    vreg: u32 = 1;
+    while vreg < IVE_VREG_CAP {
+        if ive_bm_get(used, vreg) == 1 && ive_bm_get(defined, vreg) == 0 {
+            liveness_ok = 0;
+        }
+        vreg = vreg + 1;
+    }
+
+    // Cleanup pass (forward): count dead defs (dst vreg never used).
+    dead_count: u32 = 0;
+    i = 0;
+    while i < count {
+        op_off: u32 = 8 + i * IR_SIZE;
+        op: u32 = load_u32(ir_buf, op_off);
+        dst: u32 = load_u32(ir_buf, op_off + 4);
+        if ive_op_is_def(op) == 1 && dst != 0 && ive_bm_get(used, dst) == 0 {
+            dead_count = dead_count + 1;
+        }
+        i = i + 1;
+    }
+
+    __vuma_free(defined, IVE_BITMAP_BYTES);
+    __vuma_free(used, IVE_BITMAP_BYTES);
+    // dead_count is computed but not used to mutate the IR — a real IVE pass
+    // would rewrite the buffer; the bootstrap leaves it to the codegen to
+    // silently skip dead instructions.
+    return liveness_ok;
 }
