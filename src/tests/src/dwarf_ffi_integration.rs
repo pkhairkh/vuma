@@ -881,6 +881,7 @@ fn test_ffi_demo_compiles_x86_64() {
                     lhs: ScgExpr::Int(0x400000),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "msg_len".to_string(),
@@ -888,6 +889,7 @@ fn test_ffi_demo_compiles_x86_64() {
                     lhs: ScgExpr::Int(21),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Int(0)]),
             ],
@@ -1059,6 +1061,7 @@ fn test_dwarf_debug_full_pipeline() {
                     lhs: ScgExpr::Int(42),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".to_string())]),
             ],
