@@ -1,0 +1,79 @@
+# ============================================================================
+# VUMA Wave 36 — Proof-Verify CI
+# ============================================================================
+# Dedicated CI job for the Wave 36 proof-logging / `bv_verify` gate pipeline.
+#
+# This workflow exists to satisfy Wave 36's CI requirement (referenced in the
+# test comment at `src/codegen/src/bv_verify.rs:429` — `test_wave36_unsound_rule_rejected`).
+# It runs the full set of proof-related unit tests across the workspace so a
+# regression in:
+#
+#   * `bv_verify`                  — bitvector soundness gate
+#   * `proof_artifacts`            — `check_proof_log` post-saturation audit
+#   * any `proof_log`-named test   — broader proof-system wiring
+#
+# is surfaced on every push to `main` and every PR targeting `main`, even if
+# the broader `ci.yml` test matrix is skipped or its cache is stale.
+#
+# Test selector: `cargo test --workspace -- bv_verify proof_artifacts proof_log`
+# runs every test whose name (or path) contains one of those substrings.
+# Currently this exercises:
+#   - vuma-codegen: `bv_verify::tests::*` (7 tests, incl. the unsound-rule gate test)
+#   - vuma-codegen: `proof_artifacts::tests::*` (4 tests, incl. `test_wave36_saturate_with_proof_then_check`)
+#   - vuma-codegen: `egraph::tests::test_wave36_*` (2 tests)
+#   - vuma-proof / vuma-ive: any `proof_log`-named tests that exist across the workspace
+#
+# Style mirrors `.github/workflows/ci.yml` (same `dtolnay/rust-toolchain@stable`
+# action with `toolchain: nightly-2026-03-01`, same `Swatinem/rust-cache@v2`
+# caching, same env vars).
+# ============================================================================
+
+name: Proof Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight jobs when a new commit lands on the same branch/PR.
+concurrency:
+  group: proof-verify-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  proof-verify:
+    name: Proof-verify (bv_verify + check_proof_log)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-03-01
+          components: rust-src
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: proof-verify-${{ runner.os }}
+
+      # Wave 36 gate smoke-check: build the workspace so any compile-level
+      # regression in the proof/bv_verify modules is caught here rather than
+      # only at test time.
+      - name: Build workspace
+        run: cargo build --workspace
+
+      # Wave 36 proof tests. The trailing positional args are test-name
+      # substrings — cargo runs any test whose full path contains at least
+      # one of them. `--no-fail-fast` keeps the run going after a single
+      # failure so all regressions are surfaced in one log.
+      - name: Run proof / bv_verify / proof_log tests
+        run: cargo test --workspace --no-fail-fast -- bv_verify proof_artifacts proof_log
