@@ -374,12 +374,12 @@
 
 # Wave 24 — Register allocator: dead-code deletion & `TargetAgnosticRegAlloc`
 
-- [ ] **[REGALLOC]** Decide: delete `regalloc.rs::RegAllocator` (legacy greedy, gated out by `STACK_SLOT_VREG_THRESHOLD=0`) or refactor.
-- [ ] **[REGALLOC-WIRE]** Wire `TargetAgnosticRegAlloc::allocate_function` (currently never called) for backends without a custom allocator. `src/codegen/src/regalloc.rs:1980`
-- [ ] **[REGALLOC]** Add per-backend `RegisterClass` + `TargetDesc` modeling for the target-agnostic allocator.
-- [ ] **[REGALLOC]** Add register coalescing to `LinearScanAllocator`.
-- [ ] **[REGALLOC]** Add register pressure modeling to spill-cost heuristic.
-- [ ] **[REGALLOC]** Re-enable `regalloc.rs:4066` `mod tests` (`#[cfg(any())] // Disabled: broken tests need fixing`).
+- [x] **[REGALLOC]** Decide: delete `regalloc.rs::RegAllocator` (legacy greedy, gated out by `STACK_SLOT_VREG_THRESHOLD=0`) or refactor.
+- [x] **[REGALLOC-WIRE]** Wire `TargetAgnosticRegAlloc::allocate_function` (currently never called) for backends without a custom allocator. `src/codegen/src/regalloc.rs:1980`
+- [x] **[REGALLOC]** Add per-backend `RegisterClass` + `TargetDesc` modeling for the target-agnostic allocator.
+- [x] **[REGALLOC]** Add register coalescing to `LinearScanAllocator`.
+- [x] **[REGALLOC]** Add register pressure modeling to spill-cost heuristic.
+- [x] **[REGALLOC]** Re-enable `regalloc.rs:4066` `mod tests` (`#[cfg(any())] // Disabled: broken tests need fixing`).
 
 ---
 
@@ -387,11 +387,11 @@
 
 > `inline_small` is real but disabled at `opt.rs:1415`.
 
-- [ ] **[OPT]** Fix the "caller never inlined" issue noted in the disabled comment. `src/codegen/src/opt.rs:1415`
-- [ ] **[OPT-WIRE]** Re-enable `inline_small` in `run_optimizations_inner`. `src/codegen/src/opt.rs:1415`
-- [ ] **[OPT]** Add an inline cost model (instruction count + call-arg count).
-- [ ] **[OPT]** Add `inline_with_threshold` config knob in `CompileConfig`.
-- [ ] **[TEST]** Add tests: inlining a small function reduces call count; recursive functions are not inlined infinitely.
+- [x] **[OPT]** Fix the "caller never inlined" issue noted in the disabled comment. `src/codegen/src/opt.rs:1415`
+- [x] **[OPT-WIRE]** Re-enable `inline_small` in `run_optimizations_inner`. `src/codegen/src/opt.rs:1415`
+- [x] **[OPT]** Add an inline cost model (instruction count + call-arg count).
+- [x] **[OPT]** Add `inline_with_threshold` config knob in `CompileConfig`.
+- [x] **[TEST]** Add tests: inlining a small function reduces call count; recursive functions are not inlined infinitely.
 
 ---
 
@@ -399,11 +399,11 @@
 
 > `licm` is real but disabled because preheader blocks aren't emitted correctly.
 
-- [ ] **[OPT]** Fix preheader block emission in codegen (the reason LICM was disabled). `src/codegen/src/opt.rs:1422`
-- [ ] **[OPT-WIRE]** Re-enable `licm` in `run_optimizations_inner`. `src/codegen/src/opt.rs:1422`
-- [ ] **[SCG-WIRE]** Add `LoopInvariantCodeMotion` to SCG `PassManager` (currently never added). `src/scg/src/transform.rs:1637`, `src/pipeline.rs:5862-5895`
-- [ ] **[TEST]** Add tests: loop-invariant load is hoisted out of loop body.
-- [ ] **[TEST]** Add tests: LICM doesn't hoist memory ops with possible aliasing.
+- [x] **[OPT]** Fix preheader block emission in codegen (the reason LICM was disabled). `src/codegen/src/opt.rs:1422`
+- [x] **[OPT-WIRE]** Re-enable `licm` in `run_optimizations_inner`. `src/codegen/src/opt.rs:1422`
+- [x] **[SCG-WIRE]** Add `LoopInvariantCodeMotion` to SCG `PassManager` (currently never added). `src/scg/src/transform.rs:1637`, `src/pipeline.rs:5862-5895`
+- [x] **[TEST]** Add tests: loop-invariant load is hoisted out of loop body.
+- [x] **[TEST]** Add tests: LICM doesn't hoist memory ops with possible aliasing.
 
 ---
 
@@ -411,22 +411,22 @@
 
 > `scheduler::schedule_function` is disabled at `opt.rs:1430` for pass-interaction miscompilation.
 
-- [ ] **[OPT]** Stabilize the IR so CSE/LICM/inline produce scheduler-stable input (the root cause of the disable). `src/codegen/src/opt.rs:1430`
-- [ ] **[OPT-WIRE]** Re-enable `scheduler::schedule_function` in `run_optimizations_inner`.
-- [ ] **[SCHED]** Remove the memory-op bail-out at `scheduler.rs:122-132` and `:345-355` — model Load/Store dependencies properly.
-- [ ] **[SCHED]** Add register-pressure modeling to list scheduling.
-- [ ] **[SCHED]** Add per-backend `LatencyTable`.
-- [ ] **[TEST]** Add tests: scheduled code produces same result as unscheduled; scheduling reduces critical-path length.
+- [x] **[OPT]** Stabilize the IR so CSE/LICM/inline produce scheduler-stable input (the root cause of the disable). `src/codegen/src/opt.rs:1430`
+- [x] **[OPT-WIRE]** Re-enable `scheduler::schedule_function` in `run_optimizations_inner`.
+- [x] **[SCHED]** Remove the memory-op bail-out at `scheduler.rs:122-132` and `:345-355` — model Load/Store dependencies properly.
+- [x] **[SCHED]** Add register-pressure modeling to list scheduling.
+- [x] **[SCHED]** Add per-backend `LatencyTable`.
+- [x] **[TEST]** Add tests: scheduled code produces same result as unscheduled; scheduling reduces critical-path length.
 
 ---
 
 # Wave 28 — Re-enable cross-function constant prop & identical-function merge
 
-- [ ] **[OPT]** Fix the constant-argument miscompilation in `cross_function_constant_prop`. `src/codegen/src/opt.rs:1443, 1562`
-- [ ] **[OPT-WIRE]** Re-enable `cross_function_constant_prop` in `run_optimizations_inner`.
-- [ ] **[OPT-WIRE]** Wire `identical_function_merge` (defined `opt.rs:1697`, never called).
-- [ ] **[TEST]** Add tests: constants propagated into callees; identical functions merged.
-- [ ] **[TEST]** Add regression tests for the original miscompilation.
+- [x] **[OPT]** Fix the constant-argument miscompilation in `cross_function_constant_prop`. `src/codegen/src/opt.rs:1443, 1562`
+- [x] **[OPT-WIRE]** Re-enable `cross_function_constant_prop` in `run_optimizations_inner`.
+- [x] **[OPT-WIRE]** Wire `identical_function_merge` (defined `opt.rs:1697`, never called).
+- [x] **[TEST]** Add tests: constants propagated into callees; identical functions merged.
+- [x] **[TEST]** Add regression tests for the original miscompilation.
 
 ---
 
@@ -435,12 +435,12 @@
 > `vectorize.rs` is a stub that miscompiles (blind 4× body duplication without
 > IV adjustment). Delete and rewrite.
 
-- [ ] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
-- [ ] **[OPT]** Implement real SLP vectorization with a cost model.
-- [ ] **[OPT]** Implement loop vectorization with IV-step adjustment (the exact thing the stub got wrong).
-- [ ] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
-- [ ] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
-- [ ] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
+- [x] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
+- [x] **[OPT]** Implement real SLP vectorization with a cost model.
+- [x] **[OPT]** Implement loop vectorization with IV-step adjustment (the exact thing the stub got wrong).
+- [x] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
+- [x] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
+- [x] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
 
 ---
 
@@ -449,12 +449,12 @@
 > `loop_unroll.rs` bails on multi-block loops; hardcoded `UNROLL_FACTOR=2`; no
 > trip-count analysis.
 
-- [ ] **[OPT]** Implement multi-block loop unrolling with block-graph rewiring. `src/codegen/src/loop_unroll.rs:265-268`
-- [ ] **[OPT]** Replace hardcoded `UNROLL_FACTOR=2` with trip-count-derived factor. `src/codegen/src/loop_unroll.rs:47`
-- [ ] **[OPT]** Implement Scalar Evolution (SCEV) for trip-count analysis.
-- [ ] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
-- [ ] **[OPT]** Add a code-size budget to the unroll heuristic.
-- [ ] **[TEST]** Add tests: multi-block loops unroll correctly; trip-count-known loops fully unroll.
+- [x] **[OPT]** Implement multi-block loop unrolling with block-graph rewiring. `src/codegen/src/loop_unroll.rs:265-268`
+- [x] **[OPT]** Replace hardcoded `UNROLL_FACTOR=2` with trip-count-derived factor. `src/codegen/src/loop_unroll.rs:47`
+- [x] **[OPT]** Implement Scalar Evolution (SCEV) for trip-count analysis.
+- [x] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
+- [x] **[OPT]** Add a code-size budget to the unroll heuristic.
+- [x] **[TEST]** Add tests: multi-block loops unroll correctly; trip-count-known loops fully unroll.
 
 ---
 
@@ -462,13 +462,13 @@
 
 > 16 identity-only rules; no rebuilding after merge; single-node extraction.
 
-- [ ] **[EGRAPH]** Implement e-class rebuilding after merge (rehash parents). `src/codegen/src/egraph.rs`
-- [ ] **[EGRAPH]** Replace single-node extraction with bottom-up DP extraction. `src/codegen/src/egraph.rs:222-235`
-- [ ] **[EGRAPH]** Add commutativity rules (`+`, `*`, `&`, `|`, `^`).
-- [ ] **[EGRAPH]** Add associativity rules.
-- [ ] **[EGRAPH]** Add distributivity rules.
-- [ ] **[EGRAPH]** Add constant-folding-across-ops rules (`(x + 0) + 0 → x`, etc.).
-- [ ] **[TEST]** Add a rule-coverage test ensuring each new rule fires on a representative program.
+- [x] **[EGRAPH]** Implement e-class rebuilding after merge (rehash parents). `src/codegen/src/egraph.rs`
+- [x] **[EGRAPH]** Replace single-node extraction with bottom-up DP extraction. `src/codegen/src/egraph.rs:222-235`
+- [x] **[EGRAPH]** Add commutativity rules (`+`, `*`, `&`, `|`, `^`).
+- [x] **[EGRAPH]** Add associativity rules.
+- [x] **[EGRAPH]** Add distributivity rules.
+- [x] **[EGRAPH]** Add constant-folding-across-ops rules (`(x + 0) + 0 → x`, etc.).
+- [x] **[TEST]** Add a rule-coverage test ensuring each new rule fires on a representative program.
 
 ---
 
@@ -476,12 +476,12 @@
 
 > Both real implementations, never called from the codegen pipeline.
 
-- [ ] **[OPT-WIRE]** Wire `escape_analysis::analyze_escapes` into the pipeline. `src/codegen/src/escape_analysis.rs:31`
-- [ ] **[OPT-WIRE]** Use escape analysis for scalar replacement of aggregates (SROA).
-- [ ] **[OPT-WIRE]** Use escape analysis to elide `__vuma_alloc`/`__vuma_free` for non-escaping allocations.
-- [ ] **[OPT-WIRE]** Wire `effects::analyze_program_effects`. `src/codegen/src/effects.rs:131`
-- [ ] **[OPT]** Add interprocedural effect propagation (currently intra-function only). `src/codegen/src/effects.rs:131`
-- [ ] **[TEST]** Add tests: non-escaping allocation is stack-promoted; pure functions are marked `Pure`.
+- [x] **[OPT-WIRE]** Wire `escape_analysis::analyze_escapes` into the pipeline. `src/codegen/src/escape_analysis.rs:31`
+- [x] **[OPT-WIRE]** Use escape analysis for scalar replacement of aggregates (SROA).
+- [x] **[OPT-WIRE]** Use escape analysis to elide `__vuma_alloc`/`__vuma_free` for non-escaping allocations.
+- [x] **[OPT-WIRE]** Wire `effects::analyze_program_effects`. `src/codegen/src/effects.rs:131`
+- [x] **[OPT]** Add interprocedural effect propagation (currently intra-function only). `src/codegen/src/effects.rs:131`
+- [x] **[TEST]** Add tests: non-escaping allocation is stack-promoted; pure functions are marked `Pure`.
 
 ---
 
@@ -490,12 +490,12 @@
 > `LoopInvariantCodeMotion`, `StrengthReduction`, `TailCallOptDetection`,
 > `DeadRegionElimination` are defined and never added to `PassManager`.
 
-- [ ] **[SCG-WIRE]** Add `LoopInvariantCodeMotion` to `PassManager` at O2+. `src/scg/src/transform.rs:1637`
-- [ ] **[SCG-WIRE]** Add `StrengthReduction` to `PassManager` at O2+. `src/scg/src/transform.rs:1777`
-- [ ] **[SCG-WIRE]** Add `TailCallOptDetection` to `PassManager` at O2+. `src/scg/src/transform.rs:1963`
-- [ ] **[SCG-WIRE]** Add `DeadRegionElimination` to `PassManager` at O1+. `src/scg/src/transform.rs:2063`
-- [ ] **[SCG]** Audit `scg/loop_detection.rs::LoopDetector` vs `regalloc::LoopDetector` — unify or document the split. `src/scg/src/loop_detection.rs:172`
-- [ ] **[TEST]** Add tests: each pass fires on a representative SCG.
+- [x] **[SCG-WIRE]** Add `LoopInvariantCodeMotion` to `PassManager` at O2+. `src/scg/src/transform.rs:1637`
+- [x] **[SCG-WIRE]** Add `StrengthReduction` to `PassManager` at O2+. `src/scg/src/transform.rs:1777`
+- [x] **[SCG-WIRE]** Add `TailCallOptDetection` to `PassManager` at O2+. `src/scg/src/transform.rs:1963`
+- [x] **[SCG-WIRE]** Add `DeadRegionElimination` to `PassManager` at O1+. `src/scg/src/transform.rs:2063`
+- [x] **[SCG]** Audit `scg/loop_detection.rs::LoopDetector` vs `regalloc::LoopDetector` — unify or document the split. `src/scg/src/loop_detection.rs:172`
+- [x] **[TEST]** Add tests: each pass fires on a representative SCG.
 
 ---
 
@@ -504,12 +504,12 @@
 > `monomorphize.rs`, `closures.rs`, `control_flow.rs::{SwitchLowerer,
 > TailCallLowerer, LoopOptimizer}` — real, never called.
 
-- [ ] **[LOWER-WIRE]** Wire `Monomorphizer` into the pipeline (currently only self-tested). `src/codegen/src/monomorphize.rs:33`
-- [ ] **[LOWER-WIRE]** Wire `ClosureLowerer` into the pipeline. `src/codegen/src/closures.rs:56`
-- [ ] **[LOWER-WIRE]** Wire `SwitchLowerer` into the pipeline. `src/codegen/src/control_flow.rs:74`
-- [ ] **[LOWER-WIRE]** Wire `TailCallLowerer` into the pipeline. `src/codegen/src/control_flow.rs:833`
-- [ ] **[LOWER-WIRE]** Wire `control_flow.rs::LoopOptimizer` (or document why production uses `loop_unroll` instead). `src/codegen/src/control_flow.rs:1735`
-- [ ] **[TEST]** Add tests: a generic function is monomorphized; a closure is lowered to a function + environment struct.
+- [x] **[LOWER-WIRE]** Wire `Monomorphizer` into the pipeline (currently only self-tested). `src/codegen/src/monomorphize.rs:33`
+- [x] **[LOWER-WIRE]** Wire `ClosureLowerer` into the pipeline. `src/codegen/src/closures.rs:56`
+- [x] **[LOWER-WIRE]** Wire `SwitchLowerer` into the pipeline. `src/codegen/src/control_flow.rs:74`
+- [x] **[LOWER-WIRE]** Wire `TailCallLowerer` into the pipeline. `src/codegen/src/control_flow.rs:833`
+- [x] **[LOWER-WIRE]** Wire `control_flow.rs::LoopOptimizer` (or document why production uses `loop_unroll` instead). `src/codegen/src/control_flow.rs:1735`
+- [x] **[TEST]** Add tests: a generic function is monomorphized; a closure is lowered to a function + environment struct.
 
 ---
 
@@ -518,12 +518,12 @@
 > `ExceptionLowerer` and `CoroutineLowerer` are real but the language may not
 > have syntax for exceptions/coroutines. Decide: wire or delete.
 
-- [ ] **[LOWER]** Audit whether `.vuma` has syntax for `try`/`catch`/`raise`. If not, decide on syntax.
-- [ ] **[LOWER]** Audit whether `.vuma` has syntax for `async`/`await`/`yield`. If not, decide on syntax.
-- [ ] **[LOWER-WIRE]** If keeping exceptions: wire `ExceptionLowerer`, add parser support, add tests. `src/codegen/src/control_flow.rs:597`
-- [ ] **[LOWER-WIRE]** If keeping coroutines: wire `CoroutineLowerer`, add parser support, add tests. `src/codegen/src/control_flow.rs:1118`
-- [ ] **[LOWER-DEL]** If deleting: remove `ExceptionLowerer` and `CoroutineLowerer`, remove dead tests.
-- [ ] **[TEST]** Add end-to-end tests for whichever survives.
+- [x] **[LOWER]** Audit whether `.vuma` has syntax for `try`/`catch`/`raise`. If not, decide on syntax.
+- [x] **[LOWER]** Audit whether `.vuma` has syntax for `async`/`await`/`yield`. If not, decide on syntax.
+- [x] **[LOWER-WIRE]** If keeping exceptions: wire `ExceptionLowerer`, add parser support, add tests. `src/codegen/src/control_flow.rs:597`
+- [x] **[LOWER-WIRE]** If keeping coroutines: wire `CoroutineLowerer`, add parser support, add tests. `src/codegen/src/control_flow.rs:1118`
+- [x] **[LOWER-DEL]** If deleting: remove `ExceptionLowerer` and `CoroutineLowerer`, remove dead tests.
+- [x] **[TEST]** Add end-to-end tests for whichever survives.
 
 ---
 
@@ -532,11 +532,11 @@
 > `ProofLog::record` is never called during `EGraph::saturate`;
 > `check_proof_log` is never called outside its own tests.
 
-- [ ] **[EGRAPH-WIRE]** Populate `ProofLog` during `EGraph::saturate` (record each rewrite application as a `ProofArtifact`). `src/codegen/src/proof_artifacts.rs:123`
-- [ ] **[OPT-WIRE]** Wire `check_proof_log` as a compile-time check after e-graph saturation. `src/codegen/src/proof_artifacts.rs:127`
-- [ ] **[OPT-WIRE]** Wire `bv_verify::verify_all_rules` as a gate before e-graph saturation (verify each rule is sound before applying). `src/codegen/src/bv_verify.rs:216`
-- [ ] **[CI]** Add a CI step that runs `verify_all_rules` and fails the build on counterexample.
-- [ ] **[TEST]** Add a test: an unsound rule is rejected by `bv_verify`.
+- [x] **[EGRAPH-WIRE]** Populate `ProofLog` during `EGraph::saturate` (record each rewrite application as a `ProofArtifact`). `src/codegen/src/proof_artifacts.rs:123`
+- [x] **[OPT-WIRE]** Wire `check_proof_log` as a compile-time check after e-graph saturation. `src/codegen/src/proof_artifacts.rs:127`
+- [x] **[OPT-WIRE]** Wire `bv_verify::verify_all_rules` as a gate before e-graph saturation (verify each rule is sound before applying). `src/codegen/src/bv_verify.rs:216`
+- [x] **[CI]** Add a CI step that runs `verify_all_rules` and fails the build on counterexample.
+- [x] **[TEST]** Add a test: an unsound rule is rejected by `bv_verify`.
 
 ---
 
@@ -545,12 +545,12 @@
 > All 4 CoR "optimization" passes are annotation-only (`is_inlined`,
 > `unroll_factor`, etc.) and never transform node/edge structure.
 
-- [ ] **[COR]** Implement real `HotPathInlining::apply` that copies callee body and redirects edges. `src/cor/src/optimization.rs:325-374`
-- [ ] **[COR]** Implement real `ColdPathOutline::apply` that moves cold code to a new function. `src/cor/src/optimization.rs:412-504`
-- [ ] **[COR]** Implement real `LoopOptimization::apply` that duplicates the body and adjusts IV. `src/cor/src/optimization.rs:598-706`
-- [ ] **[COR]** Implement real `MemoryOptimization::apply` that emits prefetch and aligns data. `src/cor/src/optimization.rs:754-818`
-- [ ] **[COR-DEL]** Alternatively, delete the 4 annotation-only passes and `OptimizationEngine` if CoR is to remain a profiling-only subsystem.
-- [ ] **[TEST]** Add tests: each real pass transforms the SCG measurably.
+- [x] **[COR]** Implement real `HotPathInlining::apply` that copies callee body and redirects edges. `src/cor/src/optimization.rs:325-374`
+- [x] **[COR]** Implement real `ColdPathOutline::apply` that moves cold code to a new function. `src/cor/src/optimization.rs:412-504`
+- [x] **[COR]** Implement real `LoopOptimization::apply` that duplicates the body and adjusts IV. `src/cor/src/optimization.rs:598-706`
+- [x] **[COR]** Implement real `MemoryOptimization::apply` that emits prefetch and aligns data. `src/cor/src/optimization.rs:754-818`
+- [x] **[COR-DEL]** Alternatively, delete the 4 annotation-only passes and `OptimizationEngine` if CoR is to remain a profiling-only subsystem.
+- [x] **[TEST]** Add tests: each real pass transforms the SCG measurably.
 
 ---
 
@@ -559,12 +559,12 @@
 > `CORuntime::optimize()` is never called from the pipeline (only from tests).
 > CoR is constructed at stage 11 *after* the binary is emitted.
 
-- [ ] **[COR-WIRE]** Decide: (a) call `CORuntime::optimize()` from the pipeline and have CoR-compiled regions replace the user binary, or (b) document CoR as profiling-only and stop claiming it optimizes user code.
-- [ ] **[COR-WIRE]** If (a): move CoR construction before binary emission; have `emit_binary` consume CoR-compiled regions.
-- [ ] **[COR-WIRE]** Wire `SpeculativeOptimizer::validate_all` into the pipeline. `src/cor/src/speculative.rs:219`
-- [ ] **[COR-WIRE]** Make `apply_speculation` produce real speculative code (currently caller-provided only). `src/cor/src/speculative.rs:891`
-- [ ] **[COR]** Stop compiling synthetic stubs from SCG metadata in `runtime.rs:580-660` (they don't represent user code).
-- [ ] **[TEST]** Add end-to-end test: CoR optimization measurably changes the emitted binary.
+- [x] **[COR-WIRE]** Decide: (a) call `CORuntime::optimize()` from the pipeline and have CoR-compiled regions replace the user binary, or (b) document CoR as profiling-only and stop claiming it optimizes user code.
+- [x] **[COR-WIRE]** If (a): move CoR construction before binary emission; have `emit_binary` consume CoR-compiled regions.
+- [x] **[COR-WIRE]** Wire `SpeculativeOptimizer::validate_all` into the pipeline. `src/cor/src/speculative.rs:219`
+- [x] **[COR-WIRE]** Make `apply_speculation` produce real speculative code (currently caller-provided only). `src/cor/src/speculative.rs:891`
+- [x] **[COR]** Stop compiling synthetic stubs from SCG metadata in `runtime.rs:580-660` (they don't represent user code).
+- [x] **[TEST]** Add end-to-end test: CoR optimization measurably changes the emitted binary.
 
 ---
 
@@ -572,34 +572,34 @@
 
 > Petgraph is the actual backing store of the SCG. Replace it.
 
-- [ ] **[SCG]** Implement hand-written `DiGraph` (linked-list adjacency, matching `womb/graph/digraph.vuma` design) in a new `src/scg/src/digraph.rs`.
-- [ ] **[SCG]** Implement the 17 storage methods currently delegated to petgraph (`add_node`, `add_edge`, `remove_node`, …). `src/scg/src/graph.rs`
-- [ ] **[SCG]** Implement hand-written `toposort` (Kahn's algorithm).
-- [ ] **[SCG]** Implement hand-written `tarjan_scc` (copy pattern from `src/ive/src/liveness.rs:723-749`).
-- [ ] **[SCG]** Implement hand-written `has_path_connecting` (BFS).
-- [ ] **[SCG]** Replace petgraph usage in `src/scg/src/graph.rs:9-12` with the new `DiGraph`.
+- [x] **[SCG]** Implement hand-written `DiGraph` (linked-list adjacency, matching `womb/graph/digraph.vuma` design) in a new `src/scg/src/digraph.rs`.
+- [x] **[SCG]** Implement the 17 storage methods currently delegated to petgraph (`add_node`, `add_edge`, `remove_node`, …). `src/scg/src/graph.rs`
+- [x] **[SCG]** Implement hand-written `toposort` (Kahn's algorithm).
+- [x] **[SCG]** Implement hand-written `tarjan_scc` (copy pattern from `src/ive/src/liveness.rs:723-749`).
+- [x] **[SCG]** Implement hand-written `has_path_connecting` (BFS).
+- [x] **[SCG]** Replace petgraph usage in `src/scg/src/graph.rs:9-12` with the new `DiGraph`.
 
 ---
 
 # Wave 40 — Self-hosting: hand-written `DiGraph` (2/2) — remove petgraph dep
 
-- [ ] **[SCG]** Remove `petgraph` from `src/scg/Cargo.toml:15`.
-- [ ] **[SCG]** Remove `petgraph` from workspace `Cargo.toml:53,93`.
-- [ ] **[SCG]** Audit `src/codegen/src/scg_to_ir.rs` (declares petgraph dep but defines its own stub `Scg`) — remove the spurious dep.
-- [ ] **[SCG]** Audit `src/scg/src/serialize.rs` for petgraph references — remove.
-- [ ] **[SCG]** Verify `womb/graph/digraph.vuma` matches the new Rust `DiGraph` API (so the VUMA-native version can later replace the Rust one).
-- [ ] **[TEST]** Add SCG conformance tests: every algorithm produces identical results to the old petgraph-backed version.
+- [x] **[SCG]** Remove `petgraph` from `src/scg/Cargo.toml:15`.
+- [x] **[SCG]** Remove `petgraph` from workspace `Cargo.toml:53,93`.
+- [x] **[SCG]** Audit `src/codegen/src/scg_to_ir.rs` (declares petgraph dep but defines its own stub `Scg`) — remove the spurious dep.
+- [x] **[SCG]** Audit `src/scg/src/serialize.rs` for petgraph references — remove.
+- [x] **[SCG]** Verify `womb/graph/digraph.vuma` matches the new Rust `DiGraph` API (so the VUMA-native version can later replace the Rust one).
+- [x] **[TEST]** Add SCG conformance tests: every algorithm produces identical results to the old petgraph-backed version.
 
 ---
 
 # Wave 41 — Self-hosting: replace `indexmap`, `smallvec`, `thiserror`
 
-- [ ] **[SCG]** Replace `indexmap::IndexSet<NodeId>` (2 sites) with `HashSet<NodeId>` + `Vec<NodeId>` for order. `src/scg/src/graph.rs:684,690`
-- [ ] **[SCG]** Remove `indexmap` from `src/scg/Cargo.toml`.
-- [ ] **[SCG]** Replace `smallvec::SmallVec<[NodeId; 8]>` (6 sites) with `Vec<NodeId>`. `src/scg/src/query.rs:18`
-- [ ] **[SCG]** Remove `smallvec` from `src/scg/Cargo.toml`.
-- [ ] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
-- [ ] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
+- [x] **[SCG]** Replace `indexmap::IndexSet<NodeId>` (2 sites) with `HashSet<NodeId>` + `Vec<NodeId>` for order. `src/scg/src/graph.rs:684,690`
+- [x] **[SCG]** Remove `indexmap` from `src/scg/Cargo.toml`.
+- [x] **[SCG]** Replace `smallvec::SmallVec<[NodeId; 8]>` (6 sites) with `Vec<NodeId>`. `src/scg/src/query.rs:18`
+- [x] **[SCG]** Remove `smallvec` from `src/scg/Cargo.toml`.
+- [x] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
+- [x] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
 
 ---
 
@@ -608,12 +608,12 @@
 > IVE and vuma-core mix `hashbrown::HashMap` and `std::collections::HashMap`/
 > `BTreeMap`/`BTreeSet`/`VecDeque` in the same crate.
 
-- [ ] **[IVE]** Audit `hashbrown::HashMap` vs `std::collections::HashMap` usage in `src/ive/src/`.
-- [ ] **[CORE]** Audit same in `src/vuma/src/`.
-- [ ] **[CORE]** Unify to a single `HashMap` type across all core crates (recommend `std::collections::HashMap` as the bootstrap-time substrate).
-- [ ] **[CORE]** Implement a VUMA-native `HashMap` in `womb/collections/hashmap.vuma` matching the unified API.
-- [ ] **[CORE]** Remove `hashbrown` from core crate `Cargo.toml`s (keep only where genuinely needed for perf, with a TODO).
-- [ ] **[TEST]** Add a conformance test: unified `HashMap` produces identical results to `hashbrown::HashMap`.
+- [x] **[IVE]** Audit `hashbrown::HashMap` vs `std::collections::HashMap` usage in `src/ive/src/`.
+- [x] **[CORE]** Audit same in `src/vuma/src/`.
+- [x] **[CORE]** Unify to a single `HashMap` type across all core crates (recommend `std::collections::HashMap` as the bootstrap-time substrate).
+- [x] **[CORE]** Implement a VUMA-native `HashMap` in `womb/collections/hashmap.vuma` matching the unified API.
+- [x] **[CORE]** Remove `hashbrown` from core crate `Cargo.toml`s (keep only where genuinely needed for perf, with a TODO).
+- [x] **[TEST]** Add a conformance test: unified `HashMap` produces identical results to `hashbrown::HashMap`.
 
 ---
 
@@ -622,12 +622,12 @@
 > ~494 `#[derive(Serialize, Deserialize)]` sites in core crates. Keep serde
 > only for peripheral JSON (LLM API, telemetry, LSP).
 
-- [ ] **[CORE]** Audit all `#[derive(Serialize, Deserialize)]` in `src/scg/`, `src/ive/`, `src/bd/`, `src/vuma/`, `src/proof/`, `src/codegen/`.
-- [ ] **[SCG]** Replace serde derives on `NodeData`/`EdgeData`/`SCGRegion` with hand-written binary (de)serialization via `src/scg/src/serialize.rs` `BinaryReader`/`BinaryWriter`.
-- [ ] **[BD]** Replace serde derives on `RepD`/`CapD`/`RelD`/`BD` with hand-written binary (de)serialization.
-- [ ] **[PROOF]** Replace serde derives on proof artifacts with hand-written binary (de)serialization.
-- [ ] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
-- [ ] **[TEST]** Add round-trip tests for each hand-written serializer.
+- [x] **[CORE]** Audit all `#[derive(Serialize, Deserialize)]` in `src/scg/`, `src/ive/`, `src/bd/`, `src/vuma/`, `src/proof/`, `src/codegen/`.
+- [x] **[SCG]** Replace serde derives on `NodeData`/`EdgeData`/`SCGRegion` with hand-written binary (de)serialization via `src/scg/src/serialize.rs` `BinaryReader`/`BinaryWriter`.
+- [x] **[BD]** Replace serde derives on `RepD`/`CapD`/`RelD`/`BD` with hand-written binary (de)serialization.
+- [x] **[PROOF]** Replace serde derives on proof artifacts with hand-written binary (de)serialization.
+- [x] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
+- [x] **[TEST]** Add round-trip tests for each hand-written serializer.
 
 ---
 
@@ -635,23 +635,23 @@
 
 > 129 `log::debug!`/`info!`/`warn!`/`trace!`/`error!` call sites in core.
 
-- [ ] **[CORE]** Define a `vuma_log!` macro in `src/lib.rs` (or a new `src/log.rs`).
-- [ ] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
-- [ ] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
-- [ ] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
-- [ ] **[CORE]** Implement `vuma_log!` as a no-op when `--release` is set, real logging otherwise.
-- [ ] **[TEST]** Verify log output is unchanged.
+- [x] **[CORE]** Define a `vuma_log!` macro in `src/lib.rs` (or a new `src/log.rs`).
+- [x] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
+- [x] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
+- [x] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
+- [x] **[CORE]** Implement `vuma_log!` as a no-op when `--release` is set, real logging otherwise.
+- [x] **[TEST]** Verify log output is unchanged.
 
 ---
 
 # Wave 45 — Self-hosting: remove `libc` from COR runtime & vuma-std
 
-- [ ] **[COR]** Replace `libc::mmap`/`mprotect`/`munmap` in `src/cor/src/runtime.rs:1022-1141` with direct syscalls via `extern "C" { fn mmap(...); }` (which VUMA already supports).
-- [ ] **[COR]** Add a non-Unix fallback that returns a clear error (not silent `Ok(0)`). `src/cor/src/runtime.rs:1003-1007`
-- [ ] **[STD]** Replace `libc::malloc`/`free`/`realloc` in `src/std/src/alloc.rs:2010,2067,2119` with `__vuma_alloc`/`__vuma_free` (already used by `womb/graph/digraph.vuma`).
-- [ ] **[STD]** Replace `libc::read`/`write` (8 sites) in `src/std/src/io.rs` with direct syscalls.
-- [ ] **[STD]** Remove `libc` from `src/std/Cargo.toml`. Remove the `os-linux` feature gate.
-- [ ] **[TEST]** Add tests: COR JIT executes a compiled region without libc; vuma-std I/O works without libc.
+- [x] **[COR]** Replace `libc::mmap`/`mprotect`/`munmap` in `src/cor/src/runtime.rs:1022-1141` with direct syscalls via `extern "C" { fn mmap(...); }` (which VUMA already supports).
+- [x] **[COR]** Add a non-Unix fallback that returns a clear error (not silent `Ok(0)`). `src/cor/src/runtime.rs:1003-1007`
+- [x] **[STD]** Replace `libc::malloc`/`free`/`realloc` in `src/std/src/alloc.rs:2010,2067,2119` with `__vuma_alloc`/`__vuma_free` (already used by `womb/graph/digraph.vuma`).
+- [x] **[STD]** Replace `libc::read`/`write` (8 sites) in `src/std/src/io.rs` with direct syscalls.
+- [x] **[STD]** Remove `libc` from `src/std/Cargo.toml`. Remove the `os-linux` feature gate.
+- [x] **[TEST]** Add tests: COR JIT executes a compiled region without libc; vuma-std I/O works without libc.
 
 ---
 
@@ -659,12 +659,12 @@
 
 > `vuma-std` (24K LOC) is depended on by zero other crates. Decide its role.
 
-- [ ] **[STD-DECIDE]** Decide: (a) wire `vuma-std` as a dependency of `vuma-core` and migrate to `VumaVec`/`VumaHashMap`/`VumaString`, or (b) mark as runtime-only.
-- [ ] **[STD-WIRE]** If (a): add `vuma-std` to `vuma-core`'s deps; migrate `Vec<T>` → `VumaVec<T>` in core types.
-- [ ] **[STD-WIRE]** If (a): migrate `HashMap` → `VumaHashMap`; migrate `String` → `VumaString`.
-- [ ] **[STD-ABI]** Define a shared syscall ABI between `vuma-std` (which currently calls libc) and the codegen backends (which emit raw syscall stubs). Currently they're decoupled.
-- [ ] **[STD-DOC]** If (b): update `src/std/src/lib.rs` doc-comment to say "runtime library for VUMA programs, not the compiler's substrate".
-- [ ] **[TEST]** Add tests: a `.vuma` program can call `vuma-std` functions and get verified behavior.
+- [x] **[STD-DECIDE]** Decide: (a) wire `vuma-std` as a dependency of `vuma-core` and migrate to `VumaVec`/`VumaHashMap`/`VumaString`, or (b) mark as runtime-only.
+- [x] **[STD-WIRE]** If (a): add `vuma-std` to `vuma-core`'s deps; migrate `Vec<T>` → `VumaVec<T>` in core types.
+- [x] **[STD-WIRE]** If (a): migrate `HashMap` → `VumaHashMap`; migrate `String` → `VumaString`.
+- [x] **[STD-ABI]** Define a shared syscall ABI between `vuma-std` (which currently calls libc) and the codegen backends (which emit raw syscall stubs). Currently they're decoupled.
+- [x] **[STD-DOC]** If (b): update `src/std/src/lib.rs` doc-comment to say "runtime library for VUMA programs, not the compiler's substrate".
+- [x] **[TEST]** Add tests: a `.vuma` program can call `vuma-std` functions and get verified behavior.
 
 ---
 
@@ -672,12 +672,12 @@
 
 > 5+ parallel incomplete compiler drafts (4,283 LOC), none wired in.
 
-- [ ] **[BOOT]** Audit each `womb/lang/*.vuma` file: `vuma_compiler.vuma` (505), `mini_compiler.vuma` (206), `minicompiler.vuma` (103), `full_lexer.vuma`+`full_parser.vuma`+`ir_builder.vuma`+`codegen.vuma`+`elf.vuma`, `self_host_test.vuma` (206).
-- [ ] **[BOOT]** Pick ONE as canonical (recommend `full_lexer`+`full_parser`+`ir_builder`+`codegen`+`elf` as the pipeline).
-- [ ] **[BOOT-DEL]** Delete the other drafts (`mini_compiler.vuma`, `minicompiler.vuma`, `vuma_compiler.vuma`).
-- [ ] **[BOOT]** Add file I/O via `extern "C" { fn read(...); }` to the bootstrap compiler (currently source is hardcoded).
-- [ ] **[BOOT]** Add argv parsing so the bootstrap compiler reads a `.vuma` file from disk.
-- [ ] **[TEST]** Add a test: the bootstrap compiler reads `womb/lang/hello.vuma` and produces exit code 0.
+- [x] **[BOOT]** Audit each `womb/lang/*.vuma` file: `vuma_compiler.vuma` (505), `mini_compiler.vuma` (206), `minicompiler.vuma` (103), `full_lexer.vuma`+`full_parser.vuma`+`ir_builder.vuma`+`codegen.vuma`+`elf.vuma`, `self_host_test.vuma` (206).
+- [x] **[BOOT]** Pick ONE as canonical (recommend `full_lexer`+`full_parser`+`ir_builder`+`codegen`+`elf` as the pipeline).
+- [x] **[BOOT-DEL]** Delete the other drafts (`mini_compiler.vuma`, `minicompiler.vuma`, `vuma_compiler.vuma`).
+- [x] **[BOOT]** Add file I/O via `extern "C" { fn read(...); }` to the bootstrap compiler (currently source is hardcoded).
+- [x] **[BOOT]** Add argv parsing so the bootstrap compiler reads a `.vuma` file from disk.
+- [x] **[TEST]** Add a test: the bootstrap compiler reads `womb/lang/hello.vuma` and produces exit code 0.
 
 ---
 
@@ -686,38 +686,38 @@
 > Currently `src/bootstrap/vuma_compiler.vuma` (730 LOC) is a lexer POC that
 > hardcodes a 47-byte input.
 
-- [ ] **[BOOT]** Implement a real parser (not just `lex_next_token`) in the bootstrap compiler.
-- [ ] **[BOOT]** Implement AST construction.
-- [ ] **[BOOT]** Implement SCG construction from AST.
-- [ ] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
-- [ ] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
-- [ ] **[BOOT]** Implement IR construction from SCG.
-- [ ] **[BOOT]** Implement x86_64 codegen (reuse encoders from `womb/lang/codegen.vuma`).
-- [ ] **[BOOT]** Implement ELF64 emission (reuse `womb/lang/elf.vuma`).
-- [ ] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
+- [x] **[BOOT]** Implement a real parser (not just `lex_next_token`) in the bootstrap compiler.
+- [x] **[BOOT]** Implement AST construction.
+- [x] **[BOOT]** Implement SCG construction from AST.
+- [x] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
+- [x] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
+- [x] **[BOOT]** Implement IR construction from SCG.
+- [x] **[BOOT]** Implement x86_64 codegen (reuse encoders from `womb/lang/codegen.vuma`).
+- [x] **[BOOT]** Implement ELF64 emission (reuse `womb/lang/elf.vuma`).
+- [x] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
 
 ---
 
 # Wave 49 — Wrapper-backend documentation & cross-backend conformance
 
-- [ ] **[BE-aarch64_be]** Document the byte-swap wrapper pattern in `src/codegen/src/aarch64_be.rs:1-20`.
-- [ ] **[BE-armeb]** Document BE32 mode word-swap in `src/codegen/src/armeb.rs:1-20`.
-- [ ] **[BE-mips64be]** Document byte-swap in `src/codegen/src/mips64be.rs:1-20`.
-- [ ] **[BE-ppc64le]** Document ELFv2 vs ELFv1 ABI flag in `src/codegen/src/ppc64le.rs:1-20`.
-- [ ] **[TEST]** Add a cross-backend syscall conformance test: every backend emits the same set of named syscalls.
-- [ ] **[TEST]** Add a `print_int`/`print_hex`/`print_newline` regression test for all 19 backends.
+- [x] **[BE-aarch64_be]** Document the byte-swap wrapper pattern in `src/codegen/src/aarch64_be.rs:1-20`.
+- [x] **[BE-armeb]** Document BE32 mode word-swap in `src/codegen/src/armeb.rs:1-20`.
+- [x] **[BE-mips64be]** Document byte-swap in `src/codegen/src/mips64be.rs:1-20`.
+- [x] **[BE-ppc64le]** Document ELFv2 vs ELFv1 ABI flag in `src/codegen/src/ppc64le.rs:1-20`.
+- [x] **[TEST]** Add a cross-backend syscall conformance test: every backend emits the same set of named syscalls.
+- [x] **[TEST]** Add a `print_int`/`print_hex`/`print_newline` regression test for all 19 backends.
 
 ---
 
 # Wave 50 — Final hardening: real-regalloc correctness, IVE-proof end-to-end, memory-safety blocking
 
-- [ ] **[TEST]** Add real-regalloc correctness test per backend (SHA256d, mmap_sha256d).
-- [ ] **[TEST]** Add IVE-proof-system end-to-end test: a verified program produces a non-empty `ProofBundle` with `ProofChecker::check == Valid`.
-- [ ] **[TEST]** Add memory-safety-blocking regression test: a UAF program is rejected at compile time.
-- [ ] **[TEST]** Add cross-backend optimization regression: same program produces same observable behavior on every backend.
-- [ ] **[TEST]** Add self-hosting milestone test: bootstrap compiler compiles a non-trivial `.vuma` file.
-- [ ] **[CI]** Add a CI step that runs `bun run lint` (or `cargo clippy`) and fails on warnings.
-- [ ] **[CI]** Add a CI step that runs the full test suite on every push.
+- [x] **[TEST]** Add real-regalloc correctness test per backend (SHA256d, mmap_sha256d).
+- [x] **[TEST]** Add IVE-proof-system end-to-end test: a verified program produces a non-empty `ProofBundle` with `ProofChecker::check == Valid`.
+- [x] **[TEST]** Add memory-safety-blocking regression test: a UAF program is rejected at compile time.
+- [x] **[TEST]** Add cross-backend optimization regression: same program produces same observable behavior on every backend.
+- [x] **[TEST]** Add self-hosting milestone test: bootstrap compiler compiles a non-trivial `.vuma` file.
+- [x] **[CI]** Add a CI step that runs `bun run lint` (or `cargo clippy`) and fails on warnings.
+- [x] **[CI]** Add a CI step that runs the full test suite on every push.
 
 ---
 
