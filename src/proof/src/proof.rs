@@ -4,7 +4,6 @@
 //! invariants. A proof demonstrates that a particular goal (safety property)
 //! holds by chaining inference steps from axioms and assumptions to a conclusion.
 
-use serde::{Deserialize, Serialize};
 
 use crate::judgment::Judgment;
 
@@ -25,8 +24,7 @@ pub type DerivationId = u64;
 pub type FactId = u64;
 
 /// Name of a memory-safety invariant.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InvariantName {
     /// The liveness invariant: every access targets allocated memory.
     Liveness,
@@ -99,7 +97,7 @@ impl ProofContext {
 // ---------------------------------------------------------------------------
 
 /// The target of a proof goal — what the proof is about.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// Prove an invariant holds for a specific memory region.
     Region(RegionId),
@@ -145,7 +143,7 @@ impl Goal {
 // ---------------------------------------------------------------------------
 
 /// How a fact was established.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactKind {
     /// An axiom — accepted without proof.
     Axiom,
@@ -316,7 +314,7 @@ pub enum ProofStep {
 // ---------------------------------------------------------------------------
 
 /// The outcome of a proof attempt.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Conclusion {
     /// The goal has been proven.
     Proven,

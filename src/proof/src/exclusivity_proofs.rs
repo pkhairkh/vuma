@@ -11,7 +11,6 @@
 //! - [`SynchronizationProof`] — proves that proper synchronization exists
 //!   between two conflicting accesses.
 
-use serde::{Deserialize, Serialize};
 
 use crate::judgment::RegionId;
 use crate::models::{
@@ -151,7 +150,7 @@ impl ProofFailure {
 // ---------------------------------------------------------------------------
 
 /// Method by which non-aliasing was established.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoAliasMethod {
     DifferentRegions,
     NonOverlappingRanges,
@@ -271,7 +270,7 @@ impl NoAliasProof {
 // ---------------------------------------------------------------------------
 
 /// The kind of synchronization established between two accesses.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SynchronizationKind {
     LockBased,
     HappensBefore,
@@ -482,7 +481,7 @@ pub struct ExclusivityProof {
 }
 
 /// Domain-specific tactics for proving exclusivity.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExclusivityTactic {
     LocksetAnalysis,
     HappensBefore,

@@ -27,7 +27,6 @@
 //! top-level proof is assembled via the [`InferenceRule::InterpretationIntro`]
 //! rule (added in Wave 17).
 
-use serde::{Deserialize, Serialize};
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -45,7 +44,7 @@ use crate::rules::InferenceRule;
 ///
 /// Each tactic produces a different style of sub-proof for a write-read
 /// pair or a reinterpretation (cast) site.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterpretationTactic {
     /// Prove BD compatibility by showing the read RepD is a sub-RepD of the
     /// write RepD and the access is properly aligned.  This is the
@@ -75,7 +74,7 @@ impl std::fmt::Display for InterpretationTactic {
 // ---------------------------------------------------------------------------
 
 /// Reason why an interpretation proof attempt failed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ProofFailure {
     /// An access's expected RepD was not found in the MSG.
     MissingRepD { access_id: u64, repd_id: u64 },

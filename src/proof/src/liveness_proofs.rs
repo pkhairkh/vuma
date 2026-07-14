@@ -24,7 +24,6 @@
 //! - **Structural induction** — decompose the program into sub-programs and
 //!   prove liveness by induction on the structure.
 
-use serde::{Deserialize, Serialize};
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -37,7 +36,7 @@ use crate::rules::InferenceRule;
 // ---------------------------------------------------------------------------
 
 /// A liveness-specific proof tactic.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LivenessTactic {
     /// Enumerate all feasible execution paths and verify liveness on each.
     PathEnumeration,
@@ -140,7 +139,7 @@ impl std::error::Error for ProofFailure {}
 
 /// A well-founded ordering on resources (regions), used to prove termination
 /// of deallocation loops and the absence of deadlock cycles.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WellFoundedOrdering {
     /// Human-readable name for this ordering.
     pub name: String,

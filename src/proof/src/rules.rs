@@ -9,7 +9,6 @@
 //! falling back to string-based matching for backward compatibility with
 //! facts that lack a judgment.
 
-use serde::{Deserialize, Serialize};
 
 use crate::judgment::Judgment;
 use crate::proof::{Fact, FactId};
@@ -70,7 +69,7 @@ impl std::error::Error for RuleError {}
 /// memory-safety discipline. The [`InferenceRule::apply`] method validates
 /// that the supplied premises match the rule's expectations and, if so,
 /// produces the derived conclusion fact.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceRule {
     // -- Liveness ----------------------------------------------------------
     /// **Liveness Introduction**: If a region has been allocated, then it is live.

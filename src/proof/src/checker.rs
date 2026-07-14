@@ -3,7 +3,6 @@
 //! Verifies that a formal proof is valid: every step follows from previously
 //! established facts using the stated rule, and there is no circular reasoning.
 
-use serde::{Deserialize, Serialize};
 
 use crate::proof::{Conclusion, Fact, FactId, Proof, ProofStep};
 use crate::tactics::ProofResult;
@@ -24,7 +23,7 @@ pub type ProofCache = std::collections::HashMap<u64, ProofResult>;
 // ---------------------------------------------------------------------------
 
 /// The result of checking a proof.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckResult {
     /// Every step in the proof is valid and the conclusion follows.
     Valid,

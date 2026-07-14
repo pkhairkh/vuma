@@ -11,18 +11,18 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/proof/src/liveness_proofs.rs:27
-# (and 64 other sites on non-named types like LivenessTactic/WellFoundedOrdering/
-# models.rs types); migrate to hand-written codec. Named types (Proof/Judgment/
-# Fact/ProofStep + cascade ProofContext/Goal/CleanupProof/NoDoubleFreeProof/
+# serde/serde_json removed in Wave 43 — all proof types (Proof, Judgment,
+# Fact, ProofStep + cascade ProofContext/Goal/CleanupProof/NoDoubleFreeProof/
 # NoUseAfterFreeProof/NoAliasProof/SynchronizationProof/ExclusivitySubProof/
 # ExclusivityProof/OriginProof/DerivationChainProof/TaintProof/
 # BDCompatibilityProof/ReinterpretationSafetyProof/InterpretationProof/
-# NoDeadlockProof/AllocationFreedProof/LivenessProof/ProofBundle) were stripped
-# in Wave 43 — see src/proof/src/serialization.rs BinaryWrite/BinaryRead +
-# serialize_proof/deserialize_proof for the canonical binary path.
-serde.workspace = true
-# serde_json removed in Wave 43 — the ProofEnvelope JSON path was removed
-# along with the SerializationError wrapper; no remaining serde_json:: usage
-# in src/proof/.
+# NoDeadlockProof/AllocationFreedProof/LivenessProof/ProofBundle/
+# InvariantName/ProofKind/etc.) now rely on hand-written Debug + Clone
+# derives only. Binary serialization goes through `src/proof/src/serialization.rs`
+# BinaryWrite/BinaryRead + serialize_proof/deserialize_proof (added in Wave 43).
+# The `#[serde(rename_all = "snake_case")]` attribute on `InvariantName` was
+# removed; the existing `Display` impl produces the same snake_case names
+# ("liveness", "exclusivity", "cleanup", "origin", "interpretation"), so any
+# JSON-style string output is unchanged. The `ProofEnvelope` JSON path was
+# removed in Wave 43 along with the `SerializationError` wrapper.
 vuma-scg = { path = "../scg" }
