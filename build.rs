@@ -14,7 +14,7 @@ fn main() {
         if output.status.success() {
             let version_str = String::from_utf8_lossy(&output.stdout);
             // Parse "rustc 1.xx.y (sha) date" format
-            let parts: Vec<&str> = version_str.trim().split_whitespace().collect();
+            let parts: Vec<&str> = version_str.split_whitespace().collect();
             if parts.len() >= 2 {
                 let ver = parts[1]; // e.g., "1.77.0"
                 let ver_parts: Vec<&str> = ver.split('.').collect();

@@ -329,7 +329,7 @@ impl SCG {
                 .collect();
 
             let calls: Vec<LlmCallTarget> = call_graph
-                .callees(&fid)
+                .callees(fid)
                 .iter()
                 .map(|cge| LlmCallTarget {
                     callee_entry_node_id: cge.callee.0.as_u64(),
@@ -338,7 +338,7 @@ impl SCG {
                 .collect();
 
             let called_by: Vec<u64> = call_graph
-                .callers(&fid)
+                .callers(fid)
                 .iter()
                 .map(|caller_fid| caller_fid.0.as_u64())
                 .collect();
@@ -350,7 +350,7 @@ impl SCG {
                 nodes: func_nodes,
                 calls,
                 called_by,
-                is_recursive: call_graph.is_recursive(&fid),
+                is_recursive: call_graph.is_recursive(fid),
             });
         }
 

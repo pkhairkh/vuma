@@ -954,7 +954,7 @@ const INLINE_THRESHOLD_O2: u32 = 8;
 const INLINE_THRESHOLD_O3: u32 = 20;
 
 pub fn inline_small(
-    mut func: IRFunction,
+    func: IRFunction,
     program_funcs: &HashMap<String, &IRFunction>,
 ) -> IRFunction {
     inline_with_threshold(func, program_funcs, INLINE_THRESHOLD_O2)
@@ -1102,7 +1102,7 @@ pub fn inline_with_threshold(
                     // The inliner prefixes all block labels with `prefix`,
                     // so Phi incoming labels must be prefixed too.
                     if let IRInstr::Phi { incoming, .. } = &mut new_instr {
-                        for (val, label) in incoming.iter_mut() {
+                        for (_val, label) in incoming.iter_mut() {
                             *label = format!("{}_{}", prefix, label);
                         }
                     }
@@ -1437,7 +1437,7 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
 /// Apply all optimization passes in the recommended order:
 ///
 /// `constant_fold → cse → dce → inline_small → licm → constant_fold → dce`
-pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
+pub fn run_optimizations(program: IRProgram) -> IRProgram {
     run_optimizations_with_target(program, &crate::target_desc::LatencyTable::default_ooo())
 }
 
@@ -1940,7 +1940,7 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
     // Build merge map: for each set of identical functions, pick the first
     // as canonical and redirect all others to it.
     let mut merge_map: HashMap<String, String> = HashMap::new();
-    for (_hash, names) in &hash_to_func {
+    for names in hash_to_func.values() {
         if names.len() > 1 {
             let canonical = &names[0];
             for name in &names[1..] {
@@ -2025,7 +2025,7 @@ fn compute_function_hash(func: &IRFunction) -> String {
 /// discover equivalences, then extracts the cheapest form for each
 /// expression. Currently handles BinOp instructions with constant or
 /// register operands.
-pub fn equality_saturation(mut func: IRFunction) -> IRFunction {
+pub fn equality_saturation(func: IRFunction) -> IRFunction {
     equality_saturation_with_cost(func, &crate::egraph::default_cost)
 }
 
@@ -2038,7 +2038,7 @@ pub fn equality_saturation_with_cost(
     mut func: IRFunction,
     cost_fn: &dyn Fn(&crate::egraph::ENode) -> usize,
 ) -> IRFunction {
-    use crate::egraph::{EGraph, ENode, RewriteRule, standard_rules};
+    use crate::egraph::{EGraph, ENode, standard_rules};
 
     let rules = standard_rules();
 
@@ -2254,7 +2254,7 @@ pub fn equality_saturation_with_cost(
 /// map (returned via the function's metadata). A future refactor will
 /// thread it directly into `AliasAnalysis` so DSE consumes it
 /// automatically.
-pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> (IRFunction, HashMap<u32, u32>) {
+pub fn mark_ive_proven_nonaliasing(func: IRFunction) -> (IRFunction, HashMap<u32, u32>) {
     // Phase 1: Build the Alloc-region provenance map.
     //
     // For each vreg, record which Alloc region it derives from (if any).
@@ -2448,7 +2448,7 @@ pub fn dead_store_eliminate(
                 continue;
             }
 
-            let (store_addr_i, store_val_i) = match &block.instructions[i] {
+            let (store_addr_i, _store_val_i) = match &block.instructions[i] {
                 IRInstr::Store { addr, value, .. } => (addr, value),
                 _ => continue,
             };
@@ -2457,13 +2457,12 @@ pub fn dead_store_eliminate(
             let mut is_dead = false;
             for j in (i + 1)..block.instructions.len() {
                 match &block.instructions[j] {
-                    IRInstr::Load { addr: load_addr, .. } => {
+                    IRInstr::Load { addr: load_addr, .. }
                         // If a load may alias with our store, the store is not dead.
                         // (Wave 8: IVE proof can override TBAA here.)
-                        if may_alias_combined(&aa, provenance, store_addr_i, load_addr) {
+                        if may_alias_combined(&aa, provenance, store_addr_i, load_addr) => {
                             break;
                         }
-                    }
                     IRInstr::Store { addr: store_addr_j, .. } => {
                         // A later store to the same address overwrites ours.
                         // If our store's value hasn't been read between i and j,

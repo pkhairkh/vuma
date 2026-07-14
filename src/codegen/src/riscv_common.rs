@@ -248,7 +248,7 @@ pub const OPC_MSUB: u32 = 0x47;
 // ===========================================================================
 
 /// Build a simple syscall stub: `addi a7, zero, #num; ecall; ret`
-pub fn simple_stub(num: i32, jalr: fn() -> [u8; 4], addi: fn(u32, u32, i32) -> [u8; 4], ecall: fn() -> [u8; 4]) -> Vec<u8> {
+pub fn simple_stub(_num: i32, _jalr: fn() -> [u8; 4], _addi: fn(u32, u32, i32) -> [u8; 4], _ecall: fn() -> [u8; 4]) -> Vec<u8> {
     // This is a placeholder — actual implementation needs the backend's
     // Instruction enum. Each backend keeps its own simple_stub.
     // This function is here for documentation but not used directly.

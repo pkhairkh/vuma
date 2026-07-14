@@ -1922,21 +1922,21 @@ impl Instruction {
         match opcode {
             // ── LUI ────────────────────────────────────────────────
             0b0110111 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let imm = word & 0xFFFFF000;
                 Some(Instruction::Lui { rd: Gpr::Ra, imm })
             }
 
             // ── AUIPC ──────────────────────────────────────────────
             0b0010111 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let imm = word & 0xFFFFF000;
                 Some(Instruction::Auipc { rd: Gpr::Ra, imm })
             }
 
             // ── JAL ────────────────────────────────────────────────
             0b1101111 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let imm20 = ((word >> 31) & 1) << 20
                     | ((word >> 12) & 0xFF) << 12
                     | ((word >> 20) & 1) << 11
@@ -1947,7 +1947,7 @@ impl Instruction {
 
             // ── JALR ───────────────────────────────────────────────
             0b1100111 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 Some(Instruction::Jalr {
@@ -2003,7 +2003,7 @@ impl Instruction {
 
             // ── LOAD ───────────────────────────────────────────────
             0b0000011 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 match funct3 {
@@ -2081,7 +2081,7 @@ impl Instruction {
 
             // ── OP-IMM (RV64I) ─────────────────────────────────────
             0b0010011 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 let shamt = (word >> 20) & 0x3F;
@@ -2142,7 +2142,7 @@ impl Instruction {
 
             // ── OP (RV64I register-register) ────────────────────────
             0b0110011 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let rs2_reg = Gpr::from_encoding(rs2)?;
                 match (funct7, funct3) {
@@ -2243,7 +2243,7 @@ impl Instruction {
 
             // ── OP-IMM-32 (RV64) ───────────────────────────────────
             0b0011011 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 let shamt = (word >> 20) & 0x1F;
@@ -2279,7 +2279,7 @@ impl Instruction {
 
             // ── OP-32 (RV64) ───────────────────────────────────────
             0b0111011 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let rs2_reg = Gpr::from_encoding(rs2)?;
                 match (funct7, funct3) {
@@ -2320,7 +2320,7 @@ impl Instruction {
                     Some(Instruction::Ebreak)
                 } else {
                     let csr = (word >> 20) & 0xFFF;
-                    let rd_reg = Gpr::from_encoding(rd)?;
+                    let _rd_reg = Gpr::from_encoding(rd)?;
                     let rs1_reg = Gpr::from_encoding(rs1)?;
                     match funct3 {
                         0b001 => Some(Instruction::Csrrw {
@@ -2502,7 +2502,7 @@ impl Instruction {
             // funct7 are the aq/rl bits, which we ignore when decoding so
             // that all aq/rl combinations are recognised.
             0b0101111 => {
-                let rd_reg = Gpr::from_encoding(rd)?;
+                let _rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let funct5 = funct7 >> 2;
                 match (funct5, funct3) {
@@ -2730,7 +2730,7 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // The data segment starts on the next page after the text.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     let data_offset = data_vaddr - base_addr;
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
@@ -4996,7 +4996,7 @@ impl Backend for RiscV64Backend {
                         let mut code = Vec::new();
 
                         // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic
-                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                        let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                         if is_fp {
                             let is_f64 = matches!(ty, Some(IRType::F64));
                             // Load lhs/rhs bit patterns into FPRs
@@ -6793,10 +6793,10 @@ impl Backend for RiscV64Backend {
                         ]);
                         // Decode existing JAL to get rd, then re-encode with new offset
                         let rd_idx = (existing >> 7) & 0x1F;
-                        let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+                        let _rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
                         let patched = Instruction::Jal {
                             rd: Gpr::Ra,
-                            offset: offset,
+                            offset,
                         };
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
@@ -6811,7 +6811,7 @@ impl Backend for RiscV64Backend {
                         let offset = (target_addr - bl_addr) as i32;
                         let patched = Instruction::Jal {
                             rd: Gpr::Ra,
-                            offset: offset,
+                            offset,
                         };
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());

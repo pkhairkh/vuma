@@ -135,7 +135,7 @@ impl VumaCompiler {
             Err(errors) => {
                 let diagnostics = errors
                     .iter()
-                    .flat_map(|e| diagnostics::from_vuma_error(e))
+                    .flat_map(diagnostics::from_vuma_error)
                     .collect();
 
                 CompileResult {
@@ -1337,11 +1337,10 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
             if let Some(node) = scg.get_node(*node_id) {
                 if let NodePayload::Computation(comp) = &node.payload {
                     let op_label = comp.kind.label();
-                    if !is_known_binop(&op_label) && !op_label.starts_with('_') {
-                        if !calls.contains(&op_label) {
+                    if !is_known_binop(&op_label) && !op_label.starts_with('_')
+                        && !calls.contains(&op_label) {
                             calls.push(op_label);
                         }
-                    }
                 }
             }
         }
@@ -1364,11 +1363,10 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
         for node in scg.nodes() {
             if let NodePayload::Computation(comp) = &node.payload {
                 let op_label = comp.kind.label();
-                if !is_known_binop(&op_label) && !op_label.starts_with('_') {
-                    if !calls.contains(&op_label) {
+                if !is_known_binop(&op_label) && !op_label.starts_with('_')
+                    && !calls.contains(&op_label) {
                         calls.push(op_label);
                     }
-                }
             }
         }
 
@@ -1677,12 +1675,11 @@ fn extract_proof_scg(scg: &vuma_scg::SCG) -> ProofSCG {
         if node.node_type == NodeType::Control {
             if let NodePayload::Control(ctrl) = &node.payload {
                 match ctrl.kind {
-                    ControlKind::FunctionEntry | ControlKind::ClosureEntry => {
-                        if !found_entry {
+                    ControlKind::FunctionEntry | ControlKind::ClosureEntry
+                        if !found_entry => {
                             entry = pp;
                             found_entry = true;
                         }
-                    }
                     ControlKind::FunctionReturn | ControlKind::ClosureReturn => {
                         exits.push(pp);
                     }
@@ -1719,8 +1716,8 @@ fn extract_proof_scg(scg: &vuma_scg::SCG) -> ProofSCG {
 /// available in the SCG (e.g. base_addr, default_repd) are left at
 /// default values.
 fn extract_proof_msg(scg: &vuma_scg::SCG) -> ProofMSG {
-    use vuma_scg::node::{NodePayload, NodeType, AccessMode};
-    use vuma_scg::region::RegionId as ScgRegionId;
+    use vuma_scg::node::{NodePayload, AccessMode};
+    
 
     let mut regions: Vec<ProofRegion> = Vec::new();
     let mut accesses: Vec<ProofAccess> = Vec::new();

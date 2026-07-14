@@ -69,11 +69,11 @@ use crate::primitives::{CapD, CapFlag};
 /// - CapD: { Read, Compare } — pure conversion, no side effects
 // VUMA-VERIFIED: integer formatting is correct for all i64 values in bases 2–36
 pub fn format_int(value: i64, base: u32, width: u32) -> VumaString {
-    let effective_base = if base >= 2 && base <= 36 { base } else { 10 };
+    let effective_base = if (2..=36).contains(&base) { base } else { 10 };
 
     if value < 0 {
         let abs_val = (value as i128).unsigned_abs() as u64;
-        let digits = format_uint_inner(abs_val, effective_base, if width > 1 { width - 1 } else { 0 });
+        let digits = format_uint_inner(abs_val, effective_base, width.saturating_sub(1));
         let mut result = VumaString::new();
         result.push('-');
         result.push_str(digits.as_str());
@@ -128,7 +128,7 @@ pub fn format_int(value: i64, base: u32, width: u32) -> VumaString {
 /// - CapD: { Read, Compare } — pure conversion, no side effects
 // VUMA-VERIFIED: unsigned integer formatting is correct for all u64 values in bases 2–36
 pub fn format_uint(value: u64, base: u32, width: u32) -> VumaString {
-    let effective_base = if base >= 2 && base <= 36 { base } else { 10 };
+    let effective_base = if (2..=36).contains(&base) { base } else { 10 };
     format_uint_inner(value, effective_base, width)
 }
 

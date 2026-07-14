@@ -312,7 +312,7 @@ fn binop_kind_to_cmp_kind(op: &BinOpKind) -> CmpKind {
 /// and use 64-bit operations — the .W variants would truncate shift amounts
 /// to 0-31, breaking byte/halfword reconstruction into u64 (e.g. b4 << 32).
 fn is_32bit_ty(ty: &Option<IRType>) -> bool {
-    ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32))
+    ty.as_ref().is_some_and(|t| matches!(t, IRType::I32 | IRType::U32))
 }
 
 /// Map a CmpKind to a LoongArch FCmp condition code.
@@ -691,9 +691,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // - U32/U16/U8 → DivWu (unsigned 32-bit) + sign-extend
                     // - I64/Ptr → DivD (signed 64-bit)
                     // - I32/I16/I8 → DivW (signed 32-bit) + sign-extend
-                    let is_unsigned = ty.as_ref().map_or(false, |t|
+                    let is_unsigned = ty.as_ref().is_some_and(|t|
                         matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
-                    let is_32bit = is_32bit_ty(&ty);
+                    let is_32bit = is_32bit_ty(ty);
                     if is_unsigned {
                         if is_32bit {
                             code.extend_from_slice(&Instruction::DivWu { rd: S0, rj: S0, rk: S1 }.encode());
@@ -726,7 +726,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // and store the result back to the destination slot.
                     let is_fp = ty
                         .as_ref()
-                        .map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                        .is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                     let fp_handled = if is_fp
                         && matches!(
                             op,
@@ -737,7 +737,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 | BinOpKind::UDiv
                         )
                     {
-                        let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                        let is_f32 = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
                         code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                         code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
                         // GPR → FPR (movgr2fr.d) for both operands.
@@ -1043,9 +1043,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
                         | BinOpKind::Eq | BinOpKind::Ne => {
                             let cmp_kind = binop_kind_to_cmp_kind(op);
-                            let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                            let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                             if is_fp {
-                                let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                                let is_f32 = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
                                 let (lhs_val, rhs_val) = if fp_cmp_swap(&cmp_kind) {
                                     (rhs, lhs)
                                 } else {
@@ -1111,9 +1111,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let dst_id = dst.as_register().unwrap_or(0);
                     // Dispatch on operand type: FP types use FCmpS/FCmpD,
                     // integer types use the integer Slt/Sltu/Eq/Ne path.
-                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                     if is_fp {
-                        let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                        let is_f32 = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
                         // For > and >=, swap operands so we can use CLT/CLE.
                         let (lhs_val, rhs_val) = if fp_cmp_swap(kind) {
                             (rhs, lhs)
@@ -1374,10 +1374,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // ── IntToFloat (signed integer → float) ─────────────
                         CastKind::IntToFloat => {
                             // Determine source and destination types (default to i64→f64)
-                            let src_is_32 = from_ty.as_ref().map_or(false, |t|
+                            let src_is_32 = from_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::I8 | IRType::I16 | IRType::I32)
                             );
-                            let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                            let dst_is_f32 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
 
                             // Load integer value from source stack slot into GPR
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
@@ -1441,13 +1441,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             //     This yields 2 * (value >> 1) + (value & 1) == value,
                             //     and works for *all* u64 values (MSB set or clear)
                             //     because (value >> 1) always fits in a positive i63.
-                            let src_is_32 = from_ty.as_ref().map_or(false, |t|
+                            let src_is_32 = from_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
                             );
-                            let src_is_64 = from_ty.as_ref().map_or(false, |t|
+                            let src_is_64 = from_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::U64)
                             );
-                            let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                            let dst_is_f32 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
 
@@ -1496,8 +1496,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                         // ── FloatToInt (float → signed integer) ──────────────
                         CastKind::FloatToInt => {
-                            let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
-                            let dst_is_32 = to_ty.as_ref().map_or(false, |t|
+                            let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
+                            let dst_is_32 = to_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::I8 | IRType::I16 | IRType::I32)
                             );
 
@@ -1555,11 +1555,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             //     sign bit → value
                             //   * value >= 2^63: (value - 2^63) >= 0; XOR sets the
                             //     sign bit → value
-                            let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
-                            let dst_is_32 = to_ty.as_ref().map_or(false, |t|
+                            let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
+                            let dst_is_32 = to_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
                             );
-                            let dst_is_64 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::U64));
+                            let dst_is_64 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::U64));
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
@@ -1609,7 +1609,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                         // ── FloatToFloat (f32↔f64) ───────────────────────────
                         CastKind::FloatToFloat => {
-                            let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                            let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
 
@@ -1756,7 +1756,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+                IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
                     // Proper CAS using LL/SC (Load-Link/Store-Conditional).
                     // LoongArch64 sc.d overwrites rd with success/failure flag,
                     // so we must reload desired on each retry.
@@ -1904,7 +1904,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
             if !code.is_empty() {
                 byte_offset += code.len();
-                instrs.push(emit(code, &format!("{:?}", instr).split_whitespace().next().unwrap_or("unknown")));
+                instrs.push(emit(code, format!("{:?}", instr).split_whitespace().next().unwrap_or("unknown")));
             }
         }
 
@@ -1947,7 +1947,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     //   b false_block
                     //   <true copies>   ← bnez lands here
                     //   b true_block
-                    let bnez_off = byte_offset + code.len();
+                    let _bnez_off = byte_offset + code.len();
                     // N = (false_copies.len() + 4) / 4  (word offset to skip false copies + B instruction)
                     let skip_words = ((false_copies.len() as i32) + 4) / 4;
                     code.extend_from_slice(&Instruction::Bnez { rj: S0, offs21: skip_words }.encode());

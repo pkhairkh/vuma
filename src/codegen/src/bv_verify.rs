@@ -244,7 +244,7 @@ pub fn verify_rule_2var(
 /// `verified: true` field with actual executable verification.
 pub fn verify_all_rules() -> Vec<VerificationResult> {
     use BinOpKind::*;
-    let m = VERIFY_MODULO;
+    let _m = VERIFY_MODULO;
 
     vec![
         // 1-variable rules (pattern has both operands = x)

@@ -1487,7 +1487,7 @@ impl IRBuilder {
         &mut self,
         body: &[ScgStatement],
         for_range: &Option<(String, ScgExpr, ScgExpr)>,
-        while_cond: &Option<String>,
+        _while_cond: &Option<String>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
@@ -1835,7 +1835,7 @@ impl IRBuilder {
         }
 
         // Back-edge to header if the block doesn't have a terminator.
-        let back_edge_label;
+        
         if matches!(
             ir_func.current_block().terminator,
             IRTerminator::Unreachable
@@ -1845,7 +1845,7 @@ impl IRBuilder {
             });
             ir_func.current_block().terminator = IRTerminator::Jump(loop_header.clone());
         }
-        back_edge_label = ir_func.current_block().label.clone();
+        let back_edge_label = ir_func.current_block().label.clone();
 
         // ── Step 5: Patch phi nodes with correct back-edge values ──
         // For each variable that was modified in the loop body, update the
@@ -1875,7 +1875,7 @@ impl IRBuilder {
             for instr in &mut header_block.instructions {
                 if let IRInstruction::Phi { dst, incoming } = instr {
                     if let Some(phi_vreg_id) = dst.as_register() {
-                        for (name, pre_vreg, phi_vreg) in &phi_info {
+                        for (name, _pre_vreg, phi_vreg) in &phi_info {
                             if *phi_vreg == phi_vreg_id {
                                 // Get the latest vreg for this name.
                                 // Check BOTH the name_to_latest map (which tracks
@@ -2292,7 +2292,7 @@ impl IRBuilder {
                 });
 
                 // Replace all pending uses of `src_reg` with `temp_id`.
-                for (d, s) in copies.iter_mut() {
+                for (_d, s) in copies.iter_mut() {
                     if let IRValue::Register(s_id) = s {
                         if *s_id == src_reg {
                             *s = IRValue::Register(temp_id);
@@ -3454,7 +3454,7 @@ impl IRBuilder {
                     return Err(crate::CodegenError::TranslationError(format!(
                         "ct_select requires 3 operands, got {}",
                         ct.operands.len()
-                    )).into());
+                    )));
                 }
                 let cond = self.resolve_expr(&ct.operands[0], names, ir_func)?;
                 let true_val = self.resolve_expr(&ct.operands[1], names, ir_func)?;
@@ -3474,7 +3474,7 @@ impl IRBuilder {
                     return Err(crate::CodegenError::TranslationError(format!(
                         "ct_eq requires 2 operands, got {}",
                         ct.operands.len()
-                    )).into());
+                    )));
                 }
                 let lhs = self.resolve_expr(&ct.operands[0], names, ir_func)?;
                 let rhs = self.resolve_expr(&ct.operands[1], names, ir_func)?;
@@ -4074,7 +4074,7 @@ impl IRBuilder {
                     Self::expr_uses(off, &mut uses);
                 }
             }
-            ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
+            ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty: _ }) => {
                 Self::expr_uses(ptr, &mut uses);
                 if let Some(off) = offset {
                     Self::expr_uses(off, &mut uses);

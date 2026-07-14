@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{NodeId, NodePayload, NodeType};
+use vuma_scg::node::{NodeId, NodePayload};
 
 /// A cached query result.
 #[derive(Debug, Clone)]
@@ -35,6 +35,12 @@ pub struct QuerySystem {
     reverse_deps: HashMap<NodeId, HashSet<NodeId>>,
     /// Whether the system is in a consistent state.
     consistent: bool,
+}
+
+impl Default for QuerySystem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl QuerySystem {

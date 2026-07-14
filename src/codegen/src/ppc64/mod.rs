@@ -1282,28 +1282,25 @@ impl Instruction {
                 // MSB-first bits [11:15] (= LSB-first bits [16:20]) and the
                 // high 5 bits in MSB-first bits [16:20] (= LSB-first bits
                 // [11:15]). For SPR=8: low=8, high=0.
-                let word = (31u32 << 26)
+                let word = ((31u32 << 26)
                     | (rt.encoding() << 21)
-                    | (8u32 << 16)
-                    | (0u32 << 11)
+                    | (8u32 << 16))
                     | (339u32 << 1);
                 encode_word(word)
             }
             Instruction::Mtlr { rs } => {
                 // MTLR rS: primary=31, rS, SPR=8 (LR), xo=467, Rc=0
-                let word = (31u32 << 26)
+                let word = ((31u32 << 26)
                     | (rs.encoding() << 21)
-                    | (8u32 << 16)
-                    | (0u32 << 11)
+                    | (8u32 << 16))
                     | (467u32 << 1);
                 encode_word(word)
             }
             Instruction::Mtctr { rs } => {
                 // MTCTR rS: primary=31, rS, SPR=9 (CTR), xo=467, Rc=0
-                let word = (31u32 << 26)
+                let word = ((31u32 << 26)
                     | (rs.encoding() << 21)
-                    | (9u32 << 16)
-                    | (0u32 << 11)
+                    | (9u32 << 16))
                     | (467u32 << 1);
                 encode_word(word)
             }
@@ -1383,13 +1380,11 @@ impl Instruction {
                 // bits — `63` already fits in 6 bits and the frB field is
                 // intentionally zero.  Field-position comments use PPC bit
                 // numbering (bit 0 = MSB).
-                let word = (63u32 << 26)               // PO=63        (PPC bits 0:5)
+                let word = ((63u32 << 26)               // PO=63        (PPC bits 0:5)
                     | ((ft.encoding() & 0x1F) << 21)  // frT=ft       (PPC bits 6:10)
-                    | ((fa.encoding() & 0x1F) << 16)  // frA=fa       (PPC bits 11:15)
-                    | (0u32 << 11)                     // frB=0        (PPC bits 16:20, reserved for FMUL)
+                    | ((fa.encoding() & 0x1F) << 16))                     // frB=0        (PPC bits 16:20, reserved for FMUL)
                     | ((fb.encoding() & 0x1F) << 6)   // frC=fb       (PPC bits 21:25)
-                    | ((25u32 & 0x1F) << 1)           // XO=25        (PPC bits 26:30)
-                    | 0u32;                            // Rc=0         (PPC bit 31)
+                    | ((25u32 & 0x1F) << 1);                            // Rc=0         (PPC bit 31)
                 encode_word(word)
             }
             Instruction::Fdiv { ft, fa, fb } => {
@@ -1745,7 +1740,7 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // The data segment starts on the next page after the text.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     let data_offset = data_vaddr - base_addr; // file offset for data segment
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
@@ -3746,8 +3741,7 @@ fn lower_ir_instr_ppc64(
             // No Instruction variant for oris, so construct AllocatedInstruction manually.
             let oris_word: u32 = (25u32 << 26)
                 | (d.encoding() << 21)
-                | (d.encoding() << 16)
-                | 0;
+                | (d.encoding() << 16);
             result.push(AllocatedInstruction {
                 opcode: "oris".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
@@ -4439,7 +4433,7 @@ impl Backend for PPC64Backend {
             encoded: Instruction::Stdu { rs: Gpr::R1, ra: Gpr::R1, ds: -fs }.encode().to_vec(),
         });
         // MFLR R0
-        let mflr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (339 << 1);
+        let mflr_word: u32 = (31u32 << 26) | (8u32 << 16) | (339 << 1);
         instructions.push(AllocatedInstruction {
             opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
             encoded: encode_word(mflr_word).to_vec(),
@@ -4556,36 +4550,33 @@ impl Backend for PPC64Backend {
                     }
                     IRInstr::Store { .. } => store_count += 1,
                     IRInstr::Cmp { .. } => cmp_count += 1,
-                    IRInstr::Add { dst, lhs, rhs, .. } => {
+                    IRInstr::Add { dst, lhs, rhs, .. }
                         // Only treat as "array indexing" if BOTH operands are
                         // variables (Registers), not constants (Immediates).
                         // This distinguishes `*(arr + idx*4)` (array indexing
                         // with a variable offset — upgrade) from `*(p + 0)`
                         // (simple deref with a constant offset — keep U8 to
                         // match a possible U8 byte store, see ls_pass_node).
-                        if lhs.as_register().is_some() && rhs.as_register().is_some() {
+                        if lhs.as_register().is_some() && rhs.as_register().is_some() => {
                             if let Some(id) = dst.as_register() {
                                 add_defined_vregs.insert(id);
                             }
                         }
-                    }
-                    IRInstr::Offset { dst, base, offset, .. } => {
+                    IRInstr::Offset { dst, base, offset, .. }
                         // Offset is always pointer arithmetic with a variable
                         // offset (constant offsets are folded into Load's
                         // `offset` field by lower_access).
-                        if base.as_register().is_some() && offset.as_register().is_some() {
+                        if base.as_register().is_some() && offset.as_register().is_some() => {
                             if let Some(id) = dst.as_register() {
                                 add_defined_vregs.insert(id);
                             }
                         }
-                    }
-                    IRInstr::BinOp { op, dst, lhs, rhs, .. } if *op == BinOpKind::Add => {
-                        if lhs.as_register().is_some() && rhs.as_register().is_some() {
+                    IRInstr::BinOp { op, dst, lhs, rhs, .. } if *op == BinOpKind::Add
+                        && lhs.as_register().is_some() && rhs.as_register().is_some() => {
                             if let Some(id) = dst.as_register() {
                                 add_defined_vregs.insert(id);
                             }
                         }
-                    }
                     _ => {}
                 }
             }
@@ -4611,7 +4602,7 @@ impl Backend for PPC64Backend {
                     IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
+                        let is_32bit = ty.as_ref().is_some_and(|t| matches!(t, IRType::I32 | IRType::U32));
                         let mut code = Vec::new();
                         // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic.
                         // The dst_offset slot is used as scratch: store lhs bits via
@@ -4621,7 +4612,7 @@ impl Backend for PPC64Backend {
                         //   comparisons → Fcmpu → CR0 → BC + LI 0/1
                         // For non-arithmetic ops on FP (And/Or/Xor/Shl/...) we fall
                         // back to loading lhs bits into R3 (matches riscv64 pattern).
-                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                        let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                         if is_fp {
                             let is_f64 = matches!(ty, Some(IRType::F64));
                             // Load lhs → R3 → scratch slot → F0
@@ -4729,13 +4720,11 @@ impl Backend for PPC64Backend {
                                     // then masks bits 0-31, clearing upper 32 bits.
                                     // Encoding: M-form, primary opcode 23
                                     // rlwnm RA, RS, RB, MB, ME: opcode=23, RS[6:10], RA[11:15], RB[16:20], MB[21:25], ME[26:30], Rc[31]
-                                    let rlwnm_word: u32 = (23u32 << 26)
+                                    let rlwnm_word: u32 = ((23u32 << 26)
                                         | (Gpr::R4.encoding() << 21)
                                         | (Gpr::R3.encoding() << 16)
-                                        | (Gpr::R5.encoding() << 11)
-                                        | (0u32 << 6)    // MB = 0
-                                        | (31u32 << 1)   // ME = 31
-                                        | 0u32;          // Rc = 0
+                                        | (Gpr::R5.encoding() << 11))    // MB = 0
+                                        | (31u32 << 1);          // Rc = 0
                                     code.extend_from_slice(&encode_word(rlwnm_word));
                                 } else {
                                     // 64-bit rotation: use rldcl
@@ -4941,15 +4930,12 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
                                 match op {
-                                    BinOpKind::Add => {
-                                        if is_32bit {
+                                    BinOpKind::Add
+                                        if is_32bit => {
                                             // Add and mask to 32 bits
                                             code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
                                             code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
-                                        } else {
-                                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
                                         }
-                                    }
                                     BinOpKind::Sub => {
                                         if is_32bit {
                                             code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
@@ -5195,7 +5181,7 @@ impl Backend for PPC64Backend {
                         code
                     }
                     IRInstr::Free { .. } => {
-                        let trap_word: u32 = (31u32 << 26) | (31u32 << 21) | (0u32 << 16) | (0u32 << 11) | (4 << 1);
+                        let trap_word: u32 = ((31u32 << 26) | (31u32 << 21)) | (4 << 1);
                         encode_word(trap_word).to_vec()
                     }
                     IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
@@ -5578,8 +5564,7 @@ impl Backend for PPC64Backend {
                         // [4] oris r3, r3, 0 (primary=25, D-form)
                         let oris_word: u32 = (25u32 << 26)
                             | (Gpr::R3.encoding() << 21)
-                            | (Gpr::R3.encoding() << 16)
-                            | 0;
+                            | (Gpr::R3.encoding() << 16);
                         code.extend_from_slice(&encode_word(oris_word));
                         // [5] ori r3, r3, 0
                         code.extend_from_slice(&Instruction::Ori { ra: Gpr::R3, rs: Gpr::R3, uimm: 0 }.encode());
@@ -5664,7 +5649,7 @@ impl Backend for PPC64Backend {
                         // Epilogue: restore LR from the callee's own frame at SP + fs - 24
                         // (= R31 - 24), matching the prologue's save location.
                         code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs - 24 }.encode());
-                        let mtlr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (467 << 1);
+                        let mtlr_word: u32 = (31u32 << 26) | (8u32 << 16) | (467 << 1);
                         code.extend_from_slice(&encode_word(mtlr_word));
                         code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode());
                         code.extend_from_slice(&Instruction::Addi { rt: Gpr::R1, ra: Gpr::R1, simm: fs }.encode());
@@ -6126,7 +6111,7 @@ impl Backend for PPC64Backend {
 
         // Helper: encode STWBRX (Store Word Byte-Reverse Indexed)
         // X-form: primary=31, rS, rA, rB, xo=662, Rc=0
-        let stwbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+        let _stwbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
             let word = (31u32 << 26)
                 | (rs.encoding() << 21)
                 | (ra.encoding() << 16)
@@ -6137,7 +6122,7 @@ impl Backend for PPC64Backend {
 
         // Helper: encode STDBRX (Store Doubleword Byte-Reverse Indexed)
         // X-form: primary=31, rS, rA, rB, xo=660, Rc=0
-        let stdbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+        let _stdbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
             let word = (31u32 << 26)
                 | (rs.encoding() << 21)
                 | (ra.encoding() << 16)

@@ -43,12 +43,14 @@ use std::sync::Mutex;
 
 /// Logging verbosity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Default)]
 pub enum LogLevel {
     /// Only errors — suppresses all other output.
     Error = 0,
     /// Errors + warnings.
     Warn = 1,
     /// Errors + warnings + informational messages (default).
+    #[default]
     Info = 2,
     /// Errors + warnings + info + debug (--verbose / -v).
     Debug = 3,
@@ -93,11 +95,6 @@ impl fmt::Display for LogLevel {
     }
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VumaLogger

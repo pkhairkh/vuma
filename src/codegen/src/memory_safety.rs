@@ -31,9 +31,11 @@ use std::fmt;
 // dead-allocation detection. We depend on it through the codegen SCG bridge.
 
 use crate::scg_to_ir::{
-    AccessNode, AllocationNode, CallNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode,
-    ScgStatement, ScgType, SwitchArm,
+    AccessNode, AllocationNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode,
+    ScgStatement,
 };
+#[cfg(test)]
+use crate::scg_to_ir::ScgType;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Error codes for memory safety diagnostics
@@ -716,17 +718,16 @@ impl MemorySafetyAnalyzer {
     ) {
         for stmt in stmts {
             match stmt {
-                ScgStatement::Call(call) => {
-                    if is_deallocation_call(&call.func) {
+                ScgStatement::Call(call)
+                    if is_deallocation_call(&call.func) => {
                         for arg in &call.args {
                             if expr_to_name(arg) == alloc_name {
                                 *freed = true;
                             }
                         }
                     }
-                }
-                ScgStatement::Access(access) => {
-                    if *freed {
+                ScgStatement::Access(access)
+                    if *freed => {
                         let ptr_name = match access {
                             AccessNode::Load { ptr, .. } => expr_to_name(ptr),
                             AccessNode::Store { ptr, .. } => expr_to_name(ptr),
@@ -735,7 +736,6 @@ impl MemorySafetyAnalyzer {
                             *count += 1;
                         }
                     }
-                }
                 ScgStatement::Control(ctrl) => {
                     match ctrl {
                         ControlNode::If {

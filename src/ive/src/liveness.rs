@@ -1201,7 +1201,7 @@ impl LivenessVerifier {
         }
 
         // For each thread, track held locks and the order they're acquired
-        for (_thread, events) in &thread_events {
+        for events in thread_events.values() {
             let mut held_locks: Vec<ResourceId> = Vec::new();
             // Sort events by point (approximate temporal order)
             let mut sorted_events = events.clone();

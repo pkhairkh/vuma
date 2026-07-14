@@ -82,10 +82,10 @@ impl AliasAnalysis {
                     // Load: result type depends on load type
                     IRInstr::Load { dst, ty, .. } => {
                         if let Some(vreg) = dst.as_register() {
-                            let class = match ty {
-                                &crate::ir::IRType::U8 => AliasClass::U8,
-                                &crate::ir::IRType::U32 => AliasClass::U32,
-                                &crate::ir::IRType::U64 => AliasClass::U64,
+                            let class = match *ty {
+                                crate::ir::IRType::U8 => AliasClass::U8,
+                                crate::ir::IRType::U32 => AliasClass::U32,
+                                crate::ir::IRType::U64 => AliasClass::U64,
                                 _ => AliasClass::Any,
                             };
                             classes.insert(vreg, class);

@@ -70,7 +70,7 @@ pub fn strlen(s: Address) -> u64 {
     }
     let mut len: u64 = 0;
     unsafe {
-        while *(((s.0 + len) as *const u8)) != 0 {
+        while *((s.0 + len) as *const u8) != 0 {
             len += 1;
         }
     }
