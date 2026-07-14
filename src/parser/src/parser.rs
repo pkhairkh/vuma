@@ -1122,11 +1122,63 @@ impl<'src> Parser<'src> {
             TokenKind::Sync => self.parse_sync_stmt(),
             TokenKind::Free => self.parse_free_stmt(),
             TokenKind::Allocate => self.parse_allocate_stmt(),
-            // BD directives
-            TokenKind::Bd => self.parse_bd_directive(BdDirectiveKind::Bd),
-            TokenKind::Repd => self.parse_bd_directive(BdDirectiveKind::Repd),
-            TokenKind::Capd => self.parse_bd_directive(BdDirectiveKind::Capd),
-            TokenKind::Reld => self.parse_bd_directive(BdDirectiveKind::Reld),
+            // BD directives — with parser context-awareness (Task 7-b).
+            //
+            // The keywords `bd`/`repd`/`capd`/`reld` are reserved as
+            // BD-directive introducers in the lexer (form: `bd(name, expr);`),
+            // but they are also valid identifier names —
+            // `womb/lang/ir_builder.vuma:593` declares
+            // `repd: Address = __vuma_alloc(BD_VREG_CAP);` (a type-ascription
+            // declaration) and the same function reads/writes `repd` as a Var
+            // at lines 597, 611, 612, 615, 617, 621.  Without
+            // context-awareness the parser dispatched unconditionally to
+            // `parse_bd_directive`, which expected `(` immediately after the
+            // keyword and failed with
+            // `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`,
+            // blocking the Wave 48 bootstrap self-host test.
+            //
+            // We disambiguate by peeking the token AFTER the keyword:
+            //   * `(`  → real BD directive (`bd(name, expr);` / `repd(...)` / etc.)
+            //   * `:`  → type-ascription declaration (`repd: T = expr;`)
+            //   * else → assignment or bare expression statement
+            //            (`repd = …;`, `repd[i] = …;`, `repd.field = …;`, …)
+            //
+            // This is the sophisticated fix path (parser context-awareness),
+            // explicitly preferred over the brittle alternative of renaming
+            // the bootstrap source variable.
+            //
+            // Note: `expect_name`, `parse_primary`, and `is_name_keyword`
+            // already accept `Bd`/`Repd`/`Capd`/`Reld` as identifier names
+            // (see `parse_primary` at line ~2210 and `is_name_keyword` at
+            // line ~3164), so the type-ascription and assign/expr paths
+            // work unchanged once we route to them.
+            TokenKind::Bd | TokenKind::Repd | TokenKind::Capd | TokenKind::Reld => {
+                let next = self.peek_next();
+                let kind = match self.current.kind {
+                    TokenKind::Bd => BdDirectiveKind::Bd,
+                    TokenKind::Repd => BdDirectiveKind::Repd,
+                    TokenKind::Capd => BdDirectiveKind::Capd,
+                    TokenKind::Reld => BdDirectiveKind::Reld,
+                    // Unreachable: this arm is only entered for the four
+                    // TokenKind variants matched above.
+                    _ => unreachable!("Bd/Repd/Capd/Reld dispatch arm reached for {:?}", self.current.kind),
+                };
+                match next.kind {
+                    // Real BD directive: `bd(name, expr);` — always followed
+                    // by `(`.  This preserves the historical parse path.
+                    TokenKind::LParen => self.parse_bd_directive(kind),
+                    // Type-ascription declaration: `repd: T = expr;`
+                    // — `parse_type_ascription_decl` calls `expect_name`,
+                    // which accepts `Bd`/`Repd`/`Capd`/`Reld` via
+                    // `is_name_keyword`.
+                    TokenKind::Colon => self.parse_type_ascription_decl(),
+                    // Otherwise the keyword is being used as a regular
+                    // identifier — `repd = …;`, `repd[i] = …;`,
+                    // `repd.field = …;`, `repd;`, etc.  Parse as a normal
+                    // assignment or expression statement.
+                    _ => self.parse_assign_or_expr_stmt(),
+                }
+            }
             // Handle `region` used as a variable name in assignments
             TokenKind::Region => self.parse_assign_or_expr_stmt(),
             // Break, Continue, and Loop are now proper keywords
