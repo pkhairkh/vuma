@@ -19,7 +19,6 @@
 //! whether two regions can safely overlap or be merged.
 
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
@@ -29,7 +28,7 @@ use crate::node::{NodeId, NodePayload, NodeType};
 ///
 /// `RegionId` is a newtype wrapper around `u64`, providing type safety
 /// to distinguish region identifiers from node and edge identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u64);
 
 impl RegionId {
@@ -54,7 +53,7 @@ impl std::fmt::Display for RegionId {
 ///
 /// Specifies where the memory region is physically or logically
 /// allocated, which affects access semantics and security properties.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeploymentTarget {
     /// Main program heap memory.
     Heap,
@@ -185,7 +184,7 @@ impl SCGRegion {
 ///
 /// A region's lifetime determines when its memory is valid and how
 /// deallocation is triggered.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RegionLifetime {
     /// The region lives for the entire duration of the program.
     Static,
@@ -230,7 +229,7 @@ impl std::fmt::Display for RegionLifetime {
 /// structure. Each inferred region corresponds to a single
 /// allocation/deallocation pair and contains all nodes whose lifetimes
 /// are bounded by that pair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredRegion {
     /// The unique identifier assigned to this inferred region.
     pub id: RegionId,

@@ -53,6 +53,7 @@ pub mod dominance;
 pub mod edge;
 pub mod graph;
 pub mod liveness;
+pub mod llm_json;
 pub mod loop_detection;
 pub mod node;
 pub mod query;

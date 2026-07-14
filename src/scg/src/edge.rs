@@ -4,7 +4,6 @@
 //! Edges represent relationships between nodes: data flow, control flow,
 //! derivation chains, and annotations.
 
-use serde::{Deserialize, Serialize};
 
 use crate::node::NodeId;
 
@@ -12,7 +11,7 @@ use crate::node::NodeId;
 ///
 /// `EdgeId` is a newtype wrapper around `u64`, providing type safety
 /// to prevent accidental confusion with `NodeId` or other identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EdgeId(pub u64);
 
 impl EdgeId {
@@ -37,7 +36,7 @@ impl std::fmt::Display for EdgeId {
 ///
 /// Each variant corresponds to a distinct kind of relationship
 /// between two nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     /// A data flow edge: the target node consumes a value produced by the source.
     DataFlow,
