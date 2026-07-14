@@ -767,7 +767,7 @@ impl InvariantAggregator {
         input: &VerificationInput,
     ) -> VerificationResult {
         if self.verbose {
-            log::info!("InvariantAggregator: checking {kind}");
+            vuma_log!(info, "InvariantAggregator: checking {kind}");
         }
 
         let mut result = match kind {

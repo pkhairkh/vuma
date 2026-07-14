@@ -101,6 +101,21 @@
 //! // assert!(summary.scg_changed());
 //! ```
 
+#[macro_use]
+mod vuma_log_w44 {
+    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
+    /// crates. No-op in release builds (format args still type-checked via
+    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
+    /// cross-crate name collisions — each core crate carries its own copy.
+    macro_rules! vuma_log {
+        ($level:ident, $($arg:tt)*) => {{
+            #[cfg(debug_assertions)]
+            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            #[cfg(not(debug_assertions))]
+            { let _ = format_args!($($arg)*); }
+        }};
+    }
+}
 pub mod bridge;
 pub mod config;
 pub mod deployment;

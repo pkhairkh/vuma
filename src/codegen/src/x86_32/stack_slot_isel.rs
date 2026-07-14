@@ -293,7 +293,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             }
             IRValue::Address(addr) => encode_mov_reg_imm64(scratch, *addr),
             IRValue::Label(name) => {
-                log::warn!("IRValue::Label('{}') in load_value: emitting placeholder 0", name);
+                vuma_log!(warn, "IRValue::Label('{}') in load_value: emitting placeholder 0", name);
                 encode_mov_reg_imm64(scratch, 0)
             }
         }
@@ -833,7 +833,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             // x86_32 only has 32-bit IDIV. For 64-bit types,
                             // this truncates to the low 32 bits.
                             if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
-                                log::warn!("x86_32: 64-bit division truncated to 32-bit (no paired-word IDIV)");
+                                vuma_log!(warn, "x86_32: 64-bit division truncated to 32-bit (no paired-word IDIV)");
                             }
                             code.extend(load_value(lhs, Gpr::Rax));
                             code.extend(encode_cqo());
@@ -843,7 +843,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         BinOpKind::UDiv => {
                             if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
-                                log::warn!("x86_32: 64-bit division truncated to 32-bit (no paired-word DIV)");
+                                vuma_log!(warn, "x86_32: 64-bit division truncated to 32-bit (no paired-word DIV)");
                             }
                             code.extend(load_value(lhs, Gpr::Rax));
                             code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));

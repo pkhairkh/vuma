@@ -216,7 +216,7 @@ impl ProofChecker {
                     // also verify structured judgments match when both sides
                     // have them.
                     if expected_conclusion.statement != conclusion.statement {
-                        log::debug!(
+                        vuma_log!(debug, 
                             "Step {}: rule {} produced '{}' but proof claims '{}'",
                             step_idx,
                             rule.name(),
@@ -243,7 +243,7 @@ impl ProofChecker {
                         (&expected_conclusion.judgment, &conclusion.judgment)
                     {
                         if expected_j != actual_j {
-                            log::debug!(
+                            vuma_log!(debug, 
                                 "Step {}: judgment mismatch — rule produced {:?} but step claims {:?}",
                                 step_idx,
                                 expected_j,

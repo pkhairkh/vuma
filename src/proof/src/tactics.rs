@@ -334,11 +334,11 @@ impl Tactic {
                 Ok(subgoals) => {
                     // If the tactic discharged the goal (no subgoals) or
                     // produced progress (fewer subgoals than a no-op), accept.
-                    log::debug!("Auto: tactic {} succeeded", tactic.name());
+                    vuma_log!(debug, "Auto: tactic {} succeeded", tactic.name());
                     return Ok(subgoals);
                 }
                 Err(e) => {
-                    log::debug!("Auto: tactic {} failed: {}", tactic.name(), e);
+                    vuma_log!(debug, "Auto: tactic {} failed: {}", tactic.name(), e);
                     last_error = Some(e);
                 }
             }

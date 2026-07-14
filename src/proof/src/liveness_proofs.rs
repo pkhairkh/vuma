@@ -495,20 +495,20 @@ pub fn prove_liveness(msg: &ProofMSG, scg: &ProofSCG) -> Result<LivenessProof, P
         match prove_liveness_tactic(msg, scg, LivenessTactic::PathEnumeration) {
             Ok(proof) => return Ok(proof),
             Err(e) if is_concrete_violation(&e) => return Err(e),
-            Err(e) => log::debug!("path-enumeration failed: {}", e),
+            Err(e) => vuma_log!(debug, "path-enumeration failed: {}", e),
         }
     }
 
     match prove_liveness_tactic(msg, scg, LivenessTactic::RankingFunction) {
         Ok(proof) => return Ok(proof),
         Err(e) if is_concrete_violation(&e) => return Err(e),
-        Err(e) => log::debug!("ranking-function failed: {}", e),
+        Err(e) => vuma_log!(debug, "ranking-function failed: {}", e),
     }
 
     match prove_liveness_tactic(msg, scg, LivenessTactic::StructuralInduction) {
         Ok(proof) => return Ok(proof),
         Err(e) if is_concrete_violation(&e) => return Err(e),
-        Err(e) => log::debug!("structural-induction failed: {}", e),
+        Err(e) => vuma_log!(debug, "structural-induction failed: {}", e),
     }
 
     Err(ProofFailure::AllTacticsFailed {

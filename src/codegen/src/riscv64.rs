@@ -6820,7 +6820,7 @@ impl Backend for RiscV64Backend {
                     //
                     // where (hi20 << 12) + sign_ext(lo12) == target - auipc_addr.
                     if abs_offset + 8 > all_code.len() {
-                        log::warn!(
+                        vuma_log!(warn, 
                             "R_RISCV_PCREL_HI20 at offset {} overflows code (len {})",
                             abs_offset, all_code.len()
                         );

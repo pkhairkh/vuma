@@ -260,7 +260,7 @@ impl InferenceEngine {
         let constraints = self.derive_constraints(scg, &bd_map);
 
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "InferenceEngine::infer: {} BDs, {} constraints, {} iterations, {} errors",
                 bd_map.len(),
                 constraints.len(),
@@ -341,7 +341,7 @@ impl InferenceEngine {
         let engine = BdEngineInner::new().with_max_iterations(self.max_iterations);
 
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "Running BD inference on SCG with {} nodes",
                 scg.node_count()
             );
@@ -350,7 +350,7 @@ impl InferenceEngine {
         let result = engine.infer(scg);
 
         if self.verbose {
-            log::info!(
+            vuma_log!(info, 
                 "BD inference complete: {} BDs inferred, {} errors, {} warnings, {} iterations",
                 result.bd_map.len(),
                 result.errors.len(),
@@ -549,7 +549,7 @@ impl InferenceEngine {
         }
 
         if self.verbose {
-            log::info!("Derived {} constraints from SCG", constraints.len());
+            vuma_log!(info, "Derived {} constraints from SCG", constraints.len());
         }
 
         constraints

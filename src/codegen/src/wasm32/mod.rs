@@ -3026,7 +3026,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // and patch the i32.const immediate (signed LEB128, 5 bytes
             // following the 0x41 opcode) with the symbol's linear-memory
             // address.
-            log::warn!(
+            vuma_log!(warn, 
                 "wasm32 GetAddress: returning placeholder 0 — symbol addresses \
                  are not yet supported on the wasm32 backend"
             );
@@ -4632,7 +4632,7 @@ fn resolve_call_relocations(
                 // -ENOSYS so callers can detect unsupported syscalls (Wave 5).
                 // This allows tests to detect unsupported functionality gracefully
                 // (e.g. epoll_create1 returns -ENOSYS on wasm32/WASI).
-                log::debug!(
+                vuma_log!(debug, 
                     "unresolved call target '{}' in wasm32 module — using stub (returns -ENOSYS)",
                     reloc.symbol
                 );

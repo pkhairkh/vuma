@@ -840,7 +840,7 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
                         break;
                     }
                     Err(_) => {
-                        log::debug!(
+                        vuma_log!(debug, 
                             "Tactic {} failed for pair ({}, {})",
                             tactic.name(),
                             a1.id,

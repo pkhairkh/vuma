@@ -688,7 +688,7 @@ impl Emitter {
         // them in the prologue/epilogue, but that requires rewriting the
         // prologue — deferred to Wave 22 per-backend implementation).
         if !alloc.used_callee_saved_gprs.is_empty() {
-            log::debug!(
+            vuma_log!(debug, 
                 "emit_function_regalloc: {} callee-saved GPRs in AllocationResult for '{}' \
                  (spill slots: {}, coalesced copies: {})",
                 alloc.used_callee_saved_gprs.len(),
@@ -1250,7 +1250,7 @@ impl Emitter {
             }
 
             IRInstr::Phi { .. } => {
-                log::warn!(
+                vuma_log!(warn, 
                     "IRInstr::Phi encountered during emission — should be resolved by SSA pass"
                 );
             }
@@ -2293,7 +2293,7 @@ impl Emitter {
         match op {
             Operand::Reg { reg, shift: _ } => Ok(*reg),
             Operand::Imm12(v) => {
-                log::error!(
+                vuma_log!(error, 
                     "operand_to_reg: expected register operand, got Imm12({v}) — \
                      caller should have spilled the immediate to a scratch register \
                      before invoking this method"
@@ -4938,7 +4938,7 @@ fn resolve_call_relocs(
             Some(&off) => off,
             None => {
                 // External symbol — the linker will resolve this.
-                log::debug!(
+                vuma_log!(debug, 
                     "call relocation target '{}' is an external symbol — deferring to linker",
                     reloc.target_func
                 );

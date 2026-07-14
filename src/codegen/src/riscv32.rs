@@ -5488,7 +5488,7 @@ impl Backend for RiscV32Backend {
                                     if src_is_32bit {
                                         code.extend(Instruction::FcvtSW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: I64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: I64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtSW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     }
                                     // Store f32 result: FSW F0 then LW T0
@@ -5499,7 +5499,7 @@ impl Backend for RiscV32Backend {
                                     if src_is_32bit {
                                         code.extend(Instruction::FcvtDW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: I64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: I64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtDW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     }
                                     // Store f64 result: FSD F0 then LD T0
@@ -5519,7 +5519,7 @@ impl Backend for RiscV32Backend {
                                     if src_is_32bit {
                                         code.extend(Instruction::FcvtSWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: U64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: U64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtSWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     }
                                     // Store f32 result: FSW F0 then LW T0
@@ -5530,7 +5530,7 @@ impl Backend for RiscV32Backend {
                                     if src_is_32bit {
                                         code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: U64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: U64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     }
                                     // Store f64 result: FSD F0 then LD T0
@@ -5549,7 +5549,7 @@ impl Backend for RiscV32Backend {
                                         // Sign-extend the 32-bit result
                                         code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                     }
                                 } else {
@@ -5560,7 +5560,7 @@ impl Backend for RiscV32Backend {
                                         // Sign-extend the 32-bit result
                                         code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                                     } else {
-                                        log::warn!("riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtWD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                     }
                                 }
@@ -5587,7 +5587,7 @@ impl Backend for RiscV32Backend {
                                         code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
                                         code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
                                     } else {
-                                        log::warn!("riscv32: FP→U64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                        vuma_log!(warn, "riscv32: FP→U64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                         code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                     }
                                 }
@@ -5747,7 +5747,7 @@ impl Backend for RiscV32Backend {
                         // non-empty; the IR builder always sets a name for real
                         // GetAddress instructions.)
                         if !name.is_empty() {
-                            log::warn!("riscv32: GetAddress(\"{}\") emitted as LUI+ADDI \
+                            vuma_log!(warn, "riscv32: GetAddress(\"{}\") emitted as LUI+ADDI \
                                         placeholder (returns 0); data-section symbol \
                                         resolution is not yet implemented for this backend",
                                        name);

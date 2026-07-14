@@ -3247,7 +3247,7 @@ fn resolve_gpr_arm32(
         }
         crate::ir::IRValue::Label(name) => {
             // Labels need relocation; emit a placeholder MOV Rd, #0
-            log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
+            vuma_log!(warn, "IRValue::Label('{}') emitting placeholder 0", name);
             let code = load_immediate_arm32(scratch, 0);
             (scratch, code)
         }
@@ -3816,7 +3816,7 @@ impl Backend for Arm32Backend {
                 crate::ir::IRValue::Immediate(v) => load_immediate_arm32(scratch, *v as u32),
                 crate::ir::IRValue::Address(a) => load_immediate_arm32(scratch, *a as u32),
                 crate::ir::IRValue::Label(name) => {
-                    log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
+                    vuma_log!(warn, "IRValue::Label('{}') emitting placeholder 0", name);
                     load_immediate_arm32(scratch, 0)
                 }
             }
@@ -3850,7 +3850,7 @@ impl Backend for Arm32Backend {
                     ));
                 }
                 crate::ir::IRValue::Label(name) => {
-                    log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
+                    vuma_log!(warn, "IRValue::Label('{}') emitting placeholder 0", name);
                     code.extend_from_slice(&encode_dp_imm(
                         Condition::Al, DP_MOV, false, 0, lo_reg.encoding(), 0, 0,
                     ));
@@ -5721,7 +5721,7 @@ impl Backend for Arm32Backend {
                         // a warning so the limitation is visible at compile
                         // time.
                         if *is_extern {
-                            log::warn!(
+                            vuma_log!(warn, 
                                 "Extern call to '{}' — float args may not be in D0-D7 \
                                  (AAPCS-VFP hardfloat convention not implemented; args \
                                  passed in R0-R3 only)",
@@ -6570,7 +6570,7 @@ impl Backend for Arm32Backend {
                         // size_of(LDR) + size_of(B) = +8 bytes from the
                         // start of this instruction's emitted code).
                         let reloc_offset = current_byte_offset + code.len() as u64;
-                        log::debug!(
+                        vuma_log!(debug, 
                             "GetAddress for '{}' — emitting literal-pool load (R_ARM_ABS32 reloc at func byte {})",
                             name, reloc_offset
                         );
@@ -7739,7 +7739,7 @@ impl Backend for Arm32Backend {
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
@@ -7773,7 +7773,7 @@ impl Backend for Arm32Backend {
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
@@ -7826,7 +7826,7 @@ impl Backend for Arm32Backend {
                         // Unresolved symbol — leave the .word as 0 so the
                         // program fails loudly (NULL pointer dereference)
                         // rather than silently calling the wrong address.
-                        log::warn!(
+                        vuma_log!(warn, 
                             "unresolved R_ARM_ABS32 relocation: symbol '{}' in '{}' \
                              at 0x{:X} — leaving literal-pool entry as 0",
                             reloc.symbol, func.name, reloc.offset

@@ -227,7 +227,7 @@ fn encode_load_value(val: &IRValue, scratch: Gpr, fp: Gpr, vreg_slots: &HashMap<
             encode_load_imm(scratch, *addr as i64)
         }
         IRValue::Label(name) => {
-            log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
+            vuma_log!(warn, "IRValue::Label('{}') emitting placeholder 0", name);
             encode_load_imm(scratch, 0) // placeholder
         }
     }

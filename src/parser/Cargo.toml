@@ -14,4 +14,3 @@ rust-version.workspace = true
 vuma-scg.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-log.workspace = true

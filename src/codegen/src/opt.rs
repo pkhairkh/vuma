@@ -2356,7 +2356,7 @@ pub fn mark_ive_proven_nonaliasing(mut func: IRFunction) -> (IRFunction, HashMap
 
     // Log the closure (visible in -v verbose mode via the timing stage).
     if tagged_loads + tagged_stores > 0 {
-        log::debug!(
+        vuma_log!(debug, 
             "IVE→codegen: tagged {} loads, {} stores with Alloc-region provenance",
             tagged_loads,
             tagged_stores

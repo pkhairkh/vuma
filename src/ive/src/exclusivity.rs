@@ -750,7 +750,7 @@ impl ExclusivityVerifier {
                     Conflict::new(a1.id, a2.id, kind, overlap_start, overlap_end, description);
 
                 if self.verbose {
-                    log::info!("ExclusivityVerifier: detected conflict: {}", conflict);
+                    vuma_log!(info, "ExclusivityVerifier: detected conflict: {}", conflict);
                 }
 
                 // Add to the interference graph regardless; the
