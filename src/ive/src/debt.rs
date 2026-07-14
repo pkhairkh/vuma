@@ -4,7 +4,6 @@
 //! verified but should be. This module provides a priority-ordered queue
 //! of outstanding verification obligations.
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -12,7 +11,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// The priority of a verification debt item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     /// Must be resolved immediately — safety-critical property.
     Critical,
@@ -40,7 +39,7 @@ impl fmt::Display for Priority {
 // ---------------------------------------------------------------------------
 
 /// The current status of a verification debt item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DebtStatus {
     /// Not yet started.
     Pending,
@@ -65,7 +64,7 @@ impl fmt::Display for DebtStatus {
 // ---------------------------------------------------------------------------
 
 /// A single verification debt item.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DebtItem {
     /// The property or invariant that needs verification.
     pub property: String,
@@ -120,7 +119,7 @@ impl fmt::Display for DebtItem {
 /// The debt tracker helps the VUMA system understand which properties still
 /// need formal verification, allowing the compiler to emit appropriate
 /// warnings and the developer to prioritize verification effort.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VerificationDebt {
     /// The collection of debt items.
     items: Vec<DebtItem>,

@@ -3,7 +3,6 @@
 //! This module defines the core result and status types used by the
 //! verification engine to report outcomes of invariant checks.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -27,7 +26,7 @@ pub type ProofStep = String;
 ///
 /// Encodes the spectrum from full formal proof to detected violations,
 /// following VUMA's graduated assurance model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VerificationStatus {
     /// The invariant has been formally proven to hold.
     Proven,
@@ -71,7 +70,7 @@ impl fmt::Display for VerificationStatus {
 // ---------------------------------------------------------------------------
 
 /// A concrete counterexample demonstrating a violation of an invariant.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CounterExample {
     /// The execution path leading to the violation.
     pub execution_path: Vec<ProgramPoint>,
@@ -101,7 +100,7 @@ impl CounterExample {
 // ---------------------------------------------------------------------------
 
 /// Evidence supporting a verification result.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Evidence {
     /// A formal proof consisting of discrete steps.
     FormalProof {
@@ -127,7 +126,7 @@ impl fmt::Display for Evidence {
 }
 
 /// The result of verifying a single invariant.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VerificationResult {
     /// The name of the invariant that was checked.
     pub invariant: InvariantName,
@@ -192,7 +191,7 @@ impl fmt::Display for VerificationResult {
 // ---------------------------------------------------------------------------
 
 /// Graduated confidence level for verification results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConfidenceLevel {
     /// Low confidence — unverified or violated.
     Low,
@@ -217,7 +216,7 @@ impl fmt::Display for ConfidenceLevel {
 // ---------------------------------------------------------------------------
 
 /// Severity level for invariant violations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Severity {
     /// A minor issue or warning.
     Low,
@@ -242,7 +241,7 @@ impl fmt::Display for Severity {
 // ---------------------------------------------------------------------------
 
 /// A structured invariant violation for use in batched error recovery.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InvariantViolation {
     /// Which invariant was violated.
     pub invariant: InvariantName,
@@ -285,7 +284,7 @@ impl fmt::Display for InvariantViolation {
 /// severity for error recovery. Unlike stopping at the first violation,
 /// `BatchedViolations` collects ALL violations so the user can see every
 /// issue in a single pass.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BatchedViolations {
     /// All violations found, in order of discovery.
     pub violations: Vec<InvariantViolation>,

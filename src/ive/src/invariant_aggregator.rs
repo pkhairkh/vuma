@@ -25,7 +25,6 @@
 
 use crate::result::{ConfidenceLevel, VerificationResult, VerificationStatus};
 use crate::verification::{VerificationEngine, VerificationInput};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Instant;
 
@@ -37,7 +36,7 @@ use std::time::Instant;
 ///
 /// Each variant corresponds to one of the core safety invariants that
 /// every VUMA program must satisfy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InvariantKind {
     /// Every requested resource will eventually be provided.
     Liveness,
@@ -117,7 +116,7 @@ impl fmt::Display for InvariantKind {
 ///
 /// Controls which invariant checks are run and whether proofs are
 /// attempted for properties that can be formally established.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VerificationLevel {
     /// Only run cheap, syntactic checks (exclusivity, origin).
     Quick,
@@ -161,7 +160,7 @@ impl fmt::Display for VerificationLevel {
 ///
 /// When a program is edited, only the invariants whose results could
 /// change need to be re-checked. The delta captures this set.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct InvariantDelta {
     /// Invariant kinds that must be re-checked.
     pub affected: Vec<InvariantKind>,
@@ -213,7 +212,7 @@ impl InvariantDelta {
 // ---------------------------------------------------------------------------
 
 /// The result of a single invariant check within an aggregated run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PerInvariantResult {
     /// Which invariant was checked.
     pub kind: InvariantKind,
@@ -269,7 +268,7 @@ impl PerInvariantResult {
 ///
 /// Contains per-invariant results, an overall pass/fail verdict, and a
 /// summary of statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AggregatedResult {
     /// Per-invariant results, in canonical order.
     pub per_invariant: Vec<PerInvariantResult>,
@@ -288,7 +287,7 @@ pub struct AggregatedResult {
 // ---------------------------------------------------------------------------
 
 /// The overall verdict across all invariant checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OverallVerdict {
     /// All checked invariants passed (proven or probably safe).
     Pass,
@@ -316,7 +315,7 @@ impl fmt::Display for OverallVerdict {
 // ---------------------------------------------------------------------------
 
 /// Statistics about an aggregated verification run.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VerificationSummary {
     /// Number of invariants that passed (proven or probably safe).
     pub passed: usize,
@@ -413,7 +412,7 @@ impl fmt::Display for VerificationSummary {
 /// Generates a structured text report suitable for terminal output or
 /// logging, summarising the verification results and highlighting
 /// violations and unverified invariants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DiagnosticsReport {
     /// Header line (e.g., "IVE Verification Report").
     pub header: String,
@@ -430,7 +429,7 @@ pub struct DiagnosticsReport {
 }
 
 /// A single diagnostic entry for one invariant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DiagnosticEntry {
     /// Which invariant this entry is about.
     pub kind: InvariantKind,
