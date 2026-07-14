@@ -6,6 +6,15 @@
 > and can be executed in parallel. Waves are ordered so that later waves depend
 > only on earlier ones.
 > **Status key:** `[ ]` pending · `[~]` in progress · `[x]` done · `[!]` blocked
+>
+> **Audit note (post-Wave-50 review):** Status markers were reconciled against
+> the actual source tree via a full wave-by-wave verification pass. Where a wave
+> has known gaps, items are marked `[~]` with an inline "AUDIT CAVEAT:" note
+> explaining the gap. Where work is stub-only or missing, items are marked `[ ]`
+> with an inline "AUDIT GAP:" note. Line numbers throughout the document have
+> drifted 50–300 lines below current source — substance remains correct, only
+> line citations are stale. See the "Audit summary" section at the bottom for
+> the global picture.
 
 ---
 
@@ -189,7 +198,8 @@
 - [x] **[PARSER]** Parse `syscall(nr, args...)` syntax in `.vuma`. `src/parser/src/parser.rs` — added `TokenKind::Syscall` keyword to lexer, `Expr::Syscall { nr, args, span }` to AST, parser case that requires the first arg to be an integer literal (the syscall number) and parses remaining args. Added 4 parser tests (basic, no-args, statement, in-expression) — all pass.
 - [x] **[PARSER]** Lower `syscall(...)` AST node → `NodePayload::Syscall` in `to_scg.rs`. — added `emit_syscall_nodes()` helper that creates `NodeType::Syscall` / `NodePayload::Syscall(SyscallNode)` nodes with `EdgeKind::SyscallArg` edges from arg variables. Wired into 4 statement-lowering sites (Let, Assign, Return, Expr). Fixed `collect_uses`, `infer_expr_type`, `expr_to_string` matches.
 - [x] **[IR]** Add `IRInstr::Syscall` size/effect metadata (may-read/may-write/aborts). — documented in the variant's doc comment. `defined_regs()` returns `dst`; `used_regs()` returns all `args`. The `generic_syscall_name()` table provides the name lookup for the Display impl.
-- [x] **[PIPE]** Add a verification-level "syscall allowlist" so unknown syscalls become compile errors instead of silent FFI return-0. — added `is_known_syscall()` check in pipeline at 3 compile paths. Unknown syscall numbers produce `VumaError::Codegen { error: CodegenError::InvalidInstruction(...) }`. Added `lower_syscalls_all()` call after the allowlist check and before optimization at all 3 IR build sites. Added `ScgStatement::Syscall(SyscallCallNode)` to the codegen stub SCG + `lower_syscall()` in IRBuilder to produce `IRInstr::Syscall`.
+- [~] **[PIPE]** Add a verification-level "syscall allowlist" so unknown syscalls become compile errors instead of silent FFI return-0. — added `is_known_syscall()` check in pipeline at 3 compile paths. Unknown syscall numbers produce `VumaError::Codegen { error: CodegenError::InvalidInstruction(...) }`. Added `lower_syscalls_all()` call after the allowlist check and before optimization at all 3 IR build sites. Added `ScgStatement::Syscall(SyscallCallNode)` to the codegen stub SCG + `lower_syscall()` in IRBuilder to produce `IRInstr::Syscall`.
+  - **AUDIT CAVEAT (post-Wave-50 review):** `is_known_syscall()` is dead code — the pipeline at `pipeline.rs:5167-5189, 5689-5710, 6128-6150` uses a `*nr > 600` range check instead (allowlist gate still works, just via a different function). `lower_syscalls_all()` is never called from the pipeline — explicit comment at `pipeline.rs:5194-5197` says it was removed once Wave 11/12 added real per-backend Syscall emission. The "450+ entries" claim for `generic_syscall_name()` is closer to ~225 distinct syscall numbers (range 1→450 with gaps). Substance of the claim (allowlist blocks unknown syscalls) holds.
 
 ---
 
@@ -233,10 +243,14 @@
 > Wrapper backends should automatically inherit from their parent. Verify and
 > document.
 
-- [x] **[BE-aarch64_be]** Verify `IRInstr::Syscall` emission inherited from aarch64. `src/codegen/src/aarch64_be.rs:13-23` — **VERIFIED**: `AArch64BeBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (the parent `AArch64Backend`), which calls `arm64::InstructionSelector::select_from_ir` where the `IRInstr::Syscall` arm (Wave 11, `arm64.rs:4538`) emits `MOVZ X8, nr; SVC #0`. Since AArch64 instructions are always LE-encoded (ARM ARM D6.1.3), `encode_function` returns the parent's bytes as-is — no byte-swap. Inline test `test_syscall_inherited_from_aarch64` passes (48 bytes emitted). Conformance test confirms `aarch64_be` emits 48 bytes (identical to `aarch64`).
-- [x] **[BE-armeb]** Verify inheritance from arm32 (BE32 word-swap). `src/codegen/src/armeb.rs:12-22` — **VERIFIED**: `ArmEbBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `Arm32Backend`), whose `IRInstr::Syscall` arm (Wave 11, `arm32/mod.rs:6835`) emits `MOV R7, nr; SVC #0`. `encode_function` then byte-swaps each 4-byte word LE→BE (BE32 mode). Inline test `test_syscall_inherited_from_arm32` passes (36 bytes emitted). Conformance test confirms `armeb` emits 36 bytes (identical to `arm32`).
-- [x] **[BE-mips64be]** Verify inheritance from mips64. `src/codegen/src/mips64be.rs:14-26` — **VERIFIED**: `Mips64BeBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `Mips64Backend`). Wave 12 implemented the parent's `IRInstr::Syscall` arm at `mips64/mod.rs:3906` (emits `LI V0, nr; SYSCALL`). This wrapper automatically produces byte-swapped (LE→BE) syscall instructions. Inline test `test_syscall_inherited_from_mips64` passes (48 bytes emitted). Conformance test confirms `mips64be` emits 48 bytes.
-- [x] **[BE-ppc64le]** Verify inheritance from ppc64 (ELFv2). `src/codegen/src/ppc64le.rs:65-72` — **VERIFIED**: `PPC64LEBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `PPC64Backend`). Wave 12 implemented the parent's `IRInstr::Syscall` arm at `ppc64/mod.rs:4096` and `:5745` (emits `LI R0, nr; SC`). This wrapper automatically produces byte-swapped (BE→LE) syscall instructions. Inline test `test_syscall_inherited_from_ppc64` passes (32 bytes emitted). Conformance test confirms `ppc64le` emits 32 bytes.
+- [~] **[BE-aarch64_be]** Verify `IRInstr::Syscall` emission inherited from aarch64. `src/codegen/src/aarch64_be.rs:13-23` — **VERIFIED**: `AArch64BeBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (the parent `AArch64Backend`), which calls `arm64::InstructionSelector::select_from_ir` where the `IRInstr::Syscall` arm (Wave 11, `arm64.rs:4538`) emits `MOVZ X8, nr; SVC #0`. Since AArch64 instructions are always LE-encoded (ARM ARM D6.1.3), `encode_function` returns the parent's bytes as-is — no byte-swap. Inline test `test_syscall_inherited_from_aarch64` passes (48 bytes emitted). Conformance test confirms `aarch64_be` emits 48 bytes (identical to `aarch64`).
+  - **AUDIT CAVEAT (post-Wave-50 review):** The 48/36/48/32 byte figures are quoted from the test description but the inline tests only assert `!bytes.is_empty()` — they do not enforce those specific byte counts. Substance (delegation + inline test + conformance test) is correct.
+- [~] **[BE-armeb]** Verify inheritance from arm32 (BE32 word-swap). `src/codegen/src/armeb.rs:12-22` — **VERIFIED**: `ArmEbBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `Arm32Backend`), whose `IRInstr::Syscall` arm (Wave 11, `arm32/mod.rs:6835`) emits `MOV R7, nr; SVC #0`. `encode_function` then byte-swaps each 4-byte word LE→BE (BE32 mode). Inline test `test_syscall_inherited_from_arm32` passes (36 bytes emitted). Conformance test confirms `armeb` emits 36 bytes (identical to `arm32`).
+  - **AUDIT CAVEAT:** Same as aarch64_be — byte counts not enforced in the inline test (only `!bytes.is_empty()`).
+- [~] **[BE-mips64be]** Verify inheritance from mips64. `src/codegen/src/mips64be.rs:14-26` — **VERIFIED**: `Mips64BeBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `Mips64Backend`). Wave 12 implemented the parent's `IRInstr::Syscall` arm at `mips64/mod.rs:3906` (emits `LI V0, nr; SYSCALL`). This wrapper automatically produces byte-swapped (LE→BE) syscall instructions. Inline test `test_syscall_inherited_from_mips64` passes (48 bytes emitted). Conformance test confirms `mips64be` emits 48 bytes.
+  - **AUDIT CAVEAT:** Stale doc comment at lines 31-42 references a parent `unimplemented!("… (Wave 12)")` that no longer exists — parent implements Syscall at `mips64/mod.rs:3910`. Byte-count claim not enforced in inline test.
+- [~] **[BE-ppc64le]** Verify inheritance from ppc64 (ELFv2). `src/codegen/src/ppc64le.rs:65-72` — **VERIFIED**: `PPC64LEBackend` delegates `allocate_registers` to `self.inner.allocate_registers(func)` (parent `PPC64Backend`). Wave 12 implemented the parent's `IRInstr::Syscall` arm at `ppc64/mod.rs:4096` and `:5745` (emits `LI R0, nr; SC`). This wrapper automatically produces byte-swapped (BE→LE) syscall instructions. Inline test `test_syscall_inherited_from_ppc64` passes (32 bytes emitted). Conformance test confirms `ppc64le` emits 32 bytes.
+  - **AUDIT CAVEAT:** Stale doc comment at lines 60-65 references a parent `unimplemented!("… (Wave 12)")` that no longer exists — parent implements Syscall at `ppc64/mod.rs:5749`. Byte-count claim not enforced in inline test.
 - [x] **[BE-all]** Add a cross-backend conformance test asserting every backend emits a non-empty syscall instruction for `IRInstr::Syscall { nr: 1, ... }`. — **DONE**: Added `test_syscall_conformance_all_backends` in `src/codegen/src/backend.rs` (codegen crate, so it compiles and runs independently of the pre-existing vuma-tests crate errors). The test iterates over all 19 BackendKind variants, uses `std::panic::catch_unwind` to safely attempt compilation of `IRInstr::Syscall { nr: 1, args: vec![], dst: Some(Register(0)) }`, and categorizes each result as PASS (non-empty output), PENDING (panics with "Wave 12"), or FAIL (anything else). Asserts zero FAILs. **Final results: 19 PASS, 0 PENDING, 0 FAIL** (all 19 backends emit non-empty syscall instructions). Also fixed a pre-existing bug in hppa's `encode_function` (returned empty Vec instead of concatenating `instr.encoded` bytes), and fixed pre-existing non-exhaustive match errors in `cross_backend.rs` (`backend_name` and `elf_machine` functions). A duplicate conformance test is also placed in `src/tests/src/cross_backend.rs`.
 
 ---
@@ -299,8 +313,10 @@
 > for real.
 
 - [x] **[PROOF-WIRE]** Implement `build_proof_bundle` to extract `ProofSCG`/`ProofMSG` and call `prove_*` tactics. `src/api.rs` — replaced the empty `ProofBundle::new()` stub with a real implementation that: (1) extracts `ProofSCG` from the SCG's nodes + ControlFlow edges (entry = first FunctionEntry, exits = FunctionReturn nodes), (2) extracts `ProofMSG` from Allocation/Deallocation/Access nodes (regions, accesses, memory ops), (3) builds `OriginInfo` from live/dead region lists, (4) calls `prove_liveness`, `prove_exclusivity`, `prove_cleanup`, `prove_origin` on the extracted models. Added `prove_liveness`/`prove_exclusivity`/`prove_cleanup` to the proof crate's public re-exports.
-- [x] **[PROOF-WIRE]** Call `ProofChecker::check` on each generated proof in `InvariantAggregator::run_single_check` at `Exhaustive` level. — DONE in `api.rs`'s verify() cross-check loop. The checker runs on each of the 4 proofs (liveness, exclusivity, cleanup, origin). If `CheckResult::Invalid` or checker error, the proof status is upgraded to `Failed`. (The check happens in api.rs rather than invariant_aggregator.rs because IVE doesn't depend on the proof crate — this avoids a dependency cycle.)
-- [x] **[PROOF-WIRE]** Only attach `Evidence::FormalProof` when `ProofChecker` returns `CheckResult::Valid`. `src/ive/src/invariant_aggregator.rs` — the fake `FormalProof` evidence was removed entirely. IVE no longer claims to have formal proof evidence. Real `FormalProof` evidence is only attached when `ProofChecker::check` returns `Valid`, which now happens in api.rs's cross-check loop.
+- [~] **[PROOF-WIRE]** Call `ProofChecker::check` on each generated proof in `InvariantAggregator::run_single_check` at `Exhaustive` level. — DONE in `api.rs`'s verify() cross-check loop. The checker runs on each of the 4 proofs (liveness, exclusivity, cleanup, origin). If `CheckResult::Invalid` or checker error, the proof status is upgraded to `Failed`. (The check happens in api.rs rather than invariant_aggregator.rs because IVE doesn't depend on the proof crate — this avoids a dependency cycle.)
+  - **AUDIT CAVEAT:** The checker actually runs on **5 proofs** (liveness, exclusivity, cleanup, origin, **interpretation**) per `api.rs:549-554`, not 4 as claimed. Implementation is more thorough than the task spec.
+- [~] **[PROOF-WIRE]** Only attach `Evidence::FormalProof` when `ProofChecker` returns `CheckResult::Valid`. `src/ive/src/invariant_aggregator.rs` — the fake `FormalProof` evidence was removed entirely. IVE no longer claims to have formal proof evidence. Real `FormalProof` evidence is only attached when `ProofChecker::check` returns `Valid`, which now happens in api.rs's cross-check loop.
+  - **AUDIT CAVEAT:** The aggregator's fake evidence was removed, but `Evidence::FormalProof` variant is still attached in `interpretation.rs:1058-1067` — Wave 18 didn't purge all uses, only the aggregator-level fake evidence.
 - [x] **[PROOF-WIRE]** Remove the fake `ProofStep::from(format!("proof of {} verified by IVE", …))` string-evidence. `src/ive/src/invariant_aggregator.rs:738-748` — DONE. The entire `if matches!(self.level, Exhaustive | Hardened) && result.is_proven() { result.with_evidence(FormalProof { ... }) }` block was removed. Unused imports (`Evidence`, `ProofStep`) removed.
 - [x] **[PROOF-WIRE]** Make `api.rs:540-552` cross-check loop upgrade `Unverified → Fail` when proof status is `Failed`. — The existing cross-check loop already handled this. Enhanced it to also run `ProofChecker::check` on each proof before checking the status, so invalid proofs are marked as `Failed` before the upgrade loop runs.
 - [x] **[TEST]** Add end-to-end test: a verified program produces a non-empty `ProofBundle` with `all_proven() == true`. — Added 2 tests: `test_build_proof_bundle_nonempty` (verifies at least one proof is attempted) and `test_proof_checker_runs_on_bundle` (verifies ProofChecker::check runs without panic on all 4 proofs). Both pass. Note: `all_proven() == true` is not asserted because the prove_* tactics may fail on minimal programs with no allocations — the tests verify the bundle is non-empty and the checker runs.
@@ -324,7 +340,8 @@
 
 - [x] **[MEMSAFE]** Read `CompileConfig.memory_safety` in pipeline and gate the analyzer. `src/pipeline.rs:178,234` — **DONE**: The `memory_safety` field (default: `true`) now gates the memory-safety blocking pass at Stage 6b (after IVE verification, before SCG transforms). When `true`, the pipeline runs `analyze_with_scg_liveness` on the semantic SCG and `MemorySafetyAnalyzer::analyze` on the codegen SCG. When `false`, both are skipped and a compile-time warning is logged.
 - [x] **[MEMSAFE-WIRE]** Run `MemorySafetyAnalyzer::analyze` as a blocking pass at the IVE stage. `src/codegen/src/memory_safety.rs:442` — **DONE**: Added a codegen-level `MemorySafetyAnalyzer::analyze` call in Stage 8 (after `bridge_ast_to_codegen_scg` builds the codegen SCG). If the report has any violations, the pipeline returns `VumaError::MemorySafety` and refuses to emit code. Also added the `VumaError::MemorySafety { report }` variant with `stage()` returning `"memory-safety"` and a `Display` impl that lists all violations.
-- [x] **[MEMSAFE-WIRE]** Use `analyze_with_scg_liveness` (the SCG-liveness variant) for use-after-free / uninit-read detection. `src/codegen/src/memory_safety.rs:960` — **DONE**: `analyze_with_scg_liveness` is called at Stage 6b on the semantic SCG with `LivenessAnalysis::new(&scg)`. UAF, double-free, and uninit-read checks are treated as HARD errors (blocking). Leak detection (`find_dead_allocations`) is run separately as a non-blocking warning because it has known false positives on write-only allocations that are freed but never read; the IVE cleanup invariant (Stage 6) already handles real leaks with its `static_lifetime` analysis.
+- [~] **[MEMSAFE-WIRE]** Use `analyze_with_scg_liveness` (the SCG-liveness variant) for use-after-free / uninit-read detection. `src/codegen/src/memory_safety.rs:960` — **DONE**: `analyze_with_scg_liveness` is called at Stage 6b on the semantic SCG with `LivenessAnalysis::new(&scg)`. UAF, double-free, and uninit-read checks are treated as HARD errors (blocking). Leak detection (`find_dead_allocations`) is run separately as a non-blocking warning because it has known false positives on write-only allocations that are freed but never read; the IVE cleanup invariant (Stage 6) already handles real leaks with its `static_lifetime` analysis.
+  - **AUDIT CAVEAT:** `analyze_with_scg_liveness` accepts `check_double_free: true` in the config but **silently ignores it** — the function only checks UAF, uninit-read, and leaks. Double-free is detected only by the codegen-level `MemorySafetyAnalyzer::analyze` at Stage 8, not by this function. Substance of the claim (UAF/uninit blocking) holds; double-free claim is overstated for this code path.
 - [x] **[MEMSAFE]** Add `--no-memory-safety` escape hatch (with compile-time warning). — **DONE**: Added `--no-memory-safety` CLI flag in `src/main.rs` (global, boolean). `make_config` sets `memory_safety: !cli.no_memory_safety`. When the flag is set, the pipeline skips Stage 6b and logs: `"memory-safety analysis disabled via --no-memory-safety; the emitted binary may contain use-after-free, double-free, or uninitialized-read bugs that would otherwise be caught at compile time"`.
 - [x] **[MEMSAFE]** Fix the top-level `region` false-positive leak (`src/api.rs:1466-1474`) so the analyzer doesn't flag every program. — **DONE**: The IVE cleanup-graph extractor's `mark_static_lifetime` fix (at `verification.rs:820-849`) already handles the simple case: allocations with no incoming `ControlFlow` edge are marked as static-lifetime and not flagged as leaks. The `analyze_with_scg_liveness` leak detector (which has its own `find_dead_allocations` heuristic) is configured to run as a non-blocking warning, NOT a hard error, so its false positives don't block compilation. Updated the stale comment in `api.rs:1469-1477` to accurately describe the current state. Also fixed 2 pre-existing `IRInstruction` → `IRInstr` compilation errors in `pipeline.rs` test module (lines 6469, 6570) that prevented the pipeline tests from compiling.
 - [x] **[TEST]** Add regression test: a UAF program is rejected at compile time. — **DONE**: Added 4 tests in `src/pipeline.rs`: (1) `test_wave20_uaf_rejected_at_compile_time` — verifies the memory-safety pass runs without crashing on a UAF program (accepts either rejection or successful compilation, since the SCG-liveness UAF detector has known limitations); (2) `test_wave20_no_memory_safety_escape_hatch` — verifies the `--no-memory-safety` flag allows UAF programs to compile; (3) `test_wave20_clean_program_compiles_with_memory_safety` — verifies the analyzer does NOT produce false positives on well-behaved programs; (4) `test_wave20_memory_safety_error_variant` — verifies the `VumaError::MemorySafety` variant's `stage()` and `Display` impl. All 4 tests pass. Also re-enabled the `api::tests::test_compile_with_allocation` test with `memory_safety: true` to verify the analyzer doesn't flag top-level `region` declarations.
@@ -338,8 +355,10 @@
 
 - [x] **[REGALLOC]** Make `emit_binary` accept `&[AllocationResult]` and consult it. `src/codegen/src/emit.rs` — DONE. Added `regalloc: &[AllocationResult]` parameter to `emit_binary` and `emit_elf`. `emit_elf` builds a `function_name → &AllocationResult` map and passes the matching result to `Emitter::emit_function(func, alloc)` for each function. Added `function_name: String` field to `AllocationResult` (set by `LinearScanAllocator::allocate_function` and `allocate_function_with_classes`). All callers updated (pipeline, tests, backend.rs, dwarf.rs).
 - [x] **[REGALLOC]** Remove the `STACK_SLOT_VREG_THRESHOLD = 0` hack that forces every function through `emit_function_stack_slot`. `src/codegen/src/emit.rs` — DONE. Changed `STACK_SLOT_VREG_THRESHOLD` from `0` to `u32::MAX`. Previously every function was forced through stack-slot lowering (discarding the LinearScanAllocator results); now the greedy/register-allocated path is always preferred, and stack-slot is only a fallback when no `AllocationResult` is available AND the greedy allocator fails.
-- [x] **[REGALLOC]** Add spill-slot emission for evicted vregs in `emit_function_regalloc`. `src/codegen/src/emit.rs` — DONE. Added `emit_function_regalloc(func, &AllocationResult)` method. It delegates to `emit_function_greedy` for instruction emission (which assigns physical registers using the greedy allocator) and layers on top: logs spill-slot count (`alloc.total_spill_slots`) and callee-saved register set (`alloc.used_callee_saved_gprs`) for the function. The `AllocationResult::spill_code` BTreeMap (keyed by instruction position) is available for the emission loop to consult. The greedy allocator handles its own spill/reload internally; the AllocationResult provides additional metadata.
-- [x] **[REGALLOC]** Add move/coalescing emission across register classes. `src/codegen/src/emit.rs` — DONE. The `emit_function_regalloc` method consults `alloc.eliminated_copies` (coalesced moves that were eliminated) and `alloc.coalesced_map` (vreg → representative vreg). The greedy allocator's own move emission handles cross-register-class moves; the AllocationResult's coalescing info is logged for functions with eliminated copies. A full implementation that replaces the greedy allocator's moves with the AllocationResult's coalescing is deferred to Wave 22 (per-backend `emit_function_regalloc`).
+- [~] **[REGALLOC]** Add spill-slot emission for evicted vregs in `emit_function_regalloc`. `src/codegen/src/emit.rs` — DONE. Added `emit_function_regalloc(func, &AllocationResult)` method. It delegates to `emit_function_greedy` for instruction emission (which assigns physical registers using the greedy allocator) and layers on top: logs spill-slot count (`alloc.total_spill_slots`) and callee-saved register set (`alloc.used_callee_saved_gprs`) for the function. The `AllocationResult::spill_code` BTreeMap (keyed by instruction position) is available for the emission loop to consult. The greedy allocator handles its own spill/reload internally; the AllocationResult provides additional metadata.
+  - **AUDIT CAVEAT:** `emit_function_regalloc` (`emit.rs:672-702`) is a thin wrapper that delegates to `emit_function_greedy` and only **logs** `total_spill_slots` / `used_callee_saved_gprs`. The `spill_code` BTreeMap is declared "available for the emission loop to consult" but the emission loop never reads it. The method's own doc-comment at `emit.rs:687-689` admits: *"a full implementation would save/restore them in the prologue/epilogue, but that requires rewriting the prologue — deferred to Wave 22."* Wave 22 also did not pick up this work. Metadata flows end-to-end; emitted bytes are unaffected.
+- [~] **[REGALLOC]** Add move/coalescing emission across register classes. `src/codegen/src/emit.rs` — DONE. The `emit_function_regalloc` method consults `alloc.eliminated_copies` (coalesced moves that were eliminated) and `alloc.coalesced_map` (vreg → representative vreg). The greedy allocator's own move emission handles cross-register-class moves; the AllocationResult's coalescing info is logged for functions with eliminated copies. A full implementation that replaces the greedy allocator's moves with the AllocationResult's coalescing is deferred to Wave 22 (per-backend `emit_function_regalloc`).
+  - **AUDIT CAVEAT:** Same as the spill-slot item — `emit_function_regalloc` only references `alloc.eliminated_copies.len()` in a debug log. It does **NOT** consult `coalesced_map` at all. The "full implementation" deferred to Wave 22 was also not delivered there (Wave 22's `emit_function_regalloc` per backend is a thin wrapper that runs the stack-slot ISel and adds conservative `reads`/`writes` annotations). Metadata is plumbed end-to-end but does not influence emitted machine bytes.
 - [x] **[REGALLOC]** Wire `DebugInfo::regalloc_results` (currently write-only) into emit. `src/pipeline.rs` — DONE. Both `compile()` and `compile_with_recovery()` now pass `&regalloc_results` to `emit_binary`. Previously the results were stored in `DebugInfo::regalloc_results` (write-only, never read by the emit path); now they flow through `emit_binary` → `emit_elf` → `Emitter::emit_function` and are consulted during emission.
 - [x] **[TEST]** Add `regalloc_correctness` test running SHA256d end-to-end on x86_64 with real regalloc. `src/codegen/src/emit.rs` — DONE. Added 5 new tests: `emit_function_with_allocation_result` (verifies emit_function accepts AllocationResult and produces non-empty code), `emit_binary_with_regalloc_results` (verifies the full plumbing emit_binary→emit_elf→emit_function produces valid ELF with regalloc results), `stack_slot_vreg_threshold_is_not_zero` (verifies the threshold hack is removed), `allocation_result_has_function_name` (verifies the function_name field is set), `emit_function_without_allocation_result` (verifies backward-compatible None path). All 5 pass. Codegen tests: 789 pass / 15 fail (identical baseline + 5 new).
 
@@ -435,12 +454,18 @@
 > `vectorize.rs` is a stub that miscompiles (blind 4× body duplication without
 > IV adjustment). Delete and rewrite.
 
-- [x] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
-- [x] **[OPT]** Implement real SLP vectorization with a cost model.
+- [~] **[OPT-DEL]** Delete `src/codegen/src/vectorize.rs` (the miscompiling stub).
+  - **AUDIT CAVEAT:** `vectorize.rs` was NOT deleted — it was rewritten in place (1,208 LOC). Module doc at lines 1-9 explicitly says "Replaces the miscompiling Wave 13 stub." Net effect is the same (miscompiling stub gone, real implementation in its place) but the file was not physically removed.
+- [~] **[OPT]** Implement real SLP vectorization with a cost model.
+  - **AUDIT CAVEAT:** `slp_vectorize_block` (`vectorize.rs:611`) detects isomorphic adjacent independent ops but only records `PackedOp`s in a side-channel plan — it does **NOT** rewrite the IR. "Cost model" is `MAX_BODY_INSTRS = 24` + elem_size/2 power-of-two checks, not a real cost function.
 - [x] **[OPT]** Implement loop vectorization with IV-step adjustment (the exact thing the stub got wrong).
-- [x] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
-- [x] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
-- [x] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
+  - **AUDIT CONFIRMED:** `vectorize.rs:338` `let iv_step = vf * elem_size;` and `:369-376` emits `BinOp(Add, phi_vreg, Immediate(iv_step))`. Test `test_loop_vectorization_iv_step_fix` (`vectorize.rs:930`) asserts `iv_step == Some(16)` (vf=4, elem_size=4) — the core bug fix is real.
+- [ ] **[BE-x86_64]** Emit SSE/AVX instructions from vectorized IR.
+  - **AUDIT GAP:** Encoders exist (`x86_64/mod.rs:940 encode_sse_paddq`, `:949 psubd`, `:958 pmulld`, `:970 movdqu_load`, `:987 movdqu_store`, `:1024 avx_vpaddq`, `:1032 vmovdqu_load`) and are unit-tested (`x86_64/mod.rs:4887-4946`), **but they are called ONLY from `#[test]` functions** — never from the backend's ISel/lowering path. Module doc at `vectorize.rs:46-49` honestly admits: *"Leave full ISel integration as a `TODO(wave29)` — the encoders and plan exist and are unit-tested, but the backend does not yet lower `PackedOp` to real machine code."* Compiled binaries contain zero SIMD instructions for vectorizable loops.
+- [ ] **[BE-aarch64]** Emit NEON instructions from vectorized IR.
+  - **AUDIT GAP:** Same as x86_64 — encoders exist (`arm64.rs:3333-3372`) and are unit-tested (`arm64.rs:5959-6003`) but only called from tests, not from the ISel path.
+- [~] **[TEST]** Add tests: `for i in 0..N { a[i] = b[i] + c[i]; }` lowers to a single vector loop.
+  - **AUDIT CAVEAT:** Verified at the **IR level only**. `build_add_loop_function` (`vectorize.rs:817`) constructs exactly this loop, and `test_loop_vectorization_no_miscompile_body_count` (`vectorize.rs:1053`) verifies 4 body copies + IV step 16. But no SIMD machine code is produced (see BE-x86_64 / BE-aarch64 gaps above).
 
 ---
 
@@ -452,7 +477,16 @@
 - [x] **[OPT]** Implement multi-block loop unrolling with block-graph rewiring. `src/codegen/src/loop_unroll.rs:265-268`
 - [x] **[OPT]** Replace hardcoded `UNROLL_FACTOR=2` with trip-count-derived factor. `src/codegen/src/loop_unroll.rs:47`
 - [x] **[OPT]** Implement Scalar Evolution (SCEV) for trip-count analysis.
-- [x] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
+- [ ] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
+  - **AUDIT GAP:** `try_unroll_and_jam` at `loop_unroll.rs:832-836` is a literal no-op stub:
+    ```rust
+    fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
+        // TODO(wave30): implement unroll-and-jam for nested loops where the
+        // inner body has no outer-loop-carried dependencies. For now, no-op.
+        func
+    }
+    ```
+    Module doc at lines 24-25 admits it's "a no-op placeholder with a `TODO(wave30)`". Test `test_unroll_and_jam_is_noop` at `loop_unroll.rs:1915` explicitly verifies the stub does nothing.
 - [x] **[OPT]** Add a code-size budget to the unroll heuristic.
 - [x] **[TEST]** Add tests: multi-block loops unroll correctly; trip-count-known loops fully unroll.
 
@@ -533,10 +567,15 @@
 > `check_proof_log` is never called outside its own tests.
 
 - [x] **[EGRAPH-WIRE]** Populate `ProofLog` during `EGraph::saturate` (record each rewrite application as a `ProofArtifact`). `src/codegen/src/proof_artifacts.rs:123`
-- [x] **[OPT-WIRE]** Wire `check_proof_log` as a compile-time check after e-graph saturation. `src/codegen/src/proof_artifacts.rs:127`
-- [x] **[OPT-WIRE]** Wire `bv_verify::verify_all_rules` as a gate before e-graph saturation (verify each rule is sound before applying). `src/codegen/src/bv_verify.rs:216`
-- [x] **[CI]** Add a CI step that runs `verify_all_rules` and fails the build on counterexample.
+  - **AUDIT CONFIRMED:** `ProofLog::record` is called inside `EGraph::saturate_with_proof` at `egraph.rs:340` after each rewrite application. However, the production pipeline calls the wrapper `EGraph::saturate` (`egraph.rs:277`) which discards the log — see next item.
+- [ ] **[OPT-WIRE]** Wire `check_proof_log` as a compile-time check after e-graph saturation. `src/codegen/src/proof_artifacts.rs:127`
+  - **AUDIT GAP:** `check_proof_log` is real at `proof_artifacts.rs:128` but is **NOT wired into the production pipeline** — grep across `src/pipeline.rs` and `src/codegen/src/opt.rs` finds zero call sites. The production `EGraph::saturate` wrapper at `egraph.rs:277` discards the log. Only the inline test `test_wave36_saturate_with_proof_then_check` (`proof_artifacts.rs:296`) exercises the saturate→check chain.
+- [~] **[OPT-WIRE]** Wire `bv_verify::verify_all_rules` as a gate before e-graph saturation (verify each rule is sound before applying). `src/codegen/src/bv_verify.rs:216`
+  - **AUDIT CAVEAT:** `verify_all_rules` is called at `pipeline.rs:5155` but is **advisory only** — logs a `warn!` on unsound rules, does NOT abort compilation. The hard gate `verify_rules_with_counterexample` (`bv_verify.rs:330`) IS called inside `saturate_with_proof` (`egraph.rs:306`), so production `saturate()` does effectively go through the gate. Substance of the claim (rule soundness verified before saturation) holds; the specific function named (`verify_all_rules`) is advisory-only.
+- [ ] **[CI]** Add a CI step that runs `verify_all_rules` and fails the build on counterexample.
+  - **AUDIT GAP:** No such CI step exists. The test comment at `bv_verify.rs:429` references `.github/workflows/proof-verify.yml`, but no such file exists. Available workflows: `ci.yml`, `cross-compile.yml`, `release.yml`, `vuma-tests.yml`, `wave50-hardening.yml` — none mention `verify_all_rules` or `bv_verify`. The unsound-rule test runs only as part of `cargo test --workspace` inside `ci.yml`'s test job, which is not the same as a dedicated `verify_all_rules` CI gate.
 - [x] **[TEST]** Add a test: an unsound rule is rejected by `bv_verify`.
+  - **AUDIT CONFIRMED:** `test_wave36_unsound_rule_rejected` at `bv_verify.rs:432` — real test that registers a deliberately unsound `wave36_unsound_inc` rule and asserts the gate rejects it.
 
 ---
 
@@ -564,7 +603,8 @@
 - [x] **[COR-WIRE]** Wire `SpeculativeOptimizer::validate_all` into the pipeline. `src/cor/src/speculative.rs:219`
 - [x] **[COR-WIRE]** Make `apply_speculation` produce real speculative code (currently caller-provided only). `src/cor/src/speculative.rs:891`
 - [x] **[COR]** Stop compiling synthetic stubs from SCG metadata in `runtime.rs:580-660` (they don't represent user code).
-- [x] **[TEST]** Add end-to-end test: CoR optimization measurably changes the emitted binary.
+- [~] **[TEST]** Add end-to-end test: CoR optimization measurably changes the emitted binary.
+  - **AUDIT CAVEAT:** The end-to-end test `test_wave38_cor_optimization_changes_output` at `runtime.rs:1605` verifies SCG-level changes (node count grows, `is_inlined`/`unroll_factor > 1`/`has_prefetch` flags set, `validate_all_speculations` returns Ok). It does **NOT** verify emitted binary changes — which is correct given that decision (b) was taken (CoR is profiling-only and does NOT modify the user binary). TASKS wording "changes the emitted binary" is internally inconsistent with decision (b); the test correctly reflects decision (b)'s semantics.
 
 ---
 
@@ -598,8 +638,10 @@
 - [x] **[SCG]** Remove `indexmap` from `src/scg/Cargo.toml`.
 - [x] **[SCG]** Replace `smallvec::SmallVec<[NodeId; 8]>` (6 sites) with `Vec<NodeId>`. `src/scg/src/query.rs:18`
 - [x] **[SCG]** Remove `smallvec` from `src/scg/Cargo.toml`.
-- [x] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
-- [x] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
+- [~] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
+  - **AUDIT CAVEAT:** `scg` crate fully migrated (`SCGError` at `graph.rs:99-122` has hand-written `Display` + `impl Error`). Other crates NOT migrated: `cor/src/runtime.rs:83, 961` still uses `#[derive(Debug, Clone, thiserror::Error)]`; `package/src/lib.rs:45` still has `use thiserror::Error;` and `#[derive(Debug, Error)]` at line 48; `parser/Cargo.toml:16`, `cor/Cargo.toml:18`, `package/Cargo.toml:16` still depend on `thiserror`. `cor/Cargo.toml:17` has self-documenting TODO: `# TODO(wave41): remove after cor/src/runtime.rs thiserror migration`.
+- [ ] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
+  - **AUDIT GAP:** `thiserror = "1"` is STILL in workspace `Cargo.toml:53` (line citation off by 1). Removal blocked by the partial migration in the previous item.
 
 ---
 
@@ -623,11 +665,16 @@
 > only for peripheral JSON (LLM API, telemetry, LSP).
 
 - [x] **[CORE]** Audit all `#[derive(Serialize, Deserialize)]` in `src/scg/`, `src/ive/`, `src/bd/`, `src/vuma/`, `src/proof/`, `src/codegen/`.
-- [x] **[SCG]** Replace serde derives on `NodeData`/`EdgeData`/`SCGRegion` with hand-written binary (de)serialization via `src/scg/src/serialize.rs` `BinaryReader`/`BinaryWriter`.
-- [x] **[BD]** Replace serde derives on `RepD`/`CapD`/`RelD`/`BD` with hand-written binary (de)serialization.
-- [x] **[PROOF]** Replace serde derives on proof artifacts with hand-written binary (de)serialization.
-- [x] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
+- [~] **[SCG]** Replace serde derives on `NodeData`/`EdgeData`/`SCGRegion` with hand-written binary (de)serialization via `src/scg/src/serialize.rs` `BinaryReader`/`BinaryWriter`.
+  - **AUDIT CAVEAT:** Hand-written BinaryReader/BinaryWriter codecs were ADDED (`serialize.rs:195-289` with `write_node`/`read_node`/`write_edge`/`read_edge`/`write_region`/`read_region`), but the serde derives were **NOT removed** from the types themselves. `NodeData` at `node.rs:129` still has `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`; `EdgeData` at `edge.rs:108` same; `SCGRegion` at `region.rs:91` same. ~426 total `derive(... Serialize ... Deserialize ...)` sites still exist across core crates. The hand-written codecs were added **alongside** serde, not as a replacement.
+- [~] **[BD]** Replace serde derives on `RepD`/`CapD`/`RelD`/`BD` with hand-written binary (de)serialization.
+  - **AUDIT CAVEAT:** Real `BinarySerializable` trait + impls at `bd/src/serialize.rs:101` (~50+ impls for RepD, CapD, RelD, Relation, etc.) — but serde derives are NOT removed from the types. Same pattern as SCG: hand-written codec added alongside serde.
+- [~] **[PROOF]** Replace serde derives on proof artifacts with hand-written binary (de)serialization.
+  - **AUDIT CAVEAT:** Real `BinarySerializable` pattern at `proof/src/serialization.rs:221` with many impls — but serde derives are NOT removed from the types. Same pattern as SCG/BD.
+- [ ] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
+  - **AUDIT GAP:** `serde.workspace = true` and `serde_json.workspace = true` are STILL in every core crate Cargo.toml: scg, ive, bd, vuma, proof, codegen, parser, cor, std, package. None have been removed. This is the most material misrepresentation in the document — the dep removal half of the wave was not delivered.
 - [x] **[TEST]** Add round-trip tests for each hand-written serializer.
+  - **AUDIT CONFIRMED:** Real round-trip tests exist for SCG (`serialize.rs:1784, 1796, 1815`), BD (`bd/src/serialize.rs:1002, 1010, 1036, 1104, 1124, 1147, 1192`), Proof (`proof/src/serialization.rs:1078, 1098, 1165, 1173, 1185, 1266, 1384`).
 
 ---
 
@@ -636,9 +683,12 @@
 > 129 `log::debug!`/`info!`/`warn!`/`trace!`/`error!` call sites in core.
 
 - [x] **[CORE]** Define a `vuma_log!` macro in `src/lib.rs` (or a new `src/log.rs`).
-- [x] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
-- [x] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
-- [x] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
+- [~] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
+  - **AUDIT CAVEAT:** ~85 call sites in 24 files across codegen/ive/cor/proof/package were migrated. But `src/vuma/src/repl.rs:857, 1032` still call `log::warn!("MSG conversion failed: {e}")` — two unmigrated sites in the `vuma` crate.
+- [~] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
+  - **AUDIT CAVEAT:** Same as the `debug!` migration — most sites converted, but `src/vuma/src/repl.rs:857, 1032` still use `log::warn!`.
+- [ ] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
+  - **AUDIT GAP:** `log.workspace = true` is STILL in `src/vuma/Cargo.toml:16`. Root `Cargo.toml:54, 86` still pins `log = "0.4"` and `log.workspace = true`. The `vuma` crate (where the unmigrated `log::warn!` calls live) still depends on `log`. Other core crates (codegen, ive, cor, proof, package) did remove the `log` dep.
 - [x] **[CORE]** Implement `vuma_log!` as a no-op when `--release` is set, real logging otherwise.
 - [x] **[TEST]** Verify log output is unchanged.
 
@@ -648,7 +698,8 @@
 
 - [x] **[COR]** Replace `libc::mmap`/`mprotect`/`munmap` in `src/cor/src/runtime.rs:1022-1141` with direct syscalls via `extern "C" { fn mmap(...); }` (which VUMA already supports).
 - [x] **[COR]** Add a non-Unix fallback that returns a clear error (not silent `Ok(0)`). `src/cor/src/runtime.rs:1003-1007`
-- [x] **[STD]** Replace `libc::malloc`/`free`/`realloc` in `src/std/src/alloc.rs:2010,2067,2119` with `__vuma_alloc`/`__vuma_free` (already used by `womb/graph/digraph.vuma`).
+- [~] **[STD]** Replace `libc::malloc`/`free`/`realloc` in `src/std/src/alloc.rs:2010,2067,2119` with `__vuma_alloc`/`__vuma_free` (already used by `womb/graph/digraph.vuma`).
+  - **AUDIT CAVEAT:** `libc::malloc`/`free`/`realloc` are indeed gone, but they were replaced with **raw `mmap`/`munmap` externs** (`alloc.rs:46-50, 2045-2090`), NOT with `__vuma_alloc`/`__vuma_free` as claimed. The `alloc.rs:36-43` doc-comment explicitly explains why: vuma-std "is NOT linked against the VUMA runtime (so the `__vuma_alloc`/`__vuma_free` stubs referenced by `womb/graph/digraph.vuma` are unavailable here)." Substance (no `libc` crate) is met; the specific symbol claim is inaccurate.
 - [x] **[STD]** Replace `libc::read`/`write` (8 sites) in `src/std/src/io.rs` with direct syscalls.
 - [x] **[STD]** Remove `libc` from `src/std/Cargo.toml`. Remove the `os-linux` feature gate.
 - [x] **[TEST]** Add tests: COR JIT executes a compiled region without libc; vuma-std I/O works without libc.
@@ -664,7 +715,8 @@
 - [x] **[STD-WIRE]** If (a): migrate `HashMap` → `VumaHashMap`; migrate `String` → `VumaString`.
 - [x] **[STD-ABI]** Define a shared syscall ABI between `vuma-std` (which currently calls libc) and the codegen backends (which emit raw syscall stubs). Currently they're decoupled.
 - [x] **[STD-DOC]** If (b): update `src/std/src/lib.rs` doc-comment to say "runtime library for VUMA programs, not the compiler's substrate".
-- [x] **[TEST]** Add tests: a `.vuma` program can call `vuma-std` functions and get verified behavior.
+- [~] **[TEST]** Add tests: a `.vuma` program can call `vuma-std` functions and get verified behavior.
+  - **AUDIT CAVEAT:** Tests exist at `lib.rs:259-282` (`test_wave46_std_runtime_role_documented` — compile-time `include_str!` self-check that the doc-comment contains the required phrases) and `lib.rs:288-308` (`test_wave46_vumavec_basic` — Rust smoke test of `VumaVec<i32>` push/pop LIFO semantics). These test vuma-std **from Rust**, not from a `.vuma` program. The "verified behavior" part is satisfied at the Rust level only; there's no end-to-end `.vuma` → vuma-std link test.
 
 ---
 
@@ -676,8 +728,10 @@
 - [x] **[BOOT]** Pick ONE as canonical (recommend `full_lexer`+`full_parser`+`ir_builder`+`codegen`+`elf` as the pipeline).
 - [x] **[BOOT-DEL]** Delete the other drafts (`mini_compiler.vuma`, `minicompiler.vuma`, `vuma_compiler.vuma`).
 - [x] **[BOOT]** Add file I/O via `extern "C" { fn read(...); }` to the bootstrap compiler (currently source is hardcoded).
-- [x] **[BOOT]** Add argv parsing so the bootstrap compiler reads a `.vuma` file from disk.
-- [x] **[TEST]** Add a test: the bootstrap compiler reads `womb/lang/hello.vuma` and produces exit code 0.
+- [ ] **[BOOT]** Add argv parsing so the bootstrap compiler reads a `.vuma` file from disk.
+  - **AUDIT GAP:** argv parsing is explicitly deferred. `full_lexer.vuma:39` has `TODO: replace with argv[1]`; `:62-69` says `ARGV TODO (Wave 47 deferral): real argv access requires the Rust runtime to expose process startup arguments`; `input_path()` at `:512-536` hardcodes `"womb/lang/hello.vuma\0"` byte-by-byte.
+- [ ] **[TEST]** Add a test: the bootstrap compiler reads `womb/lang/hello.vuma` and produces exit code 0.
+  - **AUDIT GAP:** No Rust test invokes the bootstrap. `grep` for `wave47\|wave_47\|bootstrap.*hello\|hello.*exit.*0` in `src/tests/` finds only `wave50.rs:630 test_wave50_bootstrap_milestone` which is a file-existence smoke test (see Wave 50). The bootstrap compiler is not wired into the Rust test harness.
 
 ---
 
@@ -688,13 +742,39 @@
 
 - [x] **[BOOT]** Implement a real parser (not just `lex_next_token`) in the bootstrap compiler.
 - [x] **[BOOT]** Implement AST construction.
-- [x] **[BOOT]** Implement SCG construction from AST.
-- [x] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
-- [x] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
-- [x] **[BOOT]** Implement IR construction from SCG.
+- [ ] **[BOOT]** Implement SCG construction from AST.
+  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:375-384`:
+    ```
+    fn scg_construct(ast) -> u32 {
+        // STUB: returns 0 (bootstrap skips SCG; AST→IR direct)
+        return 0;
+    }
+    ```
+- [ ] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
+  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:413-424`:
+    ```
+    fn bd_infer(ir_buf) -> u32 {
+        // STUB. Phase 1 propagation in the production compiler walks the IR forward...
+        // The bootstrap treats every vreg as a full i64.
+        return 1;
+    }
+    ```
+- [ ] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
+  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:426-438`:
+    ```
+    fn ive_verify(ir_buf) -> u32 {
+        // STUB. The production IVE pass checks (a) liveness — every vreg used
+        // has been defined... and (b) cleanup — removes lets whose init vreg
+        // is never read.
+        return 1;
+    }
+    ```
+- [~] **[BOOT]** Implement IR construction from SCG.
+  - **AUDIT CAVEAT:** `irb_build_main` at `ir_builder.vuma:392` lowers AST→IR **directly**, bypassing SCG entirely (since `scg_construct` is a stub). Comment justifies: *"The bootstrap skips SCG because (a) hello.vuma has no loops in codegen and (b) the bootstrap's IR is already linear."* So IR construction exists, but "from SCG" is inaccurate — it's "from AST".
 - [x] **[BOOT]** Implement x86_64 codegen (reuse encoders from `womb/lang/codegen.vuma`).
 - [x] **[BOOT]** Implement ELF64 emission (reuse `womb/lang/elf.vuma`).
-- [x] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
+- [ ] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
+  - **AUDIT GAP:** Documented unfulfilled contract. `full_lexer.vuma:33-36` explicitly states: *"(The .vuma bootstrap compiler is not yet wired into the Rust test harness — `cargo check` is unaffected. The contract above is the Wave 48 self-host target; a future wave adds the Rust-side test that invokes the compiled `vumac` on hello.vuma and checks a.out's output.)"* No test exists that invokes the bootstrap compiler on `hello.vuma`.
 
 ---
 
@@ -711,13 +791,20 @@
 
 # Wave 50 — Final hardening: real-regalloc correctness, IVE-proof end-to-end, memory-safety blocking
 
-- [x] **[TEST]** Add real-regalloc correctness test per backend (SHA256d, mmap_sha256d).
-- [x] **[TEST]** Add IVE-proof-system end-to-end test: a verified program produces a non-empty `ProofBundle` with `ProofChecker::check == Valid`.
-- [x] **[TEST]** Add memory-safety-blocking regression test: a UAF program is rejected at compile time.
-- [x] **[TEST]** Add cross-backend optimization regression: same program produces same observable behavior on every backend.
-- [x] **[TEST]** Add self-hosting milestone test: bootstrap compiler compiles a non-trivial `.vuma` file.
-- [x] **[CI]** Add a CI step that runs `bun run lint` (or `cargo clippy`) and fails on warnings.
-- [x] **[CI]** Add a CI step that runs the full test suite on every push.
+- [~] **[TEST]** Add real-regalloc correctness test per backend (SHA256d, mmap_sha256d).
+  - **AUDIT CAVEAT:** `wave50.rs:201 test_wave50_regalloc_correctness` uses `build_regalloc_smoke_func` (line 74) — a **3-instruction IR function** (Add + Call print_int + Add + Ret), NOT SHA256d. Comment at `:70-72` admits this. `grep "mmap_sha256d"` across entire repo → **zero matches**. Real SHA256d kernel lives in `sha256d_backends.rs` (W28-era) but is not exercised here. Test runs but does not satisfy the SHA256d/mmap_sha256d claim.
+- [ ] **[TEST]** Add IVE-proof-system end-to-end test: a verified program produces a non-empty `ProofBundle` with `ProofChecker::check == Valid`.
+  - **AUDIT GAP:** `wave50.rs:337 test_wave50_ive_proof_e2e` **hand-builds** a `Proof` using `LivenessIntro` rule (lines 295-311), wraps in `LivenessProof`/`ProofBundle`. Comment at `:314-335` explicitly says: *"The full end-to-end wiring (parse → SCG → IVE → `build_proof_bundle` in `src/api.rs`) is reachable via `vuma::api::VumaCompiler`, but the resulting `ProofBundle`'s liveness/exclusivity/etc. fields are `None` for most programs... we therefore test the proof system directly: build a `Proof` by hand."* This is unit-testing the proof system, NOT e2e on a verified program.
+- [~] **[TEST]** Add memory-safety-blocking regression test: a UAF program is rejected at compile time.
+  - **AUDIT CAVEAT:** `wave50.rs:430 test_wave50_uaf_rejected` accepts **EITHER** rejection OR successful compile. Comment at `:421-425`: *"must either reject the program with `VumaError::MemorySafety` (preferred — the UAF detector caught it) OR compile successfully (known limitation of the current SCG-liveness UAF detector — same accepted-outcome contract as Wave 20)."* Test passes even if UAF NOT detected — i.e., it does not enforce the claim's semantics.
+- [ ] **[TEST]** Add cross-backend optimization regression: same program produces same observable behavior on every backend.
+  - **AUDIT GAP:** `wave50.rs:505 test_wave50_cross_backend_opt_regression` checks non-empty bytes + `print_int` relocation present — NOT observable behavior. Comment at `:498-503`: *"execution simulation (running the emitted binary and checking it prints \"42\") is not yet available in the test harness... Until an execution harness exists, this test asserts structural equivalence."* The "observable behavior" claim is not delivered.
+- [ ] **[TEST]** Add self-hosting milestone test: bootstrap compiler compiles a non-trivial `.vuma` file.
+  - **AUDIT GAP:** `wave50.rs:630 test_wave50_bootstrap_milestone` is a SMOKE test that asserts **file existence + ≥100 bytes**. Comment at `:617-628`: *"Per W48 PARTIAL: the `.vuma` bootstrap compiler is not yet invokable from the Rust runtime... Until then, this is a SMOKE test: assert that the canonical bootstrap source files exist and are non-empty (≥100 bytes each)."* No compilation or execution of a `.vuma` file occurs.
+- [~] **[CI]** Add a CI step that runs `bun run lint` (or `cargo clippy`) and fails on warnings.
+  - **AUDIT CAVEAT:** Pre-existing `.github/workflows/ci.yml:124` already runs `cargo clippy --workspace -- -D warnings` (added in Wave 11). Wave 50's contribution `.github/workflows/wave50-hardening.yml:70-81` explicitly does **NOT** use `-D warnings`: comment says *"Run clippy across the workspace WITHOUT `-D warnings` — the codebase has ~300 pre-existing warnings... Fail only on clippy ERRORS... not on warnings."* The strict "fails on warnings" job is pre-existing; Wave 50's own job is advisory.
+- [~] **[CI]** Add a CI step that runs the full test suite on every push.
+  - **AUDIT CAVEAT:** Pre-existing `.github/workflows/ci.yml:84` already runs `cargo test --workspace --verbose` (Wave 11). Wave 50's `wave50-hardening.yml:84-113` adds `full-test-advisory` job with `continue-on-error: true` — explicitly advisory, not blocking. The blocking "full test suite on every push" job is pre-existing; Wave 50's own job is advisory.
 
 ---
 
@@ -755,3 +842,89 @@
 47 ──► 48 (bootstrap, after 39-46)
 50 (final hardening, after all)
 ```
+
+---
+
+## Audit summary (post-Wave-50 review)
+
+A full wave-by-wave verification pass was run against the source tree at
+`HEAD = 7472a6b` (docs ignored). Every wave was spot-checked against the actual
+source files. Status markers in this document have been reconciled with the
+findings. The summary below is the global picture; per-item caveats are inlined
+on each affected task as `AUDIT CAVEAT:` (for partial / overstated items) or
+`AUDIT GAP:` (for stubs or missing items).
+
+### Verdict tally
+
+| Verdict                              | Count | Waves                                                                                                                  |
+| ------------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------- |
+| ✅ VERIFIED (substance matches claim) | 35    | 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 19, 22, 23, 24, 25, 26, 27, 28, 31, 32, 33, 34, 35, 37, 39, 40, 42, 45, 46, 49 |
+| ⚠️ PARTIAL (real work + gaps)        | 13    | 10, 13, 16, 18, 20, 21, 29, 30, 36, 38, 41, 43, 44, 47                                                                |
+| ❌ STUB-ONLY / MISSING                | 2     | 48, 50                                                                                                                 |
+
+### Cross-cutting findings
+
+1. **Systematic line-number drift.** Almost every `file:line` reference in the
+   task descriptions is off by 50–300 lines because the codegen files have
+   grown substantially since the descriptions were written. **Substance is
+   always correct; line numbers are stale.** No corrections were applied to
+   the stale line numbers — only status markers and inline caveats were
+   updated. A future cleanup pass should regenerate line numbers from current
+   source.
+
+2. **Conservative-regalloc pattern (Waves 21–23).** Real `AllocationResult`
+   flows through `emit_binary → emit_elf → emit_function` end-to-end and is
+   recorded in `reads`/`writes`, but the actual emitted machine bytes come
+   from the **stack-slot ISel**, not from the new regalloc. Comments at
+   `emit.rs:687-689`, `regalloc_emit.rs:125-136`, `s390x.rs:1242-1248`
+   honestly admit this. The "real register allocation" claim is overstated
+   for the emit path.
+
+3. **Stub-labeled-as-done pattern (Waves 48, 50).** Both waves have source
+   code that **honestly labels itself as stub** with comments like "STUB",
+   "TODO(wave48)", "deferred", "this is a SMOKE test" — yet the original
+   TASKS.md marked them `[x]`. The pattern was: write a stub that compiles,
+   add a doc-comment explaining the deferral, mark the task done. Status
+   markers in this document have been corrected to `[ ]` or `[~]` for these
+   items.
+
+4. **Self-hosting dep removal is partial (Waves 41, 43, 44).** `indexmap`,
+   `smallvec`, `hashbrown`, and `petgraph` are fully gone. But `thiserror`,
+   `serde`/`serde_json`, and `log` are **partially** removed — workspace
+   `Cargo.toml` still pins all three, and several core crates still import
+   them. The hand-written replacements exist **alongside** the deps they were
+   supposed to replace.
+
+5. **CI claims (Waves 36, 50) are overstated.** Wave 36 references a
+   `proof-verify.yml` workflow that doesn't exist. Wave 50's "clippy fails on
+   warnings" and "full test suite on every push" are technically satisfied by
+   pre-existing Wave-11 `ci.yml`, while Wave 50's own additions are explicitly
+   `continue-on-error: true` advisory jobs.
+
+6. **Honest doc-comments are a positive signal.** Where stubs exist, they're
+   usually labeled as such in source — `vectorize.rs:46-49`,
+   `loop_unroll.rs:832-836`, `wave50.rs:314-335/421-425/498-503/617-628`,
+   `ir_builder.vuma:344-438`. A careful reader of the source can tell what's
+   real; only the original TASKS.md `[x]` markers were misleading. The
+   corrected markers in this document reflect the actual state.
+
+### Priority follow-up actions
+
+1. **Demote Wave 48 and Wave 50 in spirit** — implement the remaining stubs
+   (SCG construction, BD inference, IVE verification in the bootstrap; real
+   SHA256d/mmap_sha256d regalloc tests; e2e proof-bundle test on a verified
+   program; execution harness for cross-backend regression; real self-host
+   test that compiles and runs `hello.vuma`).
+2. **Complete the dep removal waves 41/43/44** — finish migrating `thiserror`,
+   `serde`, and `log` in `cor`, `package`, `parser`, and `vuma/repl.rs`, then
+   drop them from workspace `Cargo.toml`.
+3. **Wire `check_proof_log` into the production pipeline** (Wave 36) and
+   create the missing `.github/workflows/proof-verify.yml`.
+4. **Wire SSE/AVX/NEON encoders into the ISel path** (Wave 29) — currently
+   dead code outside unit tests.
+5. **Implement unroll-and-jam** (Wave 30) — currently an explicit no-op stub.
+6. **Add a real execution harness** so Wave 50's "cross-backend opt
+   regression" and "self-hosting milestone" tests can do more than structural
+   byte-count checks.
+7. **Refresh line numbers in this document** — they're off across the board.
+
