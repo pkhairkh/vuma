@@ -1831,8 +1831,11 @@ impl fmt::Display for IRInstr {
 ///
 /// This table is used by:
 /// - `IRInstr::Syscall` Display impl (for readable IR dumps)
-/// - `lower_syscalls()` (to convert `Syscall` → `Call { func: name, is_extern: true }`)
-/// - The pipeline's syscall allowlist verification
+/// - Backends that need to resolve a syscall number to a POSIX name
+///
+/// Note: the pipeline's syscall allowlist (`pipeline.rs`) uses a simple
+/// `*nr > 600` range check rather than this table — see the AUDIT RESOLVED
+/// note in TASKS.md (Wave 10 PIPE item).
 ///
 /// The numbers are from `include/uapi/asm-generic/unistd.h` (the generic
 /// Linux ABI used by AArch64, RISC-V, LoongArch, etc.). x86_32, x86_64,
@@ -2081,47 +2084,6 @@ pub fn generic_syscall_name(nr: u32) -> Option<&'static str> {
         450 => Some("set_mempolicy_home_node"),
         // Unknown — return None so the allowlist can reject it.
         _ => None,
-    }
-}
-
-/// The set of generic syscall numbers that are recognized by the allowlist.
-/// Used by `pipeline.rs` to reject unknown syscalls at compile time.
-pub fn is_known_syscall(nr: u32) -> bool {
-    generic_syscall_name(nr).is_some()
-}
-
-/// Lower all `IRInstr::Syscall` instructions in a function to
-/// `IRInstr::Call { is_extern: true }` with the canonical syscall name.
-///
-/// This is a temporary lowering pass that runs after SCG→IR conversion and
-/// before optimization/codegen. It allows `IRInstr::Syscall` to exist as a
-/// first-class IR node (produced by the parser and SCG) without requiring
-/// every backend to handle it directly.
-///
-/// Wave 11–13 will remove this pass and make each backend emit real syscall
-/// instructions from `IRInstr::Syscall` directly.
-pub fn lower_syscalls(func: &mut IRFunction) {
-    for block in &mut func.blocks {
-        for instr in &mut block.instructions {
-            if let IRInstr::Syscall { nr, args, dst } = instr {
-                let name = generic_syscall_name(*nr)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("__vuma_syscall_{}", nr));
-                *instr = IRInstr::Call {
-                    dst: dst.take(),
-                    func: name,
-                    args: std::mem::take(args),
-                    is_extern: true,
-                };
-            }
-        }
-    }
-}
-
-/// Lower syscalls in all functions. Convenience wrapper around `lower_syscalls`.
-pub fn lower_syscalls_all(funcs: &mut [IRFunction]) {
-    for func in funcs {
-        lower_syscalls(func);
     }
 }
 
