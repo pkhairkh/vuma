@@ -613,6 +613,52 @@ impl VumaCompiler {
             },
         }
     }
+
+    /// Build the proof bundle for a VUMA program by running the full
+    /// front-end pipeline (parse → SCG → IVE) and then invoking
+    /// [`build_proof_bundle`] on the resulting SCG.
+    ///
+    /// This is the same path taken internally by [`VumaCompiler::verify`]
+    /// (which calls `build_proof_bundle` as a cross-check against the IVE
+    /// invariant aggregator).  Exposing it directly lets external test
+    /// harnesses and tooling inspect the actual `ProofBundle` produced by
+    /// the `prove_*` tactics on a parser-generated SCG — not just the
+    /// summary `VerificationReport` that `verify` returns.
+    ///
+    /// On front-end failure, returns the diagnostics as `Err` so the caller
+    /// can surface them.  On success, returns the bundle as `Ok` — note the
+    /// bundle may have all five invariant slots set to `None` if no
+    /// `prove_*` tactic succeeded for the given program (this is a known
+    /// limitation: the tactics require structured SCG metadata that the
+    /// parser does not always produce for trivial programs).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use vuma::api::VumaCompiler;
+    ///
+    /// let compiler = VumaCompiler::new();
+    /// let source = "fn main() {}";
+    /// match compiler.build_proof_bundle(source) {
+    ///     Ok(bundle) => {
+    ///         let statuses = bundle.status();
+    ///         for (name, status) in &statuses {
+    ///             println!("  {:?} — {:?}", name, status);
+    ///         }
+    ///     }
+    ///     Err(diags) => {
+    ///         for d in &diags { eprintln!("{}", d.message); }
+    ///     }
+    /// }
+    /// ```
+    pub fn build_proof_bundle(&self, source: &str) -> Result<ProofBundle, Vec<VumaDiagnostic>> {
+        let front_result = run_frontend(source, &self.config);
+        let scg = match front_result {
+            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Err { diagnostics } => return Err(diagnostics),
+        };
+        Ok(build_proof_bundle(&scg))
+    }
 }
 
 impl Default for VumaCompiler {
