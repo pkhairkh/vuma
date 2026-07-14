@@ -25,7 +25,6 @@
 use crate::config::Config;
 use crate::profile::ProfileData;
 use crate::types::RegionId;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -34,7 +33,7 @@ use std::time::{Duration, Instant};
 // ===========================================================================
 
 /// A target where a compiled region can be deployed for execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentTarget {
     /// Execute the region in the local process.
     Local,
@@ -79,7 +78,7 @@ impl std::fmt::Display for DeploymentTarget {
 // ===========================================================================
 
 /// Semantic version for a deployed region.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PackageVersion(pub u64);
 
 impl std::fmt::Display for PackageVersion {
@@ -89,7 +88,7 @@ impl std::fmt::Display for PackageVersion {
 }
 
 /// Compilation metadata attached to a deployment package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageMetadata {
     /// Region this package was compiled from.
     pub region_id: RegionId,
@@ -106,7 +105,7 @@ pub struct PackageMetadata {
 }
 
 /// Debug information bundled with a deployment package.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct DebugInfo {
     /// Source-to-code-offset mapping: (source_line, code_byte_offset).
     pub source_map: Vec<(u32, u32)>,
@@ -117,7 +116,7 @@ pub struct DebugInfo {
 }
 
 /// A deployment-ready compiled package: binary + metadata + debug info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DeploymentPackage {
     /// Compiled machine code bytes.
     pub code: Vec<u8>,
@@ -171,7 +170,7 @@ impl DeploymentPackage {
 
 /// A delta (diff) between two deployment packages, used for bandwidth-
 /// efficient re-deployment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DeploymentDelta {
     /// The region this delta applies to.
     pub region_id: RegionId,
@@ -318,7 +317,7 @@ impl DeploymentDelta {
 // ===========================================================================
 
 /// Outcome of a deployment operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DeploymentResult {
     /// The region that was deployed.
     pub region_id: RegionId,
@@ -342,7 +341,7 @@ pub struct DeploymentResult {
 // ===========================================================================
 
 /// A record of a deployed version, stored in the [`VersionLog`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VersionRecord {
     /// The region that was deployed.
     pub region_id: RegionId,
@@ -359,7 +358,7 @@ pub struct VersionRecord {
 }
 
 /// Tracks deployed versions per region, enabling rollback.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct VersionLog {
     /// region_id → ordered list of deployed versions (oldest first).
     records: HashMap<RegionId, Vec<VersionRecord>>,
@@ -416,7 +415,7 @@ impl VersionLog {
 // ===========================================================================
 
 /// State machine for a hot-swap operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotSwapPhase {
     /// No hot-swap in progress.
     Idle,
@@ -446,7 +445,7 @@ impl std::fmt::Display for HotSwapPhase {
 }
 
 /// Tracks the state of a hot-swap in progress for a region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct HotSwapState {
     /// The region being hot-swapped.
     pub region_id: RegionId,
@@ -478,7 +477,7 @@ impl HotSwapState {
 ///
 /// The plan is recomputed periodically (or when a significant profile
 /// shift is detected) by [`DeploymentPlanner`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct DeploymentPlan {
     /// Ordered list of (region, target) assignments.
     pub regions: Vec<(RegionId, DeploymentTarget)>,

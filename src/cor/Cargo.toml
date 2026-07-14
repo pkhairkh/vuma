@@ -13,10 +13,9 @@ rust-version.workspace = true
 [dependencies]
 vuma-scg.workspace = true
 vuma-codegen.workspace = true
-# TODO(wave43): remaining serde usage at src/cor/src/config.rs:8 (and 44
-# other sites across config/deployment/speculative/profile/types); migrate
-# to hand-written codec.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 — all COR config/deployment/profile/types
+# now rely on hand-written Debug + Clone derives only; no JSON serialization
+# is performed inside this crate.
 
 # (Wave 45 followup) `libc` removed — runtime.rs now uses raw `extern "C"`
 # mmap/mprotect/munmap syscalls directly. No remaining `libc::` references.

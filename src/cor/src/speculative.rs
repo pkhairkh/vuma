@@ -38,7 +38,6 @@
 use crate::config::Config;
 use crate::profile::ProfileData;
 use crate::types::{CompiledRegion, EdgeId, NodeId, RegionId};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -51,7 +50,7 @@ use std::collections::HashMap;
 /// Each variant encodes a specific kind of assumption. If the assumption
 /// ceases to hold at runtime, the associated speculative code must be
 /// deoptimized.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Assumption {
     /// The branch identified by `EdgeId` is taken with high probability.
     ///
@@ -542,7 +541,7 @@ impl SpeculativeOptimizer {
 // ---------------------------------------------------------------------------
 
 /// The kind of speculation opportunity identified in the SCG.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateKind {
     /// A branch that is predicted to go one way with high confidence.
     LikelyBranch(EdgeId),
@@ -578,7 +577,7 @@ impl CandidateKind {
 /// how likely the associated assumption is to hold. The executor uses
 /// this score (along with the config's optimization level) to decide
 /// whether to speculate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SpeculationCandidate {
     /// Unique identifier for this candidate.
     pub id: u64,
@@ -617,7 +616,7 @@ impl SpeculationCandidate {
 // ---------------------------------------------------------------------------
 
 /// The outcome of applying a speculative optimization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpeculationResult {
     /// The speculation succeeded; keep the optimized code.
     Success {
@@ -659,7 +658,7 @@ impl SpeculationResult {
 
 /// A single branch prediction: which edge is likely taken, with what
 /// probability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BranchPrediction {
     /// The branch (edge) being predicted.
     pub edge: EdgeId,
@@ -691,7 +690,7 @@ impl BranchPrediction {
 }
 
 /// A table of branch predictions derived from profile data.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct BranchPredictionTable {
     /// Per-edge predictions.
     predictions: HashMap<EdgeId, BranchPrediction>,
@@ -797,7 +796,7 @@ impl BranchPredictionTable {
 // ---------------------------------------------------------------------------
 
 /// Describes a speculative inlining decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct InlineDecision {
     /// The call site node being inlined.
     pub call_site: NodeId,
@@ -887,7 +886,7 @@ impl SpeculativeInlining {
 // ---------------------------------------------------------------------------
 
 /// The kind of code motion being performed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeMotionKind {
     /// Hoist invariant code out of a loop / hot region to execute it once
     /// before the region.
@@ -907,7 +906,7 @@ pub enum CodeMotionKind {
 }
 
 /// Describes a speculative code motion decision.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CodeMotionDecision {
     /// The kind of code motion.
     pub kind: CodeMotionKind,
