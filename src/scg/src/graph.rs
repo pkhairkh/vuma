@@ -9,8 +9,7 @@
 //! are also implemented in [`crate::digraph`] — this module no longer reaches
 //! into `petgraph`.
 
-use hashbrown::HashMap;
-use indexmap::IndexSet;
+use hashbrown::{HashMap, HashSet};
 
 use crate::digraph::{
     has_path_connecting, tarjan_scc, toposort, DiGraph, Direction, EdgeIndex, NodeIndex,
@@ -18,6 +17,83 @@ use crate::digraph::{
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::node::{NodeData, NodeId, NodePayload, NodeType, ProgramPoint};
 use crate::region::{RegionId, SCGRegion};
+
+/// A small insertion-ordered set built on top of `HashSet` + `Vec`.
+///
+/// This replaces the previous `indexmap::IndexSet<NodeId>` usage so that the
+/// crate no longer depends on `indexmap`. Membership is O(1) (HashSet) and
+/// insertion order is preserved (Vec), matching the `IndexSet` semantics used
+/// at the call sites.
+pub(crate) struct OrderedSet<T: Eq + std::hash::Hash + Clone> {
+    set: HashSet<T>,
+    order: Vec<T>,
+}
+
+impl<T: Eq + std::hash::Hash + Clone> OrderedSet<T> {
+    /// Creates an empty `OrderedSet`.
+    pub(crate) fn new() -> Self {
+        Self {
+            set: HashSet::new(),
+            order: Vec::new(),
+        }
+    }
+
+    /// Inserts a value. Returns `true` if it was not already present.
+    pub(crate) fn insert(&mut self, value: T) -> bool {
+        if self.set.insert(value.clone()) {
+            self.order.push(value);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if the set contains the given value.
+    pub(crate) fn contains(&self, value: &T) -> bool {
+        self.set.contains(value)
+    }
+
+    /// Returns the number of elements in the set.
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Returns `true` if the set is empty.
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// Iterates over the elements in insertion order.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.order.iter()
+    }
+}
+
+impl<T: Eq + std::hash::Hash + Clone> Default for OrderedSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Eq + std::hash::Hash + Clone> FromIterator<T> for OrderedSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut s = Self::new();
+        for v in iter {
+            s.insert(v);
+        }
+        s
+    }
+}
+
+impl<'a, T: Eq + std::hash::Hash + Clone> IntoIterator for &'a OrderedSet<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 /// Errors that can occur during SCG operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -688,13 +764,13 @@ impl SCG {
         }
 
         // Check for allocation/deallocation pairing
-        let allocations: IndexSet<NodeId> = self
+        let allocations: OrderedSet<NodeId> = self
             .nodes()
             .filter(|n| matches!(n.node_type, NodeType::Allocation))
             .map(|n| n.id)
             .collect();
 
-        let deallocations_referenced: IndexSet<NodeId> = self
+        let deallocations_referenced: OrderedSet<NodeId> = self
             .nodes()
             .filter_map(|n| match &n.payload {
                 NodePayload::Deallocation(d) => Some(d.allocation_node),

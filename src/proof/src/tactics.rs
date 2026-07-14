@@ -6,7 +6,6 @@
 //! together establish the original goal.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::judgment::Judgment;
 use crate::proof::{Goal, ProofContext, RegionId, Target};
@@ -98,16 +97,29 @@ pub fn tactic_contradiction(goal: ProofGoal) -> ProofResult {
 // ---------------------------------------------------------------------------
 
 /// Errors that can arise during tactic application.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum TacticError {
     /// The tactic is not applicable to the given goal.
-    #[error("tactic {tactic} is not applicable to goal {goal}")]
     NotApplicable { tactic: String, goal: String },
 
     /// The tactic failed to produce subgoals.
-    #[error("tactic {tactic} failed: {reason}")]
     Failed { tactic: String, reason: String },
 }
+
+impl std::fmt::Display for TacticError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TacticError::NotApplicable { tactic, goal } => {
+                write!(f, "tactic {tactic} is not applicable to goal {goal}")
+            }
+            TacticError::Failed { tactic, reason } => {
+                write!(f, "tactic {tactic} failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TacticError {}
 
 // ---------------------------------------------------------------------------
 // Tactic

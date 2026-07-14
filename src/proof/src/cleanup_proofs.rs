@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use thiserror::Error;
 
 use crate::judgment::RegionId;
 use crate::models::{ProofMSG, ProofMemOp, ProofMemOpKind, ProofSCG};
@@ -21,34 +20,61 @@ use crate::proof::{
 // ---------------------------------------------------------------------------
 
 /// Describes why a cleanup proof could not be established.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum ProofFailure {
-    #[error("region {region} allocated at 0x{alloc_point:x} is never freed on path {path_id}")]
     LeakedResource {
         region: RegionId,
         alloc_point: ProgramPoint,
         path_id: usize,
     },
 
-    #[error("region {region} freed multiple times: at {free_points:?}")]
     DoubleFree {
         region: RegionId,
         free_points: Vec<ProgramPoint>,
     },
 
-    #[error("region {region} accessed at 0x{access_point:x} after free at 0x{free_point:x}")]
     UseAfterFree {
         region: RegionId,
         access_point: ProgramPoint,
         free_point: ProgramPoint,
     },
 
-    #[error("SCG has no exit points; cleanup cannot be verified")]
     NoExitPoints,
 
-    #[error("internal proof error: {0}")]
     Internal(String),
 }
+
+impl std::fmt::Display for ProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofFailure::LeakedResource {
+                region,
+                alloc_point,
+                path_id,
+            } => write!(
+                f,
+                "region {region} allocated at 0x{alloc_point:x} is never freed on path {path_id}"
+            ),
+            ProofFailure::DoubleFree { region, free_points } => {
+                write!(f, "region {region} freed multiple times: at {free_points:?}")
+            }
+            ProofFailure::UseAfterFree {
+                region,
+                access_point,
+                free_point,
+            } => write!(
+                f,
+                "region {region} accessed at 0x{access_point:x} after free at 0x{free_point:x}"
+            ),
+            ProofFailure::NoExitPoints => {
+                write!(f, "SCG has no exit points; cleanup cannot be verified")
+            }
+            ProofFailure::Internal(s) => write!(f, "internal proof error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for ProofFailure {}
 
 // ---------------------------------------------------------------------------
 // CleanupProof

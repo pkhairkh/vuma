@@ -6,7 +6,6 @@
 //! flow to sensitive sinks.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -21,40 +20,78 @@ use crate::rules::InferenceRule;
 // ---------------------------------------------------------------------------
 
 /// Reasons why an origin proof might fail.
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProofFailure {
-    #[error("broken derivation chain at derivation {derivation_id}: {reason}")]
     BrokenChain { derivation_id: u64, reason: String },
 
-    #[error("derivation chain for {derivation_id} terminates at dead region {region_id}")]
     TerminatesAtDeadRegion {
         derivation_id: u64,
         region_id: RegionId,
     },
 
-    #[error("no provenance for region {region_id}")]
     NoProvenance { region_id: RegionId },
 
-    #[error("taint violation: tainted data from region {src_region} flows to {sensitivity} sink {sink_region}")]
     TaintViolation {
         src_region: RegionId,
         sink_region: RegionId,
         sensitivity: SinkSensitivity,
     },
 
-    #[error("untrusted source {src_region} flows to {sensitivity} sink {sink_region}")]
     UntrustedFlow {
         src_region: RegionId,
         sink_region: RegionId,
         sensitivity: SinkSensitivity,
     },
 
-    #[error("insufficient origin info: {detail}")]
     InsufficientInfo { detail: String },
 
-    #[error("internal proof error: {reason}")]
     Internal { reason: String },
 }
+
+impl std::fmt::Display for ProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofFailure::BrokenChain { derivation_id, reason } => write!(
+                f,
+                "broken derivation chain at derivation {derivation_id}: {reason}"
+            ),
+            ProofFailure::TerminatesAtDeadRegion {
+                derivation_id,
+                region_id,
+            } => write!(
+                f,
+                "derivation chain for {derivation_id} terminates at dead region {region_id}"
+            ),
+            ProofFailure::NoProvenance { region_id } => {
+                write!(f, "no provenance for region {region_id}")
+            }
+            ProofFailure::TaintViolation {
+                src_region,
+                sink_region,
+                sensitivity,
+            } => write!(
+                f,
+                "taint violation: tainted data from region {src_region} flows to {sensitivity} sink {sink_region}"
+            ),
+            ProofFailure::UntrustedFlow {
+                src_region,
+                sink_region,
+                sensitivity,
+            } => write!(
+                f,
+                "untrusted source {src_region} flows to {sensitivity} sink {sink_region}"
+            ),
+            ProofFailure::InsufficientInfo { detail } => {
+                write!(f, "insufficient origin info: {detail}")
+            }
+            ProofFailure::Internal { reason } => {
+                write!(f, "internal proof error: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProofFailure {}
 
 // ---------------------------------------------------------------------------
 // Origin proof objects

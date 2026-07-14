@@ -35,38 +35,33 @@ use vuma_scg::node::{NodeId, NodePayload, NodeType};
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during inference.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum InferenceError {
     /// The requested node does not exist in the SCG.
-    #[error("node not found: {node_id:?}")]
     NodeNotFound {
         /// The ID of the node that was not found.
         node_id: NodeId,
     },
 
     /// The SCG is in an invalid state for inference.
-    #[error("invalid SCG: {reason}")]
     InvalidSCG {
         /// A description of why the SCG is invalid.
         reason: String,
     },
 
     /// A cycle was detected during BD propagation.
-    #[error("cycle detected during BD propagation at node {node_id:?}")]
     CycleDetected {
         /// The node at which the cycle was detected.
         node_id: NodeId,
     },
 
     /// Inference could not converge.
-    #[error("inference did not converge after {iterations} iterations")]
     NoConvergence {
         /// The number of iterations completed before giving up.
         iterations: usize,
     },
 
     /// One or more BD inference errors occurred.
-    #[error("{count} BD inference error(s): {summary}")]
     BdErrors {
         /// The number of BD inference errors that occurred.
         count: usize,
@@ -75,12 +70,34 @@ pub enum InferenceError {
     },
 
     /// Topological sort failed (SCG has cycles).
-    #[error("SCG is not a DAG: {reason}")]
     NotADag {
         /// A description of why the SCG is not a DAG.
         reason: String,
     },
 }
+
+impl std::fmt::Display for InferenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InferenceError::NodeNotFound { node_id } => {
+                write!(f, "node not found: {node_id:?}")
+            }
+            InferenceError::InvalidSCG { reason } => write!(f, "invalid SCG: {reason}"),
+            InferenceError::CycleDetected { node_id } => {
+                write!(f, "cycle detected during BD propagation at node {node_id:?}")
+            }
+            InferenceError::NoConvergence { iterations } => {
+                write!(f, "inference did not converge after {iterations} iterations")
+            }
+            InferenceError::BdErrors { count, summary } => {
+                write!(f, "{count} BD inference error(s): {summary}")
+            }
+            InferenceError::NotADag { reason } => write!(f, "SCG is not a DAG: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for InferenceError {}
 
 // ---------------------------------------------------------------------------
 // InferenceResult
