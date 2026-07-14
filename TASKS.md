@@ -663,8 +663,8 @@
   - **AUDIT RESOLVED (Task 3-a):** Approach A taken. `Serialize, Deserialize` stripped from the named types plus their cascade containers in `src/bd/src/`: `RepD` (repd.rs), `CapD` (capd.rs), `RelD` (reld.rs), `BD` (descriptor.rs), plus `StructRep`/`ArrayRep`/`EnumRep`/`PtrRep`/`UnionRep`/`FuncRep`/`BDConstraint` (repd.rs), `BDTerm`/`BDConstraint` (unify.rs), and `ContextSolver` (context_solver.rs). The 8 `*_serde_roundtrip` tests in `repd.rs` were migrated to the hand-written `BinaryRead`/`BinaryWrite` codec and renamed `*_binary_roundtrip`. `serde_json.workspace = true` was **removed** from `src/bd/Cargo.toml` (no remaining `serde_json::` usage in `src/bd/src/`); `serde.workspace = true` retained with TODO comment listing ~33 remaining sites on non-named types (`Capability`/`Condition`/`Relation`/`ContextRule`/etc.). `cargo test -p vuma-bd --lib`: 354 passed, 0 failed.
 - [x] **[PROOF]** Replace serde derives on proof artifacts with hand-written binary (de)serialization.
   - **AUDIT RESOLVED (Task 3-a):** Approach A taken. `Serialize, Deserialize` stripped from the named types plus their cascade containers in `src/proof/src/`: `Proof`/`ProofStep`/`Fact`/`Goal`/`ProofContext` (proof.rs), `Judgment` (judgment.rs), `CleanupProof`/`NoDoubleFreeProof`/`NoUseAfterFreeProof` (cleanup_proofs.rs), `LivenessProof`/`NoDeadlockProof`/`AllocationFreedProof` (liveness_proofs.rs), `ExclusivityProof`/`ExclusivitySubProof`/`NoAliasProof`/`SynchronizationProof` (exclusivity_proofs.rs), `OriginProof`/`DerivationChainProof`/`TaintProof` (origin_proofs.rs), `BDCompatibilityProof`/`ReinterpretationSafetyProof`/`InterpretationProof` (interpretation_proofs.rs), `ProofBundle` (composition.rs), and the `ProofEnvelope` sum type (serialization.rs). The serde-derived `ProofEnvelope` JSON helpers (`to_json_string`/`from_json_string`/`to_json_string_pretty`/`to_writer`/`from_reader`), the `SerializationError` wrapper enum, the `From<serde_json::Error>` impl, and 4 JSON round-trip tests were removed; the hand-written binary codec (`serialize_proof`/`deserialize_proof`/`BinaryWrite`/`BinaryRead`) is now the canonical (de)serialization path. The `#[serde(default)]` attribute on `Fact::judgment` was removed (no longer needed without the derive). `serde_json.workspace = true` was **removed** from `src/proof/Cargo.toml` (no remaining `serde_json::` usage in `src/proof/src/`); `serde.workspace = true` retained with TODO comment listing ~64 remaining sites on non-named types (`LivenessTactic`/`WellFoundedOrdering`/`models.rs` types/etc.). `cargo test -p vuma-proof --lib`: 126 passed, 0 failed.
-- [~] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
-  - **AUDIT RESOLVED (Task 3-a, partial — Approach A):** `serde_json.workspace = true` removed from the 2 crates with no remaining `serde_json::` usage: `src/bd/Cargo.toml` and `src/proof/Cargo.toml`. For all other core crates (`scg`/`ive`/`vuma`/`codegen`/`parser`/`cor`/`std`/`package`), both `serde.workspace = true` and (where present) `serde_json.workspace = true` are retained, each with a `# TODO(wave43):` comment listing the file:line of the first remaining serde usage and an approximate count of remaining sites on non-named types. Full dep removal requires migrating ~426 remaining `#[derive(... Serialize ... Deserialize ...)]` sites across the core crates; that work is deferred to a future wave. `cargo check --workspace`: 0 errors.
+- [x] **[CORE]** Remove `serde`/`serde_json` from core crate `Cargo.toml`s. Keep in `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` only.
+  - **AUDIT RESOLVED (Tasks 3-a + 8-a):** All 10 core crates (scg, ive, bd, vuma-core, proof, codegen, parser, cor, std, package) are now serde-free. Task 3-a stripped the named types (NodeData/EdgeData/SCGRegion/RepD/CapD/RelD/BD/proof artifacts) and added hand-written BinarySerializable codecs. Task 8-a finished the job: stripped all remaining `Serialize`/`Deserialize` derives from non-named types across all 10 core crates, removed all `use serde::` imports, replaced all `serde_json::` call sites with hand-written alternatives (e.g., `merge_module_asts::fn_defs_equivalent` was rewritten to use Debug-string + span normalization instead of `serde_json::to_value`), removed `serde.workspace = true` and `serde_json.workspace = true` from every core crate Cargo.toml. `serde`/`serde_json` retained ONLY in the root vuma crate Cargo.toml for peripheral API types (CompileConfig, CompileResult, etc.) consumed by `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` — per the original Wave 43 spec. `#[derive(PartialEq)]` added to all 48 AST types in `src/parser/src/ast.rs` for future structural-equality use cases. `cargo check --workspace`: 0 errors. All 947+ workspace tests pass.
 - [x] **[TEST]** Add round-trip tests for each hand-written serializer.
   - **AUDIT CONFIRMED:** Real round-trip tests exist for SCG (`serialize.rs:1784, 1796, 1815`), BD (`bd/src/serialize.rs:1002, 1010, 1036, 1104, 1124, 1147, 1192`), Proof (`proof/src/serialization.rs:1078, 1098, 1165, 1173, 1185, 1266, 1384`).
 
@@ -915,10 +915,19 @@ notes. The updated verdict tally below reflects the post-remediation state.
 
 ### Priority follow-up actions (post-remediation)
 
-1. **Wave 43 finish.** Migrate the remaining ~426 `#[derive(Serialize,
-   Deserialize)]` sites on non-named types, then remove `serde`/`serde_json`
-   from the remaining 8 core crate `Cargo.toml`s (currently only `bd` and
-   `proof` are fully serde-free).
+1. **Wave 43 — DONE (Task 8-a).** All 10 core crates (scg, ive, bd, vuma-core,
+   proof, codegen, parser, cor, std, package) are now serde-free — no
+   `Serialize`/`Deserialize` derives, no `use serde::` imports, no
+   `serde_json::` calls, no `serde`/`serde_json` deps in their Cargo.tomls.
+   `serde`/`serde_json` retained ONLY in the root vuma crate for peripheral
+   API types (`CompileConfig`, `CompileResult`, etc.) consumed by
+   `src/llm_api.rs`, `src/telemetry.rs`, `src/lsp/` — per the original
+   Wave 43 spec ("Keep serde only for peripheral JSON"). The
+   `merge_module_asts::fn_defs_equivalent` function (Task 7-c) was
+   rewritten to use Debug-string + span normalization instead of
+   `serde_json::to_value` (Task 8-a). `#[derive(PartialEq)]` added to all
+   48 AST types in `src/parser/src/ast.rs` for future structural-equality
+   use cases. All 947+ workspace tests pass.
 2. **Wave 50 clippy paydown.** Fix the ~658 clippy warnings (114 auto-
    fixable via `cargo fix --lib -p vuma-codegen --tests`), then upgrade
    `wave50-hardening.yml`'s clippy job from advisory to strict.
