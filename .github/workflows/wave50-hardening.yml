@@ -1,0 +1,113 @@
+# ============================================================================
+# VUMA Wave 50 — Final Hardening CI
+# ============================================================================
+# Advisory CI jobs for Wave 50:
+#   * clippy-advisory  — runs `cargo clippy --workspace`, fails only on
+#                        clippy ERRORS (not warnings).  The codebase has
+#                        ~300 pre-existing warnings; once they trend to
+#                        zero, this job should switch to `-D warnings`
+#                        (matching the existing `ci.yml` clippy job).
+#   * full-test-advisory — runs `cargo test --workspace --no-fail-fast`,
+#                          continue-on-error: true (advisory).  Some
+#                          pre-existing tests fail (W49 documented vuma-tests
+#                          compile issues); the job is advisory until the
+#                          full workspace test suite is green, at which
+#                          point `continue-on-error` should be removed.
+#
+# These jobs are SEPARATE from `.github/workflows/ci.yml` (which has
+# `-D warnings` clippy and a per-OS `cargo test --workspace` test job)
+# so that the existing gating jobs are unaffected.  Wave 50 introduces
+# these advisory jobs to surface clippy errors and full-test status on
+# every push without blocking merge until the codebase is clean.
+# ============================================================================
+
+name: Wave 50 Hardening
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: wave50-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Clippy (advisory — fails on errors only) ──────────────────────────────
+  clippy-advisory:
+    name: Clippy (advisory, errors-only)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-03-01
+          components: clippy, rust-src
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wave50-clippy-${{ runner.os }}
+
+      - name: Run Clippy (advisory)
+        # Run clippy across the workspace WITHOUT `-D warnings` — the
+        # codebase has ~300 pre-existing warnings that are being worked
+        # off incrementally.  Fail only on clippy ERRORS (lines starting
+        # with "error"), not on warnings.
+        #
+        # TODO(wave50): once the warning count trends to zero, replace
+        # this with `cargo clippy --workspace -- -D warnings` (matching
+        # the existing ci.yml clippy job) and remove the advisory nature.
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets 2>&1 | tee clippy.log
+          # If clippy emitted any "error:" lines (excluding "error: could
+          # not compile" which is a downstream summary), fail the job.
+          if grep -E '^error' clippy.log | grep -v 'could not compile' | grep -q . ; then
+            echo "::error::Clippy emitted errors — see clippy.log"
+            exit 1
+          fi
+          # Warnings are tolerated (advisory).
+          echo "Clippy passed (warnings tolerated, errors blocked)."
+          exit 0
+
+  # ── Full test suite (advisory — continue-on-error) ────────────────────────
+  full-test-advisory:
+    name: Full test suite (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: do not block merge on this job until the workspace test
+    # suite is fully green.  Once all pre-existing failures are resolved,
+    # remove `continue-on-error` to make this job blocking.
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-03-01
+          components: rust-src
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wave50-test-${{ runner.os }}
+
+      - name: Run full test suite (--no-fail-fast)
+        # --no-fail-fast keeps the suite running after a failure so that
+        # all failures are surfaced in a single run, not just the first.
+        #
+        # TODO(wave50): once the workspace test suite is green, remove
+        # `--no-fail-fast` (optional) and remove the job-level
+        # `continue-on-error: true` to make this blocking.
+        run: cargo test --workspace --no-fail-fast
