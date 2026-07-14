@@ -8,11 +8,10 @@
 
 use crate::address::Address;
 use crate::region::RegionId;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Unique identifier for a derivation step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DerivationId(pub u64);
 
 impl fmt::Display for DerivationId {
@@ -22,7 +21,7 @@ impl fmt::Display for DerivationId {
 }
 
 /// What a derivation starts from.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DerivationSource {
     /// Directly from a region base address (e.g. `&x`).
     Region(RegionId),
@@ -35,7 +34,7 @@ pub enum DerivationSource {
 /// `RepD` captures the low-level representation of the type being cast
 /// from/to (e.g. `*mut u8` vs `*mut u32`). This is kept intentionally
 /// lightweight; the front-end is free to encode whatever it needs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepD {
     /// A human-readable name for the representation (e.g. `"*mut u8"`).
     pub name: String,
@@ -49,7 +48,7 @@ pub struct RepD {
 /// such as `ptr + n * stride`. It is intentionally minimal — the goal
 /// is to record enough information to reconstruct bounds, not to serve
 /// as a general expression evaluator.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DerivationExpr {
     /// A constant offset (in bytes).
     Constant(i64),
@@ -62,7 +61,7 @@ pub enum DerivationExpr {
 }
 
 /// The kind of derivation operation performed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DerivationKind {
     /// Taking the address of a value: `&x`.
     Direct,
@@ -104,7 +103,7 @@ impl fmt::Display for DerivationKind {
 /// - what kind of derivation was performed ([`DerivationKind`]),
 /// - the provenance range `[proven_range.0, proven_range.1)` — the address
 ///   range that this derivation is *allowed* to access.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Derivation {
     /// Unique identifier for this derivation.
     pub id: DerivationId,

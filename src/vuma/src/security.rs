@@ -25,7 +25,6 @@ use crate::derivation::{Derivation, DerivationId};
 use crate::program_point::{NodeId, ProgramPoint};
 use crate::region::RegionId;
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ use std::fmt;
 /// - **Join** (lub) = `max(l1, l2)` — the more restrictive level.
 /// - **Meet** (glb) = `min(l1, l2)` — the less restrictive level.
 /// - **Top** = `TopSecret`, **Bottom** = `Public`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SecurityLevel {
     /// Bottom element — unrestricted, openly observable.
     Public = 0,
@@ -119,7 +118,7 @@ impl fmt::Display for SecurityLevel {
 // ---------------------------------------------------------------------------
 
 /// The permissible information-flow direction for a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowPolicy {
     /// Unrestricted movement in any direction.
     FreeFlow,
@@ -145,7 +144,7 @@ impl fmt::Display for FlowPolicy {
 // ---------------------------------------------------------------------------
 
 /// A source of taint — untrusted origin that data may come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaintSource {
     /// User input (stdin, CLI args, env vars, GUI events).
     UserInput,
@@ -166,7 +165,7 @@ impl fmt::Display for TaintSource {
 }
 
 /// The taint status of a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaintStatus {
     /// Value is not tainted.
     Clean,
@@ -313,7 +312,7 @@ impl fmt::Display for TaintStatus {
 ///
 /// A `TaintLabel` is essentially a set of [`TaintSource`] values. The empty
 /// set represents "Clean" (no taint). Taint propagation is set union.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaintLabel {
     /// The set of taint sources. Empty means clean.
     sources: HashSet<TaintSource>,
@@ -517,7 +516,7 @@ impl TaintTracker {
 /// security-level and hardware-mapping decisions. The full set lives in
 /// `bd::capd::Capability`; we duplicate the relevant variants here to keep
 /// the security module self-contained and avoid a cross-crate dependency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecurityCapability {
     /// Permission to observe the value's content.
     Read,
@@ -553,7 +552,7 @@ impl fmt::Display for SecurityCapability {
 /// This is the core data structure of the security model. It records the
 /// security classification, flow policy, taint status, and (if applicable)
 /// the provenance of any declassification that has been applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityRel {
     /// The security classification of this value.
     pub level: SecurityLevel,
@@ -693,7 +692,7 @@ impl FlowPolicy {
 // ---------------------------------------------------------------------------
 
 /// A violation of the security model detected during verification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecurityViolation {
     /// Information would leak from a higher level to a lower level.
     InformationLeak {
@@ -806,7 +805,7 @@ impl fmt::Display for SecurityViolation {
 // ---------------------------------------------------------------------------
 
 /// Opaque identifier for a declassification gate function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GateFunctionId(pub u64);
 
 impl fmt::Display for GateFunctionId {
@@ -822,7 +821,7 @@ impl fmt::Display for GateFunctionId {
 /// 2. The gate function has been verified to produce output safe at the
 ///    target level (output independence, no side channels, completeness).
 /// 3. The gate is the designated gate for the boundary being crossed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclassificationProof {
     /// The gate function that performs the declassification.
     pub gate: GateFunctionId,
@@ -874,7 +873,7 @@ impl DeclassificationProof {
 ///
 /// Every declassification is logged at runtime, enabling post-incident
 /// analysis of information leaks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclassificationRecord {
     /// The gate function that performed the declassification.
     pub gate_function: GateFunctionId,
@@ -893,7 +892,7 @@ pub struct DeclassificationRecord {
 // ---------------------------------------------------------------------------
 
 /// Opaque identifier for a security boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BoundaryId(pub u64);
 
 impl fmt::Display for BoundaryId {
@@ -907,7 +906,7 @@ impl fmt::Display for BoundaryId {
 /// A boundary `B = (R_high, R_low)` enforces that data and control flow
 /// crossing from the higher-level region to the lower-level region must
 /// satisfy the information-flow rule or go through a declassification gate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityBoundary {
     /// Unique identifier.
     pub id: BoundaryId,
@@ -1028,7 +1027,7 @@ impl SecurityBoundary {
 // ---------------------------------------------------------------------------
 
 /// ARM64 PAC key identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PacKey {
     /// APIAKey — for instruction addresses (function pointers).
     ApiA,
@@ -1037,7 +1036,7 @@ pub enum PacKey {
 }
 
 /// ARM64 MTE operating mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MteMode {
     /// Synchronous tag checks (precise faults, used in dev/test).
     Synchronous,
@@ -1046,7 +1045,7 @@ pub enum MteMode {
 }
 
 /// ARM64 BTI landing pad type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BtiType {
     /// `bti c` — permits indirect calls.
     Call,
@@ -1066,7 +1065,7 @@ pub enum BtiType {
 /// | Bounds invariant          | MTE           | Allocation tags prevent spatial overflow  |
 /// | Liveness invariant        | MTE           | Deallocation retagging prevents UAF      |
 /// | Capability monotonicity   | PAC + BTI     | Can't forge pointers or redirect exec    |
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arm64SecurityMapping {
     /// The PAC key used for instruction (code) pointer signing.
     pub pac_instruction_key: PacKey,
@@ -1218,7 +1217,7 @@ impl Arm64SecurityMapping {
 }
 
 /// ARM64 hardware security features.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arm64Feature {
     /// Pointer Authentication Codes.
     Pac,
@@ -1273,7 +1272,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Result of a security verification pass.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerificationResult {
     /// Total number of checks performed.
     pub total_checks: usize,
@@ -1331,7 +1330,7 @@ impl fmt::Display for VerificationResult {
 
 /// A value node in the security graph, carrying its SecurityRel and
 /// associated region.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecNode {
     /// Unique node identifier.
     pub id: NodeId,
@@ -1346,7 +1345,7 @@ pub struct SecNode {
 }
 
 /// A data-flow edge in the security graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecEdge {
     /// Source node.
     pub from: NodeId,

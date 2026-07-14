@@ -60,6 +60,7 @@ use vuma_ive::{AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAg
 use vuma_parser::ast::{Expr, Item, Lit, Stmt, Type as AstType};
 use vuma_parser::to_scg::AstToScg;
 use vuma_parser::{offset_to_location, ParseError, Parser, Span};
+use vuma_scg::llm_json::{build_array, build_object, json_str, json_usize, JsonValue};
 use vuma_scg::SCG;
 
 use crate::msg::MSG;
@@ -1304,81 +1305,100 @@ Expressions:
     ///
     /// Outputs all current parse errors, verification results, and
     /// compilation warnings in JSON format for LLM consumption.
+    ///
+    /// Wave 43 serde-migration: previously used `serde_json::json!({...})` to
+    /// build a `serde_json::Value` and `serde_json::to_string_pretty` to
+    /// serialize it. Now uses `vuma_scg::llm_json::JsonValue` + the
+    /// `build_object` / `build_array` helpers + `JsonValue::to_string_pretty`.
+    /// The on-disk JSON shape is byte-identical.
     fn cmd_diagnostics(&self) -> Result<ReplResult, ReplError> {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics: Vec<JsonValue> = Vec::new();
 
         // Add verification diagnostics if available.
         if let Some(ref result) = self.last_verification {
             let report = DiagnosticsReport::from_aggregated(result);
-            diagnostics.push(serde_json::json!({
-                "source": "ive_verification",
-                "overall": format!("{:?}", result.overall),
-                "details": format!("{}", report),
-                "timestamp_ms": 0,
-            }));
+            diagnostics.push(build_object(vec![
+                ("source".to_string(), json_str("ive_verification")),
+                ("overall".to_string(), json_str(format!("{:?}", result.overall))),
+                ("details".to_string(), json_str(format!("{}", report))),
+                ("timestamp_ms".to_string(), json_usize(0)),
+            ]));
         }
 
         // Add profile diagnostics.
         if self.profile.parse_errors > 0 {
-            diagnostics.push(serde_json::json!({
-                "source": "parser",
-                "severity": "error",
-                "count": self.profile.parse_errors,
-                "message": format!("{} parse error(s) encountered in this session", self.profile.parse_errors),
-            }));
+            diagnostics.push(build_object(vec![
+                ("source".to_string(), json_str("parser")),
+                ("severity".to_string(), json_str("error")),
+                ("count".to_string(), json_usize(self.profile.parse_errors)),
+                (
+                    "message".to_string(),
+                    json_str(format!(
+                        "{} parse error(s) encountered in this session",
+                        self.profile.parse_errors
+                    )),
+                ),
+            ]));
         }
 
         // Add SCG status.
         if self.scg.node_count() > 0 {
-            diagnostics.push(serde_json::json!({
-                "source": "scg",
-                "severity": "info",
-                "node_count": self.scg.node_count(),
-                "edge_count": self.scg.edge_count(),
-                "region_count": self.scg.region_count(),
-                "message": "SCG is populated",
-            }));
+            diagnostics.push(build_object(vec![
+                ("source".to_string(), json_str("scg")),
+                ("severity".to_string(), json_str("info")),
+                ("node_count".to_string(), json_usize(self.scg.node_count())),
+                ("edge_count".to_string(), json_usize(self.scg.edge_count())),
+                ("region_count".to_string(), json_usize(self.scg.region_count())),
+                ("message".to_string(), json_str("SCG is populated")),
+            ]));
         }
 
         // Add MSG status.
         match &self.msg {
             Some(msg) => {
-                diagnostics.push(serde_json::json!({
-                    "source": "msg",
-                    "severity": "info",
-                    "message": "MSG available",
-                    "summary": format!("{}", msg),
-                }));
+                diagnostics.push(build_object(vec![
+                    ("source".to_string(), json_str("msg")),
+                    ("severity".to_string(), json_str("info")),
+                    ("message".to_string(), json_str("MSG available")),
+                    ("summary".to_string(), json_str(format!("{}", msg))),
+                ]));
             }
             None => {
                 if self.scg.node_count() > 0 {
-                    diagnostics.push(serde_json::json!({
-                        "source": "msg",
-                        "severity": "warning",
-                        "message": "MSG not available (conversion may have failed)",
-                    }));
+                    diagnostics.push(build_object(vec![
+                        ("source".to_string(), json_str("msg")),
+                        ("severity".to_string(), json_str("warning")),
+                        (
+                            "message".to_string(),
+                            json_str("MSG not available (conversion may have failed)"),
+                        ),
+                    ]));
                 }
             }
         }
 
         if diagnostics.is_empty() {
-            diagnostics.push(serde_json::json!({
-                "source": "repl",
-                "severity": "info",
-                "message": "No diagnostics available. Enter some VUMA code first.",
-            }));
+            diagnostics.push(build_object(vec![
+                ("source".to_string(), json_str("repl")),
+                ("severity".to_string(), json_str("info")),
+                (
+                    "message".to_string(),
+                    json_str("No diagnostics available. Enter some VUMA code first."),
+                ),
+            ]));
         }
 
-        let json_output = serde_json::json!({
-            "version": "0.1.0-alpha.1",
-            "session_source_bytes": self.session_source.len(),
-            "target": self.target,
-            "diagnostics": diagnostics,
-        });
+        let json_output = build_object(vec![
+            ("version".to_string(), json_str("0.1.0-alpha.1")),
+            (
+                "session_source_bytes".to_string(),
+                json_usize(self.session_source.len()),
+            ),
+            ("target".to_string(), json_str(self.target.clone())),
+            ("diagnostics".to_string(), build_array(diagnostics)),
+        ]);
 
-        Ok(ReplResult::Ok(Some(
-            serde_json::to_string_pretty(&json_output).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e))
-        )))
+        Ok(ReplResult::Ok(Some(json_output.to_string_pretty())))
     }
 
     // -----------------------------------------------------------------------
