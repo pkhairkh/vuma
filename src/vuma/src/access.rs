@@ -7,11 +7,10 @@
 use crate::address::Address;
 use crate::derivation::DerivationId;
 use crate::program_point::ProgramPoint;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Unique identifier for a memory access event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccessId(pub u64);
 
 impl fmt::Display for AccessId {
@@ -21,7 +20,7 @@ impl fmt::Display for AccessId {
 }
 
 /// The kind of memory access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum AccessKind {
     /// A read from memory.
     Read,
@@ -49,7 +48,7 @@ impl fmt::Display for AccessKind {
 /// Two accesses *conflict* if their byte ranges overlap and at least one
 /// of them is a write. This is the classic condition for a potential
 /// data race (absent synchronisation).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Access {
     /// Unique identifier for this access.
     pub id: AccessId,

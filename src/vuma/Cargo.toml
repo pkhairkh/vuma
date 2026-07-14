@@ -11,11 +11,13 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/vuma/src/repl.rs:1313 (and 54
-# other sites across security/sync/address/access/derivation/region/
-# program_point modules); migrate to hand-written codec.
-serde.workspace = true
-serde_json.workspace = true
+# serde/serde_json removed in Wave 43 — all vuma-core types (security/sync/
+# address/access/derivation/region/program_point/msg/etc.) now rely on
+# hand-written Debug + Clone derives only. The `:diagnostics` REPL command
+# (`src/vuma/src/repl.rs`) previously used `serde_json::json!` +
+# `serde_json::to_string_pretty`; it now uses `vuma_scg::llm_json` (the
+# hand-written JSON value type + pretty-printer in `src/scg/src/llm_json.rs`).
+# The on-disk JSON shape produced by `:diagnostics` is byte-identical.
 vuma-scg.workspace = true
 vuma-parser.workspace = true
 vuma-ive.workspace = true

@@ -7,11 +7,10 @@
 
 use crate::address::Address;
 use crate::program_point::ProgramPoint;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Unique identifier for a memory region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionId(pub u64);
 
 impl fmt::Display for RegionId {
@@ -21,7 +20,7 @@ impl fmt::Display for RegionId {
 }
 
 /// The lifecycle status of a memory region.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RegionStatus {
     /// Heap-allocated and currently live.
     Allocated,
@@ -60,7 +59,7 @@ impl fmt::Display for RegionStatus {
 /// - `size > 0` — zero-sized regions are not represented.
 /// - The range `[base, base + size)` must not wrap around the `u64` address
 ///   space.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Region {
     /// Unique identifier for this region.
     pub id: RegionId,
