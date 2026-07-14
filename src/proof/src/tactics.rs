@@ -5,7 +5,6 @@
 //! they take a goal and produce zero or more subgoals that, once proven,
 //! together establish the original goal.
 
-use serde::{Deserialize, Serialize};
 
 use crate::judgment::Judgment;
 use crate::proof::{Goal, ProofContext, RegionId, Target};
@@ -127,7 +126,7 @@ impl std::error::Error for TacticError {}
 
 /// A proof tactic — an automated proof strategy that decomposes a goal into
 /// subgoals.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tactic {
     /// Simplify the goal by applying beta-reduction and trivial rewrites.
     Simplify,

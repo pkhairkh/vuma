@@ -5,30 +5,29 @@
 //! memory state, enabling structural matching instead of fragile string
 //! comparison.
 
-use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Typed ID newtypes
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a memory region.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RegionId(pub u64);
 
 /// Unique identifier for a resource (lock, buffer, etc.).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResourceId(pub u64);
 
 /// Unique identifier for a pointer derivation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PointerId(pub u64);
 
 /// Unique identifier for a variable.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VariableId(pub u64);
 
 /// Unique identifier for an event in the happens-before relation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventId(pub u64);
 
 impl std::fmt::Display for RegionId {
@@ -79,7 +78,7 @@ impl From<RegionId> for u64 {
 
 /// Capability derivation kind — used in `PreservesCapD` judgments to track
 /// what capability property is being preserved across a transformation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapDKind {
     /// Read capability — allows observing the value.
     Read,

@@ -11,7 +11,6 @@
 //!   invariant's proof.
 
 use crate::proof::{Conclusion, InvariantName, Proof};
-use serde::{Deserialize, Serialize};
 
 /// A bundle of proofs for all five invariants.
 #[derive(Debug, Clone)]
@@ -29,7 +28,7 @@ pub struct ProofBundle {
 }
 
 /// Status of an individual invariant within a ProofBundle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvariantStatus {
     /// Proof successfully established.
     Proven,
@@ -40,7 +39,7 @@ pub enum InvariantStatus {
 }
 
 /// An assumption from one proof that isn't discharged by any other proof.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct UnresolvedAssumption {
     /// The invariant that makes this assumption.
     pub source_invariant: InvariantName,
