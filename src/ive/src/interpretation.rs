@@ -1048,23 +1048,24 @@ impl InterpretationVerifier {
             }
         }
 
-        // Build the verification result
+        // Build the verification result.
+        //
+        // Wave 18: No `Evidence::FormalProof` is attached here. This verifier
+        // performs dataflow analysis (RepD/CapD/RelD compatibility, type
+        // confusion, pointer reinterpretation, uninitialized reads), not a
+        // ProofChecker-style formal proof — so claiming `FormalProof` evidence
+        // would be the same string-evidence anti-pattern that was removed from
+        // `invariant_aggregator.rs`. Per Wave 18's claim, `FormalProof` is
+        // only attached when `ProofChecker::check` returns `Valid`, which
+        // happens in `api.rs`'s cross-check loop — not here. Sibling invariant
+        // verifiers (`liveness`, `exclusivity`) use `ExhaustiveAnalysis` for
+        // their dataflow results; this verifier attaches no evidence.
         let result = if violations.is_empty() && pending_proof_obligations == 0 {
             VerificationResult::new(
                 "interpretation",
                 VerificationStatus::Proven,
                 "all write-read pairs satisfy the interpretation invariant",
             )
-            .with_evidence(crate::result::Evidence::FormalProof {
-                steps: vec![
-                    "checked RepD compatibility for all write-read pairs".into(),
-                    "checked CapD transition validity for all write-read pairs".into(),
-                    "checked RelD preservation for all write-read pairs".into(),
-                    "no type confusion detected".into(),
-                    "no pointer reinterpretation without cast detected".into(),
-                    "no uninitialized reads detected".into(),
-                ],
-            })
         } else if !violations.is_empty() {
             // Hard violations exist
             let descriptions: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
