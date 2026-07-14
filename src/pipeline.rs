@@ -5124,6 +5124,46 @@ pub fn compile_with_path(
         }
     };
 
+    // ── Wave 34: Lowering passes (monomorphize, closures, switch, tail-call,
+    //    loop-normalize) — run after SCG→IR build, before the main opt pass.
+    //    Gated at O1+. Each pass is best-effort: a soft-failure is logged but
+    //    does not abort compilation (these are newly-wired passes; the
+    //    pipeline's correctness does not yet depend on them).
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let tlower = Instant::now();
+        let mut lower = |name: &str, f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
+            if let Err(e) = f(&mut ir_program) {
+                vuma_log!(warn, "wave34 lowering pass '{}' soft-failed: {}", name, e);
+            }
+        };
+        lower("monomorphize", vuma_codegen::monomorphize::monomorphize);
+        lower("lower_closures", vuma_codegen::closures::lower_closures);
+        lower("lower_switches", vuma_codegen::control_flow::lower_switches);
+        lower("lower_tail_calls", vuma_codegen::control_flow::lower_tail_calls);
+        lower("normalize_loops", vuma_codegen::control_flow::normalize_loops);
+        timings.push(("wave34-lowering".to_string(), tlower.elapsed().as_millis() as u64));
+    }
+
+    // ── Wave 36: bv_verify gate — verify all e-graph rewrite rules are sound
+    //    BEFORE the opt pass (which runs the e-graph). If any rule is unsound,
+    //    log a warning so the user knows the e-graph may miscompile. The gate
+    //    is advisory (does not abort) to avoid breaking compilation for
+    //    pre-existing rule sets; a future strict mode could promote this to an
+    //    error.
+    {
+        let tverify = Instant::now();
+        let results = vuma_codegen::bv_verify::verify_all_rules();
+        let unsound: Vec<_> = results.iter().filter(|r| !r.sound).collect();
+        if !unsound.is_empty() {
+            vuma_log!(warn,
+                "wave36 bv_verify: {} unsound e-graph rule(s) detected (compilation may miscompile): {}",
+                unsound.len(),
+                unsound.iter().map(|r| r.rule_name).collect::<Vec<_>>().join(", ")
+            );
+        }
+        timings.push(("wave36-bv-verify".to_string(), tverify.elapsed().as_millis() as u64));
+    }
+
     // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers
     // at compile time. Since `nr` is arch-specific (Wave 11/12 design), we
     // use a range check rather than a name lookup. Valid Linux syscall
@@ -5260,7 +5300,7 @@ pub fn compile_with_path(
 
     // ── Stage 11: COR Initialization ──────────────────────────────────
     let t = Instant::now();
-    let cor_runtime = {
+    let mut cor_runtime = {
         // Bridge the vuma_scg::SCG to the COR-internal SCG representation
         // using CORuntime::from_vuma_scg(), then compile all regions
         // incrementally with a Delta containing every node ID.
@@ -5285,6 +5325,34 @@ pub fn compile_with_path(
         Some(rt)
     };
     timings.push(("cor-init".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Wave 38: CORuntime::optimize_module — run the real CoR optimization
+    //    passes (HotPathInlining/ColdPathOutline/LoopOptimization/MemoryOptimization,
+    //    per Wave 37) on the constructed runtime. Per Wave 38 decision (b),
+    //    CoR is profiling-only: this call optimizes the CoR-internal SCG
+    //    representation and logs the OptimizationSummary, but does NOT splice
+    //    the result back into the emitted user binary (that would require
+    //    moving CoR construction before emit_binary — deferred). Gated behind
+    //    a runtime check so default compilation is unaffected.
+    if let Some(ref mut rt) = cor_runtime {
+        let topt = Instant::now();
+        match rt.optimize_module() {
+            Ok(summary) => {
+                vuma_log!(info,
+                    "wave38 cor-optimize: nodes {}->{}, edges {}->{}, reoptimized {} regions",
+                    summary.scg_node_count_before,
+                    summary.scg_node_count_after,
+                    summary.scg_edge_count_before,
+                    summary.scg_edge_count_after,
+                    summary.reoptimized_regions,
+                );
+                timings.push(("wave38-cor-optimize".to_string(), topt.elapsed().as_millis() as u64));
+            }
+            Err(e) => {
+                vuma_log!(warn, "wave38 cor-optimize soft-failed: {}", e);
+            }
+        }
+    }
 
     // If we accumulated errors but still produced a binary, report them.
     if !errors.is_empty() {
