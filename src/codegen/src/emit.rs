@@ -71,18 +71,6 @@ use crate::regalloc::{AllocationResult, RegAllocator};
 use crate::CodegenError;
 use crate::Result;
 
-/// Vreg count threshold above which the stack-slot emitter is used as a
-/// fallback.  Set to `u32::MAX` (Wave 21) so the greedy/register-allocated
-/// path is always preferred; the stack-slot emitter is now only used when
-/// no `AllocationResult` is available AND the greedy allocator fails.
-///
-/// Previously this was `0`, which forced EVERY function through
-/// `emit_function_stack_slot` — discarding the `LinearScanAllocator`'s
-/// `AllocationResult` and lowering every vreg to a stack slot.  Wave 21
-/// removes this hack so the register-allocated emission path is actually
-/// used.
-const STACK_SLOT_VREG_THRESHOLD: u32 = u32::MAX;
-
 // ---------------------------------------------------------------------------
 // Branch fixup format
 // ---------------------------------------------------------------------------
@@ -618,9 +606,16 @@ impl Emitter {
     /// (Wave 21) If an `AllocationResult` is provided, the register-allocated
     /// emission path is used (`emit_function_regalloc`), which consults the
     /// pre-computed register assignments, spill code, and coalescing info.
-    /// Otherwise, the greedy register allocator is used for functions with
-    /// ≤ `STACK_SLOT_VREG_THRESHOLD` vregs, and the stack-slot emitter is
-    /// used as a fallback.
+    /// Otherwise, the greedy register allocator is used.
+    ///
+    /// (Wave 50) The previous `vreg_count > STACK_SLOT_VREG_THRESHOLD`
+    /// dispatch to [`emit_function_stack_slot`](Self::emit_function_stack_slot)
+    /// was removed: `STACK_SLOT_VREG_THRESHOLD` had been set to `u32::MAX`
+    /// in Wave 21 (making the greedy path always preferred), so the
+    /// comparison was *always false* and the stack-slot branch was dead
+    /// code — flagged by `clippy::absurd_extreme_comparisons`.  The
+    /// stack-slot emitter remains available as a public method for callers
+    /// that want it explicitly; it is just no longer auto-selected here.
     ///
     /// Returns a vector of 32-bit ARM64 instruction words.
     pub fn emit_function(
@@ -632,14 +627,13 @@ impl Emitter {
         if let Some(result) = alloc {
             return self.emit_function_regalloc(func, result);
         }
-        // No AllocationResult — use the greedy allocator (threshold is now
-        // u32::MAX, so this path is always taken when no result is provided).
-        let vreg_count = count_vregs(func);
-        if vreg_count > STACK_SLOT_VREG_THRESHOLD {
-            self.emit_function_stack_slot(func)
-        } else {
-            self.emit_function_greedy(func)
-        }
+        // No AllocationResult — use the greedy allocator.  (Wave 50: the
+        // previous `vreg_count > STACK_SLOT_VREG_THRESHOLD` check was
+        // always false because the threshold was `u32::MAX`, so the
+        // stack-slot emitter was unreachable from here.  Callers that want
+        // the stack-slot strategy must invoke `emit_function_stack_slot`
+        // directly.)
+        self.emit_function_greedy(func)
     }
 
     /// (Wave 21) Emit a single IR function using a pre-computed
@@ -4157,58 +4151,14 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
 }
 
 // ---------------------------------------------------------------------------
-// Vreg count computation
-// ---------------------------------------------------------------------------
-
-/// Count the number of unique virtual registers used in a function.
-/// This is used to decide whether to use the stack-slot emitter or the
-/// greedy register allocator.
-fn count_vregs(func: &IRFunction) -> u32 {
-    let mut vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for &id in func.vregs.keys() {
-        vregs.insert(id);
-    }
-    for param in &func.params {
-        if let Some(id) = param.as_register() {
-            vregs.insert(id);
-        }
-    }
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            for id in instr.defined_regs() {
-                vregs.insert(id);
-            }
-            for id in instr.used_regs() {
-                vregs.insert(id);
-            }
-        }
-        match &block.terminator {
-            IRTerminator::Branch { cond, .. } => {
-                if let Some(id) = cond.as_register() {
-                    vregs.insert(id);
-                }
-            }
-            IRTerminator::Return(vals) => {
-                for val in vals {
-                    if let Some(id) = val.as_register() {
-                        vregs.insert(id);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    for val in &func.results {
-        if let Some(id) = val.as_register() {
-            vregs.insert(id);
-        }
-    }
-    vregs.len() as u32
-}
-
-// ---------------------------------------------------------------------------
 // Frame-size computation
 // ---------------------------------------------------------------------------
+
+// (Wave 50) The `count_vregs` helper that used to live here was removed:
+// it was only consulted by the dead `vreg_count > STACK_SLOT_VREG_THRESHOLD`
+// dispatch in `emit_function`, and became unused once that branch was
+// deleted.  `compute_frame_size` below performs its own vreg scan inline
+// (it needs the *max* vreg id, not the count).
 
 /// Compute the stack frame size for a function by summing its `Alloc`
 /// instructions and rounding up to 16-byte alignment.

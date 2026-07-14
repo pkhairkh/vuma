@@ -1921,7 +1921,9 @@ impl Default for LinearScanAllocator {
 //
 // Despite the task description suggesting this was "gated out by
 // `STACK_SLOT_VREG_THRESHOLD=0`", that hack was removed in Wave 21
-// (`STACK_SLOT_VREG_THRESHOLD` is now `u32::MAX` in `emit.rs`).  The
+// (the threshold was set to `u32::MAX`, then in Wave 50 the
+// `vreg_count > STACK_SLOT_VREG_THRESHOLD` dispatch was deleted
+// entirely as dead code — see `emit.rs::emit_function`).  The
 // legacy greedy allocator is still actively used by `codegen::emit::Emitter`
 // (see `emit.rs:570` — `reg_alloc: RegAllocator` field, constructed in
 // `Emitter::new` at `emit.rs:599`) for the non-register-allocated emit
