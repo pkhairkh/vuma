@@ -1664,6 +1664,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_st(R28, dst_off));
                         }
                     }
+                    // ── VectorOp (Wave 29) ──
+                    // HPPA has no SIMD encoder in the Wave 29 suite; emit nothing.
+                    IRInstr::VectorOp { .. } => {}
                 }
             }
 

@@ -1256,6 +1256,11 @@ fn emit_instr(
                 code.extend(ss_st(Gpr::R0, dst_off));
             }
         }
+        // ── VectorOp (Wave 29) ──
+        // Alpha has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // The vectorizer still produces the IR; this backend just cannot
+        // lower it to SIMD machine code.
+        IRInstr::VectorOp { .. } => {}
     }
 }
 

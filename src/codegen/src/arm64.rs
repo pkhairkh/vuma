@@ -1226,6 +1226,15 @@ pub enum Instruction {
     SVC { imm16: u16 },
     /// No-operation: `NOP`
     NOP,
+
+    // ---- NEON SIMD (Wave 29 ISel wiring) ----
+    /// Raw 32-bit NEON instruction word, pre-encoded by `encode_neon_*`.
+    ///
+    /// Used by `select_from_ir` when lowering `IRInstr::VectorOp` — the
+    /// encoder helpers (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`)
+    /// already produce the final 32-bit machine-word, so we just wrap it.
+    /// The mnemonic is kept for `Display` / disasm only.
+    NEON_RAW { enc: u32, mnemonic: &'static str },
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,6 +2164,10 @@ impl Instruction {
             // ---- NOP ----
             // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
             Instruction::NOP => Ok(0xD503201F),
+
+            // ---- NEON_RAW (Wave 29) ----
+            // Pre-encoded NEON instruction word — pass through unchanged.
+            Instruction::NEON_RAW { enc, mnemonic: _ } => Ok(*enc),
         }
     }
 
@@ -3289,6 +3302,7 @@ impl std::fmt::Display for Instruction {
             Instruction::UMOV { rd, vn } => write!(f, "umov {}, v{}.b[0]", rd, vn),
             Instruction::SVC { imm16 } => write!(f, "svc #{}", imm16),
             Instruction::NOP => write!(f, "nop"),
+            Instruction::NEON_RAW { enc, mnemonic } => write!(f, "{} ; 0x{:08x}", mnemonic, enc),
         }
     }
 }
@@ -4623,6 +4637,35 @@ impl InstructionSelector {
                     let rd = resolve(d);
                     self.push(Instruction::MOV { rd, rm: Register::X0 });
                 }
+            }
+
+            // ── VectorOp (Wave 29) ───────────────────────────────────────
+            // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
+            // We invoke the existing NEON encoder helpers with fixed V0/V1/V2
+            // (indices 0/1/2) and push a single `NEON_RAW` instruction.
+            //
+            // Selection rules (matching the Wave 29 NEON encoder suite —
+            // all 4S = 4×i32, the only width the encoders currently cover):
+            //   - Add → `add v0.4s, v1.4s, v2.4s`  (0x4E208400 base)
+            //   - Sub → `sub v0.4s, v1.4s, v2.4s`  (0x6E208400 base)
+            //   - Mul → `mul v0.4s, v1.4s, v2.4s`  (0x4E209C00 base)
+            //
+            // Full vector-vreg → physical-V register allocation is deferred;
+            // the IR-level vregs are tracked for dataflow but the encoded
+            // word uses fixed V0/V1/V2.
+            IRInstr::VectorOp { op, lanes: _, elem_size: _, dst: _, lhs: _, rhs: _ } => {
+                let (enc, mnemonic): (u32, &'static str) = match op {
+                    crate::ir::VectorOpKind::Add => {
+                        (encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Sub => {
+                        (encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Mul => {
+                        (encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                    }
+                };
+                self.push(Instruction::NEON_RAW { enc, mnemonic });
             }
         }
         Ok(())

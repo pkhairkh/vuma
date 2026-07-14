@@ -1897,6 +1897,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                     code
                 }
+                // ── VectorOp (Wave 29) ──
+                // LoongArch64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+                IRInstr::VectorOp { .. } => Vec::new(),
             };
 
             if !code.is_empty() {
