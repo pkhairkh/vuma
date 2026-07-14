@@ -5392,11 +5392,25 @@ pub fn compile_with_path(
 /// real `fn` definitions.
 ///
 /// Algorithm:
-/// 1. **Duplicate-fn detection** — collect every `fn` definition name
-///    across all modules. If the same name is defined in more than one
-///    module, return a `VumaError::AstToScg` (the merged AST would
-///    otherwise contain two bodies for the same symbol, which the codegen
-///    cannot link).
+/// 1. **Duplicate-fn deduplication** (Task 7-c) — collect every `fn`
+///    definition across all modules into a `HashMap<String, FnDef>` keyed
+///    by name. When a name collides, compare the new definition to the
+///    existing one via [`fn_defs_equivalent`] (span-agnostic structural
+///    equality — see the helper's doc-comment for the rationale).
+///    - **Identical** (modulo spans) → silently drop the duplicate
+///      (with a `vuma_log!(debug, ...)` trace). This supports the
+///      "each-module-is-self-contained" bootstrap pattern, where each
+///      `.vuma` file copy-pastes a small helper preamble
+///      (`store_u64`/`load_u64`/`store_u32`/`load_u32`) at the top of
+///      the file so the file can be compiled standalone with `vuma run`.
+///      Without this dedup, linking the 5 bootstrap files together would
+///      produce 14 duplicate-fn errors (4 helper names × 5 files, minus
+///      the first occurrences) and `compile_modules` would reject the
+///      whole bundle.
+///    - **Conflicting** (same name, different signature or body) →
+///      return a `VumaError::AstToScg` with a clear message naming the
+///      conflicting fn. This is the real "duplicate symbol" case the
+///      codegen cannot link.
 /// 2. **Extern-block filtering** — iterate every `extern "C" { ... }`
 ///    block in every module. For each `fn foo(...)` declaration inside
 ///    the block, check whether `foo` is defined as a real `fn` in any
@@ -5410,7 +5424,10 @@ pub fn compile_with_path(
 /// 4. **Concatenation** — all surviving items (fn defs, struct/enum/
 ///    region/const/static/import/export/module/trait/impl declarations,
 ///    filtered extern blocks, and top-level statements) are concatenated
-///    into the merged `AstProgram.items` in module-then-declaration order.
+///    into the merged `AstProgram.items` in module-then-declaration
+///    order. For fn defs, only the FIRST occurrence of each name survives
+///    (subsequent occurrences were either deduplicated in Pass 1 or would
+///    have caused Pass 1 to return an error before reaching Pass 2).
 ///
 /// The merged AST is what `compile_modules` feeds into the codegen
 /// pipeline. Because cross-module calls are no longer in the merged
@@ -5422,23 +5439,67 @@ pub fn compile_with_path(
 /// `write_elf64(...)` calls resolve correctly when the five `.vuma`
 /// files are linked together.
 fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaError>> {
-    use vuma_parser::ast::{ExternBlockDef, ExternFnDecl};
+    use vuma_parser::ast::{ExternBlockDef, ExternFnDecl, FnDef};
 
     let mut errors: Vec<VumaError> = Vec::new();
 
-    // ── Pass 1: collect all fn definition names. Detect duplicates. ──
-    let mut fn_def_names: HashSet<String> = HashSet::new();
+    // ── Pass 1: deduplicate fn definitions across modules. ──────────
+    //
+    // Why dedup? The 5 bootstrap `.vuma` files in `womb/lang/` each
+    // copy-paste the same 4 helper fns (`store_u64`, `load_u64`,
+    // `store_u32`, `load_u32`) at the top of the file as a self-
+    // contained preamble, so each file can be compiled standalone with
+    // `vuma run <file>` (no inter-file `import` resolution required).
+    // When `compile_modules` links all 5 files together, those 4 helper
+    // names appear 4-5 times each (18 occurrences total → 14 duplicates
+    // after the first occurrences are kept). The pre-Task-7-c policy
+    // rejected every duplicate as a hard error, blocking the bootstrap
+    // self-host test (`test_wave48_bootstrap_self_host`).
+    //
+    // Task 7-c replaces that hard-reject policy with a dedup-or-conflict
+    // policy: identical duplicates are silently dropped (the bootstrap
+    // pattern is legitimate), conflicting duplicates (same name,
+    // different signature or body) still produce a hard error (the
+    // codegen cannot link two different bodies for the same symbol).
+    //
+    // Structural equality is span-agnostic: two fns at different source
+    // positions (which necessarily have different `Span` byte offsets)
+    // compare as equal iff their non-span AST fields are identical. See
+    // [`fn_defs_equivalent`] for the comparison mechanism.
+    let mut fn_def_map: HashMap<String, FnDef> = HashMap::new();
     for ast in module_asts {
         for item in &ast.items {
             if let Item::FnDef(fn_def) = item {
-                if !fn_def_names.insert(fn_def.name.clone()) {
-                    errors.push(VumaError::AstToScg {
-                        message: format!(
-                            "compile_modules: duplicate fn definition '{}' across modules \
-                             — each function name must be defined in at most one module",
-                            fn_def.name
-                        ),
-                    });
+                match fn_def_map.get(&fn_def.name) {
+                    None => {
+                        // First occurrence of this name — keep it.
+                        fn_def_map.insert(fn_def.name.clone(), fn_def.clone());
+                    }
+                    Some(existing) => {
+                        // Name collision — decide dedup vs. conflict.
+                        if fn_defs_equivalent(existing, fn_def) {
+                            vuma_log!(
+                                debug,
+                                "merge_module_asts: dedup identical fn '{}' \
+                                 (later occurrence silently dropped)",
+                                fn_def.name
+                            );
+                        } else {
+                            errors.push(VumaError::AstToScg {
+                                message: format!(
+                                    "compile_modules: conflicting fn definition '{}' — a later \
+                                     occurrence's signature or body differs from the earlier \
+                                     definition with the same name. Each fn name may be defined \
+                                     in multiple modules only if the definitions are byte-identical \
+                                     modulo source spans (the bootstrap's self-contained-preamble \
+                                     pattern is allowed); conflicting overloads are not. Compare \
+                                     the two definitions' parameter types, return type, and body \
+                                     statements to find the divergence.",
+                                    fn_def.name
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -5447,11 +5508,34 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
         return Err(errors);
     }
 
-    // ── Pass 2: concatenate items, filtering extern blocks. ──
+    // The set of fn names defined across all modules (post-dedup). Used
+    // by Pass 2's extern-block filtering to decide which `extern "C" {
+    // fn foo(...); }` declarations should be stripped (because a real
+    // `fn foo` definition exists in some module) vs. kept (because `foo`
+    // is a genuine external like `__vuma_alloc` that resolves at link
+    // time).
+    let fn_def_names: HashSet<String> = fn_def_map.keys().cloned().collect();
+
+    // ── Pass 2: concatenate items, filtering extern blocks and skipping
+    //    duplicate fn occurrences (which were verified identical to the
+    //    first occurrence in Pass 1; conflicts would have returned an
+    //    error before reaching this point). ──────────────────────────
     let mut merged_items: Vec<Item> = Vec::new();
+    let mut emitted_fns: HashSet<String> = HashSet::new();
     for ast in module_asts {
         for item in &ast.items {
             match item {
+                Item::FnDef(fn_def) => {
+                    // First occurrence wins. `emitted_fns.insert` returns
+                    // false for subsequent occurrences, so we skip them.
+                    // (All subsequent occurrences were already verified
+                    // identical to the first in Pass 1; if any had been
+                    // conflicting, we'd have returned `Err(errors)`
+                    // before reaching Pass 2.)
+                    if emitted_fns.insert(fn_def.name.clone()) {
+                        merged_items.push(item.clone());
+                    }
+                }
                 Item::ExternBlock(eb) => {
                     // Keep only the extern fn declarations for which NO
                     // real fn definition exists in any module. The rest
@@ -5487,6 +5571,106 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
     })
 }
 
+/// Compare two [`vuma_parser::ast::FnDef`]s for span-agnostic structural
+/// equality (Task 7-c).
+///
+/// Two fn definitions are "equivalent" iff their ASTs are identical
+/// **modulo source spans**. We achieve this by serializing both `FnDef`s
+/// to JSON via `serde_json` (which both `FnDef` and every type it
+/// transitively contains derive `Serialize` for — see
+/// `src/parser/src/ast.rs`), recursively stripping every `"span"` field
+/// from the resulting JSON trees via [`strip_spans`], and then comparing
+/// the two normalised JSON values with `PartialEq<serde_json::Value>`.
+///
+/// # Why span-agnostic?
+///
+/// Every AST node carries a `Span` (a byte-offset range into its source
+/// file). Two textually-identical fn definitions copy-pasted into two
+/// different `.vuma` files have *different* spans (the files have
+/// different lengths and the helper preamble appears at different line
+/// numbers — see the site map in `test_wave48_bootstrap_self_host`'s
+/// doc-comment). A naive `PartialEq` on `FnDef` (which `FnDef` does NOT
+/// derive, but if it did) would compare the spans and report the two
+/// fns as different even when their source text is byte-identical. That
+/// would defeat the dedup policy in [`merge_module_asts`]: every
+/// duplicate would look like a conflict and produce a hard error.
+///
+/// Span-agnostic equality is the correct relation: two fns are "the same
+/// preamble helper" iff their source text (modulo whitespace and span
+/// positions) parses to the same AST. The `serde_json` + `strip_spans`
+/// approach gives us exactly this relation without requiring us to add
+/// `#[derive(PartialEq)]` to ~30 AST types and write a span-erasing
+/// visitor pass.
+///
+/// # What is compared?
+///
+/// Every non-`span` field of `FnDef` and its transitive sub-types:
+/// - `visibility`, `attrs`, `name`, `type_params`, `params`,
+///   `return_type`, `body`, `is_async`, `where_clause`.
+/// - For `Block`: `statements`.
+/// - For `Stmt` variants: every field except `span` (e.g. `LetStmt.name`,
+///   `LetStmt.ty`, `LetStmt.value`; `AssignStmt.target`,
+///   `AssignStmt.value`; `ReturnStmt.value`; `BdDirectiveStmt.kind`,
+///   `BdDirectiveStmt.name`, `BdDirectiveStmt.expr`; etc.).
+/// - For `Expr` variants: every field except `span` (e.g. `Var.name`,
+///   `Lit.value`, `BinOp.op` / `lhs` / `rhs`, `Call.callee` / `args`,
+///   `Syscall.nr` / `args`, etc.).
+/// - For `Type` variants: every field (Type has no `span` field — it's
+///   pure structural: `BDBase(String)`, `Ptr(Box<Type>)`, etc.).
+/// - For `Lit`, `BinOp`, `UnOp`, `BdDirectiveKind`, `CompoundOp`,
+///   `CaptureKind`, `Visibility`, `AttrValue`, `Attribute`, `TypeParam`,
+///   `WhereClause`, `WherePredicate`, `MatchArm`, `MatchPattern`,
+///   `FormatStrPart`, `ClosureBody`, `Param`, `AssignTarget`, etc.: all
+///   their non-`span` fields.
+///
+/// # Failure mode
+///
+/// If either `FnDef` fails to serialize (which should never happen —
+/// every AST type derives `Serialize` and contains only serialisable
+/// fields), the function returns `false` (treat as "not equivalent",
+/// which causes [`merge_module_asts`] to emit a conflict error). This is
+/// a fail-safe default: if the comparison itself crashes, the user gets
+/// an error rather than a silently-wrong dedup.
+fn fn_defs_equivalent(a: &vuma_parser::ast::FnDef, b: &vuma_parser::ast::FnDef) -> bool {
+    let a_json = match serde_json::to_value(a) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let b_json = match serde_json::to_value(b) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    strip_spans(a_json) == strip_spans(b_json)
+}
+
+/// Recursively remove every `"span"` field from a `serde_json::Value`
+/// (Task 7-c).
+///
+/// Used by [`fn_defs_equivalent`] to normalise serialized `FnDef`s
+/// before comparison, so that two fns at different source positions
+/// (which necessarily have different `Span` byte offsets) compare as
+/// equal iff their non-span fields are identical.
+///
+/// Walks the JSON tree depth-first: for objects, removes the `"span"`
+/// key (if present) then recurses into every remaining value; for
+/// arrays, recurses into every element; for all other JSON types
+/// (strings, numbers, bools, null) returns the value unchanged.
+fn strip_spans(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(mut map) => {
+            map.remove("span");
+            let normalized: serde_json::Map<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, strip_spans(v)))
+                .collect();
+            Value::Object(normalized)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_spans).collect()),
+        other => other,
+    }
+}
+
 /// Detect the host architecture at compile time / runtime and return the
 /// matching VUMA backend kind. Used by `compile_modules` so the emitted
 /// ELF can be executed natively on the developer's machine (mirrors the
@@ -5513,7 +5697,11 @@ fn host_backend_kind() -> vuma_codegen::backend::BackendKind {
 /// The ASTs are then merged via [`merge_module_asts`]:
 /// - `fn` definitions from all modules are concatenated into a single
 ///   `AstProgram.items` vector. Duplicate `fn` definitions across modules
-///   (same name) are rejected as a `VumaError::AstToScg`.
+///   (same name) are **deduplicated**: if the duplicates are byte-identical
+///   modulo source spans (the bootstrap's self-contained-preamble
+///   pattern), the later occurrences are silently dropped (Task 7-c);
+///   if they conflict (same name, different signature or body), a
+///   `VumaError::AstToScg` is returned.
 /// - `extern "C" { fn foo(...); }` declarations are filtered: if `foo` is
 ///   defined as a real `fn` in ANY module, the extern declaration is
 ///   removed (the actual function definition wins — no duplicate symbol).
