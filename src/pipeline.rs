@@ -79,8 +79,9 @@ use vuma_ive::{
 use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow, LoopInvariantCodeMotion, NodeData,
-    NodeId, NodePayload, NodeType, PassManager, PipelineResult as ScgPipelineResult, SCG, SCGPass,
+    DeadRegionElimination, EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow,
+    LoopInvariantCodeMotion, NodeData, NodeId, NodePayload, NodeType, PassManager,
+    PipelineResult as ScgPipelineResult, SCG, SCGPass, StrengthReduction, TailCallOptDetection,
     ComputationKind,
 };
 
@@ -6280,6 +6281,12 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
         OptLevel::O1 => {
             pm.add_pass(DeadCodeElimination::new());
             pm.add_pass(ConstantFolding::new());
+            // (Wave 33) Dead-region elimination at O1+ — drops
+            // allocation/deallocation pairs whose region is never read.
+            // Cheap analysis (single linear scan), so it's worth running
+            // even at O1.
+            pm.add_pass(DeadRegionElimination::new());
+            pm.add_pass(DeadCodeElimination::new()); // cleanup after DRE
         }
         OptLevel::O2 => {
             pm.add_pass(DeadCodeElimination::new());
@@ -6292,6 +6299,22 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
             // and at O0 (no optimisation).
             pm.add_pass(LoopInvariantCodeMotion::new());
             pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
+            // (Wave 33) Strength reduction at O2+ — rewrites multiply /
+            // divide / modulo by a constant power of two into shifts /
+            // masks.  Run after ConstantFolding so the constant operand
+            // has been materialised as a `const.<ty>:<val>` Computation
+            // node (which is what the pass pattern-matches on).
+            pm.add_pass(StrengthReduction::new());
+            // (Wave 33) Tail-call detection at O2+ — marks call nodes
+            // whose result feeds directly into a FunctionReturn with
+            // `tail_call: true`, enabling the backend to reuse the
+            // current stack frame.  Detection only — the actual
+            // frame-reuse happens in the backend.
+            pm.add_pass(TailCallOptDetection::new());
+            // (Wave 33) Dead-region elimination at O2+ as well — the
+            // post-LICM / post-SR IR may have new write-only regions.
+            pm.add_pass(DeadRegionElimination::new());
+            pm.add_pass(DeadCodeElimination::new()); // final cleanup
         }
         OptLevel::O3 => {
             pm.add_pass(DeadCodeElimination::new());
@@ -6304,6 +6327,13 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
             // (Wave 26) LICM at O3, after inlining+DCE so it sees the
             // post-inline loop structure.
             pm.add_pass(LoopInvariantCodeMotion::new());
+            pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
+            // (Wave 33) Strength reduction + tail-call detection +
+            // dead-region elimination at O3, mirroring the O2 pipeline
+            // but on the post-inline IR.
+            pm.add_pass(StrengthReduction::new());
+            pm.add_pass(TailCallOptDetection::new());
+            pm.add_pass(DeadRegionElimination::new());
             pm.add_pass(DeadCodeElimination::new()); // final cleanup
         }
     }
