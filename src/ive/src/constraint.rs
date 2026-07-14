@@ -4,7 +4,6 @@
 //! and that the verification engine must check. They encode temporal,
 //! resource-flow, security, complexity, and liveness properties.
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -12,7 +11,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// A unique identifier for a constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConstraintId(pub String);
 
 impl ConstraintId {
@@ -45,7 +44,7 @@ impl From<String> for ConstraintId {
 // ---------------------------------------------------------------------------
 
 /// A temporal constraint (e.g., "A must happen before B").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemporalConstraint {
     /// Short human-readable description.
     pub description: String,
@@ -56,7 +55,7 @@ pub struct TemporalConstraint {
 // ---------------------------------------------------------------------------
 
 /// A constraint on how resources flow through the program.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResourceFlowConstraint {
     /// Short human-readable description.
     pub description: String,
@@ -67,7 +66,7 @@ pub struct ResourceFlowConstraint {
 // ---------------------------------------------------------------------------
 
 /// A security-related constraint (e.g., information flow, access control).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SecurityConstraint {
     /// Short human-readable description.
     pub description: String,
@@ -78,7 +77,7 @@ pub struct SecurityConstraint {
 // ---------------------------------------------------------------------------
 
 /// A constraint on computational complexity (e.g., "this loop runs O(n)").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComplexityConstraint {
     /// Short human-readable description.
     pub description: String,
@@ -89,7 +88,7 @@ pub struct ComplexityConstraint {
 // ---------------------------------------------------------------------------
 
 /// A liveness constraint (e.g., "every request eventually receives a response").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LivenessConstraint {
     /// Short human-readable description.
     pub description: String,
@@ -328,7 +327,7 @@ impl LivenessConstraint {
 /// A constraint derived by the inference engine.
 ///
 /// Each variant carries a human-readable description and typed payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
     /// Temporal ordering constraint.
     Temporal(TemporalConstraint),
