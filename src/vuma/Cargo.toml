@@ -13,7 +13,6 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-log.workspace = true
 vuma-scg.workspace = true
 vuma-parser.workspace = true
 vuma-ive.workspace = true

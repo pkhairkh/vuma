@@ -683,12 +683,12 @@
 > 129 `log::debug!`/`info!`/`warn!`/`trace!`/`error!` call sites in core.
 
 - [x] **[CORE]** Define a `vuma_log!` macro in `src/lib.rs` (or a new `src/log.rs`).
-- [~] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
-  - **AUDIT CAVEAT:** ~85 call sites in 24 files across codegen/ive/cor/proof/package were migrated. But `src/vuma/src/repl.rs:857, 1032` still call `log::warn!("MSG conversion failed: {e}")` — two unmigrated sites in the `vuma` crate.
-- [~] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
-  - **AUDIT CAVEAT:** Same as the `debug!` migration — most sites converted, but `src/vuma/src/repl.rs:857, 1032` still use `log::warn!`.
-- [ ] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
-  - **AUDIT GAP:** `log.workspace = true` is STILL in `src/vuma/Cargo.toml:16`. Root `Cargo.toml:54, 86` still pins `log = "0.4"` and `log.workspace = true`. The `vuma` crate (where the unmigrated `log::warn!` calls live) still depends on `log`. Other core crates (codegen, ive, cor, proof, package) did remove the `log` dep.
+- [x] **[CORE]** Mechanically replace `log::debug!` → `vuma_log!(debug, …)` across all core crates.
+  - **AUDIT RESOLVED (Task 2-c):** vuma/repl.rs:857, 1032 migrated to `vuma_log!(warn, "MSG conversion failed: {e}")`. All core crates now use `vuma_log!` — zero `log::debug!`/`info!`/`warn!`/`trace!`/`error!` call sites remain in any core crate. (vuma-core gained its own `vuma_log!` macro copy at `src/vuma/src/lib.rs:51-65` — it was the one core crate root that hadn't yet been given the macro, which is why repl.rs couldn't migrate earlier.)
+- [x] **[CORE]** Same for `info!`, `warn!`, `trace!`, `error!`.
+  - **AUDIT RESOLVED (Task 2-c):** Same as the `debug!` migration — `src/vuma/src/repl.rs:857, 1032` (the only remaining `log::warn!` sites in core) migrated to `vuma_log!(warn, ...)`. A stale doc comment in `src/codegen/src/x86_32/mod.rs:319` referencing `log::warn!` was also corrected to `vuma_log!(warn, ...)` (the underlying code at line 326 had already been migrated).
+- [x] **[CORE]** Remove `log` from core crate `Cargo.toml`s.
+  - **AUDIT RESOLVED (Task 2-c):** `log.workspace = true` removed from `src/vuma/Cargo.toml:16`. All other core crates (codegen, ive, cor, proof, package, scg, parser, bd, std) were already clean. The root `Cargo.toml` keeps `log = "0.4"` in `[workspace.dependencies]` (line 53) and `log.workspace = true` in the root binary's `[dependencies]` (line 85) — this is intentional and correct: the root `vuma` binary crate uses `log::set_boxed_logger` / `log::set_max_level` / `log::LevelFilter` in `src/main.rs:1639-1645` to install `VumaLogBridge`, and `src/logging.rs:263-282` implements `log::Log` for `VumaLogBridge`. This is the legitimate third-party-bridge integration (lets any `log::warn!`-using dependency forward to the VUMA structured logger) — not a missed migration. `llm_api.rs`, `telemetry.rs`, `lsp/mod.rs` were verified to have zero `log::` usage (the original Wave 44 spec's "keep in llm_api/telemetry/lsp" clause was based on a stale audit; the real users are the bridge code in `main.rs` + `logging.rs`).
 - [x] **[CORE]** Implement `vuma_log!` as a no-op when `--release` is set, real logging otherwise.
 - [x] **[TEST]** Verify log output is unchanged.
 
