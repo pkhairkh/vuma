@@ -1404,6 +1404,70 @@ impl IRBuilder {
                     names.insert(key, phi_dst);
                 }
             }
+
+            // ── Task 7-d: Roll back `names` for then-branch modifications
+            //   when the then-branch does NOT fall through to merge. ──
+            //
+            // When `then_falls_through == false`, the then-branch ends with a
+            // `continue`, `break`, or `return` — control never reaches the
+            // merge block from the then-path. The merge block is only reached
+            // from the false path of the CondBranch (the entry block, which
+            // has the pre-if variable values).
+            //
+            // The loop above (`for name in &modified`) skips this case
+            // (`modified` is empty when `!then_falls_through`), so no phi is
+            // created.  BUT the `names` map still contains the then-branch's
+            // vregs for variables that were modified in the then-branch
+            // (because `lower_statements` / `lower_computation` updated
+            // `names` when lowering `pos = pos + 1`).  Without a rollback,
+            // subsequent references to those variables (in the merge block or
+            // later code) would resolve to the then-branch's vreg, which is
+            // UNDEFINED at the merge block (the then-branch jumped away
+            // before reaching merge).  This causes the variable to read
+            // garbage (often 0 or a stale stack value), which miscompiles
+            // loops with the pattern `if cond { var = var + 1; continue; }`
+            // — the variable appears to never advance past the continue
+            // point, leading to infinite loops or wrong values.
+            //
+            // The fix: for every variable that was modified in the then-branch
+            // AND had a pre-if definition, roll `names[name]` back to the
+            // pre-if vreg.  This ensures the merge block (and subsequent
+            // code) reads the pre-if value, which is correct because the
+            // then-branch's modifications are never observed at merge.  We
+            // also redirect alias entries (other names pointing to the
+            // then-branch's vreg) to the pre-if vreg, mirroring the
+            // both-branch phi-insertion's alias-redirect logic.
+            //
+            // This bug was discovered by Task 7-d (Wave 48 vumac SIGSEGV
+            // debug): the bootstrap `full_lex` function uses the pattern
+            // `if c == 10 { pos = pos + 1; continue; }` for whitespace
+            // skipping, and the bug caused `pos` to read as 0 after the if,
+            // making the lexer return 0 tokens (and the bootstrap crash
+            // under O2 when the garbage `pos` was used as a memory index).
+            if !then_falls_through {
+                // Iterate over a snapshot of then_defs to avoid borrow issues.
+                let then_defs_snapshot: Vec<(String, u32)> = then_defs
+                    .defined_names()
+                    .into_iter()
+                    .filter_map(|n| {
+                        then_defs.get(&n).map(|v| (n.clone(), v))
+                    })
+                    .collect();
+                for (name, then_vreg) in &then_defs_snapshot {
+                    if let Some(&pre_vreg) = names_before.get(name) {
+                        names.insert(name.clone(), pre_vreg);
+                        // Redirect alias entries that still point to the
+                        // then-branch's vreg back to the pre-if vreg.
+                        let alias_keys: Vec<String> = names.iter()
+                            .filter(|(_, &v)| v == *then_vreg)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for key in alias_keys {
+                            names.insert(key, pre_vreg);
+                        }
+                    }
+                }
+            }
             None
         };
 

@@ -121,7 +121,22 @@ fn name_hash(src: Address, start: u32, len: u32) -> u32 {
         hash = hash * 16777619;   // 0x01000193
         i = i + 1;
     }
-    return hash;
+    // Task 7-d: mask to a clean u32. The host vuma codegen emits a 64-bit
+    // IMUL for `hash * 16777619` (see src/codegen/src/x86_64/stack_slot_isel.rs
+    // IRInstr::Mul), which leaves non-zero garbage in the upper 32 bits of
+    // rax. Without this mask, the u32 return value's 8-byte stack slot in
+    // the caller retains the garbage upper 32 bits (because the codegen's
+    // store_vreg / load_vreg always use REX.W — 64-bit MOV). Subsequent
+    // 64-bit comparisons on the u32 value (also emitted with REX.W) then
+    // fail even when the lower 32 bits are equal. This breaks two call
+    // sites in the bootstrap: (1) `main_hash == fn_hash` in
+    // irb_build_main (locating the entry function by name hash), and
+    // (2) `lhs == print_int_hash` in codegen_emit (dispatching IR_CALL to
+    // the print_int routine). Masking here — at the single producer of the
+    // hash — is the minimal fix; the alternative (teaching the codegen to
+    // emit 32-bit ops for u32-typed IRInstr::Mul / IRInstr::Cmp) is a
+    // larger, riskier change reserved for a future wave.
+    return hash & 0xFFFFFFFF;
 }
 
 fn advance(p: Address) {
