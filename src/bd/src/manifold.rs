@@ -135,7 +135,7 @@ impl HilbertCurve {
 }
 
 /// Space-filling curve type for Manifold memory layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpaceFillingCurve {
     /// Z-order (Morton) curve.
     ZOrder,
