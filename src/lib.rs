@@ -75,7 +75,7 @@ pub use vuma_package::{
 
 // Re-export the primary pipeline API at the crate root for convenience.
 pub use pipeline::{
-    compile, compile_incremental, compile_to_wasm, compile_with_path, compile_with_recovery,
+    compile, compile_incremental, compile_modules, compile_to_wasm, compile_with_path, compile_with_recovery,
     CompilationOutput, CompileConfig, CompileResult, CompileTarget, DebugInfo,
     IncrementalCache, OptLevel, PartialCompilationOutput, PipelineStage, SourceFingerprint,
     VerificationLevel, VumaError,

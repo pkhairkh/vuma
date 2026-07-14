@@ -153,6 +153,49 @@ impl VumaCompiler {
         }
     }
 
+    /// Compile multiple VUMA source modules into a single ELF binary.
+    ///
+    /// Each `(name, source)` pair is parsed independently, the ASTs are
+    /// merged (cross-module `extern "C"` declarations are resolved against
+    /// real `fn` definitions in sibling modules), and the merged program is
+    /// compiled through the direct AST → codegen SCG → IR → register
+    /// allocation → backend.encode_program path. The emitted ELF targets
+    /// the host architecture so it can be executed natively (mirrors
+    /// `vuma run --isa <host>`).
+    ///
+    /// This is the API entry point for multi-module / multi-file VUMA
+    /// programs. Single-module callers should prefer [`Self::compile`]
+    /// (canonical pipeline, AArch64 only) or [`Self::compile_for_target`]
+    /// (direct path with explicit target selection).
+    ///
+    /// Returns the [`CompilationOutput`] on success (the `binary` field
+    /// contains the merged ELF — a single executable containing all
+    /// functions from all modules). On failure, returns a `Vec<VumaError>`
+    /// (one entry per error detected across all modules and pipeline
+    /// stages).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use vuma::api::VumaCompiler;
+    ///
+    /// let modules: Vec<(String, String)> = vec![
+    ///     ("main.vuma".into(), include_str!("../womb/lang/full_lexer.vuma").into()),
+    ///     ("parser.vuma".into(), include_str!("../womb/lang/full_parser.vuma").into()),
+    /// ];
+    /// let compiler = VumaCompiler::new();
+    /// match compiler.compile_modules(&modules) {
+    ///     Ok(output) => println!("Linked ELF: {} bytes", output.binary.len()),
+    ///     Err(errors) => for e in &errors { eprintln!("{}", e); },
+    /// }
+    /// ```
+    pub fn compile_modules(
+        &self,
+        modules: &[(String, String)],
+    ) -> Result<pipeline::CompilationOutput, Vec<pipeline::VumaError>> {
+        pipeline::compile_modules(modules, &self.config)
+    }
+
     /// Compile for a specific target backend.
     ///
     /// Valid target strings: `"x86_64"`, `"aarch64"`, `"riscv64"`,
