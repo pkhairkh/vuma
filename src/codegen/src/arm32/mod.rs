@@ -924,10 +924,9 @@ fn encode_dmb(cond: Condition, option: u32) -> [u8; 4] {
     // ARMv7 DMB encoding:
     // cond[31:28] | 01010111[27:20] | 1111[19:16] | 0000[15:12] | 1111[11:8] | 0101[7:4] | option[3:0]
     // DMB SY: cond=AL, option=0xF → 0xE57F0F5F
-    let word = (cond.encoding() << 28)
+    let word = ((cond.encoding() << 28)
         | (0b0101_0111 << 20)
-        | (0b1111 << 16)
-        | (0b0000 << 12)  // Rd = 0 (must be 0000 for DMB)
+        | (0b1111 << 16))  // Rd = 0 (must be 0000 for DMB)
         | (0b1111 << 8)   // CRm = 1111
         | (0b0101 << 4)   // DMB = 0101
         | (option & 0xF);
@@ -2304,8 +2303,8 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // The data segment starts on the next page after the text.
     let text_file_end = text_offset + text_size;
     let data_vaddr =
-        ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-    let data_offset = data_vaddr - base_addr;
+        (base_addr + text_file_end).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let _data_offset = data_vaddr - base_addr;
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
@@ -2318,7 +2317,7 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let shstrtab_offset = text_offset + text_size;
     // Section header table starts after .shstrtab, 4-byte aligned
     // (Elf32_Shdr has natural alignment of 4 bytes).
-    let shdr_offset = ((shstrtab_offset + shstrtab_size + 3) / 4) * 4;
+    let shdr_offset = (shstrtab_offset + shstrtab_size).div_ceil(4) * 4;
     // Sections: 0=null, 1=.text, 2=.data, 3=.shstrtab
     let num_shdrs: u64 = 4;
     let shstrndx: u16 = (num_shdrs - 1) as u16; // .shstrtab is the last section
@@ -4020,7 +4019,7 @@ impl Backend for Arm32Backend {
                         // When ty is F32/F64 and op is FP-arithmetic (Add/Sub/Mul/SDiv/UDiv),
                         // load operands' bit patterns into D0/D1 via the dst stack slot,
                         // run VFP arithmetic, and VSTR the result back to dst.
-                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
+                        let is_fp = ty.as_ref().is_some_and(|t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
                         let fp_arith = is_fp && matches!(op,
                             BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
                             | BinOpKind::SDiv | BinOpKind::UDiv
@@ -5231,7 +5230,7 @@ impl Backend for Arm32Backend {
                         // APSR.NZCV, then SETcc as usual. For FP, signed and
                         // unsigned comparisons are equivalent; U*-variants map
                         // to their signed counterparts.
-                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
+                        let is_fp = ty.as_ref().is_some_and(|t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
                         if is_fp {
                             // Map unsigned conditions to their signed FP equivalents.
                             let fp_cond = match kind {
@@ -5702,7 +5701,7 @@ impl Backend for Arm32Backend {
                     crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
                         let num_args = args.len();
-                        let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
+                        let num_stack_args = num_args.saturating_sub(4);
 
                         // AAPCS-VFP calling convention limitation: when calling
                         // external (C ABI) functions that take floating-point
@@ -6859,7 +6858,7 @@ impl Backend for Arm32Backend {
                     crate::ir::IRInstr::Syscall { nr, args, dst } => {
                         let mut code = Vec::new();
                         let num_args = args.len();
-                        let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
+                        let num_stack_args = num_args.saturating_sub(4);
                         let stack_bytes = num_stack_args * 4;
                         // Push args 5-6 onto the stack (kernel reads from [SP]).
                         if stack_bytes > 0 {
@@ -8532,10 +8531,9 @@ fn encode_vstr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
     } else {
         (false, (-offset / 4) as u32)
     };
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1101 << 24
-        | (d_bit << 22)
-        | 0b00 << 20
+        | (d_bit << 22))
         | ((rn as u32 & 0xF) << 16)
         | (vd << 12)
         | 0b1010 << 8
@@ -8582,10 +8580,9 @@ fn encode_vstr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
     } else {
         (false, (-offset / 4) as u32)
     };
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1101 << 24
-        | (d_bit << 22)
-        | 0b00 << 20
+        | (d_bit << 22))
         | ((rn as u32 & 0xF) << 16)
         | (vd << 12)
         | 0b1011 << 8
@@ -8606,19 +8603,16 @@ fn encode_vcvt_f32_s32(sd: u8, sm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b1000 << 16
         | (vd << 12)
-        | 0b101 << 9
-        | (0 << 8)      // sz = 0 (f32)
-        | (0 << 7)      // signed
+        | 0b101 << 9)      // signed
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8633,19 +8627,17 @@ fn encode_vcvt_f32_u32(sd: u8, sm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b1000 << 16
         | (vd << 12)
-        | 0b101 << 9
-        | (0 << 8)      // sz = 0 (f32)
+        | 0b101 << 9)      // sz = 0 (f32)
         | (1 << 7)      // unsigned
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8662,19 +8654,16 @@ fn encode_vcvt_s32_f32(sd: u8, sm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b1101 << 16
         | (vd << 12)
-        | 0b101 << 9
-        | (0 << 8)      // sz = 0 (f32)
-        | (0 << 7)      // signed
+        | 0b101 << 9)      // signed
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8689,19 +8678,17 @@ fn encode_vcvt_u32_f32(sd: u8, sm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b1101 << 16
         | (vd << 12)
-        | 0b101 << 9
-        | (0 << 8)      // sz = 0 (f32)
+        | 0b101 << 9)      // sz = 0 (f32)
         | (1 << 7)      // unsigned
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8716,7 +8703,7 @@ fn encode_vcvt_f64_f32(dd: u8, sm: u8) -> [u8; 4] {
     let vd = (dd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
@@ -8724,11 +8711,9 @@ fn encode_vcvt_f64_f32(dd: u8, sm: u8) -> [u8; 4] {
         | 0b0110 << 16
         | (vd << 12)
         | 0b101 << 9
-        | (1 << 8)      // sz = 1 (f64 dest)
-        | (0 << 7)
+        | (1 << 8))
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8743,19 +8728,16 @@ fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b0110 << 16
         | (vd << 12)
-        | 0b101 << 9
-        | (0 << 8)      // sz = 0 (f32 dest)
-        | (0 << 7)
+        | 0b101 << 9)
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8770,7 +8752,7 @@ fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
     let vd = (dd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
@@ -8781,8 +8763,7 @@ fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
         | (1 << 8)      // sz = 1 (f64 dest)
         | (1 << 7)      // unsigned
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8797,7 +8778,7 @@ fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
     let vd = (dd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
     let vm = (sm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
@@ -8805,11 +8786,9 @@ fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
         | 0b1000 << 16
         | (vd << 12)
         | 0b101 << 9
-        | (1 << 8)      // sz = 1 (f64 dest)
-        | (0 << 7)      // signed
+        | (1 << 8))      // signed
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8824,7 +8803,7 @@ fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
@@ -8835,8 +8814,7 @@ fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
         | (1 << 8)      // sz = 1 (f64 source)
         | (1 << 7)      // unsigned
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8851,7 +8829,7 @@ fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let vd = (sd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (1 << 23)
         | (d_bit << 22)
@@ -8859,11 +8837,9 @@ fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
         | 0b1101 << 16
         | (vd << 12)
         | 0b101 << 9
-        | (1 << 8)      // sz = 1 (f64 source)
-        | (0 << 7)      // signed
+        | (1 << 8))      // signed
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8879,17 +8855,15 @@ fn encode_vadd_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let vn = (dn & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (d_bit << 22)
         | 0b11 << 20
         | (vn << 16)
         | (vd << 12)
         | 0b1011 << 8
-        | (n_bit << 7)
-        | (0 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (n_bit << 7))
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8905,7 +8879,7 @@ fn encode_vsub_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let vn = (dn & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (d_bit << 22)
         | 0b11 << 20
@@ -8914,8 +8888,7 @@ fn encode_vsub_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
         | 0b1011 << 8
         | (n_bit << 7)
         | (1 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8931,17 +8904,15 @@ fn encode_vmul_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let vn = (dn & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = (((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (d_bit << 22)
         | 0b10 << 20
         | (vn << 16)
         | (vd << 12)
         | 0b1011 << 8
-        | (n_bit << 7)
-        | (0 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (n_bit << 7))
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8958,17 +8929,14 @@ fn encode_vdiv_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let vn = (dn & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
-        | (d_bit << 22)
-        | 0b00 << 20
+        | (d_bit << 22))
         | (vn << 16)
         | (vd << 12)
         | 0b1011 << 8
-        | (n_bit << 7)
-        | (0 << 6)
-        | (m_bit << 5)
-        | (0 << 4)
+        | (n_bit << 7))
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
@@ -8984,7 +8952,7 @@ fn encode_vcmp_f64(dd: u8, dm: u8) -> [u8; 4] {
     let vd = (dd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = (Condition::Al.encoding() as u32) << 28
+    let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
         | (d_bit << 22)
         | 0b11 << 20
@@ -8993,8 +8961,7 @@ fn encode_vcmp_f64(dd: u8, dm: u8) -> [u8; 4] {
         | 0b1011 << 8
         | (1 << 7)  // E = 1 (compare with register)
         | (1 << 6)  // fixed
-        | (m_bit << 5)
-        | (0 << 4)
+        | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }

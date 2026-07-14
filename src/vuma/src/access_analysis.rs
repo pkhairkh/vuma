@@ -855,9 +855,7 @@ pub fn compute_access_histogram(msg: &MSG) -> AccessHistogram {
 
     // Include regions with zero accesses.
     for region in msg.regions() {
-        if !buckets.contains_key(&region.id) {
-            buckets.insert(region.id, RegionAccessStats::empty(region.size));
-        }
+        buckets.entry(region.id).or_insert_with(|| RegionAccessStats::empty(region.size));
     }
 
     AccessHistogram {

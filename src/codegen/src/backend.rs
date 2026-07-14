@@ -2047,8 +2047,8 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     // text.  This ensures the BSS does not share a host page (which may be
     // 4K, 16K, or 64K) with the RX text segment.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + HOST_PAGE_ALIGN - 1) / HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
-    let data_offset = data_vaddr - base_addr; // file offset for data segment
+    let data_vaddr = (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+    let _data_offset = data_vaddr - base_addr; // file offset for data segment
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
@@ -2779,7 +2779,7 @@ impl Backend for AArch64Backend {
 
         let start_stub_size: usize = 20; // 5 × 4-byte instructions (LDR X0, ADD X1, BL, MOV X8, SVC)
         let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
-        let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+        let _ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
 
         // ── Build runtime I/O code ──
         // print_hex: X0 = value to print as 8 hex digits to stdout
@@ -3379,7 +3379,7 @@ impl Backend for AArch64Backend {
         // external (undefined) callees (e.g. libc functions, or functions
         // declared in `extern "C"` blocks). They get emitted as SHN_UNDEF
         // entries in `.symtab` so the system linker can resolve them.
-        let mut external_symbols: Vec<String> = Vec::new();
+        let external_symbols: Vec<String> = Vec::new();
         let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {

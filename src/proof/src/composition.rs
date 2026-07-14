@@ -329,7 +329,7 @@ impl ProofBundle {
         proof
             .all_facts()
             .iter()
-            .map(|f| FactWithJudgment::from_fact(*f))
+            .map(|f| FactWithJudgment::from_fact(f))
             .collect()
     }
 

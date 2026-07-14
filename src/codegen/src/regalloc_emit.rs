@@ -30,8 +30,8 @@
 //! A future wave can use this metadata to generate optimized code that keeps
 //! values in registers instead of spilling to stack.
 
-use crate::backend::{AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg};
-use crate::ir::{IRFunction, IRInstr};
+use crate::backend::{AllocatedFunction, AllocatedInstruction, PhysicalReg};
+use crate::ir::IRFunction;
 use crate::regalloc::{RegAllocResult, TargetAgnosticRegAlloc};
 use crate::target_desc::TargetDescRegistry;
 
@@ -54,7 +54,7 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
             return RegAllocResult::new();
         }
     };
-    let allocator = TargetAgnosticRegAlloc::new(&target);
+    let allocator = TargetAgnosticRegAlloc::new(target);
     match allocator.allocate_function(func) {
         Ok(result) => result,
         Err(e) => {

@@ -99,8 +99,8 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
 
                 // Call: if any argument is an allocation, it escapes
                 // (unless the call is to free())
-                IRInstr::Call { args, func: fname, .. } => {
-                    if !is_free_call(fname) {
+                IRInstr::Call { args, func: fname, .. }
+                    if !is_free_call(fname) => {
                         for arg in args {
                             if let IRValue::Register(vreg) = arg {
                                 if allocs.contains(vreg) {
@@ -109,7 +109,6 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
                             }
                         }
                     }
-                }
 
                 // Phi: if any incoming is an escaping allocation,
                 // mark the phi result as escaping
@@ -130,17 +129,14 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
         }
 
         // Check terminator for return
-        match &block.terminator {
-            IRTerminator::Return(vals) => {
-                for val in vals {
-                    if let IRValue::Register(vreg) = val {
-                        if allocs.contains(vreg) {
-                            escapes.insert(*vreg);
-                        }
+        if let IRTerminator::Return(vals) = &block.terminator {
+            for val in vals {
+                if let IRValue::Register(vreg) = val {
+                    if allocs.contains(vreg) {
+                        escapes.insert(*vreg);
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -555,16 +551,14 @@ pub fn elide_non_escaping_allocs(
         for block in &func.blocks {
             for instr in &block.instructions {
                 match instr {
-                    IRInstr::Load { addr, .. } | IRInstr::Store { addr, .. } => {
-                        if addr.as_register() == Some(alloc_vreg) {
+                    IRInstr::Load { addr, .. } | IRInstr::Store { addr, .. }
+                        if addr.as_register() == Some(alloc_vreg) => {
                             has_access = true;
                         }
-                    }
-                    IRInstr::AtomicLoad { addr, .. } | IRInstr::AtomicStore { addr, .. } => {
-                        if addr.as_register() == Some(alloc_vreg) {
+                    IRInstr::AtomicLoad { addr, .. } | IRInstr::AtomicStore { addr, .. }
+                        if addr.as_register() == Some(alloc_vreg) => {
                             has_access = true;
                         }
-                    }
                     _ => {}
                 }
                 if has_access {
@@ -583,26 +577,20 @@ pub fn elide_non_escaping_allocs(
         let mut removed_alloc = false;
         for block in &mut func.blocks {
             block.instructions.retain(|instr| match instr {
-                IRInstr::Alloc { dst, .. } => {
-                    if dst.as_register() == Some(alloc_vreg) {
+                IRInstr::Alloc { dst, .. }
+                    if dst.as_register() == Some(alloc_vreg) => {
                         removed_alloc = true;
                         false
-                    } else {
-                        true
                     }
-                }
                 IRInstr::Call {
                     dst: Some(dst),
                     func: fname,
                     ..
-                } if is_alloc_call(fname) => {
-                    if dst.as_register() == Some(alloc_vreg) {
+                } if is_alloc_call(fname)
+                    && dst.as_register() == Some(alloc_vreg) => {
                         removed_alloc = true;
                         false
-                    } else {
-                        true
                     }
-                }
                 _ => true,
             });
         }

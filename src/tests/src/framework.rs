@@ -1239,7 +1239,7 @@ fn bridge_expr_to_binop(
         Expr::Call { callee, args, .. } => {
             // Function call: preserve callee and arguments.
             let lhs = args.first()
-                .map(|a| bridge_expr_to_scg_expr(a))
+                .map(bridge_expr_to_scg_expr)
                 .unwrap_or(CodegenScgExpr::Int(0));
             let _ = callee;
             (

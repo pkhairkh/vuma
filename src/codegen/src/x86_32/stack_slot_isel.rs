@@ -22,7 +22,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction,
     BackendError, PhysicalReg, RegClass, RelocationEntry,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
@@ -832,7 +832,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         BinOpKind::SDiv => {
                             // x86_32 only has 32-bit IDIV. For 64-bit types,
                             // this truncates to the low 32 bits.
-                            if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
+                            if ty.as_ref().is_some_and(|t| matches!(t, IRType::I64 | IRType::U64)) {
                                 vuma_log!(warn, "x86_32: 64-bit division truncated to 32-bit (no paired-word IDIV)");
                             }
                             code.extend(load_value(lhs, Gpr::Rax));
@@ -842,7 +842,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         BinOpKind::UDiv => {
-                            if ty.as_ref().map_or(false, |t| matches!(t, IRType::I64 | IRType::U64)) {
+                            if ty.as_ref().is_some_and(|t| matches!(t, IRType::I64 | IRType::U64)) {
                                 vuma_log!(warn, "x86_32: 64-bit division truncated to 32-bit (no paired-word DIV)");
                             }
                             code.extend(load_value(lhs, Gpr::Rax));

@@ -24,7 +24,9 @@
 use crate::backend::{
     AllocatedFunction, AllocatedProgram, Backend, BackendError, TargetInfo, Endianness,
 };
-use crate::ir::{alignment_of_with_ptr_width, size_of_with_ptr_width, IRFunction, IRType, IRValue, IRInstr, IRTerminator, VirtualRegister};
+use crate::ir::{alignment_of_with_ptr_width, size_of_with_ptr_width, IRFunction, IRType, IRValue, IRInstr, IRTerminator};
+#[cfg(test)]
+use crate::ir::VirtualRegister;
 
 // ===========================================================================
 // Register definitions
@@ -126,7 +128,7 @@ fn encode_bl(target_offset: i32) -> [u8; 4] {
     // w=1 (with nullification), D=31 (link), l=17-bit signed displacement / 4
     let disp = (target_offset >> 2) as i32;
     let w = 1u32; // nullify (execute delay slot)
-    let word = 0xE8000000u32
+    let _word = 0xE8000000u32
         | (w << 31)  // wait, this is wrong. Let me use the correct format.
         | ((disp as u32) & 0x1FFFF);
     // Actually the standard BL encoding:
@@ -373,7 +375,7 @@ fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
     let imm11 = (imm as u16 as u32) & 0x7FF;
     // Arithmetic immediate format: 000010 01 bbbbb 0 t aaaa aaa ddddd iiiiiiiiiii
     // ADDI: 000010 01 r1 0 0 0000000 dst iiiiiiiiiii
-    let word = 0x08000000u32
+    let _word = 0x08000000u32
         | (1u32 << 25)  // ss=01 (immediate)
         | ((r1 as u32 & 0x1F) << 21)
         | ((dst as u32 & 0x1F) << 16) // wrong position
@@ -384,7 +386,7 @@ fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
     let word = 0x08000000u32
         | (1u32 << 25)
         | ((r1 as u32 & 0x1F) << 21)
-        | ((dst as u32 & 0x1F))
+        | (dst as u32 & 0x1F)
         | (imm11 << 1); // imm11 at bits 11-1... no
     word.to_be_bytes()
 }
@@ -862,7 +864,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         // are routed to __vuma_alloc (mmap) at runtime.
         // alloc_offsets is kept empty — the Alloc instruction generates a
         // function call instead of computing a stack pointer.
-        let alloc_offsets: HashMap<u32, i32> = HashMap::new();
+        let _alloc_offsets: HashMap<u32, i32> = HashMap::new();
 
         let frame_size = (((-current_offset) as usize + 63) & !63) as usize;
 
@@ -917,7 +919,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         struct CombPatch { code_offset: usize, target_label: String, }
         let mut comb_patches: Vec<CombPatch> = Vec::new();
 
-        for (_blk_idx, block) in func.blocks.iter().enumerate() {
+        for block in func.blocks.iter() {
             block_start_offsets.push(code.len());
 
             for instr in &block.instructions {
@@ -925,19 +927,19 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
 
                 match instr {
-                    IRInstr::Add { dst, lhs, rhs, ty: _ } => {
+                    IRInstr::Add { dst: _, lhs, rhs, ty: _ } => {
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                         code.extend_from_slice(&encode_add(S0, S1, S0));
                         code.extend(ss_st(S0, dst_off));
                     }
-                    IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
+                    IRInstr::Sub { dst: _, lhs, rhs, ty: _ } => {
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                         code.extend_from_slice(&encode_sub(S0, S1, S0));
                         code.extend(ss_st(S0, dst_off));
                     }
-                    IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
+                    IRInstr::Mul { dst: _, lhs, rhs, ty: _ } => {
                         // PA-RISC 1.1 has no hardware MUL. Implement via a
                         // repeated-addition loop: result = 0; while (rhs > 0)
                         // { result += lhs; rhs--; }. This is O(rhs) but
@@ -978,7 +980,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                         code.extend(ss_st(S0, dst_off));
                     }
-                    IRInstr::Div { dst, lhs, rhs, ty: _ } => {
+                    IRInstr::Div { dst: _, lhs, rhs, ty: _ } => {
                         // PA-RISC 1.1 has no hardware DIV. Implement via a
                         // subtraction loop: quotient = 0; while (lhs >= rhs)
                         // { lhs -= rhs; quotient++; }. Unsigned only.
@@ -1008,7 +1010,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         code[loop_off..loop_off + 4].copy_from_slice(&cmpb_patched.to_be_bytes());
                         code.extend(ss_st(S0, dst_off));
                     }
-                    IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+                    IRInstr::BinOp { op, dst: _, lhs, rhs, ty: _ } => {
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                         match op {
@@ -1574,14 +1576,14 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         code.extend(ss_st(S0, d_off));
                     }
-                    IRInstr::CtEq { dst, lhs, rhs, ty: _ } => {
+                    IRInstr::CtEq { dst, lhs: _, rhs: _, ty: _ } => {
                         code.extend(ss_load_imm(S0, 0));
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         code.extend(ss_st(S0, d_off));
                     }
                     IRInstr::AtomicLoad { dst, addr, ty } => {
-                        let load_instr = IRInstr::Load {
+                        let _load_instr = IRInstr::Load {
                             dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone(),
                         };
                         // Re-emit as Load
@@ -1592,7 +1594,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         code.extend(ss_st(S1, d_off));
                     }
                     IRInstr::AtomicStore { value, addr, ty } => {
-                        let store_instr = IRInstr::Store {
+                        let _store_instr = IRInstr::Store {
                             value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone(),
                         };
                         code.extend(ss_load_value(addr, &vreg_stack_slots, S0));
@@ -1846,7 +1848,7 @@ fn hppa_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
     // The actual register indices are backend-specific but we use a
     // generic 0-based indexing scheme here.
     let max_real_regs = 8; // conservative limit
-    for (i, &vreg_id) in all_vreg_ids.iter().enumerate() {
+    for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
             let preg = crate::backend::PhysicalReg::new(
                 crate::backend::RegClass::Gpr,
@@ -1986,7 +1988,7 @@ impl Backend for HppaBackend {
         // GATE
         start_stub.extend_from_slice(&encode_gate());
 
-        let start_stub_size = start_stub.len();
+        let _start_stub_size = start_stub.len();
 
         // ── FFI return-0 stub ──
         // Returns 0 in R28 and branches back to R2 (return address).
@@ -2468,7 +2470,7 @@ impl Backend for HppaBackend {
                     }
                 }
             }
-            let abs_offset = start_call_offset as i64;
+            let _abs_offset = start_call_offset as i64;
             patch_call_site(&mut all_code, start_call_offset, main_offset as usize, &mut trampolines);
         }
 
@@ -2503,7 +2505,7 @@ impl Backend for HppaBackend {
         // Since 4 LDOs can reach 32764 bytes, and trampolines are at the end
         // of the code, this should cover all practical binary sizes.
         let mut trampoline_offsets: Vec<usize> = Vec::new();
-        for (call_offset, target_offset) in &trampolines {
+        for (_call_offset, target_offset) in &trampolines {
             // Align trampoline to 16 bytes
             while all_code.len() % 16 != 0 {
                 all_code.extend_from_slice(&encode_nop());

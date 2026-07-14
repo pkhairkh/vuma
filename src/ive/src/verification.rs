@@ -470,20 +470,18 @@ impl VerificationEngine {
                 }
                 // Check predecessors via Derivation edges
                 for edge in scg.edges() {
-                    if edge.target.as_u64() == curr && edge.kind == EdgeKind::Derivation {
-                        if visited.insert(edge.source.as_u64()) {
+                    if edge.target.as_u64() == curr && edge.kind == EdgeKind::Derivation
+                        && visited.insert(edge.source.as_u64()) {
                             queue.push_back(edge.source.as_u64());
                         }
-                    }
                 }
                 // Also check successors via Derivation (Access → Allocation
                 // can be forward too)
                 for edge in scg.edges() {
-                    if edge.source.as_u64() == curr && edge.kind == EdgeKind::Derivation {
-                        if visited.insert(edge.target.as_u64()) {
+                    if edge.source.as_u64() == curr && edge.kind == EdgeKind::Derivation
+                        && visited.insert(edge.target.as_u64()) {
                             queue.push_back(edge.target.as_u64());
                         }
-                    }
                 }
             }
             if let Some(alloc_id) = found_alloc {

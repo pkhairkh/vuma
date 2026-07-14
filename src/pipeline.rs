@@ -79,7 +79,7 @@ use vuma_ive::{
 use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    DeadRegionElimination, EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow,
+    DeadRegionElimination, EdgeData, EdgeKind, InliningPass,
     LoopInvariantCodeMotion, NodeData, NodeId, NodePayload, NodeType, PassManager,
     PipelineResult as ScgPipelineResult, SCG, SCGPass, StrengthReduction, TailCallOptDetection,
     ComputationKind,
@@ -848,7 +848,7 @@ fn resolve_df_input_for_node(
                     if let Some(param_name) = label.strip_prefix("param ") {
                         let param_name = param_name.trim();
                         if !param_name.is_empty()
-                            && param_name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && param_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                             && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                         {
                             return ScgExpr::Var(param_name.to_string());
@@ -941,7 +941,7 @@ fn resolve_df_input(
                         // variable's value comes from a phi/merge node (not
                         // an assignment).
                         let is_var_ref = !label.is_empty()
-                            && label.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && label.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                             && label.chars().all(|c| c.is_alphanumeric() || c == '_')
                             && !(label.starts_with("v_") && label[2..].chars().all(|c| c.is_ascii_digit()))
                             && !label.starts_with("lit_")
@@ -982,7 +982,7 @@ fn resolve_df_input(
                         if let Some(param_name) = label.strip_prefix("param ") {
                             let param_name = param_name.trim();
                             if !param_name.is_empty()
-                                && param_name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                                && param_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                                 && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                             {
                                 return ScgExpr::Var(param_name.to_string());
@@ -1102,7 +1102,7 @@ fn resolve_branch_cond(
                 }
 
                 // For simple variable conditions, resolve via DataFlow
-                let is_valid_var = cond_no_calls.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                let is_valid_var = cond_no_calls.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                     && cond_no_calls.chars().all(|c| c.is_alphanumeric() || c == '_');
                 if is_valid_var {
                     return (
@@ -1943,8 +1943,7 @@ fn walk_control_flow_with_externs(
                         .iter().map(|e| e.source).collect();
                     let disc_expr = if let Some(ref label) = ctrl.label {
                         let s = label.trim();
-                        if s.starts_with("match ") {
-                            let subject_str = &s[6..];
+                        if let Some(subject_str) = s.strip_prefix("match ") {
                             resolve_subexpr(subject_str, &df_sources, edge_idx, scg)
                         } else {
                             ScgExpr::Int(0)
@@ -1979,7 +1978,7 @@ fn walk_control_flow_with_externs(
                     }
 
                     let mut arms: Vec<SwitchArm> = Vec::new();
-                    let mut arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
+                    let _arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
 
                     let mut default_body: Vec<ScgStatement> = Vec::new();
 
@@ -2060,11 +2059,10 @@ stmts.push(ScgStatement::Control(ControlNode::Switch {
                         // Still no successor — try any outgoing edge from Switch
                         current = edge_idx.outgoing
                             .get(&node_id)
-                            .map(|edges| edges.iter()
+                            .and_then(|edges| edges.iter()
                                 .filter(|e| e.kind == EdgeKind::ControlFlow)
                                 .map(|e| e.target)
-                                .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t)))
-                            .flatten();
+                                .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t)));
                     }
                     continue;
                 }
@@ -2316,7 +2314,7 @@ fn collect_args_from_df(
                     if let Some(param_name) = lbl.strip_prefix("param ") {
                         let pn = param_name.trim();
                         if !pn.is_empty()
-                            && pn.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && pn.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                             && pn.chars().all(|c| c.is_alphanumeric() || c == '_')
                         {
                             args.push(ScgExpr::Var(pn.to_string()));
@@ -3025,7 +3023,7 @@ fn convert_computation_no_calls(
     // The label starts with '*' and is NOT a store (stores have "= <value>"
     // after the pointer expression).
     if op_label.starts_with("*") && !op_label.contains("= ") {
-        let ptr_expr = strip_outer_parens(&op_label[1..].trim());
+        let ptr_expr = strip_outer_parens(op_label[1..].trim());
         let df_sources: Vec<NodeId> = edge_idx
             .incoming_df(node_id)
             .iter()
@@ -3169,7 +3167,7 @@ fn convert_computation_no_calls(
                                         let lhs = op_label[..eq_pos].trim();
                                         let rhs = op_label[eq_pos + 2..].trim();
                                         let ptr_expr =
-                                            strip_outer_parens(&lhs[1..].trim());
+                                            strip_outer_parens(lhs[1..].trim());
                                         let ptr = if let Some((op, l, r)) =
                                             parse_expr_split(ptr_expr)
                                         {
@@ -3212,7 +3210,7 @@ fn convert_computation_no_calls(
                                             // (Load + Store) instead of a single
                                             // Store. The caller (convert_computation_no_calls)
                                             // returns this Vec directly.
-                                            let load_ptr_expr = strip_outer_parens(&rhs[1..].trim());
+                                            let load_ptr_expr = strip_outer_parens(rhs[1..].trim());
                                             let load_ptr = if let Some((op2, l2, r2)) =
                                                 parse_expr_split(load_ptr_expr)
                                             {
@@ -3496,11 +3494,10 @@ fn find_top_level_op(expr: &str, op: &str) -> Option<usize> {
             if matches {
                 // Make sure this isn't part of a two-char operator
                 // (e.g., don't match the '<' in '<=')
-                if op == "<" || op == ">" {
-                    if i + 1 < bytes.len() && (bytes[i + 1] == b'=' || bytes[i + 1] == b'<' || bytes[i + 1] == b'>') {
+                if (op == "<" || op == ">")
+                    && i + 1 < bytes.len() && (bytes[i + 1] == b'=' || bytes[i + 1] == b'<' || bytes[i + 1] == b'>') {
                         continue;
                     }
-                }
                 // Don't match '&' in '&&' or '|' in '||'
                 if op == "&" || op == "|" {
                     // Skip if this is part of a double operator (&& or ||)
@@ -3605,7 +3602,7 @@ fn extract_user_var_from_label(label: &str) -> Option<String> {
         let var_part = label[..eq_pos].trim();
         let var_part = var_part.strip_prefix("let ").unwrap_or(var_part).trim();
         if !var_part.is_empty()
-            && var_part.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && var_part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             return Some(var_part.to_string());
@@ -3688,11 +3685,10 @@ fn resolve_subexpr(
                         if let NodePayload::Computation(comp) = &node_data.payload {
                             let label = comp.kind.label();
                             // Match "let var = func_name(...)" or "func_name(...)"
-                            if label.contains(subexpr) {
-                                if label.starts_with("let ") || label.contains(&(format!("= {}", subexpr))) {
+                            if label.contains(subexpr)
+                                && (label.starts_with("let ") || label.contains(&(format!("= {}", subexpr)))) {
                                     return ScgExpr::Var(format!("v_{}", node_data.id.as_u64()));
                                 }
-                            }
                         }
                     }
                 }
@@ -3718,7 +3714,7 @@ fn resolve_subexpr(
     // Match against the DataFlow sources
     if is_simple_var(subexpr) {
         // First, try exact match: the source node IS the variable definition
-        for (_i, &src) in sources.iter().enumerate() {
+        for &src in sources.iter() {
             if let Some(src_data) = scg.get_node(src) {
                 if let NodePayload::Computation(comp) = &src_data.payload {
                     let label = comp.kind.label();
@@ -3774,9 +3770,9 @@ fn resolve_subexpr(
         for node_data in scg.nodes() {
             if let NodePayload::Computation(comp) = &node_data.payload {
                 let label = comp.kind.label();
-                if label.starts_with("const ") {
+                if let Some(rest) = label.strip_prefix("const ") {
                     // Format: "const NAME = VALUE"
-                    let rest = &label[6..];  // skip "const "
+                    // skip "const "
                     if let Some(eq_pos) = rest.find('=') {
                         let name = rest[..eq_pos].trim();
                         if name == subexpr {
@@ -3805,7 +3801,7 @@ fn resolve_subexpr(
         // names map (e.g., for-loop iterators registered by lower_loop).
         // Invalid identifiers (hex literals, numbers, etc.) fall back to
         // the first source.
-        let is_valid_var = subexpr.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        let is_valid_var = subexpr.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             && subexpr.chars().all(|c| c.is_alphanumeric() || c == '_');
         if is_valid_var {
             return ScgExpr::Var(subexpr.to_string());
@@ -3893,7 +3889,7 @@ fn resolve_subexpr(
 
 /// Check if a string is a simple variable name (alphanumeric, no spaces or operators)
 fn is_simple_var(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.parse::<i64>().is_ok()
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && s.parse::<i64>().is_err()
 }
 
 /// Check if `needle` appears in `haystack` as a whole word (bounded by
@@ -4011,11 +4007,10 @@ fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
     for n in scg.nodes() {
         if let NodePayload::Computation(comp) = &n.payload {
             if let ComputationKind::Other(ref label) = comp.kind {
-                if label.starts_with(&let_prefix) {
-                    if earliest.is_none() || n.id.as_u64() < earliest.unwrap().as_u64() {
+                if label.starts_with(&let_prefix)
+                    && (earliest.is_none() || n.id.as_u64() < earliest.unwrap().as_u64()) {
                         earliest = Some(n.id);
                     }
-                }
             }
         }
     }
@@ -4283,7 +4278,7 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
             let inner = start_str[1..start_str.len()-1].trim();
             if let Ok(start) = inner.parse::<i64>() {
                 ScgExpr::Int(start)
-            } else if inner.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            } else if inner.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                 && inner.chars().all(|c| c.is_alphanumeric() || c == '_')
             {
                 ScgExpr::Var(inner.to_string())
@@ -4309,7 +4304,7 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
                     return None;
                 }
             }
-        } else if start_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        } else if start_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             && start_str.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             ScgExpr::Var(start_str.to_string())
@@ -4324,7 +4319,7 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
         let end_expr = if let Ok(end) = end_str.parse::<i64>() {
             let end = if inclusive { end + 1 } else { end };
             ScgExpr::Int(end)
-        } else if end_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        } else if end_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             && end_str.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             // Variable end bound — inclusive adjustment is handled at
@@ -4454,8 +4449,8 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
             depth += 1;
         } else if c == ')' {
             depth -= 1;
-        } else if depth == 0 {
-            if bytes[i..i + op_bytes.len()] == *op_bytes {
+        } else if depth == 0
+            && bytes[i..i + op_bytes.len()] == *op_bytes {
                 // Avoid matching "<" inside "<=" or ">" inside ">=".
                 if op == "<" && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
                     i += 1;
@@ -4469,7 +4464,6 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
                     return Some(i);
                 }
             }
-        }
         i += 1;
     }
     None
@@ -5263,7 +5257,7 @@ pub fn compile_with_path(
         })
         .collect();
     let mut regalloc_results = Vec::new();
-    for (name, result) in par_results {
+    for (_name, result) in par_results {
         match result {
             Ok(r) => regalloc_results.push(r),
             Err(e) => {
@@ -7664,7 +7658,7 @@ fn parse_while_to_for_range(
     // End bound can be a constant or a variable name.
     let end_expr = if let Ok(end) = rhs_str.parse::<i64>() {
         ScgExpr::Int(end)
-    } else if rhs_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+    } else if rhs_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && rhs_str.chars().all(|c| c.is_alphanumeric() || c == '_')
     {
         ScgExpr::Var(rhs_str.to_string())
@@ -7712,11 +7706,10 @@ fn parse_while_to_for_range(
 fn body_has_any_reassigns(body: &[ScgStatement]) -> bool {
     for stmt in body {
         match stmt {
-            ScgStatement::Computation(comp) => {
-                if comp.reassigns.is_some() {
+            ScgStatement::Computation(comp)
+                if comp.reassigns.is_some() => {
                     return true;
                 }
-            }
             ScgStatement::Control(ControlNode::If { then_body, else_body, .. }) => {
                 if body_has_any_reassigns(then_body) {
                     return true;
@@ -7727,11 +7720,10 @@ fn body_has_any_reassigns(body: &[ScgStatement]) -> bool {
                     }
                 }
             }
-            ScgStatement::Control(ControlNode::Loop { body, .. }) => {
-                if body_has_any_reassigns(body) {
+            ScgStatement::Control(ControlNode::Loop { body, .. })
+                if body_has_any_reassigns(body) => {
                     return true;
                 }
-            }
             ScgStatement::Control(ControlNode::Switch { arms, default_body, .. }) => {
                 for arm in arms {
                     if body_has_any_reassigns(&arm.body) {
@@ -7868,7 +7860,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             // If the body doesn't end with a Return, add an implicit one.
             // When the function has a return type and the last statement was an
             // expression, use ctx.last_expr_result as the return value.
-            let has_return = body.last().map_or(false, |s| matches!(s, ScgStatement::Return(_)));
+            let has_return = body.last().is_some_and(|s| matches!(s, ScgStatement::Return(_)));
             if !has_return {
                 let ret_val = if !results.is_empty() {
                     // First check if the last expression was tracked.
@@ -7910,7 +7902,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             Some(i) => {
                 if let ScgNode::Function(f) = &mut nodes[i] {
                     let mut original_body = std::mem::take(&mut f.body);
-                    top_level_stmts.extend(original_body.drain(..));
+                    top_level_stmts.append(&mut original_body);
                     f.body = top_level_stmts;
                 }
             }

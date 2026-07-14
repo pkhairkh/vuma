@@ -27,7 +27,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendError;
-use crate::ir::{IRFunction, IRInstr, IRProgram, IRValue};
+use crate::ir::{IRFunction, IRInstr, IRProgram};
+#[cfg(test)]
+use crate::ir::IRValue;
 
 /// A monomorphization key: (function_name, type_args)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +46,12 @@ pub struct Monomorphizer {
     pub pending: Vec<MonoKey>,
     /// Already-processed specialization names.
     pub done: HashSet<String>,
+}
+
+impl Default for Monomorphizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Monomorphizer {

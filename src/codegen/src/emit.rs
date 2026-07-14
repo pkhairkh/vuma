@@ -1016,7 +1016,7 @@ impl Emitter {
                 ];
 
                 let mut src_regs: Vec<Register> = Vec::new();
-                let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+                let _immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
                 let mut next_scratch = 0;
 
                 for (i, arg) in args.iter().enumerate() {
@@ -3443,7 +3443,7 @@ impl Emitter {
         // ── FP BinOp dispatch (top of function, before integer path) ──
         // When ty is F32/F64 we use AArch64 FP arithmetic (FADD/FSUB/FMUL/FDIV)
         // or FP compare (FCMP + CSET) instead of the integer path.
-        let is_fp = ty.map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+        let is_fp = ty.is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
         if is_fp {
             let is_double = matches!(ty, Some(IRType::F64));
             // FP arithmetic and comparison are the only ops that go through
@@ -4195,11 +4195,7 @@ fn compute_frame_size(func: &IRFunction) -> u32 {
     }
     // Number of potential spills: max(0, vreg_count - available_registers)
     let available_regs: u32 = 23; // 13 caller-saved + 10 callee-saved
-    let potential_spills = if max_vreg > available_regs {
-        max_vreg - available_regs
-    } else {
-        0
-    };
+    let potential_spills = max_vreg.saturating_sub(available_regs);
     let spill_bytes = potential_spills * 8; // 8 bytes per spill slot
 
     total += spill_bytes;

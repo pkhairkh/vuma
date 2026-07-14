@@ -67,6 +67,12 @@ pub struct ClosureLowerer {
     closures: Vec<LoweredClosure>,
 }
 
+impl Default for ClosureLowerer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClosureLowerer {
     pub fn new() -> Self {
         ClosureLowerer {
@@ -139,7 +145,7 @@ impl ClosureLowerer {
         &self,
         closure: &LoweredClosure,
         captured_vregs: &HashMap<String, u32>,
-        out: u32,
+        _out: u32,
     ) -> Vec<String> {
         // This would generate IR instructions.
         // For now, return a description of what would be generated.

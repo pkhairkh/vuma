@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
+use vuma_scg::node::{NodeId, NodePayload};
 
 /// Function summary for interprocedural analysis.
 #[derive(Debug, Clone, Default)]
@@ -105,17 +105,15 @@ pub fn analyze_function(
                     let region_id = dealloc.region_id.as_u64() as u32;
                     summary.freed_regions.insert(region_id);
                 }
-                NodePayload::Access(access) => {
-                    if access.mode == vuma_scg::node::AccessMode::Write {
+                NodePayload::Access(access)
+                    if access.mode == vuma_scg::node::AccessMode::Write => {
                         let region_id = access.region_id.as_u64() as u32;
                         summary.modified_regions.insert(region_id);
                     }
-                }
-                NodePayload::Effect(eff) => {
-                    if eff.effect_kind.contains("io") || eff.effect_kind.contains("write") {
+                NodePayload::Effect(eff)
+                    if (eff.effect_kind.contains("io") || eff.effect_kind.contains("write")) => {
                         summary.performs_io = true;
                     }
-                }
                 _ => {}
             }
         }
@@ -433,7 +431,7 @@ impl AbstractRegionTracker {
 pub fn verify_function(
     scg: &SCG,
     function_nodes: &[NodeId],
-    summaries: &HashMap<String, FunctionSummary>,
+    _summaries: &HashMap<String, FunctionSummary>,
     cache: &mut IncrementalCache,
     func_name: &str,
     func_hash: u64,

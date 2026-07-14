@@ -251,11 +251,11 @@ impl<N, E> DiGraph<N, E> {
     /// the SCG layer validates endpoints before calling).
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, weight: E) -> EdgeIndex {
         debug_assert!(
-            self.nodes.get(a.0).map_or(false, |s| s.is_some()),
+            self.nodes.get(a.0).is_some_and(|s| s.is_some()),
             "add_edge: source node {a:?} does not exist"
         );
         debug_assert!(
-            self.nodes.get(b.0).map_or(false, |s| s.is_some()),
+            self.nodes.get(b.0).is_some_and(|s| s.is_some()),
             "add_edge: target node {b:?} does not exist"
         );
         let eidx = self.edges.len();
@@ -360,7 +360,7 @@ impl<N, E> DiGraph<N, E> {
                     Direction::Outgoing => &entry.adj_out,
                     Direction::Incoming => &entry.adj_in,
                 };
-                list.iter().copied().collect::<Vec<_>>().into_iter()
+                list.to_vec().into_iter()
             })
             .filter_map(move |eidx| {
                 self.edges
@@ -392,7 +392,7 @@ impl<N, E> DiGraph<N, E> {
                     Direction::Outgoing => &entry.adj_out,
                     Direction::Incoming => &entry.adj_in,
                 };
-                list.iter().copied().collect::<Vec<_>>().into_iter()
+                list.to_vec().into_iter()
             })
             .filter_map(move |eidx| {
                 self.edges.get(eidx).and_then(|s| s.as_ref()).map(|en| {
@@ -491,7 +491,7 @@ pub fn toposort<N, E>(g: &DiGraph<N, E>) -> Result<Vec<NodeIndex>, NodeIndex> {
     // slot is explored first.
     let mut stack: Vec<NodeIndex> = (0..n)
         .filter(|i| {
-            g.nodes.get(*i).map_or(false, |s| s.is_some()) && in_degree[*i] == 0
+            g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] == 0
         })
         .map(NodeIndex)
         .collect();
@@ -503,7 +503,7 @@ pub fn toposort<N, E>(g: &DiGraph<N, E>) -> Result<Vec<NodeIndex>, NodeIndex> {
         result.push(u);
         if let Some(Some(entry)) = g.nodes.get(u.0) {
             // Snapshot the out-list to avoid borrow conflicts.
-            let out: Vec<usize> = entry.adj_out.iter().copied().collect();
+            let out: Vec<usize> = entry.adj_out.to_vec();
             for eidx in out {
                 if let Some(Some(en)) = g.edges.get(eidx) {
                     let v = en.target;
@@ -526,7 +526,7 @@ pub fn toposort<N, E>(g: &DiGraph<N, E>) -> Result<Vec<NodeIndex>, NodeIndex> {
         // Return any node still in a cycle (in_degree > 0 and live).
         let leftover = (0..n)
             .find(|i| {
-                g.nodes.get(*i).map_or(false, |s| s.is_some()) && in_degree[*i] > 0
+                g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] > 0
             })
             .map(NodeIndex)
             .unwrap_or(NodeIndex(0));
@@ -586,7 +586,7 @@ fn tarjan_strongconnect<N, E>(
     on_stack[v.0] = true;
 
     if let Some(Some(entry)) = g.nodes.get(v.0) {
-        let out: Vec<usize> = entry.adj_out.iter().copied().collect();
+        let out: Vec<usize> = entry.adj_out.to_vec();
         for eidx in out {
             let w = match g.edges.get(eidx).and_then(|s| s.as_ref()) {
                 Some(en) => NodeIndex(en.target),
@@ -626,8 +626,8 @@ pub fn has_path_connecting<N, E>(
     from: NodeIndex,
     to: NodeIndex,
 ) -> bool {
-    if g.nodes.get(from.0).map_or(false, |s| s.is_none())
-        || g.nodes.get(to.0).map_or(false, |s| s.is_none())
+    if g.nodes.get(from.0).is_some_and(|s| s.is_none())
+        || g.nodes.get(to.0).is_some_and(|s| s.is_none())
     {
         return false;
     }
@@ -642,7 +642,7 @@ pub fn has_path_connecting<N, E>(
 
     while let Some(u) = queue.pop_front() {
         if let Some(Some(entry)) = g.nodes.get(u.0) {
-            let out: Vec<usize> = entry.adj_out.iter().copied().collect();
+            let out: Vec<usize> = entry.adj_out.to_vec();
             for eidx in out {
                 let w = match g.edges.get(eidx).and_then(|s| s.as_ref()) {
                     Some(en) => NodeIndex(en.target),

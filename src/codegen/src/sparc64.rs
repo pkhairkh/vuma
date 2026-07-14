@@ -54,9 +54,11 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+    BackendError, RelocationEntry, TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VirtualRegister};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+#[cfg(test)]
+use crate::ir::VirtualRegister;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -376,11 +378,10 @@ impl fmt::Display for Gpr {
 ///
 /// Format: `op[31:30] | rd[29:25] | op3[24:19] | rs1[18:14] | 0[13] | reserved[12:5] | rs2[4:0]`
 fn encode_fmt3_rr(op: u32, rd: Gpr, op3: u32, rs1: Gpr, rs2: Gpr) -> [u8; 4] {
-    let word = ((op & 0x3) << 30)
+    let word = (((op & 0x3) << 30)
         | ((rd.encoding() & 0x1F) << 25)
         | ((op3 & 0x3F) << 19)
-        | ((rs1.encoding() & 0x1F) << 14)
-        | (0u32 << 13) // i = 0 (register)
+        | ((rs1.encoding() & 0x1F) << 14)) // i = 0 (register)
         | (rs2.encoding() & 0x1F);
     word.to_be_bytes()
 }
@@ -717,31 +718,28 @@ impl Instruction {
 
             // ── Shifts (64-bit, V9 — uses bit 12 as the X flag) ─────────
             Instruction::Sllx { rd, rs1, rs2 } => {
-                let word = ((OPC_FORMAT3 & 0x3) << 30)
+                let word = (((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
                     | ((OP3_SLL & 0x3F) << 19)
-                    | ((rs1.encoding() & 0x1F) << 14)
-                    | (0u32 << 13) // i = 0
+                    | ((rs1.encoding() & 0x1F) << 14)) // i = 0
                     | (1u32 << 12) // X bit (64-bit shift)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()
             }
             Instruction::Srlx { rd, rs1, rs2 } => {
-                let word = ((OPC_FORMAT3 & 0x3) << 30)
+                let word = (((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
                     | ((OP3_SRL & 0x3F) << 19)
-                    | ((rs1.encoding() & 0x1F) << 14)
-                    | (0u32 << 13)
+                    | ((rs1.encoding() & 0x1F) << 14))
                     | (1u32 << 12)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()
             }
             Instruction::Srax { rd, rs1, rs2 } => {
-                let word = ((OPC_FORMAT3 & 0x3) << 30)
+                let word = (((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
                     | ((OP3_SRA & 0x3F) << 19)
-                    | ((rs1.encoding() & 0x1F) << 14)
-                    | (0u32 << 13)
+                    | ((rs1.encoding() & 0x1F) << 14))
                     | (1u32 << 12)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()
@@ -859,11 +857,8 @@ impl Instruction {
                 // Actually SPARC V9 MEMBAR format: 10 rd=0 101000 rs1=0 0 0000000 cmask[3:0] mmask[3:0]
                 // where cmask is at bits 7-4 and mmask is at bits 3-0.
                 // But the simpler interpretation: mask is at bits 6-0, i=0.
-                let word = ((OPC_FORMAT3 & 0x3) << 30)
-                    | (0u32 << 25) // rd = 0
-                    | ((OP3_MEMBAR & 0x3F) << 19)
-                    | (0u32 << 14) // rs1 = 0
-                    | (0u32 << 13) // i = 0 (required for MEMBAR)
+                let word = ((((OPC_FORMAT3 & 0x3) << 30) // rd = 0
+                    | ((OP3_MEMBAR & 0x3F) << 19))) // i = 0 (required for MEMBAR)
                     | (*mask & 0x7F); // mask at bits 6-0
                 word.to_be_bytes()
             }
@@ -872,12 +867,9 @@ impl Instruction {
             Instruction::Movcc { rd, rs2, cond } => {
                 // MOVcc: op=10, rd, op3=0x2C, rs1=0, i=0, cc2.cc1.cc0[12:11], cond[17:14]
                 // For simplicity, we use %icc (cc=000) and encode cond in bits[17:14].
-                let word = ((OPC_FORMAT3 & 0x3) << 30)
+                let word = ((((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
-                    | ((OP3_MOVCC & 0x3F) << 19)
-                    | (0u32 << 14) // rs1 = 0
-                    | (0u32 << 13) // i = 0
-                    | (0u32 << 11) // cc = 000 (%icc)
+                    | ((OP3_MOVCC & 0x3F) << 19))) // cc = 000 (%icc)
                     | ((*cond & 0xF) << 14)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()
@@ -1087,7 +1079,7 @@ fn build_sparc64_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> 
 
     let text_file_end = text_offset + text_size;
     let data_vaddr =
-        ((base_addr + text_file_end + HOST_PAGE_ALIGN - 1) / HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+        (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_size: u64 = PAGE_SIZE;
     let entry_point = base_addr + text_offset;
 
@@ -1854,7 +1846,7 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
     let frame_size = (((total_local + 192) + 15) & !15) as usize;
 
     // ── Phase 2: Build the phi-map for predecessor-aware phi resolution ──
-    let phi_map = func.build_phi_map();
+    let _phi_map = func.build_phi_map();
 
     // ── Phase 3: Emit prologue ──
     let mut code: Vec<u8> = Vec::new();
@@ -1963,7 +1955,7 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
     let mut branch_patches: Vec<BranchPatch> = Vec::new();
     let mut cond_branch_false_patches: Vec<BranchPatch> = Vec::new();
 
-    for (blk_idx, block) in func.blocks.iter().enumerate() {
+    for block in func.blocks.iter() {
         block_start_offsets.push(code.len());
 
         // Emit phi copies for this block (from predecessor's perspective, these
@@ -2244,7 +2236,7 @@ fn sparc64_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunctio
     // The actual register indices are backend-specific but we use a
     // generic 0-based indexing scheme here.
     let max_real_regs = 8; // conservative limit
-    for (i, &vreg_id) in all_vreg_ids.iter().enumerate() {
+    for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
             let preg = crate::backend::PhysicalReg::new(
                 crate::backend::RegClass::Gpr,
@@ -3489,7 +3481,7 @@ fn emit_binop(
                 .encode(),
             );
             // BE skip (if equal, skip the "l0 = 0")
-            let bne_off = code.len();
+            let _bne_off = code.len();
             code.extend_from_slice(&Instruction::Be { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
             // l0 = 0 (not equal)

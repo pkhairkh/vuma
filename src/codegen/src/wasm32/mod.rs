@@ -2914,7 +2914,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 CastKind::FloatToFloat => match src_ty {
                     WasmType::F32 => WasmType::F64,
                     WasmType::F64 => WasmType::F32,
-                    _ => src_ty.clone(),
+                    _ => src_ty,
                 },
                 // Integer-only casts — not FP, but include for completeness.
                 CastKind::Trunc => WasmType::I32,
@@ -2932,7 +2932,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // default.  Integer destinations are always I32 on Wasm32.
             let dst_ty = match dst {
                 IRValue::Register(id) => {
-                    ctx.vreg_types.get(id).copied().unwrap_or_else(|| match to_ty {
+                    ctx.vreg_types.get(id).copied().unwrap_or(match to_ty {
                         Some(IRType::F32) => WasmType::F32,
                         Some(IRType::F64) => WasmType::F64,
                         _ => dst_ty_default,
@@ -2988,7 +2988,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 CastKind::FloatToFloat => match (src_ty, dst_ty) {
                     (WasmType::F32, WasmType::F64) => (WasmInstr::F64PromoteF32, WasmType::F64),
                     (WasmType::F64, WasmType::F32) => (WasmInstr::F32DemoteF64, WasmType::F32),
-                    _ => (WasmInstr::Nop, src_ty.clone()), // same type, no conversion
+                    _ => (WasmInstr::Nop, src_ty), // same type, no conversion
                 },
             };
             ctx.emit(wasm_op);
@@ -4200,9 +4200,9 @@ impl Backend for Wasm32Backend {
             params: vec![WasmType::I32, WasmType::I32, WasmType::I32],
             results: vec![WasmType::I32],
         });
-        let vuma_read_func_idx = module.add_function(read_write_type_idx);
+        let _vuma_read_func_idx = module.add_function(read_write_type_idx);
         module.add_code(emit_read_wrapper());
-        let vuma_write_func_idx = module.add_function(read_write_type_idx);
+        let _vuma_write_func_idx = module.add_function(read_write_type_idx);
         module.add_code(emit_write_wrapper());
 
         // Export the runtime helpers so they can be called from outside.

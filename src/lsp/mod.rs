@@ -450,7 +450,7 @@ fn read_message() -> io::Result<Option<String>> {
             // EOF
             return Ok(None);
         }
-        let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
             break;
         }
@@ -1401,12 +1401,12 @@ impl LspServer {
             return String::new();
         }
         let line_text = lines[line];
-        if character as usize >= line_text.len() {
+        if character >= line_text.len() {
             return String::new();
         }
 
         let chars: Vec<char> = line_text.chars().collect();
-        let char_idx = character as usize;
+        let char_idx = character;
 
         // Find start of word
         let mut start = char_idx;
@@ -1452,13 +1452,13 @@ impl LspServer {
         match item {
             Item::FnDef(fndef) => {
                 let range = self.span_to_range(text, fndef.span);
-                let ret_type = fndef.return_type.as_ref().map(|t| format_type(t));
+                let ret_type = fndef.return_type.as_ref().map(format_type);
                 info.functions.push((fndef.name.clone(), range, ret_type));
 
                 // Extract parameters as variables
                 for param in &fndef.params {
                     let range = self.span_to_range(text, param.span);
-                    let ty = param.ty.as_ref().map(|t| format_type(t));
+                    let ty = param.ty.as_ref().map(format_type);
                     info.variables.push((param.name.clone(), range, ty));
                 }
 
@@ -1488,12 +1488,12 @@ impl LspServer {
             }
             Item::Const(constdef) => {
                 let range = self.span_to_range(text, constdef.span);
-                let ty = constdef.ty.as_ref().map(|t| format_type(t));
+                let ty = constdef.ty.as_ref().map(format_type);
                 info.constants.push((constdef.name.clone(), range, ty));
             }
             Item::Static(staticdef) => {
                 let range = self.span_to_range(text, staticdef.span);
-                let ty = staticdef.ty.as_ref().map(|t| format_type(t));
+                let ty = staticdef.ty.as_ref().map(format_type);
                 info.constants.push((staticdef.name.clone(), range, ty));
             }
             Item::TraitDef(traitdef) => {
@@ -1504,19 +1504,19 @@ impl LspServer {
                 // Extract method signatures
                 for method in traitdef.required_methods.iter().chain(traitdef.provided_methods.iter()) {
                     let range = self.span_to_range(text, method.span);
-                    let ret_type = method.return_type.as_ref().map(|t| format_type(t));
+                    let ret_type = method.return_type.as_ref().map(format_type);
                     info.functions.push((method.name.clone(), range, ret_type));
                 }
             }
             Item::ImplBlock(implblock) => {
                 for method in &implblock.methods {
                     let range = self.span_to_range(text, method.span);
-                    let ret_type = method.return_type.as_ref().map(|t| format_type(t));
+                    let ret_type = method.return_type.as_ref().map(format_type);
                     info.functions.push((method.name.clone(), range, ret_type));
 
                     for param in &method.params {
                         let range = self.span_to_range(text, param.span);
-                        let ty = param.ty.as_ref().map(|t| format_type(t));
+                        let ty = param.ty.as_ref().map(format_type);
                         info.variables.push((param.name.clone(), range, ty));
                     }
 
@@ -1547,7 +1547,7 @@ impl LspServer {
         match stmt {
             Stmt::Let(let_stmt) => {
                 let range = self.span_to_range(text, let_stmt.span);
-                let ty = let_stmt.ty.as_ref().map(|t| format_type(t));
+                let ty = let_stmt.ty.as_ref().map(format_type);
                 info.variables.push((let_stmt.name.clone(), range, ty));
             }
             Stmt::If(if_stmt) => {
@@ -1634,7 +1634,7 @@ impl LspServer {
                 // Identifiers — could be variable, function, or type
                 TokenKind::Ident => {
                     // Heuristic: if it starts with uppercase, it's likely a type
-                    if token.lexeme.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if token.lexeme.chars().next().is_some_and(|c| c.is_uppercase()) {
                         SemanticTokenType::Type
                     } else {
                         SemanticTokenType::Variable

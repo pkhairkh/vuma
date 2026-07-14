@@ -50,7 +50,9 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, Mips64TargetInfo, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VirtualRegister};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+#[cfg(test)]
+use crate::ir::VirtualRegister;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -1690,7 +1692,7 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // The data segment starts on the next page after the text.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     let data_offset = data_vaddr - base_addr;
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
@@ -2878,10 +2880,10 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
 
-                    let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
+                    let is_32bit = ty.as_ref().is_some_and(|t| matches!(t, IRType::I32 | IRType::U32));
 
                     // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic
-                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                     if is_fp {
                         // Move GPR bit patterns to FPRs
                         code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); code.extend_from_slice(&encode_nop());
@@ -3056,7 +3058,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
                     // Type-aware: U64 → Ddivu, U32/U16/U8 → Divu, I64 → Ddiv, I32 → Div
-                    let is_unsigned = ty.as_ref().map_or(false, |t|
+                    let is_unsigned = ty.as_ref().is_some_and(|t|
                         matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
                     if is_unsigned {
                         code.extend_from_slice(&Instruction::Ddivu { rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
@@ -3091,7 +3093,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                             code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 64 }.encode()); // T1 = 64
                             code.extend_from_slice(&encode_nop());
                             // Loop: while T0 != 0 { T0 <<= 1; T1-- }
-                            let loop_start = code.len();
+                            let _loop_start = code.len();
                             code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 20 }.encode()); // if T0 == 0, exit (skip 5 instrs; offset in bytes = 5*4)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 <<= 1
@@ -3110,7 +3112,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                             code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0 }.encode());
                             code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 0 }.encode()); // T1 = 0
                             code.extend_from_slice(&encode_nop());
-                            let loop_start = code.len();
+                            let _loop_start = code.len();
                             code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
                             code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::Bne { rs: Gpr::T2, rt: Gpr::Zero, offset: 20 }.encode()); // if T2 != 0, exit (5 instrs * 4 bytes)
@@ -3131,7 +3133,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                             code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0 }.encode());
                             code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 0 }.encode()); // T1 = 0
                             code.extend_from_slice(&encode_nop());
-                            let loop_start = code.len();
+                            let _loop_start = code.len();
                             code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 20 }.encode()); // if T0 == 0, exit (5 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
@@ -3157,7 +3159,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
 
                     // FP Cmp dispatch: when ty is F32/F64, use c.cond.d and CFC1.
-                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                     if is_fp {
                         // Move GPR bit patterns to FPRs: F0=lhs, F2=rhs
                         code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); code.extend_from_slice(&encode_nop());
@@ -3535,8 +3537,8 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         CastKind::FloatToFloat => {
                             // Determine direction from from_ty/to_ty.  Default
                             // (no type info) is f64 → f32 (narrowing).
-                            let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
-                            let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                            let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
+                            let dst_is_f32 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
                             if src_is_f32 && !dst_is_f32 {
                                 // f32 → f64 (widen): MTC1 T0→F0, CVT.D.S F0,F0, DMFC1 T0←F0
                                 code.extend_from_slice(&Instruction::Mtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
@@ -4031,7 +4033,7 @@ fn mips64_allocate_registers_real(func: &IRFunction, big_endian: bool) -> Result
     // The actual register indices are backend-specific but we use a
     // generic 0-based indexing scheme here.
     let max_real_regs = 8; // conservative limit
-    for (i, &vreg_id) in all_vreg_ids.iter().enumerate() {
+    for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
             let preg = crate::backend::PhysicalReg::new(
                 crate::backend::RegClass::Gpr,
@@ -4077,7 +4079,7 @@ fn lower_ir_instr(
 
     match instr {
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
-            let is_32bit = ty.as_ref().map_or(false, |t|
+            let is_32bit = ty.as_ref().is_some_and(|t|
                 matches!(t, IRType::I8 | IRType::I16 | IRType::I32 |
                             IRType::U8 | IRType::U16 | IRType::U32)
             );
@@ -4668,8 +4670,8 @@ fn lower_ir_instr(
                 CastKind::FloatToFloat => {
                     // Determine direction from from_ty/to_ty.  Default
                     // (no type info) is f64 → f32 (narrowing).
-                    let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
-                    let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                    let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
+                    let dst_is_f32 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
                     if src_is_f32 && !dst_is_f32 {
                         // f32 → f64 (widen): MTC1 src→F0, CVT.D.S F0,F0, DMFC1 dst←F0
                         let mtc1 = Instruction::Mtc1 { rt: src_reg, fs: Fpr::F0 };

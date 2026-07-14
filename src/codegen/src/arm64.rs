@@ -56,10 +56,12 @@ use crate::Result;
 /// arithmetic, which is required for algorithms like SHA-256 that operate on
 /// `u32` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum RegWidth {
     /// 32-bit W registers (W0–W30, WZR, WSP).
     W32,
     /// 64-bit X registers (X0–X30, XZR, SP) — default.
+    #[default]
     X64,
 }
 
@@ -124,11 +126,6 @@ impl RegWidth {
     }
 }
 
-impl Default for RegWidth {
-    fn default() -> Self {
-        RegWidth::X64
-    }
-}
 
 impl std::fmt::Display for RegWidth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -3039,7 +3036,7 @@ impl Instruction {
                 rd: rd_reg,
                 rn: rn_reg,
                 rm: rm_reg,
-                imm6: imm6,
+                imm6,
             });
         }
 
