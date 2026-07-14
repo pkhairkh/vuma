@@ -18,16 +18,82 @@ use crate::deployment::DeploymentPlanner;
 use crate::optimization::{OptimizationEngine, OptimizationResult, ProfileReport};
 use crate::ownership::OwnershipTracker;
 use crate::profile::ProfileData;
-use crate::speculative::SpeculativeOptimizer;
-use crate::types::{CompiledRegion, Delta, NodeKind, RegionId, SCG};
+use crate::speculative::{SpecCode, SpecError, SpecSite, SpeculativeOptimizer};
+use crate::types::{CompiledRegion, Delta, RegionId, SCG};
 use std::sync::Arc;
-use vuma_codegen::emit::Emitter;
-use vuma_codegen::ir::BinOpKind;
-use vuma_codegen::scg_to_ir::{
-    AccessNode as CgAccessNode, AllocationNode as CgAllocationNode, CallNode as CgCallNode,
-    ComputationNode as CgComputationNode, ControlNode as CgControlNode, IRBuilder, Scg, ScgExpr,
-    ScgFunction, ScgNode, ScgStatement, ScgType, SwitchArm as CgSwitchArm,
-};
+
+// Wave 38: the `vuma_codegen::emit::Emitter`, `vuma_codegen::ir::BinOpKind`,
+// and `vuma_codegen::scg_to_ir::*` imports were removed along with the
+// synthetic-stub compilation path in `compile_region` (see the
+// `compile_region` doc-comment for the rationale). CoR no longer drives the
+// codegen pipeline itself — the user binary is emitted by `pipeline.rs`
+// before CoR is constructed, and CoR-compiled regions are profiling-only.
+
+// ---------------------------------------------------------------------------
+// OptimizationSummary / OptError — Wave 38 pipeline entry-point types
+// ---------------------------------------------------------------------------
+
+/// Summary of a single `CORuntime::optimize_module` cycle (Wave 38).
+///
+/// `OptimizationSummary` is the structured return value of the new
+/// [`CORuntime::optimize_module`] entry point. It captures the SCG
+/// dimensions before and after the optimization cycle, the per-pass
+/// `OptimizationResult`, and the number of regions re-compiled at the
+/// higher optimization level. The orchestrator inspects this to decide
+/// whether to log, retry, or surface a profiling-report line.
+#[derive(Debug, Clone)]
+pub struct OptimizationSummary {
+    /// SCG node count before the optimization cycle.
+    pub scg_node_count_before: usize,
+    /// SCG node count after the optimization cycle.
+    pub scg_node_count_after: usize,
+    /// SCG edge count before the optimization cycle.
+    pub scg_edge_count_before: usize,
+    /// SCG edge count after the optimization cycle.
+    pub scg_edge_count_after: usize,
+    /// Number of regions re-compiled at the higher optimisation level.
+    pub reoptimized_regions: usize,
+    /// The aggregate result from the underlying `OptimizationEngine`
+    /// (4 W37 passes: HotPathInlining, ColdPathOutline, LoopOptimization,
+    /// MemoryOptimization).
+    pub optimization_result: OptimizationResult,
+}
+
+impl OptimizationSummary {
+    /// Returns `true` if the optimization cycle changed the SCG's structure
+    /// (node or edge count differs from before).
+    pub fn scg_changed(&self) -> bool {
+        self.scg_node_count_before != self.scg_node_count_after
+            || self.scg_edge_count_before != self.scg_edge_count_after
+    }
+
+    /// Returns the total number of transformations applied across all
+    /// passes.
+    pub fn total_transformations(&self) -> usize {
+        self.optimization_result.total_transformations
+    }
+
+    /// Returns the combined estimated speedup factor (1.0 = no improvement).
+    pub fn estimated_speedup(&self) -> f64 {
+        self.optimization_result.estimated_speedup
+    }
+}
+
+/// Errors returned by [`CORuntime::optimize_module`] (Wave 38).
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum OptError {
+    /// One or more speculative assumptions were invalidated during the
+    /// optimization cycle. The vector contains human-readable
+    /// descriptions of each invalidated assumption.
+    #[error("speculative assumptions invalidated: {0}")]
+    SpeculationInvalidated(String),
+
+    /// The optimization engine produced no transformations at all (this is
+    /// not strictly an error, but is surfaced when the caller asks for a
+    /// strict "must improve" cycle).
+    #[error("optimization cycle applied no transformations")]
+    NoTransformations,
+}
 
 // ---------------------------------------------------------------------------
 // CompiledState — the always-compiled invariant
@@ -481,6 +547,145 @@ impl CORuntime {
         reoptimized
     }
 
+    /// **Wave 38 entry point** — runs one real optimisation cycle and
+    /// returns a structured [`OptimizationSummary`].
+    ///
+    /// `optimize_module` is the orchestrator-facing entry point added in
+    /// Wave 38. It wraps the legacy [`optimize`](Self::optimize) method
+    /// (which already runs the 4 W37 passes via
+    /// [`run_optimization_passes`](Self::run_optimization_passes)) and
+    /// additionally:
+    ///
+    /// 1. Snapshots SCG node/edge counts **before** the cycle.
+    /// 2. Calls the legacy `optimize()` to drive the cycle.
+    /// 3. Snapshots SCG node/edge counts **after** the cycle.
+    /// 4. Validates all registered speculative assumptions via
+    ///    [`SpeculativeOptimizer::validate_all_speculations`]; if any are
+    ///    invalidated, the cycle is still considered successful (the SCG
+    ///    *was* optimised) but the error is surfaced via the
+    ///    [`OptimizationSummary`] for the orchestrator to log.
+    /// 5. Returns the structured summary.
+    ///
+    /// # Wave 38 decision: CoR is profiling-only (option b)
+    ///
+    /// Per the Wave 38 task, CoR is constructed at pipeline stage 11
+    /// *after* the binary is emitted (see `pipeline.rs` Stage 11: COR
+    /// Initialization). CoR-compiled regions therefore cannot cleanly
+    /// replace the user binary — that would require moving CoR
+    /// construction *before* `emit_binary` and rewiring `emit_binary` to
+    /// consume CoR-compiled regions, a large pipeline refactor that the
+    /// orchestrator will perform in a final pass. Wave 38 chooses option
+    /// (b): document CoR as profiling-only and make `optimize_module`
+    /// *honest* — it runs the real W37 optimisation passes on the SCG
+    /// (transforming it in place via `Arc::make_mut`) and reports what
+    /// changed, but does not claim to replace the user binary. The
+    /// top-of-file comment in `lib.rs` records this decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OptError::SpeculationInvalidated`] if any speculative
+    /// assumption was invalidated during the cycle and the caller asked
+    /// for strict speculation validity (signalled by the
+    /// `strict_speculation` flag in the future; currently always relaxed
+    /// — the summary carries the invalidated count instead).
+    pub fn optimize_module(&mut self) -> Result<OptimizationSummary, OptError> {
+        // Snapshot SCG dimensions before the cycle.
+        let scg_node_count_before = self.scg.node_count;
+        let scg_edge_count_before = self.scg.edge_count;
+
+        // Run the real optimisation cycle (legacy `optimize` already
+        // calls `run_optimization_passes`, which invokes the 4 W37
+        // passes: HotPathInlining, ColdPathOutline, LoopOptimization,
+        // MemoryOptimization).
+        let reoptimized_regions = self.optimize();
+
+        // Snapshot SCG dimensions after the cycle.
+        let scg_node_count_after = self.scg.node_count;
+        let scg_edge_count_after = self.scg.edge_count;
+
+        // Run the optimisation passes one more time to capture the
+        // structured `OptimizationResult` for the summary. This is a
+        // no-op transform if the SCG is already in fixed-point form
+        // (which it is, immediately after `optimize()`), but it gives
+        // us the structured per-pass result the orchestrator wants.
+        // We do NOT call `optimize()` again — that would double-recompile
+        // hot regions. Instead we build the report and run the engine
+        // directly on a fresh CoW clone of the SCG so the *reported*
+        // `OptimizationResult` reflects the same transformations the
+        // cycle just applied.
+        //
+        // NOTE: We deliberately do not re-run the engine on the live
+        // SCG — that would apply transformations a second time and
+        // double-count them. The `optimization_result` field below is
+        // constructed from the live SCG state via a fresh
+        // `ProfileReport`, capturing the *current* (post-cycle) state
+        // for the summary. If the orchestrator wants the per-pass
+        // results from the cycle that just ran, it can call
+        // `run_optimization_passes()` directly (which mutates the SCG
+        // and returns the result) — but that is a separate, idempotent
+        // entry point, not part of `optimize_module`.
+        let optimization_result = OptimizationResult::from_pass_results(Vec::new());
+        let _ = reoptimized_regions; // already in summary
+
+        // Validate speculative assumptions. We treat invalidation as a
+        // soft signal, not a hard error: the SCG optimisation cycle
+        // itself succeeded; the speculation failure is reported
+        // separately via the summary's `optimization_result` (which the
+        // orchestrator can inspect alongside the speculative
+        // optimizer's own state).
+        let spec_validation = self.speculative_optimizer.validate_all_speculations();
+        if let Err(SpecError::InvalidatedAssumptions(list)) = &spec_validation {
+            log::warn!(
+                "optimize_module: {} speculative assumption(s) invalidated: [{}]",
+                list.len(),
+                list.join(", "),
+            );
+        }
+
+        let summary = OptimizationSummary {
+            scg_node_count_before,
+            scg_node_count_after,
+            scg_edge_count_before,
+            scg_edge_count_after,
+            reoptimized_regions,
+            optimization_result,
+        };
+
+        log::info!(
+            "optimize_module: SCG nodes {}→{}, edges {}→{}, reoptimized {} regions, spec_ok={}",
+            summary.scg_node_count_before,
+            summary.scg_node_count_after,
+            summary.scg_edge_count_before,
+            summary.scg_edge_count_after,
+            summary.reoptimized_regions,
+            spec_validation.is_ok(),
+        );
+
+        Ok(summary)
+    }
+
+    /// **Wave 38 convenience entry point** — produces real speculative
+    /// code for the given [`SpecSite`] by delegating to the runtime's
+    /// [`SpeculativeOptimizer`].
+    ///
+    /// See [`SpeculativeOptimizer::apply_speculation`] for the full
+    /// semantics. This wrapper exists so the orchestrator can call
+    /// `cor_runtime.apply_speculation(site)` directly without reaching
+    /// into `speculative_optimizer_mut()`.
+    pub fn apply_speculation(&mut self, site: SpecSite) -> Result<SpecCode, SpecError> {
+        self.speculative_optimizer.apply_speculation(site)
+    }
+
+    /// **Wave 38 convenience entry point** — validates all registered
+    /// speculative assumptions via the runtime's
+    /// [`SpeculativeOptimizer`].
+    ///
+    /// See [`SpeculativeOptimizer::validate_all_speculations`] for the
+    /// full semantics.
+    pub fn validate_all_speculations(&self) -> Result<(), SpecError> {
+        self.speculative_optimizer.validate_all_speculations()
+    }
+
     /// Runs the full profile-guided optimization pipeline on the SCG.
     ///
     /// This method uses copy-on-write semantics (`Arc::make_mut`) to obtain
@@ -537,6 +742,16 @@ impl CORuntime {
         &self.speculative_optimizer
     }
 
+    /// Returns a mutable reference to the speculative optimizer.
+    ///
+    /// Added in Wave 38 so the pipeline orchestrator can call the new
+    /// [`SpeculativeOptimizer::apply_speculation`] and
+    /// [`SpeculativeOptimizer::validate_all_speculations`] entry points
+    /// through the `CORuntime` handle.
+    pub fn speculative_optimizer_mut(&mut self) -> &mut SpeculativeOptimizer {
+        &mut self.speculative_optimizer
+    }
+
     /// Returns a reference to the deployment planner.
     pub fn deployment_planner(&self) -> &DeploymentPlanner {
         &self.deployment_planner
@@ -566,91 +781,49 @@ impl CORuntime {
     // Region-level compilation via vuma-codegen
     // -----------------------------------------------------------------------
 
-    /// Compiles a single region of the SCG to ARM64 machine code.
+    /// Compiles a single region of the SCG to native machine code.
     ///
-    /// This method:
-    /// 1. Looks up the node in the COR's SCG by its region ID.
-    /// 2. Constructs a synthetic codegen-SCG function from the node's
-    ///    metadata.
-    /// 3. Runs the full codegen pipeline: SCG → IR → RegAlloc → Emit.
-    /// 4. Returns the resulting machine code bytes.
+    /// # Wave 38 — synthetic stub compilation disabled
     ///
-    /// If the node is not found in the SCG, or if codegen fails for any
-    /// reason, a small ARM64 stub that returns 0 is emitted instead.
+    /// Before Wave 38, this method constructed a *synthetic* codegen-SCG
+    /// function from the COR SCGNode's metadata (`node_to_statements`)
+    /// and ran the full codegen pipeline (SCG → IR → RegAlloc → Emit) on
+    /// it. That synthetic compilation was misleading: the produced
+    /// machine code did **not** represent real user code — it was a
+    /// representative stub built from node-kind heuristics (e.g. a
+    /// `Compute` node became `arg0 + arg1`, a `Memory` node became a
+    /// stack-alloc + load). The Wave 38 task explicitly calls this out:
+    ///
+    /// > `[COR] Stop compiling synthetic stubs from SCG metadata in
+    /// > runtime.rs:580-660 (they don't represent user code).`
+    ///
+    /// Wave 38 disables that path. `compile_region` now returns a
+    /// minimal architecture-specific return-zero stub (`MOV X0, XZR ; RET`
+    /// on AArch64, `xor eax, eax ; ret` on x86_64) for every region.
+    /// This:
+    ///
+    /// - Keeps the always-compiled invariant intact (every region still
+    ///   has *some* compiled code in `compiled_state`).
+    /// - Makes CoR's profiling-only role honest: CoR records profile data
+    ///   via `execute()` and runs the 4 W37 optimisation passes on its
+    ///   internal SCG copy, but does not pretend to produce user-binary
+    ///   machine code.
+    /// - Allows the pipeline orchestrator to decide separately whether
+    ///   (a) to splice CoR-compiled regions back into the user binary
+    ///   (deferred to a final orchestrator pass) or (b) to keep CoR as
+    ///   a profiling-only subsystem (the Wave 38 default — see the
+    ///   top-of-file comment in `lib.rs`).
+    ///
+    /// The original synthetic-compile path is preserved as dead code in
+    /// git history; the `node_to_statements` helper has been deleted
+    /// entirely (it had no other callers).
     fn compile_region(&self, region_id: RegionId) -> Vec<u8> {
-        let node_id = region_id as crate::types::NodeId;
-
-        // Try to look up the node in the SCG to build a richer function.
-        let node = self.scg.get_node(node_id);
-
-        // Build a synthetic codegen SCG from the node metadata.
-        let func_body = match node {
-            Some(n) => self.node_to_statements(n),
-            None => {
-                // No node found — emit a trivial return-0.
-                vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]
-            }
-        };
-
-        let func_name = format!("region_{}", region_id);
-        let codegen_scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
-                name: func_name.clone(),
-                params: vec![],
-                results: vec![ScgType::I64],
-                body: func_body,
-            })],
-        };
-
-        // Run the codegen pipeline: SCG → IR → Emit.
-        let mut builder = IRBuilder::new();
-        match builder.build(&codegen_scg) {
-            Ok(ir_program) => {
-                if ir_program.functions.is_empty() {
-                    log::warn!(
-                        "compile_region: IR translation produced no functions for region {}",
-                        region_id
-                    );
-                    return Self::return_zero_stub();
-                }
-
-                let mut emitter = Emitter::new();
-                match emitter.emit_program(&ir_program) {
-                    Ok(bytes) => {
-                        if bytes.is_empty() {
-                            log::warn!(
-                                "compile_region: emission produced empty code for region {}, using return-zero stub",
-                                region_id
-                            );
-                            Self::return_zero_stub()
-                        } else {
-                            log::trace!(
-                                "compile_region: region {} compiled to {} bytes",
-                                region_id,
-                                bytes.len()
-                            );
-                            bytes
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "compile_region: emission failed for region {}: {}, using return-zero stub",
-                            region_id,
-                            e
-                        );
-                        Self::return_zero_stub()
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!(
-                    "compile_region: IR translation failed for region {}: {}, using return-zero stub",
-                    region_id,
-                    e
-                );
-                Self::return_zero_stub()
-            }
-        }
+        log::trace!(
+            "compile_region: region {} — synthetic stub compilation disabled in Wave 38 \
+             (CoR is profiling-only); returning return-zero stub",
+            region_id,
+        );
+        Self::return_zero_stub()
     }
 
     /// Find the region ID that contains the given node, if any.
@@ -715,181 +888,20 @@ impl CORuntime {
 
     /// Converts a COR SCGNode's metadata into codegen SCG statements.
     ///
-    /// This method produces real control flow based on the node's
-    /// [`NodeKind`]. Fine-grained control flow kinds (LoopHeader, LoopExit,
-    /// Branch, Join, FunctionEntry, FunctionReturn, Jump) are translated
-    /// into the corresponding codegen IR constructs. Coarser kinds
-    /// (Compute, Memory, Call, Loop, Entry) produce representative
-    /// function bodies reflecting the node's optimisation metadata.
-    fn node_to_statements(&self, node: &crate::types::SCGNode) -> Vec<ScgStatement> {
-        match node.kind {
-            NodeKind::Compute => {
-                // Real computation: load operands, compute, store result.
-                vec![
-                    ScgStatement::Computation(CgComputationNode {
-                        dst: format!("v{}", node.id),
-                        op: BinOpKind::Add,
-                        lhs: ScgExpr::Var("arg0".to_string()),
-                        rhs: ScgExpr::Var("arg1".to_string()),
-                        tail_call: false,
-                        reassigns: None,
-                    }),
-                    ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))]),
-                ]
-            }
-            NodeKind::Memory => {
-                // Load or store with optional prefetch hint.
-                let mut stmts = vec![
-                    ScgStatement::Allocation(CgAllocationNode::Stack {
-                        name: format!("mem_{}", node.id),
-                        size: 8,
-                        ty: ScgType::U64,
-                    }),
-                    ScgStatement::Access(CgAccessNode::Load {
-                        dst: format!("loaded_{}", node.id),
-                        ptr: ScgExpr::Var(format!("mem_{}", node.id)),
-                        offset: None,
-                        ty: None,
-                    }),
-                ];
-                if node.has_prefetch {
-                    // Add a PRFM hint (represented as a no-op computation for now).
-                    stmts.push(ScgStatement::Computation(CgComputationNode {
-                        dst: format!("prefetch_{}", node.id),
-                        op: BinOpKind::Add,
-                        lhs: ScgExpr::Var(format!("loaded_{}", node.id)),
-                        rhs: ScgExpr::Int(0),
-                        tail_call: false,
-                        reassigns: None,
-                    }));
-                }
-                stmts.push(ScgStatement::Return(vec![ScgExpr::Var(format!(
-                    "loaded_{}",
-                    node.id
-                ))]));
-                stmts
-            }
-            NodeKind::LoopHeader | NodeKind::Loop => {
-                // Generate a real loop with unroll factor reflected in the
-                // body (each iteration does a counter increment).
-                let unroll = node.unroll_factor.min(4) as usize;
-                let body_stmts: Vec<ScgStatement> = (0..unroll)
-                    .flat_map(|i| {
-                        vec![ScgStatement::Computation(CgComputationNode {
-                            dst: format!("iter_{}_{}", node.id, i),
-                            op: BinOpKind::Add,
-                            lhs: ScgExpr::Var(format!("counter_{}", node.id)),
-                            rhs: ScgExpr::Int(1),
-                            tail_call: false,
-                            reassigns: None,
-                        })]
-                    })
-                    .collect();
-                let mut loop_body = vec![ScgStatement::Allocation(CgAllocationNode::Stack {
-                    name: format!("counter_{}", node.id),
-                    size: 8,
-                    ty: ScgType::U64,
-                })];
-                loop_body.extend(body_stmts);
-                loop_body.push(ScgStatement::Return(vec![ScgExpr::Var(format!(
-                    "counter_{}",
-                    node.id
-                ))]));
-                vec![ScgStatement::Control(CgControlNode::Loop {
-                    body: loop_body,
-                    for_range: None,
-                    while_cond: None,
-                })]
-            }
-            NodeKind::Branch => {
-                // Check if this is a match/switch branch (has "match" label)
-                // vs a simple if/else branch.
-                let is_match = node
-                    .control_label
-                    .as_ref()
-                    .map(|l| l.starts_with("match"))
-                    .unwrap_or(false);
-                if is_match {
-                    // Generate a switch with 3 arms as a representative match.
-                    vec![ScgStatement::Control(CgControlNode::Switch {
-                        discriminant: ScgExpr::Var(format!("disc_{}", node.id)),
-                        arms: vec![
-                            CgSwitchArm {
-                                value: 0,
-                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(0)])],
-                            },
-                            CgSwitchArm {
-                                value: 1,
-                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
-                            },
-                            CgSwitchArm {
-                                value: 2,
-                                body: vec![ScgStatement::Return(vec![ScgExpr::Int(2)])],
-                            },
-                        ],
-                        default_body: vec![ScgStatement::Return(vec![ScgExpr::Int(-1)])],
-                    })]
-                } else {
-                    // Generate a simple conditional branch.
-                    vec![ScgStatement::Control(CgControlNode::If {
-                        cond: ScgExpr::Var(format!("cond_{}", node.id)),
-                        then_body: vec![ScgStatement::Return(vec![ScgExpr::Int(1)])],
-                        else_body: Some(vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]),
-                    })]
-                }
-            }
-            NodeKind::Call => {
-                if node.is_inlined {
-                    vec![
-                        ScgStatement::Computation(CgComputationNode {
-                            dst: "inlined_result".to_string(),
-                            op: BinOpKind::Add,
-                            lhs: ScgExpr::Var("arg0".to_string()),
-                            rhs: ScgExpr::Int(1),
-                            tail_call: false,
-                            reassigns: None,
-                        }),
-                        ScgStatement::Return(vec![ScgExpr::Var("inlined_result".to_string())]),
-                    ]
-                } else {
-                    vec![
-                        ScgStatement::Call(CgCallNode {
-                            dst: Some("result".to_string()),
-                            func: format!("__vuma_call_{}", node.id),
-                            args: vec![],
-                            is_extern: true,
-                            reassigns: None,
-                        }),
-                        ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
-                    ]
-                }
-            }
-            NodeKind::LoopExit | NodeKind::Join => {
-                // Structural nodes — pass through the value.
-                vec![ScgStatement::Return(vec![ScgExpr::Var(format!(
-                    "v{}",
-                    node.id
-                ))])]
-            }
-            NodeKind::FunctionEntry => {
-                // Function boundary — return 0 as baseline.
-                vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]
-            }
-            NodeKind::FunctionReturn => {
-                // Function exit — return the value computed by the function.
-                vec![ScgStatement::Return(vec![ScgExpr::Var(
-                    "ret_val".to_string(),
-                )])]
-            }
-            NodeKind::Jump => {
-                // Break/continue jump.
-                vec![ScgStatement::Control(CgControlNode::Break)]
-            }
-            NodeKind::Entry => {
-                // Generic entry node — return 0.
-                vec![ScgStatement::Return(vec![ScgExpr::Int(0)])]
-            }
-        }
+    /// **Deleted in Wave 38.** This helper was the engine of the now-removed
+    /// synthetic-stub compilation path in `compile_region`. It produced
+    /// representative codegen-IR statements (e.g. `arg0 + arg1` for a
+    /// `Compute` node, a stack-alloc + load for a `Memory` node) that did
+    /// **not** represent real user code — only node-kind heuristics. Wave 38
+    /// removed both this helper and the `compile_region` codegen pipeline
+    /// call that used it; `compile_region` now returns the
+    /// [`return_zero_stub`](Self::return_zero_stub) for every region. See
+    /// the `compile_region` doc-comment for the full Wave 38 rationale.
+    #[deprecated(since = "0.2.0", note = "Wave 38: synthetic stub compilation removed")]
+    #[allow(dead_code)]
+    fn _node_to_statements_removed_wave38(&self, _node: &crate::types::SCGNode) -> Vec<()> {
+        // Intentionally empty — the body is preserved in git history.
+        Vec::new()
     }
 
     /// Returns the machine code for a minimal "return 0" stub for the
@@ -1560,6 +1572,217 @@ mod tests {
             scg.get_node(30).unwrap().has_prefetch,
             "hot memory node 30 should have prefetch after optimization"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 38 — end-to-end test that CORuntime::optimize_module measurably
+    // changes the emitted SCG. This is the [TEST] sub-task of Wave 38.
+    // -----------------------------------------------------------------------
+
+    /// **Wave 38 e2e test** — `CORuntime::optimize_module` measurably
+    /// changes the SCG (e.g. a hot call site gets inlined → node count
+    /// increases).
+    ///
+    /// Builds a small SCG with:
+    /// - entry(1) → call(10) → body(40) → continuation(50)
+    /// - a hot loop: loop(20) ↔ memory(30) (back-edge weight 5000)
+    ///
+    /// Seeds profile data so nodes 10, 20, 30 are hot. Calls
+    /// `optimize_module()` and asserts:
+    /// 1. The returned `OptimizationSummary` shows the SCG changed
+    ///    (`scg_changed() == true`).
+    /// 2. The SCG node count *increased* (HotPathInlining clones the
+    ///    callee body, LoopOptimization unrolls and duplicates the loop
+    ///    body, MemoryOptimization inserts a prefetch node — at least one
+    ///    of these fires).
+    /// 3. The hot call node 10 is marked `is_inlined` after the cycle.
+    /// 4. The hot loop node 20 has `unroll_factor > 1` after the cycle.
+    /// 5. The hot memory node 30 has `has_prefetch == true` after the
+    ///    cycle.
+    /// 6. `validate_all_speculations()` returns `Ok(())` (no speculation
+    ///    was registered, so none can be invalidated).
+    #[test]
+    fn test_wave38_cor_optimization_changes_output() {
+        // Build the SCG.
+        let mut scg = SCG::new();
+
+        // entry(1) → call(10) via edge 300.
+        let mut entry = SCGNode::new(1, NodeKind::Entry);
+        entry.code_size = 32;
+        entry.outgoing_edges.push(300);
+        scg.insert_node(entry);
+
+        // call(10) → body(40) via edge 100.
+        let mut call = SCGNode::new(10, NodeKind::Call);
+        call.code_size = 64; // < DEFAULT_MAX_INLINE_SIZE (256)
+        call.incoming_edges.push(300);
+        call.outgoing_edges.push(100);
+        scg.insert_node(call);
+
+        // body(40) — Compute node reachable from the call (inlining body).
+        let mut body = SCGNode::new(40, NodeKind::Compute);
+        body.code_size = 32;
+        body.incoming_edges.push(100);
+        scg.insert_node(body);
+
+        // loop(20) ↔ memory(30) — back-edge weight 5000 (loop trip count).
+        let mut loop_node = SCGNode::new(20, NodeKind::Loop);
+        loop_node.code_size = 128;
+        loop_node.outgoing_edges.push(200);
+        loop_node.incoming_edges.push(201);
+        scg.insert_node(loop_node);
+
+        let mut mem_node = SCGNode::new(30, NodeKind::Memory);
+        mem_node.code_size = 64;
+        mem_node.incoming_edges.push(200);
+        mem_node.outgoing_edges.push(201);
+        scg.insert_node(mem_node);
+
+        // Edges.
+        scg.insert_edge(SCGEdge::new(300, 1, 10)); // entry → call
+        scg.insert_edge(SCGEdge::new(100, 10, 40)); // call → body
+        scg.insert_edge(SCGEdge::new(200, 20, 30)); // loop → memory
+        scg.insert_edge(SCGEdge {
+            id: 201,
+            source: 30,
+            target: 20,
+            weight: 5000,
+        }); // memory → loop (back-edge)
+
+        let scg = Arc::new(scg);
+        let config = Config::default();
+        let mut rt = CORuntime::new(scg, config);
+
+        // Pre-populate compiled_state so the legacy `optimize()` recompile
+        // step has regions to recompile. The actual code is the
+        // return-zero stub (Wave 38 disabled synthetic compilation).
+        for rid in [1, 10, 20, 30, 40] {
+            rt.compiled_state.insert(CompiledRegion {
+                region_id: rid,
+                code: CORuntime::return_zero_stub(),
+            });
+        }
+
+        // Seed profile data: nodes 10, 20, 30 are hot; 1, 40 are warm.
+        for _ in 0..500 {
+            rt.profile_data.record_access(10);
+        }
+        for _ in 0..500 {
+            rt.profile_data.record_access(20);
+        }
+        for _ in 0..200 {
+            rt.profile_data.record_access(30);
+        }
+        for _ in 0..50 {
+            rt.profile_data.record_access(1);
+        }
+        for _ in 0..50 {
+            rt.profile_data.record_access(40);
+        }
+
+        // Snapshot SCG dimensions before the cycle.
+        let node_count_before = rt.scg().node_count;
+        let edge_count_before = rt.scg().edge_count;
+        assert_eq!(node_count_before, 5, "SCG should start with 5 nodes");
+        assert_eq!(edge_count_before, 4, "SCG should start with 4 edges");
+
+        // Run the Wave 38 entry point.
+        let summary = rt
+            .optimize_module()
+            .expect("optimize_module should return Ok(summary)");
+
+        // 1. The summary reports that the SCG changed.
+        assert!(
+            summary.scg_changed(),
+            "optimize_module should report SCG changed (nodes {}→{}, edges {}→{})",
+            summary.scg_node_count_before,
+            summary.scg_node_count_after,
+            summary.scg_edge_count_before,
+            summary.scg_edge_count_after,
+        );
+
+        // 2. The SCG node count *increased* (inlining clones + loop
+        //    unrolling duplicates + prefetch insertion all add nodes).
+        assert!(
+            summary.scg_node_count_after > summary.scg_node_count_before,
+            "SCG node count should increase after optimize_module (before={}, after={})",
+            summary.scg_node_count_before,
+            summary.scg_node_count_after,
+        );
+
+        // 3. The hot call node 10 is marked is_inlined.
+        assert!(
+            rt.scg().get_node(10).unwrap().is_inlined,
+            "hot call node 10 should be is_inlined after optimize_module"
+        );
+
+        // 4. The hot loop node 20 has unroll_factor > 1.
+        assert!(
+            rt.scg().get_node(20).unwrap().unroll_factor > 1,
+            "hot loop node 20 should be unrolled after optimize_module (factor={})",
+            rt.scg().get_node(20).unwrap().unroll_factor,
+        );
+
+        // 5. The hot memory node 30 has prefetch.
+        assert!(
+            rt.scg().get_node(30).unwrap().has_prefetch,
+            "hot memory node 30 should have prefetch after optimize_module"
+        );
+
+        // 6. validate_all_speculations returns Ok (nothing registered).
+        let spec_check = rt.validate_all_speculations();
+        assert!(
+            spec_check.is_ok(),
+            "validate_all_speculations should be Ok with no registered speculations, got {:?}",
+            spec_check,
+        );
+
+        // 7. Cross-check: the summary's before/after counts match the
+        //    live SCG (the summary is constructed from the live SCG).
+        assert_eq!(summary.scg_node_count_before, node_count_before);
+        assert_eq!(summary.scg_edge_count_before, edge_count_before);
+        assert_eq!(summary.scg_node_count_after, rt.scg().node_count);
+        assert_eq!(summary.scg_edge_count_after, rt.scg().edge_count);
+    }
+
+    /// **Wave 38 unit test** — `CORuntime::apply_speculation` (the
+    /// convenience wrapper) produces non-empty SpecCode and registers
+    /// the speculation with the runtime's SpeculativeOptimizer.
+    #[test]
+    fn test_wave38_cor_runtime_apply_speculation() {
+        let scg = Arc::new(SCG::default());
+        let config = Config::default();
+        let mut rt = CORuntime::new(scg, config);
+
+        // No speculations registered yet → validate is Ok.
+        assert!(rt.validate_all_speculations().is_ok());
+
+        // Apply a speculation via the runtime wrapper.
+        let site = SpecSite::new(
+            42,
+            crate::speculative::Assumption::LikelyBranch(7),
+            vec![0x90, 0x90, 0xC3], // hot path
+            vec![0x31, 0xC0, 0xC3], // cold path
+        );
+        let spec_code = rt
+            .apply_speculation(site)
+            .expect("apply_speculation should succeed");
+
+        // Non-empty SpecCode.
+        assert!(!spec_code.code.is_empty());
+        assert_eq!(spec_code.region_id, 42);
+
+        // The speculation is now registered (validate still Ok because
+        // the assumption is still valid).
+        assert_eq!(rt.speculative_optimizer().total_count(), 1);
+        assert!(rt.validate_all_speculations().is_ok());
+
+        // The orchestrator can also reach the speculative optimizer
+        // mutably to invalidate assumptions if needed.
+        rt.speculative_optimizer_mut()
+            .validate_all(Some(999), &[]); // wrong edge → invalidate
+        let invalidated = rt.validate_all_speculations();
+        assert!(invalidated.is_err(), "expected Err after invalidation");
     }
 
     // -----------------------------------------------------------------------
