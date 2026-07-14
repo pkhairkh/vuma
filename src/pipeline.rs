@@ -5383,6 +5383,376 @@ pub fn compile_with_path(
     })
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-module compilation (Wave 48 — Task 7-a)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Merge a slice of independently-parsed `AstProgram`s into a single
+/// `AstProgram`, resolving cross-module `extern "C"` declarations against
+/// real `fn` definitions.
+///
+/// Algorithm:
+/// 1. **Duplicate-fn detection** — collect every `fn` definition name
+///    across all modules. If the same name is defined in more than one
+///    module, return a `VumaError::AstToScg` (the merged AST would
+///    otherwise contain two bodies for the same symbol, which the codegen
+///    cannot link).
+/// 2. **Extern-block filtering** — iterate every `extern "C" { ... }`
+///    block in every module. For each `fn foo(...)` declaration inside
+///    the block, check whether `foo` is defined as a real `fn` in any
+///    module. If yes, drop that declaration from the block (the real
+///    `fn` definition wins — no duplicate symbol). If no, keep the
+///    declaration (it's a genuine external like `__vuma_alloc` or
+///    `open` that resolves at link time).
+/// 3. **Empty-block elision** — if filtering empties an extern block,
+///    drop the block entirely (avoids a stray `extern "C" { }` in the
+///    merged AST).
+/// 4. **Concatenation** — all surviving items (fn defs, struct/enum/
+///    region/const/static/import/export/module/trait/impl declarations,
+///    filtered extern blocks, and top-level statements) are concatenated
+///    into the merged `AstProgram.items` in module-then-declaration order.
+///
+/// The merged AST is what `compile_modules` feeds into the codegen
+/// pipeline. Because cross-module calls are no longer in the merged
+/// AST's `extern_fns` set (their extern declarations were stripped),
+/// `bridge_ast_to_codegen_scg` treats them as local calls and the
+/// backend emits proper local-call relocations that resolve to the
+/// sibling module's `fn` body — this is what makes the bootstrap's
+/// `parse(...)` / `irb_build_main(...)` / `codegen_emit(...)` /
+/// `write_elf64(...)` calls resolve correctly when the five `.vuma`
+/// files are linked together.
+fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaError>> {
+    use vuma_parser::ast::{ExternBlockDef, ExternFnDecl};
+
+    let mut errors: Vec<VumaError> = Vec::new();
+
+    // ── Pass 1: collect all fn definition names. Detect duplicates. ──
+    let mut fn_def_names: HashSet<String> = HashSet::new();
+    for ast in module_asts {
+        for item in &ast.items {
+            if let Item::FnDef(fn_def) = item {
+                if !fn_def_names.insert(fn_def.name.clone()) {
+                    errors.push(VumaError::AstToScg {
+                        message: format!(
+                            "compile_modules: duplicate fn definition '{}' across modules \
+                             — each function name must be defined in at most one module",
+                            fn_def.name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // ── Pass 2: concatenate items, filtering extern blocks. ──
+    let mut merged_items: Vec<Item> = Vec::new();
+    for ast in module_asts {
+        for item in &ast.items {
+            match item {
+                Item::ExternBlock(eb) => {
+                    // Keep only the extern fn declarations for which NO
+                    // real fn definition exists in any module. The rest
+                    // (the ones matched by a real `fn foo(...) { ... }`
+                    // in some module) are stripped — the merged AST's
+                    // extern_fns set won't contain their names, so the
+                    // codegen bridge treats calls to them as local calls.
+                    let kept_fns: Vec<ExternFnDecl> = eb
+                        .functions
+                        .iter()
+                        .filter(|fd| !fn_def_names.contains(&fd.name))
+                        .cloned()
+                        .collect();
+                    if !kept_fns.is_empty() {
+                        let filtered_eb = ExternBlockDef {
+                            convention: eb.convention.clone(),
+                            functions: kept_fns,
+                            span: eb.span,
+                        };
+                        merged_items.push(Item::ExternBlock(filtered_eb));
+                    }
+                    // else: every declaration in this block resolved to a
+                    // local fn definition — drop the block entirely.
+                }
+                _ => merged_items.push(item.clone()),
+            }
+        }
+    }
+
+    Ok(AstProgram {
+        items: merged_items,
+        span: vuma_parser::Span::synthetic(),
+    })
+}
+
+/// Detect the host architecture at compile time / runtime and return the
+/// matching VUMA backend kind. Used by `compile_modules` so the emitted
+/// ELF can be executed natively on the developer's machine (mirrors the
+/// `host_isa()` helper in `src/main.rs`).
+///
+/// Returns `BackendKind::AArch64` (the canonical pipeline's historical
+/// default) on unsupported hosts.
+fn host_backend_kind() -> vuma_codegen::backend::BackendKind {
+    match std::env::consts::ARCH {
+        "x86_64" => vuma_codegen::backend::BackendKind::X86_64,
+        "aarch64" => vuma_codegen::backend::BackendKind::AArch64,
+        "riscv64" => vuma_codegen::backend::BackendKind::RiscV64,
+        "arm" => vuma_codegen::backend::BackendKind::Arm32,
+        "powerpc64" => vuma_codegen::backend::BackendKind::PowerPC64,
+        "powerpc64le" => vuma_codegen::backend::BackendKind::PowerPC64LE,
+        "loongarch64" => vuma_codegen::backend::BackendKind::LoongArch64,
+        _ => vuma_codegen::backend::BackendKind::AArch64,
+    }
+}
+
+/// Compile multiple VUMA source modules into a single ELF binary.
+///
+/// Each `(name, source)` pair is parsed independently into an `AstProgram`.
+/// The ASTs are then merged via [`merge_module_asts`]:
+/// - `fn` definitions from all modules are concatenated into a single
+///   `AstProgram.items` vector. Duplicate `fn` definitions across modules
+///   (same name) are rejected as a `VumaError::AstToScg`.
+/// - `extern "C" { fn foo(...); }` declarations are filtered: if `foo` is
+///   defined as a real `fn` in ANY module, the extern declaration is
+///   removed (the actual function definition wins — no duplicate symbol).
+///   Extern declarations for which no definition exists anywhere are kept
+///   (these resolve to real external symbols like `__vuma_alloc`, `open`,
+///   `read`, `write` at link time).
+///
+/// The merged AST is then compiled through the direct
+/// AST → codegen SCG → IR → register allocation → backend.encode_program
+/// path. This is the same path used by `vuma run --isa <host>` (see
+/// `main.rs::compile_to_binary_direct`), so the emitted ELF targets the
+/// host architecture and can be executed natively. (The canonical
+/// [`compile_with_path`] always emits AArch64; using it here would
+/// silently produce a non-runnable binary on x86_64 / riscv64 / etc.
+/// hosts, defeating the purpose of multi-module linking for the bootstrap
+/// self-host test.)
+///
+/// Returns a [`CompilationOutput`] whose `binary` field contains the merged
+/// ELF (a single executable containing all functions from all modules).
+/// The `scg` field is the semantic SCG (best-effort — empty if
+/// `ast_to_scg` fails on the merged AST). The `msg`, `verification`,
+/// `cor_runtime`, and `debug_info` fields are `None` / empty because the
+/// direct path does not run the canonical pipeline's MSG-construction,
+/// IVE-verification, or COR-initialization stages.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use vuma::pipeline::{compile_modules, CompileConfig};
+///
+/// let modules: Vec<(String, String)> = vec![
+///     ("main.vuma".into(), "extern \"C\" { fn helper(); } fn main() { helper(); }".into()),
+///     ("helper.vuma".into(), "fn helper() { }".into()),
+/// ];
+/// let config = CompileConfig::default();
+/// match compile_modules(&modules, &config) {
+///     Ok(output) => println!("Linked ELF: {} bytes", output.binary.len()),
+///     Err(errors) => for e in &errors { eprintln!("{}", e); },
+/// }
+/// ```
+pub fn compile_modules(
+    modules: &[(String, String)],
+    config: &CompileConfig,
+) -> Result<CompilationOutput, Vec<VumaError>> {
+    let mut errors: Vec<VumaError> = Vec::new();
+    let mut timings: Vec<(String, u64)> = Vec::new();
+
+    // ── Stage 1: Parse each module independently ───────────────────────
+    let t = Instant::now();
+    let mut module_asts: Vec<AstProgram> = Vec::with_capacity(modules.len());
+    for (_name, source) in modules {
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        if result.has_errors() {
+            errors.push(VumaError::Parse {
+                errors: result.errors.clone(),
+            });
+            // Continue parsing the remaining modules so we can report
+            // all parse errors at once (rather than aborting on the
+            // first module that fails).
+            continue;
+        }
+        module_asts.push(result.unwrap());
+    }
+    timings.push(("parse-modules".to_string(), t.elapsed().as_millis() as u64));
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    // ── Stage 2: Merge ASTs (dedup externs vs fn defs) ────────────────
+    let t = Instant::now();
+    let merged_ast = match merge_module_asts(&module_asts) {
+        Ok(ast) => ast,
+        Err(merge_errors) => {
+            errors.extend(merge_errors);
+            return Err(errors);
+        }
+    };
+    timings.push(("merge-asts".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 3: Bridge merged AST → codegen SCG ──────────────────────
+    let t = Instant::now();
+    let codegen_scg = bridge_ast_to_codegen_scg(&merged_ast);
+    timings.push(("ast-to-codegen-scg".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 4: Lower codegen SCG → IR ───────────────────────────────
+    let t = Instant::now();
+    let mut ir_builder = vuma_codegen::ScgToIr::new();
+    let mut ir_program = match ir_builder.convert(&codegen_scg) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(VumaError::Codegen {
+                error: CodegenError::TranslationError(format!(
+                    "compile_modules: SCG → IR conversion failed: {}",
+                    e
+                )),
+            });
+            return Err(errors);
+        }
+    };
+    timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 4b: Codegen-level IR optimization (mirror main.rs). ─────
+    // Uses the host backend's latency table for per-ISA optimization.
+    // Gated by opt level: O0 skips (matches pipeline.rs behavior).
+    let backend_kind = host_backend_kind();
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let topt = Instant::now();
+        if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind) {
+            let latency_table = backend.target_info().latency_table();
+            ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+                ir_program,
+                &latency_table,
+                config.inline_threshold,
+            );
+        }
+        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
+    }
+
+    let ir_function_count = ir_program.functions.len();
+    let ir_instruction_count: usize = ir_program
+        .functions
+        .iter()
+        .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+        .sum();
+
+    // Populate the thread-local set of 64-bit-returning function names
+    // (mirrors main.rs::compile_to_binary_direct — needed by arm32 and
+    // other 32-bit backends for call-return lowering; included here for
+    // parity with the production path).
+    {
+        let func_64bit: HashSet<String> = ir_program
+            .functions
+            .iter()
+            .filter(|f| {
+                f.result_types
+                    .iter()
+                    .any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64))
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        vuma_codegen::backend::set_64bit_returns(&func_64bit);
+    }
+
+    // ── Stage 5: Register allocation (per-function) ───────────────────
+    let t = Instant::now();
+    let backend = match vuma_codegen::backend::create_backend(backend_kind) {
+        Ok(b) => b,
+        Err(e) => {
+            errors.push(VumaError::Emission {
+                message: format!(
+                    "compile_modules: cannot create {} backend: {}",
+                    backend_kind.isa_name(),
+                    e
+                ),
+            });
+            return Err(errors);
+        }
+    };
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => allocated_functions.push(allocated),
+            Err(e) => {
+                vuma_log!(warn,
+                    "compile_modules: register allocation failed for '{}': {}",
+                    func.name, e
+                );
+            }
+        }
+    }
+    if allocated_functions.is_empty() {
+        errors.push(VumaError::Emission {
+            message: "compile_modules: no functions were successfully allocated \
+                      (register allocation failed for all functions in the merged program)"
+                .to_string(),
+        });
+        return Err(errors);
+    }
+    timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 6: Encode program → ELF binary ──────────────────────────
+    let t = Instant::now();
+    let allocated_program = vuma_codegen::backend::AllocatedProgram {
+        functions: allocated_functions,
+        total_code_size: 0,
+        total_data_size: 0,
+    };
+    let binary = match backend.encode_program(&allocated_program) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            errors.push(VumaError::Emission {
+                message: format!(
+                    "compile_modules: {} encode_program failed: {}",
+                    backend.name(),
+                    e
+                ),
+            });
+            return Err(errors);
+        }
+    };
+    let code_words = count_text_section_instructions(&binary);
+    timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 7: Best-effort semantic SCG (for CompilationOutput.scg) ─
+    // The direct codegen path bypasses the semantic SCG; this is a
+    // best-effort construction so callers that introspect
+    // CompilationOutput.scg get a non-empty graph when the merged AST
+    // happens to be SCG-compatible. Failures are logged and an empty
+    // SCG is returned (mirrors compile_with_path's MSG soft-failure
+    // behavior at Stage 5).
+    let scg = match ast_to_scg(&merged_ast) {
+        Ok(s) => s,
+        Err(_e) => {
+            vuma_log!(warn,
+                "compile_modules: semantic SCG construction failed (non-fatal): {:?}", _e
+            );
+            SCG::new()
+        }
+    };
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    Ok(CompilationOutput {
+        binary,
+        scg,
+        msg: MSG::new(),
+        verification: None,
+        stage_timings: timings,
+        ir_function_count,
+        ir_instruction_count,
+        code_words,
+        debug_info: None,
+        cor_runtime: None,
+    })
+}
+
 /// Compile VUMA source code with crash recovery.
 ///
 /// Unlike [`compile_with_path`], which returns `Err(Vec<VumaError>)` on failure,

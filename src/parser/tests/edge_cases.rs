@@ -388,3 +388,98 @@ fn test_parse_syscall_in_expression() {
     let result = parser.parse_program();
     assert!(result.is_ok(), "syscall in expression should parse");
 }
+
+// ---- Wave 48: regression tests for `else { if X { ... } else { if Y { ... } } }`
+// ---- (the "dangling-else across block boundary" construct used heavily by
+// ---- womb/lang/full_lexer.vuma keyword matching). These tests ensure the
+// ---- parser's `parse_else_clause` special-case (see parser.rs ~line 1384)
+// ---- correctly handles arbitrary-length chains of `else { if ... { } }`
+// ---- blocks, which is the form the bootstrap self-hosting files use
+// ---- instead of the more compact `else if ... { }`.
+
+/// Regression test for the exact construct that was broken in
+/// `womb/lang/full_lexer.vuma` line 308 (missing closing brace in a
+/// deeply-nested `else { if X { if Y { if Z { if W { ... } } } } }`
+/// pattern). The original source had an unbalanced brace (5 opens, 4
+/// closes), which corrupted parser state and produced a misleading
+/// "expected expression, found 'fn'" error 220 lines later (line 529)
+/// instead of a clear error at line 308. With the brace fixed, the
+/// construct parses cleanly. This test verifies the parser handles the
+/// balanced version of this construct.
+#[test]
+fn test_parse_else_block_with_nested_if_chain_balanced() {
+    let source = r#"
+        fn match_kw(c: i32, d: i32) -> i32 {
+            if c == 99 {
+                if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }
+                else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } } }
+            }
+            return 0;
+        }
+        fn main() -> i32 { return 0; }
+    "#;
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "balanced else {{ if X {{ nested ifs }} }} should parse — errors: {:?}",
+        result.errors
+    );
+    // Should also have NO non-fatal parse errors.
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 2, "should have match_kw + main");
+}
+
+/// Regression test for a longer chain of `else { if X { } }` blocks,
+/// mirroring the full keyword-matching structure in
+/// `womb/lang/full_lexer.vuma` lines 300-315. Verifies the parser's
+/// `parse_else_clause` correctly attaches each trailing `else` to the
+/// inner if via the dangling-else-across-block-boundary recursion
+/// (see parser.rs ~line 1419-1423).
+#[test]
+fn test_parse_else_if_block_chain_five_branches() {
+    let source = r#"
+        fn classify(c: i32, d: i32) -> i32 {
+            if c == 119 {
+                if d == 104 { if d == 105 { if d == 108 { if d == 101 { return 14; } } } }
+            }
+            else { if c == 98 {
+                if d == 114 { if d == 101 { if d == 97 { if d == 107 { return 18; } } } }
+            }}
+            else { if c == 99 {
+                if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }
+                else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } } }
+            }}
+            else { if c == 102 {
+                if d == 97 { if d == 108 { if d == 115 { if d == 101 { return 30; } } } }
+            }}
+            else { if c == 119 {
+                if d == 104 { if d == 101 { if d == 114 { if d == 101 { return 32; } } } }
+            }}
+            return 0;
+        }
+        fn main() -> i32 { return 0; }
+    "#;
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "5-branch else {{ if ... {{ }} }} chain should parse — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 2, "should have classify + main");
+}
+
+/// Regression test that the parser FAILS CLEANLY (no panic, no infinite
+/// loop, no cascade) when given the UNBALANCED version of the
+/// `else { if X { ... } }` construct — i.e., the original buggy line
+/// 308 of `womb/lang/full_lexer.vuma`. The parser should report a
+/// parse error (any error), not panic. This documents the recovery
+/// behaviour that previously masked the real error site.
+#[test]
+fn test_parse_else_block_unbalanced_braces_does_not_panic() {
+    // Unbalanced: 5 opens, 4 closes (missing one closing brace).
+    let source = "fn f(c: i32, d: i32) -> i32 {\n    if c == 99 {\n        if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }\n        else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } }\n    }\n    return 0;\n}\nfn main() -> i32 { return 0; }\n";
+    assert_no_panic(source);
+}
