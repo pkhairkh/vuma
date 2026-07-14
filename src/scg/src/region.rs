@@ -88,7 +88,7 @@ impl std::fmt::Display for DeploymentTarget {
 /// Regions group related allocation, access, and deallocation nodes,
 /// providing a scope for memory lifetime analysis and security boundary
 /// enforcement.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SCGRegion {
     /// The unique identifier of this region.
     pub id: RegionId,

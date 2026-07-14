@@ -11,6 +11,9 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# TODO(wave43): remaining serde usage at src/vuma/src/repl.rs:1313 (and 54
+# other sites across security/sync/address/access/derivation/region/
+# program_point modules); migrate to hand-written codec.
 serde.workspace = true
 serde_json.workspace = true
 vuma-scg.workspace = true

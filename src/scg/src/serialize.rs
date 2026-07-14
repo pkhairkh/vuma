@@ -183,11 +183,11 @@ impl std::fmt::Display for DeserializeError {
 
 impl std::error::Error for DeserializeError {}
 
-impl From<serde_json::Error> for DeserializeError {
-    fn from(e: serde_json::Error) -> Self {
-        DeserializeError::JsonError(e.to_string())
-    }
-}
+// Note: `From<serde_json::Error> for DeserializeError` and the
+// `serialize_scg_json` / `deserialize_scg_json` functions were removed in
+// Wave 43 when `Serialize, Deserialize` derives were stripped from
+// `NodeData` / `EdgeData` / `SCGRegion`. The `DeserializeError::JsonError`
+// variant is retained for API stability and is still constructible directly.
 
 // ── Binary Reader ───────────────────────────────────────────────────────
 
@@ -533,7 +533,7 @@ fn tag_to_deployment_target(
 /// `crate::digraph`, the hand-written Vec-backed directed graph introduced
 /// in Wave 39 of the VUMA remediation plan as a petgraph replacement) into
 /// a simple structure that can be serialized with serde.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 struct SerializedSCG {
     /// Format version for forward/backward compatibility.
     version: u32,
@@ -1369,27 +1369,16 @@ fn read_region(reader: &mut BinaryReader, index: usize) -> Result<SCGRegion, Des
     })
 }
 
-// ── JSON serialization ──────────────────────────────────────────────────
-
-/// Serializes an SCG to a JSON string for debugging and interoperability.
-///
-/// The JSON representation uses the same intermediate format as the binary
-/// serialization, but rendered as human-readable JSON.
-pub fn serialize_scg_json(scg: &SCG) -> String {
-    let s = scg_to_serialized(scg);
-    serde_json::to_string_pretty(&s).unwrap_or_else(|e| {
-        // Fallback: return an error object if serialization fails
-        format!(r#"{{"error": "serialization failed: {}"}}"#, e)
-    })
-}
-
-/// Deserializes an SCG from a JSON string.
-///
-/// Returns an error if the JSON is malformed or contains inconsistent data.
-pub fn deserialize_scg_json(json: &str) -> Result<SCG, DeserializeError> {
-    let s: SerializedSCG = serde_json::from_str(json)?;
-    serialized_to_scg(s)
-}
+// ── JSON serialization (removed in Wave 43) ────────────────────────────
+// The serde-derived `SerializedSCG` intermediate and the JSON
+// `serialize_scg_json` / `deserialize_scg_json` functions were removed when
+// `Serialize, Deserialize` derives were stripped from `NodeData` / `EdgeData`
+// / `SCGRegion`. The hand-written binary codec (`serialize_scg` /
+// `deserialize_scg`) remains the canonical (de)serialization path; see
+// `write_node` / `read_node` / `write_edge` / `read_edge` / `write_region`
+// / `read_region` below. Callers needing human-readable output should use
+// `serialize_scg_dot` or `SCG::to_json` (which emits an LLM-friendly JSON
+// shape via separately-derived types in `structured_output.rs`).
 
 // ── DOT (Graphviz) serialization ────────────────────────────────────────
 
@@ -1887,44 +1876,13 @@ mod tests {
         ));
     }
 
-    // ── Test 6: JSON round-trip of a complex SCG ───────────────────────
-
-    #[test]
-    fn test_json_roundtrip_complex() {
-        let scg = complex_scg();
-        let json = serialize_scg_json(&scg);
-        let restored = deserialize_scg_json(&json).unwrap();
-
-        assert_eq!(restored.node_count(), scg.node_count());
-        assert_eq!(restored.edge_count(), scg.edge_count());
-        assert_eq!(restored.region_count(), scg.region_count());
-
-        // Verify a specific node
-        let comp_node = restored
-            .nodes()
-            .find(|n| matches!(n.node_type, NodeType::Computation))
-            .unwrap();
-        if let NodePayload::Computation(ref c) = comp_node.payload {
-            assert_eq!(c.kind.label(), "write");
-        } else {
-            panic!("Expected Computation payload");
-        }
-
-        // Verify a specific edge
-        let dataflow_edges: Vec<&EdgeData> = restored
-            .edges()
-            .filter(|e| matches!(e.kind, EdgeKind::DataFlow))
-            .collect();
-        assert_eq!(dataflow_edges.len(), 4);
-    }
-
-    // ── Test 7: JSON deserialization rejects malformed JSON ─────────────
-
-    #[test]
-    fn test_json_malformed() {
-        let result = deserialize_scg_json("{invalid json");
-        assert!(matches!(result, Err(DeserializeError::JsonError(_))));
-    }
+    // ── Test 6: JSON round-trip of a complex SCG (removed in Wave 43) ──
+    // The serde-derived `SerializedSCG` and `serialize_scg_json` /
+    // `deserialize_scg_json` were removed when `Serialize, Deserialize`
+    // derives were stripped from `NodeData` / `EdgeData` / `SCGRegion`.
+    // The hand-written binary codec round-trip is already covered by
+    // `test_binary_roundtrip_minimal` / `test_binary_roundtrip_complex`
+    // above; DOT output is covered by `test_dot_output` below.
 
     // ── Test 8: DOT output contains expected elements ──────────────────
 
@@ -1977,44 +1935,14 @@ mod tests {
         assert_eq!(version, FORMAT_VERSION);
     }
 
-    // ── Test 10: Cross-format consistency ──────────────────────────────
+    // ── Test 10: Cross-format consistency (removed in Wave 43) ────────
+    // The JSON serialization path was removed along with the serde derives
+    // on `NodeData` / `EdgeData` / `SCGRegion`. Binary round-trip
+    // consistency is already verified by `test_binary_roundtrip_complex`.
 
-    #[test]
-    fn test_cross_format_consistency() {
-        let scg = complex_scg();
-
-        // Serialize to binary and back
-        let bin_bytes = serialize_scg(&scg);
-        let from_bin = deserialize_scg(&bin_bytes).unwrap();
-
-        // Serialize to JSON and back
-        let json_str = serialize_scg_json(&scg);
-        let from_json = deserialize_scg_json(&json_str).unwrap();
-
-        // Both should have the same counts
-        assert_eq!(from_bin.node_count(), from_json.node_count());
-        assert_eq!(from_bin.edge_count(), from_json.edge_count());
-        assert_eq!(from_bin.region_count(), from_json.region_count());
-
-        // Check nodes match by type
-        let bin_types: std::collections::HashSet<NodeType> =
-            from_bin.nodes().map(|n| n.node_type.clone()).collect();
-        let json_types: std::collections::HashSet<NodeType> =
-            from_json.nodes().map(|n| n.node_type.clone()).collect();
-        assert_eq!(bin_types, json_types);
-    }
-
-    // ── Test 11: Empty SCG JSON round-trip ─────────────────────────────
-
-    #[test]
-    fn test_json_roundtrip_empty() {
-        let scg = SCG::new();
-        let json = serialize_scg_json(&scg);
-        let restored = deserialize_scg_json(&json).unwrap();
-        assert_eq!(restored.node_count(), 0);
-        assert_eq!(restored.edge_count(), 0);
-        assert_eq!(restored.region_count(), 0);
-    }
+    // ── Test 11: Empty SCG JSON round-trip (removed in Wave 43) ─────────
+    // The JSON serialization path was removed; binary empty-SCG round-trip
+    // is verified by `test_binary_roundtrip_minimal`.
 
     // ── Test 12: DOT output for empty SCG ──────────────────────────────
 

@@ -11,6 +11,18 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# TODO(wave43): remaining serde usage at src/proof/src/liveness_proofs.rs:27
+# (and 64 other sites on non-named types like LivenessTactic/WellFoundedOrdering/
+# models.rs types); migrate to hand-written codec. Named types (Proof/Judgment/
+# Fact/ProofStep + cascade ProofContext/Goal/CleanupProof/NoDoubleFreeProof/
+# NoUseAfterFreeProof/NoAliasProof/SynchronizationProof/ExclusivitySubProof/
+# ExclusivityProof/OriginProof/DerivationChainProof/TaintProof/
+# BDCompatibilityProof/ReinterpretationSafetyProof/InterpretationProof/
+# NoDeadlockProof/AllocationFreedProof/LivenessProof/ProofBundle) were stripped
+# in Wave 43 — see src/proof/src/serialization.rs BinaryWrite/BinaryRead +
+# serialize_proof/deserialize_proof for the canonical binary path.
 serde.workspace = true
-serde_json.workspace = true
+# serde_json removed in Wave 43 — the ProofEnvelope JSON path was removed
+# along with the SerializationError wrapper; no remaining serde_json:: usage
+# in src/proof/.
 vuma-scg = { path = "../scg" }

@@ -61,7 +61,7 @@ pub type ProgramPoint = u64;
 
 /// Contextual information that scopes a proof goal, such as the function name,
 /// module path, or surrounding assumptions that are in scope.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofContext {
     /// Human-readable scope name (e.g. "main::process_buffer").
     pub scope: String,
@@ -119,7 +119,7 @@ pub enum Target {
 ///
 /// A goal pairs an invariant name with a target and a context. For example,
 /// "prove `liveness` for `Region(42)` in the context of `main::alloc_buffer`".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Goal {
     /// The invariant that must hold.
     pub invariant: InvariantName,
@@ -175,7 +175,7 @@ impl std::fmt::Display for FactKind {
 /// match on the typed judgment variant instead of performing fragile string
 /// comparison on `statement`. When `judgment` is `None`, the rule falls back
 /// to string-based matching for backward compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     /// Unique identifier for this fact within the proof.
     pub id: FactId,
@@ -186,7 +186,6 @@ pub struct Fact {
     /// Optional structured judgment for precise structural matching.
     /// When present, inference rules match on the judgment variant
     /// rather than performing string pattern matching.
-    #[serde(default)]
     pub judgment: Option<super::judgment::Judgment>,
 }
 
@@ -264,7 +263,7 @@ impl Fact {
 /// A single step in a proof. Each step represents a logical inference from
 /// previously established facts to a new fact, or a structural proof technique
 /// such as case splitting or induction.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProofStep {
     /// Assume a fact without proof (for conditional reasoning).
     Assume {
@@ -346,7 +345,7 @@ impl std::fmt::Display for Conclusion {
 /// A proof starts from a goal and proceeds through a sequence of steps to
 /// reach a conclusion. Each step is either a direct inference or a structural
 /// technique (induction, case split, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Proof {
     /// The goal this proof is trying to establish.
     pub goal: Goal,
