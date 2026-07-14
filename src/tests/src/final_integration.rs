@@ -62,6 +62,7 @@ fn backend_name(kind: BackendKind) -> &'static str {
         BackendKind::PowerPC64LE => "ppc64le",
         BackendKind::X86_32 => "x86_32",
         BackendKind::RiscV32 => "riscv32",
+        _ => "unknown",
     }
 }
 
@@ -79,6 +80,7 @@ fn elf_machine(kind: BackendKind) -> u16 {
         BackendKind::PowerPC64LE => 21,
         BackendKind::X86_32 => 3,
         BackendKind::RiscV32 => 243,
+        _ => 0,
     }
 }
 
@@ -121,6 +123,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Int(10),
                     rhs: ScgExpr::Int(20),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "b".to_string(),
@@ -128,6 +131,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Int(3),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "c".to_string(),
@@ -135,6 +139,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Var("b".to_string()),
                     rhs: ScgExpr::Int(5),
                     tail_call: false,
+ reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("c".to_string())]),
             ],
