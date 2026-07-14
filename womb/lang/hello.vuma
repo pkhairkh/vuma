@@ -1,10 +1,22 @@
-// womb/lang/hello.vuma — canonical test input for the Wave 47 bootstrap compiler.
-// Minimal VUMA program: a main() that returns 0. Used as the read-path target
-// for the self-hosted bootstrap entry point in full_lexer.vuma.
+// womb/lang/hello.vuma — canonical test input for the Wave 48 self-host test.
 //
-// Wave 47 test: the bootstrap compiler (full_lexer.vuma main) opens this file,
-// reads its contents, lexes it, and exits 0 on success.
+// Wave 48 self-host contract:
+//   1. The bootstrap compiler (entry in full_lexer.vuma::main) compiles THIS file
+//      through the full pipeline: lex → parse → AST → IR → x86_64 codegen → ELF64.
+//   2. The emitted ELF (a.out) is `chmod +x` and runnable on Linux x86_64.
+//   3. Running `./a.out` prints `42\n` to stdout and exits with code 0.
+//
+// Subset exercised (the bootstrap compiler's supported grammar):
+//   - `fn main() -> i32 { ... }`           (function definition with i32 return)
+//   - `print_int(<int_literal>);`           (call to the print_int builtin)
+//   - `return <int_literal>;`               (return statement)
+//   - integer literal `42`
+//
+// The bootstrap compiler does NOT yet support: structs, enums, closures,
+// generics, match, while loops in codegen (parser handles them; codegen
+// stubs control flow as documented in codegen.vuma).
 
 fn main() -> i32 {
+    print_int(42);
     return 0;
 }

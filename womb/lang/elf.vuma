@@ -1,6 +1,20 @@
 // womb/lang/elf.vuma — Minimal ELF64 writer for x86_64
 // Generates a static ELF64 executable with a single executable segment.
-// Entry point is at the start of the code segment.
+//
+// Wave 48: the entry point is now configurable via `entry_offset` (the byte
+// offset within the code buffer where execution should start). Previously
+// the entry was hardcoded to `0x401000 + header_size`, which was a bug —
+// the segment is loaded at vaddr 0x400000 from file offset 0, so file
+// offset X maps to vaddr 0x400000 + X. The correct entry vaddr is
+// 0x400000 + header_size + entry_offset.
+//
+// The bootstrap codegen lays out:
+//   file offset 0..120              = ELF header + program header
+//   file offset 120..120+86         = print_int routine (entry_offset = 0
+//                                     would run print_int first with garbage
+//                                     in rdi — BAD)
+//   file offset 120+86..            = main function (entry_offset = 86)
+// So the driver calls write_elf64(code, code_size, fd, 86).
 
 extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
@@ -26,19 +40,30 @@ fn store_u16(ptr: Address, offset: u32, val: u32) {
 const ELFMAG: u32 = 0x464C457F;  // \x7FELF
 
 // Write a minimal ELF64 executable.
-// code: pointer to machine code buffer
-// code_size: size of code in bytes
-// out_fd: file descriptor to write to
-fn write_elf64(code: Address, code_size: u32, out_fd: i64) {
+//   code         — pointer to machine code buffer
+//   code_size    — size of code in bytes
+//   out_fd       — open file descriptor to write to (caller opens "a.out"
+//                  with O_WRONLY|O_CREAT|O_TRUNC, mode 0o755, then closes)
+//   entry_offset — byte offset within `code` where execution should start
+//                  (Wave 48: the bootstrap passes PRINT_INT_SIZE = 86 so
+//                  the ELF entry skips the print_int routine and lands on
+//                  main. Passing 0 would run print_int first with garbage
+//                  in rdi.)
+//
+// Returns 1 on success, 0 on write failure.
+fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) -> u32 {
     // ELF header: 64 bytes
     // Program header: 56 bytes
     // Total header: 120 bytes
     header_size: u32 = 120;
-    entry_point: u64 = 0x401000 + header_size;  // code starts after headers
+    // The segment is loaded at vaddr 0x400000 from file offset 0, so
+    // file offset X maps to vaddr 0x400000 + X. The entry point is the
+    // vaddr of `code[entry_offset]` = 0x400000 + header_size + entry_offset.
     vaddr: u64 = 0x400000;
-    
+    entry_point: u64 = vaddr + header_size + entry_offset;
+
     buf = __vuma_alloc(header_size + code_size);
-    
+
     // ── ELF Header (64 bytes) ──
     // e_ident[0..3]: magic 0x7F 'E' 'L' 'F'
     *(buf + 0) = 0x7F; *(buf + 1) = 0x45; *(buf + 2) = 0x4C; *(buf + 3) = 0x46;
@@ -70,7 +95,7 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64) {
     // e_phnum: number of program headers = 1
     store_u16(buf, 56, 1);
     // e_shentsize, e_shnum, e_shstrndx: 0 (no sections)
-    
+
     // ── Program Header (56 bytes, at offset 64) ──
     ph: u32 = 64;
     // p_type: PT_LOAD = 1
@@ -89,7 +114,7 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64) {
     store_u64(buf, ph + 40, header_size + code_size);
     // p_align: alignment = 0x1000 (page size)
     store_u64(buf, ph + 48, 0x1000);
-    
+
     // ── Code (at offset 120) ──
     code_offset: u32 = header_size;
     i: u32 = 0;
@@ -97,8 +122,11 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64) {
         *(buf + code_offset + i) = *(code + i) & 255;
         i = i + 1;
     }
-    
-    // Write the ELF file
-    write(out_fd, buf, header_size + code_size);
-    __vuma_free(buf, header_size + code_size);
+
+    // Write the ELF file.
+    total: i64 = header_size + code_size;
+    n: i64 = write(out_fd, buf, total);
+    __vuma_free(buf, total);
+    if n == total { return 1; }
+    return 0;
 }
