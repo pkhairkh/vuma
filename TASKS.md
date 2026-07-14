@@ -638,10 +638,10 @@
 - [x] **[SCG]** Remove `indexmap` from `src/scg/Cargo.toml`.
 - [x] **[SCG]** Replace `smallvec::SmallVec<[NodeId; 8]>` (6 sites) with `Vec<NodeId>`. `src/scg/src/query.rs:18`
 - [x] **[SCG]** Remove `smallvec` from `src/scg/Cargo.toml`.
-- [~] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
-  - **AUDIT CAVEAT:** `scg` crate fully migrated (`SCGError` at `graph.rs:99-122` has hand-written `Display` + `impl Error`). Other crates NOT migrated: `cor/src/runtime.rs:83, 961` still uses `#[derive(Debug, Clone, thiserror::Error)]`; `package/src/lib.rs:45` still has `use thiserror::Error;` and `#[derive(Debug, Error)]` at line 48; `parser/Cargo.toml:16`, `cor/Cargo.toml:18`, `package/Cargo.toml:16` still depend on `thiserror`. `cor/Cargo.toml:17` has self-documenting TODO: `# TODO(wave41): remove after cor/src/runtime.rs thiserror migration`.
-- [ ] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
-  - **AUDIT GAP:** `thiserror = "1"` is STILL in workspace `Cargo.toml:53` (line citation off by 1). Removal blocked by the partial migration in the previous item.
+- [x] **[CORE]** Replace `#[derive(thiserror::Error)]` (~15 sites) with hand-written `Display`/`Error` impls (pattern at `src/scg/src/graph.rs:44-64`).
+  - **AUDIT RESOLVED (Task 2-b):** `package/cor/parser` crates migrated to hand-written `Display` + `Error` impls. `src/package/src/lib.rs` `PackageError` (7 variants) — the `#[from] std::io::Error` attribute replaced with a hand-written `impl From<std::io::Error> for PackageError` and `Error::source()` override returning the wrapped io::Error (preserves error chaining + `?` operator at all call sites in `lib.rs`/`registry.rs`/`manifest.rs`). `src/cor/src/runtime.rs` `OptError` (2 variants) and `RuntimeError` (5 variants) — simple enums, no `#[from]`, hand-written Display + empty `impl std::error::Error`. `parser` crate had NO source usage (only Cargo.toml dep). All format strings preserved byte-for-byte (no test regressions). Pattern matches `src/scg/src/graph.rs:SCGError`.
+- [x] **[CORE]** Remove `thiserror` from workspace `Cargo.toml:54`.
+  - **AUDIT RESOLVED (Task 2-b):** `thiserror` removed from workspace `Cargo.toml` `[workspace.dependencies]` and all per-crate `Cargo.toml`s (`src/package/Cargo.toml`, `src/cor/Cargo.toml`, `src/parser/Cargo.toml`). `src/scg/Cargo.toml` was already clean (prior scg migration). The self-documenting TODO at `cor/Cargo.toml:17` was also removed. `docs/CONVENTIONS.md` §2.1 updated to mandate the hand-written `Display` + `std::error::Error` pattern (with explicit Wave 41 note that `thiserror` MUST NOT be re-added). Verified: `rg "thiserror" src/ Cargo.toml` finds only explanatory comments mentioning the migration — no dep declarations and no `use thiserror` imports remain.
 
 ---
 
