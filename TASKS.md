@@ -734,35 +734,14 @@
 
 - [x] **[BOOT]** Implement a real parser (not just `lex_next_token`) in the bootstrap compiler.
 - [x] **[BOOT]** Implement AST construction.
-- [ ] **[BOOT]** Implement SCG construction from AST.
-  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:375-384`:
-    ```
-    fn scg_construct(ast) -> u32 {
-        // STUB: returns 0 (bootstrap skips SCG; AST→IR direct)
-        return 0;
-    }
-    ```
-- [ ] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
-  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:413-424`:
-    ```
-    fn bd_infer(ir_buf) -> u32 {
-        // STUB. Phase 1 propagation in the production compiler walks the IR forward...
-        // The bootstrap treats every vreg as a full i64.
-        return 1;
-    }
-    ```
-- [ ] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
-  - **AUDIT GAP:** Explicit stub at `ir_builder.vuma:426-438`:
-    ```
-    fn ive_verify(ir_buf) -> u32 {
-        // STUB. The production IVE pass checks (a) liveness — every vreg used
-        // has been defined... and (b) cleanup — removes lets whose init vreg
-        // is never read.
-        return 1;
-    }
-    ```
+- [x] **[BOOT]** Implement SCG construction from AST.
+  - **AUDIT RESOLVED (Task 5-b):** `scg_construct` at `womb/lang/ir_builder.vuma:509` now builds a real linear-chain SCG from AST nodes with ControlFlow edges. The function allocates a 12 KB SCG buffer via `scg_new()`, walks the AST arena top-level for `NK_FN_DEF` nodes, appends a `FunctionEntry` node per function (via `scg_add_node`), then walks the function body (`NK_BLOCK`'s side-buffer of stmt indices) appending one node per statement (classified by `scg_node_kind_for` into Compute/Access/Control/Statement), connecting each pair with a `ControlFlow` edge (via `scg_connect`). Edges are also mirrored into `next`/`prev` linked-list pointers on each node for O(1) traversal. Returns the total node count. Helpers: `scg_new`, `scg_add_node`, `scg_connect`, `scg_node_kind_for`, `scg_walk_block`. Constants: `SCG_NK_FUNCTION_ENTRY/COMPUTE/ACCESS/CONTROL/STATEMENT`, `SCG_EK_CONTROL_FLOW`, `SCG_NODE_CAP=512`, `SCG_EDGE_CAP=512`, `SCG_NODE_SIZE=16`, `SCG_EDGE_SIZE=8`, `SCG_EDGES_OFFSET=8200`. Test: `src/tests/src/wave48_bootstrap.rs::test_wave48_bootstrap_*` (5 tests).
+- [x] **[BOOT]** Implement BD inference (at least Phase 1 propagation).
+  - **AUDIT RESOLVED (Task 5-b):** `bd_infer` at `womb/lang/ir_builder.vuma:591` now does real forward RepD propagation across IR instructions. The function allocates a 4 KB RepD tag array (1 byte per vreg, max 4096 vregs), zero-inits it (REPD_UNKNOWN=0), then walks the IR buffer forward. For each instruction, it reads the lhs/rhs operand RepDs (REPD_UNKNOWN if out of range or uninitialized), calls `bd_classify(op, lhs_r, rhs_r)` to determine the dst RepD based on the opcode (IR_MOV→I64, IR_ADD..IR_SHR→propagate I32 or promote to I64, IR_CMP→BOOL, IR_LOAD→I64, IR_ALLOC→PTR, IR_CALL→I64), and writes the result to the dst vreg's slot — incrementing `assigned` if the slot was previously UNKNOWN. Returns the count of vregs assigned a non-UNKNOWN RepD. The array is freed before return. Helper: `bd_classify`. Constants: `REPD_UNKNOWN/I64/BOOL/PTR/I32`, `BD_VREG_CAP=4096`. Test: `src/tests/src/wave48_bootstrap.rs::test_wave48_bootstrap_*` (5 tests).
+- [x] **[BOOT]** Implement IVE verification (at least liveness + cleanup).
+  - **AUDIT RESOLVED (Task 5-b):** `ive_verify` at `womb/lang/ir_builder.vuma:694` now does a real forward-liveness + backward-use check + cleanup-dead-let detection. The function allocates two 512-byte bitmaps (`defined`, `used`) and clears them via `ive_bm_clear`. **Pass 1 (forward):** marks every vreg that is the dst of a def-instruction (identified by `ive_op_is_def`). **Pass 2 (backward):** walks the IR in reverse, marking every vreg used as an operand (lhs/rhs for ALU/CMP, lhs for LOAD, dst+lhs for STORE, imm_lo for CALL arg0, dst for RET, dst for COND_BRANCH cond). **Liveness check:** iterates all vreg IDs 1..4096; if any used vreg is not in `defined`, sets `liveness_ok = 0`. **Cleanup pass (forward):** counts def-instructions whose dst vreg is never used (dead "lets") into `dead_count`. Returns `liveness_ok` (1 if liveness check passes, 0 otherwise). The `dead_count` is computed for diagnostics but not used to mutate the IR — a real IVE pass would rewrite the buffer; the bootstrap leaves it to the codegen to silently skip dead instructions. Helpers: `ive_bm_set`, `ive_bm_get`, `ive_bm_clear`, `ive_op_is_def`. Constants: `IVE_VREG_CAP=4096`, `IVE_BITMAP_BYTES=512`, `IVE_BITMAP_U64S=64`. Test: `src/tests/src/wave48_bootstrap.rs::test_wave48_bootstrap_*` (5 tests).
 - [~] **[BOOT]** Implement IR construction from SCG.
-  - **AUDIT CAVEAT:** `irb_build_main` at `ir_builder.vuma:392` lowers AST→IR **directly**, bypassing SCG entirely (since `scg_construct` is a stub). Comment justifies: *"The bootstrap skips SCG because (a) hello.vuma has no loops in codegen and (b) the bootstrap's IR is already linear."* So IR construction exists, but "from SCG" is inaccurate — it's "from AST".
+  - **AUDIT CAVEAT (Task 5-b):** `irb_build_main` at `womb/lang/ir_builder.vuma:535` lowers AST→IR **directly**, bypassing the SCG built by `scg_construct` (which is now a real linear-chain SCG — see the SCG item above). The pipeline header comment above `scg_construct` documents this explicitly: *"Note: this still lowers AST→IR directly rather than consuming the SCG from step 1; the SCG is built for diagnostic purposes and to make the pipeline shape match the production compiler."* So IR construction exists and is real, but "from SCG" is inaccurate — it's "from AST" with the SCG built as a side artifact. Hooking the SCG into `irb_build_main` (replacing the direct AST walk with an SCG walk) is a future-wave task; the SCG buffer is currently heap-allocated and intentionally not freed (the bootstrap exits after pipeline completion, and the OS reclaims the heap).
 - [x] **[BOOT]** Implement x86_64 codegen (reuse encoders from `womb/lang/codegen.vuma`).
 - [x] **[BOOT]** Implement ELF64 emission (reuse `womb/lang/elf.vuma`).
 - [ ] **[BOOT-SELF]** Self-host: bootstrap compiler compiles `womb/lang/hello.vuma` and the resulting binary runs correctly.
