@@ -32,7 +32,6 @@
 //! - **Option\<T\>**: VUMA option type with BD tracking.
 //! - **Range**: Integer range type (start..end).
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -45,7 +44,7 @@ use std::marker::PhantomData;
 /// Each flag represents a distinct operational capability that a type may
 /// support. The VUMA verifier uses these flags to ensure that operations
 /// are only performed on types that possess the required capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapFlag {
     /// Type supports read operations.
     Read,
@@ -98,7 +97,7 @@ impl fmt::Display for CapFlag {
 /// CapD is the central mechanism by which the VUMA verifier ensures
 /// capability-safe operations. Every type in the VUMA stdlib carries a CapD
 /// that declares what operations are valid on values of that type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapD {
     /// The set of capability flags this descriptor carries.
     pub flags: Vec<CapFlag>,
@@ -205,7 +204,7 @@ pub fn string_capd() -> CapD {
 /// RepD encodes the structural properties of a type's in-memory
 /// representation, including its name, size in bytes, alignment requirement,
 /// and the CapD that declares its supported operations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepD {
     /// The name of this type (e.g., "uint8", "float64", "ptr").
     pub name: String,
@@ -270,7 +269,7 @@ impl fmt::Display for RepD {
 ///
 /// Each variant identifies a distinct class of relationship that the
 /// VUMA verifier tracks when composing and checking BDs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RelKind {
     /// The value is contained within another structure (e.g., pointer within region).
     Containment,
@@ -305,7 +304,7 @@ impl fmt::Display for RelKind {
 /// regions this value is related to, and what constraints those relations
 /// impose. Two RelDs can be composed (union of relations) and compared
 /// for refinement (a more refined RelD has a superset of relations).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelD {
     /// The set of relational properties this descriptor carries.
     pub relations: Vec<RelKind>,
@@ -433,7 +432,7 @@ pub fn numeric_reld() -> RelD {
 ///
 /// Two BDs are **compatible** when all three layers are pairwise compatible.
 /// One BD **refines** another when every layer is at least as specific.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BD {
     /// Representation descriptor — memory shape.
     pub repd: RepD,
@@ -513,7 +512,7 @@ pub trait HasBD {
 /// SyncEdge describes a happens-before relationship between two operations,
 /// enabling the VUMA runtime to verify that concurrent accesses are properly
 /// ordered and data-race-free.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SyncEdge {
     /// The source operation identifier.
     pub from: String,
@@ -524,7 +523,7 @@ pub struct SyncEdge {
 }
 
 /// The kind of synchronization relationship between two operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncEdgeKind {
     /// Sequential happens-before (program order).
     Seq,
@@ -675,7 +674,7 @@ pub fn ptr_repd(pointee: RepD) -> RepD {
 ///
 /// `Ptr<T>` is a VUMA-verified abstraction — the runtime ensures that
 /// dereference is only permitted when the BD's capabilities allow it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ptr<T> {
     /// The raw address this pointer points to.
     pub addr: u64,
@@ -775,7 +774,7 @@ impl<T> fmt::Display for Ptr<T> {
 /// - **RepD**: 24 bytes (addr: 8 + region_base: 8 + region_size: 8).
 /// - **CapD**: Same as `Ptr<T>` plus Shared.
 /// - **RelD**: Containment, Liveness, and RegionBound.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RegionPtr<T> {
     /// The raw address this pointer points to.
     pub addr: u64,
@@ -906,7 +905,7 @@ impl<T> fmt::Display for RegionPtr<T> {
 /// - **RepD**: 16 bytes (addr: 8 + len: 8), with Iterate capability.
 /// - **CapD**: Pointee capabilities + Read, Write, Iterate.
 /// - **RelD**: Containment, Liveness, DataFlow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Slice<T> {
     /// The base address of the slice.
     pub addr: u64,
@@ -1030,7 +1029,7 @@ impl<T> fmt::Display for Slice<T> {
 /// - **RepD**: Sum type, size is `max(ok_size, err_size) + 1` (tag byte).
 /// - **CapD**: Intersection of OK and ERR capabilities.
 /// - **RelD**: DataFlow and Ownership relations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VumaResult<T, E> {
     /// Successful result carrying a value of type `T`.
     Ok(T),
@@ -1166,7 +1165,7 @@ impl<T: HasBD, E: HasBD> HasBD for VumaResult<T, E> {
 /// - **RepD**: size is `val_size + 1` (tag byte).
 /// - **CapD**: Same as the inner value's CapD.
 /// - **RelD**: DataFlow and Liveness relations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VumaOption<T> {
     /// A present value.
     Some(T),
@@ -1274,7 +1273,7 @@ impl<T: HasBD> HasBD for VumaOption<T> {
 /// - **RepD**: 16 bytes (start: 8 + end: 8), alignment 8.
 /// - **CapD**: Read, Write, Compare, Iterate, Serialize.
 /// - **RelD**: Empty (numeric range has no inherent relations).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Range {
     /// The start of the range (inclusive).
     pub start: u64,

@@ -16,7 +16,6 @@
 //! - SystemTime: CapD { Read, Compare, Serialize }
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::hash::Hash;
 use std::sync::OnceLock;
@@ -33,7 +32,7 @@ use std::sync::OnceLock;
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
 /// - SyncEdge: none (passive value type)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Duration {
     /// The whole seconds of the duration.
     pub secs: u64,
@@ -240,14 +239,13 @@ static INSTANT_BASELINE: OnceLock<std::time::Instant> = OnceLock::new();
 ///
 /// - CapD: { Read, Compare, Serialize }
 /// - SyncEdge: now → elapsed (Seq)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct Instant {
     /// Internal timestamp as nanoseconds since an arbitrary epoch.
     /// Used for ordering, comparison, and serialization.
     nanos: u64,
     /// The real std::time::Instant captured at creation, used for elapsed().
     /// Not serialized; on deserialization this is set to a placeholder.
-    #[serde(skip)]
     inner: Option<std::time::Instant>,
 }
 
@@ -380,7 +378,7 @@ impl Instant {
 ///
 /// - CapD: { Read, Compare, Serialize }
 /// - SyncEdge: now → duration_since_epoch (Seq)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SystemTime {
     /// Duration since Unix epoch.
     duration_since_epoch: Duration,

@@ -20,7 +20,6 @@
 
 use crate::error::{VumaErrorChain, VumaErrorKind, VumaResult};
 use crate::primitives::{CapD, CapFlag};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -32,7 +31,7 @@ use std::fmt;
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VumaEnvError {
     /// The environment variable was not present.
     NotPresent,

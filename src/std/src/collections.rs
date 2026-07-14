@@ -30,7 +30,6 @@
 //! describing its access mode (Read for shared, Write for mutable).
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -90,7 +89,7 @@ pub fn string_collection_capd() -> CapD {
 ///
 /// Every collection method returns a `BdResult` to ensure the VUMA verifier
 /// can track which capabilities the caller gains access to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BdResult<T> {
     /// The result value.
     pub value: Option<T>,
@@ -697,7 +696,7 @@ impl<T> std::ops::IndexMut<usize> for Vec<T> {
 }
 
 /// BD operation tracking statistics for Vec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BdVecStats {
     /// Number of push operations performed.
     pub push_count: u64,
@@ -1327,7 +1326,7 @@ pub fn siphash_key<K: Hash>(key: &K) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// A hash table entry for open addressing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 enum Entry<K, V> {
     /// Occupied slot with key-value pair.
     Occupied { key: K, value: V },
@@ -1570,7 +1569,7 @@ impl<K: Hash + Eq + Clone, V: Clone> Default for HashMap<K, V> {
 }
 
 /// BD operation tracking statistics for HashMap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BdHashMapStats {
     /// Number of insert operations performed.
     pub insert_count: u64,

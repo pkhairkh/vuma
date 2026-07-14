@@ -17,7 +17,6 @@
 //! - SyncEdge: none (passive value type)
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ use std::fmt;
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VumaErrorKind {
     /// I/O error (file, stream, UART, MMIO).
     Io,
@@ -135,7 +134,7 @@ pub trait VumaError: fmt::Debug + fmt::Display + Send + Sync + 'static {
 ///
 /// - CapD: { Read, Compare, Serialize }
 /// - SyncEdge: none (passive value type)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaErrorChain {
     /// The error kind.
     pub kind: VumaErrorKind,

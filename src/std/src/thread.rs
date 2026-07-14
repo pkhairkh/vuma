@@ -29,7 +29,6 @@
 
 use crate::error::{VumaErrorChain, VumaErrorKind};
 use crate::primitives::{CapD, CapFlag, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
@@ -42,7 +41,7 @@ use std::sync::Arc;
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VumaThreadError {
     /// Thread panicked during execution.
     Panicked(String),
@@ -90,7 +89,7 @@ impl From<VumaThreadError> for VumaErrorChain {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VumaThreadId {
     /// The underlying thread ID as a u64.
     id: u64,
@@ -144,7 +143,7 @@ impl fmt::Display for VumaThreadId {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaThreadInfo {
     /// The thread's unique identifier.
     pub id: VumaThreadId,
