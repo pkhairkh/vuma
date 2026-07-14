@@ -12,14 +12,13 @@
 //! - **Spanned**: every node can point back to its source location.
 
 use crate::error::Span;
-use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Visibility
 // ---------------------------------------------------------------------------
 
 /// Visibility modifier for items.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Visibility {
     /// Default (private) visibility — no modifier.
     #[default]
@@ -51,7 +50,7 @@ impl std::fmt::Display for Visibility {
 // ---------------------------------------------------------------------------
 
 /// An outer attribute: `#[attr]` or `#[attr = value]` or `#[attr(key = value)]`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
     /// Whether this is an inner attribute (`#![...]`) or outer (`#[...]`).
     pub is_inner: bool,
@@ -65,7 +64,7 @@ pub struct Attribute {
 }
 
 /// The value part of an attribute.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttrValue {
     /// A single identifier or literal: `#[inline(always)]` → `always`
     Single(String),
@@ -85,7 +84,7 @@ pub enum AttrValue {
 // ---------------------------------------------------------------------------
 
 /// The root of every VUMA compilation unit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Program {
     /// Top-level items (function definitions, region declarations, imports, …).
     pub items: Vec<Item>,
@@ -98,7 +97,7 @@ pub struct Program {
 // ---------------------------------------------------------------------------
 
 /// A top-level declaration within a [`Program`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Item {
     /// Function definition: `fn name(params) -> T { … }`
     FnDef(FnDef),
@@ -130,7 +129,7 @@ pub enum Item {
 }
 
 /// Function definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FnDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -155,7 +154,7 @@ pub struct FnDef {
 }
 
 /// A single function parameter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Param {
     /// Parameter name.
     pub name: String,
@@ -166,7 +165,7 @@ pub struct Param {
 }
 
 /// Struct definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StructDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -185,7 +184,7 @@ pub struct StructDef {
 }
 
 /// A single field in a struct definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StructField {
     /// Field name.
     pub name: String,
@@ -196,7 +195,7 @@ pub struct StructField {
 }
 
 /// Enum definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EnumDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -215,7 +214,7 @@ pub struct EnumDef {
 }
 
 /// A single variant in an enum definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EnumVariant {
     /// Variant name.
     pub name: String,
@@ -226,7 +225,7 @@ pub struct EnumVariant {
 }
 
 /// Region (memory arena) declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegionDef {
     /// Region name.
     pub name: String,
@@ -237,7 +236,7 @@ pub struct RegionDef {
 }
 
 /// Import declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Import {
     /// Module path (string).
     pub path: String,
@@ -248,7 +247,7 @@ pub struct Import {
 }
 
 /// Export declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Export {
     /// Name being exported.
     pub name: String,
@@ -257,7 +256,7 @@ pub struct Export {
 }
 
 /// Constant definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ConstDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -274,7 +273,7 @@ pub struct ConstDef {
 }
 
 /// Static definition: `static name: T = value;`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StaticDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -291,7 +290,7 @@ pub struct StaticDef {
 }
 
 /// Module declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ModuleDef {
     /// Module name.
     pub name: String,
@@ -306,7 +305,7 @@ pub struct ModuleDef {
 // ---------------------------------------------------------------------------
 
 /// Trait definition: `trait Name<T> { … }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TraitDef {
     /// Visibility modifier.
     pub visibility: Visibility,
@@ -331,7 +330,7 @@ pub struct TraitDef {
 }
 
 /// Associated constant in a trait: `const NAME: Type [= expr];`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AssocConst {
     /// Constant name.
     pub name: String,
@@ -344,7 +343,7 @@ pub struct AssocConst {
 }
 
 /// Impl block: `impl TraitName for Type { … }` or `impl Type { … }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ImplBlock {
     /// Outer attributes on this impl block.
     pub attrs: Vec<Attribute>,
@@ -371,7 +370,7 @@ pub struct ImplBlock {
 /// Declares external functions that will be resolved at link time.
 /// The codegen emits relocations for calls to these functions instead
 /// of local branch instructions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExternBlockDef {
     /// Calling convention string (e.g. "C", "system").
     pub convention: String,
@@ -382,7 +381,7 @@ pub struct ExternBlockDef {
 }
 
 /// A function declaration inside an `extern` block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExternFnDecl {
     /// Function name.
     pub name: String,
@@ -399,7 +398,7 @@ pub struct ExternFnDecl {
 // ---------------------------------------------------------------------------
 
 /// A type parameter with optional trait bounds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypeParam {
     /// Parameter name.
     pub name: String,
@@ -408,14 +407,14 @@ pub struct TypeParam {
 }
 
 /// A where clause with predicates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WhereClause {
     /// Individual predicates.
     pub predicates: Vec<WherePredicate>,
 }
 
 /// A single where predicate: `T: Trait + AnotherTrait`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WherePredicate {
     /// The type name being constrained.
     pub type_name: String,
@@ -428,7 +427,7 @@ pub struct WherePredicate {
 // ---------------------------------------------------------------------------
 
 /// A sequential block of statements enclosed in `{ … }`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Block {
     /// Statements in execution order.
     pub statements: Vec<Stmt>,
@@ -441,7 +440,7 @@ pub struct Block {
 // ---------------------------------------------------------------------------
 
 /// A single statement within a [`Block`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Stmt {
     /// Variable binding: `let name [: T] = expr;`
     Let(LetStmt),
@@ -489,7 +488,7 @@ pub enum Stmt {
 }
 
 /// `let` binding statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LetStmt {
     /// Bound variable name.
     pub name: String,
@@ -504,7 +503,7 @@ pub struct LetStmt {
 /// Assignment statement.
 ///
 /// The target may be a simple variable or a dereference expression.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AssignStmt {
     /// The assignment target (variable, deref, field, or index).
     pub target: AssignTarget,
@@ -515,7 +514,7 @@ pub struct AssignStmt {
 }
 
 /// What is being assigned to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum AssignTarget {
     /// Simple variable: `x = …`
     Var {
@@ -552,7 +551,7 @@ pub enum AssignTarget {
 }
 
 /// `allocate(size)` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AllocateStmt {
     /// The size (in bytes) to allocate.
     pub size: Expr,
@@ -561,7 +560,7 @@ pub struct AllocateStmt {
 }
 
 /// `free(ptr)` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FreeStmt {
     /// The pointer / region to deallocate.
     pub ptr: Expr,
@@ -571,7 +570,7 @@ pub struct FreeStmt {
 
 /// Standalone access / dereference statement (rare; usually embedded
 /// within an expression).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AccessStmt {
     /// The expression being accessed / dereferenced.
     pub expr: Expr,
@@ -580,7 +579,7 @@ pub struct AccessStmt {
 }
 
 /// Standalone cast statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CastStmt {
     /// The expression being cast.
     pub expr: Expr,
@@ -591,7 +590,7 @@ pub struct CastStmt {
 }
 
 /// `if` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IfStmt {
     /// The condition expression.
     pub condition: Expr,
@@ -604,7 +603,7 @@ pub struct IfStmt {
 }
 
 /// `while` loop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WhileStmt {
     /// Loop condition.
     pub condition: Expr,
@@ -615,7 +614,7 @@ pub struct WhileStmt {
 }
 
 /// `for` loop: `for name in iter { body }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ForStmt {
     /// Iterator variable name.
     pub name: String,
@@ -628,7 +627,7 @@ pub struct ForStmt {
 }
 
 /// Infinite `loop { body }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LoopStmt {
     /// Loop body.
     pub body: Block,
@@ -637,7 +636,7 @@ pub struct LoopStmt {
 }
 
 /// `match` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MatchStmt {
     /// Expression being matched.
     pub subject: Expr,
@@ -648,7 +647,7 @@ pub struct MatchStmt {
 }
 
 /// A single arm of a `match` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     /// Pattern (simple string for now; can be extended to full patterns).
     pub pattern: MatchPattern,
@@ -661,7 +660,7 @@ pub struct MatchArm {
 }
 
 /// A match pattern (simplified for VUMA).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum MatchPattern {
     /// Wildcard: `_`
     Wildcard(Span),
@@ -726,7 +725,7 @@ pub enum MatchPattern {
 /// type designed for structural decomposition — particularly useful when
 /// lowering struct field access and enum variant destructuring in the SCG
 /// and codegen passes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     /// Wildcard pattern: `_` — matches anything, binds nothing.
     Wild,
@@ -742,7 +741,7 @@ pub enum Pattern {
 }
 
 /// `sync { … }` block for synchronized access.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SyncBlock {
     /// Body of the sync block.
     pub body: Block,
@@ -751,7 +750,7 @@ pub struct SyncBlock {
 }
 
 /// `return` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ReturnStmt {
     /// Optional return value expression.
     pub value: Option<Expr>,
@@ -760,7 +759,7 @@ pub struct ReturnStmt {
 }
 
 /// `break` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BreakStmt {
     /// Optional break value (for loop expressions).
     pub value: Option<Expr>,
@@ -769,14 +768,14 @@ pub struct BreakStmt {
 }
 
 /// `continue` statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ContinueStmt {
     /// Source span.
     pub span: Span,
 }
 
 /// Compound assignment statement: `target op= value;`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompoundAssignStmt {
     /// The target being assigned to.
     pub target: AssignTarget,
@@ -789,7 +788,7 @@ pub struct CompoundAssignStmt {
 }
 
 /// Compound assignment operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompoundOp {
     /// `+=`
     Add,
@@ -814,7 +813,7 @@ pub enum CompoundOp {
 }
 
 /// BD (behavioral domain) directive statement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BdDirectiveStmt {
     /// The directive kind: `bd`, `repd`, `capd`, or `reld`.
     pub kind: BdDirectiveKind,
@@ -827,7 +826,7 @@ pub struct BdDirectiveStmt {
 }
 
 /// Kind of BD directive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BdDirectiveKind {
     /// `bd` — base domain annotation
     Bd,
@@ -840,7 +839,7 @@ pub enum BdDirectiveKind {
 }
 
 /// Expression used as a statement (side-effecting call, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExprStmt {
     /// The expression being evaluated for its side effects.
     pub expr: Expr,
@@ -856,7 +855,7 @@ pub struct ExprStmt {
 ///
 /// Operator precedence is resolved by the parser; the AST encodes the
 /// result directly via nested `Box<Expr>`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// Variable reference.
     Var {
@@ -1160,7 +1159,7 @@ pub enum Expr {
 // ---------------------------------------------------------------------------
 
 /// A part of a format string — either a literal text segment or an interpolated expression.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum FormatStrPart {
     /// Literal text segment.
     Lit(String),
@@ -1173,7 +1172,7 @@ pub enum FormatStrPart {
 // ---------------------------------------------------------------------------
 
 /// The body of a closure — either a single expression or a block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ClosureBody {
     /// Single expression body: `|x| x + 1`
     Expr(Box<Expr>),
@@ -1182,7 +1181,7 @@ pub enum ClosureBody {
 }
 
 /// How a closure captures variables from its environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKind {
     /// `move` closure — takes ownership of captured variables.
     Move,
@@ -1197,7 +1196,7 @@ pub enum CaptureKind {
 // ---------------------------------------------------------------------------
 
 /// Binary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     /// `+`
     Add,
@@ -1238,7 +1237,7 @@ pub enum BinOp {
 }
 
 /// Unary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     /// `-` (numeric negation)
     Neg,
@@ -1255,7 +1254,7 @@ pub enum UnOp {
 // ---------------------------------------------------------------------------
 
 /// A literal value embedded directly in the source.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     /// Integer literal (e.g. `42`, `0`).
     Int(i64),
@@ -1279,7 +1278,7 @@ pub enum Lit {
 ///
 /// The type system covers primitive types, pointer types, region-annotated
 /// types, struct types, generic type applications, and BD annotations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// Base domain type (from the BD subsystem).
     /// Examples: `u8`, `u32`, `i64`, `bool`, `void`.

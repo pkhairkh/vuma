@@ -19,7 +19,6 @@
 //! - **"Did you mean?" suggestions** — [`suggest`], [`suggest_keyword`],
 //!   [`levenshtein`], [`format_suggestion`] for typo correction.
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +26,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// A byte-offset span within a source file, used for error localisation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     /// Inclusive start byte offset.
     pub start: usize,
@@ -77,7 +76,7 @@ impl fmt::Display for Span {
 
 /// Rich source location: file path (optional), line, column, and a snippet of
 /// the surrounding source text for context rendering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
     /// Optional file path or module name.
     pub file: Option<String>,
@@ -184,7 +183,7 @@ pub fn offset_to_location(source: &str, offset: usize, file: Option<&str>) -> So
 // ---------------------------------------------------------------------------
 
 /// Severity level for a diagnostic message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
     /// A hard error — the program cannot be compiled.
     Error,
@@ -209,7 +208,7 @@ impl fmt::Display for Severity {
 // ---------------------------------------------------------------------------
 
 /// Classification of parse errors for programmatic handling.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParseErrorKind {
     // -- Core syntax errors --------------------------------------------------
     /// The lexer/parser encountered a token it did not expect at this position.
@@ -290,7 +289,7 @@ impl fmt::Display for ParseErrorKind {
 // ---------------------------------------------------------------------------
 
 /// A single parse error with full context for reporting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
     /// Human-readable error description.
     pub message: String,
@@ -526,7 +525,7 @@ impl std::error::Error for ParseError {}
 
 /// Strategy for recovering from a parse error so that the parser can continue
 /// and potentially find additional errors in the same file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorRecovery {
     /// Skip tokens until the next statement boundary (`;` or `}`).
     /// This is the default recovery strategy for most syntax errors.
@@ -592,7 +591,7 @@ impl fmt::Display for ErrorRecovery {
 /// On success the parsed `value` is present **and** there may be accumulated
 /// non-fatal errors in `errors`.  On failure `value` is `None` and `errors`
 /// contains at least one fatal error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ParseResult<T> {
     /// The parsed value, if parsing succeeded (even with non-fatal errors).
     pub value: Option<T>,
@@ -697,7 +696,7 @@ impl<T> ParseResult<T> {
 
 /// A structured diagnostic message with severity, source location, and an
 /// optional error code.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Diagnostic {
     /// Severity level.
     pub severity: Severity,
@@ -840,7 +839,7 @@ impl std::error::Error for Diagnostic {}
 ///
 /// Supports deduplication by approximate location (same line and message),
 /// and batch rendering.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ErrorCollector {
     /// Collected diagnostics.
     diagnostics: Vec<Diagnostic>,
