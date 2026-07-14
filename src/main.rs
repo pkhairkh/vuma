@@ -19,7 +19,7 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use vuma::pipeline::{
-    bridge_ast_to_codegen_scg, compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel,
+    bridge_ast_to_codegen_scg, compile_modules, compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel,
     VerificationLevel, VumaError,
 };
 use vuma::telemetry::TelemetryCollector;
@@ -333,6 +333,54 @@ enum Commands {
         /// Starting virtual address (default: 0x400000)
         #[arg(long, default_value = "0x400000")]
         base_addr: String,
+    },
+
+    /// Link multiple `.vuma` files into a single ELF binary.
+    ///
+    /// Each input file is parsed independently; the ASTs are merged
+    /// (cross-module `extern "C"` declarations are resolved against real
+    /// `fn` definitions in sibling files), and the merged program is
+    /// compiled through the direct AST → codegen SCG → IR → regalloc →
+    /// backend.encode_program path. The emitted ELF targets the host
+    /// architecture (or the explicit `--isa` if given) so it can be
+    /// executed natively.
+    ///
+    /// Usage:
+    ///   vuma link <file1.vuma> <file2.vuma> ... [-o <output>] [--run] [--isa x86_64]
+    ///
+    /// Default output is `a.out`. When `--run` is set, the linked ELF is
+    /// `chmod +x`'d and executed (with no argv; to pass argv to the linked
+    /// binary, run it directly after `vuma link` writes it). The
+    /// `--run` flag is a convenience for the smoke-test workflow; the
+    /// end-to-end test in `wave48_self_host.rs` invokes the linked ELF
+    /// directly via `std::process::Command` so it can pass argv.
+    Link {
+        /// Input VUMA source files (two or more). The first file is the
+        /// entry-point module (the one that defines `fn main`); subsequent
+        /// files are sibling modules whose `fn` definitions resolve
+        /// `extern` declarations in the entry module.
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+
+        /// Output file path (default: a.out)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Target ISA. Defaults to the host architecture so the emitted
+        /// binary can be executed natively. Currently `compile_modules`
+        /// always uses the host backend regardless of this flag (the
+        /// flag is accepted for forward-compatibility and to mirror
+        /// `vuma build`/`vuma run`'s CLI shape); a future wave will
+        /// thread it through to the pipeline.
+        #[arg(long, value_enum)]
+        isa: Option<IsaArg>,
+
+        /// After linking, `chmod +x` the output and execute it, forwarding
+        /// stdout/stderr to the terminal. The linked binary is invoked
+        /// with no argv; to pass argv, run the binary directly after
+        /// `vuma link` writes it.
+        #[arg(long)]
+        run: bool,
     },
 
     /// Run IVE 5-invariant verification
@@ -1384,6 +1432,133 @@ fn cmd_lsp() -> Result<(), String> {
     Ok(())
 }
 
+/// `vuma link <file1.vuma> <file2.vuma> ... -o <output> [--run] [--isa x86_64]`
+///
+/// Reads each named `.vuma` file, passes the `(filename, contents)` tuples
+/// to `pipeline::compile_modules`, writes the resulting ELF to the output
+/// path (default `a.out`), and (if `--run` is set) `chmod +x`'s the output
+/// and executes it (with no argv; to pass argv, run the binary directly
+/// after `vuma link` writes it).
+///
+/// The linked ELF targets the host architecture (or the explicit `--isa`
+/// if given — currently `compile_modules` always uses the host backend;
+/// the flag is accepted for forward-compatibility). The canonical pipeline
+/// (`compile_with_path`) always emits AArch64 and cannot be used here
+/// without silently producing a non-runnable binary on x86_64 / riscv64 /
+/// etc. hosts.
+fn cmd_link(
+    cli: &Cli,
+    files: &[PathBuf],
+    output: &Option<PathBuf>,
+    _isa: &Option<IsaArg>,
+    run: bool,
+) -> Result<(), String> {
+    if files.len() < 2 {
+        return Err(format!(
+            "link requires at least 2 input files (got {}); \
+             for single-file compilation use `vuma build` or `vuma emit`",
+            files.len()
+        ));
+    }
+
+    // Read each input file into a (name, contents) tuple.
+    let mut modules: Vec<(String, String)> = Vec::with_capacity(files.len());
+    for path in files {
+        let source = read_source(path)?;
+        // Use the file name (not the full path) as the module name —
+        // keeps error messages readable and matches the convention used
+        // by the bootstrap self-host test (which passes bare file names
+        // like "full_lexer.vuma").
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        modules.push((name, source));
+    }
+
+    // Build a CompileConfig from the global CLI flags.  compile_modules
+    // uses the host backend regardless of `target`, so we pass Linux
+    // (the only non-Wasm32 target) here.
+    let config = make_config(cli, CompileTarget::Linux);
+
+    // Compile + link.
+    let compile_output = compile_modules(&modules, &config).map_err(|errors| {
+        // Print each error to stderr before returning the summary.
+        print_errors(&errors);
+        format!("link failed with {} error(s)", errors.len())
+    })?;
+
+    // Write the ELF to the output path (default: a.out in CWD).
+    let out_path = output
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("a.out"));
+    fs::write(&out_path, &compile_output.binary).map_err(|e| {
+        format!(
+            "error: cannot write output file '{}': {}",
+            out_path.display(),
+            e
+        )
+    })?;
+
+    // Make the output file executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&out_path)
+            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&out_path, perms)
+            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+    }
+
+    if !cli.quiet {
+        let host_arch = std::env::consts::ARCH;
+        println!(
+            "Linked {} file(s) -> {} ({} bytes, {} IR functions, {} IR instructions, host ISA: {})",
+            files.len(),
+            out_path.display(),
+            compile_output.binary.len(),
+            compile_output.ir_function_count,
+            compile_output.ir_instruction_count,
+            host_arch,
+        );
+
+        // Print stage timings.
+        for (stage, ms) in &compile_output.stage_timings {
+            println!("  {:20} {}ms", stage, ms);
+        }
+    }
+
+    // If --run is set, execute the linked ELF (no argv — for argv, run
+    // the binary directly after vuma link writes it).
+    if run {
+        let output_result = Command::new(&out_path).output();
+        let out = output_result.map_err(|e| {
+            format!(
+                "error: failed to execute linked binary '{}': {}",
+                out_path.display(),
+                e
+            )
+        })?;
+
+        io::stdout()
+            .write_all(&out.stdout)
+            .map_err(|e| format!("error: failed to write program output: {}", e))?;
+        io::stderr()
+            .write_all(&out.stderr)
+            .map_err(|e| format!("error: failed to write program stderr: {}", e))?;
+
+        let code = out.status.code().unwrap_or(1);
+        if code != 0 {
+            return Err(format!("linked program exited with code {}", code));
+        }
+    }
+
+    Ok(())
+}
+
 /// `vuma --bench` — Run the performance benchmark suite.
 fn cmd_bench(_cli: &Cli) {
     use vuma_codegen::backend::BackendKind;
@@ -1711,6 +1886,12 @@ fn main() {
         Commands::Repl => cmd_repl(),
         Commands::Lsp => cmd_lsp(),
         Commands::Pkg { ref cmd } => cmd_pkg(cmd),
+        Commands::Link {
+            ref files,
+            ref output,
+            ref isa,
+            ref run,
+        } => cmd_link(&cli, files, output, isa, *run),
     };
 
     if let Err(err) = result {
