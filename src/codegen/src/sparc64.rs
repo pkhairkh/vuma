@@ -857,8 +857,8 @@ impl Instruction {
                 // Actually SPARC V9 MEMBAR format: 10 rd=0 101000 rs1=0 0 0000000 cmask[3:0] mmask[3:0]
                 // where cmask is at bits 7-4 and mmask is at bits 3-0.
                 // But the simpler interpretation: mask is at bits 6-0, i=0.
-                let word = ((((OPC_FORMAT3 & 0x3) << 30) // rd = 0
-                    | ((OP3_MEMBAR & 0x3F) << 19))) // i = 0 (required for MEMBAR)
+                let word = (((OPC_FORMAT3 & 0x3) << 30) // rd = 0
+                    | ((OP3_MEMBAR & 0x3F) << 19)) // i = 0 (required for MEMBAR)
                     | (*mask & 0x7F); // mask at bits 6-0
                 word.to_be_bytes()
             }
@@ -867,9 +867,9 @@ impl Instruction {
             Instruction::Movcc { rd, rs2, cond } => {
                 // MOVcc: op=10, rd, op3=0x2C, rs1=0, i=0, cc2.cc1.cc0[12:11], cond[17:14]
                 // For simplicity, we use %icc (cc=000) and encode cond in bits[17:14].
-                let word = ((((OPC_FORMAT3 & 0x3) << 30)
+                let word = (((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
-                    | ((OP3_MOVCC & 0x3F) << 19))) // cc = 000 (%icc)
+                    | ((OP3_MOVCC & 0x3F) << 19)) // cc = 000 (%icc)
                     | ((*cond & 0xF) << 14)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()

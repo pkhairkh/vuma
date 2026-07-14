@@ -3047,7 +3047,7 @@ impl AstToScg {
             // Check if inner is a dereference: (*ptr).field
             if let Expr::Deref { expr: _deref_inner, .. } = inner.as_ref() {
                 // (*ptr).field — look up the field in all known structs
-                for (_struct_name, layout) in &self.struct_table {
+                for layout in self.struct_table.values() {
                     for (fname, _ftype, foffset) in layout {
                         if fname == field {
                             return Some(*foffset);
@@ -3057,7 +3057,7 @@ impl AstToScg {
             }
             
             // Direct field access: var.field — look up in struct_table
-            for (_struct_name, layout) in &self.struct_table {
+            for layout in self.struct_table.values() {
                 for (fname, _ftype, foffset) in layout {
                     if fname == field {
                         return Some(*foffset);
