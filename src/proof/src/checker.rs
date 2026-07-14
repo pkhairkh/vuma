@@ -4,7 +4,6 @@
 //! established facts using the stated rule, and there is no circular reasoning.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::proof::{Conclusion, Fact, FactId, Proof, ProofStep};
 use crate::tactics::ProofResult;
@@ -60,16 +59,27 @@ impl std::fmt::Display for CheckResult {
 
 /// Internal errors during proof checking (distinct from `CheckResult::Invalid`,
 /// which is a normal outcome).
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum CheckerError {
     /// A referenced fact id was not found in the established fact set.
-    #[error("fact id {id} not found in established facts")]
     FactNotFound { id: FactId },
 
     /// A sub-proof could not be checked.
-    #[error("sub-proof check failed: {0}")]
     SubProofFailed(String),
 }
+
+impl std::fmt::Display for CheckerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckerError::FactNotFound { id } => {
+                write!(f, "fact id {id} not found in established facts")
+            }
+            CheckerError::SubProofFailed(s) => write!(f, "sub-proof check failed: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for CheckerError {}
 
 // ---------------------------------------------------------------------------
 // ProofChecker

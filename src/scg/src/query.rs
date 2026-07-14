@@ -15,7 +15,6 @@
 //! - [`SCGQuery::CallersOf`] — "Which functions call function X?"
 
 use hashbrown::HashSet;
-use smallvec::SmallVec;
 
 use crate::callgraph::CallGraph;
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
@@ -113,9 +112,9 @@ pub enum SCGQuery {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryResult {
     /// Node IDs that matched the query.
-    pub node_ids: SmallVec<[NodeId; 8]>,
+    pub node_ids: Vec<NodeId>,
     /// Edge IDs that matched the query.
-    pub edge_ids: SmallVec<[EdgeId; 8]>,
+    pub edge_ids: Vec<EdgeId>,
     /// Derivation chains found (only populated for `DerivationChains` queries).
     pub derivation_chains: Vec<DerivationChain>,
     /// Paths found (only populated for `PathsBetween` queries).
@@ -131,8 +130,8 @@ impl QueryResult {
     /// Creates an empty query result.
     pub fn empty() -> Self {
         Self {
-            node_ids: SmallVec::new(),
-            edge_ids: SmallVec::new(),
+            node_ids: Vec::new(),
+            edge_ids: Vec::new(),
             derivation_chains: Vec::new(),
             paths: Vec::new(),
             functions: Vec::new(),
@@ -158,17 +157,17 @@ impl QueryResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DerivationChain {
     /// The ordered sequence of node IDs in this derivation chain.
-    pub nodes: SmallVec<[NodeId; 4]>,
+    pub nodes: Vec<NodeId>,
     /// The ordered sequence of edge IDs connecting the nodes.
-    pub edges: SmallVec<[EdgeId; 4]>,
+    pub edges: Vec<EdgeId>,
 }
 
 impl DerivationChain {
     /// Creates a new empty derivation chain.
     pub fn new() -> Self {
         Self {
-            nodes: SmallVec::new(),
-            edges: SmallVec::new(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
         }
     }
 
@@ -265,8 +264,8 @@ pub fn execute(scg: &SCG, query: SCGQuery) -> QueryResult {
 
 /// Helper to create a basic QueryResult without the new fields.
 fn basic_result(
-    node_ids: SmallVec<[NodeId; 8]>,
-    edge_ids: SmallVec<[EdgeId; 8]>,
+    node_ids: Vec<NodeId>,
+    edge_ids: Vec<EdgeId>,
     derivation_chains: Vec<DerivationChain>,
     paths: Vec<Vec<NodeId>>,
 ) -> QueryResult {
@@ -282,21 +281,21 @@ fn basic_result(
 
 /// Find all nodes of a given `NodeType`.
 fn query_nodes_by_type(scg: &SCG, node_type: NodeType) -> QueryResult {
-    let node_ids: SmallVec<[NodeId; 8]> = scg
+    let node_ids: Vec<NodeId> = scg
         .nodes()
         .filter(|n| n.node_type == node_type)
         .map(|n| n.id)
         .collect();
-    basic_result(node_ids, SmallVec::new(), Vec::new(), Vec::new())
+    basic_result(node_ids, Vec::new(), Vec::new(), Vec::new())
 }
 
 /// Find all nodes belonging to a specific region.
 fn query_nodes_by_region(scg: &SCG, region_id: RegionId) -> QueryResult {
-    let node_ids: SmallVec<[NodeId; 8]> = scg
+    let node_ids: Vec<NodeId> = scg
         .get_region(region_id)
         .map(|r| r.iter_nodes().copied().collect())
         .unwrap_or_default();
-    basic_result(node_ids, SmallVec::new(), Vec::new(), Vec::new())
+    basic_result(node_ids, Vec::new(), Vec::new(), Vec::new())
 }
 
 /// Find all access nodes that target a specific region.
@@ -304,12 +303,12 @@ fn query_nodes_by_region(scg: &SCG, region_id: RegionId) -> QueryResult {
 /// Returns all `NodeType::Access` nodes whose `AccessNode::region_id`
 /// matches the given `RegionId`.
 pub fn find_access_nodes_to_region(scg: &SCG, region_id: RegionId) -> QueryResult {
-    let node_ids: SmallVec<[NodeId; 8]> = scg
+    let node_ids: Vec<NodeId> = scg
         .nodes()
         .filter(|n| matches!(&n.payload, NodePayload::Access(a) if a.region_id == region_id))
         .map(|n| n.id)
         .collect();
-    basic_result(node_ids, SmallVec::new(), Vec::new(), Vec::new())
+    basic_result(node_ids, Vec::new(), Vec::new(), Vec::new())
 }
 
 fn query_access_nodes_to_region(scg: &SCG, region_id: RegionId) -> QueryResult {
@@ -351,7 +350,7 @@ fn dfs_derivation(
     let successors = scg.successors(current).unwrap_or_default();
 
     // Find derivation edges from current to successors
-    let mut derivation_edges: SmallVec<[(NodeId, EdgeId); 4]> = SmallVec::new();
+    let mut derivation_edges: Vec<(NodeId, EdgeId)> = Vec::new();
     for &succ in &successors {
         for edge in scg.edges() {
             if edge.source == current
@@ -382,13 +381,13 @@ fn dfs_derivation(
 
 fn query_derivation_chains(scg: &SCG, start: NodeId, max_depth: usize) -> QueryResult {
     let chains = find_derivation_chains(scg, start, max_depth);
-    let node_ids: SmallVec<[NodeId; 8]> = chains
+    let node_ids: Vec<NodeId> = chains
         .iter()
         .flat_map(|c| c.nodes.iter().copied())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let edge_ids: SmallVec<[EdgeId; 8]> = chains
+    let edge_ids: Vec<EdgeId> = chains
         .iter()
         .flat_map(|c| c.edges.iter().copied())
         .collect::<HashSet<_>>()
@@ -399,12 +398,12 @@ fn query_derivation_chains(scg: &SCG, start: NodeId, max_depth: usize) -> QueryR
 
 /// Find all edges of a given `EdgeKind`.
 fn query_edges_by_kind(scg: &SCG, kind: EdgeKind) -> QueryResult {
-    let edge_ids: SmallVec<[EdgeId; 8]> = scg
+    let edge_ids: Vec<EdgeId> = scg
         .edges()
         .filter(|e| e.kind == kind)
         .map(|e| e.id)
         .collect();
-    basic_result(SmallVec::new(), edge_ids, Vec::new(), Vec::new())
+    basic_result(Vec::new(), edge_ids, Vec::new(), Vec::new())
 }
 
 /// Find all nodes reachable from a start node via data flow edges.
@@ -414,14 +413,14 @@ fn query_data_flow_reachable(scg: &SCG, start: NodeId, max_depth: usize) -> Quer
     }
 
     let mut visited: HashSet<NodeId> = HashSet::new();
-    let mut frontier: SmallVec<[NodeId; 16]> = SmallVec::new();
+    let mut frontier: Vec<NodeId> = Vec::new();
     frontier.push(start);
 
     for _ in 0..max_depth {
         if frontier.is_empty() {
             break;
         }
-        let mut next_frontier: SmallVec<[NodeId; 16]> = SmallVec::new();
+        let mut next_frontier: Vec<NodeId> = Vec::new();
         for node_id in frontier {
             if visited.insert(node_id) {
                 if let Some(succs) = scg.successors(node_id) {
@@ -442,8 +441,8 @@ fn query_data_flow_reachable(scg: &SCG, start: NodeId, max_depth: usize) -> Quer
         frontier = next_frontier;
     }
 
-    let node_ids: SmallVec<[NodeId; 8]> = visited.into_iter().collect();
-    basic_result(node_ids, SmallVec::new(), Vec::new(), Vec::new())
+    let node_ids: Vec<NodeId> = visited.into_iter().collect();
+    basic_result(node_ids, Vec::new(), Vec::new(), Vec::new())
 }
 
 /// Find all allocation nodes that lack a corresponding deallocation.
@@ -464,12 +463,12 @@ fn query_leaked_allocations(scg: &SCG) -> QueryResult {
         })
         .collect();
 
-    let leaked: SmallVec<[NodeId; 8]> = allocation_ids
+    let leaked: Vec<NodeId> = allocation_ids
         .difference(&deallocated_ids)
         .copied()
         .collect();
 
-    basic_result(leaked, SmallVec::new(), Vec::new(), Vec::new())
+    basic_result(leaked, Vec::new(), Vec::new(), Vec::new())
 }
 
 /// Find paths between two nodes using bounded depth-first search.
@@ -493,7 +492,7 @@ fn query_paths_between(scg: &SCG, from: NodeId, to: NodeId, max_length: usize) -
         &mut paths,
     );
 
-    let node_ids: SmallVec<[NodeId; 8]> = paths
+    let node_ids: Vec<NodeId> = paths
         .iter()
         .flat_map(|p| p.iter().copied())
         .collect::<HashSet<_>>()
@@ -502,7 +501,7 @@ fn query_paths_between(scg: &SCG, from: NodeId, to: NodeId, max_length: usize) -
 
     QueryResult {
         node_ids,
-        edge_ids: SmallVec::new(),
+        edge_ids: Vec::new(),
         derivation_chains: Vec::new(),
         paths,
         functions: Vec::new(),
@@ -615,14 +614,14 @@ fn query_list_functions(scg: &SCG) -> QueryResult {
         });
     }
 
-    let node_ids: SmallVec<[NodeId; 8]> = functions
+    let node_ids: Vec<NodeId> = functions
         .iter()
         .map(|f| f.entry_node_id)
         .collect();
 
     QueryResult {
         node_ids,
-        edge_ids: SmallVec::new(),
+        edge_ids: Vec::new(),
         derivation_chains: Vec::new(),
         paths: Vec::new(),
         functions,
@@ -727,11 +726,11 @@ fn query_function_inputs_outputs(scg: &SCG, function: NodeId) -> QueryResult {
 
     QueryResult {
         node_ids: {
-            let mut ids: SmallVec<[NodeId; 8]> = SmallVec::new();
+            let mut ids: Vec<NodeId> = Vec::new();
             ids.push(function);
             ids
         },
-        edge_ids: SmallVec::new(),
+        edge_ids: Vec::new(),
         derivation_chains: Vec::new(),
         paths: Vec::new(),
         functions: vec![func_info],
@@ -808,11 +807,11 @@ fn query_data_flow_path(scg: &SCG, from: NodeId, to: NodeId, max_depth: usize) -
     node_ids_set.insert(from);
     path.reverse();
 
-    let node_ids: SmallVec<[NodeId; 8]> = node_ids_set.into_iter().collect();
+    let node_ids: Vec<NodeId> = node_ids_set.into_iter().collect();
 
     QueryResult {
         node_ids,
-        edge_ids: SmallVec::new(),
+        edge_ids: Vec::new(),
         derivation_chains: Vec::new(),
         paths: vec![path],
         functions: Vec::new(),
@@ -825,7 +824,7 @@ fn query_callers_of(scg: &SCG, function: NodeId) -> QueryResult {
     let call_graph = CallGraph::build(scg);
     let fid = crate::callgraph::FunctionId(function);
 
-    let callers: SmallVec<[NodeId; 8]> = call_graph
+    let callers: Vec<NodeId> = call_graph
         .callers(&fid)
         .iter()
         .map(|caller_fid| caller_fid.0)
@@ -851,7 +850,7 @@ fn query_callers_of(scg: &SCG, function: NodeId) -> QueryResult {
 
     QueryResult {
         node_ids: callers,
-        edge_ids: SmallVec::new(),
+        edge_ids: Vec::new(),
         derivation_chains: Vec::new(),
         paths: Vec::new(),
         functions,

@@ -115,10 +115,9 @@ pub struct DataRace {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during ownership operations.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum OwnershipError {
     /// The region is already held in a conflicting mode.
-    #[error("Region {region} is held in {mode:?} mode by thread {holder:?}; thread {requestor} cannot acquire {request_mode}")]
     Conflict {
         region: RegionId,
         mode: AccessMode,
@@ -128,13 +127,37 @@ pub enum OwnershipError {
     },
 
     /// The thread does not hold the expected access on the region.
-    #[error("Thread {thread} does not hold the expected access on region {region}")]
     NotHeld { thread: ThreadId, region: RegionId },
 
     /// The region is not tracked.
-    #[error("Region {0} is not tracked")]
     NotTracked(RegionId),
 }
+
+impl std::fmt::Display for OwnershipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OwnershipError::Conflict {
+                region,
+                mode,
+                holder,
+                requestor,
+                request_mode,
+            } => write!(
+                f,
+                "Region {region} is held in {mode:?} mode by thread {holder:?}; thread {requestor} cannot acquire {request_mode}"
+            ),
+            OwnershipError::NotHeld { thread, region } => {
+                write!(
+                    f,
+                    "Thread {thread} does not hold the expected access on region {region}"
+                )
+            }
+            OwnershipError::NotTracked(region) => write!(f, "Region {region} is not tracked"),
+        }
+    }
+}
+
+impl std::error::Error for OwnershipError {}
 
 // ---------------------------------------------------------------------------
 // Ownership tracker

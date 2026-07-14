@@ -12,7 +12,6 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
-indexmap.workspace = true
 hashbrown.workspace = true
 vuma-scg.workspace = true
 serde_json.workspace = true

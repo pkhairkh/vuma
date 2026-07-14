@@ -10,7 +10,6 @@
 //! facts that lack a judgment.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::judgment::Judgment;
 use crate::proof::{Fact, FactId};
@@ -20,28 +19,46 @@ use crate::proof::{Fact, FactId};
 // ---------------------------------------------------------------------------
 
 /// Errors that can arise during rule application.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum RuleError {
     /// The number of premises supplied does not match the rule's arity.
-    #[error("wrong number of premises: expected {expected}, got {got}")]
     ArityMismatch { expected: usize, got: usize },
 
     /// A premise fact does not match the expected pattern for this rule.
-    #[error("premise {index} does not match expected pattern: {reason}")]
     PremiseMismatch { index: usize, reason: String },
 
     /// The rule cannot be applied in this context.
-    #[error("rule {rule} is not applicable: {reason}")]
     NotApplicable { rule: String, reason: String },
 
     /// A referenced fact id was not found.
-    #[error("fact id {id} not found")]
     FactNotFound { id: FactId },
 
     /// A judgment is missing on a fact that requires one for structural matching.
-    #[error("premise {index} lacks a structured judgment but one is required")]
     JudgmentMissing { index: usize },
 }
+
+impl std::fmt::Display for RuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuleError::ArityMismatch { expected, got } => {
+                write!(f, "wrong number of premises: expected {expected}, got {got}")
+            }
+            RuleError::PremiseMismatch { index, reason } => {
+                write!(f, "premise {index} does not match expected pattern: {reason}")
+            }
+            RuleError::NotApplicable { rule, reason } => {
+                write!(f, "rule {rule} is not applicable: {reason}")
+            }
+            RuleError::FactNotFound { id } => write!(f, "fact id {id} not found"),
+            RuleError::JudgmentMissing { index } => write!(
+                f,
+                "premise {index} lacks a structured judgment but one is required"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RuleError {}
 
 // ---------------------------------------------------------------------------
 // InferenceRule

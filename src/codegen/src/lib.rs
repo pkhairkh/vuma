@@ -131,37 +131,30 @@ pub use memory_safety::{
 };
 
 /// Error type for code-generation failures.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum CodegenError {
     /// An unsupported or invalid instruction was encountered.
-    #[error("invalid instruction: {0}")]
     InvalidInstruction(String),
 
     /// Register allocation failed (e.g. all registers are in use).
-    #[error("register allocation failed: {0}")]
     RegisterAllocFailed(String),
 
     /// Failed to encode an ARM64 instruction.
-    #[error("encoding error: {0}")]
     EncodingError(String),
 
     /// An IR translation error occurred.
-    #[error("IR translation error: {0}")]
     TranslationError(String),
 
     /// ELF emission error.
-    #[error("ELF emission error: {0}")]
     ElfError(String),
 
     /// An unknown variable was referenced during SCG → IR translation.
-    #[error("unknown variable '{name}' referenced in SCG")]
     UnknownVariable {
         /// Name of the unresolved variable.
         name: String,
     },
 
     /// A required WASM section was not found during module generation.
-    #[error("WASM section not found: {section}")]
     WasmSectionNotFound {
         /// Name of the missing WASM section.
         section: String,
@@ -170,7 +163,6 @@ pub enum CodegenError {
     /// A relocation references a symbol that could not be resolved during
     /// program encoding. This is a fatal error — the binary cannot be
     /// correctly linked without resolving all relocations.
-    #[error("unresolved relocation: symbol '{symbol}' in function '{function}' at offset 0x{offset:X} ({reloc_type})")]
     UnresolvedRelocation {
         /// Name of the unresolved symbol.
         symbol: String,
@@ -182,6 +174,37 @@ pub enum CodegenError {
         reloc_type: String,
     },
 }
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodegenError::InvalidInstruction(s) => write!(f, "invalid instruction: {s}"),
+            CodegenError::RegisterAllocFailed(s) => {
+                write!(f, "register allocation failed: {s}")
+            }
+            CodegenError::EncodingError(s) => write!(f, "encoding error: {s}"),
+            CodegenError::TranslationError(s) => write!(f, "IR translation error: {s}"),
+            CodegenError::ElfError(s) => write!(f, "ELF emission error: {s}"),
+            CodegenError::UnknownVariable { name } => {
+                write!(f, "unknown variable '{name}' referenced in SCG")
+            }
+            CodegenError::WasmSectionNotFound { section } => {
+                write!(f, "WASM section not found: {section}")
+            }
+            CodegenError::UnresolvedRelocation {
+                symbol,
+                function,
+                offset,
+                reloc_type,
+            } => write!(
+                f,
+                "unresolved relocation: symbol '{symbol}' in function '{function}' at offset 0x{offset:X} ({reloc_type})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {}
 
 /// Convenience alias for results in this crate.
 pub type Result<T> = std::result::Result<T, CodegenError>;

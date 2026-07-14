@@ -251,10 +251,9 @@ pub struct AllocatedProgram {
 // ---------------------------------------------------------------------------
 
 /// Error type for backend operations.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone)]
 pub enum BackendError {
     /// The requested feature is not supported by this ISA.
-    #[error("[{isa}] unsupported feature: {feature}")]
     UnsupportedFeature {
         /// ISA identifier (e.g., "aarch64", "x86_64").
         isa: &'static str,
@@ -263,7 +262,6 @@ pub enum BackendError {
     },
 
     /// Register allocation failed.
-    #[error("[{isa}] register allocation failed: {reason}")]
     RegisterAllocFailed {
         /// ISA identifier.
         isa: &'static str,
@@ -272,7 +270,6 @@ pub enum BackendError {
     },
 
     /// Instruction encoding failed.
-    #[error("[{isa}] encoding error: {reason}")]
     EncodingError {
         /// ISA identifier.
         isa: &'static str,
@@ -281,7 +278,6 @@ pub enum BackendError {
     },
 
     /// Invalid instruction for this target.
-    #[error("[{isa}] invalid instruction: {details}")]
     InvalidInstruction {
         /// ISA identifier.
         isa: &'static str,
@@ -290,7 +286,6 @@ pub enum BackendError {
     },
 
     /// ELF / binary emission error.
-    #[error("[{isa}] emission error: {reason}")]
     EmissionError {
         /// ISA identifier.
         isa: &'static str,
@@ -299,7 +294,6 @@ pub enum BackendError {
     },
 
     /// The target cannot handle this type.
-    #[error("[{isa}] unsupported type: {ty}")]
     UnsupportedType {
         /// ISA identifier.
         isa: &'static str,
@@ -309,7 +303,6 @@ pub enum BackendError {
 
     /// Unresolved relocation — a symbol referenced by a relocation entry
     /// could not be found in the program's symbol table.
-    #[error("[{isa}] unresolved relocation: symbol '{symbol}' referenced in function '{function}' at offset 0x{offset:X} (relocation type: {reloc_type})")]
     UnresolvedRelocation {
         /// ISA identifier.
         isa: &'static str,
@@ -324,7 +317,6 @@ pub enum BackendError {
     },
 
     /// Generic backend error.
-    #[error("[{isa}] {message}")]
     Other {
         /// ISA identifier.
         isa: &'static str,
@@ -332,6 +324,44 @@ pub enum BackendError {
         message: String,
     },
 }
+
+impl std::fmt::Display for BackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendError::UnsupportedFeature { isa, feature } => {
+                write!(f, "[{isa}] unsupported feature: {feature}")
+            }
+            BackendError::RegisterAllocFailed { isa, reason } => {
+                write!(f, "[{isa}] register allocation failed: {reason}")
+            }
+            BackendError::EncodingError { isa, reason } => {
+                write!(f, "[{isa}] encoding error: {reason}")
+            }
+            BackendError::InvalidInstruction { isa, details } => {
+                write!(f, "[{isa}] invalid instruction: {details}")
+            }
+            BackendError::EmissionError { isa, reason } => {
+                write!(f, "[{isa}] emission error: {reason}")
+            }
+            BackendError::UnsupportedType { isa, ty } => {
+                write!(f, "[{isa}] unsupported type: {ty}")
+            }
+            BackendError::UnresolvedRelocation {
+                isa,
+                symbol,
+                function,
+                offset,
+                reloc_type,
+            } => write!(
+                f,
+                "[{isa}] unresolved relocation: symbol '{symbol}' referenced in function '{function}' at offset 0x{offset:X} (relocation type: {reloc_type})"
+            ),
+            BackendError::Other { isa, message } => write!(f, "[{isa}] {message}"),
+        }
+    }
+}
+
+impl std::error::Error for BackendError {}
 
 // ---------------------------------------------------------------------------
 // TargetInfo trait

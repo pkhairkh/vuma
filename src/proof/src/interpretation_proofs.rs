@@ -28,7 +28,6 @@
 //! rule (added in Wave 17).
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -76,15 +75,13 @@ impl std::fmt::Display for InterpretationTactic {
 // ---------------------------------------------------------------------------
 
 /// Reason why an interpretation proof attempt failed.
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProofFailure {
     /// An access's expected RepD was not found in the MSG.
-    #[error("missing RepD {repd_id} for access {access_id}")]
     MissingRepD { access_id: u64, repd_id: u64 },
 
     /// A read's RepD is incompatible with the write's RepD at the access
     /// address (size/alignment/initialization/reinterpretation violation).
-    #[error("BD incompatibility at access {access_id} (addr 0x{address:x}): {reason}")]
     BDIncompatible {
         access_id: u64,
         address: u64,
@@ -92,16 +89,39 @@ pub enum ProofFailure {
     },
 
     /// An access targets a derivation whose root region is unknown.
-    #[error("unknown region for derivation {derivation_id} (access {access_id})")]
     UnknownRegion {
         access_id: u64,
         derivation_id: u64,
     },
 
     /// An internal error during proof construction.
-    #[error("internal error: {0}")]
     Internal(String),
 }
+
+impl std::fmt::Display for ProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofFailure::MissingRepD { access_id, repd_id } => {
+                write!(f, "missing RepD {repd_id} for access {access_id}")
+            }
+            ProofFailure::BDIncompatible { access_id, address, reason } => {
+                write!(
+                    f,
+                    "BD incompatibility at access {access_id} (addr 0x{address:x}): {reason}"
+                )
+            }
+            ProofFailure::UnknownRegion { access_id, derivation_id } => {
+                write!(
+                    f,
+                    "unknown region for derivation {derivation_id} (access {access_id})"
+                )
+            }
+            ProofFailure::Internal(s) => write!(f, "internal error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for ProofFailure {}
 
 // ---------------------------------------------------------------------------
 // Sub-proof objects

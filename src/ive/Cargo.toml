@@ -14,6 +14,5 @@ rust-version.workspace = true
 vuma-bd.workspace = true
 vuma-scg.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 log.workspace = true
 hashbrown.workspace = true
