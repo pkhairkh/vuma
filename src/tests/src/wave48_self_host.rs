@@ -1,7 +1,7 @@
-//! # Wave 48 — Task 7-a: Multi-module compile + bootstrap self-host test
+//! # Wave 48 — Task 7-a + Task 7-b: Multi-module compile + bootstrap self-host test
 //!
 //! Implements the end-to-end test coverage required by TASKS.md Wave 48
-//! `[BOOT-SELF]` (post-Task 7-a remediation):
+//! `[BOOT-SELF]` (post-Task 7-a + Task 7-b remediation):
 //!
 //! 1. **Multi-module API smoke test** (`test_wave48_compile_modules_simple`)
 //!    — proves the `VumaCompiler::compile_modules` API and the
@@ -14,8 +14,12 @@
 //!    (full_lexer + full_parser + ir_builder + codegen + elf) into a single
 //!    `vumac` ELF, run `./vumac womb/lang/hello.vuma`, then run the
 //!    emitted `a.out` and assert its stdout contains `"42"`. Currently
-//!    `#[ignore]`'d with a documented blocker (see the test's doc-comment
-//!    and TASKS.md's Wave 48 `[BOOT-SELF]` AUDIT RESOLVED note).
+//!    `#[ignore]`'d with a documented blocker — see the test's doc-comment
+//!    and TASKS.md's Wave 48 `[BOOT-SELF]` AUDIT RESOLVED note.
+//!    Task 7-b RESOLVED the original `repd` parser-coverage blocker; the
+//!    test now fails one stage later in `merge_module_asts` on duplicate
+//!    fn definitions (`store_u64`/`load_u64`/`store_u32`/`load_u32`
+//!    copy-pasted into each of the 5 bootstrap files).
 //!
 //! ## Platform gating
 //!
@@ -75,8 +79,10 @@ fn workspace_root() -> std::path::PathBuf {
 ///   prints it via `print_int` and returns 0).
 ///
 /// This is the strongest assertion that does NOT depend on the bootstrap
-/// source files (which have a documented parser-coverage blocker — see
-/// `test_wave48_bootstrap_self_host` below).
+/// source files (which have a documented `merge_module_asts`
+/// duplicate-fn-definition blocker — see `test_wave48_bootstrap_self_host`
+/// below; the original `repd` parser-coverage blocker was RESOLVED by
+/// Task 7-b).
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_wave48_compile_modules_simple() {
@@ -212,66 +218,110 @@ fn test_wave48_compile_modules_simple() {
 ///
 /// ## Current blocker (why this test is `#[ignore]`'d)
 ///
-/// The bootstrap source file `womb/lang/ir_builder.vuma` uses `repd` as a
-/// local variable name (the RepD tag array, allocated by `__vuma_alloc`):
+/// ### RESOLVED by Task 7-b: the `repd` parser-coverage blocker
+///
+/// Task 7-a documented that `womb/lang/ir_builder.vuma:593` uses `repd`
+/// (a reserved BD-directive keyword in `src/parser/src/parser.rs:1126-1129`)
+/// as a local variable name (`repd: Address = __vuma_alloc(BD_VREG_CAP);`),
+/// and the parser failed with
+/// `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`.
+/// Task 7-b fixed this via parser context-awareness: when `TokenKind::Bd` /
+/// `Repd` / `Capd` / `Reld` is followed by `:` instead of `(`, the parser
+/// now treats it as an identifier (let-statement) rather than a BD
+/// directive. See `src/parser/src/parser.rs` (the `TokenKind::Bd |
+/// TokenKind::Repd | TokenKind::Capd | TokenKind::Reld` dispatch arm in
+/// `parse_stmt`) and the regression tests in `src/parser/tests/edge_cases.rs`
+/// (`test_repd_as_identifier_in_let`, `test_bd_as_identifier_in_let`,
+/// `test_capd_as_identifier_in_let`, `test_reld_as_identifier_in_let`,
+/// `test_repd_as_bd_directive_still_works`).
+///
+/// After the Task 7-b parser fix, all 5 bootstrap files parse cleanly
+/// (verified: `cargo run --bin vuma -- run --isa x86_64
+/// womb/lang/{full_lexer,ir_builder}.vuma` no longer emits any
+/// `ParseError`).
+///
+/// ### NEW blocker: duplicate fn definitions across bootstrap modules
+///
+/// With parsing unblocked, `compile_modules` now reaches the
+/// `merge_module_asts` step (`src/pipeline.rs:5424`) and fails there:
 ///
 /// ```text
-/// womb/lang/ir_builder.vuma:593:    repd: Address = __vuma_alloc(BD_VREG_CAP);
+/// [ast-to-scg] compile_modules: duplicate fn definition 'store_u64' across
+///   modules — each function name must be defined in at most one module
+/// [ast-to-scg] compile_modules: duplicate fn definition 'load_u64' across
+///   modules — each function name must be defined in at most one module
+/// [ast-to-scg] compile_modules: duplicate fn definition 'store_u32' across
+///   modules — each function name must be defined in at most one module
+/// [ast-to-scg] compile_modules: duplicate fn definition 'load_u32' across
+///   modules — each function name must be defined in at most one module
+///   ... (14 errors total)
 /// ```
 ///
-/// The production VUMA parser (`src/parser/src/parser.rs:1126-1129`)
-/// treats `repd` as a reserved keyword (`TokenKind::Repd`) and dispatches
-/// to `parse_bd_directive(BdDirectiveKind::Repd)` when it encounters the
-/// token in statement position. `parse_bd_directive` (parser.rs:1811)
-/// expects `(` immediately after the keyword; finding `:` instead produces:
+/// Root cause: each of the 5 bootstrap files copy-pastes the same 4
+/// helper fns (`store_u64`, `load_u64`, `store_u32`, `load_u32`) at the
+/// top of the file as a self-contained preamble. `merge_module_asts`'s
+/// Pass 1 (`src/pipeline.rs:5429-5448`) treats same-name fn definitions
+/// across modules as a hard error (a conservative policy that catches
+/// real conflicts but rejects the legitimate bootstrap pattern of
+/// identical-copy preamble helpers).
+///
+/// Site map of the duplicates (rg `^fn (store_u64|load_u64|store_u32|load_u32)`):
 ///
 /// ```text
-/// ParseError { message: "expected ''('', found '':''", span: Span { start: 23724, end: 23725 },
-///              kind: ExpectedToken, line: Some(593), column: Some(9) }
+/// womb/lang/full_lexer.vuma:102  fn store_u64(...)
+/// womb/lang/full_lexer.vuma:108  fn load_u64(...)
+/// womb/lang/full_lexer.vuma:115  fn store_u32(...)
+/// womb/lang/full_lexer.vuma:119  fn load_u32(...)
+/// womb/lang/full_parser.vuma:21  fn store_u64(...)
+/// womb/lang/full_parser.vuma:27  fn load_u64(...)
+/// womb/lang/full_parser.vuma:34  fn store_u32(...)
+/// womb/lang/full_parser.vuma:38  fn load_u32(...)
+/// womb/lang/ir_builder.vuma:13   fn store_u64(...)
+/// womb/lang/ir_builder.vuma:19   fn load_u64(...)
+/// womb/lang/ir_builder.vuma:26   fn store_u32(...)
+/// womb/lang/ir_builder.vuma:30   fn load_u32(...)
+/// womb/lang/codegen.vuma:13      fn store_u64(...)
+/// womb/lang/codegen.vuma:19      fn load_u64(...)
+/// womb/lang/codegen.vuma:26      fn store_u32(...)
+/// womb/lang/codegen.vuma:30      fn load_u32(...)
+/// womb/lang/elf.vuma:25          fn store_u64(...)
+/// womb/lang/elf.vuma:31          fn store_u32(...)
 /// ```
 ///
-/// This is a parser-coverage blocker: the bootstrap source uses a reserved
-/// keyword (`repd`) as a variable name. The other four bootstrap files
-/// (`full_lexer.vuma`, `full_parser.vuma`, `codegen.vuma`, `elf.vuma`)
-/// parse cleanly — only `ir_builder.vuma` fails, and only at the single
-/// `repd:` declaration site (line 593). The variable `repd` is referenced
-/// 7 times in `bd_infer` (lines 593, 597, 611, 612, 615, 617, 621).
+/// ## Possible fixes (out of scope for Task 7-b)
 ///
-/// ## Why not fix the blocker in this task?
+/// 1. **`merge_module_asts` deduplication** — extend Pass 1 to deduplicate
+///    identical fn definitions (same name + same signature + same body)
+///    instead of rejecting them.  This is the principled fix: the
+///    bootstrap's copy-paste pattern is a deliberate "each module is
+///    self-contained" design, and `merge_module_asts` should honour it
+///    by keeping only one copy of each identical preamble helper.
+///    A simple version: keep the first definition and warn (or silently
+///    drop) subsequent identical definitions; a stricter version: compare
+///    bodies (normalised) and error only on conflicting definitions.
+///    This is a `src/pipeline.rs` change, not a parser change, and is
+///    tracked as the priority follow-up #1 in TASKS.md.
 ///
-/// Two possible fixes exist, both out of scope for Task 7-a:
+/// 2. **Bootstrap-source refactor** — extract the shared helpers into a
+///    new `womb/lang/shared.vuma` module and `import` it from each of
+///    the 5 bootstrap files.  This requires the bootstrap source to
+///    support `import` semantics (which the bootstrap parser does
+///    implement for `womb/lang/full_lexer.vuma`'s own module system, but
+///    the production `compile_modules` API does not yet resolve
+///    `import "..."` paths between the bundled modules).  Out of scope.
 ///
-/// 1. **Bootstrap-source fix** — rename the variable `repd` to `repd_arr`
-///    (or similar) in `ir_builder.vuma:593-621`. This is a 7-line change
-///    to the bootstrap source. The variable name is meaningful (it's the
-///    RepD tag array), so the rename would be slightly degrading. The
-///    bootstrap source is owned by Wave 48 (`[BOOT]` items); the rename
-///    is a Wave 48 source-level fix, not a Task 7-a (multi-module linking)
-///    fix.
-///
-/// 2. **Parser fix** — make the parser context-aware: when the token
-///    `TokenKind::Repd` (or `Bd`/`Capd`/`Reld`) is followed by `:` instead
-///    of `(`, treat it as an identifier (let-statement) rather than a BD
-///    directive. This is a real parser change in `src/parser/src/parser.rs`
-///    and would require either lexer changes (to lex `repd` as an
-///    identifier) or parser lookahead (to dispatch on the token after
-///    `TokenKind::Repd`).
-///
-/// Both fixes are documented in TASKS.md's Wave 48 `[BOOT-SELF]` AUDIT
-/// RESOLVED note as priority follow-ups. Task 7-a's scope is the
-/// multi-module compilation API (`compile_modules` + `vuma link`), which
-/// is delivered and exercised by `test_wave48_compile_modules_simple`.
-/// The bootstrap self-host test is `#[ignore]`'d pending the parser
-/// fix (or the bootstrap-source rename).
-///
-/// ## How to run this test (after the blocker is fixed)
+/// ## How to run this test (after the new blocker is fixed)
 ///
 /// ```text
 /// cargo test -p vuma-tests --lib wave48_self_host::test_wave48_bootstrap_self_host -- --ignored
 /// ```
 #[cfg(target_arch = "x86_64")]
 #[test]
-#[ignore = "blocked by parser-coverage gap: ir_builder.vuma:593 uses `repd` (a reserved BD-directive keyword) as a variable name; see TASKS.md Wave 48 [BOOT-SELF] AUDIT RESOLVED (Task 7-a) for details"]
+#[ignore = "blocked by `merge_module_asts` duplicate-fn-definition rejection: the 5 bootstrap \
+            files each copy-paste `store_u64`/`load_u64`/`store_u32`/`load_u32` as a self-contained \
+            preamble (14 errors total). The original `repd` parser-coverage blocker was RESOLVED \
+            by Task 7-b (parser context-awareness for `TokenKind::Bd`/`Repd`/`Capd`/`Reld`). \
+            See TASKS.md Wave 48 [BOOT-SELF] for the new-blocker write-up."]
 fn test_wave48_bootstrap_self_host() {
     let workspace_root = workspace_root();
     let womb_lang = workspace_root.join("womb").join("lang");

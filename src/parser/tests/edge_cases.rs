@@ -483,3 +483,242 @@ fn test_parse_else_block_unbalanced_braces_does_not_panic() {
     let source = "fn f(c: i32, d: i32) -> i32 {\n    if c == 99 {\n        if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }\n        else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } }\n    }\n    return 0;\n}\nfn main() -> i32 { return 0; }\n";
     assert_no_panic(source);
 }
+
+// ---- Wave 48 (Task 7-b): BD-directive keyword collision regression tests ----
+//
+// The BD-directive keywords `bd`/`repd`/`capd`/`reld` are reserved in the
+// lexer (form `bd(name, expr);`), but they are also valid identifier names
+// — `womb/lang/ir_builder.vuma:593` declares
+// `repd: Address = __vuma_alloc(BD_VREG_CAP);` (a type-ascription
+// declaration) and the same function references `repd` as a Var at lines
+// 597, 611, 612, 615, 617, 621.
+//
+// Before the fix the parser unconditionally dispatched to
+// `parse_bd_directive`, which expected `(` immediately after the keyword
+// and failed with
+// `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`,
+// blocking the Wave 48 bootstrap self-host test. The fix in
+// `parser.rs::parse_stmt` (see the `TokenKind::Bd | TokenKind::Repd |
+// TokenKind::Capd | TokenKind::Reld` dispatch arm) is parser
+// context-awareness: peek the token after the keyword and treat it as a
+// real BD directive only when followed by `(`; otherwise treat it as an
+// identifier (let-statement when followed by `:`, or assignment /
+// expression statement otherwise).
+//
+// These tests pin both behaviours in place so future refactors of the
+// BD-directive dispatch don't silently re-break the bootstrap.
+
+use vuma_parser::ast::BdDirectiveKind;
+
+/// `repd` used as an identifier in a type-ascription let-statement
+/// (`repd: i32 = 5;`) followed by a `return repd;` — the exact construct
+/// that broke the Wave 48 bootstrap at `womb/lang/ir_builder.vuma:593`.
+#[test]
+fn test_repd_as_identifier_in_let() {
+    let source = "fn main() { repd: i32 = 5; return repd; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    assert_eq!(program.items.len(), 1, "should have one fn");
+    // Verify the first statement is a Let, not a BdDirective.
+    match &program.items[0] {
+        vuma_parser::Item::FnDef(f) => {
+            assert_eq!(f.body.statements.len(), 2, "should have repd: let + return");
+            match &f.body.statements[0] {
+                vuma_parser::Stmt::Let(l) => {
+                    assert_eq!(l.name, "repd", "let should bind `repd`");
+                    assert!(l.ty.is_some(), "let should have a type ascription");
+                }
+                other => panic!("expected Stmt::Let, got {:?}", other),
+            }
+            match &f.body.statements[1] {
+                vuma_parser::Stmt::Return(_) => {}
+                other => panic!("expected Stmt::Return, got {:?}", other),
+            }
+        }
+        other => panic!("expected FnDef, got {:?}", other),
+    }
+}
+
+/// `bd` used as an identifier in a type-ascription let-statement.
+#[test]
+fn test_bd_as_identifier_in_let() {
+    let source = "fn main() { bd: i32 = 5; return bd; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    match &program.items[0] {
+        vuma_parser::Item::FnDef(f) => match &f.body.statements[0] {
+            vuma_parser::Stmt::Let(l) => assert_eq!(l.name, "bd"),
+            other => panic!("expected Stmt::Let, got {:?}", other),
+        },
+        other => panic!("expected FnDef, got {:?}", other),
+    }
+}
+
+/// `capd` used as an identifier in a type-ascription let-statement.
+#[test]
+fn test_capd_as_identifier_in_let() {
+    let source = "fn main() { capd: i32 = 5; return capd; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    match &program.items[0] {
+        vuma_parser::Item::FnDef(f) => match &f.body.statements[0] {
+            vuma_parser::Stmt::Let(l) => assert_eq!(l.name, "capd"),
+            other => panic!("expected Stmt::Let, got {:?}", other),
+        },
+        other => panic!("expected FnDef, got {:?}", other),
+    }
+}
+
+/// `reld` used as an identifier in a type-ascription let-statement.
+#[test]
+fn test_reld_as_identifier_in_let() {
+    let source = "fn main() { reld: i32 = 5; return reld; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    match &program.items[0] {
+        vuma_parser::Item::FnDef(f) => match &f.body.statements[0] {
+            vuma_parser::Stmt::Let(l) => assert_eq!(l.name, "reld"),
+            other => panic!("expected Stmt::Let, got {:?}", other),
+        },
+        other => panic!("expected FnDef, got {:?}", other),
+    }
+}
+
+/// Real BD directives (`bd(name, expr);`, `repd(name);`, etc.) must STILL
+/// parse as `Stmt::BdDirective` — not as a let/assign/expr statement.
+/// This guards against the context-awareness fix accidentally swallowing
+/// the directive form.
+#[test]
+fn test_repd_as_bd_directive_still_works() {
+    let source = r#"
+        fn main() {
+            bd(Secure);
+            repd(Fast, x);
+            capd(RW);
+            reld(Ordered, y + 1);
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "BD directives should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "BD directives should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    match &program.items[0] {
+        vuma_parser::Item::FnDef(f) => {
+            assert_eq!(
+                f.body.statements.len(),
+                4,
+                "should have exactly 4 BD directives"
+            );
+            // bd(Secure);
+            match &f.body.statements[0] {
+                vuma_parser::Stmt::BdDirective(d) => {
+                    assert_eq!(d.kind, BdDirectiveKind::Bd);
+                    assert_eq!(d.name, "Secure");
+                    assert!(d.expr.is_none());
+                }
+                other => panic!("expected BdDirective for `bd(Secure);`, got {:?}", other),
+            }
+            // repd(Fast, x);
+            match &f.body.statements[1] {
+                vuma_parser::Stmt::BdDirective(d) => {
+                    assert_eq!(d.kind, BdDirectiveKind::Repd);
+                    assert_eq!(d.name, "Fast");
+                    assert!(d.expr.is_some());
+                }
+                other => panic!("expected BdDirective for `repd(Fast, x);`, got {:?}", other),
+            }
+            // capd(RW);
+            match &f.body.statements[2] {
+                vuma_parser::Stmt::BdDirective(d) => {
+                    assert_eq!(d.kind, BdDirectiveKind::Capd);
+                    assert_eq!(d.name, "RW");
+                }
+                other => panic!("expected BdDirective for `capd(RW);`, got {:?}", other),
+            }
+            // reld(Ordered, y + 1);
+            match &f.body.statements[3] {
+                vuma_parser::Stmt::BdDirective(d) => {
+                    assert_eq!(d.kind, BdDirectiveKind::Reld);
+                    assert_eq!(d.name, "Ordered");
+                    assert!(d.expr.is_some());
+                }
+                other => panic!("expected BdDirective for `reld(Ordered, y + 1);`, got {:?}", other),
+            }
+        }
+        other => panic!("expected FnDef, got {:?}", other),
+    }
+}
+
+/// A BD-directive keyword used as a plain identifier in an assignment
+/// (`repd = 11;`) and as a Var in a larger expression.  This was
+/// previously swallowed by `parse_bd_directive` and produced a fatal
+/// "expected '('" error in `parse_program`; now it should parse cleanly.
+#[test]
+fn test_bd_keyword_as_identifier_in_assign_and_expr() {
+    let source = "fn main() { repd = 11; repd = repd + 1; return repd; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "should parse without fatal error — errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.errors.is_empty(),
+        "should parse with NO non-fatal errors — errors: {:?}",
+        result.errors
+    );
+}
