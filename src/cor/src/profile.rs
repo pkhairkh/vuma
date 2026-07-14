@@ -31,7 +31,6 @@
 //!   spots, cold spots, and optimisation recommendations.
 
 use crate::types::{EdgeId, NodeId, SCG};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -65,7 +64,7 @@ fn lock_profile<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `AllocStats` tracks aggregate allocation counts as well as per-region-class
 /// breakdowns, enabling the optimizer to identify allocation-heavy regions and
 /// suggest strategies such as arena allocation or object pooling.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct AllocStats {
     /// Total number of heap allocations observed.
     pub total_allocations: u64,
@@ -125,7 +124,7 @@ impl AllocStats {
 ///
 /// Each sample records the SCG node that was executing, how long it took,
 /// when it was captured.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProfileSample {
     /// Timestamp of the sample, measured as nanoseconds since profiling started.
     pub timestamp_ns: u64,
@@ -158,7 +157,7 @@ impl ProfileSample {
 /// `total_time_ns` field records the sum of execution times across all nodes
 /// in the path, while `cumulative_fraction` records what fraction of the
 /// *global* execution time this path represents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct HotPath {
     /// Nodes on the hot path, sorted hottest first.
     pub nodes: Vec<NodeId>,
@@ -199,7 +198,7 @@ impl HotPath {
 /// The struct is updated continuously as the program executes. The optimizer
 /// periodically reads it to decide which regions to recompile at higher
 /// optimization levels or speculatively specialize.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct ProfileData {
     /// Per-node execution counts (how many times each SCG node was entered).
     pub call_counts: HashMap<NodeId, u64>,
@@ -487,7 +486,7 @@ impl Default for ProfileCollector {
 /// `ProfileReport` is the output of [`collect_profile`] and contains hot
 /// spots, cold spots, hot paths, and optimisation recommendations derived
 /// from the raw profile samples and SCG structure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProfileReport {
     /// Total number of samples analysed.
     pub total_samples: usize,
@@ -505,7 +504,7 @@ pub struct ProfileReport {
 }
 
 /// A hot spot: a single node with its execution statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NodeHotSpot {
     /// The SCG node identifier.
     pub node_id: NodeId,
@@ -586,7 +585,7 @@ pub fn collect_profile(scg: &SCG, samples: &[ProfileSample]) -> ProfileReport {
 // ---------------------------------------------------------------------------
 
 /// The kind of optimization being suggested.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionKind {
     /// Inline the node's body at its call sites.
     Inline,
@@ -601,7 +600,7 @@ pub enum SuggestionKind {
 }
 
 /// A single optimization suggestion produced by profile analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OptimizationSuggestion {
     /// The kind of optimization.
     pub kind: SuggestionKind,

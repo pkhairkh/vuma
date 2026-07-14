@@ -5,14 +5,13 @@
 //! verification time budgets, speculative optimization enablement, and the
 //! target architecture for code generation.
 
-use serde::{Deserialize, Serialize};
 
 /// Target architecture for compiled code generation.
 ///
 /// The runtime generates machine code (or IR) tailored to a specific
 /// instruction set architecture. The choice of target influences register
 /// allocation, instruction selection, and vectorization strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetArch {
     /// x86-64 (AMD64) – general-purpose workstations and servers.
     X86_64,
@@ -41,7 +40,7 @@ impl Default for TargetArch {
 ///
 /// Controls how aggressively the runtime optimizes compiled regions.
 /// Higher levels trade longer compilation time for better runtime performance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptimizationLevel {
     /// Minimal optimization – fast compilation, useful for debugging.
     None,
@@ -66,7 +65,7 @@ pub enum OptimizationLevel {
 /// let config = Config::default();
 /// assert!(config.enable_speculative);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Optimization aggressiveness level.
     pub optimization_level: OptimizationLevel,

@@ -4,7 +4,6 @@
 //! referenced across multiple COR sub-modules. Keeping them in one place avoids
 //! circular dependencies and makes the public API consistent.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +28,7 @@ pub type RegionId = u64;
 /// The node kind determines which optimization passes are applicable.
 /// For example, only `Loop` / `LoopHeader` nodes are candidates for loop
 /// unrolling, and only `Call` nodes are candidates for inlining.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     /// A function call site — candidate for inlining / outlining.
     Call,
@@ -249,7 +248,7 @@ pub struct CompiledRegion {
 /// before the change, and its value after. This enables the COR to make
 /// fine-grained recompilation decisions — e.g. only re-optimize a node
 /// whose `is_inlined` flag flipped, without touching unrelated nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldChange {
     /// Name of the field that changed.
     pub field_name: String,
@@ -261,7 +260,7 @@ pub struct FieldChange {
 
 /// Information about an added node, carrying both its ID and optionally
 /// the node kind and code size for richer delta tracking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NodeDelta {
     /// The unique identifier of the added node.
     pub node_id: NodeId,
@@ -290,7 +289,7 @@ impl From<NodeId> for NodeDelta {
 
 /// Information about an added edge, carrying both its ID and optionally
 /// the source/target nodes for richer delta tracking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EdgeDelta {
     /// The unique identifier of the added edge.
     pub edge_id: EdgeId,
@@ -321,7 +320,7 @@ impl From<EdgeId> for EdgeDelta {
 ///
 /// When a node's metadata changes (e.g. `is_inlined` goes from `false` to
 /// `true`), the delta records each changed field as a [`FieldChange`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NodeModification {
     /// The ID of the modified node.
     pub node_id: u64,
@@ -333,7 +332,7 @@ pub struct NodeModification {
 ///
 /// When an edge's metadata changes (e.g. `weight` increases from 1 to 100),
 /// the delta records the change as a [`FieldChange`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EdgeModification {
     /// The ID of the modified edge.
     pub edge_id: u64,
@@ -345,7 +344,7 @@ pub struct EdgeModification {
 ///
 /// When a region's metadata changes (e.g. its optimization label or
 /// deployment target), the delta records the change.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegionDelta {
     /// The region that changed.
     pub region_id: RegionId,
@@ -366,7 +365,7 @@ pub struct RegionDelta {
 /// fine-grained incremental recompilation: if only `is_inlined` changed on
 /// a node, the recompilation can skip code-generation passes that are
 /// unrelated to inlining.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Delta {
     /// Nodes that were added (IDs only for backward compatibility; use
     /// [`NodeDelta`] for richer information).
