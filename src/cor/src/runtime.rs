@@ -80,20 +80,36 @@ impl OptimizationSummary {
 }
 
 /// Errors returned by [`CORuntime::optimize_module`] (Wave 38).
-#[derive(Debug, Clone, thiserror::Error)]
+//
+// Wave 41: migrated from `thiserror::Error` to hand-written `Display` +
+// `std::error::Error` impls (matches `src/scg/src/graph.rs:SCGError`).
+#[derive(Debug, Clone)]
 pub enum OptError {
     /// One or more speculative assumptions were invalidated during the
     /// optimization cycle. The vector contains human-readable
     /// descriptions of each invalidated assumption.
-    #[error("speculative assumptions invalidated: {0}")]
     SpeculationInvalidated(String),
 
     /// The optimization engine produced no transformations at all (this is
     /// not strictly an error, but is surfaced when the caller asks for a
     /// strict "must improve" cycle).
-    #[error("optimization cycle applied no transformations")]
     NoTransformations,
 }
+
+impl std::fmt::Display for OptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OptError::SpeculationInvalidated(detail) => {
+                write!(f, "speculative assumptions invalidated: {detail}")
+            }
+            OptError::NoTransformations => {
+                write!(f, "optimization cycle applied no transformations")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OptError {}
 
 // ---------------------------------------------------------------------------
 // CompiledState — the always-compiled invariant
@@ -958,28 +974,50 @@ impl CORuntime {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during runtime operations.
-#[derive(Debug, Clone, thiserror::Error)]
+//
+// Wave 41: migrated from `thiserror::Error` to hand-written `Display` +
+// `std::error::Error` impls (matches `src/scg/src/graph.rs:SCGError`).
+#[derive(Debug, Clone)]
 pub enum RuntimeError {
     /// The requested region has not been compiled.
-    #[error("Region {0} has not been compiled")]
     NotCompiled(RegionId),
 
     /// Compilation failed for the given region.
-    #[error("Compilation failed for region {0}: {1}")]
     CompilationFailed(RegionId, String),
 
     /// Execution of a compiled region failed.
-    #[error("Execution failed for region {0}: {1}")]
     ExecutionFailed(RegionId, String),
 
     /// Execution timed out.
-    #[error("Execution of region {0} timed out after {1}ms")]
     Timeout(RegionId, u64),
 
     /// A verification violation was detected.
-    #[error("Verification violation in region {0}: {1}")]
     VerificationViolation(RegionId, String),
 }
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::NotCompiled(region) => {
+                write!(f, "Region {region} has not been compiled")
+            }
+            RuntimeError::CompilationFailed(region, detail) => {
+                write!(f, "Compilation failed for region {region}: {detail}")
+            }
+            RuntimeError::ExecutionFailed(region, detail) => {
+                write!(f, "Execution failed for region {region}: {detail}")
+            }
+            RuntimeError::Timeout(region, ms) => {
+                write!(f, "Execution of region {region} timed out after {ms}ms")
+            }
+            RuntimeError::VerificationViolation(region, detail) => {
+                write!(f, "Verification violation in region {region}: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {}
 
 // ---------------------------------------------------------------------------
 // Memory-mapped code execution

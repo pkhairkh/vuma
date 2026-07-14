@@ -14,8 +14,8 @@ rust-version.workspace = true
 vuma-scg.workspace = true
 vuma-codegen.workspace = true
 serde.workspace = true
-# TODO(wave41): remove after cor/src/runtime.rs thiserror migration (W32-33 owns runtime.rs)
-thiserror.workspace = true
 
 # (Wave 45 followup) `libc` removed — runtime.rs now uses raw `extern "C"`
 # mmap/mprotect/munmap syscalls directly. No remaining `libc::` references.
+# (Wave 41 followup) `thiserror` removed — OptError/RuntimeError now use
+# hand-written `Display` + `std::error::Error` impls.
