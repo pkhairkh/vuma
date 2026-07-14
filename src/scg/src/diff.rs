@@ -15,7 +15,6 @@
 //! relative to a common base.
 
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 
 use crate::callgraph::CallGraph;
 use crate::edge::{EdgeData, EdgeId};
@@ -143,7 +142,7 @@ pub struct SCGDiff {
 }
 
 /// Summary statistics for a diff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiffStats {
     /// Number of nodes added.
     pub nodes_added: usize,
@@ -374,6 +373,11 @@ impl SCGDiff {
     ///
     /// Includes summary statistics, affected functions, and a list of
     /// changes with human-readable descriptions.
+    ///
+    /// Wave 43 serde-migration: previously used `serde_json::to_string_pretty(&llm_diff)`.
+    /// Now calls `LlmDiff::to_json_value(&self).to_string_pretty()` (hand-written
+    /// serializer in `src/scg/src/llm_json.rs`). The on-disk JSON shape is
+    /// byte-identical.
     pub fn to_json(&self, old: &SCG, new: &SCG) -> String {
         let affected = self.affected_functions(old, new);
         let llm_diff = LlmDiff {
@@ -398,8 +402,7 @@ impl SCGDiff {
                 })
                 .collect(),
         };
-        serde_json::to_string_pretty(&llm_diff)
-            .unwrap_or_else(|e| format!(r#"{{"error": "diff JSON serialization failed: {}"}}"#, e))
+        llm_diff.to_json_value().to_string_pretty()
     }
 
     /// Produces a human/LLM-readable text representation of this diff.
@@ -454,7 +457,7 @@ impl SCGDiff {
 // ── LLM-friendly diff types ─────────────────────────────────────────────
 
 /// Information about which functions are affected by a diff.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AffectedFunctions {
     /// Functions that were modified (had nodes changed within them).
     pub modified: Vec<String>,
@@ -472,7 +475,7 @@ impl AffectedFunctions {
 }
 
 /// LLM-friendly JSON representation of a diff.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmDiff {
     /// Summary statistics.
     pub summary: DiffStats,
@@ -483,12 +486,76 @@ pub struct LlmDiff {
 }
 
 /// A single change in LLM-friendly format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmDiffChange {
     /// The kind of change (e.g., "node_added", "edge_removed").
     pub kind: String,
     /// A human-readable description of the change.
     pub description: String,
+}
+
+// ── Hand-written JSON serialization for LlmDiff (Wave 43 serde-migration) ─
+
+impl LlmDiff {
+    /// Serialize this diff DTO to a `JsonValue` (which can then be
+    /// pretty-printed via `to_string_pretty`). Replaces the previous
+    /// `#[derive(Serialize)]` + `serde_json::to_string_pretty(&self)`.
+    pub fn to_json_value(&self) -> crate::llm_json::JsonValue {
+        use crate::llm_json::{build_array, build_object, json_str, json_usize};
+        build_object(vec![
+            ("summary".to_string(), self.summary.to_json_value()),
+            (
+                "affected_functions".to_string(),
+                self.affected_functions.to_json_value(),
+            ),
+            (
+                "changes".to_string(),
+                build_array(
+                    self.changes
+                        .iter()
+                        .map(|c| {
+                            build_object(vec![
+                                ("kind".to_string(), json_str(&c.kind)),
+                                ("description".to_string(), json_str(&c.description)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+}
+
+impl DiffStats {
+    /// Serialize these stats to a `JsonValue`. Field order matches
+    /// declaration order (matches `serde_json`'s struct serialization).
+    fn to_json_value(&self) -> crate::llm_json::JsonValue {
+        use crate::llm_json::{build_object, json_usize};
+        build_object(vec![
+            ("nodes_added".to_string(), json_usize(self.nodes_added)),
+            ("nodes_removed".to_string(), json_usize(self.nodes_removed)),
+            ("nodes_modified".to_string(), json_usize(self.nodes_modified)),
+            ("edges_added".to_string(), json_usize(self.edges_added)),
+            ("edges_removed".to_string(), json_usize(self.edges_removed)),
+            ("edges_modified".to_string(), json_usize(self.edges_modified)),
+            ("regions_added".to_string(), json_usize(self.regions_added)),
+            ("regions_removed".to_string(), json_usize(self.regions_removed)),
+            ("regions_modified".to_string(), json_usize(self.regions_modified)),
+        ])
+    }
+}
+
+impl AffectedFunctions {
+    /// Serialize this to a `JsonValue`. Field order matches declaration
+    /// order (matches `serde_json`'s struct serialization).
+    fn to_json_value(&self) -> crate::llm_json::JsonValue {
+        use crate::llm_json::{build_object, json_string_array};
+        build_object(vec![
+            ("modified".to_string(), json_string_array(&self.modified)),
+            ("added".to_string(), json_string_array(&self.added)),
+            ("removed".to_string(), json_string_array(&self.removed)),
+        ])
+    }
 }
 
 /// Computes the diff between two SCGs and returns an `SCGDiff`.
@@ -521,7 +588,7 @@ fn compute_stats(entries: &[DiffEntry]) -> DiffStats {
 // ── Diff Error ──────────────────────────────────────────────────────────────
 
 /// Errors that can occur when applying a diff to an SCG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DiffError {
     /// A node referenced in the diff was not found in the target graph.
     NodeNotFound(NodeId),

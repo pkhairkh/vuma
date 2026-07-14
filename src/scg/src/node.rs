@@ -4,7 +4,6 @@
 //! Nodes represent operations, allocations, accesses, and control flow points
 //! within the SCG, each carrying type-specific metadata.
 
-use serde::{Deserialize, Serialize};
 
 use crate::region::RegionId;
 
@@ -12,7 +11,7 @@ use crate::region::RegionId;
 ///
 /// `NodeId` is a newtype wrapper around `u64`, providing type safety
 /// to prevent accidental confusion with other identifiers (e.g., `EdgeId`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u64);
 
 impl NodeId {
@@ -37,7 +36,7 @@ impl std::fmt::Display for NodeId {
 ///
 /// Each variant corresponds to a distinct category of operation or
 /// structural element in the computation graph.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeType {
     /// A pure computation node (e.g., arithmetic, function call).
     Computation,
@@ -97,7 +96,7 @@ impl std::fmt::Display for NodeType {
 ///
 /// When present, this links a node to its behavioral specification
 /// in the BD subsystem for formal verification purposes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BDReference {
     /// The identifier of the referenced behavioral descriptor.
     pub bd_id: u64,
@@ -109,7 +108,7 @@ pub struct BDReference {
 ///
 /// Used for traceability from SCG nodes back to the original
 /// source code location.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProgramPoint {
     /// The source file identifier or path.
     pub file: Option<String>,
@@ -143,7 +142,7 @@ pub struct NodeData {
 /// Type-specific payload data for each `NodeType` variant.
 ///
 /// Each variant holds the concrete data relevant to that kind of node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodePayload {
     /// Payload for `NodeType::Computation`.
     Computation(ComputationNode),
@@ -182,7 +181,7 @@ pub enum NodePayload {
 /// This enum classifies computation into broad categories. The generic
 /// `Other` variant preserves backward compatibility for arbitrary
 /// operations expressed as strings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ComputationKind {
     /// A generic / unclassified operation (backward-compatible).
     Other(String),
@@ -239,7 +238,7 @@ impl ComputationKind {
 ///
 /// Represents a pure computational operation such as arithmetic,
 /// function invocation, or data transformation.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComputationNode {
     /// The specific kind of computation performed.
     ///
@@ -253,37 +252,16 @@ pub struct ComputationNode {
     pub tail_call: bool,
 }
 
-/// Helper struct for deserializing `ComputationNode` with backward compatibility
-/// for the old `operation` string field.
-#[derive(Deserialize)]
-struct ComputationNodeHelper {
-    kind: Option<ComputationKind>,
-    /// Legacy field: the old string-based operation name.
-    /// If `kind` is absent but `operation` is present, it is converted to
-    /// `ComputationKind::Other(operation)`.
-    operation: Option<String>,
-    result_type: Option<String>,
-    #[serde(default)]
-    tail_call: bool,
-}
-
-impl<'de> Deserialize<'de> for ComputationNode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let helper = ComputationNodeHelper::deserialize(deserializer)?;
-        let kind = helper
-            .kind
-            .or_else(|| helper.operation.map(ComputationKind::Other))
-            .ok_or_else(|| serde::de::Error::missing_field("kind"))?;
-        Ok(ComputationNode {
-            kind,
-            result_type: helper.result_type,
-            tail_call: helper.tail_call,
-        })
-    }
-}
+// Wave 43 serde-migration: the `ComputationNodeHelper` struct + manual
+// `Deserialize` impl for `ComputationNode` (which provided backward
+// compatibility for the legacy JSON `operation` string field, converting
+// it to `ComputationKind::Other(operation)` when `kind` was absent) were
+// removed along with the `Serialize, Deserialize` derives. JSON
+// (de)serialization is no longer supported — binary serialization goes
+// through `src/scg/src/serialize.rs` (BinaryWrite/BinaryRead), which writes
+// the `ComputationKind::label()` string directly. The `ComputationNode::new`
+// constructor still accepts an `operation: &str` and wraps it in
+// `ComputationKind::Other`, preserving the construction-time API.
 
 impl ComputationNode {
     /// Create a new ComputationNode with a generic (string) operation.
@@ -365,7 +343,7 @@ impl ComputationNode {
 ///
 /// Represents a memory allocation request with size, alignment,
 /// and region association.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AllocationNode {
     /// The size of the allocation in bytes.
     pub size: u64,
@@ -380,7 +358,7 @@ pub struct AllocationNode {
 /// Data specific to a deallocation node.
 ///
 /// Represents a memory deallocation, paired with a prior allocation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeallocationNode {
     /// The `NodeId` of the corresponding allocation node.
     pub allocation_node: NodeId,
@@ -389,7 +367,7 @@ pub struct DeallocationNode {
 }
 
 /// Access mode for memory access nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessMode {
     /// Read-only access.
     Read,
@@ -403,7 +381,7 @@ pub enum AccessMode {
 ///
 /// Represents a read, write, or read-write access to memory
 /// within a specific region.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccessNode {
     /// The access mode (read, write, or read-write).
     pub mode: AccessMode,
@@ -418,7 +396,7 @@ pub struct AccessNode {
 /// Data specific to a type cast node.
 ///
 /// Represents a type conversion or coercion from one type to another.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CastNode {
     /// The source type being cast from.
     pub from_type: String,
@@ -432,7 +410,7 @@ pub struct CastNode {
 ///
 /// Represents operations that have observable side effects
 /// beyond their return value, such as I/O or volatile access.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EffectNode {
     /// A textual description of the side effect.
     pub effect_kind: String,
@@ -441,7 +419,7 @@ pub struct EffectNode {
 }
 
 /// Control flow kind for control nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlKind {
     /// A conditional branch.
     Branch,
@@ -477,7 +455,7 @@ pub enum ControlKind {
 ///
 /// Represents points in the graph where control flow decisions
 /// are made or merged.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ControlNode {
     /// The specific kind of control flow operation.
     pub kind: ControlKind,
@@ -489,7 +467,7 @@ pub struct ControlNode {
 ///
 /// Phantom nodes are structural placeholders used for analysis,
 /// visualization, or as attachment points for metadata.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhantomNode {
     /// A textual description of the phantom node's purpose.
     pub purpose: String,
@@ -498,7 +476,7 @@ pub struct PhantomNode {
 /// Data specific to a vtable node for dynamic dispatch.
 ///
 /// Represents a virtual method table used in trait object dispatch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VTableNode {
     /// The trait name this vtable implements.
     pub trait_name: String,
@@ -511,7 +489,7 @@ pub struct VTableNode {
 /// Data specific to a closure environment node.
 ///
 /// Represents the captured environment of a closure.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClosureEnvNode {
     /// Names of captured variables.
     pub captured_vars: Vec<String>,
@@ -526,7 +504,7 @@ pub struct ClosureEnvNode {
 /// Represents a struct type declaration with named fields. Structs are lowered
 /// to flat memory layouts where fields are laid out sequentially with proper
 /// alignment padding between fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructDefNode {
     /// Struct name.
     pub name: String,
@@ -540,7 +518,7 @@ pub struct StructDefNode {
 }
 
 /// Information about a single field in a struct definition.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructFieldInfo {
     /// Field name.
     pub name: String,
@@ -557,7 +535,7 @@ pub struct StructFieldInfo {
 /// Represents an enum type declaration with named variants. Enums are lowered
 /// to tagged unions: a discriminant (tag) field followed by a union of the
 /// variant payloads.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumDefNode {
     /// Enum name.
     pub name: String,
@@ -576,7 +554,7 @@ pub struct EnumDefNode {
 }
 
 /// Information about a single variant in an enum definition.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariantInfo {
     /// Variant name.
     pub name: String,
@@ -592,7 +570,7 @@ pub struct EnumVariantInfo {
 ///
 /// Represents a match expression that dispatches control flow based on
 /// the discriminant of an enum value, with optional payload extraction.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchNode {
     /// The expression being matched (the discriminant).
     pub subject: String,
@@ -603,7 +581,7 @@ pub struct MatchNode {
 }
 
 /// Information about a single arm of a match expression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchArmInfo {
     /// Pattern to match against.
     pub pattern: MatchPatternInfo,
@@ -614,7 +592,7 @@ pub struct MatchArmInfo {
 }
 
 /// Pattern information for a match arm.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MatchPatternInfo {
     /// Wildcard pattern: `_`
     Wildcard,
@@ -645,7 +623,7 @@ pub enum MatchPatternInfo {
 /// Represents operations that execute in constant time to prevent
 /// timing side-channel attacks. These are lowered to branch-free
 /// bitwise operations in the backends.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConstantTimeNode {
     /// The constant-time operation kind.
     pub op: ConstantTimeOp,
@@ -656,7 +634,7 @@ pub struct ConstantTimeNode {
 }
 
 /// Kinds of constant-time operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConstantTimeOp {
     /// Constant-time conditional select: `ct_select(cond, a, b)`.
     CtSelect,
@@ -670,7 +648,7 @@ pub enum ConstantTimeOp {
 /// a generic Linux ABI syscall number (see `vuma_codegen::ir::generic_syscall_name`
 /// for the mapping). The SCG tracks syscalls as first-class nodes so that IVE
 /// can verify their safety properties (e.g. arg buffer validity).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SyscallNode {
     /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
     pub nr: u32,

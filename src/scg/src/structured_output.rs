@@ -19,20 +19,20 @@
 //!    can reason about type flow.
 //! 4. **Direction clarity**: Edges clearly indicate data flow direction.
 
-use serde::{Deserialize, Serialize};
 
 use crate::callgraph::CallGraph;
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
-use crate::node::{
-    AccessMode, NodeData, NodeId, NodePayload,
-    ProgramPoint,
+use crate::llm_json::{
+    self, build_array, build_object, json_bool, json_opt_string, json_opt_u64, json_str,
+    json_u64, json_u64_array, json_usize, JsonValue,
 };
+use crate::node::{AccessMode, NodeData, NodeId, NodePayload, ProgramPoint};
 
 // ── LLM-friendly JSON types ────────────────────────────────────────────
 
 /// LLM-friendly JSON representation of an SCG node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmNode {
     /// The node's unique identifier.
     pub id: u64,
@@ -53,7 +53,7 @@ pub struct LlmNode {
 }
 
 /// LLM-friendly source location.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmSourceLocation {
     pub file: Option<String>,
     pub line: Option<u64>,
@@ -61,7 +61,7 @@ pub struct LlmSourceLocation {
 }
 
 /// LLM-friendly JSON representation of an SCG edge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmEdge {
     /// The edge's unique identifier.
     pub id: u64,
@@ -76,7 +76,7 @@ pub struct LlmEdge {
 }
 
 /// LLM-friendly JSON representation of a function in the SCG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmFunction {
     /// The function's entry node ID.
     pub entry_node_id: u64,
@@ -95,7 +95,7 @@ pub struct LlmFunction {
 }
 
 /// A call target within a function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmCallTarget {
     /// The entry node ID of the callee.
     pub callee_entry_node_id: u64,
@@ -104,7 +104,7 @@ pub struct LlmCallTarget {
 }
 
 /// LLM-friendly JSON representation of a memory region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmRegion {
     /// The region's unique identifier.
     pub id: u64,
@@ -117,7 +117,7 @@ pub struct LlmRegion {
 }
 
 /// The top-level LLM-friendly JSON representation of an SCG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmScgJson {
     /// Summary statistics.
     pub summary: LlmSummary,
@@ -132,7 +132,7 @@ pub struct LlmScgJson {
 }
 
 /// Summary statistics for the SCG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmSummary {
     /// Total number of nodes.
     pub total_nodes: usize,
@@ -177,9 +177,7 @@ impl SCG {
     /// ```
     pub fn to_json(&self) -> String {
         let llm = self.build_llm_representation();
-        serde_json::to_string_pretty(&llm).unwrap_or_else(|e| {
-            format!(r#"{{"error": "JSON serialization failed: {}"}}"#, e)
-        })
+        llm.to_json_value().to_string_pretty()
     }
 
     /// Produces a human/LLM-readable text representation of the graph.
@@ -392,6 +390,415 @@ impl SCG {
         }
     }
 }
+
+// ── Hand-written JSON serialization / deserialization ──────────────────
+//
+// Wave 43 serde-migration: these methods replace the `Serialize, Deserialize`
+// derives that were previously on every LLM-DTO type. The on-disk JSON shape
+// is byte-identical to what `serde_json::to_string_pretty` produced for the
+// same input — struct fields are emitted in declaration order, 2-space
+// indentation, empty containers rendered as `{}` / `[]`.
+//
+// The parser side (`LlmScgJson::from_json_str`) is a thin wrapper around
+// `crate::llm_json::parse` + `LlmScgJson::from_json_value`. It is used by
+// the round-trip tests in this module (which previously called
+// `serde_json::from_str::<LlmScgJson>(&json)`). It is NOT a public API
+// for external consumers — external LLMs consume the JSON output, they do
+// not feed JSON back into `vuma-scg`.
+
+impl LlmScgJson {
+    /// Serialize this SCG JSON DTO to a pretty-printed JSON string.
+    pub fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("summary".to_string(), self.summary.to_json_value()),
+            ("nodes".to_string(), build_array(
+                self.nodes.iter().map(|n| n.to_json_value()).collect(),
+            )),
+            ("edges".to_string(), build_array(
+                self.edges.iter().map(|e| e.to_json_value()).collect(),
+            )),
+            ("functions".to_string(), build_array(
+                self.functions.iter().map(|f| f.to_json_value()).collect(),
+            )),
+            ("regions".to_string(), build_array(
+                self.regions.iter().map(|r| r.to_json_value()).collect(),
+            )),
+        ])
+    }
+
+    /// Parse a JSON string into a `LlmScgJson`.
+    ///
+    /// Returns `Err(msg)` on any parse or shape-mismatch error. Used by the
+    /// round-trip tests; not part of the external LLM-facing API.
+    pub fn from_json_str(json: &str) -> Result<Self, String> {
+        let value = llm_json::parse(json).map_err(|e| e.to_string())?;
+        Self::from_json_value(&value).map_err(|e| format!("invalid LlmScgJson: {}", e))
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let summary = value
+            .get("summary")
+            .ok_or("missing 'summary'")?;
+        let nodes = value
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'nodes' array")?;
+        let edges = value
+            .get("edges")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'edges' array")?;
+        let functions = value
+            .get("functions")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'functions' array")?;
+        let regions = value
+            .get("regions")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'regions' array")?;
+        Ok(LlmScgJson {
+            summary: LlmSummary::from_json_value(summary)?,
+            nodes: nodes
+                .iter()
+                .map(LlmNode::from_json_value)
+                .collect::<Result<_, _>>()?,
+            edges: edges
+                .iter()
+                .map(LlmEdge::from_json_value)
+                .collect::<Result<_, _>>()?,
+            functions: functions
+                .iter()
+                .map(LlmFunction::from_json_value)
+                .collect::<Result<_, _>>()?,
+            regions: regions
+                .iter()
+                .map(LlmRegion::from_json_value)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl LlmSummary {
+    fn to_json_value(&self) -> JsonValue {
+        let mut entries: Vec<(String, JsonValue)> = vec![
+            ("total_nodes".to_string(), json_usize(self.total_nodes)),
+            ("total_edges".to_string(), json_usize(self.total_edges)),
+            ("total_functions".to_string(), json_usize(self.total_functions)),
+            ("total_regions".to_string(), json_usize(self.total_regions)),
+        ];
+        // `node_type_counts` is a BTreeMap — serde_json serializes BTreeMap
+        // keys in sorted order, so we iterate the BTreeMap directly.
+        let counts_obj = JsonValue::Object(
+            self.node_type_counts
+                .iter()
+                .map(|(k, v)| (k.clone(), json_usize(*v)))
+                .collect(),
+        );
+        entries.push(("node_type_counts".to_string(), counts_obj));
+        build_object(entries)
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let total_nodes = value
+            .get("total_nodes")
+            .and_then(|v| v.as_usize())
+            .ok_or("missing 'total_nodes'")?;
+        let total_edges = value
+            .get("total_edges")
+            .and_then(|v| v.as_usize())
+            .ok_or("missing 'total_edges'")?;
+        let total_functions = value
+            .get("total_functions")
+            .and_then(|v| v.as_usize())
+            .ok_or("missing 'total_functions'")?;
+        let total_regions = value
+            .get("total_regions")
+            .and_then(|v| v.as_usize())
+            .ok_or("missing 'total_regions'")?;
+        let mut node_type_counts = std::collections::BTreeMap::new();
+        if let Some(entries) = value.get("node_type_counts").and_then(|v| v.as_object()) {
+            for (k, v) in entries {
+                if let Some(n) = v.as_usize() {
+                    node_type_counts.insert(k.to_string(), n);
+                }
+            }
+        }
+        Ok(LlmSummary {
+            total_nodes,
+            total_edges,
+            total_functions,
+            total_regions,
+            node_type_counts,
+        })
+    }
+}
+
+impl LlmNode {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("id".to_string(), json_u64(self.id)),
+            ("node_type".to_string(), json_str(&self.node_type)),
+            ("operation".to_string(), json_str(&self.operation)),
+            ("result_type".to_string(), json_opt_string(&self.result_type)),
+            ("inputs".to_string(), json_u64_array(&self.inputs)),
+            ("outputs".to_string(), json_u64_array(&self.outputs)),
+            (
+                "source_location".to_string(),
+                match &self.source_location {
+                    Some(loc) => loc.to_json_value(),
+                    None => JsonValue::Null,
+                },
+            ),
+            ("function".to_string(), json_opt_string(&self.function)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'id'")?;
+        let node_type = value
+            .get("node_type")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'node_type'")?
+            .to_string();
+        let operation = value
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'operation'")?
+            .to_string();
+        let result_type = value
+            .get("result_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let inputs = value
+            .get("inputs")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'inputs' array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-u64 in 'inputs'"))
+            .collect::<Result<_, _>>()?;
+        let outputs = value
+            .get("outputs")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'outputs' array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-u64 in 'outputs'"))
+            .collect::<Result<_, _>>()?;
+        let source_location = match value.get("source_location") {
+            Some(JsonValue::Null) | None => None,
+            Some(v) => Some(LlmSourceLocation::from_json_value(v)?),
+        };
+        let function = value
+            .get("function")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Ok(LlmNode {
+            id,
+            node_type,
+            operation,
+            result_type,
+            inputs,
+            outputs,
+            source_location,
+            function,
+        })
+    }
+}
+
+impl LlmSourceLocation {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("file".to_string(), json_opt_string(&self.file)),
+            ("line".to_string(), json_opt_u64(&self.line)),
+            ("column".to_string(), json_opt_u64(&self.column)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let file = value
+            .get("file")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let line = value.get("line").and_then(|v| v.as_u64());
+        let column = value.get("column").and_then(|v| v.as_u64());
+        Ok(LlmSourceLocation { file, line, column })
+    }
+}
+
+impl LlmEdge {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("id".to_string(), json_u64(self.id)),
+            ("from".to_string(), json_u64(self.from)),
+            ("to".to_string(), json_u64(self.to)),
+            ("kind".to_string(), json_str(&self.kind)),
+            ("label".to_string(), json_opt_string(&self.label)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'id'")?;
+        let from = value
+            .get("from")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'from'")?;
+        let to = value
+            .get("to")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'to'")?;
+        let kind = value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'kind'")?
+            .to_string();
+        let label = value
+            .get("label")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Ok(LlmEdge {
+            id,
+            from,
+            to,
+            kind,
+            label,
+        })
+    }
+}
+
+impl LlmFunction {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("entry_node_id".to_string(), json_u64(self.entry_node_id)),
+            ("return_node_id".to_string(), json_opt_u64(&self.return_node_id)),
+            ("name".to_string(), json_opt_string(&self.name)),
+            ("nodes".to_string(), json_u64_array(&self.nodes)),
+            (
+                "calls".to_string(),
+                build_array(self.calls.iter().map(|c| c.to_json_value()).collect()),
+            ),
+            ("called_by".to_string(), json_u64_array(&self.called_by)),
+            ("is_recursive".to_string(), json_bool(self.is_recursive)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let entry_node_id = value
+            .get("entry_node_id")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'entry_node_id'")?;
+        let return_node_id = value.get("return_node_id").and_then(|v| v.as_u64());
+        let name = value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let nodes = value
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'nodes' array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-u64 in 'nodes'"))
+            .collect::<Result<_, _>>()?;
+        let calls = value
+            .get("calls")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'calls' array")?
+            .iter()
+            .map(LlmCallTarget::from_json_value)
+            .collect::<Result<_, _>>()?;
+        let called_by = value
+            .get("called_by")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'called_by' array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-u64 in 'called_by'"))
+            .collect::<Result<_, _>>()?;
+        let is_recursive = value
+            .get("is_recursive")
+            .and_then(|v| v.as_bool())
+            .ok_or("missing 'is_recursive'")?;
+        Ok(LlmFunction {
+            entry_node_id,
+            return_node_id,
+            name,
+            nodes,
+            calls,
+            called_by,
+            is_recursive,
+        })
+    }
+}
+
+impl LlmCallTarget {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("callee_entry_node_id".to_string(), json_u64(self.callee_entry_node_id)),
+            ("callee_name".to_string(), json_opt_string(&self.callee_name)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let callee_entry_node_id = value
+            .get("callee_entry_node_id")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'callee_entry_node_id'")?;
+        let callee_name = value
+            .get("callee_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Ok(LlmCallTarget {
+            callee_entry_node_id,
+            callee_name,
+        })
+    }
+}
+
+impl LlmRegion {
+    fn to_json_value(&self) -> JsonValue {
+        build_object(vec![
+            ("id".to_string(), json_u64(self.id)),
+            ("deployment_target".to_string(), json_str(&self.deployment_target)),
+            ("security_boundary".to_string(), json_bool(self.security_boundary)),
+            ("nodes".to_string(), json_u64_array(&self.nodes)),
+        ])
+    }
+
+    fn from_json_value(value: &JsonValue) -> Result<Self, String> {
+        let id = value
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or("missing 'id'")?;
+        let deployment_target = value
+            .get("deployment_target")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'deployment_target'")?
+            .to_string();
+        let security_boundary = value
+            .get("security_boundary")
+            .and_then(|v| v.as_bool())
+            .ok_or("missing 'security_boundary'")?;
+        let nodes = value
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .ok_or("missing 'nodes' array")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("non-u64 in 'nodes'"))
+            .collect::<Result<_, _>>()?;
+        Ok(LlmRegion {
+            id,
+            deployment_target,
+            security_boundary,
+            nodes,
+        })
+    }
+}
+
+// `json_btreemap_usize` is not used in this file (the `node_type_counts`
+// BTreeMap is serialized inline above), but is part of the `llm_json`
+// helper API used by other modules in the crate.
 
 // ── Text formatting ────────────────────────────────────────────────────
 
@@ -675,7 +1082,7 @@ mod tests {
         let json = scg.to_json();
         assert!(json.contains("summary"));
         assert!(json.contains("total_nodes"));
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
         assert_eq!(parsed.summary.total_nodes, 0);
         assert_eq!(parsed.summary.total_edges, 0);
     }
@@ -704,7 +1111,7 @@ mod tests {
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
 
         let json = scg.to_json();
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
 
         assert_eq!(parsed.summary.total_nodes, 2);
         assert_eq!(parsed.summary.total_edges, 1);
@@ -752,7 +1159,7 @@ mod tests {
         scg.add_edge(comp, ret, EdgeKind::ControlFlow).unwrap();
 
         let json = scg.to_json();
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
 
         assert_eq!(parsed.summary.total_functions, 1);
         let func = &parsed.functions[0];
@@ -780,7 +1187,7 @@ mod tests {
         scg.add_region(region);
 
         let json = scg.to_json();
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
 
         assert_eq!(parsed.regions.len(), 1);
         assert_eq!(parsed.regions[0].id, 1);
@@ -892,7 +1299,7 @@ mod tests {
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
 
         let json = scg.to_json();
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
 
         assert_eq!(parsed.nodes.len(), 2);
         assert_eq!(parsed.edges.len(), 1);
@@ -928,7 +1335,7 @@ mod tests {
         scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
 
         let json = scg.to_json();
-        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
 
         assert_eq!(parsed.nodes.len(), 2);
         let alloc_node = parsed

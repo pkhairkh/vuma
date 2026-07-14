@@ -11,11 +11,13 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/scg/src/node.rs:7 (and 63 other
-# sites, mostly on non-named LLM-DTO types in structured_output.rs/diff.rs);
-# migrate to hand-written codec. Named types (NodeData/EdgeData/SCGRegion +
-# cascade DiffEntry/SCGDiff/MergeConflict/NodeConflict/EdgeConflict/
-# RegionConflict) were stripped in Wave 43 — see src/scg/src/serialize.rs
-# BinaryReader/BinaryWriter for the canonical binary path.
-serde.workspace = true
-serde_json.workspace = true
+# serde/serde_json removed in Wave 43 — all SCG types (NodeData, EdgeData,
+# SCGRegion + cascade NodeId/NodeType/NodePayload/EdgeKind/RegionId/...)
+# now rely on hand-written Debug + Clone derives only. Binary serialization
+# goes through `src/scg/src/serialize.rs` BinaryReader/BinaryWriter. The
+# LLM-facing JSON output (`SCG::to_json`, `SCGDiff::to_json`) is now
+# produced by a hand-written JSON serializer in `src/scg/src/llm_json.rs`
+# (replacing `serde_json::to_string_pretty`); the on-disk JSON shape is
+# byte-identical. Round-trip tests that previously used
+# `serde_json::from_str::<LlmScgJson>` now use `LlmScgJson::from_json_str`
+# (hand-written parser in `src/scg/src/llm_json.rs`).

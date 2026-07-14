@@ -95,7 +95,6 @@
 //! destabilising regalloc.
 
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
@@ -108,7 +107,7 @@ use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
 /// A natural loop is defined by a back-edge from `backedge_source` to `header`,
 /// where `header` dominates `backedge_source`. The loop body includes all nodes
 /// on paths from `header` to `backedge_source` that do not leave the loop.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NaturalLoop {
     /// The loop header — the unique entry point that dominates all body nodes.
     pub header: NodeId,
@@ -156,7 +155,7 @@ impl NaturalLoop {
 ///
 /// Each loop has a parent (the immediately enclosing loop) and zero or more
 /// children (loops directly nested within it).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoopNestingTree {
     /// All natural loops in the tree.
     pub loops: Vec<NaturalLoop>,
