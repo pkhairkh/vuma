@@ -21,7 +21,6 @@
 //! - SyncEdge: bind → accept/connect (Seq), read → write (Seq)
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Read as StdRead, Write as StdWrite};
 use std::net::{self as std_net};
@@ -35,7 +34,7 @@ use std::net::{self as std_net};
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpAddr {
     /// An IPv4 address.
     V4(Ipv4Addr),
@@ -139,7 +138,7 @@ impl fmt::Display for IpAddr {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv4Addr {
     /// The four octets of the address.
     pub octets: [u8; 4],
@@ -233,7 +232,7 @@ impl fmt::Display for Ipv4Addr {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv6Addr {
     /// The eight 16-bit segments of the address.
     pub segments: [u16; 8],
@@ -327,7 +326,7 @@ impl fmt::Display for Ipv6Addr {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Hash, Serialize }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SocketAddr {
     /// The IP address.
     pub ip: IpAddr,

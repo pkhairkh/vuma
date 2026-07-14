@@ -18,7 +18,6 @@
 //! - Child: CapD { Read, Write, Execute }
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -30,7 +29,7 @@ use std::fmt;
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Serialize }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitStatus {
     /// The raw exit code, if available.
     code: Option<i32>,
@@ -100,7 +99,7 @@ impl fmt::Display for ExitStatus {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     /// The exit status of the process.
     pub status: ExitStatus,
