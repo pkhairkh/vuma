@@ -316,7 +316,7 @@ pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
 /// full 64-bit value must arrange for the high word to be stored
 /// separately (e.g. via `store_vreg_hi`, which writes the high 4 bytes
 /// of a stack slot directly).  When `imm > 0xFFFF_FFFF` we emit a
-/// `log::warn!` so the truncation is visible in debug builds.
+/// `vuma_log!(warn, ...)` so the truncation is visible in debug builds.
 ///
 /// This function is named `encode_mov_reg_imm64` for API parity with
 /// the x86_64 backend; on x86_32 it is effectively a 32-bit immediate
