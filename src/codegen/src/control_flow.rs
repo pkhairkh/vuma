@@ -816,6 +816,27 @@ pub struct LoopInfo {
 
 /// Identifies natural loops, checks unroll eligibility, and performs loop
 /// unrolling on IR functions.
+///
+/// **Wave 34 — production-vs-helper split.** Production loop *unrolling*
+/// uses [`crate::loop_unroll`] (W30), which has SCEV-based trip-count
+/// analysis, a code-size budget, and multi-block unrolling support. This
+/// `LoopOptimizer` is kept as a **structural loop-normalization helper**:
+///
+/// - The pipeline entry point [`normalize_loops`] runs only the *safe*
+///   normalization (preheader insertion — the precondition for both
+///   loop-rotation and LCSSA construction), **NOT** unrolling.
+/// - The [`LoopOptimizer::unroll_loop`] / [`LoopOptimizer::choose_unroll_factor`]
+///   methods remain available for ad-hoc / test use, but production code
+///   paths reach for `loop_unroll` instead, which is trip-count-aware and
+///   budget-bounded.
+///
+/// Rationale: `loop_unroll` was hardened in W30 (multi-block unrolling,
+/// affine SCEV, code-size budget) and is the unroller that
+/// `run_optimizations_inner` actually drives. Keeping `LoopOptimizer`'s
+/// unroll path active in production would risk double-unrolling (W30 +
+/// W34) and would bypass W30's trip-count guard. The structural helpers
+/// on `LoopOptimizer` (loop identification, eligibility checks) are still
+/// sound and are reused by [`normalize_loops`].
 pub struct LoopOptimizer;
 
 /// Maximum loop body size (in instructions) to consider for unrolling.
@@ -1164,6 +1185,383 @@ impl LoopOptimizer {
 
         best
     }
+}
+
+// ===========================================================================
+// Pipeline entry points (Wave 34)
+// ===========================================================================
+//
+// The free functions below are the pipeline integration surface for this
+// module. The orchestrator wires them from `pipeline.rs` (deferred to the
+// orchestrator's final pass per the batch-3 strategy change). Each entry
+// point takes a `&mut IRProgram` and returns `Result<(), BackendError>`
+// so the pipeline can short-circuit on hard errors (today none of them
+// return `Err`; the `Result` wrapper is reserved for future hard-error
+// cases such as a malformed `Switch` terminator with no targets).
+//
+// All three entry points default to `AArch64TargetInfo` for target-specific
+// decisions (jump-table density, tail-call register capacity, etc.). A
+// future per-target dispatch can swap in `RiscV64TargetInfo`,
+// `X86_64TargetInfo`, etc. by parameterizing these functions; the
+// `SwitchLowerer::lower_switch_for_target` /
+// `TailCallLowerer::is_tail_call_eligible_for_target` /
+// `TailCallLowerer::lower_tail_call_for_target` methods already accept a
+// `&dyn TargetInfo`, so the plumbing is one line per call site.
+
+use crate::backend::BackendError;
+use crate::ir::IRProgram;
+
+/// Pipeline entry point for switch lowering.
+///
+/// Called from `pipeline.rs` after SCG→IR lowering (and before codegen-
+/// side optimization), this pass walks every function in `program` and
+/// replaces each `IRTerminator::Switch` with the lower-level block
+/// sequence produced by [`SwitchLowerer::lower_switch_for_target`]:
+///
+/// - The original `Switch` block's terminator is rewritten to
+///   `Jump(switch_entry_<n>)`, where `switch_entry_<n>` is the first
+///   block of the lowered sequence.
+/// - The lowered blocks (jump-table dispatch, binary-search partitioning,
+///   or if-else chain — chosen by [`SwitchLowerer::choose_strategy_for_target`])
+///   are inserted into the function immediately after the original block.
+///
+/// Target distribution is decided via [`AArch64TargetInfo`] (the existing
+/// legacy default). Per-target dispatch is left for a future per-backend
+/// wiring pass.
+pub fn lower_switches(program: &mut IRProgram) -> Result<(), BackendError> {
+    for func in &mut program.functions {
+        lower_switches_in_function(func);
+    }
+    Ok(())
+}
+
+/// Lower every `Switch` terminator in a single function. See
+/// [`lower_switches`] for the pipeline-level entry point.
+fn lower_switches_in_function(func: &mut IRFunction) {
+    // Allocate vreg / label counters past any id already in use to avoid
+    // collisions with existing IR.
+    let mut vreg_ctr = max_vreg_id_in_function(func) + 1;
+    let mut label_ctr = max_label_numeric_suffix(func) + 1;
+
+    // Collect indices of blocks whose terminator is a Switch. We process
+    // in reverse so inserting new blocks doesn't shift the indices of
+    // blocks we haven't processed yet.
+    let switch_indices: Vec<usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            if matches!(b.terminator, IRTerminator::Switch { .. }) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for bi in switch_indices.into_iter().rev() {
+        let (discr, targets, default) = match &func.blocks[bi].terminator {
+            IRTerminator::Switch { discr, targets, default } => {
+                (discr.clone(), targets.clone(), default.clone())
+            }
+            _ => unreachable!("filter_map above guarantees Switch"),
+        };
+
+        let new_blocks = SwitchLowerer::lower_switch_for_target(
+            discr,
+            &targets,
+            &default,
+            &mut vreg_ctr,
+            &mut label_ctr,
+            &AArch64TargetInfo,
+        );
+
+        // Replace the original Switch terminator with a Jump to the first
+        // lowered block (the "entry" of the lowered sequence).
+        if let Some(entry) = new_blocks.first() {
+            func.blocks[bi].terminator = IRTerminator::Jump(entry.label.clone());
+        }
+
+        // Insert the lowered blocks immediately after the original block.
+        for (j, b) in new_blocks.into_iter().enumerate() {
+            func.blocks.insert(bi + 1 + j, b);
+        }
+    }
+}
+
+/// Pipeline entry point for tail-call lowering.
+///
+/// Called from `pipeline.rs` after switch lowering, this pass walks every
+/// function in `program` looking for tail-position `Call` instructions —
+/// a `Call` whose `dst` is the sole value returned by the immediately
+/// following `Return` terminator — and rewrites each eligible pair into a
+/// single [`IRTerminator::TailCall`]:
+///
+/// - The `Call` instruction is removed (the `TailCall` terminator carries
+///   the callee name and args).
+/// - The `Return` terminator is replaced by `TailCall { func, args }`.
+/// - Any argument-shuffling instructions emitted by
+///   [`TailCallLowerer::lower_tail_call_for_target`] (for overlapping
+///   argument registers) are inserted in place of the removed `Call`.
+///
+/// Eligibility is decided by [`TailCallLowerer::is_tail_call_eligible_for_target`]:
+/// the call's `dst` must equal the returned value, the function must have
+/// no `Alloc` instructions (no stack cleanup), all caller params must fit
+/// in the target's argument registers, and the function must not contain
+/// any `Invoke` terminators.
+///
+/// Target distribution is decided via [`AArch64TargetInfo`] (the existing
+/// legacy default). Per-target dispatch is left for a future per-backend
+/// wiring pass.
+pub fn lower_tail_calls(program: &mut IRProgram) -> Result<(), BackendError> {
+    for func in &mut program.functions {
+        lower_tail_calls_in_function(func);
+    }
+    Ok(())
+}
+
+/// Lower every eligible tail call in a single function. See
+/// [`lower_tail_calls`] for the pipeline-level entry point.
+fn lower_tail_calls_in_function(func: &mut IRFunction) {
+    // First pass (immutable): collect the index + call info for every
+    // block whose last instruction is a Call in tail position AND passes
+    // the eligibility check. We do this in a separate pass so the
+    // eligibility check (which borrows `&IRFunction`) doesn't conflict
+    // with the mutable rewrite in the second pass.
+    let mut eligible: Vec<(usize, String, Vec<IRValue>)> = Vec::new();
+    for (i, block) in func.blocks.iter().enumerate() {
+        if block.instructions.is_empty() {
+            continue;
+        }
+        let last_idx = block.instructions.len() - 1;
+        let (call_dst, call_func, call_args) = match &block.instructions[last_idx] {
+            IRInstr::Call { dst, func, args, .. } => {
+                (dst.clone(), func.clone(), args.clone())
+            }
+            _ => continue,
+        };
+        let return_vals = match &block.terminator {
+            IRTerminator::Return(vals) => vals.clone(),
+            _ => continue,
+        };
+        if !TailCallLowerer::is_tail_call_eligible_for_target(
+            &call_dst,
+            &return_vals,
+            func,
+            &AArch64TargetInfo,
+        ) {
+            continue;
+        }
+        eligible.push((i, call_func, call_args));
+    }
+
+    // Second pass (mutable): apply the rewrites — drop the Call, emit any
+    // argument-shuffle instructions, and replace the Return terminator
+    // with a TailCall.
+    let mut vreg_ctr = max_vreg_id_in_function(func) + 1;
+    for (bi, call_func, call_args) in eligible {
+        let shuffle = TailCallLowerer::lower_tail_call_for_target(
+            &call_func,
+            &call_args,
+            &mut vreg_ctr,
+            &AArch64TargetInfo,
+        );
+        let block = &mut func.blocks[bi];
+        block.instructions.pop();
+        block.instructions.extend(shuffle);
+        block.terminator = TailCallLowerer::make_tail_call_terminator(&call_func, &call_args);
+    }
+}
+
+/// Pipeline entry point for loop normalization (safe subset).
+///
+/// Called from `pipeline.rs` after tail-call lowering, this pass walks
+/// every function in `program` and, for each natural loop identified by
+/// [`LoopOptimizer::identify_loops`], ensures the loop header has
+/// exactly one *outside* predecessor (i.e. a single edge from outside
+/// the loop body). If the header has two or more outside predecessors,
+/// a fresh preheader block is inserted immediately before the header
+/// and every outside predecessor is redirected to it; the preheader's
+/// terminator is `Jump(header_label)`.
+///
+/// **This is the safe subset of loop normalization.** It does NOT do:
+/// - **Loop unrolling** — production uses [`crate::loop_unroll`] (W30),
+///   which has SCEV-based trip-count analysis and a code-size budget.
+///   See the doc-comment on [`LoopOptimizer`] for the full rationale.
+/// - **Loop rotation** — would require moving the loop-exit test from
+///   the header to the back edge, which requires precise phi-rewriting
+///   that this pass does not attempt.
+/// - **Full LCSSA construction** — would require inserting a Phi in
+///   every exit block for every value defined in the loop and used
+///   outside. Preheader insertion is the *precondition* for LCSSA but
+///   is not LCSSA itself; full LCSSA is left to a future pass.
+///
+/// The pass is idempotent: running it on already-normalized IR is a
+/// no-op (every loop header already has at most one outside
+/// predecessor).
+pub fn normalize_loops(program: &mut IRProgram) -> Result<(), BackendError> {
+    for func in &mut program.functions {
+        normalize_loops_in_function(func);
+    }
+    Ok(())
+}
+
+/// Normalize every natural loop in a single function. See
+/// [`normalize_loops`] for the pipeline-level entry point.
+fn normalize_loops_in_function(func: &mut IRFunction) {
+    func.rebuild_cfg();
+    let loops = LoopOptimizer::identify_loops(func);
+
+    // Process loops in reverse order of header block index so inserting
+    // preheader blocks doesn't shift the indices of loops we haven't
+    // processed yet.
+    let label_to_idx: HashMap<String, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.clone(), i))
+        .collect();
+    let mut sorted_loops = loops;
+    sorted_loops.sort_by(|a, b| {
+        let ai = label_to_idx.get(&a.header_block).copied().unwrap_or(0);
+        let bi = label_to_idx.get(&b.header_block).copied().unwrap_or(0);
+        bi.cmp(&ai) // reverse order
+    });
+
+    for loop_info in sorted_loops {
+        // Re-resolve the header index — earlier preheader insertions may
+        // have shifted it.
+        let header_idx = match func.find_block_by_label(&loop_info.header_block) {
+            Some(i) => i,
+            None => continue,
+        };
+        let body_set: HashSet<String> = loop_info.body_blocks.iter().cloned().collect();
+
+        // Find every block OUTSIDE the loop whose terminator jumps to
+        // the header (these are the "outside predecessors" we want to
+        // funnel through a single preheader).
+        let header_label = loop_info.header_block.clone();
+        let mut outside_preds: Vec<usize> = Vec::new();
+        for (i, block) in func.blocks.iter().enumerate() {
+            if body_set.contains(&block.label) {
+                continue; // inside the loop — this is the back edge
+            }
+            if block
+                .terminator
+                .successor_labels()
+                .iter()
+                .any(|l| *l == header_label)
+            {
+                outside_preds.push(i);
+            }
+        }
+
+        if outside_preds.len() <= 1 {
+            continue; // already normalized
+        }
+
+        // Build and insert the preheader, then redirect every outside
+        // predecessor to it.
+        let preheader_label = format!("preheader_{}", loop_info.header_block);
+        let mut preheader = IRBlock::new(&preheader_label);
+        preheader.terminator = IRTerminator::Jump(loop_info.header_block.clone());
+        for &pred_idx in &outside_preds {
+            rewrite_terminator_to_target(
+                &mut func.blocks[pred_idx].terminator,
+                &loop_info.header_block,
+                &preheader_label,
+            );
+        }
+        // Re-resolve the header index after the predecessor rewrites
+        // (they don't change block count, but be defensive).
+        let header_idx = func.find_block_by_label(&loop_info.header_block).unwrap_or(header_idx);
+        func.blocks.insert(header_idx, preheader);
+    }
+}
+
+/// Find the highest vreg id used anywhere in `func` (signature,
+/// instructions, and terminators). Used to seed fresh vreg allocation
+/// past existing ids.
+fn max_vreg_id_in_function(func: &IRFunction) -> u32 {
+    let mut max_id: u32 = 0;
+    for v in func
+        .params
+        .iter()
+        .chain(func.results.iter())
+    {
+        if let IRValue::Register(id) = v {
+            if *id > max_id {
+                max_id = *id;
+            }
+        }
+    }
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.defined_regs().into_iter().chain(instr.used_regs()) {
+                if id > max_id {
+                    max_id = id;
+                }
+            }
+        }
+        for id in terminator_vregs(&block.terminator) {
+            if id > max_id {
+                max_id = id;
+            }
+        }
+    }
+    max_id
+}
+
+/// Collect every vreg id referenced by an `IRTerminator`.
+fn terminator_vregs(term: &IRTerminator) -> Vec<u32> {
+    match term {
+        IRTerminator::Jump(_) | IRTerminator::Unreachable => vec![],
+        IRTerminator::Branch { cond, .. } => cond.as_register().into_iter().collect(),
+        IRTerminator::Return(vals) => vals.iter().filter_map(|v| v.as_register()).collect(),
+        IRTerminator::Switch { discr, .. } => discr.as_register().into_iter().collect(),
+        IRTerminator::Invoke { dst, args, .. } => {
+            let mut r: Vec<u32> = dst
+                .as_ref()
+                .and_then(|v| v.as_register())
+                .into_iter()
+                .collect();
+            r.extend(args.iter().filter_map(|v| v.as_register()));
+            r
+        }
+        IRTerminator::TailCall { args, .. } => {
+            args.iter().filter_map(|v| v.as_register()).collect()
+        }
+        IRTerminator::Resume { value } => value.as_register().into_iter().collect(),
+    }
+}
+
+/// Find the largest numeric suffix among all block labels in `func`.
+/// Used to seed fresh label allocation past existing labels (e.g. if
+/// `func` already has `case_5`, we start at 6).
+///
+/// Labels with no trailing digits are ignored (returning 0 for them).
+fn max_label_numeric_suffix(func: &IRFunction) -> u32 {
+    let mut max_n: u32 = 0;
+    for block in &func.blocks {
+        let digits: String = block
+            .label
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            continue;
+        }
+        // `digits` is reversed (we walked the label back-to-front); flip
+        // it back before parsing.
+        let n: String = digits.chars().rev().collect();
+        if let Ok(parsed) = n.parse::<u32>() {
+            if parsed > max_n {
+                max_n = parsed;
+            }
+        }
+    }
+    max_n
 }
 
 // ===========================================================================
@@ -1857,6 +2255,431 @@ mod tests {
         // and the helpers `align_to`, `terminator_used_regs`,
         // `compute_live_in`, `find_yield_points`, `collect_local_vars`) are
         // gone from this module, with no dangling references.
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Wave 34 — pipeline entry-point tests
+    // ───────────────────────────────────────────────────────────────────
+
+    /// Helper: build an `IRProgram` containing a single function with a
+    /// `Switch` terminator over `n` dense case labels (0..n) plus a
+    /// `default` block. Each case body just returns its case value.
+    fn build_switch_program(n: i64) -> IRProgram {
+        use crate::ir::IRProgram;
+
+        let mut func = IRFunction::new("switch_func");
+        func.params.push(IRValue::Register(0)); // discr
+        func.results.push(IRValue::Register(1));
+        func.param_types.push(crate::ir::IRType::I64);
+        func.result_types.push(crate::ir::IRType::I64);
+
+        // entry: terminator = Switch(discr, targets, default)
+        func.blocks[0].label = "entry".to_string();
+        let targets: Vec<(i64, String)> = (0..n).map(|i| (i, format!("case_{}", i))).collect();
+        func.blocks[0].terminator = IRTerminator::Switch {
+            discr: IRValue::Register(0),
+            targets,
+            default: "default".to_string(),
+        };
+        // case_i: return i
+        for i in 0..n {
+            func.append_block(format!("case_{}", i));
+            let idx = func.blocks.len() - 1;
+            func.blocks[idx].terminator = IRTerminator::Return(vec![IRValue::Immediate(i)]);
+        }
+        // default: return -1
+        func.append_block("default");
+        let idx = func.blocks.len() - 1;
+        func.blocks[idx].terminator = IRTerminator::Return(vec![IRValue::Immediate(-1)]);
+
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+        prog
+    }
+
+    /// Wave 34: `lower_switches` rewrites an 8-case `Switch` terminator
+    /// into a lowered block sequence (jump table for dense ranges) and
+    /// leaves no `IRTerminator::Switch` in the function.
+    #[test]
+    fn test_lower_switches_eight_cases() {
+        let mut prog = build_switch_program(8);
+        let original_block_count = prog.functions[0].blocks.len();
+
+        lower_switches(&mut prog).expect("lower_switches should succeed");
+
+        let func = &prog.functions[0];
+
+        // No `IRTerminator::Switch` should remain — every Switch was
+        // rewritten to a Jump + lowered dispatch blocks.
+        let still_has_switch = func
+            .blocks
+            .iter()
+            .any(|b| matches!(b.terminator, IRTerminator::Switch { .. }));
+        assert!(
+            !still_has_switch,
+            "lower_switches should have removed every Switch terminator"
+        );
+
+        // The lowered dispatch (jump-table bounds check + per-index
+        // comparisons for 8 dense targets) should produce several new
+        // blocks, so the function grew.
+        assert!(
+            func.blocks.len() > original_block_count,
+            "expected block count to grow after switch lowering (was {}, now {})",
+            original_block_count,
+            func.blocks.len()
+        );
+
+        // The original `entry` block's terminator should now be a Jump to
+        // the lowered entry block (label starts with `switch_entry_` or
+        // similar — produced by `lower_switch_for_target`).
+        let entry = &func.blocks[0];
+        let entry_jumps_to_lowered = match &entry.terminator {
+            IRTerminator::Jump(target) => target.starts_with("switch_entry_")
+                || target.starts_with("jt_entry_")
+                || target.starts_with("bs_entry_")
+                || target.starts_with("ie_entry_"),
+            _ => false,
+        };
+        assert!(
+            entry_jumps_to_lowered,
+            "entry block should Jump to a lowered dispatch block (got {:?})",
+            entry.terminator
+        );
+    }
+
+    /// Wave 34: `lower_switches` is a no-op on functions with no Switch
+    /// terminators (preserves block count).
+    #[test]
+    fn test_lower_switches_noop_without_switch() {
+        let mut prog = IRProgram::new();
+        let mut func = IRFunction::new("plain");
+        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Immediate(0)]);
+        prog.functions.push(func);
+        let before = prog.functions[0].blocks.len();
+
+        lower_switches(&mut prog).expect("lower_switches should succeed");
+
+        assert_eq!(
+            prog.functions[0].blocks.len(),
+            before,
+            "lower_switches should be a no-op when there are no Switch terminators"
+        );
+    }
+
+    /// Wave 34: `lower_tail_calls` detects a self-recursive tail call
+    /// `fn f(n) { if n>0 { return f(n-1); } else { return 0; } }` and
+    /// rewrites the tail-position Call+Return pair into a single
+    /// `IRTerminator::TailCall`.
+    #[test]
+    fn test_lower_tail_calls_self_recursive() {
+        use crate::ir::IRProgram;
+
+        // fn f(n: i64) -> i64
+        let mut func = IRFunction::new("f");
+        func.params.push(IRValue::Register(0));
+        func.param_types.push(crate::ir::IRType::I64);
+        func.results.push(IRValue::Register(2));
+        func.result_types.push(crate::ir::IRType::I64);
+
+        // entry: cond = (n > 0); Branch(cond, then, else)
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].push(IRInstr::Cmp {
+            kind: CmpKind::SGt,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        });
+        func.blocks[0].terminator = IRTerminator::Branch {
+            cond: IRValue::Register(1),
+            true_block: "then".to_string(),
+            false_block: "else".to_string(),
+        };
+
+        // then: r2 = call f(n - 1); return r2   ← tail call
+        func.append_block("then");
+        func.blocks[1].push(IRInstr::BinOp {
+            op: BinOpKind::Sub,
+            dst: IRValue::Register(3),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        func.blocks[1].push(IRInstr::Call {
+            dst: Some(IRValue::Register(2)),
+            func: "f".to_string(),
+            args: vec![IRValue::Register(3)],
+            is_extern: false,
+        });
+        func.blocks[1].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        // else: return 0
+        func.append_block("else");
+        func.blocks[2].terminator = IRTerminator::Return(vec![IRValue::Immediate(0)]);
+
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+
+        lower_tail_calls(&mut prog).expect("lower_tail_calls should succeed");
+
+        // After lowering, the `then` block's terminator should be a
+        // TailCall to `f` with the (n-1) argument.
+        let func = &prog.functions[0];
+        let then_block = func
+            .blocks
+            .iter()
+            .find(|b| b.label == "then")
+            .expect("`then` block should exist");
+        match &then_block.terminator {
+            IRTerminator::TailCall { func: callee, args } => {
+                assert_eq!(callee, "f", "tail call should target `f`");
+                assert_eq!(
+                    args,
+                    &vec![IRValue::Register(3)],
+                    "tail call should pass the (n-1) argument"
+                );
+            }
+            other => panic!(
+                "expected TailCall terminator in `then` block, got {:?}",
+                other
+            ),
+        }
+
+        // The Call instruction should be gone from `then` (it was
+        // replaced by the TailCall terminator).
+        let has_call = then_block
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Call { .. }));
+        assert!(
+            !has_call,
+            "the tail-position Call should have been removed from `then`"
+        );
+
+        // The `else` block's Return terminator is NOT a tail call
+        // (returns an immediate, not a Call result), so it should be
+        // unchanged.
+        let else_block = func
+            .blocks
+            .iter()
+            .find(|b| b.label == "else")
+            .expect("`else` block should exist");
+        assert!(
+            matches!(&else_block.terminator, IRTerminator::Return(_)),
+            "`else` block's Return should NOT have been converted to a TailCall"
+        );
+    }
+
+    /// Wave 34: `lower_tail_calls` does NOT convert a Call whose result
+    /// is used by something other than the Return (non-tail position).
+    #[test]
+    fn test_lower_tail_calls_skips_non_tail() {
+        use crate::ir::IRProgram;
+
+        let mut func = IRFunction::new("g");
+        func.params.push(IRValue::Register(0));
+        func.param_types.push(crate::ir::IRType::I64);
+        func.results.push(IRValue::Register(2));
+        func.result_types.push(crate::ir::IRType::I64);
+
+        // entry: r1 = call h(0); r2 = r1 + 1; return r2   ← NOT a tail call
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].push(IRInstr::Call {
+            dst: Some(IRValue::Register(1)),
+            func: "h".to_string(),
+            args: vec![IRValue::Immediate(0)],
+            is_extern: false,
+        });
+        func.blocks[0].push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+
+        lower_tail_calls(&mut prog).expect("lower_tail_calls should succeed");
+
+        // No TailCall terminator should have been introduced.
+        let func = &prog.functions[0];
+        let has_tail_call = func
+            .blocks
+            .iter()
+            .any(|b| matches!(b.terminator, IRTerminator::TailCall { .. }));
+        assert!(
+            !has_tail_call,
+            "non-tail-position Call should NOT be converted to a TailCall"
+        );
+    }
+
+    /// Wave 34: `normalize_loops` inserts a preheader block so that every
+    /// loop header has exactly one *outside* predecessor. We build a
+    /// function where the loop header has TWO outside predecessors
+    /// (`entry` and `side_entry` both reach `header`); after
+    /// normalization, the header should have exactly one outside
+    /// predecessor (the new `preheader_header` block).
+    ///
+    /// `entry` branches to either `header` or `side_entry` (both then
+    /// reach `header`), giving `header` two outside predecessors. We use
+    /// a Branch (rather than two straight Jumps) so that `side_entry`
+    /// has a real predecessor in the dominator tree — without this, the
+    /// existing `compute_dominators` helper leaves unreachable-from-entry
+    /// blocks with the trivial "dominated by every block" initial state,
+    /// which would confuse back-edge detection.
+    #[test]
+    fn test_normalize_loops_inserts_preheader() {
+        use crate::ir::IRProgram;
+
+        let mut func = IRFunction::new("loop_with_two_entries");
+        // entry: Branch(cond, header, side_entry)
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].push(IRInstr::Cmp {
+            kind: CmpKind::Eq,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        });
+        func.blocks[0].terminator = IRTerminator::Branch {
+            cond: IRValue::Register(1),
+            true_block: "header".to_string(),
+            false_block: "side_entry".to_string(),
+        };
+        // side_entry: Jump(header)
+        func.append_block("side_entry");
+        func.blocks[1].terminator = IRTerminator::Jump("header".to_string());
+        // header: Branch(cond, body, exit)
+        func.append_block("header");
+        func.blocks[2].terminator = IRTerminator::Branch {
+            cond: IRValue::Register(0),
+            true_block: "body".to_string(),
+            false_block: "exit".to_string(),
+        };
+        // body: Jump(header)   ← back edge
+        func.append_block("body");
+        func.blocks[3].push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(2),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        func.blocks[3].terminator = IRTerminator::Jump("header".to_string());
+        // exit: Return
+        func.append_block("exit");
+        func.blocks[4].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+
+        normalize_loops(&mut prog).expect("normalize_loops should succeed");
+
+        let func = &prog.functions[0];
+
+        // A preheader block should have been inserted.
+        let has_preheader = func
+            .blocks
+            .iter()
+            .any(|b| b.label == "preheader_header");
+        assert!(
+            has_preheader,
+            "normalize_loops should have inserted a `preheader_header` block"
+        );
+
+        // Count the header's OUTSIDE predecessors (blocks outside the
+        // loop body that jump to it). After normalization this should be
+        // exactly 1 (the preheader).
+        let body_set: HashSet<String> = ["header".to_string(), "body".to_string()]
+            .into_iter()
+            .collect();
+        let outside_preds: Vec<&str> = func
+            .blocks
+            .iter()
+            .filter(|b| !body_set.contains(&b.label))
+            .filter(|b| {
+                b.terminator
+                    .successor_labels()
+                    .iter()
+                    .any(|l| *l == "header")
+            })
+            .map(|b| b.label.as_str())
+            .collect();
+        assert_eq!(
+            outside_preds.len(),
+            1,
+            "header should have exactly 1 outside predecessor after normalization, got {:?}",
+            outside_preds
+        );
+        assert_eq!(
+            outside_preds[0], "preheader_header",
+            "the single outside predecessor should be the preheader"
+        );
+
+        // The preheader's terminator should be `Jump(header)`.
+        let preheader = func
+            .blocks
+            .iter()
+            .find(|b| b.label == "preheader_header")
+            .expect("preheader should exist");
+        assert!(
+            matches!(&preheader.terminator, IRTerminator::Jump(t) if t == "header"),
+            "preheader's terminator should be Jump(header), got {:?}",
+            preheader.terminator
+        );
+    }
+
+    /// Wave 34: `normalize_loops` is idempotent — running it on
+    /// already-normalized IR (header has only one outside predecessor)
+    /// is a no-op (no new preheader is inserted).
+    #[test]
+    fn test_normalize_loops_idempotent() {
+        use crate::ir::IRProgram;
+
+        let mut func = IRFunction::new("already_normalized");
+        // entry: Jump(header)
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].terminator = IRTerminator::Jump("header".to_string());
+        // header: Branch(cond, body, exit)
+        func.append_block("header");
+        func.blocks[1].terminator = IRTerminator::Branch {
+            cond: IRValue::Register(0),
+            true_block: "body".to_string(),
+            false_block: "exit".to_string(),
+        };
+        // body: Jump(header)
+        func.append_block("body");
+        func.blocks[2].terminator = IRTerminator::Jump("header".to_string());
+        // exit: Return
+        func.append_block("exit");
+        func.blocks[3].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+        let before = prog.functions[0].blocks.len();
+
+        normalize_loops(&mut prog).expect("normalize_loops should succeed");
+
+        // No new preheader should be inserted — the header already has
+        // only one outside predecessor (`entry`).
+        assert_eq!(
+            prog.functions[0].blocks.len(),
+            before,
+            "normalize_loops should be a no-op on already-normalized IR"
+        );
+        let has_preheader = prog
+            .functions[0]
+            .blocks
+            .iter()
+            .any(|b| b.label == "preheader_header");
+        assert!(
+            !has_preheader,
+            "no preheader should be inserted when the header already has one outside predecessor"
+        );
     }
 
 }
