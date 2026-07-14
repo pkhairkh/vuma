@@ -33,7 +33,7 @@ use crate::msg::MSG;
 use crate::program_point::ProgramPoint;
 use crate::region::{Region, RegionId, RegionStatus};
 use crate::sync::{Ordering, SyncEdge, SyncEdgeId};
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------

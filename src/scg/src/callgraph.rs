@@ -8,7 +8,7 @@ use crate::edge::EdgeKind;
 use crate::graph::SCG;
 use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
 use crate::region::RegionId;
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Identifier for a function in the call graph.
 ///

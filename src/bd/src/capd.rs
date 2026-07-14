@@ -17,7 +17,7 @@
 //! ```
 
 use crate::context::Context;
-use hashbrown::HashSet;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;

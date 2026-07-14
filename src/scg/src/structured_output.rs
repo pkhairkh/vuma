@@ -226,7 +226,7 @@ impl SCG {
                 .unwrap_or_else(|| format!("func_{}", fid.0.as_u64()));
 
             // Walk function entry via ControlFlow to find all nodes in this function
-            let mut visited = hashbrown::HashSet::new();
+            let mut visited = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
             queue.push_back(fid.0);
             visited.insert(fid.0);

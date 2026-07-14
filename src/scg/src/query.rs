@@ -14,7 +14,7 @@
 //! - [`SCGQuery::DataFlowPath`] — "What is the data flow from variable A to variable B?"
 //! - [`SCGQuery::CallersOf`] — "Which functions call function X?"
 
-use hashbrown::HashSet;
+use std::collections::HashSet;
 
 use crate::callgraph::CallGraph;
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
@@ -561,7 +561,7 @@ fn query_list_functions(scg: &SCG) -> QueryResult {
 
         // Collect nodes belonging to this function by walking ControlFlow
         let mut func_nodes = Vec::new();
-        let mut visited = hashbrown::HashSet::new();
+        let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(fid.0);
         visited.insert(fid.0);
@@ -746,7 +746,7 @@ fn query_data_flow_path(scg: &SCG, from: NodeId, to: NodeId, max_depth: usize) -
 
     // BFS to find the shortest data-flow path from `from` to `to`
     let mut visited: HashSet<NodeId> = HashSet::new();
-    let mut parent: hashbrown::HashMap<NodeId, (NodeId, EdgeId)> = hashbrown::HashMap::new();
+    let mut parent: std::collections::HashMap<NodeId, (NodeId, EdgeId)> = std::collections::HashMap::new();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back(from);
     visited.insert(from);

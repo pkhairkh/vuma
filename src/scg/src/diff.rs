@@ -14,7 +14,7 @@
 //! Three-way merge enables combining independent changes from two branches
 //! relative to a common base.
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::callgraph::CallGraph;

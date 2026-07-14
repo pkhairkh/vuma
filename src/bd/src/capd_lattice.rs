@@ -37,7 +37,7 @@
 //! the current context.
 
 use crate::capd::{CapD, Capability, Condition};
-use hashbrown::HashSet;
+use std::collections::HashSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@
 //! satisfying the sub also satisfies the sup, but not necessarily vice versa.
 
 use crate::reld::{DepKind, FlowPolicy, RelD, Relation, TemporalKind};
-use hashbrown::HashSet;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
