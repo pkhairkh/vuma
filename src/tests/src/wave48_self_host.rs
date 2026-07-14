@@ -1,7 +1,7 @@
-//! # Wave 48 — Task 7-a + Task 7-b: Multi-module compile + bootstrap self-host test
+//! # Wave 48 — Task 7-a + Task 7-b + Task 7-c: Multi-module compile + bootstrap self-host test
 //!
 //! Implements the end-to-end test coverage required by TASKS.md Wave 48
-//! `[BOOT-SELF]` (post-Task 7-a + Task 7-b remediation):
+//! `[BOOT-SELF]` (post-Task 7-a + Task 7-b + Task 7-c remediation):
 //!
 //! 1. **Multi-module API smoke test** (`test_wave48_compile_modules_simple`)
 //!    — proves the `VumaCompiler::compile_modules` API and the
@@ -9,21 +9,32 @@
 //!    multi-module program (entry module + helper module linked via
 //!    `extern "C"`). Always runs (no platform gating, no `#[ignore]`).
 //!
-//! 2. **Bootstrap self-host end-to-end test** (`test_wave48_bootstrap_self_host`)
+//! 2. **Deduplication regression tests** (Task 7-c)
+//!    - `test_compile_modules_dedups_identical_fns`: 2 modules where
+//!      both define `fn helper() -> i32 { return 42; }` — should
+//!      compile successfully (no error) and the resulting binary should
+//!      run and print "42".
+//!    - `test_compile_modules_rejects_conflicting_fns`: 2 modules where
+//!      both define `fn helper()` but with different bodies — should
+//!      fail with a `VumaError` mentioning "conflicting fn definition".
+//!
+//! 3. **Bootstrap self-host end-to-end test** (`test_wave48_bootstrap_self_host`)
 //!    — the real Wave 48 contract: compile the 5 bootstrap `.vuma` files
 //!    (full_lexer + full_parser + ir_builder + codegen + elf) into a single
 //!    `vumac` ELF, run `./vumac womb/lang/hello.vuma`, then run the
 //!    emitted `a.out` and assert its stdout contains `"42"`. Currently
 //!    `#[ignore]`'d with a documented blocker — see the test's doc-comment
 //!    and TASKS.md's Wave 48 `[BOOT-SELF]` AUDIT RESOLVED note.
-//!    Task 7-b RESOLVED the original `repd` parser-coverage blocker; the
-//!    test now fails one stage later in `merge_module_asts` on duplicate
-//!    fn definitions (`store_u64`/`load_u64`/`store_u32`/`load_u32`
-//!    copy-pasted into each of the 5 bootstrap files).
+//!    Task 7-b RESOLVED the original `repd` parser-coverage blocker;
+//!    Task 7-c RESOLVED the `merge_module_asts` duplicate-fn blocker
+//!    (the bootstrap now compiles end-to-end into a 181 KB `vumac` ELF);
+//!    the test now fails one stage later — the emitted `vumac` ELF
+//!    crashes (SIGSEGV under O2, exit 1 under O0) when run on
+//!    `womb/lang/hello.vuma`.
 //!
 //! ## Platform gating
 //!
-//! Both tests are `#[cfg(target_arch = "x86_64")]`-gated because they
+//! All tests are `#[cfg(target_arch = "x86_64")]`-gated because they
 //! spawn the emitted ELF as a subprocess and assert on its exit code /
 //! stdout — only an x86_64 host can exec an x86_64 ELF natively (no
 //! qemu-user fallback in the test harness, mirroring Task 6-b's
@@ -79,10 +90,11 @@ fn workspace_root() -> std::path::PathBuf {
 ///   prints it via `print_int` and returns 0).
 ///
 /// This is the strongest assertion that does NOT depend on the bootstrap
-/// source files (which have a documented `merge_module_asts`
-/// duplicate-fn-definition blocker — see `test_wave48_bootstrap_self_host`
-/// below; the original `repd` parser-coverage blocker was RESOLVED by
-/// Task 7-b).
+/// source files (which have a documented runtime-crash blocker in the
+/// emitted `vumac` ELF — see `test_wave48_bootstrap_self_host` below;
+/// the original `repd` parser-coverage blocker was RESOLVED by Task 7-b,
+/// and the `merge_module_asts` duplicate-fn blocker was RESOLVED by
+/// Task 7-c's dedup-or-conflict policy).
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_wave48_compile_modules_simple() {
@@ -190,6 +202,243 @@ fn test_wave48_compile_modules_simple() {
 }
 
 // ===========================================================================
+// Test 1b — Deduplication of identical fn defs across modules (Task 7-c)
+// ===========================================================================
+
+/// Prove `merge_module_asts` **deduplicates** identical fn definitions
+/// across modules (Task 7-c) instead of rejecting them as a hard error.
+///
+/// Both modules define the SAME `fn helper() -> i32 { return 42; }`. The
+/// pre-Task-7-c `merge_module_asts` Pass 1 would have rejected this as a
+/// duplicate-fn hard error. The post-Task-7-c Pass 1 structurally compares
+/// the two `FnDef`s (span-agnostically, via `fn_defs_equivalent` →
+/// `serde_json` + `strip_spans`) and silently drops the second occurrence
+/// with a `vuma_log!(debug, ...)` trace.
+///
+/// Module `main_mod` declares `extern "C" { fn helper(); }` and calls
+/// `helper()` from `main`. Module `helper_mod` defines `fn helper()`. The
+/// `helper` definition is identical between modules — this would be
+/// unusual in user code (you'd normally only define `helper` once) but it
+/// mirrors the bootstrap pattern where each `.vuma` file copy-pastes a
+/// small helper preamble (`store_u64`/`load_u64`/`store_u32`/`load_u32`)
+/// at the top of the file for self-containment.
+///
+/// The test asserts:
+/// - `compile_modules` returns `Ok` (no error) — the dedup happened.
+/// - The emitted binary is a non-trivial ELF (≥64 bytes, starts with the
+///   ELF magic).
+/// - The emitted ELF, when executed natively on the x86_64 host, exits
+///   with code 0 and prints `"42"` to stdout (helper returns 42, main
+///   prints it via `print_int` and returns 0).
+///
+/// This is the strongest assertion that the dedup produces a working
+/// binary: not only does `compile_modules` not error, but the merged
+/// program still has exactly one `helper` definition that the codegen
+/// can link against, and the call from `main` resolves correctly.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_compile_modules_dedups_identical_fns() {
+    // Both modules define IDENTICAL `fn helper() -> i32 { return 42; }`.
+    // The merge step must dedup them down to a single definition.
+    let helper_src = r#"
+        fn helper() -> i32 {
+            return 42;
+        }
+    "#;
+
+    // Module 1: entry point. Declares `helper` as extern (to be resolved
+    // against the local `fn helper` definition during the merge step).
+    // ALSO defines the same `fn helper` body — this is the duplicate
+    // that the merge step must dedup, not reject.
+    let main_src = format!(
+        r#"
+        extern "C" {{
+            fn helper() -> i32;
+        }}
+
+        {}
+
+        fn main() -> i32 {{
+            // Call helper() — both modules define it identically; the
+            // merge step dedups down to one definition, the extern decl
+            // is stripped (because a real `fn helper` exists), and the
+            // backend emits a local call that resolves to helper's body.
+            x: i32 = helper();
+            print_int(x);
+            print_newline();
+            return 0;
+        }}
+        "#,
+        helper_src
+    );
+
+    let modules: Vec<(String, String)> = vec![
+        ("main.vuma".to_string(), main_src),
+        ("helper.vuma".to_string(), helper_src.to_string()),
+    ];
+
+    // Use O0 to disable the inliner (mirrors test_wave48_compile_modules_simple).
+    let mut config = CompileConfig::default();
+    config.opt_level = vuma::pipeline::OptLevel::O0;
+
+    let output = VumaCompiler::with_config(config)
+        .compile_modules(&modules)
+        .unwrap_or_else(|errors| {
+            for e in &errors {
+                eprintln!(
+                    "[wave48 dedup identical] error: {}",
+                    e
+                );
+            }
+            panic!(
+                "wave48 dedup identical: compilation failed with {} error(s) (see stderr) — \
+                 expected Ok because the two `fn helper` definitions are byte-identical and \
+                 should be deduplicated, not rejected",
+                errors.len()
+            );
+        });
+
+    assert!(
+        output.binary.len() >= 64,
+        "wave48 dedup identical: emitted ELF is only {} bytes — expected ≥64",
+        output.binary.len()
+    );
+    assert_eq!(
+        &output.binary[0..4],
+        b"\x7fELF",
+        "wave48 dedup identical: emitted bytes do not start with the ELF magic — got {:?}",
+        &output.binary[0..4]
+    );
+
+    let stdout = execute_elf_bytes(&output.binary, &[]).unwrap_or_else(|e| {
+        panic!(
+            "wave48 dedup identical: failed to execute emitted ELF — {}",
+            e
+        );
+    });
+    assert!(
+        stdout.contains("42"),
+        "wave48 dedup identical: emitted ELF ran but did not print \"42\" on stdout — \
+         got stdout = {:?}",
+        stdout
+    );
+
+    eprintln!(
+        "wave48 dedup identical: OK — merged 2 modules with identical `fn helper` defs into \
+         {}-byte ELF, stdout = {:?} (contains \"42\" ✓)",
+        output.binary.len(),
+        stdout
+    );
+}
+
+// ===========================================================================
+// Test 1c — Rejection of conflicting fn defs across modules (Task 7-c)
+// ===========================================================================
+
+/// Prove `merge_module_asts` **rejects** conflicting fn definitions
+/// across modules (Task 7-c) with a `VumaError::AstToScg` mentioning
+/// "conflicting fn definition".
+///
+/// Both modules define `fn helper() -> i32` but with DIFFERENT bodies:
+/// module 1 returns `42`, module 2 returns `99`. The post-Task-7-c Pass 1
+/// structurally compares the two `FnDef`s (span-agnostically) and,
+/// finding them NOT equivalent, emits a hard `VumaError::AstToScg` with a
+/// clear message naming the conflicting fn. This is the real "duplicate
+/// symbol" case the codegen cannot link — two different bodies for the
+/// same name would produce a malformed ELF.
+///
+/// The test asserts:
+/// - `compile_modules` returns `Err(errors)` (NOT `Ok`).
+/// - The error vec has at least one `VumaError::AstToScg` whose `message`
+///   contains the substring `"conflicting fn definition"` (the exact
+///   wording the doc-comment of `merge_module_asts` promises).
+///
+/// This test does NOT execute the binary (it would never be emitted —
+/// compilation fails before codegen), so it does not strictly need the
+/// `#[cfg(target_arch = "x86_64")]` gate. We keep the gate for
+/// consistency with the rest of the wave48_self_host module and to avoid
+/// accidentally exercising the AArch64 fallback path on non-x86_64 hosts.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_compile_modules_rejects_conflicting_fns() {
+    // Module 1: defines `fn helper` returning 42.
+    let main_src = r#"
+        extern "C" {
+            fn helper() -> i32;
+        }
+
+        fn helper() -> i32 {
+            return 42;
+        }
+
+        fn main() -> i32 {
+            x: i32 = helper();
+            print_int(x);
+            print_newline();
+            return 0;
+        }
+    "#;
+
+    // Module 2: defines `fn helper` with a DIFFERENT body (returns 99
+    // instead of 42). Same signature, different body — this is a real
+    // conflict that the merge step must reject.
+    let helper_src = r#"
+        fn helper() -> i32 {
+            return 99;
+        }
+    "#;
+
+    let modules: Vec<(String, String)> = vec![
+        ("main.vuma".to_string(), main_src.to_string()),
+        ("helper.vuma".to_string(), helper_src.to_string()),
+    ];
+
+    let config = CompileConfig::default();
+    let result = VumaCompiler::with_config(config).compile_modules(&modules);
+
+    let errors = match result {
+        Ok(output) => {
+            panic!(
+                "wave48 conflict reject: expected compile_modules to FAIL with a `conflicting fn \
+                 definition` error (because the two `fn helper` bodies differ), but it succeeded \
+                 and emitted a {}-byte ELF — the dedup logic incorrectly treated the conflicting \
+                 definitions as identical",
+                output.binary.len()
+            );
+        }
+        Err(errors) => errors,
+    };
+
+    // The error vec must contain at least one AstToScg variant whose
+    // message mentions "conflicting fn definition" (the exact wording
+    // promised by `merge_module_asts`'s Pass 1 conflict arm).
+    let has_conflict_error = errors.iter().any(|e| match e {
+        vuma::pipeline::VumaError::AstToScg { message } => {
+            message.contains("conflicting fn definition")
+        }
+        _ => false,
+    });
+    assert!(
+        has_conflict_error,
+        "wave48 conflict reject: compile_modules returned Err (good) but the error vec does NOT \
+         contain any `VumaError::AstToScg` whose message mentions \"conflicting fn definition\". \
+         Got {} error(s):{:?}",
+        errors.len(),
+        errors
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+    );
+
+    eprintln!(
+        "wave48 conflict reject: OK — compile_modules correctly rejected the conflicting `fn \
+         helper` definitions with {} error(s) (the first one mentions \"conflicting fn \
+         definition\")",
+        errors.len()
+    );
+}
+
+// ===========================================================================
 // Test 2 — Bootstrap self-host end-to-end (currently #[ignore]'d)
 // ===========================================================================
 
@@ -216,7 +465,7 @@ fn test_wave48_compile_modules_simple() {
 /// 7. After the bootstrap runs, find `a.out` in the bootstrap's CWD,
 ///    `chmod 0o755`, run it, assert stdout contains `"42"`.
 ///
-/// ## Current blocker (why this test is `#[ignore]`'d)
+/// ## Blocker history (why this test is `#[ignore]`'d)
 ///
 /// ### RESOLVED by Task 7-b: the `repd` parser-coverage blocker
 ///
@@ -235,35 +484,16 @@ fn test_wave48_compile_modules_simple() {
 /// `test_capd_as_identifier_in_let`, `test_reld_as_identifier_in_let`,
 /// `test_repd_as_bd_directive_still_works`).
 ///
-/// After the Task 7-b parser fix, all 5 bootstrap files parse cleanly
-/// (verified: `cargo run --bin vuma -- run --isa x86_64
-/// womb/lang/{full_lexer,ir_builder}.vuma` no longer emits any
-/// `ParseError`).
+/// ### RESOLVED by Task 7-c: the `merge_module_asts` duplicate-fn blocker
 ///
-/// ### NEW blocker: duplicate fn definitions across bootstrap modules
-///
-/// With parsing unblocked, `compile_modules` now reaches the
-/// `merge_module_asts` step (`src/pipeline.rs:5424`) and fails there:
-///
-/// ```text
-/// [ast-to-scg] compile_modules: duplicate fn definition 'store_u64' across
-///   modules — each function name must be defined in at most one module
-/// [ast-to-scg] compile_modules: duplicate fn definition 'load_u64' across
-///   modules — each function name must be defined in at most one module
-/// [ast-to-scg] compile_modules: duplicate fn definition 'store_u32' across
-///   modules — each function name must be defined in at most one module
-/// [ast-to-scg] compile_modules: duplicate fn definition 'load_u32' across
-///   modules — each function name must be defined in at most one module
-///   ... (14 errors total)
-/// ```
-///
-/// Root cause: each of the 5 bootstrap files copy-pastes the same 4
-/// helper fns (`store_u64`, `load_u64`, `store_u32`, `load_u32`) at the
-/// top of the file as a self-contained preamble. `merge_module_asts`'s
-/// Pass 1 (`src/pipeline.rs:5429-5448`) treats same-name fn definitions
-/// across modules as a hard error (a conservative policy that catches
-/// real conflicts but rejects the legitimate bootstrap pattern of
-/// identical-copy preamble helpers).
+/// After Task 7-b unblocked parsing, `compile_modules` reached the
+/// `merge_module_asts` step (`src/pipeline.rs:5424`) and failed there on
+/// duplicate fn definitions: each of the 5 bootstrap files copy-pastes
+/// the same 4 helper fns (`store_u64`, `load_u64`, `store_u32`,
+/// `load_u32`) at the top of the file as a self-contained preamble (18
+/// occurrences total → 14 duplicate-fn errors). The pre-Task-7-c Pass 1
+/// (`src/pipeline.rs:5429-5448` in the old revision) rejected every
+/// duplicate as a hard error.
 ///
 /// Site map of the duplicates (rg `^fn (store_u64|load_u64|store_u32|load_u32)`):
 ///
@@ -288,40 +518,94 @@ fn test_wave48_compile_modules_simple() {
 /// womb/lang/elf.vuma:31          fn store_u32(...)
 /// ```
 ///
-/// ## Possible fixes (out of scope for Task 7-b)
+/// Task 7-c replaced the hard-reject policy with a **dedup-or-conflict**
+/// policy in `merge_module_asts` Pass 1: identical duplicates (modulo
+/// source spans — compared via `fn_defs_equivalent` → `serde_json` +
+/// `strip_spans`) are silently dropped with a `vuma_log!(debug, ...)`
+/// trace; conflicting duplicates (same name, different signature or
+/// body) still produce a hard `VumaError::AstToScg`. See
+/// `src/pipeline.rs:fn merge_module_asts` and the new helpers
+/// `fn_defs_equivalent` / `strip_spans` for the implementation, and the
+/// regression tests `test_compile_modules_dedups_identical_fns` /
+/// `test_compile_modules_rejects_conflicting_fns` in this file for the
+/// pinning tests. With the dedup in place, `compile_modules` successfully
+/// links the 5 bootstrap files into a 181 KB ELF (104 IR functions, 8834
+/// IR instructions; verified end-to-end via `vuma link`).
 ///
-/// 1. **`merge_module_asts` deduplication** — extend Pass 1 to deduplicate
-///    identical fn definitions (same name + same signature + same body)
-///    instead of rejecting them.  This is the principled fix: the
-///    bootstrap's copy-paste pattern is a deliberate "each module is
-///    self-contained" design, and `merge_module_asts` should honour it
-///    by keeping only one copy of each identical preamble helper.
-///    A simple version: keep the first definition and warn (or silently
-///    drop) subsequent identical definitions; a stricter version: compare
-///    bodies (normalised) and error only on conflicting definitions.
-///    This is a `src/pipeline.rs` change, not a parser change, and is
-///    tracked as the priority follow-up #1 in TASKS.md.
+/// ### CURRENT blocker (Task 7-c): emitted `vumac` ELF crashes at runtime
 ///
-/// 2. **Bootstrap-source refactor** — extract the shared helpers into a
-///    new `womb/lang/shared.vuma` module and `import` it from each of
-///    the 5 bootstrap files.  This requires the bootstrap source to
-///    support `import` semantics (which the bootstrap parser does
-///    implement for `womb/lang/full_lexer.vuma`'s own module system, but
-///    the production `compile_modules` API does not yet resolve
-///    `import "..."` paths between the bundled modules).  Out of scope.
+/// With Task 7-c's dedup in place, `compile_modules` succeeds and emits a
+/// `vumac` ELF. But when that ELF is run on `womb/lang/hello.vuma`, it
+/// **crashes**:
 ///
-/// ## How to run this test (after the new blocker is fixed)
+/// ```text
+/// $ vuma link womb/lang/{full_lexer,full_parser,ir_builder,codegen,elf}.vuma -o vumac
+/// Linked 5 file(s) -> vumac (181312 bytes, 104 IR functions, 8834 IR instructions)
+///   codegen-opt  69070ms    ← O2 codegen-opt pass takes ~69 seconds
+/// $ ./vumac womb/lang/hello.vuma
+/// Segmentation fault (exit code 139 = 128 + SIGSEGV)
+/// ```
+///
+/// - **O2 (default `CompileConfig`)**: `vumac` exits with code 139
+///   (SIGSEGV) — no stdout, no stderr, no `a.out` produced. The crash
+///   happens somewhere inside the bootstrap's lex → parse → IR → codegen
+///   → ELF pipeline (stages 2-9 of `main()` in `full_lexer.vuma:671`);
+///   since no `a.out` is produced, the crash is before
+///   `write_elf64(...)` returns (stage 9).
+/// - **O0 (`--opt-level O0`)**: `vumac` exits with code 1 (NOT a
+///   segfault) — the bootstrap's `main()` returns 1 from one of its
+///   failure paths (lex/parse/ir/codegen stage returned 0 / failed).
+///   No `a.out` produced. So the O2 segfault is a **separate,
+///   additional** codegen-opt-pass bug layered on top of the O0
+///   bootstrap-pipeline failure.
+/// - The crash reproduces with **any** input file (verified with both
+///   `womb/lang/hello.vuma` and a minimal `fn main() -> i32 { return 7; }`
+///   file), so it's not input-specific.
+/// - The host `vuma` compiler runs `womb/lang/hello.vuma` correctly
+///   (prints `42`), so the crash is in the bootstrap's own pipeline
+///   (lex/parse/ir/codegen/elf), NOT in the host's runtime stubs
+///   (`__vuma_alloc` / `open` / `read` / `print_int` / etc. — all
+///   verified by `wave47_bootstrap` tests) or in the host's codegen for
+///   simple programs.
+///
+/// Possible root causes (out of scope for Task 7-c — to be investigated
+/// in a future wave):
+///
+/// 1. **Bootstrap pipeline bug** — one of `full_lex`, `parse`,
+///    `irb_build_main`, `codegen_emit`, or `write_elf64` has a runtime
+///    crash bug (null deref, OOB access, etc.) on the `hello.vuma`
+///    input. Most likely candidate: `codegen_emit` (the most complex
+///    stage, with the most opportunity for codegen-table mistakes).
+/// 2. **Host codegen bug on complex inputs** — the host vuma's codegen
+///    (especially the O2 codegen-opt pass that takes 69 seconds, which
+///    is unusually long) may miscompile some construct in the bootstrap
+///    source, producing a `vumac` binary that crashes. The O0-vs-O2
+///    difference (O0 exits 1, O2 segfaults) strongly suggests the
+///    codegen-opt pass introduces a miscompilation.
+/// 3. **Bootstrap runtime-stub mismatch** — the bootstrap calls
+///    `__vuma_alloc` / `__vuma_free` / `__vuma_argc` / `__vuma_argv` /
+///    `open` / `read` / `close` / `write` with sizes / arg counts that
+///    don't match what the host codegen's runtime stubs expect. (Less
+///    likely — wave47 tests verify the stubs work for minimal programs.)
+///
+/// ## How to run this test (still `#[ignore]`'d pending the runtime
+/// crash blocker)
 ///
 /// ```text
 /// cargo test -p vuma-tests --lib wave48_self_host::test_wave48_bootstrap_self_host -- --ignored
 /// ```
 #[cfg(target_arch = "x86_64")]
 #[test]
-#[ignore = "blocked by `merge_module_asts` duplicate-fn-definition rejection: the 5 bootstrap \
-            files each copy-paste `store_u64`/`load_u64`/`store_u32`/`load_u32` as a self-contained \
-            preamble (14 errors total). The original `repd` parser-coverage blocker was RESOLVED \
-            by Task 7-b (parser context-awareness for `TokenKind::Bd`/`Repd`/`Capd`/`Reld`). \
-            See TASKS.md Wave 48 [BOOT-SELF] for the new-blocker write-up."]
+#[ignore = "blocked by a runtime crash in the emitted `vumac` ELF (Task 7-c state): with the \
+            Task 7-b parser fix and the Task 7-c `merge_module_asts` dedup in place, `compile_modules` \
+            successfully links the 5 bootstrap files into a 181 KB ELF, but the resulting `vumac` \
+            binary crashes (SIGSEGV, exit 139) when run on `womb/lang/hello.vuma` under the default O2 \
+            opt level — no stdout, no stderr, no `a.out` produced. Under O0 the binary instead exits \
+            with code 1 (one of the bootstrap's lex/parse/IR/codegen stages returns a failure code), \
+            suggesting the O2 codegen-opt pass additionally miscompiles something. The crash reproduces \
+            with any input file (not specific to hello.vuma). The original `repd` parser-coverage \
+            blocker (Task 7-b) and the `merge_module_asts` duplicate-fn blocker (Task 7-c) are both \
+            RESOLVED. See TASKS.md Wave 48 [BOOT-SELF] for the new-blocker write-up."]
 fn test_wave48_bootstrap_self_host() {
     let workspace_root = workspace_root();
     let womb_lang = workspace_root.join("womb").join("lang");
