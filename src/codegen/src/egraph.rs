@@ -1371,21 +1371,15 @@ impl ProfileData {
     /// This is the Wave 12 PGO loading mechanism. Profile files are
     /// produced by instrumented runs and consumed by the optimizer to
     /// bias e-graph extraction toward hot-path optimization.
+    ///
+    /// Wave 43 serde-migration: previously used `serde_json::from_str::<serde_json::Value>`
+    /// to parse the JSON into a generic value tree, then navigated it with
+    /// `.get("hotness").and_then(|h| h.as_object())`. Now uses a hand-written
+    /// minimal JSON parser (`parse_profile_json`) that understands only the
+    /// shape `{"hotness": {"<id>": <u64>, ...}}`. The on-disk JSON format
+    /// is unchanged.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let v: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| format!("invalid profile JSON: {}", e))?;
-        let hotness_map = v.get("hotness")
-            .and_then(|h| h.as_object())
-            .ok_or("missing 'hotness' object")?;
-        let mut hotness = std::collections::HashMap::new();
-        for (key, val) in hotness_map {
-            let id: EClassId = key.parse()
-                .map_err(|e| format!("invalid vreg id '{}': {}", key, e))?;
-            let count = val.as_u64()
-                .ok_or(format!("hotness for {} is not a number", key))?;
-            hotness.insert(id, count as u32);
-        }
-        Ok(Self { hotness })
+        parse_profile_json(json).map(|hotness| Self { hotness })
     }
 
     /// Serialize profile data to a JSON string.
@@ -1406,6 +1400,360 @@ impl ProfileData {
     pub fn has_data(&self) -> bool {
         !self.hotness.is_empty()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hand-written JSON parser for PGO profile data (Wave 43 serde-migration)
+// ---------------------------------------------------------------------------
+//
+// Parses the shape `{"hotness": {"<id>": <u64>, ...}}`. This is a minimal
+// recursive descent parser — it does NOT implement the full JSON grammar.
+// It handles only:
+//   - The literal token `"hotness"` as the top-level key
+//   - String-literal keys (the e-class/vreg IDs as ASCII strings)
+//   - Non-negative integer values
+//   - Whitespace between tokens
+//   - Optional trailing commas
+//
+// All other JSON constructs (nested objects other than `hotness`, arrays,
+// floats, escapes in strings, etc.) are rejected. If the format ever needs
+// to expand, this parser should be replaced with a full JSON value type.
+//
+// The on-disk JSON format produced by `ProfileData::to_json` is unchanged.
+
+fn parse_profile_json(json: &str) -> Result<HashMap<EClassId, u32>, String> {
+    let bytes = json.as_bytes();
+    let mut pos = 0;
+    let mut hotness: HashMap<EClassId, u32> = HashMap::new();
+
+    skip_ws(bytes, &mut pos);
+    expect_byte(bytes, &mut pos, b'{')?;
+    skip_ws(bytes, &mut pos);
+
+    // Allow empty top-level object: `{}`
+    if peek_byte(bytes, pos) == Some(b'}') {
+        pos += 1;
+        // No hotness key — return empty map (caller treats as "no profile").
+        return Ok(hotness);
+    }
+
+    // Iterate top-level key-value pairs.
+    loop {
+        skip_ws(bytes, &mut pos);
+        let key = parse_json_string(bytes, &mut pos)?;
+        skip_ws(bytes, &mut pos);
+        expect_byte(bytes, &mut pos, b':')?;
+        skip_ws(bytes, &mut pos);
+
+        if key == "hotness" {
+            // Parse the inner hotness map.
+            expect_byte(bytes, &mut pos, b'{')?;
+            skip_ws(bytes, &mut pos);
+            if peek_byte(bytes, pos) == Some(b'}') {
+                pos += 1;
+            } else {
+                loop {
+                    skip_ws(bytes, &mut pos);
+                    let id_str = parse_json_string(bytes, &mut pos)?;
+                    skip_ws(bytes, &mut pos);
+                    expect_byte(bytes, &mut pos, b':')?;
+                    skip_ws(bytes, &mut pos);
+                    let count = parse_json_u64(bytes, &mut pos)?;
+                    let id: EClassId = id_str.parse().map_err(|e| {
+                        format!("invalid vreg id '{}': {}", id_str, e)
+                    })?;
+                    if count > u32::MAX as u64 {
+                        return Err(format!(
+                            "hotness for {} exceeds u32::MAX ({})",
+                            id_str, count
+                        ));
+                    }
+                    hotness.insert(id, count as u32);
+                    skip_ws(bytes, &mut pos);
+                    match peek_byte(bytes, pos) {
+                        Some(b',') => {
+                            pos += 1;
+                            skip_ws(bytes, &mut pos);
+                            // Allow trailing comma.
+                            if peek_byte(bytes, pos) == Some(b'}') {
+                                pos += 1;
+                                break;
+                            }
+                        }
+                        Some(b'}') => {
+                            pos += 1;
+                            break;
+                        }
+                        _ => return Err(format!(
+                            "expected ',' or '}}' in hotness object at byte {}",
+                            pos
+                        )),
+                    }
+                }
+            }
+        } else {
+            // Unknown top-level key — skip its value (best-effort forward compat).
+            skip_json_value(bytes, &mut pos)?;
+        }
+
+        skip_ws(bytes, &mut pos);
+        match peek_byte(bytes, pos) {
+            Some(b',') => {
+                pos += 1;
+                skip_ws(bytes, &mut pos);
+                // Allow trailing comma.
+                if peek_byte(bytes, pos) == Some(b'}') {
+                    pos += 1;
+                    break;
+                }
+            }
+            Some(b'}') => {
+                pos += 1;
+                break;
+            }
+            _ => return Err(format!(
+                "expected ',' or '}}' at top level at byte {}",
+                pos
+            )),
+        }
+    }
+
+    // Allow trailing whitespace; no trailing characters allowed.
+    skip_ws(bytes, &mut pos);
+    if pos != bytes.len() {
+        return Err(format!(
+            "trailing characters after top-level object at byte {} (len={})",
+            pos,
+            bytes.len()
+        ));
+    }
+    Ok(hotness)
+}
+
+fn skip_ws(bytes: &[u8], pos: &mut usize) {
+    while *pos < bytes.len() {
+        match bytes[*pos] {
+            b' ' | b'\t' | b'\n' | b'\r' => *pos += 1,
+            _ => break,
+        }
+    }
+}
+
+fn peek_byte(bytes: &[u8], pos: usize) -> Option<u8> {
+    bytes.get(pos).copied()
+}
+
+fn expect_byte(bytes: &[u8], pos: &mut usize, expected: u8) -> Result<(), String> {
+    if *pos >= bytes.len() {
+        return Err(format!("expected {:?} but reached end of input", expected as char));
+    }
+    if bytes[*pos] != expected {
+        return Err(format!(
+            "expected {:?} at byte {} but found {:?}",
+            expected as char,
+            *pos,
+            bytes[*pos] as char
+        ));
+    }
+    *pos += 1;
+    Ok(())
+}
+
+/// Parse a JSON string literal. Supports the common escapes (`\"`, `\\`,
+/// `\/`, `\b`, `\f`, `\/`, `\n`, `\r`, `\t`, and `\uXXXX`). Does NOT
+/// validate UTF-8 well-formedness beyond what `String::from_utf8` provides.
+fn parse_json_string(bytes: &[u8], pos: &mut usize) -> Result<String, String> {
+    expect_byte(bytes, pos, b'"')?;
+    let mut out = Vec::new();
+    while *pos < bytes.len() {
+        let b = bytes[*pos];
+        *pos += 1;
+        match b {
+            b'"' => {
+                return String::from_utf8(out).map_err(|e| {
+                    format!("invalid UTF-8 in JSON string: {}", e)
+                });
+            }
+            b'\\' => {
+                if *pos >= bytes.len() {
+                    return Err("trailing backslash in JSON string".to_string());
+                }
+                let esc = bytes[*pos];
+                *pos += 1;
+                match esc {
+                    b'"' => out.push(b'"'),
+                    b'\\' => out.push(b'\\'),
+                    b'/' => out.push(b'/'),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'u' => {
+                        if *pos + 4 > bytes.len() {
+                            return Err("truncated \\uXXXX escape in JSON string".to_string());
+                        }
+                        let hex = std::str::from_utf8(&bytes[*pos..*pos + 4])
+                            .map_err(|_| "invalid UTF-8 in \\uXXXX escape".to_string())?;
+                        let code = u32::from_str_radix(hex, 16)
+                            .map_err(|e| format!("invalid \\uXXXX escape: {}", e))?;
+                        *pos += 4;
+                        if let Some(ch) = char::from_u32(code) {
+                            let mut buf = [0u8; 4];
+                            let s = ch.encode_utf8(&mut buf);
+                            out.extend_from_slice(s.as_bytes());
+                        } else {
+                            return Err(format!("invalid Unicode codepoint U+{:04X}", code));
+                        }
+                    }
+                    _ => return Err(format!("invalid JSON escape '\\{}'", esc as char)),
+                }
+            }
+            // Reject raw control characters (JSON requires they be escaped).
+            0x00..=0x1f => {
+                return Err(format!(
+                    "raw control character (0x{:02X}) in JSON string at byte {}",
+                    b, *pos - 1
+                ));
+            }
+            _ => out.push(b),
+        }
+    }
+    Err("unterminated JSON string".to_string())
+}
+
+/// Parse a JSON number as a u64. Rejects negatives, floats, and exponents.
+fn parse_json_u64(bytes: &[u8], pos: &mut usize) -> Result<u64, String> {
+    let start = *pos;
+    if *pos < bytes.len() && bytes[*pos] == b'-' {
+        return Err("negative numbers are not allowed in hotness values".to_string());
+    }
+    while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    if *pos == start {
+        return Err(format!("expected digit at byte {}", start));
+    }
+    let s = std::str::from_utf8(&bytes[start..*pos])
+        .map_err(|_| "invalid UTF-8 in JSON number".to_string())?;
+    s.parse::<u64>()
+        .map_err(|e| format!("invalid integer '{}': {}", s, e))
+}
+
+/// Best-effort skip of any JSON value (used for unknown top-level keys).
+/// Supports objects, arrays, strings, numbers, true/false/null.
+fn skip_json_value(bytes: &[u8], pos: &mut usize) -> Result<(), String> {
+    skip_ws(bytes, pos);
+    if *pos >= bytes.len() {
+        return Err("expected JSON value but reached end of input".to_string());
+    }
+    match bytes[*pos] {
+        b'{' => {
+            *pos += 1;
+            skip_ws(bytes, pos);
+            if peek_byte(bytes, *pos) == Some(b'}') {
+                *pos += 1;
+                return Ok(());
+            }
+            loop {
+                skip_ws(bytes, pos);
+                let _key = parse_json_string(bytes, pos)?;
+                skip_ws(bytes, pos);
+                expect_byte(bytes, pos, b':')?;
+                skip_json_value(bytes, pos)?;
+                skip_ws(bytes, pos);
+                match peek_byte(bytes, *pos) {
+                    Some(b',') => {
+                        *pos += 1;
+                        skip_ws(bytes, pos);
+                        if peek_byte(bytes, *pos) == Some(b'}') {
+                            *pos += 1;
+                            return Ok(());
+                        }
+                    }
+                    Some(b'}') => {
+                        *pos += 1;
+                        return Ok(());
+                    }
+                    _ => return Err(format!("expected ',' or '}}' at byte {}", *pos)),
+                }
+            }
+        }
+        b'[' => {
+            *pos += 1;
+            skip_ws(bytes, pos);
+            if peek_byte(bytes, *pos) == Some(b']') {
+                *pos += 1;
+                return Ok(());
+            }
+            loop {
+                skip_json_value(bytes, pos)?;
+                skip_ws(bytes, pos);
+                match peek_byte(bytes, *pos) {
+                    Some(b',') => {
+                        *pos += 1;
+                        skip_ws(bytes, pos);
+                        if peek_byte(bytes, *pos) == Some(b']') {
+                            *pos += 1;
+                            return Ok(());
+                        }
+                    }
+                    Some(b']') => {
+                        *pos += 1;
+                        return Ok(());
+                    }
+                    _ => return Err(format!("expected ',' or ']' at byte {}", *pos)),
+                }
+            }
+        }
+        b'"' => {
+            let _ = parse_json_string(bytes, pos)?;
+            Ok(())
+        }
+        b't' => {
+            expect_literal(bytes, pos, "true")
+        }
+        b'f' => {
+            expect_literal(bytes, pos, "false")
+        }
+        b'n' => {
+            expect_literal(bytes, pos, "null")
+        }
+        b'0'..=b'9' | b'-' => {
+            // Skip a number — accept leading '-', digits, '.', 'e', 'E', '+', '-'.
+            if *pos < bytes.len() && bytes[*pos] == b'-' {
+                *pos += 1;
+            }
+            while *pos < bytes.len()
+                && (bytes[*pos].is_ascii_digit()
+                    || matches!(bytes[*pos], b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                *pos += 1;
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "unexpected character {:?} at byte {}",
+            bytes[*pos] as char, *pos
+        )),
+    }
+}
+
+fn expect_literal(bytes: &[u8], pos: &mut usize, lit: &str) -> Result<(), String> {
+    if *pos + lit.len() > bytes.len() {
+        return Err(format!("expected '{}' but reached end of input", lit));
+    }
+    if &bytes[*pos..*pos + lit.len()] != lit.as_bytes() {
+        return Err(format!(
+            "expected '{}' at byte {} but found '{}'",
+            lit,
+            *pos,
+            std::str::from_utf8(&bytes[*pos..*pos + lit.len().min(bytes.len() - *pos)])
+                .unwrap_or("<invalid utf-8>")
+        ));
+    }
+    *pos += lit.len();
+    Ok(())
 }
 
 #[cfg(test)]

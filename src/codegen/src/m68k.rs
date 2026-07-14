@@ -66,7 +66,7 @@ use std::fmt;
 
 /// m68k general-purpose registers: 8 data (D0–D7) and 8 address (A0–A7).
 /// A7 is the stack pointer.  Encodings 0–7 are D0–D7, 8–15 are A0–A7.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Gpr {
     D0 = 0, D1 = 1, D2 = 2, D3 = 3, D4 = 4, D5 = 5, D6 = 6, D7 = 7,

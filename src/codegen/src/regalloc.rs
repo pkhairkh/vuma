@@ -99,7 +99,7 @@ pub struct Arm64RegAllocResult {
 /// - V0–V7: caller-saved (argument / result)
 /// - V8–V15: callee-saved (only lower 64 bits, D8–D15, must be preserved)
 /// - V16–V31: caller-saved temporaries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(missing_docs)]
 pub enum SimdFpRegister {
     V0,
@@ -252,7 +252,7 @@ impl std::fmt::Display for SimdFpRegister {
 
 /// A physical register on ARM64 — either a general-purpose register or a
 /// SIMD/FP register.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PhysReg {
     /// General-purpose register.
     Gpr(Register),
@@ -293,7 +293,7 @@ impl std::fmt::Display for PhysReg {
 
 /// The class of a virtual register, determining which physical register
 /// pool it can be allocated from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegClass {
     /// General-purpose integer register (X0–X30).
     Gpr,
@@ -310,7 +310,7 @@ pub enum RegClass {
 ///
 /// Positions are sequential instruction indices assigned during a linear
 /// pass over all blocks in a function.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveInterval {
     /// The virtual register ID.
     pub vreg: IRValueId,
@@ -480,7 +480,7 @@ impl LiveInterval {
 /// Contains the mapping from virtual registers to physical registers,
 /// spill slot assignments, and metadata needed for prologue/epilogue
 /// generation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AllocationResult {
     /// (Wave 21) Name of the function this result applies to.
     /// Used by the emit path to match AllocationResults to IRFunctions.
@@ -606,7 +606,7 @@ impl Default for AllocationResult {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A spill slot on the stack, identified by an index and byte size.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpillSlot {
     /// Slot index (sequential).
     pub index: u32,
@@ -641,7 +641,7 @@ impl SpillSlot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A spill or reload instruction to be inserted into the instruction stream.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpillCode {
     /// Spill (store) a register to its stack slot.
     Spill {
@@ -2777,7 +2777,7 @@ impl From<crate::backend::RegClass> for RegClass {
 ///
 /// Uses `backend::PhysicalReg` (class + index) instead of target-specific
 /// register enums, making it portable across all supported ISAs.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegAllocResult {
     /// Mapping from virtual register ID to physical register.
     pub vreg_to_preg: HashMap<IRValueId, crate::backend::PhysicalReg>,
@@ -2871,7 +2871,7 @@ impl Default for RegAllocResult {
 /// A target-agnostic spill slot on the stack.
 ///
 /// Uses `backend::RegClass` instead of the ARM64-specific `RegClass`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenericSpillSlot {
     /// Slot index (sequential).
     pub index: u32,
@@ -2908,7 +2908,7 @@ impl GenericSpillSlot {
 ///
 /// Uses `backend::PhysicalReg` and `GenericSpillSlot` so it is not tied
 /// to any specific ISA.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenericSpillCode {
     /// Spill (store) a register to its stack slot.
     Spill {
@@ -2956,7 +2956,7 @@ impl std::fmt::Display for GenericSpillCode {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Information about a natural loop in the CFG.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LoopInfo {
     /// The header block label (target of the back edge).
     pub header: String,
@@ -3402,7 +3402,7 @@ impl LiveInterval {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The location of a virtual register's value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VregLocation {
     /// The value is in a physical register.
     Register {
@@ -3418,7 +3418,7 @@ pub enum VregLocation {
 }
 
 /// State of a physical register in the cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedRegState {
     /// The vreg currently occupying this register, if any.
     pub vreg: Option<IRValueId>,
@@ -3444,7 +3444,7 @@ pub struct CachedRegState {
 /// The `TargetAgnosticRegAlloc` can produce a `GreedyRegCachePlan` that
 /// pre-assigns frequently-used vregs to registers. The cache then manages
 /// the dynamic state as ISel processes instructions.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GreedyRegCache {
     /// Current location of each vreg.
     vreg_locs: HashMap<IRValueId, VregLocation>,
@@ -4191,7 +4191,7 @@ impl TargetAgnosticRegAlloc {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Per-instruction liveness information.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LivenessInfo {
     /// Set of vregs that are live at the START of this instruction.
     pub live_in: HashSet<IRValueId>,
@@ -4202,7 +4202,7 @@ pub struct LivenessInfo {
 }
 
 /// Result of liveness analysis on a function.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LivenessAnalysis {
     /// Per-block liveness: (block_label, live_in, live_out).
     pub block_liveness: HashMap<String, (HashSet<IRValueId>, HashSet<IRValueId>)>,

@@ -12,9 +12,9 @@ rust-version.workspace = true
 
 [dependencies]
 vuma-scg.workspace = true
-# TODO(wave43): remaining serde usage at src/codegen/src/mips64/mod.rs:199
-# (and 122 other sites across IR/regalloc/backend types); migrate to
-# hand-written codec. serde_json retained for EGraph::from_json (PGO profile
-# loading, src/codegen/src/egraph.rs:1375).
-serde.workspace = true
-serde_json.workspace = true
+# serde/serde_json removed in Wave 43 — all codegen IR/regalloc/backend types
+# now rely on hand-written Debug + Clone derives only. The single JSON call
+# site (`ProfileData::from_json` in `src/codegen/src/egraph.rs`) was migrated
+# to a hand-written recursive descent parser (`parse_profile_json`) that
+# understands the shape `{"hotness": {"<id>": <u64>, ...}}` — the on-disk
+# JSON format produced by `ProfileData::to_json` is unchanged.

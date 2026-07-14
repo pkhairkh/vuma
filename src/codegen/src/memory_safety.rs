@@ -40,7 +40,7 @@ use crate::scg_to_ir::{
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Memory safety violation kind, mapped to E041–E050.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MemorySafetyViolation {
     /// E041 — Use-after-free: value still live after deallocation.
     UseAfterFree {
@@ -228,7 +228,7 @@ impl fmt::Display for MemorySafetyViolation {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Configuration for memory safety checks.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MemorySafetyConfig {
     /// Enable runtime bounds checking for array accesses.
     /// When enabled, the codegen inserts bounds-check instructions before
@@ -297,7 +297,7 @@ impl MemorySafetyConfig {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The result of running memory safety analysis on a program.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MemorySafetyReport {
     /// All violations found during analysis.
     pub violations: Vec<MemorySafetyViolation>,
@@ -824,7 +824,7 @@ impl MemorySafetyAnalyzer {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Represents a site where a runtime bounds check should be inserted.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BoundsCheckSite {
     /// The function containing the access.
     pub function_name: String,

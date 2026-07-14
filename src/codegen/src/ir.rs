@@ -39,7 +39,7 @@ use std::fmt;
 /// depends on the target's pointer width (4 bytes on 32-bit targets like
 /// Wasm32/ARM32, 8 bytes on 64-bit targets like ARM64/x86_64).  All other
 /// types have fixed sizes regardless of target.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IRType {
     /// Signed 8-bit integer.
     I8,
@@ -339,7 +339,7 @@ pub fn alignment_of(t: &IRType) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Classification of how an argument or return value is passed under AAPCS64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgClass {
     /// Passed in a general-purpose (X) register.
     Integer,
@@ -415,7 +415,7 @@ pub fn classify_arg(t: &IRType) -> ArgClass {
 // ---------------------------------------------------------------------------
 
 /// Which kind of register an argument or return value occupies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegisterClass {
     /// General-purpose X register (X0–X30, SP, XZR).
     X,
@@ -433,7 +433,7 @@ impl fmt::Display for RegisterClass {
 }
 
 /// Describes where a single argument or return value is placed.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArgLocation {
     /// Index of the argument (0-based) in the argument list.
     pub index: usize,
@@ -450,7 +450,7 @@ pub struct ArgLocation {
 }
 
 /// Describes the location of the return value.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetLocation {
     /// AAPCS64 classification of the return.
     pub class: ArgClass,
@@ -464,7 +464,7 @@ pub struct RetLocation {
 }
 
 /// Complete calling-convention information for a function signature.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallingConvInfo {
     /// Location for each argument.
     pub arg_locations: Vec<ArgLocation>,
@@ -684,7 +684,7 @@ pub fn compute_calling_conv(args: &[IRType], ret: &IRType) -> CallingConvInfo {
 // ---------------------------------------------------------------------------
 
 /// A named slot in the stack frame.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackSlot {
     /// Human-readable name for this slot.
     pub name: String,
@@ -721,7 +721,7 @@ pub struct StackSlot {
 ///   └─────────────────────┘  ← SP
 /// Lower addresses
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackLayout {
     /// Total stack frame size in bytes (always 16-byte aligned).
     pub total_size: usize,
@@ -872,7 +872,7 @@ pub fn compute_stack_layout_with_info(
 // ---------------------------------------------------------------------------
 
 /// A value that can appear as an operand in an IR instruction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IRValue {
     /// A virtual register identified by a numeric ID.
     Register(u32),
@@ -947,7 +947,7 @@ impl fmt::Display for IRValue {
 // ---------------------------------------------------------------------------
 
 /// Binary operations supported by the IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOpKind {
     /// Integer addition.
     Add,
@@ -1038,7 +1038,7 @@ impl fmt::Display for BinOpKind {
 /// Each variant denotes a lane-wise arithmetic op the backends lower to a
 /// single SSE/AVX (x86_64) or NEON (aarch64) instruction.  The set is
 /// intentionally narrow — only the kinds the Wave 29 encoders cover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VectorOpKind {
     /// Lane-wise integer add.
     Add,
@@ -1059,7 +1059,7 @@ impl fmt::Display for VectorOpKind {
 }
 
 /// Unary operations supported by the IR.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOpKind {
     /// Arithmetic negation.
     Neg,
@@ -1094,7 +1094,7 @@ impl fmt::Display for UnaryOpKind {
 /// Each virtual register has a unique numeric ID and an optional human-readable
 /// name derived from the original source variable.  The ID guarantees uniqueness
 /// even when the same source name is reused in different scopes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
     /// Unique numeric identifier.
     pub id: u32,
@@ -1146,7 +1146,7 @@ impl fmt::Display for VirtualRegister {
 ///
 /// Each comparison produces a boolean result (1 or 0) stored in the
 /// destination register.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CmpKind {
     /// Equal.
     Eq,
@@ -1188,7 +1188,7 @@ impl fmt::Display for CmpKind {
 }
 
 /// Cast / reinterpretation kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CastKind {
     /// Zero-extend (e.g. u8 → u64).
     ZExt,
@@ -1232,7 +1232,7 @@ impl fmt::Display for CastKind {
 // ---------------------------------------------------------------------------
 
 /// A single IR instruction.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IRInstr {
     /// Load a value from memory: `dst = load addr + offset`
     Load {
@@ -2158,7 +2158,7 @@ pub fn generic_syscall_name(nr: u32) -> Option<&'static str> {
 
 /// A block terminator — the last "instruction" in an `IRBlock` that transfers
 /// control flow.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IRTerminator {
     /// Unconditional jump to a label.
     Jump(String),
@@ -2316,7 +2316,7 @@ impl fmt::Display for IRTerminator {
 ///
 /// Execution enters at the top and falls through each instruction.  The block
 /// always ends with exactly one terminator.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IRBlock {
     /// Block label (used as a branch target).
     pub label: String,
@@ -2392,7 +2392,7 @@ impl fmt::Display for IRBlock {
 // ---------------------------------------------------------------------------
 
 /// A function in the IR.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IRFunction {
     /// Function name (used as a symbol in the emitted binary).
     pub name: String,
@@ -2596,7 +2596,7 @@ impl fmt::Display for IRFunction {
 // ---------------------------------------------------------------------------
 
 /// A data section embedded in the emitted binary.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataSection {
     /// Section name (e.g. `"rodata"`, `"data"`, `"bss"`).
     pub name: String,
@@ -2609,7 +2609,7 @@ pub struct DataSection {
 }
 
 /// Classification of a data section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataSectionKind {
     /// Read-only data (`.rodata`).
     ReadOnly,
@@ -2624,7 +2624,7 @@ pub enum DataSectionKind {
 // ---------------------------------------------------------------------------
 
 /// A complete IR program — the top-level container.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IRProgram {
     /// Functions in the program.
     pub functions: Vec<IRFunction>,
