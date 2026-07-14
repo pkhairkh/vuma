@@ -305,7 +305,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
                 }}
                 else { if f == 99 {  // c → const, catch
                     if *(src + start + 1) == 111 { if *(src + start + 2) == 110 { if *(src + start + 3) == 115 { if *(src + start + 4) == 116 { ttype = 25; } } } }
-                    else { if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 34; } } } }
+                    else { if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 34; } } } } }
                 }}
                 else { if f == 102 {  // f → false
                     if *(src + start + 1) == 97 { if *(src + start + 2) == 108 { if *(src + start + 3) == 115 { if *(src + start + 4) == 101 { ttype = 30; } } } }
