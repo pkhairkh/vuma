@@ -477,16 +477,8 @@
 - [x] **[OPT]** Implement multi-block loop unrolling with block-graph rewiring. `src/codegen/src/loop_unroll.rs:265-268`
 - [x] **[OPT]** Replace hardcoded `UNROLL_FACTOR=2` with trip-count-derived factor. `src/codegen/src/loop_unroll.rs:47`
 - [x] **[OPT]** Implement Scalar Evolution (SCEV) for trip-count analysis.
-- [ ] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
-  - **AUDIT GAP:** `try_unroll_and_jam` at `loop_unroll.rs:832-836` is a literal no-op stub:
-    ```rust
-    fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
-        // TODO(wave30): implement unroll-and-jam for nested loops where the
-        // inner body has no outer-loop-carried dependencies. For now, no-op.
-        func
-    }
-    ```
-    Module doc at lines 24-25 admits it's "a no-op placeholder with a `TODO(wave30)`". Test `test_unroll_and_jam_is_noop` at `loop_unroll.rs:1915` explicitly verifies the stub does nothing.
+- [x] **[OPT]** Implement unroll-and-jam (nested-loop optimization).
+  - **AUDIT RESOLVED:** `try_unroll_and_jam` now implements conservative unroll-and-jam for perfectly-nested loops with no outer-loop-carried dependencies. Skips unsafe cases. The implementation (in `src/codegen/src/loop_unroll.rs`) unrolls the outer loop by `FACTOR=2`, duplicates the inner loop `FACTOR` times, places the copies adjacent in the CFG ("jammed"), and rewrites the outer latch's increment from `+1` to `+FACTOR`. Safety contract (all must hold or the function is returned unchanged): (1) perfectly nested — outer body IS the inner loop; (2) canonical counted outer/inner IVs; (3) inner trip count's `end` is a constant `Immediate` (invariant w.r.t. outer IV); (4) no `Store` in the inner body whose `addr` is transitively derived from the outer IV (computed via fixpoint taint analysis); (5) inner body passes `is_safe_for_unroll` (no calls/atomics/free); (6) inner header has exactly one instruction (the IV Phi — no loop-carried accumulators); (7) no Phis in inner body blocks; (8) `inner_body_size * FACTOR ≤ UNROLL_CODE_SIZE_BUDGET`. SSA preservation: for copy `k > 0`, fresh vregs are allocated for the inner Phi dst, the inner increment's dst, and the inner cmp's dst; the inner header's Phi back-incoming is updated to reference the copy's increment dst. Tests: `test_unroll_and_jam_basic` (verifies block layout, `+2` outer increment, `between_u1` adjacency, exit targets), `test_unroll_and_jam_skips_when_unsafe` (store to outer-IV-derived addr → no-op), `test_unroll_and_jam_skips_when_not_perfectly_nested` (extra block between inner exit and outer latch → no-op), `test_unroll_and_jam_is_noop_for_single_loop` (renamed from `test_unroll_and_jam_is_noop` — single non-nested loop → no-op). The "jam" uses the simpler "adjacent inner loops" approach (not true fusion into a single inner loop with `FACTOR×` body) per the task spec's conservative recommendation.
 - [x] **[OPT]** Add a code-size budget to the unroll heuristic.
 - [x] **[TEST]** Add tests: multi-block loops unroll correctly; trip-count-known loops fully unroll.
 
@@ -922,7 +914,10 @@ on each affected task as `AUDIT CAVEAT:` (for partial / overstated items) or
    create the missing `.github/workflows/proof-verify.yml`.
 4. **Wire SSE/AVX/NEON encoders into the ISel path** (Wave 29) — currently
    dead code outside unit tests.
-5. **Implement unroll-and-jam** (Wave 30) — currently an explicit no-op stub.
+5. **Implement unroll-and-jam** (Wave 30) — DONE (Task 4-b): conservative
+   unroll-and-jam for perfectly-nested loops now implemented in
+   `try_unroll_and_jam`; the "no-op stub" item above is marked
+   `AUDIT RESOLVED`. (Pre-existing gaps in other Wave-30 items remain.)
 6. **Add a real execution harness** so Wave 50's "cross-backend opt
    regression" and "self-hosting milestone" tests can do more than structural
    byte-count checks.

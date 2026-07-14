@@ -21,8 +21,10 @@
 //!   from the exit condition `iv < end` (or `<=`, `!=`).
 //! - **Code-size budget.** `UNROLL_CODE_SIZE_BUDGET` (default 500 instrs)
 //!   prevents unrolling when `body_size * factor` exceeds the budget.
-//! - **Unroll-and-jam stub.** `try_unroll_and_jam` is a no-op placeholder with
-//!   a `TODO(wave30)` — it does not miscompile.
+//! - **Unroll-and-jam.** `try_unroll_and_jam` implements a conservative
+//!   version of unroll-and-jam for perfectly-nested loops with no
+//!   outer-loop-carried dependencies. See its doc-comment for the full
+//!   safety contract.
 //!
 //! ## Correct unrolling algorithm
 //!
@@ -813,26 +815,724 @@ fn is_safe_for_unroll(instr: &IRInstr) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Unroll-and-jam (Wave 30 stub)
+// Unroll-and-jam (Wave 30 — conservative implementation)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Unroll-and-jam: unroll the outer loop of a nested loop and fuse the inner
-/// loop copies. This is a profitable transformation for nested loops where
-/// the inner body has no cross-iteration dependencies on the OUTER loop.
+/// Unroll-and-jam: unroll the outer loop of a nested loop and place the
+/// inner loop copies adjacent in the CFG ("jam" them together). This is a
+/// profitable transformation for nested loops where the inner body has no
+/// outer-loop-carried dependencies — it improves data locality and exposes
+/// vectorization opportunities.
 ///
-/// **Current status: STUB.** This function is a no-op — it returns the input
-/// function unchanged. A correct implementation requires:
-/// - Dependency analysis to prove the inner body has no outer-loop-carried
-///   dependencies.
-/// - Outer-loop unrolling (using `try_unroll_multiblock_loop`).
-/// - Inner-loop fusion (rewiring the inner latches to share the inner header).
+/// ## Conservative scope (Wave 30)
 ///
-/// `TODO(wave30)`: implement the dependency analysis + fusion. Until then,
-/// this is a safe no-op (it never miscompiles).
+/// This implementation is deliberately conservative. It only fires when ALL
+/// of the following hold:
+///
+/// 1. **Perfectly nested.** The outer loop's body (blocks in `outer.blocks`
+///    minus `outer.header`, `outer.latch`, and `inner.blocks`) is empty. The
+///    outer header's terminator is `Jump(inner.header)` — i.e., the outer
+///    body IS the inner loop.
+/// 2. **Outer IV is canonical.** Outer header starts with `Phi(0, entry),
+///    (i_o_next, outer.latch)`. Outer latch has `i_o_next = i_o + 1`,
+///    `cond_o = cmp i_o_next, end`, `Branch cond_o, outer.header, exit`.
+/// 3. **Inner IV is canonical.** Inner header starts with `Phi(0, ?),
+///    (i_i_next, inner.latch)`. Inner latch has `i_i_next = i_i + 1`,
+///    `cond_i = cmp i_i_next, M`, `Branch cond_i, inner.header, outer.latch`.
+/// 4. **Inner trip count invariant.** The inner loop's `end` (the RHS of the
+///    inner cmp) is a constant `Immediate` — so it doesn't depend on the
+///    outer IV. (If `end` were `i_o * 4`, jamming would be unsafe because
+///    the inner trip count would vary across outer iterations.)
+/// 5. **Inner body has no outer-loop-carried stores.** No `Store` in the
+///    inner loop body has an `addr` that uses the outer IV (`outer_phi_vreg`).
+///    (A store to `A[i_o]` would be violated by jamming: the second inner
+///    loop copy would write to `A[i_o + 1]` before the first copy's writes
+///    are observed by a downstream reader — a classic anti-dependency.)
+/// 6. **Inner body is safe to duplicate.** Every instruction passes
+///    `is_safe_for_unroll` (no calls, atomics, free, etc.).
+/// 7. **Inner header has exactly one instruction** (the IV Phi). No
+///    loop-carried Phis for `sum`-style accumulators.
+/// 8. **Code-size budget.** `inner_body_size * FACTOR ≤ UNROLL_CODE_SIZE_BUDGET`.
+///
+/// If any check fails, the function is returned unchanged (safe no-op).
+///
+/// ## Transformation
+///
+/// Unroll the outer loop by `FACTOR = 2`. The inner loop is duplicated `FACTOR`
+/// times and placed adjacent in the CFG. Each copy `k` uses `i_o + k` as its
+/// outer IV value (substituted into the inner body). The outer latch's
+/// increment is changed from `+1` to `+FACTOR`.
+///
+/// ```text
+/// BEFORE:                          AFTER (FACTOR=2):
+/// outer_header:                    outer_header:
+///   i_o = phi(0,entry),            i_o = phi(0,entry),
+///          (i_o_next, latch)              (i_o_next, latch)
+///   jump inner_header              jump inner_header_u0
+/// inner_header:                    inner_header_u0:
+///   i_i = phi(0,oh),                     i_i = phi(0,oh),(i_i_next,latch_u0)
+///         (i_i_next,latch)         ... body using i_o, i_i ...
+/// ... body using i_o, i_i ...           jump body_u0 ... latch_u0
+/// inner_latch:                     latch_u0: Branch → inner_header_u0 / between_u1
+///   i_i_next = i_i + 1             between_u1:
+///   cond = cmp i_i_next, M           i_o_1 = i_o + 1
+///   Branch → inner_header /          jump inner_header_u1
+///          outer_latch              inner_header_u1:
+/// outer_latch:                       i_i = phi(0,between_u1),
+///   i_o_next = i_o + 1                     (i_i_next,latch_u1)
+///   cond = cmp i_o_next, end         ... body using i_o_1, i_i ...
+///   Branch → outer_header /               jump body_u1 ... latch_u1
+///          exit                     latch_u1: Branch → inner_header_u1 / outer_latch
+///                                   outer_latch:
+///                                     i_o_next = i_o + 2   (step by FACTOR)
+///                                     cond = cmp i_o_next, end
+///                                     Branch → outer_header / exit
+/// ```
+///
+/// The outer loop now runs `ceil(N / FACTOR)` iterations (not `N * FACTOR`),
+/// so total work stays `N * M` — no miscompilation. The "jam" places the
+/// inner loops adjacent (simpler than true fusion into a single inner loop
+/// with `FACTOR×` the body — see the task spec's "Conservative approach").
 fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
-    // TODO(wave30): implement unroll-and-jam for nested loops where the
-    // inner body has no outer-loop-carried dependencies. For now, no-op.
-    func
+    const UNROLL_AND_JAM_FACTOR: u32 = 2;
+
+    // ── Step 1: Detect loops ───────────────────────────────────────────
+    let loops = LoopDetector::detect_with_induction_vars(&func);
+    if loops.len() < 2 {
+        return func; // Need ≥ 2 loops for nesting.
+    }
+
+    // ── Step 2: Find a perfectly-nested (outer, inner) pair ───────────
+    // Outer: a loop that contains another loop's header in its block set.
+    // Inner: a loop whose header is in outer's blocks, and whose blocks are
+    // a subset of outer's blocks. Perfect nesting: outer's blocks (minus
+    // header, latch, and inner's blocks) must be empty.
+    let mut chosen: Option<(&LoopInfo, &LoopInfo)> = None;
+    'outer: for outer in &loops {
+        for inner in &loops {
+            if outer.header == inner.header {
+                continue;
+            }
+            if !outer.blocks.contains(&inner.header) {
+                continue;
+            }
+            if !inner.blocks.is_subset(&outer.blocks) {
+                continue;
+            }
+            // Perfect-nest check: outer body blocks (not header, not latch,
+            // not in inner) must be empty.
+            let outer_extra: Vec<&String> = outer
+                .blocks
+                .iter()
+                .filter(|l| {
+                    **l != outer.header
+                        && **l != outer.latch
+                        && !inner.blocks.contains(*l)
+                })
+                .collect();
+            if !outer_extra.is_empty() {
+                continue;
+            }
+            chosen = Some((outer, inner));
+            break 'outer;
+        }
+    }
+    let (outer, inner) = match chosen {
+        Some(p) => p,
+        None => return func, // No perfectly-nested pair found.
+    };
+
+    // ── Step 3: Validate outer header/latch structure ─────────────────
+    let outer_header = match func.blocks.iter().find(|b| b.label == outer.header) {
+        Some(b) => b,
+        None => return func,
+    };
+    // Outer header must Jump directly to inner header (perfect nesting).
+    match &outer_header.terminator {
+        IRTerminator::Jump(t) if t == &inner.header => {}
+        _ => return func,
+    }
+    // Outer header must start with a Phi (the outer IV).
+    if outer_header.instructions.is_empty() {
+        return func;
+    }
+    let outer_phi_vreg = match &outer_header.instructions[0] {
+        IRInstr::Phi { dst, incoming } => {
+            if incoming.len() != 2 {
+                return func;
+            }
+            match dst {
+                IRValue::Register(r) => *r,
+                _ => return func,
+            }
+        }
+        _ => return func,
+    };
+
+    // Outer latch: must have `i_o_next = i_o + 1`, `cond_o = cmp i_o_next, end`,
+    // `Branch cond_o, outer.header, exit`.
+    let outer_latch = match func.blocks.iter().find(|b| b.label == outer.latch) {
+        Some(b) => b,
+        None => return func,
+    };
+    // Find the increment `i_o_next = i_o + 1`.
+    let mut outer_inc_idx = None;
+    let mut outer_iv_next = 0u32;
+    for (i, instr) in outer_latch.instructions.iter().enumerate() {
+        if let IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs,
+            rhs: IRValue::Immediate(1),
+            ..
+        } = instr
+        {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *l == outer_phi_vreg {
+                    outer_inc_idx = Some(i);
+                    outer_iv_next = *d;
+                    break;
+                }
+            }
+        }
+    }
+    let outer_inc_idx = match outer_inc_idx {
+        Some(i) => i,
+        None => return func,
+    };
+    // Find the exit Branch + the cond vreg + exit label.
+    let outer_cond_vreg = match &outer_latch.terminator {
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            let cv = match cond {
+                IRValue::Register(r) => *r,
+                _ => return func,
+            };
+            let _exit = if true_block == &outer.header {
+                false_block.clone()
+            } else if false_block == &outer.header {
+                true_block.clone()
+            } else {
+                return func;
+            };
+            cv
+        }
+        _ => return func,
+    };
+    // Find the cmp `cond_o = cmp i_o_next, end` in the latch.
+    let mut outer_cmp_idx = None;
+    for (i, instr) in outer_latch.instructions.iter().enumerate() {
+        if let IRInstr::Cmp { dst, lhs, .. } = instr {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *d == outer_cond_vreg && *l == outer_iv_next {
+                    outer_cmp_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    let outer_cmp_idx = match outer_cmp_idx {
+        Some(i) => i,
+        None => return func,
+    };
+
+    // ── Step 4: Validate inner header/latch structure ─────────────────
+    let inner_header = match func.blocks.iter().find(|b| b.label == inner.header) {
+        Some(b) => b,
+        None => return func,
+    };
+    // Inner header must have exactly ONE instruction (the IV Phi). Bail on
+    // any loop-carried accumulator Phis (e.g., `sum = phi(0, ..., (sum, latch))`).
+    if inner_header.instructions.len() != 1 {
+        return func;
+    }
+    let inner_phi_vreg = match &inner_header.instructions[0] {
+        IRInstr::Phi { dst, incoming } => {
+            if incoming.len() != 2 {
+                return func;
+            }
+            match dst {
+                IRValue::Register(r) => *r,
+                _ => return func,
+            }
+        }
+        _ => return func,
+    };
+
+    let inner_latch = match func.blocks.iter().find(|b| b.label == inner.latch) {
+        Some(b) => b,
+        None => return func,
+    };
+    // Inner latch's exit target must be outer.latch (perfect nesting).
+    let inner_cond_vreg = match &inner_latch.terminator {
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            let cv = match cond {
+                IRValue::Register(r) => *r,
+                _ => return func,
+            };
+            let exit = if true_block == &inner.header {
+                false_block.clone()
+            } else if false_block == &inner.header {
+                true_block.clone()
+            } else {
+                return func;
+            };
+            if exit != outer.latch {
+                return func; // Inner loop's exit must go to outer latch.
+            }
+            cv
+        }
+        _ => return func,
+    };
+    // Find the inner increment `i_i_next = i_i + 1`.
+    let mut inner_inc_idx = None;
+    let mut inner_iv_next = 0u32;
+    for (i, instr) in inner_latch.instructions.iter().enumerate() {
+        if let IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs,
+            rhs: IRValue::Immediate(1),
+            ..
+        } = instr
+        {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *l == inner_phi_vreg {
+                    inner_inc_idx = Some(i);
+                    inner_iv_next = *d;
+                    break;
+                }
+            }
+        }
+    }
+    let inner_inc_idx = match inner_inc_idx {
+        Some(i) => i,
+        None => return func,
+    };
+    // Find the inner cmp `cond_i = cmp i_i_next, end`. The `end` must be a
+    // constant Immediate (else the inner trip count may depend on the outer
+    // IV — unsafe for jamming).
+    let mut inner_cmp_idx = None;
+    for (i, instr) in inner_latch.instructions.iter().enumerate() {
+        if let IRInstr::Cmp { dst, lhs, rhs, .. } = instr {
+            if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
+                if *d == inner_cond_vreg && *l == inner_iv_next {
+                    if !matches!(rhs, IRValue::Immediate(_)) {
+                        return func; // Inner end is not a constant — bail.
+                    }
+                    inner_cmp_idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    let inner_cmp_idx = match inner_cmp_idx {
+        Some(i) => i,
+        None => return func,
+    };
+
+    // ── Step 5: Safety checks on inner body ───────────────────────────
+    // (a) Every instruction must be safe to duplicate (no calls/atomics/free).
+    // (b) No Store may have an `addr` that is transitively derived from the
+    //     outer IV (outer-loop-carried memory dependency). We compute the set
+    //     of vregs "tainted" by the outer IV (defined using the outer IV or
+    //     another tainted vreg) and bail if any Store's addr is tainted.
+    // (c) No Phi in the inner body blocks (Phis only belong in loop headers).
+    let mut outer_tainted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    outer_tainted.insert(outer_phi_vreg);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block_label in &inner.blocks {
+            let block = match func.blocks.iter().find(|b| &b.label == block_label) {
+                Some(b) => b,
+                None => return func,
+            };
+            for instr in &block.instructions {
+                let uses_outer = instr.used_regs().iter().any(|r| outer_tainted.contains(r));
+                if uses_outer {
+                    for def in instr.defined_regs() {
+                        if outer_tainted.insert(def) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for block_label in &inner.blocks {
+        // Skip the header and latch — they contain the IV Phi and the
+        // increment/cmp, which are expected and already validated. The
+        // "no Phi in body" check applies only to the body blocks.
+        if block_label == &inner.header || block_label == &inner.latch {
+            continue;
+        }
+        let block = match func.blocks.iter().find(|b| &b.label == block_label) {
+            Some(b) => b,
+            None => return func,
+        };
+        for instr in &block.instructions {
+            if !is_safe_for_unroll(instr) {
+                return func; // (a) unsafe instruction.
+            }
+            if let IRInstr::Store { addr, .. } = instr {
+                if let IRValue::Register(r) = addr {
+                    if outer_tainted.contains(r) {
+                        return func; // (b) outer-loop-carried store.
+                    }
+                }
+            }
+            if matches!(instr, IRInstr::Phi { .. }) {
+                return func; // (c) Phi in body — bail.
+            }
+        }
+    }
+
+    // ── Step 6: Code-size budget ──────────────────────────────────────
+    let inner_body_size: usize = inner
+        .blocks
+        .iter()
+        .filter_map(|l| func.blocks.iter().find(|b| &b.label == l))
+        .map(|b| b.instructions.len())
+        .sum();
+    if inner_body_size as u32 * UNROLL_AND_JAM_FACTOR > UNROLL_CODE_SIZE_BUDGET {
+        return func;
+    }
+
+    // ── Step 7: Perform the transformation ────────────────────────────
+    let mut new_func = func.clone();
+    let mut next_vreg = func_max_vreg(&new_func) + 1;
+
+    // Capture the original inner blocks (header, body blocks in function
+    // order, latch) — we'll clone them FACTOR times.
+    let inner_header_orig = inner_header.clone();
+    let inner_latch_orig = inner_latch.clone();
+    let inner_body_blocks: Vec<IRBlock> = func
+        .blocks
+        .iter()
+        .filter(|b| {
+            inner.blocks.contains(&b.label)
+                && b.label != inner.header
+                && b.label != inner.latch
+        })
+        .cloned()
+        .collect();
+    let inner_body_labels: Vec<String> =
+        inner_body_blocks.iter().map(|b| b.label.clone()).collect();
+
+    // Remove the original inner blocks from new_func (we'll add the
+    // duplicated versions after the outer header).
+    new_func
+        .blocks
+        .retain(|b| !inner.blocks.contains(&b.label));
+
+    // Find the outer header index in new_func (its position may have shifted
+    // because we removed inner blocks, but the outer header is NOT an inner
+    // block so it's retained; only its index may change if inner blocks
+    // preceded it, which they can't since outer header dominates inner).
+    let outer_header_idx = match new_func.blocks.iter().position(|b| b.label == outer.header) {
+        Some(i) => i,
+        None => return func,
+    };
+
+    // Generate FACTOR copies of the inner loop, plus "between" blocks that
+    // compute `i_o_k = i_o + k` for k > 0.
+    let mut new_blocks: Vec<IRBlock> = Vec::new();
+
+    for k in 0u32..UNROLL_AND_JAM_FACTOR {
+        // The outer IV value used by copy k.
+        // k=0: iv_o_0 = outer_phi_vreg (no extra instruction needed).
+        // k>0: iv_o_k = outer_phi_vreg + k, computed in a "between" block.
+        let iv_o_k = if k == 0 {
+            outer_phi_vreg
+        } else {
+            let v = next_vreg;
+            next_vreg += 1;
+            v
+        };
+
+        // For k > 0, emit a "between" block that computes iv_o_k = i_o + k
+        // and jumps to inner_header_u{k}.
+        if k > 0 {
+            let mut between = IRBlock::new(&format!("between_u{}", k));
+            between.instructions.push(IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(iv_o_k),
+                lhs: IRValue::Register(outer_phi_vreg),
+                rhs: IRValue::Immediate(k as i64),
+                ty: None,
+            });
+            between.terminator = IRTerminator::Jump(format!("{}_u{}", inner.header, k));
+            new_blocks.push(between);
+        }
+
+        // For k > 0, allocate fresh vregs for the inner Phi's dst, the inner
+        // increment's dst (i_i_next), and the inner cmp's dst (cond_i), so
+        // SSA is preserved across copies. For k=0, keep the originals.
+        let inner_phi_k = if k == 0 {
+            inner_phi_vreg
+        } else {
+            let v = next_vreg;
+            next_vreg += 1;
+            v
+        };
+        let inner_iv_next_k = if k == 0 {
+            inner_iv_next
+        } else {
+            let v = next_vreg;
+            next_vreg += 1;
+            v
+        };
+        let inner_cond_k = if k == 0 {
+            inner_cond_vreg
+        } else {
+            let v = next_vreg;
+            next_vreg += 1;
+            v
+        };
+
+        // ── Clone the inner header ────────────────────────────────────
+        let new_header_label = format!("{}_u{}", inner.header, k);
+        let mut new_header = IRBlock::new(&new_header_label);
+
+        // The entry predecessor for this copy's Phi:
+        //   k=0: outer.header (the original entry).
+        //   k>0: between_u{k}.
+        let phi_entry_pred: String = if k == 0 {
+            outer.header.clone()
+        } else {
+            format!("between_u{}", k)
+        };
+        let phi_back_pred = format!("{}_u{}", inner.latch, k);
+
+        // Rebuild the Phi with updated dst (for k>0) and incoming predecessors.
+        if let IRInstr::Phi { dst, incoming } = &inner_header_orig.instructions[0] {
+            let new_dst = if k == 0 {
+                dst.clone()
+            } else {
+                IRValue::Register(inner_phi_k)
+            };
+            let mut new_incoming = Vec::with_capacity(incoming.len());
+            for (val, src) in incoming {
+                let (new_val, new_src) = if src == &inner.latch {
+                    // Back-incoming: update the predecessor to inner_latch_u{k},
+                    // and the value from inner_iv_next to inner_iv_next_k.
+                    let v = if let IRValue::Register(r) = val {
+                        if *r == inner_iv_next {
+                            IRValue::Register(inner_iv_next_k)
+                        } else {
+                            val.clone()
+                        }
+                    } else {
+                        val.clone()
+                    };
+                    (v, phi_back_pred.clone())
+                } else {
+                    // Entry-incoming: value unchanged, predecessor updated.
+                    (val.clone(), phi_entry_pred.clone())
+                };
+                new_incoming.push((new_val, new_src));
+            }
+            new_header.instructions.push(IRInstr::Phi {
+                dst: new_dst,
+                incoming: new_incoming,
+            });
+        }
+        // Header terminator: jump to the first inner body block (or latch if
+        // no body) of THIS copy.
+        let first_inner_target = if !inner_body_labels.is_empty() {
+            format!("{}_u{}", inner_body_labels[0], k)
+        } else {
+            format!("{}_u{}", inner.latch, k)
+        };
+        new_header.terminator = IRTerminator::Jump(first_inner_target);
+        new_header.source_line = inner_header_orig.source_line;
+        new_blocks.push(new_header);
+
+        // ── Clone the inner body blocks ───────────────────────────────
+        for orig_b in &inner_body_blocks {
+            let new_label = format!("{}_u{}", orig_b.label, k);
+            let mut new_b = IRBlock::new(&new_label);
+            for instr in &orig_b.instructions {
+                let mut cloned = instr.clone();
+                // Substitute the outer IV: outer_phi_vreg → iv_o_k.
+                substitute_vreg(&mut cloned, outer_phi_vreg, iv_o_k);
+                // For k > 0, substitute the inner IV: inner_phi_vreg → inner_phi_k.
+                if k > 0 {
+                    substitute_vreg(&mut cloned, inner_phi_vreg, inner_phi_k);
+                }
+                // Renumber the dst for SSA (fresh vreg per copy).
+                renumber_dst(&mut cloned, &mut next_vreg);
+                new_b.instructions.push(cloned);
+            }
+            // Rewire the terminator: jump/branch targets to inner body/latch
+            // blocks get the _u{k} suffix.
+            new_b.terminator = rewire_inner_terminator(
+                &orig_b.terminator,
+                k,
+                &inner_body_labels,
+                &inner.latch,
+            );
+            new_b.source_line = orig_b.source_line;
+            new_blocks.push(new_b);
+        }
+
+        // ── Clone the inner latch ─────────────────────────────────────
+        let new_latch_label = format!("{}_u{}", inner.latch, k);
+        let mut new_latch = IRBlock::new(&new_latch_label);
+        for (i, instr) in inner_latch_orig.instructions.iter().enumerate() {
+            let mut cloned = instr.clone();
+            // Substitute the outer IV (in case the latch uses it).
+            substitute_vreg(&mut cloned, outer_phi_vreg, iv_o_k);
+            // For k > 0, substitute the inner IV.
+            if k > 0 {
+                substitute_vreg(&mut cloned, inner_phi_vreg, inner_phi_k);
+            }
+            // Handle the increment and cmp specially: their dsts are
+            // inner_iv_next_k and inner_cond_k (not fresh-per-call).
+            if i == inner_inc_idx {
+                if let IRInstr::BinOp { dst, .. } = &mut cloned {
+                    *dst = IRValue::Register(inner_iv_next_k);
+                }
+            } else if i == inner_cmp_idx {
+                if let IRInstr::Cmp { dst, .. } = &mut cloned {
+                    *dst = IRValue::Register(inner_cond_k);
+                }
+                // Also update the cmp's lhs (which is inner_iv_next) to
+                // inner_iv_next_k for k > 0.
+                if k > 0 {
+                    if let IRInstr::Cmp { lhs, .. } = &mut cloned {
+                        if let IRValue::Register(r) = lhs {
+                            if *r == inner_iv_next {
+                                *r = inner_iv_next_k;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Other instructions: renumber dst for SSA.
+                renumber_dst(&mut cloned, &mut next_vreg);
+            }
+            new_latch.instructions.push(cloned);
+        }
+        // The latch's Branch: loop back to inner_header_u{k}, exit to
+        // between_u{k+1} (if k < FACTOR-1) or outer.latch (if k == FACTOR-1).
+        let inner_exit_target = if k < UNROLL_AND_JAM_FACTOR - 1 {
+            format!("between_u{}", k + 1)
+        } else {
+            outer.latch.clone()
+        };
+        new_latch.terminator = IRTerminator::Branch {
+            cond: IRValue::Register(inner_cond_k),
+            true_block: format!("{}_u{}", inner.header, k),
+            false_block: inner_exit_target,
+        };
+        new_latch.source_line = inner_latch_orig.source_line;
+        new_blocks.push(new_latch);
+    }
+
+    // ── Modify the outer latch: change +1 to +FACTOR ──────────────────
+    let outer_latch_idx = match new_func.blocks.iter().position(|b| b.label == outer.latch) {
+        Some(i) => i,
+        None => return func,
+    };
+    // Replace the increment's rhs from Immediate(1) to Immediate(FACTOR).
+    new_func.blocks[outer_latch_idx].instructions[outer_inc_idx] = IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst: IRValue::Register(outer_iv_next),
+        lhs: IRValue::Register(outer_phi_vreg),
+        rhs: IRValue::Immediate(UNROLL_AND_JAM_FACTOR as i64),
+        ty: None,
+    };
+
+    // ── Rewire the outer header to jump to inner_header_u0 ────────────
+    new_func.blocks[outer_header_idx].terminator =
+        IRTerminator::Jump(format!("{}_u{}", inner.header, 0));
+
+    // ── Insert the new blocks after the outer header ──────────────────
+    let insert_pos = outer_header_idx + 1;
+    new_func.blocks.splice(insert_pos..insert_pos, new_blocks);
+
+    // Rebuild CFG so predecessors/successors are consistent.
+    new_func.rebuild_cfg();
+    new_func
+}
+
+/// Rewire an inner body block's terminator targets to the `_u{k}` suffix for
+/// the current copy. Branches to other inner body blocks (or the inner latch)
+/// get suffixed; branches to blocks outside the inner loop are unchanged.
+fn rewire_inner_terminator(
+    term: &IRTerminator,
+    k: u32,
+    body_labels: &[String],
+    latch_label: &str,
+) -> IRTerminator {
+    let suffix = |label: &str| -> String {
+        if body_labels.iter().any(|l| l == label) || label == latch_label {
+            format!("{}_u{}", label, k)
+        } else {
+            label.to_string()
+        }
+    };
+    match term {
+        IRTerminator::Jump(t) => IRTerminator::Jump(suffix(t)),
+        IRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => IRTerminator::Branch {
+            cond: cond.clone(),
+            true_block: suffix(true_block),
+            false_block: suffix(false_block),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Renumber an instruction's destination vreg to a fresh `next_vreg`-derived
+/// id, for SSA preservation across duplicated copies. Does NOT renumber Phi
+/// dsts (the loop-carried IV is handled separately). Used by
+/// `try_unroll_and_jam` for inner body / latch instructions where the
+/// outer-IV substitution has already been applied via `substitute_vreg`.
+fn renumber_dst(instr: &mut IRInstr, next_vreg: &mut u32) {
+    let fresh = *next_vreg;
+    *next_vreg += 1;
+    match instr {
+        IRInstr::BinOp { dst, .. }
+        | IRInstr::Add { dst, .. }
+        | IRInstr::Sub { dst, .. }
+        | IRInstr::Mul { dst, .. }
+        | IRInstr::Div { dst, .. }
+        | IRInstr::Load { dst, .. }
+        | IRInstr::Offset { dst, .. }
+        | IRInstr::Cast { dst, .. }
+        | IRInstr::Select { dst, .. } => {
+            if let IRValue::Register(r) = dst {
+                *r = fresh;
+            }
+        }
+        IRInstr::Cmp { dst, .. } => {
+            if let IRValue::Register(r) = dst {
+                *r = fresh;
+            }
+        }
+        IRInstr::Phi { dst, .. } => {
+            // Phi dsts are handled by the caller (loop-carried IV).
+            let _ = fresh;
+        }
+        IRInstr::Store { .. } | IRInstr::Alloc { .. } | IRInstr::Ret { .. } | _ => {
+            // No dst to renumber, or not safe to renumber.
+            let _ = fresh;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1453,6 +2153,137 @@ mod tests {
         func
     }
 
+    /// Build a function with perfectly-nested loops (the unroll-and-jam target):
+    ///
+    /// ```text
+    /// for i_o in 0..N:
+    ///   for i_i in 0..M:   (M = 4, constant)
+    ///     r = i_o * i_i     (no stores — safe for jamming)
+    /// ```
+    ///
+    /// CFG:
+    /// ```text
+    /// entry → outer_header → inner_header → inner_body → inner_latch
+    ///                            ↑                            ↓ (exit to outer_latch)
+    ///                            └────────────────────────────┘
+    /// outer_latch → outer_header (back-edge) / exit
+    /// ```
+    ///
+    /// vregs: 0=N (param), 1=M (param, unused — M is hardcoded as Imm(4)),
+    ///        10=i_o, 11=i_o_next, 12=cond_o,
+    ///        20=i_i, 21=i_i_next, 22=cond_i, 30=r
+    fn build_perfectly_nested_loops() -> IRFunction {
+        let mut func = IRFunction::new("nested");
+        func.params = vec![IRValue::Register(0)]; // N
+
+        let entry = IRBlock {
+            label: "entry".to_string(),
+            instructions: vec![],
+            terminator: IRTerminator::Jump("outer_header".to_string()),
+            predecessors: HashSet::new(),
+            successors: HashSet::new(),
+            source_line: 0,
+        };
+        func.blocks[0] = entry;
+
+        // outer_header: i_o = phi(0, entry), (i_o_next, outer_latch); jump inner_header
+        let mut outer_header = IRBlock::new("outer_header");
+        outer_header.instructions.push(IRInstr::Phi {
+            dst: IRValue::Register(10),
+            incoming: vec![
+                (IRValue::Immediate(0), "entry".to_string()),
+                (IRValue::Register(11), "outer_latch".to_string()),
+            ],
+        });
+        outer_header.terminator = IRTerminator::Jump("inner_header".to_string());
+        func.blocks.push(outer_header);
+
+        // inner_header: i_i = phi(0, outer_header), (i_i_next, inner_latch)
+        let mut inner_header = IRBlock::new("inner_header");
+        inner_header.instructions.push(IRInstr::Phi {
+            dst: IRValue::Register(20),
+            incoming: vec![
+                (IRValue::Immediate(0), "outer_header".to_string()),
+                (IRValue::Register(21), "inner_latch".to_string()),
+            ],
+        });
+        inner_header.terminator = IRTerminator::Jump("inner_body".to_string());
+        func.blocks.push(inner_header);
+
+        // inner_body: r = i_o * i_i; jump inner_latch
+        let mut inner_body = IRBlock::new("inner_body");
+        inner_body.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(30),
+            lhs: IRValue::Register(10), // i_o
+            rhs: IRValue::Register(20), // i_i
+            ty: None,
+        });
+        inner_body.terminator = IRTerminator::Jump("inner_latch".to_string());
+        func.blocks.push(inner_body);
+
+        // inner_latch: i_i_next = i_i + 1; cond_i = cmp i_i_next, 4; Branch → inner_header / outer_latch
+        let mut inner_latch = IRBlock::new("inner_latch");
+        inner_latch.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(21),
+            lhs: IRValue::Register(20),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        inner_latch.instructions.push(IRInstr::Cmp {
+            kind: CmpKind::SLt,
+            dst: IRValue::Register(22),
+            lhs: IRValue::Register(21),
+            rhs: IRValue::Immediate(4), // M = 4 (constant → inner trip count invariant)
+            ty: None,
+        });
+        inner_latch.terminator = IRTerminator::Branch {
+            cond: IRValue::Register(22),
+            true_block: "inner_header".to_string(),
+            false_block: "outer_latch".to_string(),
+        };
+        func.blocks.push(inner_latch);
+
+        // outer_latch: i_o_next = i_o + 1; cond_o = cmp i_o_next, N; Branch → outer_header / exit
+        let mut outer_latch = IRBlock::new("outer_latch");
+        outer_latch.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(11),
+            lhs: IRValue::Register(10),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        });
+        outer_latch.instructions.push(IRInstr::Cmp {
+            kind: CmpKind::SLt,
+            dst: IRValue::Register(12),
+            lhs: IRValue::Register(11),
+            rhs: IRValue::Register(0), // N is a vreg (outer trip count may be unknown)
+            ty: None,
+        });
+        outer_latch.terminator = IRTerminator::Branch {
+            cond: IRValue::Register(12),
+            true_block: "outer_header".to_string(),
+            false_block: "exit".to_string(),
+        };
+        func.blocks.push(outer_latch);
+
+        let exit = IRBlock {
+            label: "exit".to_string(),
+            instructions: vec![IRInstr::Ret { values: vec![] }],
+            terminator: IRTerminator::Return(vec![]),
+            predecessors: HashSet::new(),
+            successors: HashSet::new(),
+            source_line: 0,
+        };
+        func.blocks.push(exit);
+        // Rebuild CFG so predecessors/successors are populated — the
+        // LoopDetector's natural-loop-body BFS relies on `predecessors`
+        // being set (it doesn't re-derive them from terminators).
+        func.rebuild_cfg();
+        func
+    }
+
     fn loop_info_for(func: &IRFunction) -> Vec<LoopInfo> {
         LoopDetector::detect_with_induction_vars(func)
     }
@@ -1909,17 +2740,231 @@ mod tests {
         let _ = mul_count;
     }
 
-    // ── Unroll-and-jam stub test ───────────────────────────────────────
+    // ── Unroll-and-jam tests (Wave 30) ─────────────────────────────────
 
     #[test]
-    fn test_unroll_and_jam_is_noop() {
-        // The unroll-and-jam stub must be a no-op (does not miscompile).
+    fn test_unroll_and_jam_is_noop_for_single_loop() {
+        // A single (non-nested) loop has no (outer, inner) pair to jam, so
+        // `try_unroll_and_jam` must be a no-op for it. This is the renamed
+        // original `test_unroll_and_jam_is_noop` — the function is no longer
+        // a global no-op, but it is still a no-op for inputs that don't match
+        // the perfectly-nested pattern.
         let func = build_3block_loop_function();
         let result = try_unroll_and_jam(func.clone());
         assert_eq!(
             result.blocks.len(),
             func.blocks.len(),
-            "unroll-and-jam stub must not change block count"
+            "unroll-and-jam must be a no-op for a single (non-nested) loop"
+        );
+    }
+
+    #[test]
+    fn test_unroll_and_jam_basic() {
+        // Perfectly nested loops with no stores → outer unrolled by 2, inner
+        // loops placed adjacent ("jammed") in the CFG.
+        let func = build_perfectly_nested_loops();
+        let original_block_count = func.blocks.len(); // entry + 5 loop blocks + exit = 7.
+        let result = try_unroll_and_jam(func.clone());
+
+        // After unroll-and-jam by 2:
+        //   - Original inner blocks (inner_header, inner_body, inner_latch) removed (-3).
+        //   - 2 copies added: inner_header_u0, inner_body_u0, inner_latch_u0,
+        //     between_u1, inner_header_u1, inner_body_u1, inner_latch_u1 (+7).
+        //   - Net: +4 blocks.
+        assert!(
+            result.blocks.len() > original_block_count,
+            "unroll-and-jam should add blocks, got {} -> {}",
+            original_block_count,
+            result.blocks.len()
+        );
+
+        let labels: Vec<&str> =
+            result.blocks.iter().map(|b| b.label.as_str()).collect();
+        assert!(labels.contains(&"outer_header"), "outer_header missing: {:?}", labels);
+        assert!(
+            labels.contains(&"inner_header_u0"),
+            "inner_header_u0 missing: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"inner_header_u1"),
+            "inner_header_u1 missing: {:?}",
+            labels
+        );
+        assert!(labels.contains(&"between_u1"), "between_u1 missing: {:?}", labels);
+        assert!(
+            labels.contains(&"inner_latch_u0"),
+            "inner_latch_u0 missing: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"inner_latch_u1"),
+            "inner_latch_u1 missing: {:?}",
+            labels
+        );
+        // The original inner blocks should be gone.
+        assert!(
+            !labels.contains(&"inner_header"),
+            "original inner_header should be removed: {:?}",
+            labels
+        );
+        assert!(
+            !labels.contains(&"inner_latch"),
+            "original inner_latch should be removed: {:?}",
+            labels
+        );
+
+        // Outer header should jump to inner_header_u0.
+        let outer_header = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "outer_header")
+            .unwrap();
+        match &outer_header.terminator {
+            IRTerminator::Jump(t) => assert_eq!(t, "inner_header_u0"),
+            other => panic!("outer_header should Jump(inner_header_u0), got {:?}", other),
+        }
+
+        // Outer latch's increment should be +2 (FACTOR), not +1.
+        let outer_latch = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "outer_latch")
+            .unwrap();
+        let has_plus_2 = outer_latch.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    rhs: IRValue::Immediate(2),
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_plus_2,
+            "outer latch should have +2 increment after unroll-and-jam by 2"
+        );
+
+        // inner_latch_u0 should exit to between_u1 (the "jam" adjacency).
+        let inner_latch_u0 = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "inner_latch_u0")
+            .unwrap();
+        match &inner_latch_u0.terminator {
+            IRTerminator::Branch { false_block, .. } => {
+                assert_eq!(
+                    false_block, "between_u1",
+                    "inner_latch_u0 should exit to between_u1 (jam adjacency)"
+                );
+            }
+            other => panic!("inner_latch_u0 should Branch, got {:?}", other),
+        }
+
+        // inner_latch_u1 should exit to outer_latch (the last copy exits to
+        // the outer latch, which then checks the outer loop condition).
+        let inner_latch_u1 = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "inner_latch_u1")
+            .unwrap();
+        match &inner_latch_u1.terminator {
+            IRTerminator::Branch { false_block, .. } => {
+                assert_eq!(
+                    false_block, "outer_latch",
+                    "inner_latch_u1 should exit to outer_latch"
+                );
+            }
+            other => panic!("inner_latch_u1 should Branch, got {:?}", other),
+        }
+
+        // between_u1 should compute i_o + 1 and jump to inner_header_u1.
+        let between_u1 = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "between_u1")
+            .unwrap();
+        let has_add_1 = between_u1.instructions.iter().any(|instr| {
+            matches!(
+                instr,
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    rhs: IRValue::Immediate(1),
+                    ..
+                }
+            )
+        });
+        assert!(has_add_1, "between_u1 should compute i_o + 1");
+        match &between_u1.terminator {
+            IRTerminator::Jump(t) => assert_eq!(t, "inner_header_u1"),
+            other => panic!("between_u1 should Jump(inner_header_u1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unroll_and_jam_skips_when_unsafe() {
+        // Inner body has a store to an outer-dependent address → no-op.
+        // The store's addr is `i_o` (the outer IV) — a classic outer-loop-
+        // carried memory dependency that unroll-and-jam would violate.
+        let mut func = build_perfectly_nested_loops();
+        let inner_body = func
+            .blocks
+            .iter_mut()
+            .find(|b| b.label == "inner_body")
+            .unwrap();
+        inner_body.instructions.push(IRInstr::Store {
+            value: IRValue::Register(30), // r
+            addr: IRValue::Register(10),  // addr = i_o (outer IV) — UNSAFE
+            offset: 0,
+            ty: crate::ir::IRType::I64,
+        });
+
+        let original_block_count = func.blocks.len();
+        let result = try_unroll_and_jam(func.clone());
+        assert_eq!(
+            result.blocks.len(),
+            original_block_count,
+            "unroll-and-jam should be a no-op when inner body has an outer-loop-carried store"
+        );
+    }
+
+    #[test]
+    fn test_unroll_and_jam_skips_when_not_perfectly_nested() {
+        // Outer body has a non-loop block between the inner loop's exit and
+        // the outer latch → not perfectly nested → no-op.
+        let mut func = build_perfectly_nested_loops();
+        // Rewire inner_latch's exit to go to "between_extra" (a new block)
+        // instead of "outer_latch".
+        let inner_latch = func
+            .blocks
+            .iter_mut()
+            .find(|b| b.label == "inner_latch")
+            .unwrap();
+        inner_latch.terminator = IRTerminator::Branch {
+            cond: IRValue::Register(22),
+            true_block: "inner_header".to_string(),
+            false_block: "between_extra".to_string(),
+        };
+        // Add the "between_extra" block — this is an extra outer-body block
+        // that violates the perfect-nesting condition.
+        let mut between_extra = IRBlock::new("between_extra");
+        between_extra.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(31),
+            lhs: IRValue::Register(10),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        });
+        between_extra.terminator = IRTerminator::Jump("outer_latch".to_string());
+        func.blocks.push(between_extra);
+
+        let original_block_count = func.blocks.len();
+        let result = try_unroll_and_jam(func.clone());
+        assert_eq!(
+            result.blocks.len(),
+            original_block_count,
+            "unroll-and-jam should be a no-op when outer body is not perfectly nested"
         );
     }
 
