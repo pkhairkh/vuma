@@ -4101,6 +4101,12 @@ fn lower_ir_instr_ppc64(
             // Dead code path — lower_ir_instr_ppc64 is never called.
             // The real implementation is in allocate_registers (stack-slot ISel).
         }
+        IRInstr::VectorOp { .. } => {
+            // Dead code path — lower_ir_instr_ppc64 is never called.
+            // The real implementation is in allocate_registers (stack-slot ISel),
+            // which emits Vec::new() since ppc64 has no SIMD encoder in the
+            // Wave 29 suite.
+        }
     }
 
     (result, relocations)
@@ -5770,6 +5776,10 @@ impl Backend for PPC64Backend {
                         }
                         code
                     }
+                    // ── VectorOp (Wave 29) ──
+                    // ppc64 (AltiVec/VSX) has no SIMD encoder in the Wave 29
+                    // suite; emit nothing.
+                    IRInstr::VectorOp { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic

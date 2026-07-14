@@ -6901,6 +6901,10 @@ impl Backend for Arm32Backend {
                         }
                         code
                     }
+                    // ── VectorOp (Wave 29) ──
+                    // arm32 (ARMv7 NEON) has no SIMD encoder in the Wave 29
+                    // suite (only x86_64 and aarch64 do); emit nothing.
+                    crate::ir::IRInstr::VectorOp { .. } => Vec::new(),
                 };
 
                 let encoded_len = encoded.len() as u64;

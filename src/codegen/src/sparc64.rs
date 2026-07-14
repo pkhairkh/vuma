@@ -3146,6 +3146,9 @@ fn emit_instr(
                 code.extend(ss_stx(Gpr::O0, dst_off));
             }
         }
+        // ── VectorOp (Wave 29) ──
+        // sparc64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+        IRInstr::VectorOp { .. } => {}
     }
 }
 

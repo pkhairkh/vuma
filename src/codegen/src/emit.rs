@@ -1590,6 +1590,31 @@ impl Emitter {
                     self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
                 }
             }
+            // ── VectorOp (Wave 29) ───────────────────────────────────────
+            // SIMD lowering for `IRInstr::VectorOp` — emit a pre-encoded
+            // NEON word via `Instruction::NEON_RAW`. The encoder helpers
+            // (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`) produce the
+            // final 32-bit machine word with fixed V0/V1/V2 operands; full
+            // vector-vreg → physical-V register allocation is deferred.
+            //
+            // This emit_ir_instr path is the one actually invoked by
+            // `AArch64Backend::allocate_registers` (via `emit_function`),
+            // so the NEON bytes must be emitted here, not in
+            // `arm64::InstructionSelector::select_from_ir`.
+            IRInstr::VectorOp { op, .. } => {
+                let (enc, mnemonic): (u32, &'static str) = match op {
+                    crate::ir::VectorOpKind::Add => {
+                        (crate::arm64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Sub => {
+                        (crate::arm64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Mul => {
+                        (crate::arm64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                    }
+                };
+                self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
+            }
         }
         Ok(())
     }
@@ -3352,6 +3377,12 @@ impl Emitter {
                     self.ss_store_to_slot(Register::X0, dst_offset)?;
                 }
             }
+            // ── VectorOp (Wave 29) ───────────────────────────────────────
+            // SIMD lowering for `IRInstr::VectorOp` happens in the ARM64
+            // `InstructionSelector::select_from_ir` path (arm64.rs), which
+            // pushes a `NEON_RAW` instruction. This stack-slot emit path
+            // treats VectorOp as a no-op (same as Phi/Select/CtSelect/CtEq).
+            IRInstr::VectorOp { .. } => {}
         }
         Ok(())
     }

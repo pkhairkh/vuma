@@ -333,6 +333,13 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(rhs, from, to);
                 }
                 IRInstr::Branch { .. } => {}
+                // ── VectorOp (Wave 29) ──
+                // Substitute dst/lhs/rhs vregs (lanes/elem_size are not vregs).
+                IRInstr::VectorOp { dst, lhs, rhs, .. } => {
+                    sub(dst, from, to);
+                    sub(lhs, from, to);
+                    sub(rhs, from, to);
+                }
             }
         }
         match &mut block.terminator {

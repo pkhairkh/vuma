@@ -1033,6 +1033,31 @@ impl fmt::Display for BinOpKind {
     }
 }
 
+/// SIMD/vector operation kind for `IRInstr::VectorOp`.
+///
+/// Each variant denotes a lane-wise arithmetic op the backends lower to a
+/// single SSE/AVX (x86_64) or NEON (aarch64) instruction.  The set is
+/// intentionally narrow — only the kinds the Wave 29 encoders cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum VectorOpKind {
+    /// Lane-wise integer add.
+    Add,
+    /// Lane-wise integer subtract.
+    Sub,
+    /// Lane-wise integer multiply.
+    Mul,
+}
+
+impl fmt::Display for VectorOpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            VectorOpKind::Add => "vadd",
+            VectorOpKind::Sub => "vsub",
+            VectorOpKind::Mul => "vmul",
+        })
+    }
+}
+
 /// Unary operations supported by the IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum UnaryOpKind {
@@ -1560,6 +1585,37 @@ pub enum IRInstr {
         /// `None` for void syscalls (e.g. `exit`, `exit_group`).
         dst: Option<IRValue>,
     },
+
+    /// SIMD packed operation: `dst = op lanes×elem_size lhs, rhs` (Wave 29).
+    ///
+    /// Produced by `vectorize::slp_vectorize_block` when an independent
+    /// isomorphic group of scalar ops is detected. The backends lower this
+    /// variant to a single SSE/AVX (x86_64) or NEON (aarch64) instruction
+    /// by calling the existing `encode_sse_*` / `encode_avx_*` /
+    /// `encode_neon_*` helpers — the wiring lives in
+    /// `x86_64::stack_slot_isel::allocate_registers` and
+    /// `arm64::InstructionSelector::select_from_ir`.
+    ///
+    /// **Scope:** only `op ∈ {Add, Sub, Mul}` and `elem_size ∈ {4, 8}` are
+    /// supported — matching the encoders the Wave 29 audit identified.
+    /// Full vector-vreg register allocation is deferred (the ISel arms use
+    /// fixed physical XMM0/XMM1/XMM2 on x86_64 and V0/V1/V2 on aarch64);
+    /// the IR-level `dst`/`lhs`/`rhs` vregs are still tracked for
+    /// dataflow but the bytes come from the encoders directly.
+    VectorOp {
+        /// Lane-wise arithmetic kind.
+        op: VectorOpKind,
+        /// Number of lanes packed (e.g. 4 for 4×i32, 2 for 2×i64).
+        lanes: u32,
+        /// Element size in bytes (4 for i32, 8 for i64).
+        elem_size: u32,
+        /// Destination vreg (lane 0; lanes 1..vf are dead after packing).
+        dst: IRValue,
+        /// Left source vreg (lane 0).
+        lhs: IRValue,
+        /// Right source vreg (lane 0).
+        rhs: IRValue,
+    },
 }
 
 impl IRInstr {
@@ -1586,6 +1642,7 @@ impl IRInstr {
                 .and_then(|v| v.as_register())
                 .into_iter()
                 .collect(),
+            IRInstr::VectorOp { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Add { dst, .. }
             | IRInstr::Sub { dst, .. }
             | IRInstr::Mul { dst, .. }
@@ -1627,6 +1684,11 @@ impl IRInstr {
             IRInstr::UnaryOp { operand, .. } => operand.as_register().into_iter().collect(),
             IRInstr::Call { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
             IRInstr::Syscall { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
+            IRInstr::VectorOp { lhs, rhs, .. } => {
+                let mut r = lhs.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(rhs.as_register());
+                r
+            }
             IRInstr::Alloc { .. } | IRInstr::GetAddress { .. } => vec![],
             IRInstr::Free { ptr } => ptr.as_register().into_iter().collect(),
             IRInstr::Cast { src, .. } => src.as_register().into_iter().collect(),
@@ -1818,6 +1880,9 @@ impl fmt::Display for IRInstr {
                     Some(d) => write!(f, "{} = syscall {}({})", d, nr, args_str),
                     None => write!(f, "syscall {}({})", nr, args_str),
                 }
+            }
+            IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs } => {
+                write!(f, "{} = {}<{}x{}> {}, {}", dst, op, lanes, elem_size, lhs, rhs)
             }
         }
     }
