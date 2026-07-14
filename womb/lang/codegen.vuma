@@ -147,6 +147,70 @@ fn enc_mov_edi_imm32(code: Address, pos: u32, val: u32) -> u32 {
     return pos + 5;
 }
 
+// ── Wave 48: additional x86_64 encoders for the full pipeline ──
+
+// MOV rcx, [rbp+disp8]: 48 8B 4D <disp8>
+fn enc_load_rcx(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x4D);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
+// MOV rdi, [rbp+disp8]: 48 8B 7D <disp8>
+fn enc_load_rdi(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x7D);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
+// IMUL rax, rcx: 48 0F AF C1
+fn enc_imul_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x0F);
+    emit_byte(code, pos + 2, 0xAF);
+    emit_byte(code, pos + 3, 0xC1);
+    return pos + 4;
+}
+
+// MOV rdi, rax: 48 89 C7  (used to move a vreg's value into rdi for sys_exit)
+fn enc_mov_rdi_rax(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x89);
+    emit_byte(code, pos + 2, 0xC7);
+    return pos + 3;
+}
+
+// MOV eax, imm32: B8 <imm32>  (zero-extends to rax)
+fn enc_mov_eax_imm32(code: Address, pos: u32, val: u32) -> u32 {
+    emit_byte(code, pos, 0xB8);
+    emit_u32(code, pos + 1, val);
+    return pos + 5;
+}
+
+// XOR edi, edi: 31 FF  (zeroes rdi for sys_exit with code 0)
+fn enc_xor_edi(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x31);
+    emit_byte(code, pos + 1, 0xFF);
+    return pos + 2;
+}
+
+// CALL rel32: E8 <rel32 LE>
+// rel32 = target_offset - (pos + 5), as a signed 32-bit two's complement value.
+// u32 subtraction wraps modulo 2^32, yielding the correct bit pattern for
+// both forward (positive rel) and backward (negative rel) calls. The
+// print_int routine lives at offset 0 of the code buffer, so calls from
+// main to print_int are backward (negative rel32).
+fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
+    emit_byte(code, pos, 0xE8);
+    rel: u32 = target_offset - (pos + 5);
+    emit_u32(code, pos + 1, rel);
+    return pos + 5;
+}
+
 // Generate function prologue
 fn gen_prologue(code: Address, pos: u32, frame_size: u32) -> u32 {
     pos = enc_push_rbp(code, pos);
@@ -159,5 +223,308 @@ fn gen_prologue(code: Address, pos: u32, frame_size: u32) -> u32 {
 fn gen_epilogue(code: Address, pos: u32) -> u32 {
     pos = enc_pop_rbp(code, pos);
     pos = enc_ret(code, pos);
+    return pos;
+}
+
+// ============================================================================
+// Wave 48 — print_int routine + codegen_emit entry point
+// ============================================================================
+// The bootstrap compiler emits a self-contained ELF executable with this
+// .text layout:
+//
+//   ┌── offset 0 ──────────────────────────────────────────────┐
+//   │ print_int routine (86 bytes, hand-assembled)            │
+//   │   input:  rdi = integer to print                        │
+//   │   output: writes decimal digits + '\n' to stdout        │
+//   │   clobbers: rax, rcx, rdx, rsi                          │
+//   │   stack:   uses 32 bytes of red-zone-equivalent scratch │
+//   ├─ offset 86 (= PRINT_INT_SIZE) ──────────────────────────┤
+//   │ main function:                                          │
+//   │   prologue (push rbp; mov rbp, rsp; sub rsp, frame)     │
+//   │   per-IR-opcode x86_64 emission (see codegen_emit)      │
+//   │   defensive exit(0) in case IR lacks a trailing RET     │
+//   └──────────────────────────────────────────────────────────┘
+//
+// The ELF entry point is offset 86 (= PRINT_INT_SIZE), NOT offset 0 —
+// otherwise print_int would run first with garbage in rdi. See elf.vuma's
+// write_elf64, which takes an entry_offset parameter for exactly this.
+//
+// The print_int routine:
+//   sub rsp, 32              ; 32-byte digit buffer
+//   mov rsi, rsp
+//   add rsi, 31              ; rsi -> last byte of buffer
+//   mov byte [rsi], 10       ; trailing newline
+//   dec rsi                  ; rsi -> next digit slot (grows leftward)
+//   mov rax, rdi             ; rax = number to convert
+//   mov ecx, 10              ; divisor
+//   test rax, rax
+//   jnz .loop                ; if non-zero, convert digits
+//   mov byte [rsi], 48       ; zero special case: '0'
+//   jmp .done
+// .loop:
+//   test rax, rax
+//   jz .done
+//   xor rdx, rdx
+//   div rcx                  ; rax = rax/10, rdx = rax%10
+//   add dl, 48               ; to ASCII
+//   mov [rsi], dl
+//   dec rsi
+//   jmp .loop
+// .done:
+//   inc rsi                  ; rsi -> first digit
+//   mov rdx, rsp
+//   add rdx, 32              ; rdx = end of buffer
+//   sub rdx, rsi             ; rdx = byte count
+//   mov edi, 1               ; fd = stdout
+//   mov eax, 1               ; sys_write
+//   syscall
+//   add rsp, 32
+//   ret
+
+const PRINT_INT_SIZE: u32 = 86;
+
+// Emit the 86-byte print_int routine at `pos` in the code buffer.
+// Returns pos + 86.
+fn emit_print_int_routine(code: Address, pos: u32) -> u32 {
+    // 0: sub rsp, 32                  (48 83 EC 20)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0x83);
+    emit_byte(code, pos + 2, 0xEC); emit_byte(code, pos + 3, 0x20);
+    // 4: mov rsi, rsp                 (48 89 E6)
+    emit_byte(code, pos + 4, 0x48); emit_byte(code, pos + 5, 0x89);
+    emit_byte(code, pos + 6, 0xE6);
+    // 7: add rsi, 31                  (48 83 C6 1F)
+    emit_byte(code, pos + 7, 0x48); emit_byte(code, pos + 8, 0x83);
+    emit_byte(code, pos + 9, 0xC6); emit_byte(code, pos + 10, 0x1F);
+    // 11: mov byte [rsi], 10          (C6 06 0A)
+    emit_byte(code, pos + 11, 0xC6); emit_byte(code, pos + 12, 0x06);
+    emit_byte(code, pos + 13, 0x0A);
+    // 14: dec rsi                     (48 FF CE)
+    emit_byte(code, pos + 14, 0x48); emit_byte(code, pos + 15, 0xFF);
+    emit_byte(code, pos + 16, 0xCE);
+    // 17: mov rax, rdi                (48 89 F8)
+    emit_byte(code, pos + 17, 0x48); emit_byte(code, pos + 18, 0x89);
+    emit_byte(code, pos + 19, 0xF8);
+    // 20: mov ecx, 10                 (B9 0A 00 00 00)
+    emit_byte(code, pos + 20, 0xB9); emit_byte(code, pos + 21, 0x0A);
+    emit_byte(code, pos + 22, 0x00); emit_byte(code, pos + 23, 0x00);
+    emit_byte(code, pos + 24, 0x00);
+    // 25: test rax, rax               (48 85 C0)
+    emit_byte(code, pos + 25, 0x48); emit_byte(code, pos + 26, 0x85);
+    emit_byte(code, pos + 27, 0xC0);
+    // 28: jnz .loop (rel8=+5)         (75 05)
+    emit_byte(code, pos + 28, 0x75); emit_byte(code, pos + 29, 0x05);
+    // 30: mov byte [rsi], 48          (C6 06 30)
+    emit_byte(code, pos + 30, 0xC6); emit_byte(code, pos + 31, 0x06);
+    emit_byte(code, pos + 32, 0x30);
+    // 33: jmp .done (rel8=+21)        (EB 15)
+    emit_byte(code, pos + 33, 0xEB); emit_byte(code, pos + 34, 0x15);
+    // 35 (.loop): test rax, rax       (48 85 C0)
+    emit_byte(code, pos + 35, 0x48); emit_byte(code, pos + 36, 0x85);
+    emit_byte(code, pos + 37, 0xC0);
+    // 38: jz .done (rel8=+16)         (74 10)
+    emit_byte(code, pos + 38, 0x74); emit_byte(code, pos + 39, 0x10);
+    // 40: xor rdx, rdx                (48 31 D2)
+    emit_byte(code, pos + 40, 0x48); emit_byte(code, pos + 41, 0x31);
+    emit_byte(code, pos + 42, 0xD2);
+    // 43: div rcx                     (48 F7 F1)
+    emit_byte(code, pos + 43, 0x48); emit_byte(code, pos + 44, 0xF7);
+    emit_byte(code, pos + 45, 0xF1);
+    // 46: add dl, 48                  (80 C2 30)
+    emit_byte(code, pos + 46, 0x80); emit_byte(code, pos + 47, 0xC2);
+    emit_byte(code, pos + 48, 0x30);
+    // 49: mov [rsi], dl               (88 16)
+    emit_byte(code, pos + 49, 0x88); emit_byte(code, pos + 50, 0x16);
+    // 51: dec rsi                     (48 FF CE)
+    emit_byte(code, pos + 51, 0x48); emit_byte(code, pos + 52, 0xFF);
+    emit_byte(code, pos + 53, 0xCE);
+    // 54: jmp .loop (rel8=-21)        (EB EB)
+    emit_byte(code, pos + 54, 0xEB); emit_byte(code, pos + 55, 0xEB);
+    // 56 (.done): inc rsi             (48 FF C6)
+    emit_byte(code, pos + 56, 0x48); emit_byte(code, pos + 57, 0xFF);
+    emit_byte(code, pos + 58, 0xC6);
+    // 59: mov rdx, rsp                (48 89 E2)
+    emit_byte(code, pos + 59, 0x48); emit_byte(code, pos + 60, 0x89);
+    emit_byte(code, pos + 61, 0xE2);
+    // 62: add rdx, 32                 (48 83 C2 20)
+    emit_byte(code, pos + 62, 0x48); emit_byte(code, pos + 63, 0x83);
+    emit_byte(code, pos + 64, 0xC2); emit_byte(code, pos + 65, 0x20);
+    // 66: sub rdx, rsi                (48 29 F2)
+    emit_byte(code, pos + 66, 0x48); emit_byte(code, pos + 67, 0x29);
+    emit_byte(code, pos + 68, 0xF2);
+    // 69: mov edi, 1                  (BF 01 00 00 00)
+    emit_byte(code, pos + 69, 0xBF); emit_byte(code, pos + 70, 0x01);
+    emit_byte(code, pos + 71, 0x00); emit_byte(code, pos + 72, 0x00);
+    emit_byte(code, pos + 73, 0x00);
+    // 74: mov eax, 1                  (B8 01 00 00 00)
+    emit_byte(code, pos + 74, 0xB8); emit_byte(code, pos + 75, 0x01);
+    emit_byte(code, pos + 76, 0x00); emit_byte(code, pos + 77, 0x00);
+    emit_byte(code, pos + 78, 0x00);
+    // 79: syscall                     (0F 05)
+    emit_byte(code, pos + 79, 0x0F); emit_byte(code, pos + 80, 0x05);
+    // 81: add rsp, 32                 (48 83 C4 20)
+    emit_byte(code, pos + 81, 0x48); emit_byte(code, pos + 82, 0x83);
+    emit_byte(code, pos + 83, 0xC4); emit_byte(code, pos + 84, 0x20);
+    // 85: ret                         (C3)
+    emit_byte(code, pos + 85, 0xC3);
+    return pos + 86;
+}
+
+// vreg_offset(N): the signed disp8 byte for the stack slot of vreg N.
+// Stack layout: [rbp - 8] is vreg 1, [rbp - 16] is vreg 2, etc.
+// (vreg 0 is reserved — see ir_builder.vuma's irb_new — and never loaded.)
+// LIMIT: only valid for vreg 1..15 (disp8 range -128..+127). For larger
+// frames, use a disp32 encoding (TODO — not needed for hello.vuma which
+// uses < 5 vregs). Returns the two's-complement byte value.
+fn vreg_offset(vreg: u32) -> u32 {
+    return (256 - 8 * vreg) & 0xFF;
+}
+
+// Scan the IR buffer to find the highest vreg id used. Used to size the
+// stack frame. Returns 0 if no vregs are used.
+//
+// IMPORTANT: not every field of every IR opcode is a vreg. We must only
+// count fields that are actually vreg indices for the given opcode:
+//   IR_MOV (16): dst is a vreg; imm is a literal (NOT a vreg — must skip).
+//   IR_ADD/SUB/MUL (1/2/3): dst, lhs, rhs are all vregs.
+//   IR_RET (14): dst is the returned vreg (or 0 for void return).
+//   IR_CALL (13): dst = result vreg; lhs = callee_hash (NOT a vreg!);
+//                 rhs = arg_count (NOT a vreg!); imm (lower 32) = arg0_vreg.
+//   Other ops: not supported in the bootstrap codegen; skip.
+fn codegen_max_vreg(ir_buf: Address) -> u32 {
+    count: u32 = load_u32(ir_buf, 0);
+    max: u32 = 0;
+    i: u32 = 0;
+    while i < count {
+        op_off: u32 = 8 + i * 32;
+        op: u32 = load_u32(ir_buf, op_off);
+        dst: u32 = load_u32(ir_buf, op_off + 4);
+        lhs: u32 = load_u32(ir_buf, op_off + 8);
+        rhs: u32 = load_u32(ir_buf, op_off + 12);
+
+        if op == 16 {  // IR_MOV: dst is a vreg; imm is a literal (skip).
+            if dst > max { max = dst; }
+        }
+        else { if op == 1 || op == 2 || op == 3 {  // ADD/SUB/MUL: all vregs.
+            if dst > max { max = dst; }
+            if lhs > max { max = lhs; }
+            if rhs > max { max = rhs; }
+        }}
+        else { if op == 14 {  // IR_RET: dst is the returned vreg.
+            if dst > max { max = dst; }
+        }}
+        else { if op == 13 {  // IR_CALL: dst = result vreg; imm = arg0_vreg.
+            if dst > max { max = dst; }
+            imm: u64 = load_u64(ir_buf, op_off + 16);
+            imm_lo: u32 = imm & 0xFFFFFFFF;
+            if imm_lo > max { max = imm_lo; }
+        }}
+        // Other ops (NOP, BRANCH, COND_BRANCH, CMP, LOAD, STORE, ALLOC):
+        // not supported in the bootstrap codegen; skip.
+        i = i + 1;
+    }
+    return max;
+}
+
+// codegen_emit: walk the IR buffer and emit x86_64 machine code.
+//
+// Inputs:
+//   ir_buf          — heap pointer to the IR buffer (layout per ir.vuma:
+//                     [count: u32][cap: u32][instr * count: 32 bytes each])
+//   code            — heap pointer to the output code buffer (caller-owned)
+//   code_cap        — capacity of `code` in bytes
+//   print_int_hash  — FNV-1a 32-bit hash of "print_int" (computed by the
+//                     driver via name_hash); used to dispatch IR_CALL targets
+//
+// Returns: total bytes emitted into `code`.
+//
+// Supported IR opcodes (the hello.vuma subset):
+//   IR_MOV (16)   — mov rax, imm64; mov [rbp-vreg_off], rax
+//   IR_ADD (1)    — load lhs,load rhs,add,store dst
+//   IR_SUB (2)    — same with sub
+//   IR_MUL (3)    — same with imul
+//   IR_RET (14)   — load dst into rdi (or xor edi if dst==0); mov eax, 60; syscall
+//   IR_CALL (13)  — if callee_hash == print_int_hash and arg_count >= 1:
+//                     load arg0 into rdi; call print_int (rel32 to offset 0)
+//                   else: skip silently (real calls are a TODO)
+//
+// Unsupported (silently skipped — documented TODO):
+//   IR_NOP, IR_BRANCH, IR_COND_BRANCH, IR_CMP, IR_LOAD, IR_STORE, IR_ALLOC
+//   hello.vuma doesn't use these; if/while codegen + memory ops are future work.
+fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u32) -> u32 {
+    pos: u32 = 0;
+
+    // 1. Emit print_int routine at offset 0.
+    pos = emit_print_int_routine(code, pos);
+
+    // 2. Emit main prologue.
+    //    Frame size: 8 bytes per vreg, rounded up to 16-byte alignment
+    //    (System V ABI requires rsp % 16 == 0 at call boundaries; the
+    //    prologue's `push rbp` misaligns by 8, so we need `sub rsp, frame`
+    //    to bring rsp back to 16-aligned).
+    max_vreg: u32 = codegen_max_vreg(ir_buf);
+    frame_size: u32 = (max_vreg + 1) * 8;
+    if frame_size % 16 != 0 { frame_size = frame_size + 8; }
+    if frame_size == 0 { frame_size = 16; }  // minimum: keep rsp aligned
+    pos = gen_prologue(code, pos, frame_size);
+
+    // 3. Walk IR and emit code per opcode.
+    count: u32 = load_u32(ir_buf, 0);
+    i: u32 = 0;
+    while i < count {
+        op_off: u32 = 8 + i * 32;
+        op: u32 = load_u32(ir_buf, op_off);
+        dst: u32 = load_u32(ir_buf, op_off + 4);
+        lhs: u32 = load_u32(ir_buf, op_off + 8);
+        rhs: u32 = load_u32(ir_buf, op_off + 12);
+        imm: u64 = load_u64(ir_buf, op_off + 16);
+
+        if op == 16 {  // IR_MOV: dst = imm
+            pos = enc_mov_rax_imm64(code, pos, imm);
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }
+        else { if op == 1 || op == 2 || op == 3 {  // ADD / SUB / MUL
+            pos = enc_load_rax(code, pos, vreg_offset(lhs));
+            pos = enc_load_rcx(code, pos, vreg_offset(rhs));
+            if op == 1 { pos = enc_add_rax_rcx(code, pos); }
+            else { if op == 2 { pos = enc_sub_rax_rcx(code, pos); }
+            else { pos = enc_imul_rax_rcx(code, pos); } }
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
+        else { if op == 14 {  // IR_RET: exit(dst)
+            if dst == 0 {
+                pos = enc_xor_edi(code, pos);  // exit code 0
+            } else {
+                pos = enc_load_rax(code, pos, vreg_offset(dst));
+                pos = enc_mov_rdi_rax(code, pos);  // rdi = exit code
+            }
+            pos = enc_mov_eax_imm32(code, pos, 60);  // sys_exit_group
+            pos = enc_syscall(code, pos);
+        }}
+        else { if op == 13 {  // IR_CALL
+            if lhs == print_int_hash {
+                if rhs >= 1 {
+                    arg0: u32 = imm & 0xFFFFFFFF;
+                    pos = enc_load_rdi(code, pos, vreg_offset(arg0));
+                    // Backward call to print_int at offset 0.
+                    pos = enc_call_rel32(code, pos, 0);
+                }
+            }
+            // else: real calls not supported in bootstrap; skip silently.
+        }}
+        // IR_NOP (0), IR_BRANCH (17), IR_COND_BRANCH (18), IR_CMP (10),
+        // IR_LOAD (11), IR_STORE (12), IR_ALLOC (15), etc.: not handled
+        // in the bootstrap codegen. hello.vuma doesn't use them; if/while
+        // codegen + memory ops are documented TODO for a future wave.
+
+        i = i + 1;
+    }
+
+    // 4. Defensive exit(0) — in case the IR didn't end with IR_RET.
+    //    Unreachable for well-formed input (irb_lower_fn ensures a trailing
+    //    RET), but guarantees the emitted binary never falls off .text.
+    pos = enc_xor_edi(code, pos);
+    pos = enc_mov_eax_imm32(code, pos, 60);
+    pos = enc_syscall(code, pos);
+
     return pos;
 }
