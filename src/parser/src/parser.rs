@@ -1859,7 +1859,7 @@ impl<'src> Parser<'src> {
         }))
     }
 
-    /// BD directive: `bd(name [, expr])`, `repd(name [, expr])`, etc.
+    /// BD directive: `bd(name [expr])`, `repd(name [expr])`, etc.
     fn parse_bd_directive(&mut self, kind: BdDirectiveKind) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.advance(); // consume the directive keyword (bd/repd/capd/reld)

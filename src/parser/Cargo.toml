@@ -12,6 +12,6 @@ rust-version.workspace = true
 
 [dependencies]
 vuma-scg.workspace = true
-# TODO(wave43): remaining serde usage at src/parser/src/lexer.rs:23 (and 73
-# other sites across AST/lexer/error types); migrate to hand-written codec.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 — all parser AST/lexer/error types now
+# rely on hand-written Debug + Clone derives only; no JSON serialization is
+# performed inside this crate.
