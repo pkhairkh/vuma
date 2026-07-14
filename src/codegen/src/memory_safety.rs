@@ -982,6 +982,76 @@ pub fn analyze_with_scg_liveness(
         }
     }
 
+    // Double-free detection (Wave 20).
+    //
+    // Audit caveat (now resolved): previously the `check_double_free` config
+    // flag was silently ignored here — double-free was detected only by the
+    // codegen-level `MemorySafetyAnalyzer::analyze` at Stage 8.  This
+    // SCG-level check now honours the flag.
+    //
+    // Algorithm: walk SCG nodes in deterministic `NodeId` order, tracking
+    // which `RegionId`s are currently in the "deallocated" state.  An
+    // `Allocation` node for a region clears the deallocated state (so a
+    // re-allocation followed by a fresh free is not a double-free); a
+    // `Deallocation` node on an already-deallocated region with no
+    // intervening allocation is a double-free (E042).
+    //
+    // Violations are always pushed onto the returned `Vec`; whether they
+    // become HARD errors depends on `config.errors_are_fatal` at the caller
+    // (Stage 6b in the pipeline treats any non-empty result as fatal when
+    // `errors_are_fatal == true`).
+    if config.check_double_free {
+        // Collect and sort nodes for deterministic iteration order.  The
+        // underlying `petgraph`-style storage does not guarantee a stable
+        // iteration order, so we sort by `NodeId` (which corresponds to
+        // insertion order in the SCG builder).
+        let mut nodes: Vec<&vuma_scg::node::NodeData> = scg.nodes().collect();
+        nodes.sort_by_key(|n| n.id);
+
+        // Region IDs that are currently in the deallocated state.
+        let mut deallocated_regions: HashSet<vuma_scg::region::RegionId> = HashSet::new();
+        // First deallocation `NodeId` per region, for diagnostic line info.
+        let mut first_dealloc: HashMap<vuma_scg::region::RegionId, vuma_scg::node::NodeId> =
+            HashMap::new();
+
+        for node in &nodes {
+            match &node.payload {
+                vuma_scg::node::NodePayload::Allocation(alloc) => {
+                    // An intervening allocation clears the deallocated
+                    // state for the region — a subsequent free is not a
+                    // double-free.
+                    deallocated_regions.remove(&alloc.region_id);
+                    first_dealloc.remove(&alloc.region_id);
+                }
+                vuma_scg::node::NodePayload::Deallocation(dealloc) => {
+                    if deallocated_regions.contains(&dealloc.region_id) {
+                        // Double-free: region already deallocated with no
+                        // intervening allocation.
+                        let first_node_id = first_dealloc.get(&dealloc.region_id).copied();
+                        let first_free_line = first_node_id
+                            .and_then(|nid| scg.get_node(nid))
+                            .and_then(|nd| nd.program_point.line)
+                            .map(|l| l as u32);
+                        let second_free_line = node
+                            .program_point
+                            .line
+                            .map(|l| l as u32);
+                        violations.push(MemorySafetyViolation::DoubleFree {
+                            allocation_name: format!("region_{}", dealloc.region_id.as_u64()),
+                            first_free_line,
+                            second_free_line,
+                        });
+                    } else {
+                        // First deallocation of this region — record it.
+                        deallocated_regions.insert(dealloc.region_id);
+                        first_dealloc.insert(dealloc.region_id, node.id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Uninitialized read detection
     if config.check_uninitialized_reads {
         let uninit_reads = vuma_scg::liveness::find_uninitialized_reads(scg, &scg_liveness.liveness);
@@ -1317,5 +1387,239 @@ mod tests {
 
         let dirty_display = format!("{}", report);
         assert!(dirty_display.contains("violation"));
+    }
+
+    // ── Wave 20 SCG-level double-free regression tests ──────────────────────
+    //
+    // The codegen-level `MemorySafetyAnalyzer::analyze` has always detected
+    // double-free, but the SCG-liveness variant `analyze_with_scg_liveness`
+    // silently ignored `check_double_free` until Wave 20 audit remediation.
+    // These tests exercise the new SCG-level check directly.
+
+    /// Helper: build an SCG with one allocation in `region` and `n_frees`
+    /// deallocations of that region.  Returns the SCG.
+    fn build_scg_with_region_frees(region: vuma_scg::region::RegionId, n_frees: usize) -> vuma_scg::graph::SCG {
+        use vuma_scg::{
+            AllocationNode, DeallocationNode, NodeId, NodePayload, NodeType,
+            ProgramPoint, SCG,
+        };
+
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: Some("test.vu".to_string()),
+            line: Some(10),
+            column: Some(1),
+            offset: None,
+        };
+
+        let alloc_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64,
+                align: 8,
+                region_id: region,
+                type_name: Some("Buf".to_string()),
+            }),
+            pp.clone(),
+        );
+
+        for i in 1..=n_frees {
+            let _dealloc_id: NodeId = scg.add_node(
+                NodeType::Deallocation,
+                NodePayload::Deallocation(DeallocationNode {
+                    allocation_node: alloc_id,
+                    region_id: region,
+                }),
+                ProgramPoint {
+                    file: Some("test.vu".to_string()),
+                    line: Some(10 + i as u64),
+                    column: Some(1),
+                    offset: None,
+                },
+            );
+        }
+        scg
+    }
+
+    /// Wave 20: a single region freed twice → one DoubleFree (E042) violation.
+    #[test]
+    fn test_wave20_double_free_detected() {
+        let region = vuma_scg::region::RegionId::new(42);
+        let scg = build_scg_with_region_frees(region, 2);
+        let liveness = vuma_scg::liveness::LivenessAnalysis::new(&scg);
+
+        let config = MemorySafetyConfig {
+            check_use_after_free: false,
+            check_double_free: true,
+            check_uninitialized_reads: false,
+            check_memory_leaks: false,
+            check_dangling_pointers: false,
+            runtime_bounds_checks: false,
+            errors_are_fatal: true,
+        };
+
+        let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
+        let double_frees: Vec<_> = violations
+            .iter()
+            .filter(|v| v.code() == "E042")
+            .collect();
+        assert_eq!(
+            double_frees.len(),
+            1,
+            "expected exactly one DoubleFree violation, got {:?}",
+            violations
+        );
+        // Verify the allocation_name encodes the region id and the line
+        // numbers propagate from the SCG program points.
+        if let MemorySafetyViolation::DoubleFree {
+            allocation_name,
+            first_free_line,
+            second_free_line,
+        } = double_frees[0]
+        {
+            assert_eq!(allocation_name, "region_42");
+            assert_eq!(*first_free_line, Some(11));
+            assert_eq!(*second_free_line, Some(12));
+        } else {
+            panic!("expected DoubleFree variant");
+        }
+    }
+
+    /// Wave 20: a single region freed once → no DoubleFree violation.
+    #[test]
+    fn test_wave20_single_free_no_double_free() {
+        let region = vuma_scg::region::RegionId::new(7);
+        let scg = build_scg_with_region_frees(region, 1);
+        let liveness = vuma_scg::liveness::LivenessAnalysis::new(&scg);
+
+        let config = MemorySafetyConfig {
+            check_use_after_free: false,
+            check_double_free: true,
+            check_uninitialized_reads: false,
+            check_memory_leaks: false,
+            check_dangling_pointers: false,
+            runtime_bounds_checks: false,
+            errors_are_fatal: true,
+        };
+
+        let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
+        let double_frees: Vec<_> = violations
+            .iter()
+            .filter(|v| v.code() == "E042")
+            .collect();
+        assert!(
+            double_frees.is_empty(),
+            "single free should not produce a DoubleFree violation; got {:?}",
+            double_frees
+        );
+    }
+
+    /// Wave 20: `check_double_free: false` suppresses the check entirely,
+    /// even when the SCG has an obvious double-free pattern.
+    #[test]
+    fn test_wave20_double_free_flag_disabled() {
+        let region = vuma_scg::region::RegionId::new(99);
+        let scg = build_scg_with_region_frees(region, 2);
+        let liveness = vuma_scg::liveness::LivenessAnalysis::new(&scg);
+
+        let config = MemorySafetyConfig {
+            check_use_after_free: false,
+            check_double_free: false, // ← flag OFF
+            check_uninitialized_reads: false,
+            check_memory_leaks: false,
+            check_dangling_pointers: false,
+            runtime_bounds_checks: false,
+            errors_are_fatal: true,
+        };
+
+        let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.code() != "E042"),
+            "check_double_free=false must suppress DoubleFree; got {:?}",
+            violations
+        );
+    }
+
+    /// Wave 20: an intervening allocation clears the region's deallocated
+    /// state, so free → alloc → free is NOT a double-free.
+    #[test]
+    fn test_wave20_intervening_alloc_clears_state() {
+        use vuma_scg::{
+            AllocationNode, DeallocationNode, NodePayload, NodeType, ProgramPoint, SCG,
+        };
+
+        let region = vuma_scg::region::RegionId::new(5);
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: None,
+            line: None,
+            column: None,
+            offset: None,
+        };
+
+        // alloc R
+        let alloc1 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 8,
+                region_id: region,
+                type_name: None,
+            }),
+            pp.clone(),
+        );
+        // free R  (R now deallocated)
+        scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc1,
+                region_id: region,
+            }),
+            pp.clone(),
+        );
+        // alloc R again  (intervening allocation — clears deallocated state)
+        let alloc2 = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 8,
+                region_id: region,
+                type_name: None,
+            }),
+            pp.clone(),
+        );
+        // free R again  (NOT a double-free — fresh allocation since last free)
+        scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc2,
+                region_id: region,
+            }),
+            pp,
+        );
+
+        let liveness = vuma_scg::liveness::LivenessAnalysis::new(&scg);
+        let config = MemorySafetyConfig {
+            check_use_after_free: false,
+            check_double_free: true,
+            check_uninitialized_reads: false,
+            check_memory_leaks: false,
+            check_dangling_pointers: false,
+            runtime_bounds_checks: false,
+            errors_are_fatal: true,
+        };
+
+        let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
+        let double_frees: Vec<_> = violations
+            .iter()
+            .filter(|v| v.code() == "E042")
+            .collect();
+        assert!(
+            double_frees.is_empty(),
+            "free → alloc → free is NOT a double-free; got {:?}",
+            double_frees
+        );
     }
 }
