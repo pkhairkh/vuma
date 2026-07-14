@@ -92,7 +92,7 @@ impl ProofLog {
 }
 
 /// Summary of a proof log, suitable for display or serialization.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProofSummary {
     /// Total number of rewrites applied.
     pub total_rewrites: usize,

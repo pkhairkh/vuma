@@ -62,7 +62,7 @@ const OP_FP: u32 = 0b1010011;
 // ===========================================================================
 
 /// RISC-V 64-bit general-purpose registers (x0–x31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     Zero = 0,
     Ra = 1,
@@ -243,7 +243,7 @@ impl std::fmt::Display for Gpr {
 // ===========================================================================
 
 /// RISC-V 64-bit floating-point registers (f0–f31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fpr {
     F0 = 0,
     F1 = 1,
@@ -503,7 +503,7 @@ fn encode_j_type(imm: i32, rd: u32, opcode: u32) -> [u8; 4] {
 /// Covers RV64I base, M extension, and key F/D extension instructions.
 /// Each variant captures the operands needed for encoding and disassembly.
 /// The `encode()` method produces a 4-byte little-endian machine code word.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── RV64I: Upper Immediate ────────────────────────────────────────
     /// Load Upper Immediate: `lui rd, imm`

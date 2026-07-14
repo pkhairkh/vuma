@@ -42,7 +42,7 @@ pub mod disasm;
 // ===========================================================================
 
 /// WebAssembly value types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WasmType {
     I32,
     I64,
@@ -128,7 +128,7 @@ impl std::fmt::Display for WasmType {
 ///
 /// Each variant corresponds to one Wasm opcode.  Variants that take
 /// immediates carry them as fields.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WasmInstr {
     // ── Control ───────────────────────────────────────────────────────
     Block(Option<WasmType>),
@@ -1160,7 +1160,7 @@ const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // version 1
 ///
 /// Supports multi-value returns (Wasm 2.0 feature): the `results` vector
 /// may contain more than one type.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmFuncType {
     pub params: Vec<WasmType>,
     pub results: Vec<WasmType>,
@@ -1184,7 +1184,7 @@ impl WasmFuncType {
 }
 
 /// A Wasm import entry.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmImport {
     pub module: String,
     pub name: String,
@@ -1295,7 +1295,7 @@ impl WasmImport {
 }
 
 /// Kind of import.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmImportKind {
     Function { type_idx: u32 },
     Table { elem_type: u8, limits: WasmLimits },
@@ -1304,7 +1304,7 @@ pub enum WasmImportKind {
 }
 
 /// Wasm limits (for tables and memories).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmLimits {
     pub min: u32,
     pub max: Option<u32>,
@@ -1329,7 +1329,7 @@ impl WasmLimits {
 }
 
 /// A Wasm export entry.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmExport {
     pub name: String,
     pub kind: WasmExportKind,
@@ -1337,7 +1337,7 @@ pub struct WasmExport {
 }
 
 /// Kind of export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WasmExportKind {
     Function = 0,
     Table = 1,
@@ -1346,7 +1346,7 @@ pub enum WasmExportKind {
 }
 
 /// A Wasm global variable.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WasmGlobal {
     pub ty: WasmType,
     pub mutable: bool,
@@ -1492,7 +1492,7 @@ const ARGV_BUF_ADDR: i32 = 0x0938;
 const UNRESOLVED_CALL_IDX: u32 = 0xDEAD;
 
 /// A Wasm data segment.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmDataSegment {
     pub memory_index: u32,
     pub offset_expr: Vec<u8>, // init expr for offset
@@ -1500,7 +1500,7 @@ pub struct WasmDataSegment {
 }
 
 /// A Wasm element segment (for indirect calls).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmElementSegment {
     pub table_index: u32,
     pub offset_expr: Vec<u8>,
@@ -1527,7 +1527,7 @@ pub struct WasmModuleBuilder {
 /// A Wasm function body.
 ///
 /// Supports local declarations (count + type pairs) as per the Wasm binary format.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmFuncBody {
     pub locals: Vec<(u32, WasmType)>, // (count, type) pairs
     pub body: Vec<u8>,                // bytecode of the function body

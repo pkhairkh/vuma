@@ -19,7 +19,7 @@ use std::fmt;
 // ===========================================================================
 
 /// RISC-V general-purpose registers (x0–x31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Gpr {
     Zero, Ra, Sp, Gp, Tp, T0, T1, T2,
@@ -88,7 +88,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// RISC-V floating-point registers (f0–f31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Fpr {
     F0, F1, F2, F3, F4, F5, F6, F7,

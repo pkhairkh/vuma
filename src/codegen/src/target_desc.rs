@@ -7,7 +7,7 @@
 use crate::backend::{Endianness, OutputFormat, RegClass};
 
 /// A complete machine-readable description of a target ISA.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TargetDesc {
     /// ISA name in lowercase (e.g., `"aarch64"`, `"riscv64"`).
     pub name: &'static str,
@@ -32,7 +32,6 @@ pub struct TargetDesc {
     /// Instruction latency table for the scheduler (Wave 5).
     /// Maps instruction category → (latency_cycles, throughput_per_cycle).
     /// If empty, the scheduler assumes uniform latency 1.
-    #[serde(default)]
     pub latency_table: LatencyTable,
 }
 
@@ -41,14 +40,14 @@ pub struct TargetDesc {
 /// Models pipeline hazards for list-scheduling. Each entry maps an
 /// instruction category to its latency (cycles until result is available)
 /// and throughput (instructions per cycle on that functional unit).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct LatencyTable {
     /// Map from instruction category name to latency info.
     pub entries: Vec<LatencyEntry>,
 }
 
 /// A single latency entry for one instruction category.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LatencyEntry {
     /// Category name (matches `InstCategoryDesc::name`).
     pub category: String,
@@ -62,7 +61,7 @@ pub struct LatencyEntry {
 }
 
 /// Functional units for scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FunctionalUnit {
     /// Integer ALU.
     Alu,
@@ -385,7 +384,7 @@ impl LatencyTable {
 }
 
 /// Description of a single register.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RegDesc {
     /// Register name (e.g., `"X0"`, `"RAX"`, `"x10"`).
     pub name: &'static str,
@@ -567,7 +566,7 @@ impl RegDesc {
 /// a register with its class (GPR / SIMD-FP / Condition / Special).
 /// `RegisterClass` aggregates information about *all* registers sharing
 /// that tag.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterClass {
     /// Human-readable class name (e.g. `"GPR"`, `"FPR"`, `"Vec"`, `"Condition"`).
     pub name: &'static str,
@@ -711,7 +710,7 @@ impl TargetDesc {
 }
 
 /// Description of a calling convention.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CallingConventionDesc {
     /// Calling convention name (e.g., `"aapcs64"`, `"lp64d"`, `"systemv"`).
     pub name: &'static str,
@@ -738,7 +737,7 @@ pub struct CallingConventionDesc {
 }
 
 /// Description of an instruction category.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct InstCategoryDesc {
     /// Category name (e.g., `"arithmetic"`, `"branch"`, `"load_store"`).
     pub name: &'static str,

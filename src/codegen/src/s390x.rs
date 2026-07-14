@@ -104,7 +104,7 @@ use std::fmt;
 /// - R13  — base pointer (convention; unused here)
 /// - R14  — link register (return address)
 /// - R15  — stack pointer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Gpr {
     R0 = 0,

@@ -319,7 +319,7 @@ const R_ARM_MOVT_ABS: u32 = 44;
 // ---------------------------------------------------------------------------
 
 /// Output format for the code emitter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputFormat {
     /// Full ELF64 executable (Linux) or object file.
     ELF,
@@ -343,7 +343,7 @@ impl std::fmt::Display for OutputFormat {
 }
 
 /// Target platform for code emission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     /// Linux on AArch64.
     Linux,
@@ -366,7 +366,7 @@ impl std::fmt::Display for Target {
 /// Configuration for the code emitter.
 ///
 /// Controls the output format, target platform, and various emission options.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EmitConfig {
     /// Output format (ELF, raw binary, or object file).
     pub format: OutputFormat,
