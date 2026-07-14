@@ -31,7 +31,7 @@ use crate::repd::{
     ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep,
     PtrRep, RepD, StructRep, UnionRep,
 };
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
@@ -1044,7 +1044,7 @@ pub fn infer_interprocedural(scg: &SCG, entries: &[NodeId]) -> HashMap<NodeId, B
 /// use vuma_bd::capd::CapD;
 /// use vuma_bd::reld::RelD;
 /// use vuma_bd::repd::{RepD, ByteRep};
-/// use hashbrown::HashMap;
+/// use std::collections::HashMap;
 ///
 /// let template = BD::new(
 ///     RepD::Byte(ByteRep { size: 4, align: 4 }),
@@ -1164,7 +1164,7 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
 /// use vuma_bd::descriptor::BD;
 /// use vuma_scg::graph::SCG;
 /// use vuma_scg::node::NodeId;
-/// use hashbrown::{HashMap, HashSet};
+/// use std::collections::{HashMap, HashSet};
 ///
 /// let scg = SCG::new();
 /// let dirty: HashSet<NodeId> = [NodeId::new(3)].into_iter().collect();

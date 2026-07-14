@@ -9,7 +9,7 @@
 //! are also implemented in [`crate::digraph`] — this module no longer reaches
 //! into `petgraph`.
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::digraph::{
     has_path_connecting, tarjan_scc, toposort, DiGraph, Direction, EdgeIndex, NodeIndex,

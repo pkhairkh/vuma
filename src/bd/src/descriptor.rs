@@ -206,7 +206,7 @@ mod tests {
     use crate::capd::{CapD, Capability};
     use crate::reld::{RelD, Relation};
     use crate::repd::{ByteRep, RepD};
-    use hashbrown::HashSet;
+    use std::collections::HashSet;
 
     use super::*;
 

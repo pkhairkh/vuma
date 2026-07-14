@@ -29,7 +29,7 @@
 
 use std::fmt;
 
-use hashbrown::HashMap;
+use std::collections::HashMap;
 
 use crate::access::{Access, AccessId, AccessKind};
 use crate::address::Address;
@@ -292,7 +292,7 @@ pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
 
     // Step 2: Pre-scan — identify which allocation nodes exist and which regions
     // are freed, so we can assign correct region status upfront.
-    let mut freed_allocations: hashbrown::HashSet<ScgNodeId> = hashbrown::HashSet::new();
+    let mut freed_allocations: std::collections::HashSet<ScgNodeId> = std::collections::HashSet::new();
     for node_data in scg.nodes() {
         if let NodePayload::Deallocation(dealloc) = &node_data.payload {
             freed_allocations.insert(dealloc.allocation_node);
@@ -338,7 +338,7 @@ fn process_node(
     scg: &SCG,
     ctx: &mut ConversionContext,
     node: &NodeData,
-    freed_allocations: &hashbrown::HashSet<ScgNodeId>,
+    freed_allocations: &std::collections::HashSet<ScgNodeId>,
 ) -> Result<(), ConversionError> {
     match node.node_type {
         NodeType::Allocation => {
@@ -384,7 +384,7 @@ fn process_allocation(
     scg: &SCG,
     ctx: &mut ConversionContext,
     node: &NodeData,
-    freed_allocations: &hashbrown::HashSet<ScgNodeId>,
+    freed_allocations: &std::collections::HashSet<ScgNodeId>,
 ) -> Result<(), ConversionError> {
     let alloc_payload = match &node.payload {
         NodePayload::Allocation(a) => a,

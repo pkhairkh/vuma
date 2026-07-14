@@ -19,7 +19,7 @@
 //! each one, and accumulates aggregate statistics across all runs.
 
 use crate::node::ComputationKind;
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::edge::EdgeKind;
 use crate::graph::{ValidationResult, SCG};

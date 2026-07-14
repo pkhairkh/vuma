@@ -36,7 +36,7 @@
 use crate::capd::{CapD, Capability, Condition};
 use crate::context::Context;
 use crate::descriptor::{BDId, BD};
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

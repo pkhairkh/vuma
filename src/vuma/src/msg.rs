@@ -15,7 +15,7 @@ use crate::address::Address;
 use crate::derivation::{Derivation, DerivationId};
 use crate::region::{Region, RegionId};
 use crate::sync::{SyncEdge, SyncEdgeId};
-use hashbrown::HashMap;
+use std::collections::HashMap;
 use std::fmt;
 
 /// The Memory State Graph.

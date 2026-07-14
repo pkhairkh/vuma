@@ -35,7 +35,7 @@
 use crate::result::{
     CounterExample, Evidence, ProgramPoint, VerificationResult, VerificationStatus,
 };
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

@@ -8,7 +8,7 @@
 //! is satisfied only when phase 3 is listed among [`Context::active_phases`].
 
 use crate::capd::{CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel};
-use hashbrown::HashSet;
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

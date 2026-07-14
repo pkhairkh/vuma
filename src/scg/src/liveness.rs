@@ -37,7 +37,7 @@
 //! - **Dead code detection**: pure computations whose results are never used
 //! - **Uninitialized read detection**: reads of values with no reaching definition
 
-use hashbrown::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
