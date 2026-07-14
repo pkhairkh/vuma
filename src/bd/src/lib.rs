@@ -40,6 +40,7 @@ pub mod reld;
 pub mod reld_refine;
 pub mod repd;
 pub mod repd_compat;
+pub mod serialize;
 pub mod unify;
 
 // Convenient re-exports for the most commonly used types.
