@@ -2943,6 +2943,25 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
 // Runtime Syscall Stubs
 // ===========================================================================
 
+/// Wave 47: Size in bytes of the runtime argv-storage slot reserved at
+/// offset 0 of BSS. Holds argc (8 bytes) and argv (8 bytes) saved by the
+/// `_start` stub at process entry, so the `__vuma_argc` / `__vuma_argv`
+/// runtime stubs can retrieve them later. Unconditionally reserved by
+/// `encode_program` so the stubs are always safe to call.
+pub const RUNTIME_ARGV_STORAGE_SIZE: u64 = 16;
+
+/// Wave 47: 8-byte sentinel value used as a placeholder for the BSS
+/// argv-storage virtual address inside the `_start` stub and the
+/// `__vuma_argc` / `__vuma_argv` runtime stubs. The placeholder is emitted
+/// by `build_runtime_syscall_stubs` (for the two argv stubs) and by
+/// `encode_program` (for the `_start` stub), then patched in a single
+/// scan-and-replace pass over the concatenated code once BSS layout is
+/// finalized. The value is chosen to be a recognizable sentinel that will
+/// not collide with any legitimate instruction immediate emitted by the
+/// x86_64 encoders (which produce small constants ≤ 0xFFFFFFFF or syscall
+/// numbers ≤ 318).
+pub const RUNTIME_ARGV_STORAGE_PLACEHOLDER: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
 /// Build runtime syscall stubs for x86_64 Linux.
 ///
 /// These are tiny functions that use the `syscall` instruction to implement
@@ -2973,6 +2992,13 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
 /// - Linux syscall ABI: args in RDI, RSI, RDX, R10, R8, R9, number in RAX
 /// - The only difference is the 4th arg: RCX (calling) vs R10 (syscall)
 /// - For functions with ≤3 args, no register shuffling is needed
+///
+/// # Wave 47 — Process Startup Argument Access
+///
+/// Two non-syscall stubs (`__vuma_argc`, `__vuma_argv`) provide VUMA programs
+/// with access to argc/argv. They read from a 16-byte runtime-managed slot at
+/// the start of BSS, populated by the `_start` stub before `main` is called.
+/// See [`RUNTIME_ARGV_STORAGE_PLACEHOLDER`] and [`RUNTIME_ARGV_STORAGE_SIZE`].
 fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     let mut stubs = Vec::new();
 
@@ -3422,6 +3448,51 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // stub table) are the live ones; the duplicate block has been removed to
     // avoid emitting ~70 bytes of dead code.
 
+    // ── Wave 47: process startup argument access ──────────────────────────
+    // __vuma_argc() -> i32   and   __vuma_argv() -> Address
+    //
+    // These stubs read from a runtime-managed 16-byte slot at the START of
+    // the BSS segment (offset 0). The _start stub (built in encode_program)
+    // populates this slot before calling main:
+    //   [bss_vaddr + 0] = argc  (8 bytes, populated from [rsp] at entry)
+    //   [bss_vaddr + 8] = argv  (8 bytes, populated from rsp+8 at entry)
+    //
+    // The stubs below load the BSS argv-storage address via a placeholder
+    // 64-bit immediate (RUNTIME_ARGV_STORAGE_PLACEHOLDER). encode_program()
+    // scans the emitted bytes for this placeholder and patches it with the
+    // real BSS virtual address once layout is finalized. Until patched, the
+    // placeholder is a recognizable sentinel (0xDEADBEEFCAFEBABE) so any
+    // accidental call before patching would trap immediately rather than
+    // silently corrupt a random address.
+    //
+    // Stub layout (14 bytes for __vuma_argc, 15 for __vuma_argv):
+    //   48 B8 <8-byte placeholder>   ; mov rax, <placeholder>
+    //   48 8B 00                     ; mov rax, [rax]         (__vuma_argc)
+    //   48 8B 40 08                  ; mov rax, [rax+8]       (__vuma_argv)
+    //   C3                           ; ret
+    //
+    // The 16-byte BSS slot is reserved unconditionally by encode_program()
+    // (every emitted ELF gets one), so these stubs are always safe to call
+    // — though programs that never reference __vuma_argc/__vuma_argv will
+    // have the stubs as dead code (the linker-style resolution in
+    // encode_program only patches CALL sites that actually reference them;
+    // the stub bytes themselves are always present in the runtime stubs
+    // table, same as print_int, mmap, etc.).
+    {
+        let mut code = Vec::with_capacity(14);
+        code.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, 0));
+        code.extend(encode_ret());
+        stubs.push(("__vuma_argc".to_string(), code));
+    }
+    {
+        let mut code = Vec::with_capacity(15);
+        code.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, 8));
+        code.extend(encode_ret());
+        stubs.push(("__vuma_argv".to_string(), code));
+    }
+
     stubs
 }
 
@@ -3616,13 +3687,16 @@ impl Backend for X86_64Backend {
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
         // Build the _start stub:
-        //   mov rdi, [rsp]          ; argc = *RSP       (4 bytes with SIB)
-        //   lea rsi, [rsp + 8]      ; argv = RSP + 8    (5 bytes with SIB)
-        //   E8 <rel32 to main>      ; call main         (5 bytes)
-        //   48 89 C7                ; mov rdi, rax      (3 bytes)
-        //   48 C7 C0 3C 00 00 00   ; mov rax, 60       (7 bytes)
-        //   0F 05                   ; syscall            (2 bytes)
-        // Total = 4 + 5 + 5 + 3 + 7 + 2 = 26 bytes
+        //   mov rdi, [rsp]              ; argc = *RSP            (4 bytes with SIB)
+        //   lea rsi, [rsp + 8]          ; argv = RSP + 8         (5 bytes with SIB)
+        //   48 B8 <placeholder 8 bytes> ; mov rax, <bss_argv_addr>  (10 bytes)
+        //   48 89 38                    ; mov [rax], rdi  (save argc)  (3 bytes)
+        //   48 89 70 08                 ; mov [rax+8], rsi (save argv) (4 bytes)
+        //   E8 <rel32 to main>          ; call main              (5 bytes)
+        //   48 89 C7                    ; mov rdi, rax           (3 bytes)
+        //   48 C7 C0 3C 00 00 00        ; mov rax, 60            (7 bytes)
+        //   0F 05                       ; syscall                (2 bytes)
+        // Total = 4 + 5 + 10 + 3 + 4 + 5 + 3 + 7 + 2 = 43 bytes
         //
         // On Linux x86_64, the process entry stack layout is:
         //   [RSP]     = argc (8 bytes)
@@ -3632,8 +3706,15 @@ impl Backend for X86_64Backend {
         //   NULL
         //   envp[0], envp[1], ..., NULL
         //   auxv...
+        //
+        // The _start stub saves argc/argv into a runtime-managed 16-byte
+        // slot at the start of BSS (offset 0) so that the __vuma_argc and
+        // __vuma_argv runtime stubs can retrieve them later (Wave 47).
+        // Before main is called, argc/argv are also left in RDI/RSI —
+        // preserving the existing calling convention for any VUMA main()
+        // that might eventually declare argc/argv parameters.
 
-        let start_stub_size: usize = 26;
+        let start_stub_size: usize = 43;
 
         // Build runtime syscall stubs for common POSIX operations.
         // These are small functions that use the `syscall` instruction
@@ -3685,6 +3766,19 @@ impl Backend for X86_64Backend {
         // lea rsi, [rsp + 8] — argv starts at RSP + 8
         start_stub.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
 
+        // ── Wave 47: save argc/argv to the runtime argv-storage BSS slot ──
+        // mov rax, <placeholder> — placeholder is patched below after BSS
+        // layout is finalized. The placeholder is the same sentinel used in
+        // the __vuma_argc/__vuma_argv runtime stubs, so a single scan-and-
+        // replace pass over all_code patches every occurrence.
+        start_stub.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+
+        // mov [rax], rdi — save argc to [bss_argv_storage + 0]
+        start_stub.extend(encode_mov_mem_reg(Gpr::Rax, 0, Gpr::Rdi));
+
+        // mov [rax+8], rsi — save argv to [bss_argv_storage + 8]
+        start_stub.extend(encode_mov_mem_reg(Gpr::Rax, 8, Gpr::Rsi));
+
         // call main (E8 + rel32 placeholder)
         start_stub.extend(encode_call_rel32(0));
 
@@ -3697,18 +3791,26 @@ impl Backend for X86_64Backend {
         // syscall
         start_stub.extend(encode_syscall());
 
-        // Patch the call main rel32 offset in _start stub
-        // The mov rdi,[rsp] is 4 bytes, lea rsi,[rsp+8] is 5 bytes, then E8 at offset 9.
-        // The rel32 is at offset 10 (after the E8 opcode byte at offset 9)
+        // Patch the call main rel32 offset in _start stub.
+        // Layout within start_stub:
+        //   [0..4)   mov rdi, [rsp]         (4 bytes)
+        //   [4..9)   lea rsi, [rsp+8]      (5 bytes)
+        //   [9..19)  mov rax, <placeholder> (10 bytes)
+        //   [19..22) mov [rax], rdi         (3 bytes)
+        //   [22..26) mov [rax+8], rsi       (4 bytes)
+        //   [26..31) call main (E8 + rel32) (5 bytes)  ← E8 at offset 26, rel32 at 27
+        //   [31..34) mov rdi, rax           (3 bytes)
+        //   [34..41) mov rax, 60           (7 bytes)
+        //   [41..43) syscall                (2 bytes)
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            let rel32_patch_offset = 10usize; // offset within start_stub
+            let rel32_patch_offset = 27usize; // offset of rel32 within start_stub
             // rel32 = target - (call_site + 5)
-            // call_site = offset of the E8 byte = 9
-            let rel32 = (main_offset as i64) - (9i64 + 5i64);
+            // call_site = offset of the E8 byte = 26
+            let rel32 = (main_offset as i64) - (26i64 + 5i64);
             start_stub[rel32_patch_offset..rel32_patch_offset + 4]
                 .copy_from_slice(&(rel32 as i32).to_le_bytes());
         }
@@ -3755,7 +3857,14 @@ impl Backend for X86_64Backend {
                 }
             }
         }
-        let bss_size: u64 = data_symbols.len() as u64 * BSS_SLOT_SIZE;
+        // Wave 47: a 16-byte runtime argv-storage slot is reserved at offset 0
+        // of BSS. The _start stub writes argc (8 bytes) and argv (8 bytes)
+        // here at process entry; the __vuma_argc/__vuma_argv runtime stubs
+        // read from this slot. This reservation is unconditional so the
+        // stubs are always safe to call (even programs that never reference
+        // them just waste 16 bytes of BSS).
+        let bss_size: u64 = RUNTIME_ARGV_STORAGE_SIZE
+            + data_symbols.len() as u64 * BSS_SLOT_SIZE;
 
         // ── Compute BSS virtual address ──────────────────────────────
         // The BSS segment starts at the next 64K boundary after the text
@@ -3782,11 +3891,16 @@ impl Backend for X86_64Backend {
             0
         };
 
-        // Build a map: data symbol name → BSS virtual address
+        // Build a map: data symbol name → BSS virtual address.
+        // Wave 47: data symbols start at offset RUNTIME_ARGV_STORAGE_SIZE
+        // (16) in BSS — the first 16 bytes are reserved for the runtime
+        // argv-storage slot populated by _start.
         let data_symbol_addrs: HashMap<String, u64> = data_symbols
             .iter()
             .enumerate()
-            .map(|(i, name)| (name.clone(), bss_vaddr + i as u64 * BSS_SLOT_SIZE))
+            .map(|(i, name)| {
+                (name.clone(), bss_vaddr + RUNTIME_ARGV_STORAGE_SIZE + i as u64 * BSS_SLOT_SIZE)
+            })
             .collect();
 
         // ── Patch relocations for each function ──────────────────────
@@ -3867,6 +3981,52 @@ impl Backend for X86_64Backend {
                 .map(|i| i.encoded.len())
                 .sum();
             func_code_offset += func_size;
+        }
+
+        // ── Wave 47: patch the runtime argv-storage placeholder ──────────
+        // The _start stub and the __vuma_argc/__vuma_argv runtime stubs each
+        // contain an 8-byte placeholder (RUNTIME_ARGV_STORAGE_PLACEHOLDER)
+        // that stands in for the BSS argv-storage virtual address. Now that
+        // BSS layout is finalized (bss_vaddr is known), we scan all_code for
+        // the placeholder and replace every occurrence with the real address.
+        //
+        // The slot lives at offset 0 of BSS, so argv_storage_addr = bss_vaddr.
+        // The placeholder is a recognizable sentinel (0xDEADBEEFCAFEBABE);
+        // scanning is safe because the value is sufficiently random that it
+        // will not collide with any legitimate instruction immediate emitted
+        // by the x86_64 encoders (which produce small constants ≤0xFFFFFFFF
+        // or syscall numbers ≤318). A failure to patch would leave the
+        // stubs reading from a non-mapped address, which traps immediately
+        // — a loud failure rather than a silent corruption.
+        //
+        // This pass runs AFTER relocation patching so that any user-code
+        // relocations that happen to land inside a placeholder byte range
+        // (extremely unlikely given the sentinel's bit pattern, but defended
+        // against in principle) take precedence — the placeholder scan only
+        // matches bytes that are STILL the sentinel after relocation
+        // patching, i.e. only the stub-emitted placeholders.
+        let argv_storage_addr = bss_vaddr; // offset 0 of BSS
+        let placeholder_bytes = RUNTIME_ARGV_STORAGE_PLACEHOLDER.to_le_bytes();
+        let mut patched_count: usize = 0;
+        let mut i = 0;
+        while i + 8 <= all_code.len() {
+            if all_code[i..i + 8] == placeholder_bytes {
+                all_code[i..i + 8].copy_from_slice(&argv_storage_addr.to_le_bytes());
+                patched_count += 1;
+                i += 8; // skip past the patched bytes to avoid overlapping matches
+            } else {
+                i += 1;
+            }
+        }
+        // We expect at least one placeholder (the _start stub always has
+        // one). If zero were found, the _start stub wasn't built correctly.
+        // The two __vuma_argc/__vuma_argv stub placeholders are always present
+        // in the runtime stubs table, so the expected count is 3.
+        if patched_count == 0 {
+            vuma_log!(warn,
+                "Wave 47: runtime argv-storage placeholder not found in emitted code — \
+                 _start stub did not save argc/argv; __vuma_argc/__vuma_argv will trap if called"
+            );
         }
 
         Ok(build_minimal_x86_64_elf(&all_code, BASE_ADDR, bss_size))
