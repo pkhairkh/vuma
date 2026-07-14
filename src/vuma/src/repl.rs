@@ -854,7 +854,7 @@ impl VumaRepl {
             Err(e) => {
                 // MSG conversion failure is non-fatal for the REPL; we just
                 // don't have an MSG available.
-                log::warn!("MSG conversion failed: {e}");
+                vuma_log!(warn, "MSG conversion failed: {e}");
                 self.msg = None;
             }
         }
@@ -1029,7 +1029,7 @@ Expressions:
         match scg_to_msg::scg_to_msg(&self.scg) {
             Ok(msg) => self.msg = Some(msg),
             Err(e) => {
-                log::warn!("MSG conversion failed: {e}");
+                vuma_log!(warn, "MSG conversion failed: {e}");
                 self.msg = None;
             }
         }
