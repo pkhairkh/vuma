@@ -11,9 +11,10 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/std/src/net.rs:24 (and 57 other
-# sites across all vuma-std modules); migrate to hand-written codec.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 (Task 8-a) — all vuma-std types now use
+# hand-written Display/Debug for diagnostics and have no binary serialization
+# needs (vuma-std is a runtime-only library, not a compiler substrate — see
+# Wave 46 decision (b)).
 
 [features]
 default = []

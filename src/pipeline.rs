@@ -5632,43 +5632,56 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 /// a fail-safe default: if the comparison itself crashes, the user gets
 /// an error rather than a silently-wrong dedup.
 fn fn_defs_equivalent(a: &vuma_parser::ast::FnDef, b: &vuma_parser::ast::FnDef) -> bool {
-    let a_json = match serde_json::to_value(a) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let b_json = match serde_json::to_value(b) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    strip_spans(a_json) == strip_spans(b_json)
+    // Span-agnostic comparison via Debug-string normalization (Task 8-a).
+    //
+    // Previously (Task 7-c) this function used serde_json::to_value +
+    // strip_spans. That approach was removed when Wave 43 stripped
+    // Serialize/Deserialize derives from the parser's AST types.
+    //
+    // The current approach: format both FnDefs via Debug, then regex-
+    // replace every "Span { start: N, end: M }" pattern with a fixed
+    // placeholder "Span { start: 0, end: 0 }" before string comparison.
+    // This works because Debug output includes all fields transitively,
+    // and Span is the only field that differs between copy-pasted fns.
+    let a_dbg = format!("{:?}", a);
+    let b_dbg = format!("{:?}", b);
+    normalize_spans_in_debug(&a_dbg) == normalize_spans_in_debug(&b_dbg)
 }
 
-/// Recursively remove every `"span"` field from a `serde_json::Value`
-/// (Task 7-c).
-///
-/// Used by [`fn_defs_equivalent`] to normalise serialized `FnDef`s
-/// before comparison, so that two fns at different source positions
-/// (which necessarily have different `Span` byte offsets) compare as
-/// equal iff their non-span fields are identical.
-///
-/// Walks the JSON tree depth-first: for objects, removes the `"span"`
-/// key (if present) then recurses into every remaining value; for
-/// arrays, recurses into every element; for all other JSON types
-/// (strings, numbers, bools, null) returns the value unchanged.
-fn strip_spans(v: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match v {
-        Value::Object(mut map) => {
-            map.remove("span");
-            let normalized: serde_json::Map<String, Value> = map
-                .into_iter()
-                .map(|(k, v)| (k, strip_spans(v)))
-                .collect();
-            Value::Object(normalized)
+/// Replace every `Span { start: N, end: M }` pattern in `s` with
+/// `Span { start: 0, end: 0 }` so two ASTs at different source positions
+/// compare equal. Used by [`fn_defs_equivalent`] for span-agnostic
+/// structural equality.
+fn normalize_spans_in_debug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"Span { start: ") {
+            // Find the closing " }" for this Span struct.
+            // Scan forward: skip "Span { start: ", digits, ", end: ", digits, " }".
+            let mut j = i + "Span { start: ".len();
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if bytes[j..].starts_with(b", end: ") {
+                j += ", end: ".len();
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if bytes[j..].starts_with(b" }") {
+                    j += " }".len();
+                    out.push_str("Span { start: 0, end: 0 }");
+                    i = j;
+                    continue;
+                }
+            }
+            // If the pattern didn't match, fall through to copy the byte.
         }
-        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_spans).collect()),
-        other => other,
+        out.push(bytes[i] as char);
+        i += 1;
     }
+    out
 }
 
 /// Detect the host architecture at compile time / runtime and return the
