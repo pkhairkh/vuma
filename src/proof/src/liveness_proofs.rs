@@ -246,7 +246,7 @@ impl std::fmt::Display for WellFoundedOrdering {
 // ---------------------------------------------------------------------------
 
 /// Proof that no deadlock cycle exists in the resource acquisition graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoDeadlockProof {
     /// The underlying formal proof object.
     pub proof: Proof,
@@ -304,7 +304,7 @@ impl NoDeadlockProof {
 // ---------------------------------------------------------------------------
 
 /// Proof that a specific allocation is freed on all execution paths.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AllocationFreedProof {
     /// The underlying formal proof object.
     pub proof: Proof,
@@ -401,7 +401,7 @@ impl AllocationFreedProof {
 // ---------------------------------------------------------------------------
 
 /// A formal proof that a program satisfies the liveness invariant.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LivenessProof {
     /// The top-level formal proof object.
     pub proof: Proof,

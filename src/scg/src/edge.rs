@@ -105,7 +105,7 @@ impl std::fmt::Display for EdgeKind {
 /// `EdgeData` is the universal edge payload stored in the graph.
 /// It carries the edge's identity, source and target nodes,
 /// kind classification, and an optional label.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeData {
     /// The unique identifier of this edge.
     pub id: EdgeId,

@@ -158,7 +158,7 @@ impl fmt::Display for Condition {
 /// * `⊤` (top)    = all capabilities / all conditions
 /// * **meet**     = intersection of capabilities, union of conditions
 /// * **join**     = union of capabilities, intersection of conditions
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapD {
     /// The set of capabilities granted.
     pub caps: HashSet<Capability>,

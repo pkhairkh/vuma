@@ -88,7 +88,7 @@ impl fmt::Display for BDVariable {
 
 /// A term in the BD constraint system — either a concrete [`BD`] or a
 /// symbolic [`BDVariable`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BDTerm {
     /// A concrete, fully-specified behavioral descriptor.
     Concrete(BD),
@@ -165,7 +165,7 @@ impl fmt::Display for BDConstraintKind {
 // ---------------------------------------------------------------------------
 
 /// A constraint between two BD terms.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BDConstraint {
     /// Left-hand side of the constraint.
     pub left: BDTerm,

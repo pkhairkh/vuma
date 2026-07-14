@@ -52,7 +52,7 @@ impl fmt::Display for BDId {
 ///                ∧ bd1.capd.is_subset(bd2.capd)
 ///                ∧ bd1.reld.refines(bd2.reld)
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BD {
     /// Representation descriptor — memory shape.
     pub repd: RepD,

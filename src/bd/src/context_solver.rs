@@ -405,7 +405,7 @@ impl fmt::Display for ContextRule {
 /// assert!(read_capd.caps.contains(&Capability::Read));
 /// assert!(!read_capd.caps.contains(&Capability::Write));
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ContextSolver {
     /// The ordered list of context rules, sorted by descending priority.
     rules: Vec<ContextRule>,

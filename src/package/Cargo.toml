@@ -11,6 +11,8 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# TODO(wave43): remaining serde usage at src/package/src/manifest.rs:21 (and 9
+# other sites across manifest/registry); migrate to hand-written codec.
 serde.workspace = true
 toml.workspace = true
 tempfile.workspace = true

@@ -1,9 +1,13 @@
 //! # Serialization I/O for Proof Objects
 //!
-//! Provides JSON serialization and deserialization for all proof types through
-//! a unified [`ProofEnvelope`] tagged enum. This allows proof objects of
-//! different kinds to be serialized, stored, and later deserialized without
-//! losing type information.
+//! Provides the hand-written binary codec for the core [`Proof`] artifact and
+//! every type it (transitively) references. The former JSON `ProofEnvelope`
+//! path (Wave ≤ 42) was removed in Wave 43 when `Serialize, Deserialize`
+//! derives were stripped from `Proof` / `Judgment` / `Fact` / `ProofStep`
+//! (and their transitive containers `CleanupProof`, `LivenessProof`,
+//! `ExclusivityProof`, `OriginProof`, `InterpretationProof`, `ProofBundle`).
+//! See the `ProofEnvelope` definition below for the retained in-memory
+//! tagged-sum type.
 
 use crate::cleanup_proofs::CleanupProof;
 use crate::exclusivity_proofs::ExclusivityProof;
@@ -12,46 +16,32 @@ use crate::liveness_proofs::LivenessProof;
 use crate::origin_proofs::OriginProof;
 use crate::proof::Proof;
 
-/// Serialization error type.
-#[derive(Debug)]
-pub enum SerializationError {
-    Serialization(serde_json::Error),
-    Io(std::io::Error),
-}
+// Note (Wave 43): the `SerializationError` enum (formerly wrapping
+// `serde_json::Error` and `std::io::Error`) was removed along with the
+// `ProofEnvelope` JSON helpers. The hand-written binary codec below uses
+// `BinaryError` for its error type. Callers needing JSON I/O should
+// construct a serde-derived peripheral DTO from the `Proof` fields.
 
-impl std::fmt::Display for SerializationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SerializationError::Serialization(e) => {
-                write!(f, "JSON serialization failed: {e}")
-            }
-            SerializationError::Io(e) => write!(f, "IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SerializationError {}
-
-impl From<serde_json::Error> for SerializationError {
-    fn from(e: serde_json::Error) -> Self {
-        SerializationError::Serialization(e)
-    }
-}
-
-impl From<std::io::Error> for SerializationError {
-    fn from(e: std::io::Error) -> Self {
-        SerializationError::Io(e)
-    }
-}
+// ── ProofEnvelope (Wave 43: JSON path removed) ─────────────────────────
+//
+// `ProofEnvelope` was previously `#[derive(serde::Serialize, serde::Deserialize)]`
+// with JSON helpers (`to_json_string`, `from_json_string`, `to_json_string_pretty`,
+// `to_writer`, `from_reader`). These were removed when `Serialize, Deserialize`
+// derives were stripped from `Proof` / `Judgment` / `Fact` / `ProofStep` (and
+// their transitive containers `CleanupProof`, `LivenessProof`, `ExclusivityProof`,
+// `OriginProof`, `InterpretationProof`, `ProofBundle`). The `ProofEnvelope`
+// type itself is retained as a tagged sum type for in-memory dispatch; the
+// hand-written binary codec (`serialize_proof` / `deserialize_proof` /
+// `BinaryWrite` / `BinaryRead` below) is now the canonical (de)serialization
+// path. Callers needing JSON output should construct a serde-derived
+// peripheral DTO from the `Proof` fields and serialize that instead.
 
 /// A serializable proof envelope that can hold any proof type.
 ///
-/// Uses internally-tagged serde representation (`#[serde(tag = "type", content = "data")]`)
-/// so that the JSON output includes a `"type"` field identifying the proof kind
-/// and a `"data"` field carrying the proof payload. This allows heterogeneous
-/// collections of proofs to be serialized and deserialized correctly.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "data")]
+/// Formerly serde-derived with an internally-tagged JSON representation
+// (#[serde(tag = "type", content = "data")]). The serde derive and JSON
+// helpers were removed in Wave 43 (see module comment above). The type is
+// retained as an in-memory tagged sum.
 #[allow(clippy::large_enum_variant)]
 pub enum ProofEnvelope {
     Liveness(LivenessProof),
@@ -60,33 +50,6 @@ pub enum ProofEnvelope {
     Origin(OriginProof),
     Interpretation(InterpretationProof),
     Generic(Proof),
-}
-
-impl ProofEnvelope {
-    /// Serialize this proof envelope to a JSON string.
-    pub fn to_json_string(&self) -> Result<String, SerializationError> {
-        Ok(serde_json::to_string(self)?)
-    }
-
-    /// Serialize this proof envelope to a pretty JSON string.
-    pub fn to_json_string_pretty(&self) -> Result<String, SerializationError> {
-        Ok(serde_json::to_string_pretty(self)?)
-    }
-
-    /// Deserialize a proof envelope from a JSON string.
-    pub fn from_json_string(s: &str) -> Result<Self, SerializationError> {
-        Ok(serde_json::from_str(s)?)
-    }
-
-    /// Serialize to a writer.
-    pub fn to_writer<W: std::io::Write>(&self, writer: W) -> Result<(), SerializationError> {
-        Ok(serde_json::to_writer(writer, self)?)
-    }
-
-    /// Deserialize from a reader.
-    pub fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, SerializationError> {
-        Ok(serde_json::from_reader(reader)?)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,90 +1037,13 @@ mod tests {
         proof
     }
 
-    #[test]
-    fn test_proof_roundtrip_json() {
-        let proof = make_simple_proof();
-
-        // Serialize
-        let envelope = ProofEnvelope::Generic(proof.clone());
-        let json = envelope.to_json_string().expect("serialization failed");
-
-        // Deserialize
-        let deserialized: ProofEnvelope =
-            ProofEnvelope::from_json_string(&json).expect("deserialization failed");
-
-        // Compare
-        if let ProofEnvelope::Generic(roundtrip) = deserialized {
-            assert_eq!(roundtrip, proof);
-        } else {
-            panic!("expected Generic envelope variant");
-        }
-    }
-
-    #[test]
-    fn test_envelope_liveness_roundtrip() {
-        let proof = make_simple_proof();
-        let liveness = LivenessProof {
-            proof: proof.clone(),
-            access_proofs: vec![(0, proof.clone())],
-            freed_proofs: vec![],
-            deadlock_proof: None,
-            ordering: None,
-            tactic: LivenessTactic::PathEnumeration,
-        };
-
-        let envelope = ProofEnvelope::from(liveness.clone());
-        let json = envelope.to_json_string().expect("serialization failed");
-
-        let deserialized: ProofEnvelope =
-            ProofEnvelope::from_json_string(&json).expect("deserialization failed");
-
-        if let ProofEnvelope::Liveness(roundtrip) = deserialized {
-            assert_eq!(roundtrip, liveness);
-        } else {
-            panic!("expected Liveness envelope variant");
-        }
-    }
-
-    #[test]
-    fn test_envelope_serialization_pretty() {
-        let proof = make_simple_proof();
-        let envelope = ProofEnvelope::Generic(proof);
-
-        let pretty = envelope
-            .to_json_string_pretty()
-            .expect("pretty serialization failed");
-
-        // Pretty output should contain newlines and the "type" tag
-        assert!(pretty.contains('\n'), "pretty JSON should contain newlines");
-        assert!(pretty.contains("\"type\""), "should contain type tag");
-        assert!(
-            pretty.contains("\"Generic\""),
-            "should contain Generic variant name"
-        );
-    }
-
-    #[test]
-    fn test_envelope_from_json_string() {
-        let proof = make_simple_proof();
-        let envelope = ProofEnvelope::Generic(proof.clone());
-        let json = envelope.to_json_string().expect("serialization failed");
-
-        // Verify the JSON string contains the expected tagged structure
-        assert!(json.contains("\"type\""), "JSON should contain type tag");
-        assert!(
-            json.contains("\"Generic\""),
-            "JSON should contain Generic tag value"
-        );
-
-        // Parse back
-        let parsed = ProofEnvelope::from_json_string(&json).expect("deserialization failed");
-        if let ProofEnvelope::Generic(roundtrip) = parsed {
-            assert_eq!(roundtrip, proof);
-        } else {
-            panic!("expected Generic envelope variant");
-        }
-    }
+    // ── JSON-ProofEnvelope round-trip tests (removed in Wave 43) ────────
+    // The serde-derived `ProofEnvelope` JSON path (`to_json_string` /
+    // `from_json_string` / `to_json_string_pretty`) was removed along with
+    // the `Serialize, Deserialize` derives on `Proof` / `Judgment` / `Fact`
+    // / `ProofStep`. The hand-written binary codec (`serialize_proof` /
+    // `deserialize_proof`) is now the canonical (de)serialization path and
+    // is covered by the round-trip tests below.
 
     // ── Hand-written binary round-trip tests (Wave 43) ───────────────────
 
@@ -1403,22 +1289,12 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_and_json_produce_equivalent_proof() {
-        // The hand-written binary path and the serde JSON path must both
-        // round-trip the same Proof; this guards against drift between the
-        // two encodings.
+    fn test_binary_and_json_produce_equivalent_proof_removed_in_wave43() {
+        // The serde JSON path was removed in Wave 43; this test now verifies
+        // only that the hand-written binary codec round-trips a simple Proof.
         let proof = make_simple_proof();
         let bytes = serialize_proof(&proof);
         let bin_back = deserialize_proof(&bytes).expect("binary deserialize");
-
-        let env = ProofEnvelope::Generic(proof.clone());
-        let json = env.to_json_string().expect("json serialize");
-        let json_back = ProofEnvelope::from_json_string(&json).expect("json deserialize");
-        if let ProofEnvelope::Generic(jp) = json_back {
-            assert_eq!(jp, proof);
-        } else {
-            panic!("expected Generic envelope variant");
-        }
         assert_eq!(bin_back, proof);
     }
 }

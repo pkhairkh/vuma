@@ -14,7 +14,7 @@ use crate::proof::{Conclusion, InvariantName, Proof};
 use serde::{Deserialize, Serialize};
 
 /// A bundle of proofs for all five invariants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProofBundle {
     /// The liveness proof, if available.
     pub liveness: Option<crate::liveness_proofs::LivenessProof>,
@@ -725,78 +725,30 @@ mod tests {
 
     /// Serialize and deserialize each ProofEnvelope variant and verify
     /// round-trip correctness.
+    /// **Removed in Wave 43:** the `ProofEnvelope` JSON path was removed when
+    /// `Serialize, Deserialize` derives were stripped from `Proof` /
+    /// `Judgment` / `Fact` / `ProofStep` (and their transitive containers
+    /// `CleanupProof`, `LivenessProof`, `ExclusivityProof`, `OriginProof`,
+    /// `InterpretationProof`, `ProofBundle`). The hand-written binary codec
+    /// at `src/proof/src/serialization.rs` (`serialize_proof` /
+    /// `deserialize_proof` / `BinaryWrite` / `BinaryRead`) is now the
+    /// canonical (de)serialization path for `Proof` and is covered by the
+    /// round-trip tests in that module.
     #[test]
-    fn test_serialization_roundtrip_all_types() {
-        use crate::serialization::ProofEnvelope;
-
-        // --- Generic(Proof) ---
-        let generic_proof = make_simple_proof_for_serialization();
-        let env_generic = ProofEnvelope::Generic(generic_proof.clone());
-        let json = env_generic.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Generic(p) = rt {
-            assert_eq!(p, generic_proof);
-        } else {
-            panic!("expected Generic variant after round-trip");
-        }
-
-        // --- Liveness ---
-        let liveness = make_liveness_proof();
-        let env_liveness = ProofEnvelope::Liveness(liveness.clone());
-        let json = env_liveness.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Liveness(p) = rt {
-            assert_eq!(p, liveness);
-        } else {
-            panic!("expected Liveness variant after round-trip");
-        }
-
-        // --- Exclusivity ---
-        let exclusivity = make_exclusivity_proof();
-        let env_excl = ProofEnvelope::Exclusivity(exclusivity.clone());
-        let json = env_excl.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Exclusivity(p) = rt {
-            assert_eq!(p, exclusivity);
-        } else {
-            panic!("expected Exclusivity variant after round-trip");
-        }
-
-        // --- Cleanup ---
-        let cleanup = make_cleanup_proof();
-        let env_cleanup = ProofEnvelope::Cleanup(cleanup.clone());
-        let json = env_cleanup.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Cleanup(p) = rt {
-            assert_eq!(p, cleanup);
-        } else {
-            panic!("expected Cleanup variant after round-trip");
-        }
-
-        // --- Origin ---
-        let origin = make_origin_proof();
-        let env_origin = ProofEnvelope::Origin(origin.clone());
-        let json = env_origin.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Origin(p) = rt {
-            assert_eq!(p, origin);
-        } else {
-            panic!("expected Origin variant after round-trip");
-        }
-
-        // --- Interpretation ---
-        let interp = make_interpretation_proof();
-        let env_interp = ProofEnvelope::Interpretation(interp.clone());
-        let json = env_interp.to_json_string().unwrap();
-        let rt: ProofEnvelope = ProofEnvelope::from_json_string(&json).unwrap();
-        if let ProofEnvelope::Interpretation(p) = rt {
-            assert_eq!(p, interp);
-        } else {
-            panic!("expected Interpretation variant after round-trip");
-        }
+    fn test_serialization_roundtrip_all_types_removed_in_wave43() {
+        // Sanity check: the hand-written binary codec still round-trips a
+        // simple Proof.
+        use crate::serialization::{deserialize_proof, serialize_proof};
+        let proof = make_liveness_proof_with_facts().proof;
+        let bytes = serialize_proof(&proof);
+        let back = deserialize_proof(&bytes).expect("binary round-trip");
+        assert_eq!(back, proof);
     }
 
     /// Helper: create a simple Proof for serialization round-trip tests.
+    /// **Removed in Wave 43:** the only caller was the JSON-ProofEnvelope
+    /// round-trip test, which was migrated to the binary codec above.
+    #[allow(dead_code)]
     fn make_simple_proof_for_serialization() -> Proof {
         let mut proof = Proof::new(Goal::new(
             InvariantName::Liveness,

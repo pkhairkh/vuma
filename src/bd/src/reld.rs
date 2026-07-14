@@ -145,7 +145,7 @@ impl fmt::Display for Relation {
 ///
 /// `RelD` supports a refinement ordering (`⊑`): `a ⊑ b` when every
 /// relation in `a` is also present (or refined) in `b`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelD {
     /// The set of relations.
     pub relations: HashSet<Relation>,

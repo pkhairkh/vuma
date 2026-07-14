@@ -126,7 +126,7 @@ pub struct ProgramPoint {
 /// `NodeData` is the universal node payload stored in the graph.
 /// It carries the node's identity, type classification, optional
 /// BD annotation reference, and source program point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeData {
     /// The unique identifier of this node.
     pub id: NodeId,

@@ -39,7 +39,7 @@ pub struct ByteRep {
 }
 
 /// Representation of a struct — an ordered product of fields at fixed offsets.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructRep {
     /// Fields as `(offset, representation)` pairs, in declaration order.
     pub fields: Vec<(u64, RepD)>,
@@ -50,7 +50,7 @@ pub struct StructRep {
 }
 
 /// Representation of a fixed-count homogeneous array.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayRep {
     /// Representation of each element.
     pub element: Box<RepD>,
@@ -61,21 +61,21 @@ pub struct ArrayRep {
 /// Representation of a tagged union (enum).
 ///
 /// Each variant carries a discriminant tag and its own representation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumRep {
     /// Variants as `(tag_value, variant_representation)` pairs.
     pub variants: Vec<(u64, RepD)>,
 }
 
 /// Representation of a pointer to another representation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PtrRep {
     /// Representation of the pointee.
     pub pointee: Box<RepD>,
 }
 
 /// Representation of an untagged union — overlapping alternatives.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnionRep {
     /// All alternative representations.
     pub alternatives: Vec<RepD>,
@@ -86,7 +86,7 @@ pub struct UnionRep {
 }
 
 /// Representation of a function signature.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FuncRep {
     /// Parameter representations.
     pub params: Vec<RepD>,
@@ -163,7 +163,7 @@ pub struct ConceptRelationalRep {
 ///
 /// Each constraint specifies a condition that any concrete type substituted
 /// for the generic must satisfy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BDConstraint {
     /// The generic must have at least the given capabilities.
     CapDAtLeast(CapD),
@@ -187,7 +187,7 @@ impl fmt::Display for BDConstraint {
 ///
 /// Two `RepD`s are [`RepD::compatible`] when they can safely alias the same memory,
 /// and one [`RepD::subsumes`] the other when it is at least as permissive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepD {
     /// Raw byte sequence.
     Byte(ByteRep),
@@ -641,6 +641,7 @@ pub fn generic_satisfies_constraints(constraints: &[BDConstraint], concrete: &Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serialize::{BinaryRead, BinaryWrite};
 
     #[test]
     fn byte_size_alignment() {
@@ -940,18 +941,20 @@ mod tests {
         assert_eq!(l3.alignment(), 1);
     }
 
-    // -- RepD serialization round-trip --
+    // -- RepD binary round-trip (Wave 43: migrated from serde_json) --
 
     #[test]
-    fn byte_serde_roundtrip() {
+    fn byte_binary_roundtrip() {
         let rep = RepD::Byte(ByteRep { size: 8, align: 8 });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn struct_serde_roundtrip() {
+    fn struct_binary_roundtrip() {
         let rep = RepD::Struct(StructRep {
             fields: vec![
                 (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
@@ -965,37 +968,43 @@ mod tests {
             total_size: 12,
             align: 8,
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn enum_serde_roundtrip() {
+    fn enum_binary_roundtrip() {
         let rep = RepD::Enum(EnumRep {
             variants: vec![
                 (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
                 (1, RepD::Byte(ByteRep { size: 8, align: 8 })),
             ],
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn func_serde_roundtrip() {
+    fn func_binary_roundtrip() {
         let rep = RepD::Func(FuncRep {
             params: vec![RepD::Byte(ByteRep { size: 8, align: 8 })],
             result: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn union_serde_roundtrip() {
+    fn union_binary_roundtrip() {
         let rep = RepD::Union(UnionRep {
             alternatives: vec![
                 RepD::Byte(ByteRep { size: 4, align: 4 }),
@@ -1004,32 +1013,38 @@ mod tests {
             max_size: 8,
             max_align: 8,
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn array_serde_roundtrip() {
+    fn array_binary_roundtrip() {
         let rep = RepD::Array(ArrayRep {
             element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
             count: 100,
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
     #[test]
-    fn ptr_serde_roundtrip() {
+    fn ptr_binary_roundtrip() {
         let rep = RepD::Ptr(PtrRep {
             pointee: Box::new(RepD::Array(ArrayRep {
                 element: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
                 count: 10,
             })),
         });
-        let json = serde_json::to_string(&rep).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        rep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(rep, back);
     }
 
@@ -1188,26 +1203,30 @@ mod tests {
     }
 
     #[test]
-    fn generic_serde_roundtrip() {
+    fn generic_binary_roundtrip() {
         let g = RepD::Generic {
             name: "T".to_string(),
             constraints: vec![],
         };
-        let json = serde_json::to_string(&g).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        g.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(g, back);
     }
 
     #[test]
-    fn generic_with_constraint_serde_roundtrip() {
+    fn generic_with_constraint_binary_roundtrip() {
         let g = RepD::Generic {
             name: "U".to_string(),
             constraints: vec![BDConstraint::RepDCompatibleWith(Box::new(RepD::Byte(
                 ByteRep { size: 8, align: 8 },
             )))],
         };
-        let json = serde_json::to_string(&g).unwrap();
-        let back: RepD = serde_json::from_str(&json).unwrap();
+        let mut buf = Vec::new();
+        g.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
         assert_eq!(g, back);
     }
 

@@ -29,7 +29,7 @@ use crate::region::{RegionId, SCGRegion};
 ///
 /// Each variant captures one specific kind of graph modification, making
 /// diffs inspectable, serializable, and reversible.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DiffEntry {
     /// A node was added in the new graph.
     NodeAdded(NodeData),
@@ -134,7 +134,7 @@ impl DiffEntry {
 /// An `SCGDiff` contains an ordered list of `DiffEntry` items that
 /// collectively describe all changes needed to transform the old graph
 /// into the new graph.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SCGDiff {
     /// The ordered list of diff entries.
     entries: Vec<DiffEntry>,
@@ -883,7 +883,7 @@ pub fn compute_edit_script(old: &SCG, new: &SCG) -> Vec<DiffEntry> {
 // ── Three-Way Merge ─────────────────────────────────────────────────────────
 
 /// A conflict encountered during three-way merge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MergeConflict {
     /// Conflicts involving nodes.
     pub node_conflicts: Vec<NodeConflict>,
@@ -931,7 +931,7 @@ impl std::fmt::Display for MergeConflict {
 impl std::error::Error for MergeConflict {}
 
 /// A conflict involving a single node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeConflict {
     /// The ID of the conflicting node.
     pub id: NodeId,
@@ -944,7 +944,7 @@ pub struct NodeConflict {
 }
 
 /// A conflict involving a single edge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeConflict {
     /// The ID of the conflicting edge.
     pub id: EdgeId,
@@ -957,7 +957,7 @@ pub struct EdgeConflict {
 }
 
 /// A conflict involving a single region.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegionConflict {
     /// The ID of the conflicting region.
     pub id: RegionId,
