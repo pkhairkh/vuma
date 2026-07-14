@@ -45,7 +45,6 @@
 
 use crate::error::{VumaErrorChain, VumaErrorKind};
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{
     BufRead as StdBufRead, Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite,
@@ -75,7 +74,7 @@ mod sys {
 // ---------------------------------------------------------------------------
 
 /// VUMA-specific I/O error kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VumaIoErrorKind {
     /// The underlying resource (file, stream, etc.) is not open.
     NotOpen,
@@ -124,7 +123,7 @@ impl fmt::Display for VumaIoErrorKind {
 /// Every I/O error in the VUMA runtime carries a `CapD` that describes which
 /// capabilities were relevant at the point of failure, allowing the verifier
 /// to trace capability violations precisely.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaIoError {
     /// The category of error.
     pub kind: VumaIoErrorKind,
@@ -1800,7 +1799,7 @@ impl StdSeek for VumaFile {
 // ---------------------------------------------------------------------------
 
 /// The access mode for a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileMode {
     /// Read-only access.
     Read,

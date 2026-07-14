@@ -23,7 +23,6 @@
 //! capability compliance at compile time.
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -83,7 +82,7 @@ fn page_align_up(n: usize) -> usize {
 /// Addresses are opaque 64-bit values that identify locations in the VUMA
 /// address space. They are not raw pointers — they must be resolved through
 /// the VUMA runtime to access actual memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Address(pub u64);
 
 impl Address {
@@ -131,7 +130,7 @@ impl fmt::Display for Address {
 // ---------------------------------------------------------------------------
 
 /// Errors that can occur during allocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllocError {
     /// The allocator has run out of memory.
     OutOfMemory {
@@ -604,7 +603,7 @@ impl PoolAllocator {
 ///
 /// Provides a summary of allocation activity for diagnostic and
 /// verification purposes. Each field is annotated with BD semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryStats {
     /// Cumulative total bytes allocated over the lifetime.
     pub total_allocated: u64,
@@ -685,7 +684,7 @@ impl fmt::Display for MemoryStats {
 // ---------------------------------------------------------------------------
 
 /// The kind of allocation event recorded in the MSG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocEventKind {
     /// Memory was allocated.
     Alloc,
@@ -700,7 +699,7 @@ pub enum AllocEventKind {
 /// Each `AllocRecord` captures the who/what/when of an allocation operation,
 /// enabling the VUMA runtime to construct the Message Sequence Graph and
 /// verify behavioral compliance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AllocRecord {
     /// Sequential event ID (monotonically increasing).
     pub seq: u64,

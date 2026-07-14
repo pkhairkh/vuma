@@ -15,7 +15,6 @@
 //! - VumaPathBuf: CapD { Read, Write, Compare, Serialize }
 
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +26,7 @@ use std::fmt;
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Compare, Serialize }
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathComponent {
     /// A platform-specific path prefix (e.g., `C:` on Windows).
     Prefix(String),
@@ -90,7 +89,7 @@ impl fmt::Display for PathComponent {
 ///
 /// - CapD: { Read, Compare, Serialize }
 /// - SyncEdge: none (passive value type)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaPath {
     /// The internal path string.
     inner: String,
@@ -253,7 +252,7 @@ impl AsRef<std::path::Path> for VumaPath {
 ///
 /// - CapD: { Read, Write, Compare, Serialize }
 /// - SyncEdge: none (passive value type)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaPathBuf {
     /// The internal path string.
     inner: String,

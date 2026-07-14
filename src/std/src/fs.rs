@@ -25,7 +25,6 @@
 
 use crate::error::{VumaErrorChain, VumaErrorKind, VumaResult};
 use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
 use std::path::Path;
@@ -130,7 +129,7 @@ impl From<VumaIoError> for std::io::Error {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaPermissions {
     /// Whether the file is read-only.
     pub readonly: bool,
@@ -167,7 +166,7 @@ impl VumaPermissions {
 /// ## BD Annotations
 ///
 /// - CapD: { Read, Serialize }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VumaMetadata {
     /// File size in bytes.
     pub size: u64,
