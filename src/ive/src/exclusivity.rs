@@ -36,7 +36,6 @@ use crate::result::{
     CounterExample, Evidence, ProgramPoint, VerificationResult, VerificationStatus,
 };
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a memory access event within the exclusivity checker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AccessId(pub u64);
 
 impl fmt::Display for AccessId {
@@ -58,7 +57,7 @@ impl fmt::Display for AccessId {
 // ---------------------------------------------------------------------------
 
 /// The kind of memory access: read or write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessKind {
     /// A read from memory.
     Read,
@@ -80,7 +79,7 @@ impl fmt::Display for AccessKind {
 // ---------------------------------------------------------------------------
 
 /// The kind of ordering constraint established by a sync edge.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SyncOrdering {
     /// `access_before` happens-before `access_after` (sequential order).
     HappensBefore,
@@ -109,7 +108,7 @@ impl fmt::Display for SyncOrdering {
 /// Each access targets a derived pointer, has a kind (read/write), a base
 /// address and size determining the byte range, and a program point where
 /// it occurs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AccessRecord {
     /// Unique identifier for this access.
     pub id: AccessId,
@@ -179,7 +178,7 @@ impl AccessRecord {
 ///
 /// Records that `access_before` is ordered before `access_after` according
 /// to the given [`SyncOrdering`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SyncEdgeRecord {
     /// The access that happens first.
     pub access_before: AccessId,
@@ -218,7 +217,7 @@ impl SyncEdgeRecord {
 ///
 /// For exclusivity, we care about whether a capability includes Write and
 /// whether it is conditioned on holding a specific lock.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapDInfo {
     /// Whether the Read capability is granted.
     pub can_read: bool,
@@ -376,7 +375,7 @@ impl fmt::Display for CapDInfo {
 // ---------------------------------------------------------------------------
 
 /// The kind of exclusivity conflict between two accesses.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConflictKind {
     /// Two concurrent writes to overlapping memory (data race).
     WriteWrite,
@@ -398,7 +397,7 @@ impl fmt::Display for ConflictKind {
 // ---------------------------------------------------------------------------
 
 /// A detected conflict between two concurrent accesses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Conflict {
     /// The first access involved in the conflict.
     pub access1: AccessId,
@@ -461,7 +460,7 @@ impl fmt::Display for Conflict {
 /// - Coloring-based alias analysis
 /// - Reporting violation clusters
 /// - Determining which accesses need synchronization
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct InterferenceGraph {
     /// Adjacency list: maps each access to the set of accesses it conflicts with.
     edges: HashMap<AccessId, HashSet<AccessId>>,

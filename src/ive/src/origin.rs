@@ -29,7 +29,6 @@
 //! > Part C — No fabrication: no value appears without a traceable source.
 
 use crate::result::{CounterExample, VerificationResult, VerificationStatus};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ use std::fmt;
 ///
 /// This is a lightweight local mirror of `vuma_core::address::Address` so that
 /// the IVE crate can compile independently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub u64);
 
 impl Address {
@@ -84,7 +83,7 @@ impl fmt::Display for Address {
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a memory region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionId(pub u64);
 
 impl fmt::Display for RegionId {
@@ -94,7 +93,7 @@ impl fmt::Display for RegionId {
 }
 
 /// Unique identifier for a derivation step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DerivationId(pub u64);
 
 impl fmt::Display for DerivationId {
@@ -104,7 +103,7 @@ impl fmt::Display for DerivationId {
 }
 
 /// Unique identifier for a memory access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccessId(pub u64);
 
 impl fmt::Display for AccessId {
@@ -122,7 +121,7 @@ impl fmt::Display for AccessId {
 /// Every value in a VUMA program must trace back to one of these origins.
 /// A value that cannot be traced to any root is an **orphan** and constitutes
 /// an origin violation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OriginRoot {
     /// A compile-time constant (e.g., literal `42`, `"hello"`).
     Constant {
@@ -186,7 +185,7 @@ impl fmt::Display for OriginRoot {
 
 /// The trust level of a value, propagated from its root source.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default,
 )]
 pub enum TaintLevel {
     /// The value originates from a trusted source and no untrusted data
@@ -214,7 +213,7 @@ impl fmt::Display for TaintLevel {
 // ---------------------------------------------------------------------------
 
 /// The source of a pointer derivation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DerivationSource {
     /// Directly from a region (e.g., `&x` after allocation).
     Region(RegionId),
@@ -233,7 +232,7 @@ pub enum DerivationSource {
 // ---------------------------------------------------------------------------
 
 /// The kind of derivation operation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DerivationKind {
     /// Taking the address of a value: `&x`.
     Direct,
@@ -261,7 +260,7 @@ pub enum DerivationKind {
 // ---------------------------------------------------------------------------
 
 /// A contiguous memory region in the program.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Region {
     /// Unique identifier.
     pub id: RegionId,
@@ -300,7 +299,7 @@ impl Region {
 // ---------------------------------------------------------------------------
 
 /// A single derivation step in the pointer provenance chain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Derivation {
     /// Unique identifier.
     pub id: DerivationId,
@@ -349,7 +348,7 @@ impl Derivation {
 // ---------------------------------------------------------------------------
 
 /// Kind of memory access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccessKind {
     /// A read from memory.
     Read,
@@ -358,7 +357,7 @@ pub enum AccessKind {
 }
 
 /// A memory access event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Access {
     /// Unique identifier.
     pub id: AccessId,
@@ -401,7 +400,7 @@ impl Access {
 // ---------------------------------------------------------------------------
 
 /// A node in the provenance forest linking a derivation to its root origin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProvenanceNode {
     /// The derivation this node describes.
     pub derivation_id: DerivationId,
@@ -446,7 +445,7 @@ impl ProvenanceNode {
 // ---------------------------------------------------------------------------
 
 /// The kind of origin violation detected.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViolationKind {
     /// A value appears without a traceable origin ("orphan data").
     OrphanValue {
@@ -563,7 +562,7 @@ impl fmt::Display for ViolationKind {
 }
 
 /// A single origin violation with context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OriginViolation {
     /// The kind of violation.
     pub kind: ViolationKind,
@@ -592,7 +591,7 @@ impl fmt::Display for OriginViolation {
 // ---------------------------------------------------------------------------
 
 /// The result of verifying the origin invariant against a program.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OriginReport {
     /// The provenance forest — one entry per derivation.
     pub provenance_forest: Vec<ProvenanceNode>,

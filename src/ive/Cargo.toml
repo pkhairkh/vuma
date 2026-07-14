@@ -13,6 +13,6 @@ rust-version.workspace = true
 [dependencies]
 vuma-bd.workspace = true
 vuma-scg.workspace = true
-# TODO(wave43): remaining serde usage at src/ive/src/invariant_aggregator.rs:28
-# (and 57 other sites across all IVE types); migrate to hand-written codec.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 — all IVE types now rely on hand-written
+# Debug + Clone derives only; no JSON serialization is performed inside this
+# crate.
