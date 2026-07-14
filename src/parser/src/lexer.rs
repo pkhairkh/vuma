@@ -20,14 +20,13 @@
 //! ```
 
 use crate::error::{ParseError, ParseErrorKind, Span};
-use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Position
 // ---------------------------------------------------------------------------
 
 /// Source position: byte offset, line (0-based), and column (0-based).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Position {
     /// Byte offset into the source text.
     pub offset: usize,
@@ -64,7 +63,7 @@ impl std::fmt::Display for Position {
 // ---------------------------------------------------------------------------
 
 /// A single lexical token produced by the [`Lexer`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     /// The classified kind of this token.
     pub kind: TokenKind,
@@ -111,7 +110,7 @@ impl Token {
 ///
 /// The token set covers the full language surface syntax including memory
 /// primitives, concurrency constructs, and verification directives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
     // ---- Literals / values ------------------------------------------------
     /// Integer literal (decimal, hex `0x`, binary `0b`, octal `0o`).
@@ -2345,7 +2344,7 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         assert_eq!(
             kinds(&tokens),
-            vec![TokenKind::Number, TokenKind::DotDot, TokenKind::Number,]
+            vec![TokenKind::Number, TokenKind::DotDot, TokenKind::Number]
         );
     }
 
@@ -2693,7 +2692,7 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         assert_eq!(
             kinds(&tokens),
-            vec![TokenKind::AndAnd, TokenKind::Ampersand, TokenKind::AmpEq,]
+            vec![TokenKind::AndAnd, TokenKind::Ampersand, TokenKind::AmpEq]
         );
     }
 
@@ -2705,7 +2704,7 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         assert_eq!(
             kinds(&tokens),
-            vec![TokenKind::OrOr, TokenKind::Pipe, TokenKind::PipeEq,]
+            vec![TokenKind::OrOr, TokenKind::Pipe, TokenKind::PipeEq]
         );
     }
 
