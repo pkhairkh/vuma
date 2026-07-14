@@ -133,7 +133,7 @@ impl std::error::Error for ProofFailure {}
 /// The proof's top-level fact is a
 /// [`Judgment::InterpretationCompatible`](crate::judgment::Judgment::InterpretationCompatible)
 /// carrying the write/read RepD ids and the access address.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BDCompatibilityProof {
     /// The access id this proof discharges.
     pub access_id: u64,
@@ -153,7 +153,7 @@ pub struct BDCompatibilityProof {
 /// tactic.  Currently this is a checked-fact proof asserting that the
 /// cast derivation's target region bounds contain the access; a future
 /// enhancement could add aliasing analysis.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReinterpretationSafetyProof {
     /// The access id this proof discharges.
     pub access_id: u64,
@@ -169,7 +169,7 @@ pub struct ReinterpretationSafetyProof {
 /// It aggregates per-access BD-compatibility sub-proofs and per-cast
 /// reinterpretation-safety sub-proofs into a single proof whose conclusion
 /// is [`Conclusion::Proven`] when every access checks out.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InterpretationProof {
     /// Proofs that BD representations are compatible across the interpretation.
     pub bd_compatibility_proofs: Vec<BDCompatibilityProof>,

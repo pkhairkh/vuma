@@ -11,5 +11,11 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# TODO(wave43): remaining serde usage at src/scg/src/node.rs:7 (and 63 other
+# sites, mostly on non-named LLM-DTO types in structured_output.rs/diff.rs);
+# migrate to hand-written codec. Named types (NodeData/EdgeData/SCGRegion +
+# cascade DiffEntry/SCGDiff/MergeConflict/NodeConflict/EdgeConflict/
+# RegionConflict) were stripped in Wave 43 — see src/scg/src/serialize.rs
+# BinaryReader/BinaryWriter for the canonical binary path.
 serde.workspace = true
 serde_json.workspace = true

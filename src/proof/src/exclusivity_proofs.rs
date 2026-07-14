@@ -159,7 +159,7 @@ pub enum NoAliasMethod {
 }
 
 /// Proof that two derivations do not alias.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoAliasProof {
     pub derivation1: u64,
     pub derivation2: u64,
@@ -280,7 +280,7 @@ pub enum SynchronizationKind {
 }
 
 /// Proof that proper synchronization exists between two conflicting accesses.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SynchronizationProof {
     pub access1: AccessId,
     pub access2: AccessId,
@@ -466,7 +466,7 @@ impl SynchronizationProof {
 // ---------------------------------------------------------------------------
 
 /// A component of the overall exclusivity proof for a specific conflict pair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExclusivitySubProof {
     NoConflict,
     NoAlias(NoAliasProof),
@@ -474,7 +474,7 @@ pub enum ExclusivitySubProof {
 }
 
 /// Proof that the exclusivity invariant holds for a program.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExclusivityProof {
     pub proof: Proof,
     pub sub_proofs: Vec<(AccessId, AccessId, ExclusivitySubProof)>,

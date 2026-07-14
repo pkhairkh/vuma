@@ -12,5 +12,9 @@ rust-version.workspace = true
 
 [dependencies]
 vuma-scg.workspace = true
+# TODO(wave43): remaining serde usage at src/codegen/src/mips64/mod.rs:199
+# (and 122 other sites across IR/regalloc/backend types); migrate to
+# hand-written codec. serde_json retained for EGraph::from_json (PGO profile
+# loading, src/codegen/src/egraph.rs:1375).
 serde.workspace = true
 serde_json.workspace = true

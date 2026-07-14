@@ -82,7 +82,7 @@ impl std::error::Error for ProofFailure {}
 
 /// Proof that every allocated resource is eventually released along all
 /// execution paths through the program.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CleanupProof {
     pub proof: Proof,
     pub release_map: HashMap<RegionId, ReleaseInfo>,
@@ -109,7 +109,7 @@ impl CleanupProof {
 // NoDoubleFreeProof
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoDoubleFreeProof {
     pub proof: Proof,
     pub free_map: HashMap<RegionId, ProgramPoint>,
@@ -120,7 +120,7 @@ pub struct NoDoubleFreeProof {
 // NoUseAfterFreeProof
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoUseAfterFreeProof {
     pub proof: Proof,
     pub lifetime_map: HashMap<RegionId, RegionLifetime>,

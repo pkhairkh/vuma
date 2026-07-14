@@ -111,7 +111,7 @@ impl std::fmt::Display for CapDKind {
 /// Each variant carries typed fields that identify the entities involved,
 /// enabling precise structural matching in inference rules rather than
 /// error-prone string pattern matching.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Judgment {
     /// A region has been allocated and is available for use.
     Allocated {
