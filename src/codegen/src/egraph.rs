@@ -266,15 +266,38 @@ impl EGraph {
 
     /// Apply all rewrite rules until saturation or budget exhausted.
     ///
-    /// **Wave 36:** this is now a thin wrapper over [`Self::saturate_with_proof`]
-    /// that discards the proof log and ignores any gate error (preserving
-    /// backward compatibility with callers that don't yet opt into the
-    /// proof-logging / verification-gate pipeline). New callers should
-    /// prefer `saturate_with_proof` to get the recorded `ProofLog` and the
-    /// `bv_verify` gate result.
+    /// **Wave 36:** this is now a wrapper over [`Self::saturate_with_proof`]
+    /// that additionally runs [`crate::proof_artifacts::check_proof_log`] on
+    /// the recorded proof log. New callers should prefer `saturate_with_proof`
+    /// directly if they want access to the `ProofLog` and the `bv_verify` gate
+    /// `Result`.
+    ///
+    /// **Wave 36 — production wiring (Task 2-a):** `check_proof_log` is now
+    /// invoked from this production wrapper, not only from the inline test
+    /// `test_wave36_saturate_with_proof_then_check` in `proof_artifacts.rs`.
+    /// The check runs in **advisory mode**: a failure logs a `vuma_log!(warn, …)`
+    /// describing the offending rule and continues saturation normally, rather
+    /// than panicking. This choice avoids breaking production compiles if a
+    /// soundness surprise in `check_proof_log` (or in the rule-acceptance set
+    /// for a new Wave 31 tautological rule) ever emerges — the `bv_verify`
+    /// gate inside `saturate_with_proof` is the hard, fail-the-build gate;
+    /// `check_proof_log` is the secondary structural-correctness audit. Flip
+    /// to panic-mode only after a Wave-37+ audit of the rule-acceptance set
+    /// concludes no false positives remain.
     pub fn saturate(&mut self, rules: &[RewriteRule], budget: usize) {
-        let mut throwaway_log = crate::proof_artifacts::ProofLog::new();
-        let _ = self.saturate_with_proof(rules, budget, &mut throwaway_log);
+        let mut log = crate::proof_artifacts::ProofLog::new();
+        let _ = self.saturate_with_proof(rules, budget, &mut log);
+
+        // Wave 36 / Task 2-a: production-side post-saturation proof audit.
+        // Advisory (warn + continue) — see the doc comment above for the
+        // rationale behind not panicking here.
+        if let Err(err) = crate::proof_artifacts::check_proof_log(&log) {
+            vuma_log!(
+                warn,
+                "wave36: check_proof_log rejected a recorded rewrite (advisory — saturation result retained): {}",
+                err
+            );
+        }
     }
 
     /// **Wave 36 — proof-logging saturation.**
