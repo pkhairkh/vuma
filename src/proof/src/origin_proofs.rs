@@ -5,7 +5,6 @@
 //! region through a terminating derivation chain, and tainted data does not
 //! flow to sensitive sinks.
 
-use serde::{Deserialize, Serialize};
 
 use crate::checker::{CheckResult, ProofChecker};
 use crate::judgment::RegionId;
@@ -20,7 +19,7 @@ use crate::rules::InferenceRule;
 // ---------------------------------------------------------------------------
 
 /// Reasons why an origin proof might fail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum ProofFailure {
     BrokenChain { derivation_id: u64, reason: String },
 
@@ -166,7 +165,7 @@ impl TaintProof {
 // Origin-specific tactics
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginTactic {
     ChainVerification,
     TaintPropagation,

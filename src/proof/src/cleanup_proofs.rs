@@ -5,7 +5,6 @@
 //! is eventually released, that no resource is freed more than once, and that
 //! no resource is accessed after it has been freed.
 
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::judgment::RegionId;
@@ -90,7 +89,7 @@ pub struct CleanupProof {
 }
 
 /// Information about how a region is released.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseInfo {
     pub alloc_point: ProgramPoint,
     pub free_points: Vec<ProgramPoint>,
@@ -128,7 +127,7 @@ pub struct NoUseAfterFreeProof {
 }
 
 /// The lifetime information for a region.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionLifetime {
     pub free_point: ProgramPoint,
     pub live_access_points: Vec<ProgramPoint>,
@@ -138,7 +137,7 @@ pub struct RegionLifetime {
 // CleanupTactic
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupTactic {
     PathEnumeration,
     OwnershipTracking,

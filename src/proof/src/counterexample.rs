@@ -5,7 +5,6 @@
 //! provides data structures for representing counterexamples and methods for
 //! constructing minimal ones.
 
-use serde::{Deserialize, Serialize};
 
 use crate::proof::{InvariantName, ProgramPoint};
 
@@ -14,7 +13,7 @@ use crate::proof::{InvariantName, ProgramPoint};
 // ---------------------------------------------------------------------------
 
 /// A single step in an execution trace that constitutes a counterexample.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Allocate a memory region.
     Alloc {
@@ -76,7 +75,7 @@ impl std::fmt::Display for Step {
 // ---------------------------------------------------------------------------
 
 /// The point at which an invariant is violated in a program.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViolationPoint {
     /// The invariant that is violated.
     pub invariant: InvariantName,
@@ -110,7 +109,7 @@ impl ViolationPoint {
 /// Counterexamples are the dual of proofs — where a proof shows that an
 /// invariant *always* holds, a counterexample demonstrates a specific scenario
 /// where it *does not*.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CounterExample {
     /// The execution trace leading to the violation.
     pub execution: Vec<Step>,

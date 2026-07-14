@@ -5,7 +5,6 @@
 //! previously duplicated across the proof sub-modules (liveness, exclusivity,
 //! cleanup, origin, interpretation).
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::judgment::RegionId;
@@ -42,7 +41,7 @@ pub type TaintLabelId = u64;
 /// This enum is the union of all region status variants used across the proof
 /// sub-modules. The `Leaked` variant is used by the liveness prover; the
 /// interpretation prover uses only Allocated/Freed/Stack/Mapped.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofRegionStatus {
     /// Region has been allocated and is still live.
     Allocated,
@@ -61,7 +60,7 @@ pub enum ProofRegionStatus {
 // ---------------------------------------------------------------------------
 
 /// Access kind — read or write.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofAccessKind {
     /// A read operation.
     Read,
@@ -78,7 +77,7 @@ pub enum ProofAccessKind {
 /// This unified type covers all region fields used across the proof
 /// sub-modules. Fields that are not used by a particular module can be
 /// left at their default values.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRegion {
     /// Unique region identifier (typed).
     pub id: RegionId,
@@ -180,7 +179,7 @@ impl ProofRegion {
 /// This unified type covers all access fields used across the proof
 /// sub-modules. Fields that are not relevant for a particular proof
 /// kind can be left at their default values.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofAccess {
     /// Unique access identifier.
     pub id: u64,
@@ -280,7 +279,7 @@ impl ProofAccess {
 /// This unified type covers both the simplified exclusivity derivation
 /// (root_region + offset) and the full interpretation derivation
 /// (source_region/source_derivation + offset + optional cast).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofDerivation {
     /// Unique identifier.
     pub id: u64,
@@ -372,7 +371,7 @@ impl ProofDerivation {
 // ---------------------------------------------------------------------------
 
 /// The ordering semantics of a synchronization edge (spec §2.5).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncOrdering {
     /// a₁ completes before a₂ begins (sequential consistency, fork-join, message passing).
     HappensBefore,
@@ -383,7 +382,7 @@ pub enum SyncOrdering {
 }
 
 /// A synchronization edge between two accesses (spec §2.5).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofSyncEdge {
     /// Unique identifier for this edge.
     pub id: SyncEdgeId,
@@ -402,7 +401,7 @@ pub struct ProofSyncEdge {
 // ---------------------------------------------------------------------------
 
 /// The kind of a memory operation recorded in the MSG.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProofMemOpKind {
     /// Allocate a new memory region.
     Alloc,
@@ -432,7 +431,7 @@ impl std::fmt::Display for ProofMemOpKind {
 }
 
 /// A memory operation node in the Memory State Graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofMemOp {
     /// The region this operation acts upon.
     pub region: RegionId,
@@ -458,7 +457,7 @@ impl ProofMemOp {
 // ---------------------------------------------------------------------------
 
 /// An edge in the Synchronization/State Control Graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofSCGEdge {
     /// Source program point.
     pub from: u64,
@@ -501,7 +500,7 @@ impl ProofSCGEdge {
 ///
 /// This unified type supports both the liveness-style SCG (nodes + edges)
 /// and the cleanup-style SCG (edges + entry + exits).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofSCG {
     /// All nodes (program points) in the graph (liveness style).
     pub nodes: Vec<u64>,
@@ -673,7 +672,7 @@ impl ProofSCG {
 
 /// Byte descriptor category — the high-level classification of how a range of
 /// bytes is interpreted.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BDKind {
     /// Raw bytes — the universal supertype; any RepD can be read as bytes.
     Bytes,
@@ -708,7 +707,7 @@ impl std::fmt::Display for BDKind {
 /// A Representation Descriptor (RepD) — describes how a range of bytes is
 /// interpreted, including size, alignment, kind, and whether the bytes are
 /// initialized.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRepD {
     /// Unique identifier for this RepD.
     pub id: RepDId,
@@ -797,7 +796,7 @@ impl ProofRepD {
 }
 
 /// Result of a BD compatibility check between a write's BD and a read's BD.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Compatibility {
     /// The BDs are compatible.
     Compatible,
@@ -840,7 +839,7 @@ pub fn valid_reinterpretation(source: &ProofRepD, target: &ProofRepD) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Classification of a data source's trust level.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceTrust {
     /// Data from a trusted source (e.g. initialised memory, kernel-provided buffer).
     Trusted,
@@ -861,7 +860,7 @@ impl std::fmt::Display for SourceTrust {
 }
 
 /// Classification of a sink's sensitivity.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SinkSensitivity {
     /// The sink is public — no restriction on data flowing here.
     Public,
@@ -886,7 +885,7 @@ impl std::fmt::Display for SinkSensitivity {
 // ---------------------------------------------------------------------------
 
 /// A lightweight view into the Memory State Graph for origin proof purposes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OriginInfo {
     /// Regions that are known to be live (allocated, stack, mapped, device).
     pub live_regions: Vec<RegionId>,
@@ -1078,7 +1077,7 @@ impl OriginInfoBuilder {
 /// This unified type supports all the different MSG representations used
 /// across the proof sub-modules. Fields that are not used by a particular
 /// proof kind can be left empty.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofMSG {
     /// All memory regions (liveness, exclusivity, interpretation).
     pub regions: Vec<ProofRegion>,
