@@ -1,0 +1,10 @@
+// womb/lang/hello.vuma — canonical test input for the Wave 47 bootstrap compiler.
+// Minimal VUMA program: a main() that returns 0. Used as the read-path target
+// for the self-hosted bootstrap entry point in full_lexer.vuma.
+//
+// Wave 47 test: the bootstrap compiler (full_lexer.vuma main) opens this file,
+// reads its contents, lexes it, and exits 0 on success.
+
+fn main() -> i32 {
+    return 0;
+}
