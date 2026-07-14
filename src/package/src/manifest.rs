@@ -18,25 +18,16 @@
 //! src = "src/main.vuma"
 //! ```
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Helper to provide a default empty TOML table.
-fn toml_default_table() -> toml::Value {
-    toml::Value::Table(toml::map::Map::new())
-}
-
-/// Helper to provide a default empty TOML array.
-fn toml_default_array() -> toml::Value {
-    toml::Value::Array(Vec::new())
-}
+use crate::PackageError;
 
 // ---------------------------------------------------------------------------
 // PackageManifest
 // ---------------------------------------------------------------------------
 
 /// The parsed representation of a `vuma.pkg` manifest file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageManifest {
     /// Package name (must be a valid identifier: lowercase, hyphens allowed).
     pub name: String,
@@ -45,78 +36,92 @@ pub struct PackageManifest {
     /// Optional human-readable description.
     pub description: Option<String>,
     /// List of package dependencies.
-    #[serde(default)]
     pub dependencies: Vec<Dependency>,
     /// Build targets (binaries, libraries, tests).
-    #[serde(default)]
     pub targets: Vec<PackageTarget>,
 }
 
 impl PackageManifest {
     /// Parse a manifest from a TOML string.
-    pub fn from_toml(toml_str: &str) -> Result<Self, toml::de::Error> {
-        #[derive(Deserialize)]
-        struct RawManifest {
-            package: RawPackage,
-            #[serde(default = "toml_default_table")]
-            dependencies: toml::Value,
-            #[serde(default = "toml_default_array")]
-            target: toml::Value,
-        }
+    ///
+    /// Wave 43 serde-migration: this previously used `#[derive(Deserialize)]`
+    /// helper structs (`RawManifest`/`RawPackage`) and `toml::from_str::<RawManifest>`
+    /// to drive TOML parsing. It now parses into a `toml::Value` first and
+    /// then navigates the value tree by hand. The on-disk TOML format is
+    /// unchanged.
+    ///
+    /// The error type changed from `toml::de::Error` to `PackageError` —
+    /// `PackageError::ManifestParse` carries the human-readable message for
+    /// both low-level TOML syntax errors and high-level missing-field
+    /// validation errors.
+    pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {
+        let root: toml::Value = toml::from_str(toml_str)
+            .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+        let package = root
+            .get("package")
+            .and_then(|v| v.as_table())
+            .ok_or_else(|| {
+                PackageError::ManifestParse("missing `[package]` section in manifest".to_string())
+            })?;
+        let name = package
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                PackageError::ManifestParse("missing `package.name` field".to_string())
+            })?
+            .to_string();
+        let version = package
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                PackageError::ManifestParse("missing `package.version` field".to_string())
+            })?
+            .to_string();
+        let description = package
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
-        #[derive(Deserialize)]
-        struct RawPackage {
-            name: String,
-            version: String,
-            #[serde(default)]
-            description: Option<String>,
-        }
+        let dependencies_value = root
+            .get("dependencies")
+            .cloned()
+            .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        let dependencies = Self::parse_dependencies(&dependencies_value)?;
 
-        let raw: RawManifest = toml::from_str(toml_str)?;
-
-        // Parse dependencies from the [dependencies] section
-        let dependencies = Self::parse_dependencies(&raw.dependencies)?;
-
-        // Parse targets from [[target]] array
-        let targets = Self::parse_targets(&raw.target)?;
+        let target_value = root
+            .get("target")
+            .cloned()
+            .unwrap_or(toml::Value::Array(Vec::new()));
+        let targets = Self::parse_targets(&target_value)?;
 
         Ok(PackageManifest {
-            name: raw.package.name,
-            version: raw.package.version,
-            description: raw.package.description,
+            name,
+            version,
+            description,
             dependencies,
             targets,
         })
     }
 
     /// Serialize the manifest to a TOML string.
-    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
-        #[derive(Serialize)]
-        struct RawManifest {
-            package: RawPackage,
-            dependencies: toml::Value,
-            target: Vec<RawTarget>,
+    ///
+    /// Wave 43 serde-migration: this previously used `#[derive(Serialize)]`
+    /// helper structs (`RawManifest`/`RawPackage`/`RawTarget`) and
+    /// `toml::to_string_pretty(&raw)`. It now builds a `toml::Value::Table`
+    /// by hand and serializes that. The on-disk TOML format is unchanged.
+    ///
+    /// The error type changed from `toml::ser::Error` to `PackageError` —
+    /// `PackageError::Other` carries the human-readable message.
+    pub fn to_toml(&self) -> Result<String, PackageError> {
+        let mut package_table = toml::map::Map::new();
+        package_table.insert("name".to_string(), toml::Value::String(self.name.clone()));
+        package_table.insert(
+            "version".to_string(),
+            toml::Value::String(self.version.clone()),
+        );
+        if let Some(ref desc) = self.description {
+            package_table.insert("description".to_string(), toml::Value::String(desc.clone()));
         }
-
-        #[derive(Serialize)]
-        struct RawPackage {
-            name: String,
-            version: String,
-            description: Option<String>,
-        }
-
-        #[derive(Serialize)]
-        struct RawTarget {
-            name: String,
-            kind: String,
-            src: String,
-        }
-
-        let package = RawPackage {
-            name: self.name.clone(),
-            version: self.version.clone(),
-            description: self.description.clone(),
-        };
 
         // Build dependencies as a TOML table
         let mut dep_table = toml::map::Map::new();
@@ -131,39 +136,36 @@ impl PackageManifest {
                     "registry".to_string(),
                     toml::Value::String(registry.clone()),
                 );
-                dep_table.insert(
-                    dep.name.clone(),
-                    toml::Value::Table(dep_table_inner),
-                );
+                dep_table.insert(dep.name.clone(), toml::Value::Table(dep_table_inner));
             } else {
-                dep_table.insert(
-                    dep.name.clone(),
-                    toml::Value::String(dep.version.clone()),
-                );
+                dep_table.insert(dep.name.clone(), toml::Value::String(dep.version.clone()));
             }
         }
 
-        let targets: Vec<RawTarget> = self
+        // Build targets as a TOML array of tables
+        let targets_arr: Vec<toml::Value> = self
             .targets
             .iter()
-            .map(|t| RawTarget {
-                name: t.name.clone(),
-                kind: t.kind.to_string(),
-                src: t.src.clone(),
+            .map(|t| {
+                let mut tbl = toml::map::Map::new();
+                tbl.insert("name".to_string(), toml::Value::String(t.name.clone()));
+                tbl.insert("kind".to_string(), toml::Value::String(t.kind.to_string()));
+                tbl.insert("src".to_string(), toml::Value::String(t.src.clone()));
+                toml::Value::Table(tbl)
             })
             .collect();
 
-        let raw = RawManifest {
-            package,
-            dependencies: toml::Value::Table(dep_table),
-            target: targets,
-        };
+        let mut root = toml::map::Map::new();
+        root.insert("package".to_string(), toml::Value::Table(package_table));
+        root.insert("dependencies".to_string(), toml::Value::Table(dep_table));
+        root.insert("target".to_string(), toml::Value::Array(targets_arr));
 
-        toml::to_string_pretty(&raw)
+        toml::to_string_pretty(&toml::Value::Table(root))
+            .map_err(|e| PackageError::Other(e.to_string()))
     }
 
     /// Parse the `[dependencies]` section.
-    fn parse_dependencies(value: &toml::Value) -> Result<Vec<Dependency>, toml::de::Error> {
+    fn parse_dependencies(value: &toml::Value) -> Result<Vec<Dependency>, PackageError> {
         let mut deps = Vec::new();
 
         match value {
@@ -204,7 +206,7 @@ impl PackageManifest {
     }
 
     /// Parse the `[[target]]` array.
-    fn parse_targets(value: &toml::Value) -> Result<Vec<PackageTarget>, toml::de::Error> {
+    fn parse_targets(value: &toml::Value) -> Result<Vec<PackageTarget>, PackageError> {
         let mut targets = Vec::new();
 
         match value {
@@ -247,7 +249,7 @@ impl PackageManifest {
 // ---------------------------------------------------------------------------
 
 /// A single package dependency.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dependency {
     /// Dependency package name.
     pub name: String,
@@ -262,7 +264,7 @@ pub struct Dependency {
 // ---------------------------------------------------------------------------
 
 /// A build target within a package.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageTarget {
     /// Target name (used as the output binary name).
     pub name: String,
@@ -273,7 +275,7 @@ pub struct PackageTarget {
 }
 
 /// The kind of build target.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
     /// Binary executable.
     Bin,
@@ -303,7 +305,7 @@ impl fmt::Display for TargetKind {
 /// Parse a `vuma.pkg` TOML string into a `PackageManifest`.
 ///
 /// This is a convenience wrapper around [`PackageManifest::from_toml`].
-pub fn parse_manifest(toml_str: &str) -> Result<PackageManifest, toml::de::Error> {
+pub fn parse_manifest(toml_str: &str) -> Result<PackageManifest, PackageError> {
     PackageManifest::from_toml(toml_str)
 }
 
@@ -317,13 +319,11 @@ mod tests {
             name: "test-pkg".to_string(),
             version: "0.1.0".to_string(),
             description: Some("A test package".to_string()),
-            dependencies: vec![
-                Dependency {
-                    name: "vuma-std".to_string(),
-                    version: "0.1".to_string(),
-                    registry: None,
-                },
-            ],
+            dependencies: vec![Dependency {
+                name: "vuma-std".to_string(),
+                version: "0.1".to_string(),
+                registry: None,
+            }],
             targets: vec![PackageTarget {
                 name: "test-pkg".to_string(),
                 kind: TargetKind::Bin,
