@@ -394,6 +394,7 @@ fn test_full_pipeline_compile_to_elf() {
                     lhs: ScgExpr::Int(10),
                     rhs: ScgExpr::Int(20),
                     tail_call: false,
+ reassigns: None,
                 }),
                 // Return the computed value
                 ScgStatement::Return(vec![ScgExpr::Var("value".to_string())]),

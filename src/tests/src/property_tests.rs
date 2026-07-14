@@ -515,6 +515,7 @@ proptest! {
                 NodePayload::EnumDef(_) => NodeType::EnumDef,
                 NodePayload::Match(_) => NodeType::Match,
                 NodePayload::ConstantTime(_) => NodeType::ConstantTime,
+                NodePayload::Syscall(_) => NodeType::Effect,
             };
             let id = scg.add_node(node_type, payload, pp);
             node_ids.push(id);
@@ -575,6 +576,7 @@ proptest! {
                 NodePayload::EnumDef(_) => NodeType::EnumDef,
                 NodePayload::Match(_) => NodeType::Match,
                 NodePayload::ConstantTime(_) => NodeType::ConstantTime,
+                NodePayload::Syscall(_) => NodeType::Effect,
             };
             let id = scg.add_node(node_type, payload, pp);
             node_ids.push(id);
@@ -691,6 +693,7 @@ proptest! {
                 NodePayload::EnumDef(_) => NodeType::EnumDef,
                 NodePayload::Match(_) => NodeType::Match,
                 NodePayload::ConstantTime(_) => NodeType::ConstantTime,
+                NodePayload::Syscall(_) => NodeType::Effect,
             };
             scg.add_node(node_type, payload, pp);
         }
