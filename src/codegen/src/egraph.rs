@@ -265,7 +265,46 @@ impl EGraph {
     }
 
     /// Apply all rewrite rules until saturation or budget exhausted.
+    ///
+    /// **Wave 36:** this is now a thin wrapper over [`Self::saturate_with_proof`]
+    /// that discards the proof log and ignores any gate error (preserving
+    /// backward compatibility with callers that don't yet opt into the
+    /// proof-logging / verification-gate pipeline). New callers should
+    /// prefer `saturate_with_proof` to get the recorded `ProofLog` and the
+    /// `bv_verify` gate result.
     pub fn saturate(&mut self, rules: &[RewriteRule], budget: usize) {
+        let mut throwaway_log = crate::proof_artifacts::ProofLog::new();
+        let _ = self.saturate_with_proof(rules, budget, &mut throwaway_log);
+    }
+
+    /// **Wave 36 — proof-logging saturation.**
+    ///
+    /// Like [`Self::saturate`], but:
+    /// 1. **Gate (before saturating):** calls
+    ///    [`crate::bv_verify::verify_rules_with_counterexample`] on `rules`.
+    ///    If any rule is unsound, returns `Err(Counterexample)` *without*
+    ///    saturating — refusing to apply a rule that would change program
+    ///    semantics. The orchestrator surfaces this to fail the build.
+    /// 2. **Recording (during saturating):** after each successful rewrite
+    ///    application, calls `log.record(...)` capturing the rule name, the
+    ///    source e-node (matched pattern), the replacement e-node, and the
+    ///    source e-class ID. The resulting `ProofLog` is then typically
+    ///    passed to [`crate::proof_artifacts::check_proof_log`] by the
+    ///    orchestrator as a post-saturation compile-time check.
+    ///
+    /// Returns `Ok(())` if the gate passed and saturation ran to completion
+    /// (or budget exhaustion). Returns `Err(Counterexample)` if the gate
+    /// rejected a rule.
+    pub fn saturate_with_proof(
+        &mut self,
+        rules: &[RewriteRule],
+        budget: usize,
+        log: &mut crate::proof_artifacts::ProofLog,
+    ) -> Result<(), crate::bv_verify::Counterexample> {
+        // Wave 36 gate: verify every rule is sound BEFORE applying any of
+        // them. A counterexample aborts saturation entirely.
+        crate::bv_verify::verify_rules_with_counterexample(rules)?;
+
         for _ in 0..budget {
             let mut changed = false;
             let class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
@@ -294,8 +333,11 @@ impl EGraph {
                                     old_id,
                                     rule.name,
                                     node.clone(),
-                                    replacement,
+                                    replacement.clone(),
                                 );
+                                // Wave 36: Record the proof artifact for
+                                // the post-saturation `check_proof_log` gate.
+                                log.record(rule, node, &replacement, old_id);
                                 // Use merge_no_rebuild here for speed; we
                                 // rebuild once at the end of the round.
                                 self.merge_no_rebuild(old_id, repl_canon);
@@ -313,6 +355,26 @@ impl EGraph {
                 self.rebuild();
             }
         }
+        Ok(())
+    }
+
+    /// **Wave 36 — pre-saturation rule-verification gate.**
+    ///
+    /// Verifies that every rule in `rules` is sound (via
+    /// [`crate::bv_verify::verify_rules_with_counterexample`]) WITHOUT
+    /// saturating. Returns `Ok(())` if all rules pass the gate, or
+    /// `Err(Counterexample)` describing the first unsound rule.
+    ///
+    /// The orchestrator (pipeline.rs) calls this as an explicit gate before
+    /// the e-graph pass; `saturate_with_proof` also calls it internally.
+    /// Exposed as a `pub` entry point so callers can verify a rule set
+    /// independent of running saturation (e.g., during rule-set
+    /// construction or AOT validation).
+    pub fn verify_rules_before_saturate(
+        &self,
+        rules: &[RewriteRule],
+    ) -> Result<(), crate::bv_verify::Counterexample> {
+        crate::bv_verify::verify_rules_with_counterexample(rules)
     }
 
     /// Record a provenance step for an e-class (Wave 16).
@@ -1699,5 +1761,136 @@ mod tests {
                 rule_names_seen
             );
         }
+    }
+
+    // ============================================================
+    // Wave 36 tests — proof-logging saturation + bv_verify gate.
+    // ============================================================
+
+    /// Wave 36 [EGRAPH-WIRE]: `saturate_with_proof` records a `ProofArtifact`
+    /// for every rewrite application. Construct an input that triggers a
+    /// known rule (`xor_self` on `x ^ x`) and assert the proof log receives
+    /// a matching artifact.
+    #[test]
+    fn test_wave36_saturate_with_proof_records_artifacts() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(50));
+        let x2 = eg.add(ENode::VReg(50));
+        let _xor = eg.add(ENode::BinOp(BinOpKind::Xor, x, x2)); // x ^ x
+
+        let rules = standard_rules();
+        let mut log = crate::proof_artifacts::ProofLog::new();
+        let result = eg.saturate_with_proof(&rules, 10, &mut log);
+
+        assert!(result.is_ok(), "gate should accept standard_rules");
+        assert!(
+            !log.artifacts.is_empty(),
+            "saturate_with_proof must record at least one ProofArtifact"
+        );
+        // At least one artifact should be from xor_self (the only rule that
+        // fires on `x ^ x`).
+        let saw_xor_self = log.artifacts.iter().any(|a| a.rule_name == "xor_self");
+        assert!(
+            saw_xor_self,
+            "proof log should contain an xor_self artifact, got: {:?}",
+            log.artifacts.iter().map(|a| a.rule_name).collect::<Vec<_>>()
+        );
+        // The artifact's source must be the matched pattern (Xor node) and
+        // the replacement must be Lit(0).
+        let xor_artifact = log.artifacts.iter().find(|a| a.rule_name == "xor_self").unwrap();
+        assert!(
+            matches!(&xor_artifact.source, ENode::BinOp(BinOpKind::Xor, _, _)),
+            "xor_self artifact source should be a Xor node"
+        );
+        assert_eq!(
+            xor_artifact.replacement, ENode::Lit(0),
+            "xor_self artifact replacement should be Lit(0)"
+        );
+    }
+
+    /// Wave 36 [OPT-WIRE / bv_verify gate]: `saturate_with_proof` returns
+    /// `Err(Counterexample)` and does NOT saturate when an unsound rule is
+    /// in the rule set. The e-graph should be unchanged after the failed
+    /// call (no rules applied).
+    #[test]
+    fn test_wave36_saturate_with_proof_rejects_unsound_rule() {
+        let mut eg = EGraph::new();
+        let _x = eg.add(ENode::VReg(60));
+        let _ = eg.add(ENode::VReg(60)); // identical VReg (would allow xor_self)
+
+        let unsound_rule = RewriteRule {
+            name: "wave36_unsound_inc", // registered unsound in bv_verify
+            verified: false,
+            apply: |_node, eg| {
+                // Pretend to rewrite any node to Lit(99) — semantically wrong,
+                // but the gate must reject this rule by NAME before apply
+                // is ever called.
+                let replacement = ENode::Lit(99);
+                let repl_id = eg.add(replacement.clone());
+                Some((repl_id, replacement))
+            },
+        };
+        let rules = vec![unsound_rule];
+        let nodes_before = eg.classes.len();
+        let mut log = crate::proof_artifacts::ProofLog::new();
+        let result = eg.saturate_with_proof(&rules, 10, &mut log);
+        assert!(
+            result.is_err(),
+            "saturate_with_proof must reject the unsound rule, got {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.rule_name, "wave36_unsound_inc");
+        // The gate fires BEFORE saturating, so no rules were applied.
+        assert_eq!(
+            eg.classes.len(), nodes_before,
+            "e-graph must be unchanged after the gate rejected the rule"
+        );
+        assert!(
+            log.artifacts.is_empty(),
+            "no ProofArtifacts should be recorded when the gate rejects the rule"
+        );
+    }
+
+    /// Wave 36 [OPT-WIRE]: `verify_rules_before_saturate` is the standalone
+    /// gate entry point. It returns Ok for standard_rules() and Err for a
+    /// known-unsound rule.
+    #[test]
+    fn test_wave36_verify_rules_before_saturate_entry_point() {
+        let eg = EGraph::new();
+        // Standard rules: all sound (or assumed-sound-by-construction).
+        let standard = standard_rules();
+        assert!(
+            eg.verify_rules_before_saturate(&standard).is_ok(),
+            "verify_rules_before_saturate must accept standard_rules"
+        );
+
+        // Unsound rule: rejected.
+        let unsound = RewriteRule {
+            name: "wave36_unsound_inc",
+            verified: false,
+            apply: |_, _| None,
+        };
+        let result = eg.verify_rules_before_saturate(&[unsound]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().rule_name, "wave36_unsound_inc");
+    }
+
+    /// Wave 36 backward-compat: legacy `saturate` (no log) still works on
+    /// standard rules — its results are unchanged from the W31 behavior.
+    #[test]
+    fn test_wave36_legacy_saturate_still_works() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(70));
+        let x2 = eg.add(ENode::VReg(70));
+        let xor_id = eg.add(ENode::BinOp(BinOpKind::Xor, x, x2));
+
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+
+        // xor_self should have fired and merged xor_id's class with Lit(0).
+        assert!(eg.has_provenance(xor_id));
+        let best = eg.extract(xor_id, &default_cost);
+        assert_eq!(best, ENode::Lit(0), "x^x should extract to Lit(0)");
     }
 }
