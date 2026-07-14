@@ -196,7 +196,7 @@ const OPC_SCD: u32 = 0x3C;
 // ===========================================================================
 
 /// MIPS64 general-purpose registers ($0–$31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     Zero = 0,
     At = 1,
@@ -337,7 +337,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// MIPS64 floating-point registers ($f0–$f31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fpr {
     F0 = 0,
     F1 = 1,
@@ -535,7 +535,7 @@ fn encode_nop() -> [u8; 4] {
 ///
 /// Branch delay slots are handled by the `has_delay_slot()` method: when it
 /// returns `true`, the caller must insert a NOP after the instruction.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── R-type: Arithmetic (32-bit) ────────────────────────────────────
     /// Add: `add rd, rs, rt`

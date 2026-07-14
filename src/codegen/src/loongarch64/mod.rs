@@ -56,7 +56,7 @@ use std::fmt;
 // ===========================================================================
 
 /// LoongArch64 general-purpose registers (r0–r31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     R0 = 0,
     Ra = 1,
@@ -235,7 +235,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// LoongArch64 floating-point registers (f0–f31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fpr {
     F0 = 0,
     F1 = 1,
@@ -738,7 +738,7 @@ const OPC_ROTRI_D: u32 = 0x004D;
 /// instructions. Each variant captures the operands needed for encoding and
 /// disassembly. The `encode()` method produces a 4-byte little-endian machine
 /// code word.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── Arithmetic (3R) ──────────────────────────────────────────────
     /// Add Word: `add.w rd, rj, rk`

@@ -50,7 +50,7 @@ use std::fmt;
 // ===========================================================================
 
 /// PowerPC64 general-purpose registers (R0–R31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     R0 = 0,
     R1 = 1,
@@ -198,7 +198,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// PowerPC64 floating-point registers (F0–F31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fpr {
     F0 = 0,
     F1 = 1,
@@ -365,7 +365,7 @@ impl fmt::Display for Fpr {
 ///
 /// Each CR field has 4 bits: LT (bit 0), GT (bit 1), EQ (bit 2), SO (bit 3).
 /// CR fields are used by compare instructions and conditional branches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CrField {
     CR0 = 0,
     CR1 = 1,
@@ -518,7 +518,7 @@ fn encode_xl_form(opcode: u32, bo: u32, bi: u32, bh: u32, xo: u32, lk: u32) -> [
 /// move, and system instructions. Each variant captures the operands needed for
 /// encoding and disassembly. The `encode()` method produces a 4-byte
 /// little-endian machine code word.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── Arithmetic ──────────────────────────────────────────────────
     /// Add: `add rT, rA, rB` (XO-form, primary=31, xo=266)

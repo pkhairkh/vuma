@@ -73,7 +73,7 @@ use std::fmt;
 // ===========================================================================
 
 /// ARM 32-bit general-purpose registers (R0–R15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     R0 = 0,
     R1 = 1,
@@ -165,7 +165,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// ARM VFP/NEON double-precision registers (D0–D31).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dpr {
     D0 = 0,
     D1 = 1,
@@ -275,7 +275,7 @@ impl fmt::Display for Dpr {
 // ===========================================================================
 
 /// ARM condition codes (4-bit encoding in bits \[31:28\] of every ARM instruction).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Condition {
     /// Equal / Z set
     Eq = 0b0000,
@@ -944,7 +944,7 @@ fn encode_dmb(cond: Condition, option: u32) -> [u8; 4] {
 /// instructions. Each variant captures the operands needed for encoding and
 /// disassembly. The `encode()` method produces a 4-byte little-endian machine
 /// code word.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── Data Processing: Register-Register ────────────────────────────
     /// ADD Rd, Rn, Rm

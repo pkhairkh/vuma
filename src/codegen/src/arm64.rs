@@ -55,7 +55,7 @@ use crate::Result;
 /// the operand width. Using W registers gives automatic 32-bit wrapping
 /// arithmetic, which is required for algorithms like SHA-256 that operate on
 /// `u32` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegWidth {
     /// 32-bit W registers (W0–W30, WZR, WSP).
     W32,
@@ -144,7 +144,7 @@ impl std::fmt::Display for RegWidth {
 // ---------------------------------------------------------------------------
 
 /// ARM64 general-purpose registers (X0–X30) and special-purpose registers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Register {
     X0,
     X1,
@@ -433,7 +433,7 @@ impl std::fmt::Display for Register {
 ///
 /// Each condition code tests the NZCV flags set by a preceding comparison or
 /// arithmetic instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Condition {
     /// Equal / zero (Z == 1)
     EQ,
@@ -559,7 +559,7 @@ impl std::fmt::Display for Condition {
 // ---------------------------------------------------------------------------
 
 /// Shift type used in shifted-register operand encodings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShiftKind {
     /// Logical shift left.
     LSL,
@@ -599,7 +599,7 @@ impl std::fmt::Display for ShiftKind {
 // ---------------------------------------------------------------------------
 
 /// Barrier option for DMB / DSB instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BarrierOption {
     /// Full system barrier.
     SY,
@@ -660,7 +660,7 @@ impl std::fmt::Display for BarrierOption {
 
 /// The size of a memory operation, used to select the correct load/store
 /// variant (LDR vs LDRB vs LDRH vs LDRSW, etc.).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemorySize {
     /// 8-bit byte.
     Byte,
@@ -702,7 +702,7 @@ impl MemorySize {
 /// - **Pre-indexed**: `LDR Xt, [Xn, #offset]!` (update base before load)
 /// - **Post-indexed**: `LDR Xt, [Xn], #offset` (update base after load)
 /// - **Register offset**: `LDR Xt, [Xn, Xm, LSL #scale]`
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressingMode {
     /// Unsigned offset: `[Xn, #offset]` where offset is an unsigned multiple
     /// of the access size.
@@ -769,7 +769,7 @@ impl std::fmt::Display for AddressingMode {
 
 /// A flexible operand — either a register (optionally shifted) or a 12-bit
 /// immediate.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
     /// Register operand with optional shift.
     Reg {
@@ -815,7 +815,7 @@ impl Operand {
 /// Each variant captures the operands needed for both encoding and
 /// disassembly. The `encode()` method produces a 32-bit machine code word;
 /// the `Display` impl produces a human-readable assembly line.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum Instruction {
     // ---- Arithmetic ----
@@ -4724,7 +4724,7 @@ impl Default for InstructionSelector {
 /// The kind of synchronization edge, as derived from the SCG SyncEdge
 /// annotations. Each variant maps to a different barrier strategy per the
 /// ARM64 Code Generation Algorithm spec (Section 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyncEdgeKind {
     /// Full happens-before relationship: insert `DMB ISH` to ensure all
     /// prior memory operations are globally visible before any subsequent

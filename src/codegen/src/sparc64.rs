@@ -180,7 +180,7 @@ const COND_BVS: u32 = 0x07;
 /// - 8–15:  %o0–%o7 (output registers; %o6 = SP, %o7 = return address)
 /// - 16–23: %l0–%l7 (local registers)
 /// - 24–31: %i0–%i7 (input registers; %i6 = FP, %i7 = return address)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Gpr {
     G0 = 0,
@@ -446,7 +446,7 @@ fn encode_nop() -> [u8; 4] {
 ///
 /// Branch delay slots are handled by the `has_delay_slot()` method: when it
 /// returns `true`, the caller must insert a NOP after the instruction.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     /// No-operation (`sethi %g0, 0` = 0x01000000).
     Nop,

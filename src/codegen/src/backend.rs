@@ -28,7 +28,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Byte order of the target architecture.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Endianness {
     /// Least-significant byte first (AArch64, RISC-V, x86_64, LoongArch).
     Little,
@@ -43,7 +43,7 @@ pub enum Endianness {
 // ---------------------------------------------------------------------------
 
 /// The output binary format produced by the backend.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum OutputFormat {
     /// 64-bit ELF (AArch64, RISC-V64, x86_64, LoongArch64, MIPS64, PPC64).
     Elf64,
@@ -60,7 +60,7 @@ pub enum OutputFormat {
 // ---------------------------------------------------------------------------
 
 /// A physical register identified by class and index.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PhysicalReg {
     /// Register class.
     pub class: RegClass,
@@ -86,7 +86,7 @@ impl fmt::Display for PhysicalReg {
 // ---------------------------------------------------------------------------
 
 /// Classification of physical registers.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RegClass {
     /// General-purpose integer registers (X0-X30 on ARM64, RAX-R15 on x86_64, etc.)
     Gpr,
@@ -103,7 +103,7 @@ pub enum RegClass {
 // ---------------------------------------------------------------------------
 
 /// The kind of stack frame slot.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FrameSlotKind {
     /// Spill slot for a register that was evicted.
     Spill,
@@ -124,7 +124,7 @@ pub enum FrameSlotKind {
 /// Each entry records a byte offset within the function's encoded output where
 /// a symbolic reference must be resolved, the name of the target symbol, and
 /// the ISA-specific relocation type (e.g., `"R_X86_64_PLT32"`, `"R_X86_64_64"`).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct RelocationEntry {
     /// Byte offset within the function's encoded code where the relocation applies.
     pub offset: u64,
@@ -139,7 +139,7 @@ pub struct RelocationEntry {
 // ---------------------------------------------------------------------------
 
 /// A single instruction after register allocation, with physical registers assigned.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct AllocatedInstruction {
     /// Opcode name (for debugging / disassembly).
     pub opcode: String,
@@ -156,7 +156,7 @@ pub struct AllocatedInstruction {
 // ---------------------------------------------------------------------------
 
 /// A basic block after register allocation.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct AllocatedBlock {
     /// Block label.
     pub label: String,
@@ -171,7 +171,7 @@ pub struct AllocatedBlock {
 // ---------------------------------------------------------------------------
 
 /// A Wasm value type, stored as a simple enum for serialization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WasmValueType {
     I32,
     I64,
@@ -180,7 +180,7 @@ pub enum WasmValueType {
 }
 
 /// A Wasm function type (parameter types → result types).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct WasmFuncType {
     /// Parameter types.
     pub params: Vec<WasmValueType>,
@@ -189,7 +189,7 @@ pub struct WasmFuncType {
 }
 
 /// A Wasm local declaration: `count` locals of type `ty`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct WasmLocalDecl {
     /// Number of consecutive locals of this type.
     pub count: u32,
@@ -202,7 +202,7 @@ pub struct WasmLocalDecl {
 // ---------------------------------------------------------------------------
 
 /// A function after register allocation.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct AllocatedFunction {
     /// Function name.
     pub name: String,
@@ -217,17 +217,14 @@ pub struct AllocatedFunction {
     /// Byte size of the encoded function body.
     pub code_size: usize,
     /// Relocation entries for this function.
-    #[serde(default)]
     pub relocations: Vec<RelocationEntry>,
 
     // ── Wasm-specific metadata ──────────────────────────────────────
     /// Wasm function type (params → results), used by the Wasm32 backend
     /// to emit the type section.  `None` for non-Wasm targets.
-    #[serde(default)]
     pub wasm_func_type: Option<WasmFuncType>,
     /// Wasm local declarations (count, type) beyond function parameters.
     /// `None` for non-Wasm targets.
-    #[serde(default)]
     pub wasm_locals: Option<Vec<WasmLocalDecl>>,
 }
 
@@ -236,7 +233,7 @@ pub struct AllocatedFunction {
 // ---------------------------------------------------------------------------
 
 /// A complete program after register allocation.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct AllocatedProgram {
     /// Allocated functions.
     pub functions: Vec<AllocatedFunction>,
@@ -536,7 +533,7 @@ pub fn set_64bit_returns(names: &HashSet<String>) {
 // ---------------------------------------------------------------------------
 
 /// Enumeration of all supported backend architectures.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BackendKind {
     /// ARM 64-bit (AArch64).
     AArch64,

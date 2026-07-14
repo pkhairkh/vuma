@@ -44,7 +44,7 @@ use std::fmt;
 // ===========================================================================
 
 /// x86_32 general-purpose registers (RAX–R15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gpr {
     Rax = 0,
     Rcx = 1,
@@ -139,7 +139,7 @@ impl fmt::Display for Gpr {
 // ===========================================================================
 
 /// x86_32 SSE/SIMD registers (XMM0–XMM15).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Xmm {
     Xmm0 = 0,
     Xmm1 = 1,
@@ -204,7 +204,7 @@ impl fmt::Display for Xmm {
 // ===========================================================================
 
 /// x86_32 condition codes for SETcc, Jcc, and CMOVcc instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cc {
     Overflow = 0x0,
     NoOverflow = 0x1,
