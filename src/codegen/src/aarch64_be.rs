@@ -188,9 +188,10 @@ mod tests {
         };
         let allocated = backend.allocate_registers(&func).expect("allocate_registers");
         let bytes = backend.encode_function(&allocated).expect("encode_function");
-        assert!(
-            !bytes.is_empty(),
-            "aarch64_be must inherit non-empty syscall emission from aarch64"
+        assert_eq!(
+            bytes.len(),
+            44,
+            "wave13: aarch64_be should emit exactly 44 bytes for IRInstr::Syscall"
         );
     }
 }

@@ -256,9 +256,10 @@ mod tests {
 
         match result {
             Ok(Ok(bytes)) => {
-                assert!(
-                    !bytes.is_empty(),
-                    "mips64be must inherit non-empty syscall emission from mips64"
+                assert_eq!(
+                    bytes.len(),
+                    48,
+                    "wave13: mips64be should emit exactly 48 bytes for IRInstr::Syscall"
                 );
             }
             Ok(Err(e)) => {

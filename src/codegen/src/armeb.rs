@@ -238,9 +238,10 @@ mod tests {
         };
         let allocated = backend.allocate_registers(&func).expect("allocate_registers");
         let bytes = backend.encode_function(&allocated).expect("encode_function");
-        assert!(
-            !bytes.is_empty(),
-            "armeb must inherit non-empty syscall emission from arm32"
+        assert_eq!(
+            bytes.len(),
+            36,
+            "wave13: armeb should emit exactly 36 bytes for IRInstr::Syscall"
         );
     }
 }
