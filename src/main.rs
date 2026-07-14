@@ -2057,10 +2057,10 @@ mod tests {
     /// Test 17: VerificationArg conversion to pipeline VerificationLevel.
     #[test]
     fn test_verification_conversion() {
-        assert_eq!(
-            VerificationLevel::from(VerificationArg::None),
-            VerificationLevel::None
-        );
+        // Note: `VerificationArg::None` was removed in Wave 19 (close
+        // verification escape hatches). The CLI `--verification` arg now
+        // accepts only quick/normal/exhaustive; `VerificationLevel::None`
+        // remains an internal pipeline default but is not user-selectable.
         assert_eq!(
             VerificationLevel::from(VerificationArg::Quick),
             VerificationLevel::Quick
