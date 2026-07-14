@@ -2488,11 +2488,10 @@ fn convert_node_to_statement_with_externs(
         NodePayload::Syscall(syscall) => {
             // Wave 10: lower a syscall to a first-class
             // `ScgStatement::Syscall`. The `IRBuilder` lowers this to
-            // `IRInstr::Syscall`, which `lower_syscalls_all()` (called from
-            // the pipeline after `IRBuilder::build`) then converts to
-            // `IRInstr::Call { is_extern: true }` with the canonical syscall
-            // name (e.g. `write`, `exit`). Backends resolve that name via
-            // their existing `syscall_stubs` tables.
+            // `IRInstr::Syscall`, which each backend lowers directly to a
+            // real syscall instruction (Wave 11/12 removed the intermediate
+            // `lower_syscalls_all()` lowering pass). Backends resolve the
+            // syscall number via their existing `syscall_stubs` tables.
             single(Some(ScgStatement::Syscall(SyscallCallNode {
                 nr: syscall.nr,
                 dst: syscall.dst.clone(),
@@ -5193,8 +5192,10 @@ pub fn compile_with_path(
 
     // Note: lower_syscalls_all() was removed — Wave 11/12 added real
     // IRInstr::Syscall emission to all backends, so the IR flows through
-    // to codegen unchanged. The generic_syscall_name() table and
-    // lower_syscalls() function remain in ir.rs as utilities.
+    // to codegen unchanged. The generic_syscall_name() table remains in
+    // ir.rs as a utility. The lower_syscalls()/lower_syscalls_all()
+    // definitions were also deleted in Wave 10 dead-code cleanup
+    // (see TASKS.md).
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
@@ -6150,7 +6151,8 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
 
     // Note: lower_syscalls_all() was removed — Wave 11/12 added real
     // IRInstr::Syscall emission to all backends, so the IR flows through
-    // to codegen unchanged.
+    // to codegen unchanged. (lower_syscalls()/lower_syscalls_all()
+    // definitions were also deleted in Wave 10 dead-code cleanup.)
 
     // ── Codegen-Level IR Optimization (production caller) ────────
     ir_program = vuma_codegen::opt::run_optimizations(ir_program);
@@ -7712,11 +7714,10 @@ pub fn flatten_expr(
         //
         // Wave 10: `syscall(nr, args...)` is a first-class AST expression
         // that lowers to `ScgStatement::Syscall`. The IRBuilder then emits
-        // `IRInstr::Syscall`, which `lower_syscalls_all()` (called from the
-        // pipeline after `IRBuilder::build`) converts to an extern
-        // `IRInstr::Call` with the canonical syscall name (`write`, `exit`,
-        // …) so backends can resolve it via their existing `syscall_stubs`
-        // tables.
+        // `IRInstr::Syscall`, which each backend lowers directly to a real
+        // syscall instruction (Wave 11/12 removed the intermediate
+        // `lower_syscalls_all()` lowering pass) so backends can resolve it
+        // via their existing `syscall_stubs` tables.
         //
         // Void syscalls (exit, exit_group) get `dst: None` so the IR doesn't
         // contain a dead vreg that would never be assigned. For all other

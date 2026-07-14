@@ -195,8 +195,9 @@ pub enum ScgStatement {
     /// Compute the address of a named symbol (function or data).
     /// Lowers to `IRInstr::GetAddress`.
     GetAddress(GetAddressNode),
-    /// Direct syscall — lowers to `IRInstr::Syscall`, then to `IRInstr::Call`
-    /// via `lower_syscalls()` before codegen.
+    /// Direct syscall — lowers to `IRInstr::Syscall`. Each backend emits a
+    /// real syscall instruction directly (Wave 11/12 removed the intermediate
+    /// `lower_syscalls()` lowering pass).
     Syscall(SyscallCallNode),
 }
 
@@ -369,9 +370,9 @@ pub struct CallNode {
 /// Direct syscall node — first-class syscall invocation.
 ///
 /// Produced by the bridge when it encounters `Expr::Syscall { nr, args, .. }`
-/// in the AST. The `IRBuilder` lowers this to `IRInstr::Syscall`, which is
-/// then converted to `IRInstr::Call { is_extern: true }` by
-/// `lower_syscalls()` before optimization/codegen.
+/// in the AST. The `IRBuilder` lowers this to `IRInstr::Syscall`, which each
+/// backend lowers directly to a real syscall instruction (Wave 11/12 removed
+/// the intermediate `lower_syscalls()` lowering pass).
 #[derive(Debug, Clone)]
 pub struct SyscallCallNode {
     /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
@@ -3304,9 +3305,9 @@ impl IRBuilder {
 
     /// Lower a direct syscall node to an `IRInstr::Syscall` instruction.
     ///
-    /// This emits a first-class syscall IR node which `lower_syscalls_all()`
-    /// (called from the pipeline after `IRBuilder::build`) converts to
-    /// `IRInstr::Call { is_extern: true }` with the canonical syscall name.
+    /// This emits a first-class syscall IR node. Each backend lowers it
+    /// directly to a real syscall instruction (Wave 11/12 removed the
+    /// intermediate `lower_syscalls_all()` lowering pass).
     ///
     /// The destination vreg (if any) is registered in the `names` map so
     /// that subsequent expressions can refer to the syscall's result by the
