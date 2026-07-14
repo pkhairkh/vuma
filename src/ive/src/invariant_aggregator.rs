@@ -769,7 +769,7 @@ impl InvariantAggregator {
             vuma_log!(info, "InvariantAggregator: checking {kind}");
         }
 
-        let mut result = match kind {
+        let result = match kind {
             InvariantKind::Liveness => engine.verify_liveness(input),
             InvariantKind::Exclusivity => engine.verify_exclusivity(input),
             InvariantKind::Interpretation => engine.verify_interpretation(input),

@@ -3131,8 +3131,8 @@ impl LoopDetector {
                     let has_const = match (lhs, rhs) {
                         (IRValue::Register(id), IRValue::Immediate(_)) if *id == vreg => true,
                         (IRValue::Immediate(_), IRValue::Register(id)) if *id == vreg => true,
-                        (IRValue::Register(id), IRValue::Immediate(_)) => true,
-                        (IRValue::Immediate(_), IRValue::Register(id)) => true,
+                        (IRValue::Register(_id), IRValue::Immediate(_)) => true,
+                        (IRValue::Immediate(_), IRValue::Register(_id)) => true,
                         _ => false,
                     };
                     if self_referencing && has_const {

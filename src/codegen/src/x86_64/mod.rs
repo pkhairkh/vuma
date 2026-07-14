@@ -32,10 +32,12 @@
 //! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 
 use crate::backend::{
-    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend,
+    BackendError, TargetInfo, X86_64TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CmpKind, IRFunction, IRValue};
+#[cfg(test)]
+use crate::ir::{CastKind, IRInstr, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -1002,7 +1004,7 @@ pub fn encode_sse_movdqu_store(base: Gpr, offset: i32, src: Xmm) -> Vec<u8> {
 /// or R8+ operands. For operands in the high register file, callers should use
 /// a 3-byte VEX prefix (C4); this minimal encoder supports the common case
 /// where all operands are in the low 8 registers.
-fn emit_vex2(code: &mut Vec<u8>, pp: u8, opcode: u8, dst: Xmm, src1: Xmm, src2_or_rm: Xmm) {
+fn emit_vex2(code: &mut Vec<u8>, pp: u8, opcode: u8, _dst: Xmm, src1: Xmm, src2_or_rm: Xmm) {
     // C5 RvvvvLpp — R is the inverted REX.R bit (for src2/reg field),
     //   vvvv encodes the inverted src1 register, L is 0 for 128-bit,
     //   pp is the mandatory-prefix payload (00=none, 01=66, 10=F3, 11=F2).
@@ -2613,22 +2615,20 @@ fn decode_modrm_operand(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize
 
     // Displacement based on mod.
     match mod_bits {
-        1 => {
-            if new_pos < bytes.len() {
+        1
+            if new_pos < bytes.len() => {
                 disp = bytes[new_pos] as i8 as i64;
                 new_pos += 1;
                 has_disp = true;
             }
-        }
-        2 => {
-            if new_pos + 4 <= bytes.len() {
+        2
+            if new_pos + 4 <= bytes.len() => {
                 disp = i32::from_le_bytes(
                     bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
                 ) as i64;
                 new_pos += 4;
                 has_disp = true;
             }
-        }
         _ => {}
     }
 
@@ -2767,18 +2767,18 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     let num_phdrs: u64 = if has_bss { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility (required by QEMU).
-    let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+    let text_offset = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
     let text_size = code.len() as u64;
     // Align the text virtual address to 64K for host page size compatibility.
     // p_offset (text_offset, 4K-aligned) and p_vaddr (64K-aligned) are both
     // 0 mod 4K, satisfying the p_align congruence requirement.
-    let text_vaddr = ((base_addr + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    let text_vaddr = (base_addr + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
     let entry_point = text_vaddr;
 
     // BSS virtual address (computed once; used by both the program header
     // and the .bss section header). Zero when there is no BSS.
     let bss_vaddr: u64 = if has_bss {
-        ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
+        (text_vaddr + text_size).div_ceil(VADDR_ALIGN) * VADDR_ALIGN
     } else {
         0
     };
@@ -2792,7 +2792,7 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     let shstrtab_offset = text_offset + text_size;
     // Section header table starts after .shstrtab, 8-byte aligned
     // (Elf64_Shdr has natural alignment of 8 bytes).
-    let shdr_offset = ((shstrtab_offset + shstrtab_size + 7) / 8) * 8;
+    let shdr_offset = (shstrtab_offset + shstrtab_size).div_ceil(8) * 8;
     // Sections: 0=null, 1=.text, [2=.bss], last=.shstrtab
     let num_shdrs: u64 = if has_bss { 4 } else { 3 };
     let shstrndx: u16 = (num_shdrs - 1) as u16; // .shstrtab is the last section
@@ -3882,11 +3882,11 @@ impl Backend for X86_64Backend {
         // text_offset / text_vaddr will diverge from the emitted ELF.
         let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
-        let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+        let text_offset = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
-        let text_vaddr: u64 = ((BASE_ADDR + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+        let text_vaddr: u64 = (BASE_ADDR + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
         let bss_vaddr: u64 = if bss_size > 0 {
-            ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
+            (text_vaddr + text_size).div_ceil(VADDR_ALIGN) * VADDR_ALIGN
         } else {
             0
         };

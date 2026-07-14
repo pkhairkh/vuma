@@ -555,9 +555,9 @@ fn query_list_functions(scg: &SCG) -> QueryResult {
     let mut functions = Vec::new();
 
     for fid in call_graph.functions() {
-        let name = call_graph.function_label(&fid).map(|s| s.to_string());
-        let return_node_id = call_graph.function_return(&fid);
-        let is_recursive = call_graph.is_recursive(&fid);
+        let name = call_graph.function_label(fid).map(|s| s.to_string());
+        let return_node_id = call_graph.function_return(fid);
+        let is_recursive = call_graph.is_recursive(fid);
 
         // Collect nodes belonging to this function by walking ControlFlow
         let mut func_nodes = Vec::new();
@@ -590,13 +590,13 @@ fn query_list_functions(scg: &SCG) -> QueryResult {
         }
 
         let calls: Vec<NodeId> = call_graph
-            .callees(&fid)
+            .callees(fid)
             .iter()
             .map(|cge| cge.callee.0)
             .collect();
 
         let called_by: Vec<NodeId> = call_graph
-            .callers(&fid)
+            .callers(fid)
             .iter()
             .map(|caller_fid| caller_fid.0)
             .collect();

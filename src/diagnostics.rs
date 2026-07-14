@@ -1285,7 +1285,7 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
             vec![VumaDiagnostic::new(
                 "E050",
                 DiagnosticSeverity::Error,
-                &format!("internal panic in stage '{}': {}", stage, message),
+                format!("internal panic in stage '{}': {}", stage, message),
                 stage,
                 DiagnosticSourceLocation::unknown(),
             )]
@@ -1298,7 +1298,7 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
             report
                 .violations
                 .iter()
-                .flat_map(|v| from_memory_safety_violation_list(v))
+                .flat_map(from_memory_safety_violation_list)
                 .collect()
         }
     }

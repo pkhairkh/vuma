@@ -857,6 +857,12 @@ impl SCGPass for VerificationPass {
 ///   function that receives an allocation as an argument and returns it).
 pub struct InterproceduralAllocFlow;
 
+impl Default for InterproceduralAllocFlow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InterproceduralAllocFlow {
     pub fn new() -> Self {
         Self
@@ -1287,7 +1293,7 @@ impl InterproceduralAllocFlow {
                     // deallocation if not already present.
                     let already = scg
                         .successors(alloc_id)
-                        .map_or(false, |s| s.contains(node_id));
+                        .is_some_and(|s| s.contains(node_id));
                     if !already {
                         let _ = scg.add_edge(alloc_id, *node_id, EdgeKind::Derivation);
                     }
@@ -1419,12 +1425,11 @@ impl InterproceduralAllocFlow {
                 continue;
             }
             if let Some(node) = scg.get_node(curr) {
-                if node.node_type == NodeType::Allocation && curr != start {
-                    if !already_matched.contains(&curr) {
+                if node.node_type == NodeType::Allocation && curr != start
+                    && !already_matched.contains(&curr) {
                         return Some(curr);
                     }
                     // Already matched — skip but continue BFS
-                }
             }
             // Collect neighbors via Derivation and DataFlow edges
             for edge in scg.edges() {
@@ -2314,10 +2319,10 @@ fn get_const_df_predecessor(graph: &SCG, id: NodeId) -> Option<u64> {
         }
         if let Some(pn) = graph.get_node(pred) {
             if let NodePayload::Computation(c) = &pn.payload {
-                if let Some(v) = (match &c.kind {
+                if let Some(v) = match &c.kind {
                     ComputationKind::Other(ref op) => StrengthReduction::try_parse_const_int(op),
                     _ => None,
-                }) {
+                } {
                     return Some(v);
                 }
             }

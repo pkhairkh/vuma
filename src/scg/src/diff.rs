@@ -501,7 +501,7 @@ impl LlmDiff {
     /// pretty-printed via `to_string_pretty`). Replaces the previous
     /// `#[derive(Serialize)]` + `serde_json::to_string_pretty(&self)`.
     pub fn to_json_value(&self) -> crate::llm_json::JsonValue {
-        use crate::llm_json::{build_array, build_object, json_str, json_usize};
+        use crate::llm_json::{build_array, build_object, json_str};
         build_object(vec![
             ("summary".to_string(), self.summary.to_json_value()),
             (

@@ -32,10 +32,12 @@
 //! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 
 use crate::backend::{
-    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_32TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend,
+    BackendError, TargetInfo, X86_32TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CmpKind, IRFunction, IRValue};
+#[cfg(test)]
+use crate::ir::{CastKind, IRInstr, IRType, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -1878,10 +1880,10 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     let num_phdrs: u32 = if bss_size > 0 { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility.
-    let text_offset: u32 = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+    let text_offset: u32 = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
     let text_size: u32 = code.len() as u32;
     // Align text vaddr to 64K for host page size compatibility.
-    let text_vaddr: u32 = ((base_addr + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    let text_vaddr: u32 = (base_addr + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
     let entry_point: u32 = text_vaddr;
 
     let mut elf = Vec::with_capacity(text_offset as usize + code.len());
@@ -1926,7 +1928,7 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     // Only emitted when there is BSS data. BSS starts at the next 64K boundary
     // after the text segment to avoid sharing a host page with text.
     if bss_size > 0 {
-        let bss_vaddr: u32 = ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+        let bss_vaddr: u32 = (text_vaddr + text_size).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
         elf.extend_from_slice(&1u32.to_le_bytes());        // p_type = PT_LOAD
         elf.extend_from_slice(&0u32.to_le_bytes());        // p_offset (no file content)
         elf.extend_from_slice(&bss_vaddr.to_le_bytes());   // p_vaddr (u32)
@@ -3451,11 +3453,11 @@ impl Backend for X86_32Backend {
         const BASE_ADDR: u64 = 0x400000;
         let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
-        let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+        let text_offset = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
-        let text_vaddr: u64 = ((BASE_ADDR + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+        let text_vaddr: u64 = (BASE_ADDR + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
         let bss_vaddr: u64 = if bss_size > 0 {
-            ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
+            (text_vaddr + text_size).div_ceil(VADDR_ALIGN) * VADDR_ALIGN
         } else {
             0
         };

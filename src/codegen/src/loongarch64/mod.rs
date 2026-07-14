@@ -2109,7 +2109,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // The data segment starts on the next page after the text.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
@@ -2122,7 +2122,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let shstrtab_offset = text_offset + text_size;
     // Section header table starts after .shstrtab, 8-byte aligned
     // (Elf64_Shdr has natural alignment of 8 bytes).
-    let shdr_offset = ((shstrtab_offset + shstrtab_size + 7) / 8) * 8;
+    let shdr_offset = (shstrtab_offset + shstrtab_size).div_ceil(8) * 8;
     // Sections: 0=null, 1=.text, 2=.bss, 3=.shstrtab
     let num_shdrs: u64 = 4;
     let shstrndx: u16 = (num_shdrs - 1) as u16; // .shstrtab is the last section
@@ -2157,7 +2157,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // p_filesz = page-aligned text size (code + headers). QEMU needs this
     // for mmap. p_offset=0 means the LOAD segment starts at the beginning
     // of the file (covering the ELF header + phdrs + code).
-    let text_memsz = ((text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_memsz = (text_offset + text_size).div_ceil(PAGE_SIZE) * PAGE_SIZE;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
@@ -2309,13 +2309,10 @@ fn decode_loongarch64_instruction(word: u32) -> String {
 
     // ── 2RI12 format: 10-bit opcode at bits[31:22] ──
     let opc_2ri12 = (word >> 22) & 0x3FF;
-    match opc_2ri12 {
-        0x0E7 => {
-            // DBAR hint: rd=$r0, rj=$r0, hint=si12
-            let hint = (word >> 10) & 0xFFF;
-            return format!("dbar {}", hint);
-        }
-        _ => {}
+    if opc_2ri12 == 0x0E7 {
+        // DBAR hint: rd=$r0, rj=$r0, hint=si12
+        let hint = (word >> 10) & 0xFFF;
+        return format!("dbar {}", hint);
     }
 
     // ── 3R format: 17-bit opcode at bits[31:15] for atomic memory ops ──

@@ -84,7 +84,9 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VirtualRegister};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+#[cfg(test)]
+use crate::ir::VirtualRegister;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -978,7 +980,7 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     let mut branch_patches: Vec<BranchPatch> = Vec::new();
     let mut cond_branch_false_patches: Vec<BranchPatch> = Vec::new();
 
-    for (_blk_idx, block) in func.blocks.iter().enumerate() {
+    for block in func.blocks.iter() {
         block_start_offsets.push(code.len());
 
         for instr in &block.instructions {
@@ -1233,7 +1235,7 @@ fn s390x_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction,
     // The actual register indices are backend-specific but we use a
     // generic 0-based indexing scheme here.
     let max_real_regs = 8; // conservative limit
-    for (i, &vreg_id) in all_vreg_ids.iter().enumerate() {
+    for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
             let preg = crate::backend::PhysicalReg::new(
                 crate::backend::RegClass::Gpr,
@@ -3185,7 +3187,7 @@ fn build_s390x_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Ve
 
     let text_file_end = text_offset + text_size;
     let data_vaddr =
-        ((base_addr + text_file_end + HOST_PAGE_ALIGN - 1) / HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+        (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_size: u64 = PAGE_SIZE;
     let entry_point = base_addr + text_offset;
 

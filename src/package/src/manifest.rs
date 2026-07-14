@@ -168,38 +168,35 @@ impl PackageManifest {
     fn parse_dependencies(value: &toml::Value) -> Result<Vec<Dependency>, PackageError> {
         let mut deps = Vec::new();
 
-        match value {
-            toml::Value::Table(table) => {
-                for (name, val) in table {
-                    match val {
-                        toml::Value::String(version) => {
-                            deps.push(Dependency {
-                                name: name.clone(),
-                                version: version.clone(),
-                                registry: None,
-                            });
-                        }
-                        toml::Value::Table(inner) => {
-                            let version = inner
-                                .get("version")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("*")
-                                .to_string();
-                            let registry = inner
-                                .get("registry")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            deps.push(Dependency {
-                                name: name.clone(),
-                                version,
-                                registry,
-                            });
-                        }
-                        _ => {}
+        if let toml::Value::Table(table) = value {
+            for (name, val) in table {
+                match val {
+                    toml::Value::String(version) => {
+                        deps.push(Dependency {
+                            name: name.clone(),
+                            version: version.clone(),
+                            registry: None,
+                        });
                     }
+                    toml::Value::Table(inner) => {
+                        let version = inner
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("*")
+                            .to_string();
+                        let registry = inner
+                            .get("registry")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        deps.push(Dependency {
+                            name: name.clone(),
+                            version,
+                            registry,
+                        });
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
 
         Ok(deps)
@@ -209,35 +206,32 @@ impl PackageManifest {
     fn parse_targets(value: &toml::Value) -> Result<Vec<PackageTarget>, PackageError> {
         let mut targets = Vec::new();
 
-        match value {
-            toml::Value::Array(arr) => {
-                for item in arr {
-                    if let toml::Value::Table(table) = item {
-                        let name = table
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("main")
-                            .to_string();
-                        let kind = table
-                            .get("kind")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("bin");
-                        let kind = match kind {
-                            "lib" => TargetKind::Lib,
-                            "test" => TargetKind::Test,
-                            "example" => TargetKind::Example,
-                            _ => TargetKind::Bin,
-                        };
-                        let src = table
-                            .get("src")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("src/main.vuma")
-                            .to_string();
-                        targets.push(PackageTarget { name, kind, src });
-                    }
+        if let toml::Value::Array(arr) = value {
+            for item in arr {
+                if let toml::Value::Table(table) = item {
+                    let name = table
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("main")
+                        .to_string();
+                    let kind = table
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("bin");
+                    let kind = match kind {
+                        "lib" => TargetKind::Lib,
+                        "test" => TargetKind::Test,
+                        "example" => TargetKind::Example,
+                        _ => TargetKind::Bin,
+                    };
+                    let src = table
+                        .get("src")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("src/main.vuma")
+                        .to_string();
+                    targets.push(PackageTarget { name, kind, src });
                 }
             }
-            _ => {}
         }
 
         Ok(targets)

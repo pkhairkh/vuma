@@ -331,7 +331,7 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Phantom,
                     NodePayload::Phantom(PhantomNode {
-                        purpose: format!("extern_block"),
+                        purpose: "extern_block".to_string(),
                     }),
                     self.span_to_pp(&eb.span),
                 );
@@ -3045,9 +3045,9 @@ impl AstToScg {
             // track types through the SCG.
             
             // Check if inner is a dereference: (*ptr).field
-            if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+            if let Expr::Deref { expr: _deref_inner, .. } = inner.as_ref() {
                 // (*ptr).field — look up the field in all known structs
-                for (struct_name, layout) in &self.struct_table {
+                for (_struct_name, layout) in &self.struct_table {
                     for (fname, _ftype, foffset) in layout {
                         if fname == field {
                             return Some(*foffset);
@@ -3057,7 +3057,7 @@ impl AstToScg {
             }
             
             // Direct field access: var.field — look up in struct_table
-            for (struct_name, layout) in &self.struct_table {
+            for (_struct_name, layout) in &self.struct_table {
                 for (fname, _ftype, foffset) in layout {
                     if fname == field {
                         return Some(*foffset);

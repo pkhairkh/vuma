@@ -86,6 +86,12 @@ pub struct EGraph {
     pub provenance: HashMap<EClassId, Vec<RewriteStep>>,
 }
 
+impl Default for EGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EGraph {
     pub fn new() -> Self {
         EGraph {

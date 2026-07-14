@@ -70,7 +70,7 @@ const HEAP_ALLOC_HEADER_SIZE: usize = 16;
 #[cfg(unix)]
 fn page_align_up(n: usize) -> usize {
     let p = sys::PAGE_SIZE;
-    ((n + p - 1) / p) * p
+    n.div_ceil(p) * p
 }
 
 // ---------------------------------------------------------------------------

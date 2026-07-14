@@ -1786,7 +1786,7 @@ impl fmt::Display for IRInstr {
             IRInstr::Free { ptr } => write!(f, "free {}", ptr),
             IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                 match (from_ty, to_ty) {
-                    (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+                    (Some(ft), Some(_tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
                     _ => write!(f, "{} = {} {}", dst, kind, src),
                 }
             }

@@ -215,7 +215,7 @@ pub fn analyze_trip_count(func: &IRFunction, loop_info: &LoopInfo) -> TripCount 
 
     // Find the exit comparison `cond = cmp i_next, end, kind`.
     // The cond is referenced by the latch's Branch terminator.
-    let (cond_vreg, exit_label) = match &latch.terminator {
+    let (cond_vreg, _exit_label) = match &latch.terminator {
         IRTerminator::Branch {
             cond,
             true_block,
@@ -317,11 +317,11 @@ pub fn analyze_trip_count(func: &IRFunction, loop_info: &LoopInfo) -> TripCount 
     let trip = match kind {
         CmpKind::SLt | CmpKind::ULt => {
             // trip = ceil(abs_diff / abs_step)
-            (abs_diff + abs_step - 1) / abs_step
+            abs_diff.div_ceil(abs_step)
         }
         CmpKind::SLe | CmpKind::ULe => {
             // trip = ceil((abs_diff + 1) / abs_step)
-            (abs_diff + 1 + abs_step - 1) / abs_step
+            (abs_diff + 1).div_ceil(abs_step)
         }
         CmpKind::Ne => {
             // Exact division required.
@@ -587,7 +587,7 @@ fn try_unroll_multiblock_loop(
             }
         }
     }
-    let cmp_idx = cmp_idx?;
+    let _cmp_idx = cmp_idx?;
 
     // Validate body blocks for safety (no calls/atomics/free).
     let body_labels: Vec<String> = func
@@ -628,7 +628,7 @@ fn try_unroll_multiblock_loop(
         .iter()
         .filter_map(|l| func.blocks.iter().find(|b| &b.label == l).cloned())
         .collect();
-    let orig_latch = latch.clone();
+    let _orig_latch = latch.clone();
 
     // Determine the first body block (or the latch if there are no body blocks).
     let first_body_label = body_labels
@@ -1034,7 +1034,7 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
             }
         }
     }
-    let outer_cmp_idx = match outer_cmp_idx {
+    let _outer_cmp_idx = match outer_cmp_idx {
         Some(i) => i,
         None => return func,
     };
@@ -1262,7 +1262,7 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
         // For k > 0, emit a "between" block that computes iv_o_k = i_o + k
         // and jumps to inner_header_u{k}.
         if k > 0 {
-            let mut between = IRBlock::new(&format!("between_u{}", k));
+            let mut between = IRBlock::new(format!("between_u{}", k));
             between.instructions.push(IRInstr::BinOp {
                 op: BinOpKind::Add,
                 dst: IRValue::Register(iv_o_k),
@@ -1524,7 +1524,7 @@ fn renumber_dst(instr: &mut IRInstr, next_vreg: &mut u32) {
                 *r = fresh;
             }
         }
-        IRInstr::Phi { dst, .. } => {
+        IRInstr::Phi { dst: _, .. } => {
             // Phi dsts are handled by the caller (loop-carried IV).
             let _ = fresh;
         }
@@ -1984,7 +1984,7 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
                 *r = fresh;
             }
         }
-        IRInstr::Phi { dst, .. } => {
+        IRInstr::Phi { dst: _, .. } => {
             // Don't renumber the header's Phi (it's the loop-carried IV).
             let _ = fresh;
         }

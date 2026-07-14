@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
-use crate::ir::{IRInstr, IRValue, IRTerminator};
+use crate::ir::IRInstr;
 use crate::target_desc::{FunctionalUnit, LatencyTable};
 
 // ── Wave 27: per-backend latency model hook ────────────────────────────

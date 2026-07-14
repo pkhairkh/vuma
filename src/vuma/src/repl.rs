@@ -90,7 +90,7 @@ mod ansi {
 
 /// Check if the terminal supports ANSI color codes.
 fn supports_color() -> bool {
-    std::env::var("TERM").map_or(false, |v| v != "dumb")
+    std::env::var("TERM").is_ok_and(|v| v != "dumb")
         || std::env::var("COLORTERM").is_ok()
 }
 
@@ -1580,7 +1580,7 @@ Expressions:
                 // Match by payload content.
                 let matches = match &node.payload {
                     vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(expr),
-                    vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(expr)),
+                    vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().is_some_and(|t| t.contains(expr)),
                     _ => false,
                 };
                 if matches {
@@ -1623,7 +1623,7 @@ Expressions:
             // the node's payload (operation, type_name, etc.).
             let matches = match &node.payload {
                 vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(func_name),
-                vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(func_name)),
+                vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().is_some_and(|t| t.contains(func_name)),
                 _ => false,
             };
             if matches {
@@ -1669,7 +1669,7 @@ Expressions:
                 .unwrap_or_default();
             output.push_str(&format!(
                 "    [{:?}] {} ({}){}\n",
-                node.node_type, node_label(&node), node.id, bd_str
+                node.node_type, node_label(node), node.id, bd_str
             ));
         }
 

@@ -49,8 +49,10 @@
 //!   to real machine code.
 
 use crate::ir::{
-    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue, BinOpKind, VectorOpKind,
+    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind, VectorOpKind,
 };
+#[cfg(test)]
+use crate::ir::IRType;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
