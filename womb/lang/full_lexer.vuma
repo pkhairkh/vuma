@@ -36,9 +36,8 @@
 //  invokes the compiled `vumac` on hello.vuma and checks a.out's output.)
 //
 // The main() at the bottom of this file:
-//   1. Opens the source file at INPUT_PATH (TODO: replace with argv[1] — see
-//      ARGV TODO below; real argv access requires a `__vuma_argc`/`__vuma_argv`
-//      runtime intrinsic that does not yet exist in the Rust runtime).
+//   1. Resolves the source file path (argv[1] if present, else the hardcoded
+//      fallback "womb/lang/hello.vuma") — see input_path() below.
 //   2. Reads the file contents into a heap buffer via the raw `open`/`read`
 //      POSIX syscall stubs (same ABI as W45 std/io).
 //   3. Lexes the buffer with full_lex().
@@ -59,14 +58,23 @@ extern "C" {
     fn read(fd: i32, buf: Address, count: i64) -> i64;
     fn close(fd: i32) -> i32;
     fn write(fd: i32, buf: Address, count: i64) -> i64;
-    // ARGV TODO (Wave 47 deferral): real argv access requires the Rust runtime
-    // to expose process startup arguments. Intended interface:
-    //     fn __vuma_argc() -> i32;
-    //     fn __vuma_argv() -> Address;   // *const *const u8
-    // These intrinsics are NOT declared here (declaring without a call site is
-    // harmless, but calling them would fail to link until the runtime adds
-    // them). main() therefore uses INPUT_PATH as a fixed fallback; once the
-    // intrinsics land, replace read_file(INPUT_PATH) with an argv[1] lookup.
+    // ── Wave 47: process startup argument access ──
+    // __vuma_argc / __vuma_argv read from a runtime-managed 16-byte slot at
+    // the start of BSS, populated by the `_start` stub (see
+    // src/codegen/src/x86_64/mod.rs:`encode_program`) before main() is
+    // called. The stubs are emitted by the x86_64 codegen backend alongside
+    // the other POSIX syscall stubs above.
+    //
+    //   __vuma_argc() -> i32       — process argc (0 if called before _start)
+    //   __vuma_argv() -> Address   — *const *const u8 pointer to the argv
+    //                                array (argv[0] at offset 0, argv[1] at
+    //                                offset 8, ..., NULL-terminated)
+    //
+    // input_path() below uses these to read argv[1] as the source file
+    // path, falling back to the hardcoded "womb/lang/hello.vuma" when argc
+    // < 2 (i.e., no path argument was provided).
+    fn __vuma_argc() -> i32;
+    fn __vuma_argv() -> Address;   // *const *const u8
 
     // ── Wave 48: cross-module pipeline entry points ──
     // Each lives in its own .vuma file; the runtime linker resolves the calls
@@ -504,35 +512,84 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
 // Wave 47 — file I/O + bootstrap entry point
 // ============================================================================
 
-// Hardcoded source path (Wave 47 ARGV TODO: replace with argv[1] once the
-// __vuma_argc/__vuma_argv runtime intrinsics land — see extern block above).
-// This path is relative to the process CWD; the Wave 47 test runs the compiler
-// from the repo root, so `womb/lang/hello.vuma` resolves correctly.
-// "womb/lang/hello.vuma\0" — 21 bytes including NUL.
+// Fixed-size buffer used for the source file path. The path comes from
+// argv[1] (when provided) or the hardcoded fallback. 256 bytes is plenty
+// for typical repo-relative paths; longer paths fall back to the hardcoded
+// default (see input_path()). The buffer is allocated with __vuma_alloc and
+// freed with __vuma_free by the caller (main) using the same size.
+//
+// NOTE: this size is duplicated in main() (for __vuma_free) because VUMA's
+// bootstrap parser (full_parser.vuma) doesn't yet support module-level
+// `const` declarations. If the value changes, update both call sites.
+
+// Write the NUL-terminated fallback path "womb/lang/hello.vuma\0" (21 bytes)
+// into the buffer `buf`. Used by input_path() when argc < 2 (no path
+// argument provided) or when argv[1] is too long for the buffer. The caller
+// owns `buf` and frees it with __vuma_free(buf, 256).
+fn write_fallback_path(buf: Address) {
+    *(buf + 0) = 119;   // w
+    *(buf + 1) = 111;   // o
+    *(buf + 2) = 109;   // m
+    *(buf + 3) = 98;    // b
+    *(buf + 4) = 47;    // /
+    *(buf + 5) = 108;   // l
+    *(buf + 6) = 97;    // a
+    *(buf + 7) = 110;   // n
+    *(buf + 8) = 103;   // g
+    *(buf + 9) = 47;    // /
+    *(buf + 10) = 104;  // h
+    *(buf + 11) = 101;  // e
+    *(buf + 12) = 108;  // l
+    *(buf + 13) = 108;  // l
+    *(buf + 14) = 111;  // o
+    *(buf + 15) = 46;   // .
+    *(buf + 16) = 118;  // v
+    *(buf + 17) = 117;  // u
+    *(buf + 18) = 109;  // m
+    *(buf + 19) = 97;   // a
+    *(buf + 20) = 0;    // NUL
+}
+
+// Resolve the source file path. Returns a heap-allocated NUL-terminated
+// string that the caller frees with __vuma_free(ptr, 256).
+//
+// Wave 47: reads argv[1] via the __vuma_argc / __vuma_argv runtime
+// intrinsics. If argc < 2 (no path argument was provided), or argv[1] is
+// longer than 255 chars (leaving room for the NUL terminator), falls back
+// to the hardcoded "womb/lang/hello.vuma".
+//
+// The fallback path is relative to the process CWD; the Wave 47 test runs
+// the compiler from the repo root, so "womb/lang/hello.vuma" resolves
+// correctly.
 fn input_path() -> Address {
-    p = __vuma_alloc(21);
-    *(p + 0) = 119;   // w
-    *(p + 1) = 111;   // o
-    *(p + 2) = 109;   // m
-    *(p + 3) = 98;    // b
-    *(p + 4) = 47;    // /
-    *(p + 5) = 108;   // l
-    *(p + 6) = 97;    // a
-    *(p + 7) = 110;   // n
-    *(p + 8) = 103;   // g
-    *(p + 9) = 47;    // /
-    *(p + 10) = 104;  // h
-    *(p + 11) = 101;  // e
-    *(p + 12) = 108;  // l
-    *(p + 13) = 108;  // l
-    *(p + 14) = 111;  // o
-    *(p + 15) = 46;   // .
-    *(p + 16) = 118;  // v
-    *(p + 17) = 117;  // u
-    *(p + 18) = 109;  // m
-    *(p + 19) = 97;   // a
-    *(p + 20) = 0;    // NUL
-    return p;
+    buf_size: i64 = 256;
+    buf = __vuma_alloc(buf_size);
+    argc: i32 = __vuma_argc();
+    if argc < 2 {
+        write_fallback_path(buf);
+        return buf;
+    }
+    // argv is a *const *const u8: argv[0] at offset 0, argv[1] at offset 8.
+    argv: Address = __vuma_argv();
+    argv1_ptr: Address = load_u64(argv, 8);
+    // Measure the NUL-terminated string length.
+    len: u32 = 0;
+    while *(argv1_ptr + len) != 0 {
+        len = len + 1;
+    }
+    // Defensive: if the path is too long for our buffer, fall back.
+    if len >= 255 {
+        write_fallback_path(buf);
+        return buf;
+    }
+    // Copy argv[1] into the buffer and NUL-terminate.
+    i: u32 = 0;
+    while i < len {
+        *(buf + i) = *(argv1_ptr + i);
+        i = i + 1;
+    }
+    *(buf + len) = 0;
+    return buf;
 }
 
 // Open `path` (NUL-terminated) with O_RDONLY (0) and read up to `cap` bytes
@@ -607,9 +664,10 @@ fn output_path() -> Address {
 //   1  →  failure at any pipeline stage (I/O, lex, parse, IR build, codegen,
 //          ELF write)
 //
-// ARGV TODO: once __vuma_argc/__vuma_argv exist, replace `input_path()` with a
-// lookup of argv[1] (read the C string, NUL-terminate, pass to read_file_into).
-// The output path "a.out" could similarly become argv[2] (or a -o flag).
+// The source file path comes from argv[1] (if provided) or the hardcoded
+// fallback "womb/lang/hello.vuma" — see input_path() above. The output
+// path "a.out" could similarly become argv[2] (or a -o flag) in a future
+// wave; for now it remains fixed.
 fn main() -> i32 {
     // ── Pipeline buffer sizes ──
     // These are conservative upper bounds for the hello.vuma subset. Larger
@@ -638,7 +696,7 @@ fn main() -> i32 {
     path = input_path();
     src = __vuma_alloc(src_cap);
     src_len: i64 = read_file_into(path, src, src_cap);
-    __vuma_free(path, 21);
+    __vuma_free(path, 256);
     if src_len < 0 {
         __vuma_free(src, src_cap);
         return 1;
