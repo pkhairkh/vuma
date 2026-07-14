@@ -19,7 +19,6 @@
 use crate::capd::CapD;
 use crate::error_reporting::BdError;
 use crate::reld::RelD;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Pointer size in bytes for the 64-bit target model.
@@ -30,7 +29,7 @@ pub const POINTER_SIZE: u64 = 8;
 // ---------------------------------------------------------------------------
 
 /// Representation of a raw byte sequence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ByteRep {
     /// Size in bytes.
     pub size: u64,
@@ -103,7 +102,7 @@ pub struct FuncRep {
 ///
 /// The physical memory is a 1D buffer; N-dimensional semantic coordinates
 /// are translated to physical offsets via bit-interleaving.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ManifoldSpatialRep {
     /// Number of dimensions (e.g., 2 for a matrix, 3 for a volume).
     pub dimensions: u32,
@@ -123,7 +122,7 @@ pub struct ManifoldSpatialRep {
 ///
 /// When `degraded` is true, a hidden 1-byte runtime tag is present at
 /// `tag_offset`. When false, the IVE proved that no tag is needed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GestaltSuperpositionRep {
     /// All possible variant names.
     pub variants: Vec<String>,
@@ -141,7 +140,7 @@ pub struct GestaltSuperpositionRep {
 ///
 /// The physical layout (AoS vs SoA) is resolved by the LayoutResolutionPass
 /// based on access pattern analysis.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConceptRelationalRep {
     /// Field names in declaration order.
     pub field_names: Vec<String>,

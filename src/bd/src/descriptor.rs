@@ -16,7 +16,6 @@
 use crate::capd::CapD;
 use crate::reld::RelD;
 use crate::repd::RepD;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +26,7 @@ use std::fmt;
 ///
 /// Used as a key in registries and during composition so that structural
 /// equality is not needed to identify descriptors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BDId(pub u64);
 
 impl fmt::Display for BDId {

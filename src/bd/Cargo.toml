@@ -11,12 +11,11 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# TODO(wave43): remaining serde usage at src/bd/src/context.rs:12 (and 33
-# other sites on non-named types like Capability/Condition/Relation/etc.);
-# migrate to hand-written codec. Named types (RepD/CapD/RelD/BD + cascade
-# StructRep/ArrayRep/EnumRep/PtrRep/UnionRep/FuncRep/BDConstraint/
-# BDTerm/ContextSolver) were stripped in Wave 43 — see src/bd/src/serialize.rs
-# BinaryWrite/BinaryRead for the canonical binary path.
-serde.workspace = true
+# serde/serde_json removed in Wave 43 — all BD descriptor types (RepD, CapD,
+# RelD, BD + cascade StructRep/ArrayRep/EnumRep/PtrRep/UnionRep/FuncRep/
+# BDConstraint/BDTerm/ContextSolver/Capability/Condition/Relation/etc.) now
+# rely on hand-written Debug + Clone derives only. Binary serialization goes
+# through `src/bd/src/serialize.rs` BinaryWrite/BinaryRead (added in Wave 43
+# for the named types; non-named types do not currently need serialization
+# and rely on Debug + Clone only).
 vuma-scg.workspace = true
-# serde_json removed in Wave 43 — no remaining serde_json:: usage in src/bd/.

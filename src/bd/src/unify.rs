@@ -39,7 +39,6 @@ use crate::descriptor::BD;
 use crate::reld::RelD;
 use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep};
 use std::collections::{HashMap, HashSet};
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -50,7 +49,7 @@ use std::fmt;
 ///
 /// Variables are identified by a unique `id` and may carry a human-readable
 /// `name` for debugging.  Two variables are equal iff their `id`s match.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BDVariable {
     /// Unique identifier for this variable.
     pub id: u64,
@@ -138,7 +137,7 @@ impl fmt::Display for BDTerm {
 // ---------------------------------------------------------------------------
 
 /// The kind of constraint between two BD terms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BDConstraintKind {
     /// The two terms must be *equal* — they describe the exact same BD.
     Equality,

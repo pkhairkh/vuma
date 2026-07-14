@@ -17,7 +17,6 @@
 //! | `Liveness`    | The value is guaranteed to eventually be usable     |
 
 use std::collections::HashSet;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -25,7 +24,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Kinds of temporal ordering between two lifetimes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TemporalKind {
     /// The first lifetime outlives the second.
     Outlives,
@@ -53,7 +52,7 @@ impl fmt::Display for TemporalKind {
 // ---------------------------------------------------------------------------
 
 /// Kinds of dependency between two operations or values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DepKind {
     /// Data dependency — one value flows into the other.
     DataDep,
@@ -78,7 +77,7 @@ impl fmt::Display for DepKind {
 // ---------------------------------------------------------------------------
 
 /// Information-flow policies governing how data may move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowPolicy {
     /// Data must not be downgraded to a less-restrictive label.
     NoDowngrade,
@@ -108,7 +107,7 @@ impl fmt::Display for FlowPolicy {
 /// (optionally) the flavour of the relation.  The actual *endpoints* of
 /// each relation are tracked externally — the `RelD` merely enumerates
 /// *which* relations exist.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Relation {
     /// Temporal ordering constraint.
     Temporal(TemporalKind),
