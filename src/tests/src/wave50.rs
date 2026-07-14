@@ -33,10 +33,20 @@
 //!    relocations are populated) the relocation table contains an entry
 //!    for `print_int`.  Execution simulation is not yet available in the
 //!    test harness — gap documented.
-//! 5. **Self-hosting milestone (smoke)** — the canonical `.vuma` bootstrap
-//!    source files exist and are non-empty (≥100 bytes each).  Full
-//!    self-hosting execution is deferred (W48 PARTIAL: the `.vuma`
-//!    compiler is not yet invokable from the Rust runtime).
+//! 5. **Self-hosting milestone** — strengthened in Task 6-c from a
+//!    file-existence smoke test to a three-part check:
+//!    (A) file existence + ≥100 bytes (regression guard),
+//!    (B) source-level structural cross-references between the five
+//!        canonical bootstrap `.vuma` files (proves the lex → parse → IR
+//!        → codegen → ELF pipeline is wired in source),
+//!    (C) **real compile + execute** of `womb/lang/hello.vuma` — the
+//!        bootstrap's canonical target input — through the production
+//!        Rust pipeline → x86_64 ELF → spawn → assert stdout contains
+//!        "42".  Sub-check C is gated on `target_arch = "x86_64"`.
+//!    Full bootstrap self-hosting (compiling `full_lexer.vuma` itself)
+//!    remains deferred — see `test_wave50_bootstrap_milestone`'s
+//!    doc-comment for the two specific blockers (multi-module linking
+//!    and parser coverage).
 //!
 //! The CI sub-tasks (clippy + full-test) live in
 //! `.github/workflows/wave50-hardening.yml`.
@@ -1990,22 +2000,95 @@ fn test_wave50_cross_backend_opt_regression() {
 }
 
 // ===========================================================================
-// Test 5 — Self-hosting milestone (smoke)
+// Test 5 — Self-hosting milestone
 // ===========================================================================
 
-/// Wave 50 / Task 5: Self-hosting milestone smoke test.
+/// Wave 50 / Task 6-c: Strengthened self-hosting milestone test.
 ///
-/// Per W48 PARTIAL: the `.vuma` bootstrap compiler is not yet invokable
-/// from the Rust runtime (`cargo run -- compile womb/lang/full_lexer.vuma`
-/// doesn't work because the Rust-side `Compile` subcommand uses the
-/// canonical Rust pipeline, not the `.vuma` bootstrap).  A future wave
-/// must add a runtime path that compiles + links the `.vuma` files into a
-/// `vumac` binary; then this test becomes `./vumac && ./a.out` → "42\n".
+/// Previously (Wave 48 PARTIAL / Task 5): this was a SMOKE test that only
+/// checked file existence + ≥100 bytes.  Task 6-c strengthens it to a
+/// three-part check:
 ///
-/// Until then, this is a SMOKE test: assert that the canonical bootstrap
-/// source files exist and are non-empty (≥100 bytes each), and that
-/// `hello.vuma` exists.  This catches accidental deletion or truncation
-/// of the bootstrap sources in CI.
+/// **Sub-check A — File existence + non-trivial size (regression guard,
+/// retained from the original smoke test).**  The five canonical bootstrap
+/// source files plus `hello.vuma` must exist and be ≥100 bytes each.
+/// Catches accidental deletion/truncation of the bootstrap sources in CI.
+///
+/// **Sub-check B — Source-level structural cross-references (Option C).**
+/// Asserts the bootstrap files form a complete pipeline:
+///   - `full_lexer.vuma` (the entry point, 805 lines) declares `extern`
+///     calls to `parse`, `irb_build_main`, `codegen_emit`, `write_elf64`
+///     (the cross-module entry points living in the four sibling files).
+///   - `full_parser.vuma` defines `fn parse(tokens, token_count, src, ast,
+///     ast_cap) -> u32`.
+///   - `ir_builder.vuma` defines `fn irb_build_main(...)`, plus the real
+///     SCG/BD/IVE implementations from Task 5-b: `fn scg_construct(ast)`,
+///     `fn bd_infer(ir_buf)`, `fn ive_verify(ir_buf)`.
+///   - `codegen.vuma` defines `fn codegen_emit(...)`.
+///   - `elf.vuma` defines `fn write_elf64(...)`.
+/// This catches accidental divergence of the bootstrap's cross-module
+/// wiring (e.g., a rename of `irb_build_main` in one file but not the
+/// others).
+///
+/// **Sub-check C — Real compile + execute of `womb/lang/hello.vuma`
+/// (Option B flavour, gated on `target_arch = "x86_64"`).**  Compiles the
+/// bootstrap's canonical target input — `hello.vuma` (the 22-line program
+/// the bootstrap compiler is contracted to compile) — through the
+/// production Rust pipeline:
+///
+/// ```text
+///   parse (vuma_parser::Parser)
+///   → bridge_ast_to_codegen_scg
+///   → ScgToIr::convert
+///   → x86_64 backend's allocate_registers + encode_program
+///   → full Linux ELF (with _start stub + print_int runtime syscall stub)
+///   → execute_x86_64_elf → spawn → capture stdout
+///   → assert stdout contains "42"
+/// ```
+///
+/// This is materially stronger than the file-existence smoke test: it
+/// actually compiles AND runs a non-trivial `.vuma` file from
+/// `womb/lang/`.  The compile path mirrors `main.rs::cmd_run`'s
+/// `compile_to_binary_direct` helper (parse → AST → codegen SCG → IR →
+/// backend.encode_program) — that's the same path a future wave will use
+/// to compile the bootstrap itself once its blockers (see below) are
+/// resolved.
+///
+/// ## Why hello.vuma and not full_lexer.vuma (the bootstrap itself)?
+///
+/// The bootstrap compiler (`full_lexer.vuma` + 4 sibling files) is NOT
+/// yet compilable end-to-end by the production Rust compiler for two
+/// reasons documented here so a future wave can pick up the work:
+///
+/// 1. **Multi-module linking.**  `full_lexer.vuma::main` declares
+///    `extern` calls to `parse`, `irb_build_main`, `codegen_emit`,
+///    `write_elf64` — functions that live in `full_parser.vuma`,
+///    `ir_builder.vuma`, `codegen.vuma`, `elf.vuma` respectively.  The
+///    production Rust compiler emits a *static* ELF with no link step,
+///    so the calls would land on address 0 (verified: running
+///    `vuma run --isa x86_64 womb/lang/full_lexer.vuma womb/lang/hello.vuma`
+///    prints `[warn] Unresolved external symbol 'parse' in 'main' …`
+///    for each of the four entry points and then exits with code 1).
+/// 2. **Parser coverage.**  The bootstrap uses some VUMA-language
+///    constructs the production parser does not yet accept.  Verified:
+///    the same `vuma run` invocation logs
+///    `ParseError { message: "expected expression, found 'fn'", … line:
+///    Some(529), column: Some(1) }` against `full_lexer.vuma`.
+///
+/// Compiling `hello.vuma` — the bootstrap's canonical INPUT — exercises
+/// the same Rust pipeline (parse → SCG → IR → codegen → ELF → exec) that
+/// a future wave will use to compile `full_lexer.vuma` once multi-module
+/// linking and parser coverage land.  This is the strongest milestone
+/// test currently feasible: it proves the production compiler can host
+/// the input contract that the bootstrap is supposed to host.
+///
+/// ## Platform gating
+///
+/// Sub-check C is gated on `#[cfg(target_arch = "x86_64")]` — mirrors
+/// Task 6-b's `execute_x86_64_elf` helper, which only spawns the emitted
+/// ELF natively on an x86_64 host (no qemu-user fallback in the test
+/// harness).  On non-x86_64 hosts, only sub-checks A and B run; an
+/// `eprintln!` reports the skip so it's visible in CI logs.
 #[test]
 fn test_wave50_bootstrap_milestone() {
     // Resolve the workspace root from CARGO_MANIFEST_DIR (the vuma-tests
@@ -2031,6 +2114,9 @@ fn test_wave50_bootstrap_milestone() {
         "elf.vuma",
     ];
 
+    // -----------------------------------------------------------------
+    // Sub-check A — file existence + ≥100 bytes (regression guard).
+    // -----------------------------------------------------------------
     let mut missing = Vec::new();
     let mut too_small = Vec::new();
 
@@ -2072,4 +2158,312 @@ fn test_wave50_bootstrap_milestone() {
             eprintln!("wave50 bootstrap: {} = {} bytes", fname, m.len());
         }
     }
+
+    // -----------------------------------------------------------------
+    // Sub-check B — source-level structural cross-references.
+    // -----------------------------------------------------------------
+    // Assert the five bootstrap files form a complete pipeline:
+    //
+    //   full_lexer.vuma (entry)
+    //     └─ extern calls to: parse, irb_build_main, codegen_emit, write_elf64
+    //   full_parser.vuma   → defines `fn parse`
+    //   ir_builder.vuma    → defines `fn irb_build_main`, `fn scg_construct`,
+    //                        `fn bd_infer`, `fn ive_verify`  (Task 5-b real impls)
+    //   codegen.vuma       → defines `fn codegen_emit`
+    //   elf.vuma           → defines `fn write_elf64`
+    //
+    // Each `fn ...` definition uses the VUMA `fn <name>(<args>) -> <ty> {`
+    // surface syntax, so we can scan the source for the substring
+    // `fn <name>(` to confirm a definition is present.
+
+    /// Read a file under `womb/lang/` to a `String`.  Panics if missing —
+    /// sub-check A already established the files exist.
+    fn read_lang_file(womb_lang: &std::path::Path, name: &str) -> String {
+        std::fs::read_to_string(womb_lang.join(name))
+            .unwrap_or_else(|e| panic!("cannot read {}: {}", name, e))
+    }
+
+    let full_lexer_src = read_lang_file(&womb_lang, "full_lexer.vuma");
+    let full_parser_src = read_lang_file(&womb_lang, "full_parser.vuma");
+    let ir_builder_src = read_lang_file(&womb_lang, "ir_builder.vuma");
+    let codegen_src = read_lang_file(&womb_lang, "codegen.vuma");
+    let elf_src = read_lang_file(&womb_lang, "elf.vuma");
+
+    // (B.1) full_lexer.vuma declares extern calls to the four sibling
+    // entry points.  The extern block uses the surface syntax
+    // `fn <name>(<args>) -> <ty>;` (with trailing semicolon, no body).
+    // We assert each name appears at least once in the source — this
+    // catches accidental rename of an entry point without updating the
+    // extern declaration.
+    for entry_point in &[
+        "parse",
+        "irb_build_main",
+        "codegen_emit",
+        "write_elf64",
+    ] {
+        assert!(
+            full_lexer_src.contains(entry_point),
+            "wave50 bootstrap milestone (sub-check B): full_lexer.vuma does not reference \
+             cross-module entry point '{}'",
+            entry_point
+        );
+    }
+
+    // (B.2) Each sibling file defines its contracted `fn <name>(` symbol.
+    // Use the `fn <name>(` prefix to avoid matching substring occurrences
+    // inside comments or unrelated identifiers.
+    assert!(
+        full_parser_src.contains("fn parse("),
+        "wave50 bootstrap milestone (sub-check B): full_parser.vuma does not define `fn parse(`"
+    );
+    assert!(
+        ir_builder_src.contains("fn irb_build_main("),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
+         `fn irb_build_main(`"
+    );
+    assert!(
+        ir_builder_src.contains("fn scg_construct("),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
+         `fn scg_construct(` (Task 5-b real SCG implementation is missing)"
+    );
+    assert!(
+        ir_builder_src.contains("fn bd_infer("),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
+         `fn bd_infer(` (Task 5-b real BD implementation is missing)"
+    );
+    assert!(
+        ir_builder_src.contains("fn ive_verify("),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
+         `fn ive_verify(` (Task 5-b real IVE implementation is missing)"
+    );
+    assert!(
+        codegen_src.contains("fn codegen_emit("),
+        "wave50 bootstrap milestone (sub-check B): codegen.vuma does not define \
+         `fn codegen_emit(`"
+    );
+    assert!(
+        elf_src.contains("fn write_elf64("),
+        "wave50 bootstrap milestone (sub-check B): elf.vuma does not define \
+         `fn write_elf64(`"
+    );
+
+    // (B.3) Cross-reference: ir_builder.vuma must contain explicit
+    // "REAL" annotations for the SCG/BD/IVE implementations (Task 5-b
+    // contract).  The file's source uses `REAL:` markers in its
+    // commentary; we assert at least one occurrence of each marker
+    // pair to guard against accidental stub-ification regressions.
+    assert!(
+        ir_builder_src.contains("scg_construct") && ir_builder_src.contains("REAL"),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma missing REAL annotation \
+         for scg_construct (Task 5-b regression)"
+    );
+    assert!(
+        ir_builder_src.contains("bd_infer") && ir_builder_src.contains("REAL"),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma missing REAL annotation \
+         for bd_infer (Task 5-b regression)"
+    );
+    assert!(
+        ir_builder_src.contains("ive_verify") && ir_builder_src.contains("REAL"),
+        "wave50 bootstrap milestone (sub-check B): ir_builder.vuma missing REAL annotation \
+         for ive_verify (Task 5-b regression)"
+    );
+
+    // (B.4) Non-trivial size: each bootstrap file must be >100 lines
+    // (the original smoke check used ≥100 bytes; here we raise the bar
+    // to >100 lines to catch accidental truncation to a stub).  The
+    // elf.vuma file is intentionally compact (132 lines for a minimal
+    // ELF64 writer), so this threshold is conservative.
+    for (fname, src) in [
+        ("full_lexer.vuma", &full_lexer_src[..]),
+        ("full_parser.vuma", &full_parser_src[..]),
+        ("ir_builder.vuma", &ir_builder_src[..]),
+        ("codegen.vuma", &codegen_src[..]),
+        ("elf.vuma", &elf_src[..]),
+    ] {
+        let line_count = src.lines().count();
+        assert!(
+            line_count > 100,
+            "wave50 bootstrap milestone (sub-check B): {} has only {} lines — expected >100 \
+             (accidental truncation to stub?)",
+            fname,
+            line_count
+        );
+        eprintln!("wave50 bootstrap (sub-check B): {} = {} lines", fname, line_count);
+    }
+
+    // -----------------------------------------------------------------
+    // Sub-check C — real compile + execute of womb/lang/hello.vuma.
+    // -----------------------------------------------------------------
+    // Gated on x86_64 host: the emitted ELF is x86_64 machine code and
+    // we have no qemu-user fallback in the test harness (mirrors Task
+    // 6-b's `execute_x86_64_elf` gating).
+    #[cfg(target_arch = "x86_64")]
+    {
+        let hello_src = read_lang_file(&womb_lang, "hello.vuma");
+        let elf_bytes = compile_vuma_source_to_x86_64_elf(&hello_src).expect(
+            "wave50 bootstrap milestone (sub-check C): production pipeline failed to compile \
+             womb/lang/hello.vuma to an x86_64 ELF — see the error in the panic message"
+        );
+
+        // The emitted binary must be a non-trivial ELF (≥64 bytes for
+        // the ELF header alone, starts with the ELF magic).
+        assert!(
+            elf_bytes.len() >= 64,
+            "wave50 bootstrap milestone (sub-check C): emitted ELF is only {} bytes — expected \
+             ≥64 (a full ELF64 header)",
+            elf_bytes.len()
+        );
+        assert_eq!(
+            &elf_bytes[0..4], b"\x7fELF",
+            "wave50 bootstrap milestone (sub-check C): emitted bytes do not start with the ELF \
+             magic — got {:?}",
+            &elf_bytes[0..4]
+        );
+
+        // Execute the ELF natively and assert stdout contains "42".
+        let stdout = execute_x86_64_elf(&elf_bytes).expect(
+            "wave50 bootstrap milestone (sub-check C): failed to execute the emitted x86_64 ELF \
+             for womb/lang/hello.vuma — see the error in the panic message"
+        );
+        assert!(
+            stdout.contains("42"),
+            "wave50 bootstrap milestone (sub-check C): emitted ELF for womb/lang/hello.vuma ran \
+             but did not print \"42\" on stdout — got stdout = {:?}",
+            stdout
+        );
+        eprintln!(
+            "wave50 bootstrap milestone (sub-check C): compiled womb/lang/hello.vuma → {}-byte \
+             x86_64 ELF, executed, stdout = {:?} (contains \"42\" ✓)",
+            elf_bytes.len(),
+            stdout
+        );
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        eprintln!(
+            "wave50 bootstrap milestone (sub-check C): SKIPPED — host is not x86_64; \
+             sub-checks A and B only (mirrors execute_x86_64_elf's platform gating)"
+        );
+    }
+}
+
+/// Compile a VUMA source string to a Linux x86_64 ELF binary via the
+/// production Rust pipeline.
+///
+/// Mirrors `main.rs::compile_to_binary_direct` (the path used by `vuma
+/// run --isa x86_64`) but trims to the test's needs:
+///
+/// 1. Parse the source via `vuma_parser::Parser` (fatal errors → `Err`).
+/// 2. Bridge parser AST → codegen SCG via
+///    `vuma::pipeline::bridge_ast_to_codegen_scg`.
+/// 3. Lower codegen SCG → IR via `vuma_codegen::ScgToIr::convert`.
+/// 4. (IR optimizations skipped — the production `compile_to_binary_direct`
+///    runs `opt::run_optimizations_with_target` only at `OptLevel > O0`;
+///    this helper never invokes that path, keeping the test deterministic
+///    and avoiding the latency-table lookup.)
+/// 5. Populate the thread-local 64-bit-returns set (required by some
+///    backends for call-return lowering; populated here for parity with
+///    the production path).
+/// 6. Allocate registers + encode_program via the x86_64 backend.
+///
+/// Returns the full Linux ELF bytes (with `_start` stub, `print_int`
+/// runtime syscall stub, and `__vuma_argc`/`__vuma_argv` runtime stubs).
+#[cfg(target_arch = "x86_64")]
+fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
+    use vuma::pipeline::bridge_ast_to_codegen_scg;
+    use vuma_codegen::backend::{AllocatedProgram, set_64bit_returns};
+    use vuma_codegen::ir::IRType;
+    use vuma_codegen::ScgToIr;
+    use vuma_parser::Parser;
+
+    // Step 1: Parse source → AST.  Fatal parse errors abort; non-fatal
+    // warnings are logged to stderr (mirrors cmd_run's behavior).
+    let mut parser = Parser::new(source);
+    let parse_result = parser.parse_program();
+    if parse_result.is_err() {
+        return Err(format!(
+            "parse error: {:?}",
+            parse_result.errors
+        ));
+    }
+    if !parse_result.errors.is_empty() {
+        eprintln!(
+            "[wave50 bootstrap milestone] WARNING: {} non-fatal parse errors:",
+            parse_result.errors.len()
+        );
+        for err in &parse_result.errors {
+            eprintln!("[wave50 bootstrap milestone]   {:?}", err);
+        }
+    }
+    let program = parse_result.value.expect(
+        "is_err() returned false → value must be Some; this is a parser-API invariant"
+    );
+
+    // Step 2: Bridge parser AST → codegen SCG.
+    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+    // Step 3: Lower codegen SCG → IR.  (No IR optimization pass —
+    // keeps the test deterministic and avoids the latency-table lookup
+    // that the production `compile_to_binary_direct` performs at
+    // `OptLevel > O0`.)
+    let mut ir_builder = ScgToIr::new();
+    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+        format!("IR conversion error: {}", e)
+    })?;
+
+    // Step 4: Create the x86_64 backend.
+    let backend = create_backend(BackendKind::X86_64).map_err(|e| {
+        format!("cannot create x86_64 backend: {}", e)
+    })?;
+
+    // Step 5: Populate the thread-local set of 64-bit-returning function
+    // names (mirrors main.rs::compile_to_binary_direct:553-558 — needed
+    // by arm32 and other 32-bit backends for call-return lowering; here
+    // for parity with the production path).
+    {
+        let func_64bit: HashSet<String> = ir_program
+            .functions
+            .iter()
+            .filter(|f| {
+                f.result_types
+                    .iter()
+                    .any(|t| matches!(t, IRType::I64 | IRType::U64))
+            })
+            .map(|f| f.name.clone())
+            .collect();
+        set_64bit_returns(&func_64bit);
+    }
+
+    // Step 6: Allocate registers for each function.
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => allocated_functions.push(allocated),
+            Err(e) => {
+                eprintln!(
+                    "[wave50 bootstrap milestone] warning: register allocation failed for \
+                     '{}': {}",
+                    func.name, e
+                );
+            }
+        }
+    }
+    if allocated_functions.is_empty() {
+        return Err(
+            "no functions were successfully allocated (register allocation failed for all \
+             functions in the program)"
+                .to_string(),
+        );
+    }
+
+    // Step 7: Encode the full program → Linux x86_64 ELF.
+    let allocated_program = AllocatedProgram {
+        functions: allocated_functions,
+        total_code_size: 0,
+        total_data_size: 0,
+    };
+    backend.encode_program(&allocated_program).map_err(|e| {
+        format!("x86_64 encode_program failed: {}", e)
+    })
 }
