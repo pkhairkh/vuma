@@ -271,6 +271,61 @@ tables (x86_64 / aarch64 / riscv64 / arm32 / …) and replace every
 and makes the kernel ABI the only external surface — invoked via the vuma-native
 `syscall` intrinsic, not a C calling-convention wrapper.
 
+**Design (P1):** The "Fix" above is revised by the P1 wave — instead of
+per-arch `__NR_*` constant tables on the womb side, the womb side will use a
+**single VUMA-generic numbering** and codegen translates to native per-arch.
+
+- **VUMA-generic numbering = Linux `asm-generic/unistd.h`** (used natively by
+  aarch64, riscv64, riscv32, loongarch64). Canonical numbers: `write=64`,
+  `read=63`, `close=57`, `openat=56`, `lseek=62`, `mmap=222`, `munmap=215`,
+  `exit=93`, `exit_group=94`, `fstat=80`, `newfstatat=79`, `clone=220`,
+  `clone3=435`, `socket=198`, `connect=203`, `accept=202`, `bind=200`,
+  `listen=201`, `sendto=206`, `recvfrom=207`, `futex=98`, `epoll_create1=20`,
+  `epoll_ctl=21`, `epoll_wait=22`, `getpid=172`, `getrandom=278`, etc.
+- **`syscall(nr, args...)`** will use VUMA-generic numbers in source; codegen
+  translates `nr` to the native per-arch number via
+  `crate::codegen::syscall_abi::translate(backend, nr)` before emitting it
+  into the syscall-number register.
+- **Identity arches** (no translation needed — native numbering == asm-generic):
+  `aarch64`, `riscv64`, `riscv32`, `loongarch64`, `arm32` (EABI; arm32-OABI
+  would differ but VUMA targets EABI).
+- **Translated arches** (per-arch `match` table in `syscall_abi.rs`):
+  - `x86_64`, `x86_32` — tables done (this wave, P1-a). E.g. `write 64→1` on
+    x86_64; `write 64→4` on x86_32.
+  - `mips64`, `ppc64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k` — tables
+    **TODO P1-b**; `translate` returns `None` until then (the intrinsic is
+    not portable on these arches yet).
+- **`wasm32`** uses host imports (`vuma.*`), not syscalls — `translate`
+  returns `None`; the `syscall` intrinsic is not meaningful on this target.
+- **BE wrappers** (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) delegate to
+  their LE (or bare) counterpart: `aarch64_be→aarch64`, `armeb→arm32`,
+  `mips64be→mips64`, `ppc64le→ppc64`.
+- **Signature note (no simplifications):** asm-generic lacks legacy
+  `open`/`stat`/`fork`/`poll` — only `openat`/`newfstatat`/`clone`/`ppoll`
+  exist. womb migration must adopt the modern signatures, e.g.
+  `openat(AT_FDCWD, path, flags, mode)` where `AT_FDCWD = -100`. Likewise
+  `unlinkat(AT_FDCWD, path, 0)`, `fchmodat(AT_FDCWD, path, mode, 0)`, etc.
+  This is the "no simplifications" path — the alternative of synthesising
+  legacy `open`/`stat`/`fork`/`poll` shim stubs per-arch was rejected as
+  adding exactly the kind of C-style wrapper the user's hard constraint
+  forbids.
+- **Foundation module `src/codegen/src/syscall_abi.rs`** created (this wave,
+  P1-a) with `pub fn vuma_generic_name(nr) -> Option<&'static str>` and
+  `pub fn translate(backend, generic_nr) -> Option<u32>` + comprehensive
+  tests. **Not yet wired** into `IRInstr::Syscall` emission in any backend;
+  the legacy `generic_syscall_name` in `ir.rs` is left unchanged (with a
+  one-line comment above it pointing to the new authoritative module).
+- **Phasing:**
+  - **P1-a (this wave):** foundation module + tests + design note. No
+    backend changes, no womb changes.
+  - **P1-b (next):** wire `translate` into each backend's
+    `IRInstr::Syscall` emission so the intrinsic becomes portable. Fill in
+    the mips64/ppc64/s390x/sparc64/alpha/hppa/m68k per-arch tables.
+  - **P1-c:** migrate womb's `extern "C" { fn write }` Rust-emitted wrappers
+    to vuma-native `syscall(64, ...)` calls (the original "Fix" above, now
+    using the VUMA-generic numbering directly — no per-arch `__NR_*`
+    constants needed on the womb side).
+
 ### 6. womb vuma-native gap — allocator stubs (P2)
 
 18 womb files declare `extern "C" { fn __vuma_alloc(size) -> Address;
