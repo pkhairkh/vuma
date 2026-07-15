@@ -223,7 +223,7 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
     swap_u16(elf, p); p += 2; // e_phnum
     swap_u16(elf, p); p += 2; // e_shentsize
     swap_u16(elf, p); p += 2; // e_shnum
-    swap_u16(elf, p); p += 2; // e_shstrndx
+    swap_u16(elf, p); // e_shstrndx
     // p == 64
 
     // Read phoff/shoff/phnum/shnum/shentsize now in LE for the loops below.

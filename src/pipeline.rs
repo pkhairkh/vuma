@@ -3195,7 +3195,7 @@ fn convert_computation_no_calls(
                                                 scg,
                                             )
                                         };
-                                        let value = if rhs.starts_with('*') {
+                                        let value = if let Some(rhs_rest) = rhs.strip_prefix('*') {
                                             // RHS is a dereference: `*(msg + i)`.
                                             // Generate a Load statement first, then
                                             // use the loaded value as the store value.
@@ -3209,7 +3209,7 @@ fn convert_computation_no_calls(
                                             // (Load + Store) instead of a single
                                             // Store. The caller (convert_computation_no_calls)
                                             // returns this Vec directly.
-                                            let load_ptr_expr = strip_outer_parens(rhs[1..].trim());
+                                            let load_ptr_expr = strip_outer_parens(rhs_rest.trim());
                                             let load_ptr = if let Some((op2, l2, r2)) =
                                                 parse_expr_split(load_ptr_expr)
                                             {
@@ -3639,8 +3639,8 @@ fn resolve_subexpr(
     // Dereference: *expr = Load(expr)
     // When a dereference appears as a function call argument or in an
     // expression, resolve the address expression and emit a Load.
-    if subexpr.starts_with('*') {
-        let inner = subexpr[1..].trim();
+    if let Some(inner) = subexpr.strip_prefix('*') {
+        let inner = inner.trim();
         let inner_expr = resolve_subexpr(inner, sources, edge_idx, scg);
         return ScgExpr::Load {
             addr: Box::new(inner_expr),
@@ -6882,8 +6882,10 @@ pub struct EscapeAndEffectsSummary {
 /// `Pure`-count summary, but a later pass that wants the full map can
 /// re-call `analyze_program_effects` directly.
 pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffectsSummary {
-    let mut summary = EscapeAndEffectsSummary::default();
-    summary.total_functions = program.functions.len();
+    let mut summary = EscapeAndEffectsSummary {
+        total_functions: program.functions.len(),
+        ..Default::default()
+    };
 
     // Phase 1: per-function escape analysis + transforms.
     // We recompute `analyze_escapes` per function (rather than calling
@@ -7946,6 +7948,12 @@ pub struct BridgeCtx {
     /// bodies. Used by `flatten_expr` to emit `dst: None` for void function
     /// calls — critical for wasm32 which loads from mem[0] for non-void calls.
     pub void_functions: HashSet<String>,
+}
+
+impl Default for BridgeCtx {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BridgeCtx {
