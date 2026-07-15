@@ -5754,7 +5754,6 @@ pub fn compile_with_recovery(
 ) -> CompileResult {
     let mut errors: Vec<VumaError> = Vec::new();
     let mut timings: Vec<(String, u64)> = Vec::new();
-    let mut last_completed: Option<PipelineStage> = None;
 
     // Helper: try an operation, catch any panic, return Result
     macro_rules! try_or_partial {
@@ -5792,7 +5791,7 @@ pub fn compile_with_recovery(
             stage_timings: timings,
             ir_function_count: None,
             ir_instruction_count: None,
-            last_completed_stage: last_completed,
+            last_completed_stage: None,
             diagnostics: errors,
         }
     ) {
@@ -5808,13 +5807,12 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: None,
                 ir_instruction_count: None,
-                last_completed_stage: last_completed,
+                last_completed_stage: None,
                 diagnostics: errors,
             }));
         }
     };
     timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::Parse);
 
     // ── Stage 2: AST → SCG ───────────────────────────────────────────
     let t = Instant::now();
@@ -5829,7 +5827,7 @@ pub fn compile_with_recovery(
             stage_timings: timings,
             ir_function_count: None,
             ir_instruction_count: None,
-            last_completed_stage: last_completed,
+            last_completed_stage: Some(PipelineStage::Parse),
             diagnostics: errors,
         }
     ) {
@@ -5845,13 +5843,12 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: None,
                 ir_instruction_count: None,
-                last_completed_stage: last_completed,
+                last_completed_stage: Some(PipelineStage::Parse),
                 diagnostics: errors,
             }));
         }
     };
     timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::AstToScg);
 
     // ── Stage 3: SCG Validation ──────────────────────────────────────
     let t = Instant::now();
@@ -5864,7 +5861,6 @@ pub fn compile_with_recovery(
         // Non-fatal: continue with warnings
     }
     timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::ScgValidation);
 
     // ── Stage 3b: Interprocedural Allocation Flow ────────────────────
     let t = Instant::now();
@@ -5878,7 +5874,6 @@ pub fn compile_with_recovery(
     let bd_results = inference_engine.infer_types(&scg);
     refine_scg_types_with_bd(&mut scg, &bd_results);
     timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::BdInference);
 
     // ── Stage 5: MSG Construction (soft failure) ─────────────────────
     let t = Instant::now();
@@ -5892,7 +5887,6 @@ pub fn compile_with_recovery(
         }
     };
     timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::MsgConstruction);
 
     // ── Stage 6: IVE Verification ─────────────────────────────────────
     let t = Instant::now();
@@ -5932,7 +5926,7 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: None,
                 ir_instruction_count: None,
-                last_completed_stage: last_completed,
+                last_completed_stage: Some(PipelineStage::MsgConstruction),
                 diagnostics: errors,
             }));
         }
@@ -5953,7 +5947,7 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: None,
                 ir_instruction_count: None,
-                last_completed_stage: last_completed,
+                last_completed_stage: Some(PipelineStage::MsgConstruction),
                 diagnostics: errors,
             }));
         }
@@ -5962,7 +5956,6 @@ pub fn compile_with_recovery(
         None
     };
     timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::IveVerification);
 
     // ── Stage 7: SCG Transforms ───────────────────────────────────────
     let t = Instant::now();
@@ -5984,7 +5977,6 @@ pub fn compile_with_recovery(
         }
     }
     timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::ScgTransforms);
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
     let t = Instant::now();
@@ -6010,7 +6002,7 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: None,
                 ir_instruction_count: None,
-                last_completed_stage: last_completed,
+                last_completed_stage: Some(PipelineStage::ScgTransforms),
                 diagnostics: errors,
             }));
         }
@@ -6046,7 +6038,7 @@ pub fn compile_with_recovery(
             stage_timings: timings,
             ir_function_count: None,
             ir_instruction_count: None,
-            last_completed_stage: last_completed,
+            last_completed_stage: Some(PipelineStage::ScgTransforms),
             diagnostics: errors,
         }));
     }
@@ -6095,7 +6087,6 @@ pub fn compile_with_recovery(
         .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
         .sum();
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::IrLowering);
 
     // ── Stage 9: Register Allocation (parallel across functions) ──────
     // Wave 9: parallelize per-function register allocation with rayon.
@@ -6131,12 +6122,11 @@ pub fn compile_with_recovery(
             stage_timings: timings,
             ir_function_count: Some(ir_function_count),
             ir_instruction_count: Some(ir_instruction_count),
-            last_completed_stage: last_completed,
+            last_completed_stage: Some(PipelineStage::IrLowering),
             diagnostics: errors,
         }));
     }
     timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::RegisterAlloc);
 
     // ── Stage 10: Code Emission (with backend fallback) ───────────────
     let t = Instant::now();
@@ -6163,14 +6153,13 @@ pub fn compile_with_recovery(
                 stage_timings: timings,
                 ir_function_count: Some(ir_function_count),
                 ir_instruction_count: Some(ir_instruction_count),
-                last_completed_stage: last_completed,
+                last_completed_stage: Some(PipelineStage::RegisterAlloc),
                 diagnostics: errors,
             }));
         }
     };
     let code_words = count_text_section_instructions(&binary);
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
-    last_completed = Some(PipelineStage::CodeEmission);
 
     // ── Stage 11: COR Initialization (soft failure) ──────────────────
     let t = Instant::now();
