@@ -413,8 +413,7 @@ fn query_data_flow_reachable(scg: &SCG, start: NodeId, max_depth: usize) -> Quer
     }
 
     let mut visited: HashSet<NodeId> = HashSet::new();
-    let mut frontier: Vec<NodeId> = Vec::new();
-    frontier.push(start);
+    let mut frontier: Vec<NodeId> = vec![start];
 
     for _ in 0..max_depth {
         if frontier.is_empty() {
@@ -726,8 +725,7 @@ fn query_function_inputs_outputs(scg: &SCG, function: NodeId) -> QueryResult {
 
     QueryResult {
         node_ids: {
-            let mut ids: Vec<NodeId> = Vec::new();
-            ids.push(function);
+            let ids: Vec<NodeId> = vec![function];
             ids
         },
         edge_ids: Vec::new(),

@@ -1071,19 +1071,16 @@ impl DwarfBuilder {
         //   return_address_reg: ULEB128
         //   initial_instructions: CFI instructions
 
-        let mut cie_body = Vec::new();
-
-        // Version
-        cie_body.push(DW_CIE_VERSION);
-
-        // Augmentation string (empty)
-        cie_body.push(0);
-
-        // Address size (DWARF v4 .debug_frame)
-        cie_body.push(self.address_size);
-
-        // Segment selector size (0)
-        cie_body.push(0);
+        let mut cie_body = vec![
+            // Version
+            DW_CIE_VERSION,
+            // Augmentation string (empty)
+            0,
+            // Address size (DWARF v4 .debug_frame)
+            self.address_size,
+            // Segment selector size (0)
+            0,
+        ];
 
         // Code alignment factor
         encode_uleb128(&mut cie_body, cie_ref.code_alignment_factor as u64);
