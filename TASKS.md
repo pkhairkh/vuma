@@ -164,16 +164,16 @@ recompilation. The dedup policy actively encourages code duplication
 **Fix:** Replace with a proper symbol-resolution + relocation model, or
 implement a VUMA-native `import` mechanism.
 
-### 4. Real spill-code emission in regalloc
+### 4. Real spill-code emission — implemented (Wave 53)
 
-`emit_function_regalloc` delegates to `emit_function_greedy` for actual
-code generation. The `AllocationResult::spill_code` BTreeMap is populated
-by `LinearScanAllocator` but never consulted during emission. The emitted
-machine bytes are identical to what the greedy stack-slot ISel would
-produce on its own.
+`emit_function_regalloc` now consumes the `AllocationResult`:
+- Callee-saved prologue/epilogue (STP/LDP for used callee-saved GPRs)
+- Per-instruction spill/reload from `spill_code` BTreeMap
+- `vreg_to_preg` mapping fed to the greedy allocator via `preassign`
+- Eliminated copies (coalesced moves) skipped
 
-**Fix:** Restructure `emit_function_greedy` to consult `spill_code`
-per-instruction. Emit prologue/epilogue for `used_callee_saved_gprs`.
+Test `test_wave53_real_spill_code_emission` verifies emitted bytes
+differ from the greedy path when the allocator reports spills.
 
 ---
 
