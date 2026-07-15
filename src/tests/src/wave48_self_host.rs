@@ -690,20 +690,15 @@ fn test_wave48_bootstrap_self_host() {
     // ── Step 2 + 3: compile the merged program; capture errors for
     //    debugging if compilation fails. ──────────────────────────────
     //
-    // Task 7-d note on opt level: the test uses O0 because the production
-    // O2 pipeline (inliner + LICM + scheduler) has a codegen bug that
-    // causes the emitted `vumac` to SIGSEGV during its own parse stage.
-    // The O2 bug is independent of the multi-module linking work (Task
-    // 7-a) and the parser/scg_to_ir fixes (Task 7-b/7-d) — it surfaces
-    // only when the optimizer reorders or inlines across the bootstrap's
-    // deeply-nested `if c == ... { ... continue; }` chains in `full_lex`.
-    // Root cause is suspected to be in the scheduler's type-based alias
-    // analysis (TBAA) which doesn't model Cast through typed pointers
-    // (see scheduler.rs Load-after-Store comment). Fixing the O2 bug
-    // requires a Cast-aware points-to analysis — out of scope for Wave 48
-    // self-host. The test passing under O0 demonstrates the multi-module
-    // linking, parser context-awareness, scg_to_ir rollback fix, and
-    // name_hash u32 mask are all correct.
+    // Wave 51: the test uses O0 because the O2 pipeline has a multi-pass
+    // miscompilation involving the inliner + scheduler + LICM that causes
+    // the emitted vumac to SIGSEGV. Wave 51 fixed:
+    //   - Cast-aware alias analysis (alias_analysis.rs now tracks Cast)
+    //   - IRInstr::Ret stripping in inlined bodies (opt.rs)
+    //   - threshold=0 fully disables inlining (no cost-0 edge case)
+    // But the remaining bug requires the inliner to be active to trigger,
+    // suggesting the inliner creates IR shapes that expose scheduler/LICM
+    // bugs. Investigation continues in Wave 56.
     let mut config = CompileConfig::default();
     config.opt_level = vuma::pipeline::OptLevel::O0;
     let output = VumaCompiler::with_config(config)
