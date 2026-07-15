@@ -2873,43 +2873,6 @@ fn riscv32_compute_frame_size(func: &IRFunction) -> usize {
     total as usize
 }
 
-/// Allocatable GPR registers for RISC-V 32-bit, in priority order.
-///
-/// Order: temporaries first, then callee-saved.
-const ALLOCATABLE_GPRS: &[Gpr] = &[
-    // Caller-saved temporaries (highest priority — no save/restore needed)
-    Gpr::T0,
-    Gpr::T1,
-    Gpr::T2,
-    Gpr::T3,
-    Gpr::T4,
-    Gpr::T5,
-    Gpr::T6,
-    // Argument registers (also caller-saved)
-    Gpr::A0,
-    Gpr::A1,
-    Gpr::A2,
-    Gpr::A3,
-    Gpr::A4,
-    Gpr::A5,
-    Gpr::A6,
-    Gpr::A7,
-    // Callee-saved (require save/restore)
-    Gpr::S1,
-    Gpr::S2,
-    Gpr::S3,
-    Gpr::S4,
-    Gpr::S5,
-    Gpr::S6,
-    Gpr::S7,
-    Gpr::S8,
-    Gpr::S9,
-    Gpr::S10,
-    Gpr::S11,
-    // s0 (frame pointer) is last — we prefer not to use it
-    Gpr::S0,
-];
-
 /// Map from virtual register ID to a physical GPR using a simple linear scan.
 ///
 /// Argument virtual registers are mapped to a0–a7 first.  Remaining virtual
@@ -2919,6 +2882,42 @@ fn map_vreg_to_gpr(
     arg_index: Option<usize>,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
 ) -> Gpr {
+    /// Allocatable GPR registers for RISC-V 32-bit, in priority order.
+    ///
+    /// Order: temporaries first, then callee-saved.
+    const ALLOCATABLE_GPRS: &[Gpr] = &[
+        // Caller-saved temporaries (highest priority — no save/restore needed)
+        Gpr::T0,
+        Gpr::T1,
+        Gpr::T2,
+        Gpr::T3,
+        Gpr::T4,
+        Gpr::T5,
+        Gpr::T6,
+        // Argument registers (also caller-saved)
+        Gpr::A0,
+        Gpr::A1,
+        Gpr::A2,
+        Gpr::A3,
+        Gpr::A4,
+        Gpr::A5,
+        Gpr::A6,
+        Gpr::A7,
+        // Callee-saved (require save/restore)
+        Gpr::S1,
+        Gpr::S2,
+        Gpr::S3,
+        Gpr::S4,
+        Gpr::S5,
+        Gpr::S6,
+        Gpr::S7,
+        Gpr::S8,
+        Gpr::S9,
+        Gpr::S10,
+        Gpr::S11,
+        // s0 (frame pointer) is last — we prefer not to use it
+        Gpr::S0,
+    ];
     if let Some(gpr) = vreg_map.get(&vreg_id) {
         return *gpr;
     }

@@ -43,10 +43,6 @@ const R0: Reg = 0;   // Hardwired zero
 const R1: Reg = 1;   // RP (return pointer)
 const R2: Reg = 2;   // Return R30 (caller's R30)
 const R3: Reg = 3;   // FP (frame pointer)
-const R4: Reg = 4;
-const R5: Reg = 5;
-const R6: Reg = 6;
-const R7: Reg = 7;
 const R8: Reg = 8;
 const R9: Reg = 9;
 const R10: Reg = 10;
@@ -66,11 +62,9 @@ const R23: Reg = 23; // Syscall arg 4
 const R24: Reg = 24; // Syscall arg 3
 const R25: Reg = 25; // Syscall arg 2
 const R26: Reg = 26; // Syscall arg 1
-const R27: Reg = 27;
 const R28: Reg = 28; // Return value
 const R29: Reg = 29; // Return value 2
 const R30: Reg = 30; // R30 (stack pointer)
-const R31: Reg = 31; // Link register target for BL
 
 // Global set of function names that return 64-bit values (I64/U64).
 static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
