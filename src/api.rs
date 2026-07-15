@@ -522,7 +522,7 @@ impl VumaCompiler {
         let front_result = run_frontend(source, &self.config);
 
         let scg = match front_result {
-            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Ok { scg } => *scg,
             FrontendResult::Err { diagnostics } => {
                 let messages: Vec<String> =
                     diagnostics.iter().map(|d| d.message.clone()).collect();
@@ -697,7 +697,7 @@ impl VumaCompiler {
     pub fn build_proof_bundle(&self, source: &str) -> Result<ProofBundle, Vec<VumaDiagnostic>> {
         let front_result = run_frontend(source, &self.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Ok { scg } => *scg,
             FrontendResult::Err { diagnostics } => return Err(diagnostics),
         };
         Ok(build_proof_bundle(&scg))
@@ -1054,7 +1054,7 @@ impl fmt::Display for VerificationReport {
 /// Front-end pipeline result (everything up to and including SCG transforms).
 enum FrontendResult {
     Ok {
-        scg: vuma_scg::SCG,
+        scg: Box<vuma_scg::SCG>,
     },
     Err {
         diagnostics: Vec<VumaDiagnostic>,
@@ -1121,7 +1121,7 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
     // Stage 6: SCG Transforms
     pipeline::run_scg_transforms(&mut scg, config);
 
-    FrontendResult::Ok { scg }
+    FrontendResult::Ok { scg: Box::new(scg) }
 }
 
 /// Run target-specific codegen using the Backend trait.
@@ -2035,7 +2035,7 @@ mod tests {
         // a ScgSummary, not the full SCG that build_proof_bundle needs).
         let front_result = run_frontend(source, &compiler.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Ok { scg } => *scg,
             FrontendResult::Err { diagnostics } => {
                 panic!("Frontend failed: {:?}", diagnostics);
             }
@@ -2071,7 +2071,7 @@ mod tests {
         "#;
         let front_result = run_frontend(source, &compiler.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Ok { scg } => *scg,
             FrontendResult::Err { diagnostics } => {
                 panic!("Frontend failed: {:?}", diagnostics);
             }
