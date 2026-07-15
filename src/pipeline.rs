@@ -8367,13 +8367,9 @@ pub fn flatten_expr(
             // (1 for the current one + N for any nested Derefs in `expr`).
             let mut chain_depth: usize = 1;
             let mut cur = expr.as_ref();
-            loop {
-                if let Expr::Deref { expr: inner, .. } = cur {
-                    chain_depth += 1;
-                    cur = inner.as_ref();
-                } else {
-                    break;
-                }
+            while let Expr::Deref { expr: inner, .. } = cur {
+                chain_depth += 1;
+                cur = inner.as_ref();
             }
             // `cur` is now the innermost non-Deref expression (typically a
             // Var holding a pointer, or an Offset/Index computing an address).
@@ -8717,13 +8713,9 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     // load in the chain reads a pointer (U64).
                     let mut chain_depth: usize = 0;
                     let mut cur = expr.as_ref();
-                    loop {
-                        if let vuma_parser::ast::Expr::Deref { expr: inner, .. } = cur {
-                            chain_depth += 1;
-                            cur = inner.as_ref();
-                        } else {
-                            break;
-                        }
+                    while let vuma_parser::ast::Expr::Deref { expr: inner, .. } = cur {
+                        chain_depth += 1;
+                        cur = inner.as_ref();
                     }
                     let mut current_addr = flatten_expr(cur, &mut stmts, ctx);
                     for _ in 0..chain_depth {

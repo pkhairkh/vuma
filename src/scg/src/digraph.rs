@@ -360,7 +360,7 @@ impl<N, E> DiGraph<N, E> {
                     Direction::Outgoing => &entry.adj_out,
                     Direction::Incoming => &entry.adj_in,
                 };
-                list.to_vec().into_iter()
+                list.iter().copied()
             })
             .filter_map(move |eidx| {
                 self.edges
@@ -392,7 +392,7 @@ impl<N, E> DiGraph<N, E> {
                     Direction::Outgoing => &entry.adj_out,
                     Direction::Incoming => &entry.adj_in,
                 };
-                list.to_vec().into_iter()
+                list.iter().copied()
             })
             .filter_map(move |eidx| {
                 self.edges.get(eidx).and_then(|s| s.as_ref()).map(|en| {

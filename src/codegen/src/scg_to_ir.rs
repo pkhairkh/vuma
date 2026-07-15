@@ -72,6 +72,10 @@ use std::collections::{HashMap, HashSet};
 /// Convenience alias used throughout this module.
 type IRInstruction = IRInstr;
 
+/// Phi information collected during `resolve_phis`:
+/// `(block_idx, phi_dst, vec of (value, predecessor_label))`.
+type PhiInfo = (usize, IRValue, Vec<(IRValue, String)>);
+
 // ---------------------------------------------------------------------------
 // SCG Node stubs
 // ---------------------------------------------------------------------------
@@ -948,8 +952,8 @@ impl IRBuilder {
                     }
                 }
                 if !found {
-                    for i in (j + 1)..n {
-                        if defines[i].contains(var) {
+                    for (i, def_set) in defines.iter().enumerate().skip(j + 1) {
+                        if def_set.contains(var) {
                             deps[j].insert(i);
                             break;
                         }
@@ -2064,7 +2068,7 @@ impl IRBuilder {
 
         // Collect all phi information first (to avoid borrow issues)
         // Each entry: (block_idx, phi_dst, vec of (value, predecessor_label))
-        let mut all_phis: Vec<(usize, IRValue, Vec<(IRValue, String)>)> = Vec::new();
+        let mut all_phis: Vec<PhiInfo> = Vec::new();
 
         for (block_idx, block) in ir_func.blocks.iter().enumerate() {
             for instr in &block.instructions {
@@ -3988,8 +3992,8 @@ impl IRBuilder {
                     }
                 }
                 if !found {
-                    for i in (j + 1)..n {
-                        if defines[i].contains(var) {
+                    for (i, def_set) in defines.iter().enumerate().skip(j + 1) {
+                        if def_set.contains(var) {
                             deps[j].insert(i);
                             break;
                         }
