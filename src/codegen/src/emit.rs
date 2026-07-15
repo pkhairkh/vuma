@@ -1800,6 +1800,10 @@ impl Emitter {
             }
             // ── Syscall (Wave 11) ──────────────────────────────────────────
             IRInstr::Syscall { nr, args, dst } => {
+                // Translate VUMA-generic (asm-generic) syscall number to the
+                // backend's native numbering. Identity on AArch64.
+                let native_nr =
+                    crate::syscall_abi::translate(BackendKind::AArch64, *nr).unwrap_or(*nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
@@ -1810,7 +1814,7 @@ impl Emitter {
                         })?;
                     }
                 }
-                self.emit_load_immediate(Register::X8, *nr as i64)?;
+                self.emit_load_immediate(Register::X8, native_nr as i64)?;
                 self.emit_instruction(Instruction::SVC { imm16: 0 })?;
                 if let Some(d) = dst {
                     let rd = self.resolve_reg(d)?;
@@ -3843,12 +3847,16 @@ impl Emitter {
             }
             // ── Syscall (Wave 11) ──────────────────────────────────────────
             IRInstr::Syscall { nr, args, dst } => {
+                // Translate VUMA-generic (asm-generic) syscall number to the
+                // backend's native numbering. Identity on AArch64.
+                let native_nr =
+                    crate::syscall_abi::translate(BackendKind::AArch64, *nr).unwrap_or(*nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
                     self.ss_load_value(arg, arg_regs[i], slots)?;
                 }
-                self.emit_load_immediate(Register::X8, *nr as i64)?;
+                self.emit_load_immediate(Register::X8, native_nr as i64)?;
                 self.emit_instruction(Instruction::SVC { imm16: 0 })?;
                 if let Some(d) = dst {
                     let dst_id = d.as_register().unwrap_or(0);

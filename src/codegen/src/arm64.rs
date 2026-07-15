@@ -4611,6 +4611,13 @@ impl InstructionSelector {
             // AArch64 ABI: args in X0-X5, nr in X8, SVC #0, result in X0.
             // Move args high→low to avoid clobbering, then MOVZ X8 + SVC.
             IRInstr::Syscall { nr, args, dst } => {
+                // Translate VUMA-generic (asm-generic) syscall number to the
+                // backend's native numbering. Identity on AArch64.
+                let native_nr = crate::syscall_abi::translate(
+                    crate::backend::BackendKind::AArch64,
+                    *nr,
+                )
+                .unwrap_or(*nr);
                 let arg_regs = [
                     Register::X0, Register::X1, Register::X2,
                     Register::X3, Register::X4, Register::X5,
@@ -4624,7 +4631,7 @@ impl InstructionSelector {
                 // MOVZ X8, nr  (syscall number; all __NR_* fit in 16 bits)
                 self.push(Instruction::MOVZ {
                     rd: Register::X8,
-                    imm16: *nr as u16,
+                    imm16: native_nr as u16,
                     shift: 0,
                 });
                 // SVC #0
