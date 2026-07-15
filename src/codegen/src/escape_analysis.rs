@@ -108,6 +108,20 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
                         }
                     }
 
+                // Syscall: if any argument is an allocation, it escapes.
+                // The kernel reads/writes through pointer arguments (e.g.
+                // write(fd, buf, n) reads `buf`), so the allocation cannot
+                // be elided. This mirrors the Call case above.
+                IRInstr::Syscall { args, .. } => {
+                    for arg in args {
+                        if let IRValue::Register(vreg) = arg {
+                            if allocs.contains(vreg) {
+                                escapes.insert(*vreg);
+                            }
+                        }
+                    }
+                }
+
                 // Phi: if any incoming is an escaping allocation,
                 // mark the phi result as escaping
                 IRInstr::Phi { dst, incoming } => {
@@ -954,6 +968,93 @@ mod tests {
         let map = analyze_escapes_program(&[f, g]);
         assert_eq!(map["f"][&1], EscapeResult::Escapes);
         assert_eq!(map["g"][&1], EscapeResult::DoesNotEscape);
+    }
+
+    // ── Syscall escape regression tests (P1-c-2) ──────────────────────
+    //
+    // A syscall that takes a pointer argument (e.g. write(fd, buf, n))
+    // reads/writes through that pointer in the kernel. The allocation
+    // MUST be treated as escaping so it is not elided by SROA/alloc-elision.
+    // Before the fix, IRInstr::Syscall was missing from the escape-point
+    // analysis, causing the alloc + stores + syscall to be removed at O2.
+
+    /// Alloc passed to a Syscall as an argument escapes (kernel reads it).
+    #[test]
+    fn test_syscall_arg_alloc_escapes() {
+        // %v1 = call __vuma_alloc(3)
+        // store 72 -> [%v1 + 0]
+        // %v2 = syscall(64, 1, %v1, 3)   // write(1, v1, 3)
+        // call __vuma_free(%v1)
+        // ret
+        let instrs = vec![
+            IRInstr::Call {
+                dst: Some(r(1)),
+                func: "__vuma_alloc".to_string(),
+                args: vec![IRValue::Immediate(3)],
+                is_extern: true,
+            },
+            IRInstr::Store {
+                value: IRValue::Immediate(72),
+                addr: r(1),
+                offset: 0,
+                ty: IRType::U8,
+            },
+            IRInstr::Syscall {
+                nr: 64,
+                args: vec![
+                    IRValue::Immediate(1),
+                    r(1),
+                    IRValue::Immediate(3),
+                ],
+                dst: Some(r(2)),
+            },
+            IRInstr::Call {
+                dst: None,
+                func: "__vuma_free".to_string(),
+                args: vec![r(1)],
+                is_extern: true,
+            },
+        ];
+        let func = fn_with("syscall_escape", instrs, IRTerminator::Return(vec![]));
+
+        let info = analyze_escapes(&func);
+        assert_eq!(
+            info.get(&1).copied(),
+            Some(EscapeResult::Escapes),
+            "alloc passed to syscall MUST escape — kernel reads through it"
+        );
+    }
+
+    /// Alloc passed to a Syscall must NOT be elided.
+    #[test]
+    fn test_elide_skips_syscall_escape() {
+        let instrs = vec![
+            IRInstr::Call {
+                dst: Some(r(1)),
+                func: "__vuma_alloc".to_string(),
+                args: vec![IRValue::Immediate(3)],
+                is_extern: true,
+            },
+            IRInstr::Syscall {
+                nr: 64,
+                args: vec![IRValue::Immediate(1), r(1), IRValue::Immediate(3)],
+                dst: Some(r(2)),
+            },
+            IRInstr::Call {
+                dst: None,
+                func: "__vuma_free".to_string(),
+                args: vec![r(1)],
+                is_extern: true,
+            },
+        ];
+        let mut func = fn_with("elide_syscall", instrs, IRTerminator::Return(vec![]));
+
+        let info = analyze_escapes(&func);
+        let elided = elide_non_escaping_allocs(&mut func, &info);
+        assert_eq!(
+            elided, 0,
+            "alloc passed to syscall must NOT be elided"
+        );
     }
 
     // Reference the unused import to silence dead-code warnings in
