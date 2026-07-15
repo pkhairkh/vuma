@@ -949,9 +949,7 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
 /// Inline threshold by optimization level.
 /// O2: 8 (conservative — matches old instruction_count<=5 safety level,
 /// but with real per-instruction costs so Div/Call are weighted higher).
-/// O3: 20 (more aggressive, but still safe).
 const INLINE_THRESHOLD_O2: u32 = 8;
-const INLINE_THRESHOLD_O3: u32 = 20;
 
 pub fn inline_small(
     func: IRFunction,

@@ -1961,15 +1961,14 @@ impl Default for PPC64Backend {
     }
 }
 
-/// Number of bytes reserved at the end of the stack frame for FP conversion
-/// scratch space (GPR↔FPR bridging via memory).
-const FP_SCRATCH_SIZE: u32 = 16;
-
 /// Compute the stack frame size for an IR function on PPC64.
 ///
 /// Sums `Alloc` instruction sizes, adds 32 bytes for the LR/CR save area
 /// (per ELFv2 ABI), and rounds up to 16-byte alignment.
 fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
+    /// Number of bytes reserved at the end of the stack frame for FP conversion
+    /// scratch space (GPR↔FPR bridging via memory).
+    const FP_SCRATCH_SIZE: u32 = 16;
     let mut total: u32 = 32; // LR save (8) + CR save (8) + back chain (8) + TOC save (8)
     for block in &func.blocks {
         for instr in &block.instructions {
@@ -1985,51 +1984,50 @@ fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
     total as usize
 }
 
-/// Allocatable GPR registers for PPC64, in priority order.
-///
-/// Order: argument registers first, then volatile temporaries, then callee-saved.
-/// R0 is reserved (not allocatable — in some ISA contexts rA=0 means literal zero).
-/// R11 is reserved as a scratch register for instruction lowering.
-/// R12 is the first allocatable temporary.
-const ALLOCATABLE_GPRS: &[Gpr] = &[
-    // Argument registers (also volatile)
-    Gpr::R3,
-    Gpr::R4,
-    Gpr::R5,
-    Gpr::R6,
-    Gpr::R7,
-    Gpr::R8,
-    Gpr::R9,
-    Gpr::R10,
-    // Volatile temporary
-    Gpr::R12,
-    // Callee-saved (require save/restore)
-    Gpr::R14,
-    Gpr::R15,
-    Gpr::R16,
-    Gpr::R17,
-    Gpr::R18,
-    Gpr::R19,
-    Gpr::R20,
-    Gpr::R21,
-    Gpr::R22,
-    Gpr::R23,
-    Gpr::R24,
-    Gpr::R25,
-    Gpr::R26,
-    Gpr::R27,
-    Gpr::R28,
-    Gpr::R29,
-    Gpr::R30,
-    Gpr::R31,
-];
-
 /// Map from virtual register ID to a physical GPR using a simple linear scan.
 fn map_vreg_to_gpr(
     vreg_id: u32,
     arg_index: Option<usize>,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
 ) -> Gpr {
+    /// Allocatable GPR registers for PPC64, in priority order.
+    ///
+    /// Order: argument registers first, then volatile temporaries, then callee-saved.
+    /// R0 is reserved (not allocatable — in some ISA contexts rA=0 means literal zero).
+    /// R11 is reserved as a scratch register for instruction lowering.
+    /// R12 is the first allocatable temporary.
+    const ALLOCATABLE_GPRS: &[Gpr] = &[
+        // Argument registers (also volatile)
+        Gpr::R3,
+        Gpr::R4,
+        Gpr::R5,
+        Gpr::R6,
+        Gpr::R7,
+        Gpr::R8,
+        Gpr::R9,
+        Gpr::R10,
+        // Volatile temporary
+        Gpr::R12,
+        // Callee-saved (require save/restore)
+        Gpr::R14,
+        Gpr::R15,
+        Gpr::R16,
+        Gpr::R17,
+        Gpr::R18,
+        Gpr::R19,
+        Gpr::R20,
+        Gpr::R21,
+        Gpr::R22,
+        Gpr::R23,
+        Gpr::R24,
+        Gpr::R25,
+        Gpr::R26,
+        Gpr::R27,
+        Gpr::R28,
+        Gpr::R29,
+        Gpr::R30,
+        Gpr::R31,
+    ];
     if let Some(gpr) = vreg_map.get(&vreg_id) {
         return *gpr;
     }

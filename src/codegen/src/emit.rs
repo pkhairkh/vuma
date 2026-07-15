@@ -171,8 +171,6 @@ const STB_GLOBAL: u8 = 1;
 const STT_FUNC: u8 = 2;
 /// Symbol type: section.
 const STT_SECTION: u8 = 3;
-/// Symbol type: no type (undefined/external symbol).
-const STT_NOTYPE: u8 = 0;
 
 /// Default base address for Linux LOAD segment.
 const BASE_ADDR_LINUX: u64 = 0x400000;
@@ -191,12 +189,15 @@ const SHN_UNDEF: u16 = 0;
 const R_AARCH64_CALL26: u32 = 283;
 
 /// R_AARCH64_JUMP26 — B relocation for 26-bit branch offset (unconditional branch).
+#[cfg(test)]
 const R_AARCH64_JUMP26: u32 = 282;
 
 /// R_AARCH64_ADR_PREL_PG_HI21 — ADRP page-relative relocation.
+#[cfg(test)]
 const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
 
 /// R_AARCH64_LDST64_ABS_LO12_NC — 64-bit load/store offset relocation.
+#[cfg(test)]
 const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
 
 // ---------------------------------------------------------------------------
@@ -204,15 +205,19 @@ const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
 // ---------------------------------------------------------------------------
 
 /// R_X86_64_64 — 64-bit absolute relocation.
+#[cfg(test)]
 const R_X86_64_64: u32 = 1;
 /// R_X86_64_PC32 — 32-bit PC-relative relocation.
+#[cfg(test)]
 const R_X86_64_PC32: u32 = 2;
 const R_386_PC32: u32 = 2;
 /// R_X86_64_PLT32 — 32-bit PLT-relative relocation (call).
 const R_X86_64_PLT32: u32 = 4;
 /// R_X86_64_32 — 32-bit absolute relocation (zero-extended).
+#[cfg(test)]
 const R_X86_64_32: u32 = 10;
 /// R_X86_64_32S — 32-bit absolute relocation (sign-extended).
+#[cfg(test)]
 const R_X86_64_32S: u32 = 11;
 
 // ---------------------------------------------------------------------------
@@ -220,20 +225,27 @@ const R_X86_64_32S: u32 = 11;
 // ---------------------------------------------------------------------------
 
 /// R_RISCV_JAL — JAL instruction relocation.
+#[cfg(test)]
 const R_RISCV_JAL: u32 = 2;
 /// R_RISCV_BRANCH — Conditional branch relocation.
+#[cfg(test)]
 const R_RISCV_BRANCH: u32 = 16;
 /// R_RISCV_CALL — CALL pseudo-instruction relocation (AUIPC + JALR).
 const R_RISCV_CALL: u32 = 18;
 /// R_RISCV_CALL_PLT — CALL PLT pseudo-instruction relocation.
+#[cfg(test)]
 const R_RISCV_CALL_PLT: u32 = 19;
 /// R_RISCV_PCREL_HI20 — PC-relative high 20 bits.
+#[cfg(test)]
 const R_RISCV_PCREL_HI20: u32 = 23;
 /// R_RISCV_PCREL_LO12_I — PC-relative low 12 bits (I-type).
+#[cfg(test)]
 const R_RISCV_PCREL_LO12_I: u32 = 24;
 /// R_RISCV_HI20 — Absolute high 20 bits.
+#[cfg(test)]
 const R_RISCV_HI20: u32 = 26;
 /// R_RISCV_LO12_I — Absolute low 12 bits (I-type).
+#[cfg(test)]
 const R_RISCV_LO12_I: u32 = 27;
 
 // ---------------------------------------------------------------------------
@@ -241,18 +253,24 @@ const R_RISCV_LO12_I: u32 = 27;
 // ---------------------------------------------------------------------------
 
 /// R_MIPS_32 — 32-bit absolute relocation.
+#[cfg(test)]
 const R_MIPS_32: u32 = 2;
 /// R_MIPS_26 — 26-bit jump target relocation.
 const R_MIPS_26: u32 = 4;
 /// R_MIPS_HI16 — High 16 bits of an address.
+#[cfg(test)]
 const R_MIPS_HI16: u32 = 5;
 /// R_MIPS_LO16 — Low 16 bits of an address.
+#[cfg(test)]
 const R_MIPS_LO16: u32 = 6;
 /// R_MIPS_GPREL16 — GP-relative 16-bit relocation.
+#[cfg(test)]
 const R_MIPS_GPREL16: u32 = 7;
 /// R_MIPS_CALL16 — 16-bit call through GOT.
+#[cfg(test)]
 const R_MIPS_CALL16: u32 = 11;
 /// R_MIPS_64 — 64-bit absolute relocation.
+#[cfg(test)]
 const R_MIPS_64: u32 = 18;
 
 // ---------------------------------------------------------------------------
@@ -262,10 +280,13 @@ const R_MIPS_64: u32 = 18;
 /// R_PPC64_REL24 — 24-bit PC-relative branch relocation (call).
 const R_PPC64_REL24: u32 = 10;
 /// R_PPC64_REL32 — 32-bit PC-relative relocation.
+#[cfg(test)]
 const R_PPC64_REL32: u32 = 26;
 /// R_PPC64_ADDR32 — 32-bit absolute address relocation.
+#[cfg(test)]
 const R_PPC64_ADDR32: u32 = 20;
 /// R_PPC64_ADDR64 — 64-bit absolute address relocation.
+#[cfg(test)]
 const R_PPC64_ADDR64: u32 = 38;
 
 // ---------------------------------------------------------------------------
@@ -273,16 +294,21 @@ const R_PPC64_ADDR64: u32 = 38;
 // ---------------------------------------------------------------------------
 
 /// R_LARCH_PCALA_HI20 — PC-relative high 20 bits for PCALA.
+#[cfg(test)]
 const R_LARCH_PCALA_HI20: u32 = 44;
 /// R_LARCH_PCALA_LO12 — PC-relative low 12 bits for PCALA.
+#[cfg(test)]
 const R_LARCH_PCALA_LO12: u32 = 45;
 /// R_LARCH_B26 — 26-bit branch relocation.
 const R_LARCH_B26: u32 = 69;
 /// R_LARCH_32 — 32-bit absolute relocation.
+#[cfg(test)]
 const R_LARCH_32: u32 = 77;
 /// R_LARCH_64 — 64-bit absolute relocation.
+#[cfg(test)]
 const R_LARCH_64: u32 = 79;
 /// R_LARCH_CALL36 — CALL36 relocation (36-bit call).
+#[cfg(test)]
 const R_LARCH_CALL36: u32 = 89;
 
 // ---------------------------------------------------------------------------
@@ -290,16 +316,21 @@ const R_LARCH_CALL36: u32 = 89;
 // ---------------------------------------------------------------------------
 
 /// R_ARM_ABS32 — 32-bit absolute relocation.
+#[cfg(test)]
 const R_ARM_ABS32: u32 = 2;
 /// R_ARM_REL32 — 32-bit PC-relative relocation.
+#[cfg(test)]
 const R_ARM_REL32: u32 = 3;
 /// R_ARM_CALL — BL call relocation (PC-relative 24-bit).
 const R_ARM_CALL: u32 = 28;
 /// R_ARM_JUMP24 — B jump relocation (PC-relative 24-bit).
+#[cfg(test)]
 const R_ARM_JUMP24: u32 = 29;
 /// R_ARM_MOVW_ABS_NC — MOVW absolute (lower 16 bits).
+#[cfg(test)]
 const R_ARM_MOVW_ABS_NC: u32 = 43;
 /// R_ARM_MOVT_ABS — MOVT absolute (upper 16 bits).
+#[cfg(test)]
 const R_ARM_MOVT_ABS: u32 = 44;
 
 // ---------------------------------------------------------------------------

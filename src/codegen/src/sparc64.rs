@@ -85,9 +85,6 @@ const OPC_CALL: u32 = 0x01;
 /// Format 2 op2 values.
 const OP2_SETHI: u32 = 0x04;
 const OP2_BICC: u32 = 0x02;
-const OP2_FBICC: u32 = 0x06;
-const OP2_BPCC: u32 = 0x01;
-const OP2_BPR: u32 = 0x03;
 
 /// Format 3 op3 values (arithmetic / logical).
 const OP3_ADD: u32 = 0x00;
@@ -98,29 +95,13 @@ const OP3_SUB: u32 = 0x04;
 const OP3_ANDN: u32 = 0x05;
 const OP3_ORN: u32 = 0x06;
 const OP3_XNOR: u32 = 0x07;
-const OP3_ADDC: u32 = 0x08;
 const OP3_MULX: u32 = 0x09; // V9 64-bit multiply
-const OP3_UMUL: u32 = 0x0A; // V8 32-bit unsigned multiply
-const OP3_SMUL: u32 = 0x0B; // V8 32-bit signed multiply
 const OP3_SUBC: u32 = 0x0C;
 const OP3_UDIVX: u32 = 0x0D; // V9 64-bit unsigned divide
-const OP3_SDIV: u32 = 0x0E; // V8 32-bit signed divide
-const OP3_UDIV: u32 = 0x0F; // V8 32-bit unsigned divide
 
 const OP3_ADDCC: u32 = 0x10;
-const OP3_ANDCC: u32 = 0x11;
-const OP3_ORCC: u32 = 0x12;
-const OP3_XORCC: u32 = 0x13;
 const OP3_SUBCC: u32 = 0x14;
-const OP3_ANDNCC: u32 = 0x15;
-const OP3_ORNCC: u32 = 0x16;
-const OP3_XNORCC: u32 = 0x17;
-const OP3_ADDCCC: u32 = 0x18;
-const OP3_UDIVCC: u32 = 0x1C;
-const OP3_SDIVCC: u32 = 0x1E;
 const OP3_SDIVX: u32 = 0x2D; // V9 64-bit signed divide
-const OP3_UMULCC: u32 = 0x1A;
-const OP3_SMULCC: u32 = 0x1B;
 
 /// Shift op3 values.
 const OP3_SLL: u32 = 0x25;
@@ -131,7 +112,6 @@ const OP3_SRA: u32 = 0x27;
 const OP3_LDUW: u32 = 0x00;
 const OP3_LDUB: u32 = 0x01;
 const OP3_LDUH: u32 = 0x02;
-const OP3_LDD: u32 = 0x03;
 const OP3_LDSW: u32 = 0x08;
 const OP3_LDSB: u32 = 0x09;
 const OP3_LDSH: u32 = 0x0A;
@@ -141,16 +121,12 @@ const OP3_LDX: u32 = 0x0B;
 const OP3_STW: u32 = 0x04;
 const OP3_STB: u32 = 0x05;
 const OP3_STH: u32 = 0x06;
-const OP3_STD: u32 = 0x07;
 const OP3_STX: u32 = 0x0E;
 
 /// Control-transfer / system op3 values.
 const OP3_JMPL: u32 = 0x38;
-const OP3_RETT: u32 = 0x39;
-const OP3_RETURN: u32 = 0x39; // RETURN (V9) shares op3 with RETT (V8)
 const OP3_SAVE: u32 = 0x3C;
 const OP3_RESTORE: u32 = 0x3D;
-const OP3_TICC: u32 = 0x3A;
 const OP3_MEMBAR: u32 = 0x28;
 const OP3_MOVCC: u32 = 0x2C;
 
@@ -167,10 +143,6 @@ const COND_BGU: u32 = 0x0C;
 const COND_BLEU: u32 = 0x04;
 const COND_BCC: u32 = 0x0D;
 const COND_BCS: u32 = 0x05;
-const COND_BPOS: u32 = 0x0E;
-const COND_BNEG: u32 = 0x06;
-const COND_BVC: u32 = 0x0F;
-const COND_BVS: u32 = 0x07;
 
 // ===========================================================================
 // General-Purpose Registers

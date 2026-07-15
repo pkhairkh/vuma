@@ -378,9 +378,8 @@ const S1: Gpr = Gpr::D1;
 const S2: Gpr = Gpr::D2;
 const S3: Gpr = Gpr::D3;
 
-/// Frame pointer (A6) and stack pointer (A7).
+/// Frame pointer (A6).
 const FP: Gpr = Gpr::A6;
-const SP: Gpr = Gpr::A7;
 
 // ===========================================================================
 // Stack-slot helpers

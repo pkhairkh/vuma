@@ -350,7 +350,6 @@ const DP_RSB: u32 = 0b0011;
 const DP_ADD: u32 = 0b0100;
 const DP_ADC: u32 = 0b0101; // Add with Carry
 const DP_SBC: u32 = 0b0110; // Subtract with Borrow
-const DP_RSC: u32 = 0b0111; // Reverse Subtract with Carry
 const DP_TST: u32 = 0b1000;
 const DP_TEQ: u32 = 0b1001;
 const DP_CMP: u32 = 0b1010;

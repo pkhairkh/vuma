@@ -696,19 +696,9 @@ const OPC_REVB_4H: u32 = 0x000000D;
 const OPC_REVB_2W: u32 = 0x000000E;
 const OPC_BITREV_4B: u32 = 0x0000012;
 const OPC_BITREV_8B: u32 = 0x0000013;
-const OPC_CPBYTE: u32 = 0x0000057;
-
-// 2R: special opcodes for move/clover
-const OPC_MOVCF2GR: u32 = 0x0000055;
-const OPC_MOVGR2CF: u32 = 0x0000054;
-
 // ===========================================================================
 // 4R-format Opcodes (bits[31:20])
 // ===========================================================================
-
-const OPC_BYTEREV_D: u32 = 0x009;
-const OPC_BYTEREV_W: u32 = 0x00A;
-const OPC_BYTEREV_H: u32 = 0x00B;
 
 // ===========================================================================
 // reg2i5-format Opcodes (bits[31:15], 17-bit) — .W shift immediates
@@ -717,7 +707,6 @@ const OPC_BYTEREV_H: u32 = 0x00B;
 const OPC_SLLI_W: u32 = 0x0081;
 const OPC_SRLI_W: u32 = 0x0089;
 const OPC_SRAI_W: u32 = 0x0091;
-const OPC_ROTRI_W: u32 = 0x0099;
 
 // ===========================================================================
 // reg2i6-format Opcodes (bits[31:16], 16-bit) — .D shift immediates
@@ -726,7 +715,6 @@ const OPC_ROTRI_W: u32 = 0x0099;
 const OPC_SLLI_D: u32 = 0x0041;
 const OPC_SRLI_D: u32 = 0x0045;
 const OPC_SRAI_D: u32 = 0x0049;
-const OPC_ROTRI_D: u32 = 0x004D;
 
 // ===========================================================================
 // Instruction Enum
@@ -3201,7 +3189,6 @@ impl Backend for LoongArch64Backend {
         // ── Compute code virtual-address base ──
         // Must match the layout in build_loongarch64_elf_2seg.
         const ELF_BASE_ADDR: u64 = 0x120000000;
-        const ELF_PAGE_SIZE: u64 = 0x10000;
         const ELF_HEADER_SIZE: u64 = 64;
         const ELF_PHDR_SIZE: u64 = 56;
         const ELF_NUM_PHDRS: u64 = 3; // 2 LOAD + 1 GNU_STACK
