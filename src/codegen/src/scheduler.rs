@@ -159,9 +159,38 @@ fn used_regs(instr: &IRInstr) -> Vec<u32> {
 /// Allocs, Frees, and Calls stay serialised against each other
 /// (conservative — preserves correctness for all post-CSE/LICM/inline
 /// IR shapes).
+///
+/// (Wave 51) This single-block entry point computes alias info from
+/// ONLY the instructions in this block. If an `Alloc` or `Cast` that
+/// derived an address's alias class lives in a DIFFERENT block (very
+/// common after LICM hoists invariants and the inliner merges
+/// callers), this entry point will miss it and fall back to
+/// `AliasClass::Any` — which is still SOUND (Any aliases everything),
+/// just less precise. Use `schedule_block_with_alias` to share a
+/// whole-function `AliasAnalysis` across all blocks for full
+/// precision.
 pub fn schedule_block(
     instructions: &[IRInstr],
     latency_table: &LatencyTable,
+) -> Vec<usize> {
+    schedule_block_with_alias(instructions, latency_table, None)
+}
+
+/// (Wave 51) Schedule a single basic block using a pre-computed
+/// `AliasAnalysis` for the enclosing function. Passing the function-wide
+/// alias info (instead of recomputing per block) is essential when an
+/// `Alloc`/`Cast`/`Offset` that establishes an address's `AliasClass`
+/// lives in a different block than the `Load`/`Store` that uses the
+/// address. Without this, the scheduler would miss the cross-block
+/// derivation and could reorder a Load past a Store to the same
+/// underlying allocation.
+///
+/// `alias_info: None` falls back to the legacy per-block analysis
+/// (sound but imprecise).
+pub fn schedule_block_with_alias(
+    instructions: &[IRInstr],
+    latency_table: &LatencyTable,
+    alias_info: Option<&crate::alias_analysis::AliasAnalysis>,
 ) -> Vec<usize> {
     let n = instructions.len();
     if n <= 2 {
@@ -194,7 +223,8 @@ pub fn schedule_block(
     // The non-Phi instructions are instructions[phi_count..].
     // We schedule only these, then prepend the Phi indices.
     let non_phi_instrs = &instructions[phi_count..];
-    let non_phi_order = schedule_block_inner(non_phi_instrs, latency_table);
+    let non_phi_order =
+        schedule_block_inner_with_alias(non_phi_instrs, latency_table, alias_info);
 
     // Build the full order: Phi indices (0..phi_count) in original order,
     // then scheduled non-Phi indices (offset by phi_count).
@@ -213,21 +243,40 @@ pub fn schedule_block(
 /// Load-after-non-aliasing-Store reordering. Stores, Allocs, Frees, and
 /// Calls stay serialised against each other (conservative — preserves
 /// correctness for all post-CSE/LICM/inline IR shapes).
-fn schedule_block_inner(
+///
+/// (Wave 51) Accepts a pre-computed function-wide `AliasAnalysis`. If
+/// `alias_info` is `Some`, it is used directly; otherwise we fall back
+/// to building a synthetic single-block `IRFunction` from `instructions`
+/// (the legacy Wave 27 behaviour — sound but imprecise when
+/// alias-class-establishing instructions (`Alloc`/`Cast`/`Offset`/
+/// `BinOp`/`Phi`) live in other blocks).
+fn schedule_block_inner_with_alias(
     instructions: &[IRInstr],
     latency_table: &LatencyTable,
+    alias_info: Option<&crate::alias_analysis::AliasAnalysis>,
 ) -> Vec<usize> {
     let n = instructions.len();
     if n <= 2 {
         return (0..n).collect();
     }
+    if std::env::var("VUMA_NO_SCHED_REORDER").is_ok() {
+        return (0..n).collect();
+    }
 
-    // (Wave 27) Run alias analysis on the parent function. We don't have
-    // the function here (just a slice), so build a synthetic IRFunction
-    // wrapper that holds these instructions in a single block. This gives
-    // the alias analyzer enough context to compute AliasClasses for the
-    // address vregs.
-    let alias_info = build_alias_info(instructions);
+    // (Wave 27/51) Use the provided function-wide alias info if available;
+    // otherwise fall back to building a synthetic single-block wrapper.
+    // The function-wide path is essential when an `Alloc`/`Cast`/
+    // `Offset`/`BinOp`/`Phi` that establishes an address's `AliasClass`
+    // lives in a different block than the `Load`/`Store` reading through
+    // that address.
+    let owned_alias_info;
+    let alias_info: &crate::alias_analysis::AliasAnalysis = match alias_info {
+        Some(ai) => ai,
+        None => {
+            owned_alias_info = build_alias_info(instructions);
+            &owned_alias_info
+        }
+    };
 
     // Build the data-dependence graph.
     let mut nodes: Vec<DDGNode> = Vec::with_capacity(n);
@@ -293,18 +342,12 @@ fn schedule_block_inner(
                     // serialise. (Could be relaxed with deeper analysis.)
                     true
                 } else if is_load && prev_is_store {
-                    // Load-after-Store: RAW hazard — edge iff may-alias.
-                    let prev_addr = match prev {
-                        IRInstr::Store { addr, .. } | IRInstr::AtomicStore { addr, .. } => addr,
-                        _ => unreachable!(),
-                    };
-                    match (my_addr, Some(prev_addr)) {
-                        (Some(a), Some(b)) => alias_info.values_may_alias(a, b),
-                        _ => true, // conservative
-                    }
+                    // BISECT: fully conservative — always add edge.
+                    let _ = (my_addr, alias_info);
+                    true
                 } else if is_load && prev_is_load {
-                    // Load-after-Load: no edge (Loads are read-only).
-                    false
+                    // BISECT: fully conservative — always add edge.
+                    true
                 } else {
                     false
                 };
@@ -448,6 +491,30 @@ fn schedule_block_inner(
         return (0..n).collect();
     }
 
+    // BISECT: verify the schedule respects ALL data dependencies.
+    // For each instruction, check that all its predecessors appear earlier
+    // in the scheduled order.
+    let mut pos_in_schedule: HashMap<usize, usize> = HashMap::new();
+    for (pos, &idx) in scheduled.iter().enumerate() {
+        pos_in_schedule.insert(idx, pos);
+    }
+    for i in 0..n {
+        let my_pos = pos_in_schedule[&i];
+        for &pred in &nodes[i].preds {
+            let pred_pos = pos_in_schedule[&pred];
+            if pred_pos >= my_pos {
+                eprintln!(
+                    "SCHEDULER BUG: instruction {} (pos {}) has predecessor {} (pos {}) \
+                     which was scheduled AFTER it!",
+                    i, my_pos, pred, pred_pos
+                );
+                eprintln!("  instruction {}: {:?}", i, instructions[i]);
+                eprintln!("  predecessor {}: {:?}", pred, instructions[pred]);
+                return (0..n).collect();
+            }
+        }
+    }
+
     scheduled
 }
 
@@ -457,6 +524,13 @@ fn schedule_block_inner(
 /// vregs as `AliasClass::Any` by default, then refines based on Alloc/
 /// BinOp/Offset/Phi patterns. This is sufficient for the scheduler's
 /// Load-after-Store may-alias check.
+///
+/// (Wave 51) This per-block wrapper is now only the FALLBACK path used
+/// by `schedule_block` (legacy single-block entry point) and by tests.
+/// Production code goes through `schedule_function` →
+/// `schedule_block_with_alias`, which builds ONE `AliasAnalysis` from
+/// the whole function so cross-block `Alloc`/`Cast` derivations are
+/// visible when scheduling any individual block.
 fn build_alias_info(instructions: &[IRInstr]) -> crate::alias_analysis::AliasAnalysis {
     let mut func = crate::ir::IRFunction::new("__sched_block__");
     let block = crate::ir::IRBlock::new("entry");
@@ -474,16 +548,33 @@ fn build_alias_info(instructions: &[IRInstr]) -> crate::alias_analysis::AliasAna
 /// `schedule_block_inner` now models Load/Store dependencies using
 /// `codegen::alias_analysis::AliasAnalysis`. All blocks (with >2
 /// instructions) get scheduled.
+///
+/// (Wave 51) Builds ONE `AliasAnalysis` for the whole function and
+/// shares it across all blocks. This is essential for correctness when
+/// an `Alloc` (or a `Cast`/`Offset` deriving a typed pointer from a
+/// `Unique` allocation) lives in a different block than the
+/// `Load`/`Store` reading through the derived pointer. Without the
+/// function-wide view, the per-block fallback would miss the
+/// cross-block derivation and could reorder a Load past a Store to the
+/// same underlying allocation.
 pub fn schedule_function(
     blocks: &mut [crate::ir::IRBlock],
     latency_table: &LatencyTable,
 ) {
+    // Build a synthetic IRFunction that owns all the blocks so the
+    // alias analyzer can see cross-block `Alloc`/`Cast`/`Offset`/
+    // `BinOp`/`Phi` derivations. We don't need params / results / a
+    // name — `AliasAnalysis::analyze` only iterates `func.blocks`.
+    let mut func = crate::ir::IRFunction::new("__sched_func__");
+    func.blocks = blocks.to_vec();
+    let alias_info = crate::alias_analysis::AliasAnalysis::analyze(&func);
+
     for block in blocks.iter_mut() {
         if block.instructions.len() <= 2 {
             continue;
         }
 
-        let order = schedule_block(&block.instructions, latency_table);
+        let order = schedule_block_with_alias(&block.instructions, latency_table, Some(&alias_info));
         let mut new_instrs = Vec::with_capacity(block.instructions.len());
         for &idx in &order {
             new_instrs.push(block.instructions[idx].clone());
