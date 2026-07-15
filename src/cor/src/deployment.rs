@@ -512,16 +512,13 @@ impl DeploymentPlan {
 pub struct DeploymentPlanner {
     /// Current deployment plan.
     plan: DeploymentPlan,
-    /// Runtime configuration.
-    config: Config,
 }
 
 impl DeploymentPlanner {
     /// Creates a new deployment planner with the given configuration.
-    pub fn new(config: Config) -> Self {
+    pub fn new(_config: Config) -> Self {
         DeploymentPlanner {
             plan: DeploymentPlan::new(),
-            config,
         }
     }
 

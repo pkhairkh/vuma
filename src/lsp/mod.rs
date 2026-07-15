@@ -497,8 +497,6 @@ pub struct LspServer {
     parse_cache: HashMap<String, Option<Program>>,
     /// Cached document info per URI.
     info_cache: HashMap<String, DocumentInfo>,
-    /// Next request ID counter (for server-initiated requests).
-    next_id: i64,
     /// Whether the server has been initialized.
     initialized: bool,
     /// Whether the server is shutting down.
@@ -512,7 +510,6 @@ impl LspServer {
             documents: HashMap::new(),
             parse_cache: HashMap::new(),
             info_cache: HashMap::new(),
-            next_id: 1,
             initialized: false,
             shutting_down: false,
         }
