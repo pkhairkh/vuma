@@ -548,9 +548,9 @@ pub struct PartialCompilationOutput {
 #[derive(Debug)]
 pub enum CompileResult {
     /// Compilation succeeded.
-    Success(CompilationOutput),
+    Success(Box<CompilationOutput>),
     /// Compilation failed, but partial results are available.
-    Partial(PartialCompilationOutput),
+    Partial(Box<PartialCompilationOutput>),
 }
 
 impl CompileResult {
@@ -5773,7 +5773,7 @@ pub fn compile_with_recovery(
                         stage: $stage.to_string(),
                         message,
                     });
-                    return CompileResult::Partial($partial_builder);
+                    return CompileResult::Partial(Box::new($partial_builder));
                 }
             }
         };
@@ -5800,7 +5800,7 @@ pub fn compile_with_recovery(
         Err(e) => {
             errors.push(e);
             timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: None,
                 scg: None,
                 msg: None,
@@ -5810,7 +5810,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: None,
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
     };
     timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
@@ -5837,7 +5837,7 @@ pub fn compile_with_recovery(
         Err(e) => {
             errors.push(e);
             timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: Some(ast),
                 scg: None,
                 msg: None,
@@ -5847,7 +5847,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: None,
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
     };
     timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
@@ -5924,7 +5924,7 @@ pub fn compile_with_recovery(
                 "ive-verification".to_string(),
                 t.elapsed().as_millis() as u64,
             ));
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: Some(ast),
                 scg: Some(scg),
                 msg: Some(msg),
@@ -5934,7 +5934,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: None,
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
         // (Wave 19) `--strict-verification`: treat `Inconclusive` as blocking.
         if config.strict_verification
@@ -5945,7 +5945,7 @@ pub fn compile_with_recovery(
                 "ive-verification".to_string(),
                 t.elapsed().as_millis() as u64,
             ));
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: Some(ast),
                 scg: Some(scg),
                 msg: Some(msg),
@@ -5955,7 +5955,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: None,
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
         Some(result)
     } else {
@@ -6002,7 +6002,7 @@ pub fn compile_with_recovery(
         Err(e) => {
             errors.push(VumaError::Codegen { error: e });
             timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: Some(ast),
                 scg: Some(scg),
                 msg: Some(msg),
@@ -6012,7 +6012,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: None,
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
     };
 
@@ -6038,7 +6038,7 @@ pub fn compile_with_recovery(
     }
     if had_syscall_error {
         timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
-        return CompileResult::Partial(PartialCompilationOutput {
+        return CompileResult::Partial(Box::new(PartialCompilationOutput {
             ast: Some(ast),
             scg: Some(scg),
             msg: Some(msg),
@@ -6048,7 +6048,7 @@ pub fn compile_with_recovery(
             ir_instruction_count: None,
             last_completed_stage: last_completed,
             diagnostics: errors,
-        });
+        }));
     }
 
     // Note: lower_syscalls_all() was removed — Wave 11/12 added real
@@ -6123,7 +6123,7 @@ pub fn compile_with_recovery(
     }
     if regalloc_failed && regalloc_results.is_empty() {
         timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
-        return CompileResult::Partial(PartialCompilationOutput {
+        return CompileResult::Partial(Box::new(PartialCompilationOutput {
             ast: Some(ast),
             scg: Some(scg),
             msg: Some(msg),
@@ -6133,7 +6133,7 @@ pub fn compile_with_recovery(
             ir_instruction_count: Some(ir_instruction_count),
             last_completed_stage: last_completed,
             diagnostics: errors,
-        });
+        }));
     }
     timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
     last_completed = Some(PipelineStage::RegisterAlloc);
@@ -6155,7 +6155,7 @@ pub fn compile_with_recovery(
             });
             timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
             // Return partial — no binary but we have everything else
-            return CompileResult::Partial(PartialCompilationOutput {
+            return CompileResult::Partial(Box::new(PartialCompilationOutput {
                 ast: Some(ast),
                 scg: Some(scg),
                 msg: Some(msg),
@@ -6165,7 +6165,7 @@ pub fn compile_with_recovery(
                 ir_instruction_count: Some(ir_instruction_count),
                 last_completed_stage: last_completed,
                 diagnostics: errors,
-            });
+            }));
         }
     };
     let code_words = count_text_section_instructions(&binary);
@@ -6212,7 +6212,7 @@ pub fn compile_with_recovery(
     // without changing the struct, so just return Success).
     // The caller can check the error list separately.
     if errors.is_empty() {
-        CompileResult::Success(CompilationOutput {
+        CompileResult::Success(Box::new(CompilationOutput {
             binary,
             scg,
             msg,
@@ -6232,13 +6232,13 @@ pub fn compile_with_recovery(
                 None
             },
             cor_runtime,
-        })
+        }))
     } else {
         // We have a binary but also some non-fatal errors — still return
         // Success since the binary is valid. Errors can be logged.
         // If the caller needs partial+diagnostics, they should use
         // compile_with_recovery.
-        CompileResult::Success(CompilationOutput {
+        CompileResult::Success(Box::new(CompilationOutput {
             binary,
             scg,
             msg,
@@ -6258,7 +6258,7 @@ pub fn compile_with_recovery(
                 None
             },
             cor_runtime,
-        })
+        }))
     }
 }
 

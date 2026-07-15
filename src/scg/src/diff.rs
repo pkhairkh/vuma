@@ -31,7 +31,7 @@ use crate::region::{RegionId, SCGRegion};
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffEntry {
     /// A node was added in the new graph.
-    NodeAdded(NodeData),
+    NodeAdded(Box<NodeData>),
     /// A node was removed from the old graph.
     NodeRemoved(NodeId),
     /// A node exists in both graphs but its data changed.
@@ -39,9 +39,9 @@ pub enum DiffEntry {
         /// The stable identifier of the modified node.
         id: NodeId,
         /// The node data in the old graph.
-        old: NodeData,
+        old: Box<NodeData>,
         /// The node data in the new graph.
-        new: NodeData,
+        new: Box<NodeData>,
     },
     /// An edge was added in the new graph.
     EdgeAdded(EdgeData),
@@ -673,8 +673,8 @@ pub fn diff_scg(old: &SCG, new: &SCG) -> SCGDiff {
         if old_data != new_data {
             entries.push(DiffEntry::NodeModified {
                 id,
-                old: old_data.clone(),
-                new: new_data.clone(),
+                old: Box::new(old_data.clone()),
+                new: Box::new(new_data.clone()),
             });
         }
     }
@@ -738,7 +738,7 @@ pub fn diff_scg(old: &SCG, new: &SCG) -> SCGDiff {
     // Added nodes (in new but not in old)
     for id in &new_node_ids - &old_node_ids {
         let node_data = new.get_node(id).unwrap();
-        entries.push(DiffEntry::NodeAdded(node_data.clone()));
+        entries.push(DiffEntry::NodeAdded(Box::new(node_data.clone())));
     }
 
     SCGDiff::from_entries(entries)
@@ -1208,13 +1208,13 @@ fn collect_node_changes(diff: &SCGDiff) -> HashMap<NodeId, ElementChange<NodeDat
     for entry in diff.entries() {
         match entry {
             DiffEntry::NodeAdded(data) => {
-                changes.insert(data.id, ElementChange::Added(data.clone()));
+                changes.insert(data.id, ElementChange::Added(data.as_ref().clone()));
             }
             DiffEntry::NodeRemoved(id) => {
                 changes.insert(*id, ElementChange::Removed);
             }
             DiffEntry::NodeModified { id, new, .. } => {
-                changes.insert(*id, ElementChange::Modified(new.clone()));
+                changes.insert(*id, ElementChange::Modified(new.as_ref().clone()));
             }
             _ => {}
         }
