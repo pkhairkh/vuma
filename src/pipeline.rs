@@ -782,53 +782,6 @@ fn node_var(id: NodeId, _prefix: &str) -> String {
     format!("v_{}", id.as_u64())
 }
 
-/// Resolve a DataFlow input for a node, returning a `ScgExpr` referencing
-/// the variable produced by the source node of the DataFlow edge at the
-/// given position.
-///
-/// If the source node is a Control node (FunctionEntry, etc.) that does not
-/// produce a named variable, falls back to `ScgExpr::Int(0)` to avoid
-/// referencing a non-existent variable in the codegen IR.
-/// Check if a node has a Derivation edge to an Allocation node.
-fn has_derivation_to_allocation(
-    node_id: NodeId,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> bool {
-    if let Some(edges) = edge_idx.outgoing.get(&node_id) {
-        for e in edges {
-            if e.kind == EdgeKind::Derivation {
-                if let Some(target) = scg.get_node(e.target) {
-                    if matches!(target.payload, NodePayload::Allocation(_)) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Resolve all inputs of a node from DataFlow (and Derivation fallback) edges.
-fn resolve_all_inputs(
-    node_id: NodeId,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> Vec<(NodeId, ScgExpr)> {
-    let df_inputs = edge_idx.incoming_df(node_id);
-    let inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
-        edge_idx.incoming
-            .get(&node_id)
-            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
-            .unwrap_or_default()
-    } else {
-        df_inputs.iter().map(|e| (*e).clone()).collect()
-    };
-    inputs.iter().enumerate().map(|(i, e)| {
-        (e.source, resolve_df_input(node_id, i, edge_idx, scg))
-    }).collect()
-}
-
 
 /// Resolve a node to an ScgExpr by checking its payload.
 /// For Computation nodes, checks for literal labels and Derivation to Allocation.
@@ -1385,31 +1338,6 @@ fn extract_case_value(
 }
 
 // ── Control flow walk ──────────────────────────────────────────────────
-
-/// Walk control flow starting from `start`, producing `ScgStatement`s.
-///
-/// Stops when reaching a node in `stop_at` (does NOT consume that node;
-/// the caller is responsible for handling it). Adds processed nodes to
-/// `consumed`.
-///
-/// # Control Flow Reconstruction
-///
-/// - **Branch → If**: Follows "then"/"else" labeled CF edges, walks each
-///   arm until reaching a Join, produces `ControlNode::If`.
-/// - **LoopHeader → Loop**: Follows body/exit CF edges, walks the body
-///   until back-edge or LoopExit, produces `ControlNode::Loop`.
-/// - **Jump("break")**: Produces `ControlNode::Break`.
-/// - **Jump("continue")**: Produces `ControlNode::Continue`.
-/// - **FunctionReturn**: Produces `ScgStatement::Return`.
-fn walk_control_flow(
-    start: NodeId,
-    scg: &SCG,
-    edge_idx: &EdgeIndex,
-    consumed: &mut HashSet<NodeId>,
-    stop_at: &HashSet<NodeId>,
-) -> Vec<ScgStatement> {
-    walk_control_flow_with_externs(start, scg, edge_idx, consumed, stop_at, &HashSet::new())
-}
 
 /// Walk control flow starting from `start`, producing `ScgStatement`s,
 /// with knowledge of extern functions for marking foreign calls.
@@ -2105,23 +2033,6 @@ stmts.push(ScgStatement::Control(ControlNode::Switch {
 
 // ── Node-to-statement conversion ───────────────────────────────────────
 
-/// Convert a non-control SCG node into a list of `ScgStatement`s.
-///
-/// Returns a `Vec` because some nodes (notably `Computation` nodes whose
-/// label contains function calls inside expressions) need to emit additional
-/// `Call` statements before the main statement.
-///
-/// Handles all node types except `Control` (which is handled by
-/// `walk_control_flow`) and `Phantom` (which is skipped).
-fn convert_node_to_statement(
-    node_id: NodeId,
-    node_data: &NodeData,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> Vec<ScgStatement> {
-    convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, &HashSet::new())
-}
-
 /// Scan an expression label for function-call patterns like
 /// `func_name(arg1, arg2, ...)`.  For each call found:
 ///
@@ -2767,36 +2678,6 @@ fn result_type_to_load_ty(result_type: &Option<String>) -> Option<vuma_codegen::
     }
 }
 
-
-/// Get the store type from the value's source node.
-/// Returns None if the type can't be determined.
-fn get_store_type_from_value(
-    node_id: NodeId,
-    position: usize,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> Option<vuma_codegen::ir::IRType> {
-    let df_inputs = edge_idx.incoming_df(node_id);
-    let df_inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
-        edge_idx.incoming
-            .get(&node_id)
-            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
-            .unwrap_or_default()
-    } else {
-        df_inputs.iter().map(|e| (*e).clone()).collect()
-    };
-    if position < df_inputs.len() {
-        let source = df_inputs[position].source;
-        if let Some(src_data) = scg.get_node(source) {
-            if let NodePayload::Computation(comp) = &src_data.payload {
-                if let Some(rt) = &comp.result_type {
-                    return result_type_to_load_ty(&Some(rt.clone()));
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Original (no-call-extraction) Computation node handling — used when
 /// `extract_calls_from_label` finds no calls in the label.
@@ -3536,31 +3417,6 @@ fn strip_outer_parens(expr: &str) -> &str {
     expr
 }
 
-/// Check if an expression is likely unsigned by looking up the source node's
-/// type information. Used to decide ShrL vs ShrA for `>>` operators.
-fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
-    let expr = expr.trim();
-    // If the expression is a simple variable name, check the source nodes
-    for &src_id in sources {
-        if let Some(node) = scg.get_node(src_id) {
-            if let vuma_scg::node::NodePayload::Computation(c) = &node.payload {
-                // Check if this node defines the expression variable
-                let label = c.kind.label();
-                if label.contains(expr) {
-                    // Check if the node's result_type is unsigned
-                    if let Some(ref rt) = c.result_type {
-                        if rt.starts_with('u') {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Default: assume signed (safer for arithmetic shifts)
-    false
-}
-
 /// Resolve a sub-expression string to an ScgExpr.
 /// The sub-expression can be:
 /// - A variable name (matched to a DataFlow source)
@@ -3992,26 +3848,6 @@ fn extract_dynamic_alloc_size(
         return None;
     }
     Some(size_expr)
-}
-
-/// Find the earliest Computation node that defines `var_name` via a
-/// "let <var_name> = ..." label.  This is the original variable definition;
-/// reassignments ("x = ...") should reuse this node's id as their dst so that
-/// SSA phi nodes are created at control-flow merge points (if/else, loops).
-fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
-    let let_prefix = format!("let {} = ", var_name);
-    let mut earliest: Option<NodeId> = None;
-    for n in scg.nodes() {
-        if let NodePayload::Computation(comp) = &n.payload {
-            if let ComputationKind::Other(ref label) = comp.kind {
-                if label.starts_with(&let_prefix)
-                    && (earliest.is_none() || n.id.as_u64() < earliest.unwrap().as_u64()) {
-                        earliest = Some(n.id);
-                    }
-            }
-        }
-    }
-    earliest
 }
 
 /// Determine the destination variable name for a Computation node.
@@ -4465,26 +4301,6 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
     None
 }
 
-/// If `expr` is a fallback `Int(0)` (the default when resolve_df_input can't
-/// find a real source), try to parse `str_repr` as an integer or use it as a
-/// variable name.  Otherwise, return `expr` unchanged.
-fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
-    // If the expr is already a Var or a non-zero Int, keep it.
-    match expr {
-        ScgExpr::Int(0) => {
-            // Fallback value — try to improve.
-            if let Ok(n) = str_repr.parse::<i64>() {
-                ScgExpr::Int(n)
-            } else if !str_repr.is_empty() {
-                ScgExpr::Var(str_repr.to_string())
-            } else {
-                expr.clone()
-            }
-        }
-        _ => expr.clone(),
-    }
-}
-
 /// Bridge the `vuma-scg` SCG to the codegen SCG (no extern functions).
 ///
 /// This is a convenience wrapper around [`bridge_scg_to_codegen_with_externs`]
@@ -4713,54 +4529,6 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
     }
 
     Scg { nodes: scg_nodes }
-}
-
-/// Try to parse an operation string into a BinOpKind.
-fn parse_binop(op: &str) -> Option<IrBinOpKind> {
-    match op {
-        "add" | "+" => return Some(IrBinOpKind::Add),
-        "sub" | "-" => return Some(IrBinOpKind::Sub),
-        "mul" | "*" => return Some(IrBinOpKind::Mul),
-        "sdiv" | "/" => return Some(IrBinOpKind::SDiv),
-        "udiv" => return Some(IrBinOpKind::UDiv),
-        "srem" | "%" => return Some(IrBinOpKind::SRem),
-        "urem" => return Some(IrBinOpKind::URem),
-        "and" | "&" => return Some(IrBinOpKind::And),
-        "or" | "|" => return Some(IrBinOpKind::Or),
-        "xor" | "^" => return Some(IrBinOpKind::Xor),
-        "shl" | "<<" => return Some(IrBinOpKind::Shl),
-        "shr.a" | ">>" => return Some(IrBinOpKind::ShrA),
-        "shr.l" => return Some(IrBinOpKind::ShrL),
-        "slt" | "<" => return Some(IrBinOpKind::SLt),
-        "sle" | "<=" => return Some(IrBinOpKind::SLe),
-        "sgt" | ">" => return Some(IrBinOpKind::SGt),
-        "sge" | ">=" => return Some(IrBinOpKind::SGe),
-        "ult" => return Some(IrBinOpKind::ULt),
-        "ule" => return Some(IrBinOpKind::ULe),
-        "ugt" => return Some(IrBinOpKind::UGt),
-        "uge" => return Some(IrBinOpKind::UGe),
-        "eq" | "==" => return Some(IrBinOpKind::Eq),
-        "ne" | "!=" => return Some(IrBinOpKind::Ne),
-        _ => {}
-    }
-    let op_str = op.trim();
-    for (pat, kind) in [
-        ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
-        ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
-        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrA),
-    ] {
-        if op_str.contains(&format!(" {} ", pat)) { return Some(kind); }
-    }
-    for (pat, kind) in [
-        ("+", IrBinOpKind::Add), ("-", IrBinOpKind::Sub),
-        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::SDiv),
-        ("%", IrBinOpKind::SRem), ("&", IrBinOpKind::And),
-        ("|", IrBinOpKind::Or), ("^", IrBinOpKind::Xor),
-        ("<", IrBinOpKind::SLt), (">", IrBinOpKind::SGt),
-    ] {
-        if op_str.contains(&format!(" {} ", pat)) { return Some(kind); }
-    }
-    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
