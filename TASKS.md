@@ -204,8 +204,12 @@ DCE + cross-function const prop. The bootstrap self-host test passes at
 O2 (production default) for the first time.
 
 **Remaining:** The instruction scheduler still has an alias analysis bug
-when reordering inlined code. Disabled via `VUMA_NO_SCHED` env var until
-the Cast-aware TBAA handles the larger functions created by inlining.
+when reordering inlined code. Disabled via `VUMA_NO_SCHED` env var (which
+disables the whole function-level scheduling pass) until the Cast-aware
+TBAA handles the larger functions created by inlining. `VUMA_NO_SCHED` is
+distinct from the finer-grained `VUMA_NO_SCHED_REORDER` (within-block
+reordering only); both are now documented at their definition sites
+(opt.rs:1666, scheduler.rs:262).
 
 ### 2. Runtime stubs — partially emitted by bootstrap (Wave 52)
 
@@ -318,7 +322,10 @@ resolution + relocation in `merge_module_asts` (this also resolves Open Work §3
   but for a fully self-contained repo it should be replaced by a hand-written
   PRNG (xorshift / chacha8) so the fuzz target is also dependency-free.
 - `VUMA_NO_SCHED` (opt.rs:1666) vs `VUMA_NO_SCHED_REORDER` (scheduler.rs:262) —
-  two env vars gate the same scheduler; consolidate or document the split.
+  DISTINCT granularities, not a duplicate: the former disables the whole
+  function-level scheduling pass; the latter disables only within-block
+  reordering while keeping the pass running (each block becomes pass-through).
+  Now documented at both definition sites (comments only).
 - `womb/env/cli.vuma` — `argv` reader is stubbed (returns 0 args, reads
   `/proc/self/cmdline` but does not parse). Needed for real CLI tools.
 - `womb/lib/compression_extra.vuma` — DEFLATE does stored-block-only (no
