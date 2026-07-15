@@ -51,7 +51,7 @@ const ELFMAG: u32 = 0x464C457F;  // \x7FELF
 //                  in rdi.)
 //
 // Returns 1 on success, 0 on write failure.
-fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) -> u32 {
+fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32 {
     // ELF header: 64 bytes
     // Program header: 56 bytes
     // Total header: 120 bytes
@@ -110,8 +110,11 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) ->
     store_u64(buf, ph + 24, vaddr);
     // p_filesz: file size = header_size + code_size
     store_u64(buf, ph + 32, header_size + code_size);
-    // p_memsz: memory size = same as filesz
-    store_u64(buf, ph + 40, header_size + code_size);
+    // p_memsz: memory size = filesz + bss_size (kernel zero-fills the gap)
+    // This creates a BSS segment: the region [filesz, memsz) is mapped
+    // but not backed by file data, so the kernel zero-initializes it.
+    // Used by _start to save argc/argv and by __vuma_argc/__vuma_argv.
+    store_u64(buf, ph + 40, header_size + code_size + bss_size);
     // p_align: alignment = 0x1000 (page size)
     store_u64(buf, ph + 48, 0x1000);
 
