@@ -1048,22 +1048,47 @@ pub fn inline_with_threshold(
             // so we don't re-inline it at a later call site.
             inlined_callees.insert(callee_name.clone());
 
-            // Build vreg mapping: callee params → caller args.
-            // Maps ALL parameter types: Register, Address, Immediate.
-            // The old code only mapped Register params, silently dropping
-            // Address and Immediate params — causing Store-through-pointer
-            // and other side effects to reference undefined values.
+            // Build vreg mapping: callee params → fresh vregs, then insert
+            // explicit copy instructions (param_vreg = caller_arg + 0) at the
+            // start of the inlined body.
+            //
+            // (Wave 54 fix): Previously, callee params were mapped directly
+            // to the caller's arg vregs. This is correct for the FIRST read
+            // of the param, but if the callee reassigns the param (e.g.,
+            // `pos = pos + 1` inside a loop), the reassignment's `dst` would
+            // be substituted to the CALLER's vreg — overwriting the caller's
+            // variable. This caused silent data corruption in the bootstrap
+            // (the lexer's `pos` variable was clobbered by inlined `store_u32`
+            // reassignments).
+            //
+            // The fix: map each callee param to a FRESH vreg, and insert a
+            // copy instruction at the start of the inlined body that copies
+            // the caller's arg into the fresh param vreg. This way:
+            //   - Reads of the param use the fresh vreg (correct).
+            //   - Writes to the param update the fresh vreg (correct).
+            //   - The caller's original vreg is never clobbered.
             let mut vreg_map: HashMap<u32, IRValue> = HashMap::new();
+            let mut param_copies: Vec<IRInstr> = Vec::new();
             for (param, arg) in callee.params.iter().zip(call_args.iter()) {
                 match param {
                     IRValue::Register(id) => {
-                        vreg_map.insert(*id, arg.clone());
+                        // Create a fresh vreg for the callee param.
+                        let fresh_vreg = IRValue::Register(vreg_counter);
+                        vreg_counter += 1;
+                        vreg_map.insert(*id, fresh_vreg.clone());
+                        // Insert a copy: fresh_vreg = arg + 0
+                        // (Add with 0 is the universal copy — every backend handles it.)
+                        param_copies.push(IRInstr::Add {
+                            dst: fresh_vreg,
+                            lhs: arg.clone(),
+                            rhs: IRValue::Immediate(0),
+                            ty: None,
+                        });
                     }
                     IRValue::Address(_) | IRValue::Immediate(_) | IRValue::Label(_) => {
                         // Non-register params are concrete values, not vregs.
                         // They don't need mapping — substitute_instr handles
-                        // them directly. But if a param IS a Register that
-                        // happens to hold an Address, we map it above.
+                        // them directly.
                     }
                 }
             }
@@ -1095,9 +1120,19 @@ pub fn inline_with_threshold(
 
             // Clone and remap callee blocks.
             let mut new_blocks: Vec<IRBlock> = Vec::new();
-            for cblock in &callee.blocks {
+            for (block_idx_callee, cblock) in callee.blocks.iter().enumerate() {
                 let new_label = format!("{}_{}", prefix, cblock.label);
                 let mut new_block = IRBlock::new(&new_label);
+
+                // (Wave 54) Insert param-copy instructions at the start of
+                // the FIRST inlined block. These copy the caller's args into
+                // fresh param vregs, so the callee body can freely reassign
+                // its params without clobbering the caller's variables.
+                if block_idx_callee == 0 {
+                    for copy_instr in &param_copies {
+                        new_block.push(copy_instr.clone());
+                    }
+                }
 
                 for instr in &cblock.instructions {
                     // (Wave 51) Strip instruction-level control-flow from
