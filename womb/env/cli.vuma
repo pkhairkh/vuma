@@ -3,13 +3,19 @@
 // Provides: cli_args_count, cli_arg_get, cli_parse_flags
 // Uses the vuma-native syscall() intrinsic for write (asm-generic nr 64).
 // allocate()/free() are vuma-native builtins (P2 work).
-// NOTE: cli_read_cmdline is stubbed (returns 0 args) — P5 work to wire up
-// openat/read syscalls against /proc/self/cmdline.
+// cli_read_cmdline reads /proc/self/cmdline via openat(56)/read(63)/close(57)
+// syscalls (P5.2 work).
 
 // On x86_64 Linux, the kernel places argc at [rsp] and argv at [rsp+8]
 // at program start. Since VUMA's main() takes no args, we access them
 // via a syscall-free approach: read from /proc/self/cmdline.
 // This is more portable than stack scraping.
+
+// Constants for the openat/read/close syscalls (asm-generic numbers).
+//   openat = 56, close = 57, read = 63, write = 64
+const AT_FDCWD: i64 = -100;
+const O_RDONLY: i32 = 0;
+const CMDLINE_BUF_SIZE: u32 = 4096;
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
@@ -60,15 +66,72 @@ fn cli_read_cmdline() -> Address {
     *(path + 17) = 101; // e
     *(path + 18) = 0;   // null terminator
     
-    // Use read syscall to read the file
-    // We need open + read — use extern "C" wrappers
-    // For now, return a minimal result with 0 args
-    // (This requires the open/read syscall stubs to be linked)
-    result = allocate(16);
-    store_u64(result, 0, 0);      // data_ptr = 0
-    store_u32(result, 8, 0);      // total_len = 0
-    store_u32(result, 12, 0);     // arg_count = 0
+    // Open /proc/self/cmdline via openat(AT_FDCWD, path, O_RDONLY, 0).
+    // asm-generic syscall nr 56 = openat. Returns fd (i64); fd<0 on error.
+    fd: i64 = syscall(56, AT_FDCWD, path, O_RDONLY as i64, 0);
+    if fd < 0 {
+        // Open failed — return empty result. Free path, no data buffer yet.
+        result = allocate(16);
+        store_u64(result, 0, 0);      // data_ptr = 0
+        store_u32(result, 8, 0);      // total_len = 0
+        store_u32(result, 12, 0);     // arg_count = 0
+        free(path);
+        return result;
+    }
+    
+    // Read the entire cmdline into a 4096-byte heap buffer.
+    // asm-generic syscall nr 63 = read. Returns bytes read (i64); <=0 on EOF/error.
+    buf = allocate(CMDLINE_BUF_SIZE);
+    n: i64 = syscall(63, fd, buf, CMDLINE_BUF_SIZE as i64);
+    // Close the fd regardless of read outcome (asm-generic nr 57 = close).
+    syscall(57, fd);
+    // Path buffer is no longer needed — free it (data buffer is kept for caller).
     free(path);
+    
+    if n < 0 {
+        // Read failed — return empty result, free the unused data buffer.
+        free(buf);
+        result = allocate(16);
+        store_u64(result, 0, 0);
+        store_u32(result, 8, 0);
+        store_u32(result, 12, 0);
+        return result;
+    }
+    
+    total_len: u32 = n & 0xFFFFFFFF;
+    
+    // Count args. The cmdline format is `arg0\0arg1\0...argN\0` (args separated
+    // by null bytes). The kernel terminates the buffer with the last arg's null;
+    // some kernels/emitters add an extra trailing null (double-null), in which
+    // case the final null is a terminator, not a separator, and we subtract one.
+    null_count: u32 = 0;
+    pos: u32 = 0;
+    while pos < total_len {
+        if *(buf + pos) == 0 {
+            null_count = null_count + 1;
+        }
+        pos = pos + 1;
+    }
+    
+    arg_count: u32 = null_count;
+    if total_len >= 2 {
+        last_byte: u32 = *(buf + total_len - 1) & 255;
+        prev_byte: u32 = *(buf + total_len - 2) & 255;
+        if last_byte == 0 && prev_byte == 0 {
+            // Trailing double-null: the final null is a terminator, not a
+            // separator. Drop it from the arg count.
+            arg_count = null_count - 1;
+        }
+    }
+    // Guard against the (impossible) underflow when null_count == 0.
+    if arg_count > null_count { arg_count = 0; }
+    
+    // Build result struct (16 bytes): { data_ptr: u64, total_len: u32, arg_count: u32 }
+    // The data buffer (buf) is kept allocated — the caller accesses args via it.
+    result = allocate(16);
+    store_u64(result, 0, buf);          // data_ptr
+    store_u32(result, 8, total_len);    // total_len
+    store_u32(result, 12, arg_count);   // arg_count
     return result;
 }
 
