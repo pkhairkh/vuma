@@ -54,7 +54,8 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+    BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, SectionHeader,
+    TargetInfo,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
@@ -2916,36 +2917,75 @@ fn append_m68k_elf_sections(
     }
     let shdr_off = elf.len() as u64;
 
-    fn push_shdr(
-        elf: &mut Vec<u8>,
-        sh_name: u32,
-        sh_type: u32,
-        sh_flags: u32,
-        sh_addr: u32,
-        sh_offset: u32,
-        sh_size: u32,
-        sh_link: u32,
-        sh_info: u32,
-        sh_addralign: u32,
-        sh_entsize: u32,
-    ) {
-        elf.extend_from_slice(&sh_name.to_be_bytes());
-        elf.extend_from_slice(&sh_type.to_be_bytes());
-        elf.extend_from_slice(&sh_flags.to_be_bytes());
-        elf.extend_from_slice(&sh_addr.to_be_bytes());
-        elf.extend_from_slice(&sh_offset.to_be_bytes());
-        elf.extend_from_slice(&sh_size.to_be_bytes());
-        elf.extend_from_slice(&sh_link.to_be_bytes());
-        elf.extend_from_slice(&sh_info.to_be_bytes());
-        elf.extend_from_slice(&sh_addralign.to_be_bytes());
-        elf.extend_from_slice(&sh_entsize.to_be_bytes());
+    fn push_shdr(elf: &mut Vec<u8>, shdr: &SectionHeader<u32>) {
+        elf.extend_from_slice(&shdr.sh_name.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_type.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_flags.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_addr.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_offset.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_size.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_link.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_info.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_addralign.to_be_bytes());
+        elf.extend_from_slice(&shdr.sh_entsize.to_be_bytes());
     }
 
-    push_shdr(elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
-    push_shdr(elf, name_text, SHT_PROGBITS, 0x6, (0x10000 + text_offset) as u32, text_offset as u32, text_size as u32, 0, 0, 4, 0);
-    push_shdr(elf, name_symtab, SHT_SYMTAB, 0, 0, symtab_off as u32, symtab_size as u32, 3, 1, 4, SYM_SIZE);
-    push_shdr(elf, name_strtab, SHT_STRTAB, 0, 0, strtab_off as u32, strtab.len() as u32, 0, 0, 1, 0);
-    push_shdr(elf, name_shstrtab, SHT_STRTAB, 0, 0, shstrtab_off as u32, shstrtab.len() as u32, 0, 0, 1, 0);
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_type: SHT_NULL,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_text,
+            sh_type: SHT_PROGBITS,
+            sh_flags: 0x6,
+            sh_addr: (0x10000 + text_offset) as u32,
+            sh_offset: text_offset as u32,
+            sh_size: text_size as u32,
+            sh_addralign: 4,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_symtab,
+            sh_type: SHT_SYMTAB,
+            sh_offset: symtab_off as u32,
+            sh_size: symtab_size as u32,
+            sh_link: 3,
+            sh_info: 1,
+            sh_addralign: 4,
+            sh_entsize: SYM_SIZE,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_strtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: strtab_off as u32,
+            sh_size: strtab.len() as u32,
+            sh_addralign: 1,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_shstrtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: shstrtab_off as u32,
+            sh_size: shstrtab.len() as u32,
+            sh_addralign: 1,
+            ..Default::default()
+        },
+    );
 
     let shnum: u16 = 5;
     let shstrndx: u16 = 4;
