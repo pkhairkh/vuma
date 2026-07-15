@@ -4,8 +4,8 @@
 extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
+// Uses the vuma-native syscall() intrinsic for write (asm-generic nr 64).
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
@@ -79,7 +79,7 @@ fn sb_append_u64(sb: Address, val: u64) {
 
 fn sb_write(sb: Address, fd: i64) {
     data: u64 = sb_data(sb); len: u32 = sb_len(sb);
-    write(fd, data, len);
+    syscall(64, fd, data, len as i64);
 }
 
 fn sb_clear(sb: Address) { store_u32(sb, 8, 0); }
