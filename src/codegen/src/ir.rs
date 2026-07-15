@@ -1892,6 +1892,11 @@ impl fmt::Display for IRInstr {
 // Syscall support
 // ---------------------------------------------------------------------------
 
+// NOTE (P1-a): The authoritative VUMA-generic syscall name table is now
+// `crate::syscall_abi::vuma_generic_name` (asm-generic numbering). This
+// legacy `generic_syscall_name` table is preserved ONLY for IR Display and
+// uses the historical x86_64-style numbering — do NOT use it as a portable
+// key. See `src/codegen/src/syscall_abi.rs` and TASKS.md Open Work §5.
 /// Map a generic Linux ABI syscall number to its canonical POSIX name.
 ///
 /// This table is used by:

@@ -83,6 +83,9 @@ pub mod scheduler;
 pub mod proof_artifacts;
 pub mod vectorize;
 pub mod sparc64;
+/// VUMA-generic (asm-generic) syscall numbering + per-arch translation
+/// tables (P1 foundation — not yet wired into `IRInstr::Syscall` emission).
+pub mod syscall_abi;
 pub mod target_desc;
 pub mod wasm32;
 pub mod x86_64;
