@@ -8243,16 +8243,25 @@ pub fn flatten_expr(
         // ── Range: just flatten start (range is handled by For) ──
         Expr::Range { start, .. } => flatten_expr(start, stmts, ctx),
 
-        // ── Allocate: emit as a heap allocation call ──
+        // ── Allocate: emit as a heap allocation via direct mmap syscall ──
+        // P2: `allocate(size)` in expression context now lowers directly to
+        // a SyscallCallNode (mmap, nr 222) instead of a Call to the
+        // Rust-emitted `__vuma_alloc` runtime stub. Eliminates the last
+        // Rust-wrapper dependency in the heap-allocation path.
         Expr::Allocate { size, .. } => {
             let size_expr = flatten_expr(size, stmts, ctx);
             let dst = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 222,
                 dst: Some(dst.clone()),
-                func: "__vuma_alloc".to_string(),
-                args: vec![size_expr],
-                is_extern: true,
-                reassigns: None,
+                args: vec![
+                    ScgExpr::Int(0),      // addr = NULL
+                    size_expr,            // length = size
+                    ScgExpr::Int(3),      // prot = PROT_READ|PROT_WRITE
+                    ScgExpr::Int(0x22),   // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(-1),     // fd = -1 (MAP_ANONYMOUS)
+                    ScgExpr::Int(0),      // offset = 0
+                ],
             }));
             ScgExpr::Var(dst)
         }
@@ -8720,19 +8729,24 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         }
 
         // ── free(ptr);  (standalone) ──
-        // There is no ScgStatement::Free variant, so lower to a runtime call
-        // to `__vuma_free(ptr, 0)`. The size argument is 0 because FreeStmt
-        // does not carry a size (most mmap-based allocators track the size
-        // internally). Previously this was silently dropped.
+        // P2: `free(ptr)` now lowers directly to a SyscallCallNode (munmap,
+        // nr 215) instead of a Call to the Rust-emitted `__vuma_free`
+        // runtime stub. Eliminates the last Rust-wrapper dependency in the
+        // heap-deallocation path.
+        //
+        // FreeStmt does not carry a size, so we pass length=0 to munmap.
+        // This matches the prior `__vuma_free` stub's behavior exactly:
+        //   backend.rs:2841  "__vuma_free(addr in X0) -> munmap(addr, 0)"
+        // Linux munmap(addr, 0) is a no-op (length=0 → nothing unmapped),
+        // which preserves the existing semantics where free() does not
+        // actually reclaim memory.
         PStmt::Free(free_stmt) => {
             let mut stmts = Vec::new();
             let ptr_expr = flatten_expr(&free_stmt.ptr, &mut stmts, ctx);
-            stmts.push(ScgStatement::Call(CallNode {
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 215,
                 dst: None,
-                func: "__vuma_free".to_string(),
                 args: vec![ptr_expr, ScgExpr::Int(0)],
-                is_extern: true,
-                reassigns: None,
             }));
             stmts
         }
