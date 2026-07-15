@@ -12,11 +12,6 @@
 // Entry layout: [key: key_max_len bytes][val: 8 bytes] = key_max_len + 8
 // Entries are kept sorted by key (insertion sort for simplicity).
 
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
-
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
@@ -43,11 +38,11 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 // Create a BTreeMap with given capacity and key size.
 // key_max_len: maximum key length in bytes (keys are fixed-size).
 fn btreemap_new(capacity: u32, key_max_len: u32) -> Address {
-    m = __vuma_alloc(24);
+    m = allocate(24);
     if capacity == 0 { capacity = 64; }
     if key_max_len == 0 { key_max_len = 32; }
     entry_size: u32 = key_max_len + 8;
-    entries = __vuma_alloc(capacity * entry_size);
+    entries = allocate(capacity * entry_size);
     // Zero
     i: u32 = 0;
     while i < capacity * entry_size { *(entries + i) = 0; i = i + 1; }
@@ -112,7 +107,7 @@ fn btreemap_grow(m: Address) {
     new_cap: u32 = cap * 2;
     if new_cap == 0 { new_cap = 64; }
     old_entries: u64 = load_u64(m, 0);
-    new_entries = __vuma_alloc(new_cap * entry_size);
+    new_entries = allocate(new_cap * entry_size);
     // Copy the entire old buffer (cap * entry_size bytes) byte-by-byte.
     // The old buffer is exactly cap * entry_size bytes (allocated in
     // btreemap_new), so this read is provably in-bounds.
@@ -122,7 +117,7 @@ fn btreemap_grow(m: Address) {
         *(new_entries + i) = *(old_entries + i) & 255;
         i = i + 1;
     }
-    __vuma_free(old_entries, old_bytes);
+    free(old_entries);
     store_u64(m, 0, new_entries);
     store_u32(m, 12, new_cap);
 }
@@ -227,6 +222,6 @@ fn btreemap_free(m: Address) {
     entries: u64 = load_u64(m, 0);
     cap: u32 = load_u32(m, 12);
     key_max_len: u32 = load_u32(m, 16);
-    __vuma_free(entries, cap * (key_max_len + 8));
-    __vuma_free(m, 24);
+    free(entries);
+    free(m);
 }

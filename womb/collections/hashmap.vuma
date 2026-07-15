@@ -3,12 +3,7 @@
 // Each entry: [key_hash: u32][key_ptr: u64][key_len: u32][val: u64][occupied: u32] = 28 bytes
 // Uses linear probing. Grows when load factor > 0.75.
 //
-// Uses __vuma_alloc for persistent heap memory.
-
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
+// Uses allocate() for persistent heap memory.
 
 // ── LE helpers ──
 fn store_u64(ptr: Address, offset: u32, val: u64) {
@@ -53,9 +48,9 @@ fn hash_fnv1a(data: Address, len: u32) -> u32 {
 
 // Create a new hash map with given capacity (must be power of 2)
 fn hashmap_new(cap: u32) -> Address {
-    m = __vuma_alloc(16);
+    m = allocate(16);
     if cap == 0 { cap = 16; }
-    entries = __vuma_alloc(cap * ENTRY_SIZE);
+    entries = allocate(cap * ENTRY_SIZE);
     // Zero all entries
     i: u32 = 0;
     while i < cap * ENTRY_SIZE {
@@ -80,8 +75,8 @@ fn hashmap_grow(m: Address) {
     old_entries: u64 = load_u64(m, 0);
     new_cap: u32 = old_cap * 2;
     if new_cap == 0 { new_cap = 16; }
-    new_entries = __vuma_alloc(new_cap * ENTRY_SIZE);
-    // Zero all new entries (mmap-backed __vuma_alloc may return garbage).
+    new_entries = allocate(new_cap * ENTRY_SIZE);
+    // Zero all new entries (mmap-backed allocate may return garbage).
     zi: u32 = 0;
     new_total: u32 = new_cap * ENTRY_SIZE;
     while zi < new_total {
@@ -119,7 +114,7 @@ fn hashmap_grow(m: Address) {
         }
         old_i = old_i + 1;
     }
-    __vuma_free(old_entries, old_cap * ENTRY_SIZE);
+    free(old_entries);
     store_u64(m, 0, new_entries);
     store_u32(m, 8, new_cap);
 }
@@ -220,6 +215,6 @@ fn hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
 fn hashmap_free(m: Address) {
     cap: u32 = load_u32(m, 8);
     entries: u64 = load_u64(m, 0);
-    __vuma_free(entries, cap * ENTRY_SIZE);
-    __vuma_free(m, 16);
+    free(entries);
+    free(m);
 }

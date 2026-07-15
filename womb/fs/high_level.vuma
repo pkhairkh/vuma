@@ -4,14 +4,9 @@
 // Uses the vuma-native syscall() intrinsic for read/write/open/close
 // (asm-generic nrs 63/64/56/57). `open` is reshaped to `openat(AT_FDCWD, ...)`
 // because asm-generic has no `open` syscall.
-// __vuma_alloc/__vuma_free remain extern "C" stubs (P2 work).
+// allocate()/free() are vuma-native builtins (P2 work).
 
 const AT_FDCWD: i64 = -100;
-
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
@@ -44,7 +39,7 @@ fn read_file(path: Address) -> Address {
     if fd < 0 { return 0; }
     
     buf_size: u32 = 4096;
-    buf = __vuma_alloc(buf_size);
+    buf = allocate(buf_size);
     total: u32 = 0;
     done: u32 = 0;
     
@@ -53,10 +48,10 @@ fn read_file(path: Address) -> Address {
         if remaining == 0 {
             // Grow
             new_size: u32 = buf_size * 2;
-            new_buf = __vuma_alloc(new_size);
+            new_buf = allocate(new_size);
             i: u32 = 0;
             while i < total { *(new_buf + i) = *(buf + i) & 255; i = i + 1; }
-            __vuma_free(buf, buf_size);
+            free(buf);
             buf = new_buf; buf_size = new_size;
             remaining = buf_size - total;
         }
@@ -66,7 +61,7 @@ fn read_file(path: Address) -> Address {
     }
     syscall(57, fd);
     
-    result = __vuma_alloc(16);
+    result = allocate(16);
     store_u64(result, 0, buf);
     store_u32(result, 8, total);
     store_u32(result, 12, buf_size);
@@ -188,6 +183,6 @@ fn path_has_extension(path: Address, path_len: u32, ext: Address, ext_len: u32) 
 fn read_result_free(result: Address) {
     data: u64 = load_u64(result, 0);
     buf_size: u32 = load_u32(result, 12);
-    __vuma_free(data, buf_size);
-    __vuma_free(result, 16);
+    free(data);
+    free(result);
 }

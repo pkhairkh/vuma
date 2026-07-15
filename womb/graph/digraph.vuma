@@ -1,5 +1,5 @@
 // womb/graph/digraph.vuma — Directed graph using heap-backed arena
-// Replaces petgraph for self-hosting. Uses __vuma_alloc for persistent
+// Replaces petgraph for self-hosting. Uses allocate() for persistent
 // heap memory and proper u32/u64 little-endian storage.
 //
 // Layout (Graph struct, 48 bytes on heap):
@@ -15,11 +15,6 @@
 //
 // Linked-list adjacency: each node has a singly-linked list of outgoing
 // edges (via next_out) and incoming edges (via next_in).
-
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
 
 // ── LE helpers ──
 fn store_u64(ptr: Address, offset: u32, val: u64) {
@@ -50,13 +45,13 @@ const EDGE_SIZE: u32 = 16;
 const GRAPH_SIZE: u32 = 48;
 
 // Create a new directed graph with given capacities.
-// Uses __vuma_alloc for heap-backed storage (persists across calls).
+// Uses allocate() for heap-backed storage (persists across calls).
 fn digraph_new(node_cap: u32, edge_cap: u32) -> Address {
-    g = __vuma_alloc(GRAPH_SIZE);
+    g = allocate(GRAPH_SIZE);
     if node_cap == 0 { node_cap = 1024; }
     if edge_cap == 0 { edge_cap = 4096; }
-    nodes = __vuma_alloc(node_cap * NODE_SIZE);
-    edges = __vuma_alloc(edge_cap * EDGE_SIZE);
+    nodes = allocate(node_cap * NODE_SIZE);
+    edges = allocate(edge_cap * EDGE_SIZE);
     // Zero everything
     i: u32 = 0;
     while i < node_cap * NODE_SIZE { *(nodes + i) = 0; i = i + 1; }
@@ -77,7 +72,7 @@ fn digraph_grow_nodes(g: Address) {
     old_cap: u32 = load_u32(g, 24);
     new_cap: u32 = old_cap * 2;
     old_nodes: u64 = load_u64(g, 0);
-    new_nodes = __vuma_alloc(new_cap * NODE_SIZE);
+    new_nodes = allocate(new_cap * NODE_SIZE);
     // Copy old data
     i: u32 = 0;
     while i < old_cap * NODE_SIZE {
@@ -89,7 +84,7 @@ fn digraph_grow_nodes(g: Address) {
         *(new_nodes + i) = 0;
         i = i + 1;
     }
-    __vuma_free(old_nodes, old_cap * NODE_SIZE);
+    free(old_nodes);
     store_u64(g, 0, new_nodes);
     store_u32(g, 24, new_cap);
 }
@@ -99,7 +94,7 @@ fn digraph_grow_edges(g: Address) {
     old_cap: u32 = load_u32(g, 28);
     new_cap: u32 = old_cap * 2;
     old_edges: u64 = load_u64(g, 8);
-    new_edges = __vuma_alloc(new_cap * EDGE_SIZE);
+    new_edges = allocate(new_cap * EDGE_SIZE);
     i: u32 = 0;
     while i < old_cap * EDGE_SIZE {
         *(new_edges + i) = *(old_edges + i) & 255;
@@ -109,7 +104,7 @@ fn digraph_grow_edges(g: Address) {
         *(new_edges + i) = 0;
         i = i + 1;
     }
-    __vuma_free(old_edges, old_cap * EDGE_SIZE);
+    free(old_edges);
     store_u64(g, 8, new_edges);
     store_u32(g, 28, new_cap);
 }
@@ -207,7 +202,7 @@ fn digraph_free(g: Address) {
     edges: u64 = load_u64(g, 8);
     node_cap: u32 = load_u32(g, 24);
     edge_cap: u32 = load_u32(g, 28);
-    __vuma_free(nodes, node_cap * NODE_SIZE);
-    __vuma_free(edges, edge_cap * EDGE_SIZE);
-    __vuma_free(g, GRAPH_SIZE);
+    free(nodes);
+    free(edges);
+    free(g);
 }

@@ -6,11 +6,6 @@
 //   offset 8-11: len (u32, byte count)
 //   offset 12-15: cap (u32, allocated capacity)
 
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
-
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
@@ -36,9 +31,9 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 
 // Create a new empty VStr with given initial capacity
 fn vstr_new(cap: u32) -> Address {
-    s = __vuma_alloc(16);
+    s = allocate(16);
     if cap == 0 { cap = 64; }
-    data = __vuma_alloc(cap);
+    data = allocate(cap);
     store_u64(s, 0, data);
     store_u32(s, 8, 0);     // len = 0
     store_u32(s, 12, cap);  // cap
@@ -81,11 +76,11 @@ fn vstr_reserve(s: Address, needed: u32) {
     if needed <= cap { return; }
     new_cap: u32 = cap; if new_cap == 0 { new_cap = 64; }
     while new_cap < needed { new_cap = new_cap * 2; }
-    new_data = __vuma_alloc(new_cap);
+    new_data = allocate(new_cap);
     old_data: u64 = vstr_data(s); old_len: u32 = vstr_len(s);
     i: u32 = 0;
     while i < old_len { *(new_data + i) = *(old_data + i) & 255; i = i + 1; }
-    __vuma_free(old_data, cap);
+    free(old_data);
     store_u64(s, 0, new_data); store_u32(s, 12, new_cap);
 }
 
@@ -121,7 +116,7 @@ fn vstr_append_bytes(s: Address, ptr: Address, len: u32) {
 // Append a u64 as decimal
 fn vstr_append_u64(s: Address, val: u64) {
     if val == 0 { vstr_push_byte(s, 48); return; }
-    digits = __vuma_alloc(32);
+    digits = allocate(32);
     n: u64 = val; pos: u32 = 0;
     while n > 0 {
         d: u32 = (n % 10) & 0xFFFFFFFF;
@@ -129,7 +124,7 @@ fn vstr_append_u64(s: Address, val: u64) {
     }
     i: u32 = pos;
     while i > 0 { i = i - 1; vstr_push_byte(s, *(digits + i)); }
-    __vuma_free(digits, 32);
+    free(digits);
 }
 
 // Append a u32 as hex (0x prefixed)
@@ -196,7 +191,7 @@ fn vstr_null_terminate(s: Address) {
 // Free
 fn vstr_free(s: Address) {
     data: u64 = vstr_data(s); cap: u32 = vstr_cap(s);
-    __vuma_free(data, cap); __vuma_free(s, 16);
+    free(data); free(s);
 }
 
 // ── UTF-8 decoding ──
