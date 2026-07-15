@@ -1873,6 +1873,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // LoongArch64 Linux syscall: args in $a0-$a5, nr in $a7,
                     // `syscall 0x0`, result in $a0.
                     let mut code = Vec::new();
+                    // Translate VUMA-generic (asm-generic) syscall number to the
+                    // backend's native numbering. Identity on LoongArch64.
+                    let native_nr = crate::syscall_abi::translate(
+                        crate::backend::BackendKind::LoongArch64,
+                        *nr,
+                    )
+                    .unwrap_or(*nr);
                     let syscall_arg_regs =
                         [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
                     let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -1882,7 +1889,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         ));
                     }
                     // LI $a7, nr
-                    code.extend(encode_load_imm(Gpr::A7, *nr as i64));
+                    code.extend(encode_load_imm(Gpr::A7, native_nr as i64));
                     // SYSCALL 0x0
                     code.extend_from_slice(&Instruction::Syscall.encode());
                     // Store result ($a0) to dst's stack slot

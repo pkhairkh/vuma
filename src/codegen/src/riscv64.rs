@@ -5758,6 +5758,13 @@ impl Backend for RiscV64Backend {
                     // RISC-V ABI: args in a0-a5, nr in a7, ECALL, result in a0.
                     IRInstr::Syscall { nr, args, dst } => {
                         let mut code = Vec::new();
+                        // Translate VUMA-generic (asm-generic) syscall number to
+                        // the backend's native numbering. Identity on RISC-V.
+                        let native_nr = crate::syscall_abi::translate(
+                            crate::backend::BackendKind::RiscV64,
+                            *nr,
+                        )
+                        .unwrap_or(*nr);
                         let syscall_arg_regs =
                             [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -5767,7 +5774,7 @@ impl Backend for RiscV64Backend {
                             );
                         }
                         // LI a7, nr  (syscall number)
-                        code.extend(ss_load_imm(Gpr::A7, *nr as i64));
+                        code.extend(ss_load_imm(Gpr::A7, native_nr as i64));
                         // ECALL
                         code.extend(Instruction::Ecall.encode());
                         // Store return value (a0) to dst's stack slot
