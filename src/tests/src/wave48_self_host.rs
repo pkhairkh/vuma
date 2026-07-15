@@ -690,17 +690,20 @@ fn test_wave48_bootstrap_self_host() {
     // ── Step 2 + 3: compile the merged program; capture errors for
     //    debugging if compilation fails. ──────────────────────────────
     //
-    // Wave 51: the test uses O0 because the O2 pipeline has a multi-pass
-    // miscompilation involving the inliner + scheduler + LICM that causes
-    // the emitted vumac to SIGSEGV. Wave 51 fixed:
-    //   - Cast-aware alias analysis (alias_analysis.rs now tracks Cast)
-    //   - IRInstr::Ret stripping in inlined bodies (opt.rs)
-    //   - threshold=0 fully disables inlining (no cost-0 edge case)
-    // But the remaining bug requires the inliner to be active to trigger,
-    // suggesting the inliner creates IR shapes that expose scheduler/LICM
-    // bugs. Investigation continues in Wave 56.
-    let mut config = CompileConfig::default();
-    config.opt_level = vuma::pipeline::OptLevel::O0;
+    // Wave 54: the test now runs at O2 (the production default) with the
+    // scheduler disabled via VUMA_NO_SCHED env var. Wave 54 fixed the
+    // inliner's param-clobbering bug (callee params were mapped directly
+    // to caller args, so callee reassignments overwrote caller variables).
+    // The fix maps each callee param to a fresh vreg and inserts a copy
+    // instruction at the start of the inlined body.
+    //
+    // With the param-copy fix, O2 works with inliner + LICM + constant
+    // folding + DCE + cross-function const prop. The scheduler still has
+    // a remaining bug when reordering inlined code (the alias analysis
+    // misses some edge case in the larger functions created by inlining).
+    // The scheduler is disabled via VUMA_NO_SCHED until that's fixed.
+    std::env::set_var("VUMA_NO_SCHED", "1");
+    let config = CompileConfig::default();
     let output = VumaCompiler::with_config(config)
         .compile_modules(&modules)
         .unwrap_or_else(|errors| {
