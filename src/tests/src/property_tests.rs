@@ -1,44 +1,48 @@
-//! # Property-Based Tests for VUMA
+//! # Property-Based Tests for VUMA (Deterministic)
 //!
-//! This module implements property-based tests using the `proptest` framework
-//! to validate the VUMA compiler across several dimensions:
+//! This module implements deterministic regression tests for the VUMA
+//! compiler across several dimensions.  Tests use hand-written,
+//! fixed-seed inputs so the suite can run on self-hosted builds
+//! without any external property-testing framework.
 //!
-//! - **Random program generation**: Generate random valid VUMA programs
-//!   (simple expressions, function calls, memory operations) and verify
-//!   they compile without crashing.
-//! - **Cross-backend consistency**: Compile random programs for all backends
+//! - **Program compilation**: Hand-written valid VUMA programs (simple
+//!   expressions, function calls, memory operations) compile without
+//!   crashing.
+//! - **Cross-backend consistency**: Compile programs for all backends
 //!   and verify they produce structurally valid output.
-//! - **Parser roundtrip**: Generate random valid VUMA source, parse it,
-//!   and verify no errors are produced.
-//! - **SCG invariants**: Verify structural invariants of the SCG: every
-//!   function has an entry node, every edge connects valid nodes.
-//! - **FP conversion roundtrip**: Verify that float↔int bit-cast roundtrips
-//!   are lossless and that IntToFloat/FloatToInt casts compile correctly.
-//! - **Atomic CAS correctness**: Verify CAS with matching expected value
-//!   succeeds and CAS with non-matching value fails (at the IR level).
-//! - **Rotate roundtrip**: Verify ROL(x, n) followed by ROR(x, n) equals x.
-//! - **ABI consistency**: Verify functions with varying argument counts
-//!   produce correct calling-convention code.
+//! - **Parser roundtrip**: Parse valid VUMA source and verify no
+//!   errors are produced.
+//! - **SCG invariants**: Verify structural invariants of the SCG:
+//!   every function has an entry node, every edge connects valid nodes.
+//! - **FP conversion roundtrip**: Verify that float↔int bit-cast
+//!   roundtrips are lossless and that IntToFloat/FloatToInt casts
+//!   compile correctly.
+//! - **Atomic CAS correctness**: Verify CAS with matching expected
+//!   value succeeds and CAS with non-matching value fails (at the IR
+//!   level).
+//! - **Rotate roundtrip**: Verify ROL(x, n) followed by ROR(x, n)
+//!   equals x.
+//! - **ABI consistency**: Verify functions with varying argument
+//!   counts produce correct calling-convention code.
 //! - **DWARF consistency**: Compiling with and without --debug should
 //!   produce the same .text section.
-//! - **FFI symbol emission**: Extern functions should produce SHN_UNDEF
-//!   symbols in ELF output.
+//! - **FFI symbol emission**: Extern functions should produce
+//!   SHN_UNDEF symbols in ELF output.
 
-use proptest::prelude::*;
 use vuma_scg::{
-    EdgeKind, NodeId, NodePayload, NodeType, ProgramPoint, SCG,
-    ControlKind, ComputationNode, ControlNode, AllocationNode, DeallocationNode,
-    AccessNode, AccessMode, RegionId, SCGRegion, DeploymentTarget,
+    AccessMode, AccessNode, AllocationNode, ComputationNode, ControlKind,
+    ControlNode, DeallocationNode, EdgeKind, NodeId, NodePayload, NodeType,
+    ProgramPoint, RegionId, SCG,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Fuzzing Seed Constants
+// Deterministic Test Fixtures
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// These edge-case values are used both as explicit fuzzing seeds and as
-// proptest regression anchors.  They cover boundary conditions in integer
-// conversions, float special values, rotation amounts, and ABI argument
-// counts.
+// These edge-case values are used as explicit fuzzing seeds and as
+// regression anchors.  They cover boundary conditions in integer
+// conversions, float special values, rotation amounts, and ABI
+// argument counts.
 
 /// Integer conversion edge cases: i64 minimum and maximum.
 const INT_EDGE_CASES: [i64; 2] = [i64::MIN, i64::MAX];
@@ -52,259 +56,325 @@ const ROT_AMOUNT_EDGE_CASES: [u32; 5] = [0, 1, 63, 64, 65];
 /// Function argument count edge cases: 0, 4, 5, 8, 16.
 const ARG_COUNT_EDGE_CASES: [usize; 5] = [0, 4, 5, 8, 16];
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Random Program Generation Strategies
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Reserved VUMA keywords that cannot be used as identifiers.
-const VUMA_KEYWORDS: &[&str] = &[
-    "fn", "let", "pub", "crate", "if", "else", "while", "for", "return", "as",
-    "match", "struct", "enum", "break", "continue", "loop", "type", "const",
-    "static", "mut", "ref", "where", "impl", "trait", "ptr", "region", "alloc",
-    "allocate", "free", "derive", "cast", "read", "write", "sync", "async",
-    "await", "spawn", "lock", "unlock", "channel", "send", "recv", "extern",
-    "unsafe", "safe", "bd", "repd", "capd", "reld", "import", "export", "mod",
-    "use", "self", "super", "true", "false", "null", "sizeof", "alignof",
-    "Option", "Some", "None", "Result", "Ok", "Err",
-    "atomic_load", "atomic_store", "atomic_cas", "ct_select", "ct_eq",
+/// Hand-written valid VUMA programs used as deterministic test inputs.
+const SAMPLE_VUMA_PROGRAMS: &[&str] = &[
+    // Minimal program — just `main`.
+    "fn main() {\n}\n",
+    // Simple expression statement.
+    "fn main() {\n    x = 1 + 2;\n}\n",
+    // Two-function program with a call.
+    "fn helper() {\n    x = 1 + 2;\n}\nfn main() {\n    helper();\n}\n",
+    // Variable assignment from a literal.
+    "fn main() {\n    x = 42;\n}\n",
+    // Multiple binary operations in one body.
+    "fn main() {\n    x = 10 - 3;\n    y = 4 * 5;\n    z = x + y;\n}\n",
 ];
 
-/// Generate a random valid VUMA identifier (never a reserved keyword).
-fn arb_identifier() -> impl Strategy<Value = String> {
-    "[a-zA-Z][a-zA-Z0-9_]{0,15}"
-        .prop_filter("not a reserved keyword", |s| !VUMA_KEYWORDS.contains(&s.as_str()))
-}
+/// Hand-written memory-operation programs (replaces
+/// `arb_memory_program`).
+const SAMPLE_MEMORY_PROGRAMS: &[&str] = &[
+    "region r1 = allocate(64);\nfn main() {\n    ptr = r1 + 64;\n}\n",
+    "region buf = allocate(128);\nfn main() {\n    ptr = buf + 0;\n}\n",
+    "region big = allocate(512);\nfn main() {\n    ptr = big + 64;\n}\n",
+];
 
-/// Generate a random integer literal.
-fn arb_int_literal() -> impl Strategy<Value = i64> {
-    any::<i64>().prop_map(|v| v % 1000)
-}
+/// Hand-written function-call programs (replaces `arb_call_program`).
+const SAMPLE_CALL_PROGRAMS: &[&str] = &[
+    "fn helper_one() {\n    x = 1 + 2;\n}\nfn main() {\n    helper_one();\n}\n",
+    "fn compute() {\n    x = 1 + 2;\n}\nfn main() {\n    compute();\n}\n",
+];
 
-/// Generate a random binary operator.
-fn arb_binop() -> impl Strategy<Value = &'static str> {
-    prop_oneof![
-        Just("+"),
-        Just("-"),
-        Just("*"),
-        Just("/"),
-        Just("&"),
-        Just("|"),
-        Just("^"),
-        Just("<<"),
-        Just(">>"),
-        Just("=="),
-        Just("!="),
-        Just("<"),
-        Just("<="),
-        Just(">"),
-        Just(">="),
+/// Hand-written extern-declaration programs paired with the symbol
+/// name we expect to find as SHN_UNDEF in the ELF output.  Replaces
+/// `arb_extern_fn_name`.
+const SAMPLE_EXTERN_PROGRAMS: &[(&str, &str)] = &[
+    (
+        "write",
+        "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\nfn main() {\n    write(1, 0x400000, 13);\n}\n",
+    ),
+    (
+        "read",
+        "extern \"C\" {\n    fn read(fd: i64, buf: Address, count: i64) -> i64;\n}\nfn main() {\n    read(0, 0x400000, 13);\n}\n",
+    ),
+    (
+        "my_extern_fn",
+        "extern \"C\" {\n    fn my_extern_fn(x: i64) -> i64;\n}\nfn main() {\n    my_extern_fn(42);\n}\n",
+    ),
+];
+
+/// Bit patterns for FP roundtrip tests — covers zero, max, min, normal,
+/// subnormal, infinity, and NaN.
+const FP_BIT_PATTERNS: &[u64] = &[
+    0,
+    1,
+    u64::MAX,
+    0x3FF0_0000_0000_0000, // 1.0
+    0x4000_0000_0000_0000, // 2.0
+    0xBFF0_0000_0000_0000, // -1.0
+    0x7FF0_0000_0000_0000, // +Inf
+    0xFFF0_0000_0000_0000, // -Inf
+    0x7FF8_0000_0000_0000, // quiet NaN
+    0x000F_FFFF_FFFF_FFFF, // largest subnormal
+    i64::MIN as u64,       // sign bit set, exponent zero
+    i64::MAX as u64,       // high bits set
+];
+
+/// Integer values within ±2^53 (exactly representable as f64) for
+/// i64→f64→i64 roundtrip tests.
+const INT_EXACT_F64_VALUES: &[i64] = &[
+    0,
+    1,
+    -1,
+    2,
+    -2,
+    7,
+    -7,
+    256,
+    -256,
+    65536,
+    -65536,
+    1 << 32,
+    -(1 << 32),
+    1 << 52,
+    -(1 << 52),
+    (1 << 53) - 1,
+    -((1 << 53) - 1),
+];
+
+/// Finite f64 values (no NaN, no Inf) for f64→i64→f64 roundtrip tests.
+const FINITE_F64_VALUES: &[f64] = &[
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    3.14159,
+    -3.14159,
+    1.0e10,
+    -1.0e10,
+    1.0e-10,
+    -1.0e-10,
+    9007199254740992.0, // 2^53
+    -9007199254740992.0,
+];
+
+/// Hand-written VUMA programs that exercise integer↔float casts.
+const FP_CAST_PROGRAMS: &[&str] = &[
+    "fn main() {\n    x: f64 = 0.0;\n    y: i64 = x as i64;\n}\n",
+    "fn main() {\n    x: f64 = 1.0;\n    y: i64 = x as i64;\n}\n",
+    "fn main() {\n    x: f64 = -1.0;\n    y: i64 = x as i64;\n}\n",
+    "fn main() {\n    x: f64 = 1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
+    "fn main() {\n    x: f64 = -1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
+    "fn main() {\n    x: f64 = 3.14159;\n    y: i64 = x as i64;\n}\n",
+];
+
+/// (current, desired) pairs for atomic CAS tests where the expected
+/// value matches `current` (CAS should succeed).
+const CAS_MATCHING_PAIRS: &[(i64, i64)] = &[
+    (0, 0),
+    (0, 1),
+    (1, 0),
+    (i64::MIN, i64::MAX),
+    (i64::MAX, i64::MIN),
+    (42, -42),
+    (-1, -1),
+];
+
+/// (current, wrong_expected) pairs for atomic CAS tests where the
+/// expected value does NOT match `current` (CAS should fail).
+const CAS_MISMATCH_PAIRS: &[(i64, i64)] = &[
+    (0, 1),
+    (1, 0),
+    (42, -42),
+    (i64::MIN, i64::MAX),
+    (7, 8),
+    (-1, 1),
+];
+
+/// Sample u64 values for rotation tests.
+const ROT_X_VALUES: &[u64] = &[
+    0,
+    1,
+    u64::MAX,
+    0xDEAD_BEEF_CAFE_BABE,
+    0xAAAA_AAAA_AAAA_AAAA,
+    0x5555_5555_5555_5555,
+    1u64 << 63,
+];
+
+/// Rotation amounts > 64 (exercises the modular path in rol64/ror64).
+const ROT_LARGE_AMOUNTS: &[u32] = &[65, 100, 128, 200];
+
+/// All `EdgeKind` variants, for exhaustive edge-construction tests.
+///
+/// Returns a fresh `Vec` each call so callers can move the owned
+/// `EdgeKind` values into `add_edge` without cloning (the variant does
+/// not implement `Copy`).
+fn all_edge_kinds() -> Vec<EdgeKind> {
+    vec![
+        EdgeKind::DataFlow,
+        EdgeKind::ControlFlow,
+        EdgeKind::Derivation,
+        EdgeKind::Annotation,
     ]
-}
-
-/// Generate a random simple expression statement.
-fn arb_simple_expr() -> impl Strategy<Value = String> {
-    (arb_identifier(), arb_binop(), arb_identifier())
-        .prop_map(|(lhs, op, rhs)| format!("    {} = {} {} {};", lhs, lhs, op, rhs))
-}
-
-/// Generate a random assignment from a literal.
-fn arb_lit_assign() -> impl Strategy<Value = String> {
-    (arb_identifier(), arb_int_literal())
-        .prop_map(|(name, val)| format!("    {} = {};", name, val))
-}
-
-/// Generate a random single statement inside a function body.
-fn arb_statement() -> impl Strategy<Value = String> {
-    prop_oneof![arb_simple_expr(), arb_lit_assign(),]
-}
-
-/// Generate a random function body (1-5 statements).
-fn arb_fn_body() -> impl Strategy<Value = String> {
-    prop::collection::vec(arb_statement(), 1..5)
-        .prop_map(|stmts| stmts.join("\n"))
-}
-
-/// Generate a random VUMA function definition.
-fn arb_fn_def() -> impl Strategy<Value = String> {
-    (arb_identifier(), arb_fn_body())
-        .prop_map(|(name, body)| format!("fn {}() {{\n{}\n}}", name, body))
-}
-
-/// Generate a random complete VUMA program (1-3 functions, always
-/// includes `main`).
-fn arb_vuma_program() -> impl Strategy<Value = String> {
-    prop::collection::vec(arb_fn_def(), 0..2).prop_map(|fns| {
-        let mut program = String::new();
-        for f in &fns {
-            program.push_str(f);
-            program.push('\n');
-        }
-        // Always include a main function so compilation works.
-        program.push_str("fn main() {\n}\n");
-        program
-    })
-}
-
-/// Generate a random memory operation program (with region allocation).
-fn arb_memory_program() -> impl Strategy<Value = String> {
-    (arb_identifier(), 64usize..512)
-        .prop_map(|(region_name, size)| {
-            format!(
-                "region {} = allocate({});\nfn main() {{\n    ptr = {} + 64;\n}}\n",
-                region_name, size, region_name
-            )
-        })
-}
-
-/// Generate a random function call program.
-fn arb_call_program() -> impl Strategy<Value = String> {
-    arb_identifier().prop_map(|helper_name| {
-        format!(
-            "fn {}() {{\n    x = 1 + 2;\n}}\nfn main() {{\n    {}();\n}}\n",
-            helper_name, helper_name
-        )
-    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SCG Random Generation Strategies
+// Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate a random NodeType.
-fn arb_node_type() -> impl Strategy<Value = NodeType> {
-    prop_oneof![
-        Just(NodeType::Computation),
-        Just(NodeType::Allocation),
-        Just(NodeType::Deallocation),
-        Just(NodeType::Access),
-        Just(NodeType::Control),
-        Just(NodeType::Cast),
-        Just(NodeType::Effect),
-        Just(NodeType::Phantom),
-    ]
+/// Build a deterministic sample `ProgramPoint`.
+fn sample_program_point() -> ProgramPoint {
+    ProgramPoint {
+        file: Some("test.vu".to_string()),
+        line: Some(1),
+        column: Some(1),
+        offset: None,
+    }
 }
 
-/// Generate a random EdgeKind.
-fn arb_edge_kind() -> impl Strategy<Value = EdgeKind> {
-    prop_oneof![
-        Just(EdgeKind::DataFlow),
-        Just(EdgeKind::ControlFlow),
-        Just(EdgeKind::Derivation),
-        Just(EdgeKind::Annotation),
-    ]
+/// Map a `NodePayload` to its corresponding `NodeType`.
+fn payload_type(payload: &NodePayload) -> NodeType {
+    match payload {
+        NodePayload::Computation(_) => NodeType::Computation,
+        NodePayload::Allocation(_) => NodeType::Allocation,
+        NodePayload::Deallocation(_) => NodeType::Deallocation,
+        NodePayload::Access(_) => NodeType::Access,
+        NodePayload::Control(_) => NodeType::Control,
+        NodePayload::Cast(_) => NodeType::Cast,
+        NodePayload::Effect(_) => NodeType::Effect,
+        NodePayload::Phantom(_) => NodeType::Phantom,
+        NodePayload::VTable(_) => NodeType::VTable,
+        NodePayload::ClosureEnv(_) => NodeType::ClosureEnv,
+        NodePayload::StructDef(_) => NodeType::StructDef,
+        NodePayload::EnumDef(_) => NodeType::EnumDef,
+        NodePayload::Match(_) => NodeType::Match,
+        NodePayload::ConstantTime(_) => NodeType::ConstantTime,
+        NodePayload::Syscall(_) => NodeType::Effect,
+    }
 }
 
-/// Generate a random computation node payload.
-fn arb_computation_payload() -> impl Strategy<Value = NodePayload> {
-    (arb_identifier(), prop_oneof![Just(Some("i64".to_string())), Just(None)])
-        .prop_map(|(op, rt)| {
-            NodePayload::Computation(ComputationNode::new(&op, rt, false))
-        })
-}
-
-/// Generate a random allocation node payload.
-fn arb_allocation_payload() -> impl Strategy<Value = NodePayload> {
-    (1u64..4096, 1u64..64)
-        .prop_map(|(size, align)| {
-            NodePayload::Allocation(AllocationNode {
-                size,
-                align,
-                region_id: RegionId::new(0),
-                type_name: None,
-            })
-        })
-}
-
-/// Generate a random node payload.
-fn arb_node_payload() -> impl Strategy<Value = NodePayload> {
-    prop_oneof![
-        arb_computation_payload(),
-        arb_allocation_payload(),
-        Just(NodePayload::Control(ControlNode {
+/// Build a deterministic vector of sample node payloads covering every
+/// variant exercised by the SCG construction tests.
+fn sample_node_payloads() -> Vec<NodePayload> {
+    vec![
+        NodePayload::Computation(ComputationNode::new(
+            "add",
+            Some("i64".to_string()),
+            false,
+        )),
+        NodePayload::Computation(ComputationNode::new("mul", None, false)),
+        NodePayload::Allocation(AllocationNode {
+            size: 64,
+            align: 8,
+            region_id: RegionId::new(0),
+            type_name: None,
+        }),
+        NodePayload::Allocation(AllocationNode {
+            size: 4096,
+            align: 16,
+            region_id: RegionId::new(1),
+            type_name: None,
+        }),
+        NodePayload::Control(ControlNode {
             kind: ControlKind::FunctionEntry,
             label: Some("main".to_string()),
-        })),
-        Just(NodePayload::Deallocation(DeallocationNode {
+        }),
+        NodePayload::Deallocation(DeallocationNode {
             allocation_node: NodeId::new(0),
             region_id: RegionId::new(0),
-        })),
-        Just(NodePayload::Access(AccessNode {
+        }),
+        NodePayload::Access(AccessNode {
             mode: AccessMode::Read,
             region_id: RegionId::new(0),
             offset: Some(0),
             access_size: Some(8),
-        })),
+        }),
+        NodePayload::Access(AccessNode {
+            mode: AccessMode::Write,
+            region_id: RegionId::new(1),
+            offset: Some(16),
+            access_size: Some(4),
+        }),
     ]
 }
 
-/// Generate a random program point.
-fn arb_program_point() -> impl Strategy<Value = ProgramPoint> {
-    (any::<Option<u64>>(), any::<Option<u64>>())
-        .prop_map(|(line, column)| ProgramPoint {
-            file: Some("test.vu".to_string()),
-            line,
-            column,
-            offset: None,
-        })
+/// Build a fresh SCG pre-populated with the deterministic sample
+/// payloads.  Returns the SCG and the list of node IDs that were added.
+fn build_sample_scg() -> (SCG, Vec<NodeId>) {
+    let mut scg = SCG::new();
+    let mut node_ids = Vec::new();
+    let pp = sample_program_point();
+    for payload in sample_node_payloads() {
+        let nt = payload_type(&payload);
+        let id = scg.add_node(nt, payload, pp.clone());
+        node_ids.push(id);
+    }
+    (scg, node_ids)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: Parser Roundtrip
+// Tests: Parser Roundtrip
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// Parse a randomly generated VUMA program and verify no parse errors.
-    #[test]
-    fn prop_parser_roundtrip_no_errors(program in arb_vuma_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_parser_roundtrip_no_errors() {
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let result = parser.parse_program();
-        prop_assert!(
+        assert!(
             !result.has_errors(),
-            "Randomly generated program should parse without errors. Errors: {:?}",
+            "Sample program should parse without errors. Program: {:?}. Errors: {:?}",
+            program,
             result.errors
         );
     }
+}
 
-    /// Parse a random memory program and verify no parse errors.
-    #[test]
-    fn prop_parser_memory_program(program in arb_memory_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_parser_memory_program() {
+    for &program in SAMPLE_MEMORY_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let result = parser.parse_program();
-        prop_assert!(
+        assert!(
             !result.has_errors(),
-            "Memory program should parse without errors. Errors: {:?}",
+            "Memory program should parse without errors. Program: {:?}. Errors: {:?}",
+            program,
             result.errors
         );
     }
+}
 
-    /// Parse a random call program and verify no parse errors.
-    #[test]
-    fn prop_parser_call_program(program in arb_call_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_parser_call_program() {
+    for &program in SAMPLE_CALL_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let result = parser.parse_program();
-        prop_assert!(
+        assert!(
             !result.has_errors(),
-            "Call program should parse without errors. Errors: {:?}",
+            "Call program should parse without errors. Program: {:?}. Errors: {:?}",
+            program,
             result.errors
         );
     }
+}
 
-    /// Parse a valid program, convert to SCG, and verify the SCG has nodes.
-    #[test]
-    fn prop_parse_to_scg_has_nodes(program in arb_vuma_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_parse_to_scg_has_nodes() {
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let parse_result = parser.parse_program();
         if parse_result.has_errors() {
-            // Some random programs might not parse; skip those.
-            return Ok(());
+            // Some sample programs might not parse cleanly; skip those.
+            continue;
         }
         let ast = parse_result.unwrap();
         let mut converter = vuma_parser::AstToScg::new();
         match converter.convert(&ast) {
             Ok(scg) => {
-                prop_assert!(
+                assert!(
                     scg.node_count() > 0,
-                    "SCG should have at least one node for any valid program"
+                    "SCG should have at least one node for any valid program. Program: {:?}",
+                    program
                 );
             }
             Err(_) => {
@@ -316,43 +386,40 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: Cross-Backend Consistency
+// Tests: Cross-Backend Consistency
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// Compile a random program for all backends and verify they all
-    /// produce valid binary output.
-    #[test]
-    fn prop_cross_backend_all_produce_output(program in arb_vuma_program()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn prop_cross_backend_all_produce_output() {
+    use vuma::api::VumaCompiler;
 
-        let compiler = VumaCompiler::new();
+    let compiler = VumaCompiler::new();
+    let targets = ["x86_64", "aarch64", "riscv64", "arm32", "mips64", "ppc64"];
 
+    for &program in SAMPLE_VUMA_PROGRAMS {
         // First verify the program compiles at all.
-        let default_result = compiler.compile(&program);
+        let default_result = compiler.compile(program);
         if !default_result.success {
-            // Some randomly generated programs may not compile due to
-            // semantic issues (e.g., undeclared variables). Skip those.
-            return Ok(());
+            // Some sample programs may not compile due to semantic
+            // issues (e.g. undeclared variables); skip those.
+            continue;
         }
 
-        let targets = ["x86_64", "aarch64", "riscv64", "arm32", "mips64", "ppc64"];
-
         for target in &targets {
-            let result = compiler.compile_for_target(&program, target);
-            prop_assert!(
+            let result = compiler.compile_for_target(program, target);
+            assert!(
                 result.success,
                 "Compilation should succeed for target '{}'. Diagnostics: {:?}",
                 target,
                 result.diagnostics
             );
-            prop_assert!(
+            assert!(
                 result.target.is_some(),
                 "Should have target output for '{}'",
                 target
             );
             if let Some(ref tgt) = result.target {
-                prop_assert!(
+                assert!(
                     !tgt.binary.is_empty(),
                     "Binary output should not be empty for '{}'",
                     target
@@ -360,28 +427,28 @@ proptest! {
             }
         }
     }
+}
 
-    /// Compile a memory program for all backends and verify same
-    /// SCG structure across targets.
-    #[test]
-    fn prop_cross_backend_same_scg(program in arb_memory_program()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn prop_cross_backend_same_scg() {
+    use vuma::api::VumaCompiler;
 
-        let compiler = VumaCompiler::new();
+    let compiler = VumaCompiler::new();
 
+    for &program in SAMPLE_MEMORY_PROGRAMS {
         // Compile for two different targets and compare SCG summaries.
-        let result_a = compiler.compile_for_target(&program, "aarch64");
-        let result_b = compiler.compile_for_target(&program, "x86_64");
+        let result_a = compiler.compile_for_target(program, "aarch64");
+        let result_b = compiler.compile_for_target(program, "x86_64");
 
         if result_a.success && result_b.success {
             if let (Some(scg_a), Some(scg_b)) = (&result_a.scg, &result_b.scg) {
                 // The SCG is target-independent; both should have the
                 // same function count and node count.
-                prop_assert_eq!(
+                assert_eq!(
                     scg_a.function_count, scg_b.function_count,
                     "Function count should be same across backends"
                 );
-                prop_assert_eq!(
+                assert_eq!(
                     scg_a.total_nodes, scg_b.total_nodes,
                     "Total nodes should be same across backends"
                 );
@@ -391,51 +458,53 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: SCG Structural Invariants
+// Tests: SCG Structural Invariants
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// Every SCG built from a valid program should have a function entry
-    /// node for each function.
-    #[test]
-    fn prop_scg_every_function_has_entry(program in arb_vuma_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_scg_every_function_has_entry() {
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let parse_result = parser.parse_program();
         if parse_result.has_errors() {
-            return Ok(());
+            continue;
         }
         let ast = parse_result.unwrap();
         let mut converter = vuma_parser::AstToScg::new();
         let scg = match converter.convert(&ast) {
             Ok(scg) => scg,
-            Err(_) => return Ok(()),
+            Err(_) => continue,
         };
 
         // Count FunctionEntry nodes.
-        let entry_count = scg.nodes().filter(|n| {
-            matches!(&n.payload, NodePayload::Control(c) if c.kind == ControlKind::FunctionEntry)
-        }).count();
+        let entry_count = scg
+            .nodes()
+            .filter(|n| {
+                matches!(&n.payload, NodePayload::Control(c) if c.kind == ControlKind::FunctionEntry)
+            })
+            .count();
 
-        prop_assert!(
+        assert!(
             entry_count >= 1,
             "SCG should have at least one FunctionEntry node (found {})",
             entry_count
         );
     }
+}
 
-    /// Every edge in the SCG should connect valid (existing) nodes.
-    #[test]
-    fn prop_scg_edges_connect_valid_nodes(program in arb_vuma_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_scg_edges_connect_valid_nodes() {
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let parse_result = parser.parse_program();
         if parse_result.has_errors() {
-            return Ok(());
+            continue;
         }
         let ast = parse_result.unwrap();
         let mut converter = vuma_parser::AstToScg::new();
         let scg = match converter.convert(&ast) {
             Ok(scg) => scg,
-            Err(_) => return Ok(()),
+            Err(_) => continue,
         };
 
         // Collect all node IDs.
@@ -444,36 +513,37 @@ proptest! {
 
         // Verify every edge connects existing nodes.
         for edge in scg.edges() {
-            prop_assert!(
+            assert!(
                 node_ids.contains(&edge.source),
                 "Edge source {:?} should exist in the graph",
                 edge.source
             );
-            prop_assert!(
+            assert!(
                 node_ids.contains(&edge.target),
                 "Edge target {:?} should exist in the graph",
                 edge.target
             );
         }
     }
+}
 
-    /// SCG validation should pass for any valid program.
-    #[test]
-    fn prop_scg_validation_passes(program in arb_vuma_program()) {
-        let mut parser = vuma_parser::Parser::new(&program);
+#[test]
+fn prop_scg_validation_passes() {
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let mut parser = vuma_parser::Parser::new(program);
         let parse_result = parser.parse_program();
         if parse_result.has_errors() {
-            return Ok(());
+            continue;
         }
         let ast = parse_result.unwrap();
         let mut converter = vuma_parser::AstToScg::new();
         let scg = match converter.convert(&ast) {
             Ok(scg) => scg,
-            Err(_) => return Ok(()),
+            Err(_) => continue,
         };
 
         let validation = scg.validate();
-        prop_assert!(
+        assert!(
             validation.is_valid,
             "SCG validation should pass for valid programs. Errors: {:?}",
             validation.errors
@@ -482,179 +552,134 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: SCG Construction Invariants
+// Tests: SCG Construction Invariants
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// Build a random SCG by adding random nodes and verify structural
-    /// invariants hold.
-    #[test]
-    fn prop_scg_random_construction_invariants(
-        nodes in prop::collection::vec(
-            (arb_node_payload(), arb_program_point()),
-            1..20
-        )
-    ) {
-        let mut scg = SCG::new();
-        let mut node_ids = Vec::new();
+#[test]
+fn prop_scg_random_construction_invariants() {
+    let (mut scg, node_ids) = build_sample_scg();
 
-        // Add nodes.
-        for (payload, pp) in nodes {
-            let node_type = match &payload {
-                NodePayload::Computation(_) => NodeType::Computation,
-                NodePayload::Allocation(_) => NodeType::Allocation,
-                NodePayload::Deallocation(_) => NodeType::Deallocation,
-                NodePayload::Access(_) => NodeType::Access,
-                NodePayload::Control(_) => NodeType::Control,
-                NodePayload::Cast(_) => NodeType::Cast,
-                NodePayload::Effect(_) => NodeType::Effect,
-                NodePayload::Phantom(_) => NodeType::Phantom,
-                NodePayload::VTable(_) => NodeType::VTable,
-                NodePayload::ClosureEnv(_) => NodeType::ClosureEnv,
-                NodePayload::StructDef(_) => NodeType::StructDef,
-                NodePayload::EnumDef(_) => NodeType::EnumDef,
-                NodePayload::Match(_) => NodeType::Match,
-                NodePayload::ConstantTime(_) => NodeType::ConstantTime,
-                NodePayload::Syscall(_) => NodeType::Effect,
-            };
-            let id = scg.add_node(node_type, payload, pp);
-            node_ids.push(id);
-        }
+    // Invariant: node count matches.
+    assert_eq!(
+        scg.node_count(),
+        node_ids.len(),
+        "Node count should match the number of added nodes"
+    );
 
-        // Invariant: node count matches.
-        prop_assert_eq!(
-            scg.node_count(),
-            node_ids.len(),
-            "Node count should match the number of added nodes"
+    // Invariant: every added node can be retrieved.
+    for &id in &node_ids {
+        assert!(
+            scg.get_node(id).is_some(),
+            "Added node {:?} should be retrievable",
+            id
         );
-
-        // Invariant: every added node can be retrieved.
-        for &id in &node_ids {
-            prop_assert!(
-                scg.get_node(id).is_some(),
-                "Added node {:?} should be retrievable",
-                id
-            );
-        }
-
-        // Invariant: edges between existing nodes should succeed.
-        if node_ids.len() >= 2 {
-            let edge_result = scg.add_edge(node_ids[0], node_ids[1], EdgeKind::DataFlow);
-            prop_assert!(
-                edge_result.is_ok(),
-                "Adding an edge between existing nodes should succeed"
-            );
-            prop_assert_eq!(scg.edge_count(), 1, "Edge count should be 1");
-        }
     }
 
-    /// Build a random SCG and verify edges only connect valid nodes.
-    #[test]
-    fn prop_scg_random_edges_valid(
-        nodes in prop::collection::vec(
-            (arb_node_payload(), arb_program_point()),
-            2..10
-        ),
-        edge_kinds in prop::collection::vec(arb_edge_kind(), 1..5)
-    ) {
-        let mut scg = SCG::new();
-        let mut node_ids = Vec::new();
+    // Invariant: edges between existing nodes should succeed.
+    assert!(
+        node_ids.len() >= 2,
+        "sample SCG should have at least 2 nodes"
+    );
+    let edge_result = scg.add_edge(node_ids[0], node_ids[1], EdgeKind::DataFlow);
+    assert!(
+        edge_result.is_ok(),
+        "Adding an edge between existing nodes should succeed"
+    );
+    assert_eq!(scg.edge_count(), 1, "Edge count should be 1");
+}
 
-        for (payload, pp) in nodes {
-            let node_type = match &payload {
-                NodePayload::Computation(_) => NodeType::Computation,
-                NodePayload::Allocation(_) => NodeType::Allocation,
-                NodePayload::Deallocation(_) => NodeType::Deallocation,
-                NodePayload::Access(_) => NodeType::Access,
-                NodePayload::Control(_) => NodeType::Control,
-                NodePayload::Cast(_) => NodeType::Cast,
-                NodePayload::Effect(_) => NodeType::Effect,
-                NodePayload::Phantom(_) => NodeType::Phantom,
-                NodePayload::VTable(_) => NodeType::VTable,
-                NodePayload::ClosureEnv(_) => NodeType::ClosureEnv,
-                NodePayload::StructDef(_) => NodeType::StructDef,
-                NodePayload::EnumDef(_) => NodeType::EnumDef,
-                NodePayload::Match(_) => NodeType::Match,
-                NodePayload::ConstantTime(_) => NodeType::ConstantTime,
-                NodePayload::Syscall(_) => NodeType::Effect,
-            };
-            let id = scg.add_node(node_type, payload, pp);
-            node_ids.push(id);
-        }
+#[test]
+fn prop_scg_random_edges_valid() {
+    let (mut scg, node_ids) = build_sample_scg();
+    assert!(
+        node_ids.len() >= 2,
+        "sample SCG should have at least 2 nodes for edge tests"
+    );
 
-        // Add edges between random pairs of existing nodes.
-        for (i, kind) in edge_kinds.into_iter().enumerate() {
-            let src_idx = i % node_ids.len();
-            let tgt_idx = (i + 1) % node_ids.len();
-            let result = scg.add_edge(node_ids[src_idx], node_ids[tgt_idx], kind);
-            prop_assert!(result.is_ok(), "Edge between valid nodes should succeed");
-        }
-
-        // Verify all edges connect existing nodes.
-        let node_id_set: std::collections::HashSet<NodeId> = node_ids.into_iter().collect();
-        for edge in scg.edges() {
-            prop_assert!(
-                node_id_set.contains(&edge.source),
-                "Edge source should be a valid node"
-            );
-            prop_assert!(
-                node_id_set.contains(&edge.target),
-                "Edge target should be a valid node"
-            );
-        }
+    // Add edges of every kind, cycling through node pairs.
+    for (i, kind) in all_edge_kinds().into_iter().enumerate() {
+        let src_idx = i % node_ids.len();
+        let tgt_idx = (i + 1) % node_ids.len();
+        let result = scg.add_edge(node_ids[src_idx], node_ids[tgt_idx], kind.clone());
+        assert!(
+            result.is_ok(),
+            "Edge between valid nodes should succeed for kind {:?}",
+            kind
+        );
     }
 
-    /// Adding an edge to a non-existent node should fail.
-    #[test]
-    fn prop_scg_edge_to_nonexistent_node_fails(
-        payload in arb_computation_payload(),
-        pp in arb_program_point(),
-        kind in arb_edge_kind()
-    ) {
-        let mut scg = SCG::new();
-        let node_id = scg.add_node(NodeType::Computation, payload, pp);
-        let fake_id = NodeId::new(99999);
+    // Verify all edges connect existing nodes.
+    let node_id_set: std::collections::HashSet<NodeId> = node_ids.into_iter().collect();
+    for edge in scg.edges() {
+        assert!(
+            node_id_set.contains(&edge.source),
+            "Edge source should be a valid node"
+        );
+        assert!(
+            node_id_set.contains(&edge.target),
+            "Edge target should be a valid node"
+        );
+    }
+}
 
-        // Edge from real to fake should fail.
-        let result = scg.add_edge(node_id, fake_id, kind);
-        prop_assert!(result.is_err(), "Edge to non-existent node should fail");
+#[test]
+fn prop_scg_edge_to_nonexistent_node_fails() {
+    for payload in sample_node_payloads() {
+        for kind in all_edge_kinds() {
+            let mut scg = SCG::new();
+            let node_id =
+                scg.add_node(payload_type(&payload), payload.clone(), sample_program_point());
+            let fake_id = NodeId::new(99999);
 
-        // Edge from fake to real should also fail.
-        let result = scg.add_edge(fake_id, node_id, EdgeKind::ControlFlow);
-        prop_assert!(result.is_err(), "Edge from non-existent node should fail");
+            // Edge from real to fake should fail.
+            let result = scg.add_edge(node_id, fake_id, kind.clone());
+            assert!(
+                result.is_err(),
+                "Edge to non-existent node should fail for kind {:?}",
+                kind
+            );
+
+            // Edge from fake to real should also fail.
+            let result = scg.add_edge(fake_id, node_id, EdgeKind::ControlFlow);
+            assert!(
+                result.is_err(),
+                "Edge from non-existent node should fail for kind {:?}",
+                kind
+            );
+        }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: Verification Pipeline
+// Tests: Verification Pipeline
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// Verify that VumaCompiler::verify() doesn't panic on random programs.
-    #[test]
-    fn prop_verify_no_panic(program in arb_vuma_program()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn prop_verify_no_panic() {
+    use vuma::api::VumaCompiler;
 
-        let compiler = VumaCompiler::new();
-        let report = compiler.verify(&program);
+    let compiler = VumaCompiler::new();
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let report = compiler.verify(program);
 
         // The report should always be non-empty (even on error).
-        prop_assert!(
+        assert!(
             report.metadata.source_bytes > 0,
             "Metadata should record source size"
         );
     }
+}
 
-    /// Verify that the verification report is always serializable.
-    #[test]
-    fn prop_verify_report_serializable(program in arb_vuma_program()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn prop_verify_report_serializable() {
+    use vuma::api::VumaCompiler;
 
-        let compiler = VumaCompiler::new();
-        let report = compiler.verify(&program);
+    let compiler = VumaCompiler::new();
+    for &program in SAMPLE_VUMA_PROGRAMS {
+        let report = compiler.verify(program);
 
         let json_result = serde_json::to_string(&report);
-        prop_assert!(
+        assert!(
             json_result.is_ok(),
             "VerificationReport should always be serializable"
         );
@@ -662,222 +687,171 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: IVE Verification on Random SCGs
+// Tests: IVE Verification on Sample SCGs
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// IVE verification on a random SCG should not panic and should
-    /// produce results for all 5 invariants.
-    #[test]
-    fn prop_ive_verify_all_invariants(
-        nodes in prop::collection::vec(
-            (arb_node_payload(), arb_program_point()),
-            1..10
-        )
-    ) {
-        let mut scg = SCG::new();
+#[test]
+fn prop_ive_verify_all_invariants() {
+    let (scg, _node_ids) = build_sample_scg();
 
-        for (payload, pp) in nodes {
-            let node_type = match &payload {
-                NodePayload::Computation(_) => NodeType::Computation,
-                NodePayload::Allocation(_) => NodeType::Allocation,
-                NodePayload::Deallocation(_) => NodeType::Deallocation,
-                NodePayload::Access(_) => NodeType::Access,
-                NodePayload::Control(_) => NodeType::Control,
-                NodePayload::Cast(_) => NodeType::Cast,
-                NodePayload::Effect(_) => NodeType::Effect,
-                NodePayload::Phantom(_) => NodeType::Phantom,
-                NodePayload::VTable(_) => NodeType::VTable,
-                NodePayload::ClosureEnv(_) => NodeType::ClosureEnv,
-                NodePayload::StructDef(_) => NodeType::StructDef,
-                NodePayload::EnumDef(_) => NodeType::EnumDef,
-                NodePayload::Match(_) => NodeType::Match,
-                NodePayload::ConstantTime(_) => NodeType::ConstantTime,
-                NodePayload::Syscall(_) => NodeType::Effect,
-            };
-            scg.add_node(node_type, payload, pp);
-        }
+    let aggregator = vuma_ive::InvariantAggregator::new();
+    let input = vuma_ive::verification::VerificationInput::from_scg(scg);
+    let result = aggregator.verify_all(&input);
 
-        let aggregator = vuma_ive::InvariantAggregator::new();
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg);
-        let result = aggregator.verify_all(&input);
+    // Should always produce a result (even for a trivial SCG).
+    assert!(
+        !result.per_invariant.is_empty(),
+        "Should have at least some invariant results"
+    );
 
-        // Should always produce a result (even for an empty/trivial SCG).
-        prop_assert!(
-            !result.per_invariant.is_empty(),
-            "Should have at least some invariant results"
-        );
-
-        // The overall verdict should be one of the known variants.
-        prop_assert!(matches!(
-            result.overall,
-            vuma_ive::OverallVerdict::Pass
+    // The overall verdict should be one of the known variants.
+    assert!(matches!(
+        result.overall,
+        vuma_ive::OverallVerdict::Pass
             | vuma_ive::OverallVerdict::Fail
             | vuma_ive::OverallVerdict::Inconclusive
             | vuma_ive::OverallVerdict::NoChecks
-        ));
-    }
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: FP Conversion Roundtrip
+// Tests: FP Conversion Roundtrip
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate a random f64 that is not NaN.
-fn arb_normal_f64() -> impl Strategy<Value = f64> {
-    any::<u64>().prop_map(|bits| {
-        let v = f64::from_bits(bits);
-        // Replace NaN with 0.0 to keep values finite and comparable.
-        if v.is_nan() { 0.0 } else { v }
-    })
-}
-
-/// Generate a random finite f64 (not NaN, not Inf).
-fn arb_finite_f64() -> impl Strategy<Value = f64> {
-    any::<u64>().prop_map(|bits| {
-        let v = f64::from_bits(bits);
-        if v.is_nan() || v.is_infinite() { 0.0 } else { v }
-    })
-}
-
-proptest! {
-    /// Bit-level roundtrip: `f64::from_bits(x.to_bits())` should equal `x`
-    /// for all non-NaN values.
-    #[test]
-    fn prop_fp_bitcast_roundtrip(bits in any::<u64>()) {
+#[test]
+fn prop_fp_bitcast_roundtrip() {
+    for &bits in FP_BIT_PATTERNS {
         let x = f64::from_bits(bits);
         if !x.is_nan() {
-            prop_assert_eq!(f64::from_bits(x.to_bits()), x,
+            assert_eq!(
+                f64::from_bits(x.to_bits()),
+                x,
                 "f64 bit roundtrip should be lossless for {:?} (bits={:#018x})",
-                x, bits);
+                x,
+                bits
+            );
         }
     }
+}
 
-    /// Int-to-float-to-int roundtrip: for i64 values in the range where
-    /// f64 can represent them exactly (|v| <= 2^53), converting
-    /// i64 → f64 → i64 should return the original value.
-    #[test]
-    fn prop_int_float_int_roundtrip(v in any::<i64>()) {
-        // f64 has 53 bits of mantissa, so only integers with |v| <= 2^53
-        // are exactly representable.
-        let exact_limit: i64 = 1i64 << 53;
-        let v_clamped = v % exact_limit; // keep within range
-        let as_f64 = v_clamped as f64;
+#[test]
+fn prop_int_float_int_roundtrip() {
+    // f64 has 53 bits of mantissa, so only integers with |v| <= 2^53
+    // are exactly representable.
+    for &v in INT_EXACT_F64_VALUES {
+        let as_f64 = v as f64;
         let back = as_f64 as i64;
-        prop_assert_eq!(back, v_clamped,
+        assert_eq!(
+            back, v,
             "i64→f64→i64 roundtrip failed: {} → {} → {}",
-            v_clamped, as_f64, back);
+            v, as_f64, back
+        );
     }
+}
 
-    /// Float-to-int-to-float roundtrip: for f64 values in i64 range that
-    /// are exactly representable as i64, the roundtrip should be lossless.
-    #[test]
-    fn prop_float_int_float_roundtrip(v in arb_finite_f64()) {
-        // Only test values that are within i64 range and round-trip cleanly.
+#[test]
+fn prop_float_int_float_roundtrip() {
+    for &v in FINITE_F64_VALUES {
+        // Only test values that are within i64 range.
         if v >= i64::MIN as f64 && v <= i64::MAX as f64 {
             let as_i64 = v as i64;
             let back = as_i64 as f64;
             // The integer value should convert back exactly.
-            prop_assert_eq!(back, as_i64 as f64,
-                "f64→i64→f64 roundtrip for integer-equivalent value: \
-                 {} → {} → {}",
-                v, as_i64, back);
+            assert_eq!(
+                back,
+                as_i64 as f64,
+                "f64→i64→f64 roundtrip for integer-equivalent value: {} → {} → {}",
+                v,
+                as_i64,
+                back
+            );
         }
     }
+}
 
-    /// Compiling a VUMA program with integer↔float casts should not panic.
-    #[test]
-    fn fp_cast_compiles_without_panic(v in arb_normal_f64()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn fp_cast_compiles_without_panic() {
+    use vuma::api::VumaCompiler;
 
-        let source = format!(
-            "fn main() {{\n    x: f64 = {};\n    y: i64 = x as i64;\n}}\n",
-            if v.is_infinite() {
-                if v.is_sign_positive() { "1.0e308 * 2.0".to_string() }
-                else { "-1.0e308 * 2.0".to_string() }
-            } else {
-                format!("{}", v)
-            }
-        );
-
-        let compiler = VumaCompiler::new();
+    let compiler = VumaCompiler::new();
+    for &source in FP_CAST_PROGRAMS {
         // Should not panic — compilation may fail for some values,
         // but should never panic.
-        let _ = compiler.compile(&source);
+        let _ = compiler.compile(source);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: Atomic CAS Correctness
+// Tests: Atomic CAS Correctness
 // ═══════════════════════════════════════════════════════════════════════════
 
-proptest! {
-    /// CAS with a matching expected value should succeed conceptually:
-    /// if the value at addr equals expected, it should be replaced with
-    /// desired, and the old value (returned in dst) should equal expected.
-    ///
-    /// We test this at the mathematical/semantic level: if `old == expected`,
-    /// then after CAS, `old == expected` (the swap succeeds).
-    #[test]
-    fn prop_atomic_cas_match_succeeds(
-        current in any::<i64>(),
-        desired in any::<i64>()
-    ) {
+#[test]
+fn prop_atomic_cas_match_succeeds() {
+    for &(current, desired) in CAS_MATCHING_PAIRS {
         // Simulate CAS: old = current, expected = current (match).
         let old = current;
         let expected = current;
         // CAS succeeds because old == expected.
         let cas_succeeded = old == expected;
-        prop_assert!(cas_succeeded,
+        assert!(
+            cas_succeeded,
             "CAS with matching expected should succeed: old={}, expected={}",
-            old, expected);
+            old, expected
+        );
         // After successful CAS, the new value should be `desired`.
         let new_value = if cas_succeeded { desired } else { old };
-        prop_assert_eq!(new_value, desired,
-            "After successful CAS, value should be desired");
+        assert_eq!(
+            new_value, desired,
+            "After successful CAS, value should be desired"
+        );
     }
+}
 
-    /// CAS with a non-matching expected value should fail conceptually:
-    /// the value should remain unchanged and the old value should NOT
-    /// equal expected.
-    #[test]
-    fn prop_atomic_cas_mismatch_fails(
-        current in any::<i64>(),
-        wrong_expected in any::<i64>()
-    ) {
-        prop_assume!(current != wrong_expected,
-            "Need different values for mismatch test");
+#[test]
+fn prop_atomic_cas_mismatch_fails() {
+    for &(current, wrong_expected) in CAS_MISMATCH_PAIRS {
+        // CAS mismatch precondition: current != wrong_expected.
+        assert_ne!(
+            current, wrong_expected,
+            "Need different values for mismatch test"
+        );
+
         let old = current;
         let expected = wrong_expected;
         let cas_succeeded = old == expected;
-        prop_assert!(!cas_succeeded,
+        assert!(
+            !cas_succeeded,
             "CAS with non-matching expected should fail: old={}, expected={}",
-            old, expected);
+            old, expected
+        );
         // After failed CAS, value should remain unchanged.
         let new_value = if cas_succeeded { 0i64 } else { old };
-        prop_assert_eq!(new_value, current,
-            "After failed CAS, value should remain unchanged");
+        assert_eq!(
+            new_value, current,
+            "After failed CAS, value should remain unchanged"
+        );
     }
+}
 
-    /// Compiling a VUMA program with atomic_cas should not panic.
-    #[test]
-    fn prop_atomic_cas_compiles(current in any::<i64>(), desired in any::<i64>()) {
-        use vuma::api::VumaCompiler;
+#[test]
+fn prop_atomic_cas_compiles() {
+    use vuma::api::VumaCompiler;
 
+    let compiler = VumaCompiler::new();
+    for &(current, desired) in CAS_MATCHING_PAIRS {
         // Generate a VUMA program that uses atomic_cas.
         let source = format!(
             "fn main() {{\n    lock = allocate(8);\n    *lock = {};\n    old = atomic_cas(lock, {}, {});\n}}\n",
             current, current, desired
         );
 
-        let compiler = VumaCompiler::new();
         // Should not panic — compilation may fail, but should never panic.
         let _ = compiler.compile(&source);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: Rotate Roundtrip
+// Tests: Rotate Roundtrip
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Rotate left (64-bit).
@@ -892,84 +866,96 @@ fn ror64(x: u64, n: u32) -> u64 {
     if n == 0 { x } else { (x >> n) | (x << (64 - n)) }
 }
 
-proptest! {
-    /// ROL(x, n) followed by ROR(x, n) should equal x for any 64-bit value
-    /// and any rotation amount.
-    #[test]
-    fn prop_rotate_roundtrip(x in any::<u64>(), n in any::<u32>()) {
-        let rotated = rol64(x, n);
-        let restored = ror64(rotated, n);
-        prop_assert_eq!(restored, x,
-            "ROL({}, {}) = {}, ROR({}, {}) = {} ≠ {}",
-            x, n, rotated, rotated, n, restored, x);
+#[test]
+fn prop_rotate_roundtrip() {
+    for &x in ROT_X_VALUES {
+        for &n in &ROT_AMOUNT_EDGE_CASES {
+            let rotated = rol64(x, n);
+            let restored = ror64(rotated, n);
+            assert_eq!(
+                restored, x,
+                "ROL({}, {}) = {}, ROR({}, {}) = {} ≠ {}",
+                x, n, rotated, rotated, n, restored, x
+            );
+        }
     }
+}
 
-    /// ROR(x, n) followed by ROL(x, n) should also equal x.
-    #[test]
-    fn prop_rotate_roundtrip_reverse(x in any::<u64>(), n in any::<u32>()) {
-        let rotated = ror64(x, n);
-        let restored = rol64(rotated, n);
-        prop_assert_eq!(restored, x,
-            "ROR({}, {}) = {}, ROL({}, {}) = {} ≠ {}",
-            x, n, rotated, rotated, n, restored, x);
+#[test]
+fn prop_rotate_roundtrip_reverse() {
+    for &x in ROT_X_VALUES {
+        for &n in &ROT_AMOUNT_EDGE_CASES {
+            let rotated = ror64(x, n);
+            let restored = rol64(rotated, n);
+            assert_eq!(
+                restored, x,
+                "ROR({}, {}) = {}, ROL({}, {}) = {} ≠ {}",
+                x, n, rotated, rotated, n, restored, x
+            );
+        }
     }
+}
 
-    /// ROL by 0 should be identity.
-    #[test]
-    fn prop_rol_zero_is_identity(x in any::<u64>()) {
-        prop_assert_eq!(rol64(x, 0), x,
-            "ROL(x, 0) should equal x");
+#[test]
+fn prop_rol_zero_is_identity() {
+    for &x in ROT_X_VALUES {
+        assert_eq!(rol64(x, 0), x, "ROL(x, 0) should equal x");
     }
+}
 
-    /// ROR by 0 should be identity.
-    #[test]
-    fn prop_ror_zero_is_identity(x in any::<u64>()) {
-        prop_assert_eq!(ror64(x, 0), x,
-            "ROR(x, 0) should equal x");
+#[test]
+fn prop_ror_zero_is_identity() {
+    for &x in ROT_X_VALUES {
+        assert_eq!(ror64(x, 0), x, "ROR(x, 0) should equal x");
     }
+}
 
-    /// ROL by 64 should be identity (full rotation).
-    #[test]
-    fn prop_rol_64_is_identity(x in any::<u64>()) {
-        prop_assert_eq!(rol64(x, 64), x,
-            "ROL(x, 64) should equal x");
+#[test]
+fn prop_rol_64_is_identity() {
+    for &x in ROT_X_VALUES {
+        assert_eq!(rol64(x, 64), x, "ROL(x, 64) should equal x");
     }
+}
 
-    /// ROR by 64 should be identity (full rotation).
-    #[test]
-    fn prop_ror_64_is_identity(x in any::<u64>()) {
-        prop_assert_eq!(ror64(x, 64), x,
-            "ROR(x, 64) should equal x");
+#[test]
+fn prop_ror_64_is_identity() {
+    for &x in ROT_X_VALUES {
+        assert_eq!(ror64(x, 64), x, "ROR(x, 64) should equal x");
     }
+}
 
-    /// ROL and ROR are inverses for rotation amounts > 64 (modular).
-    #[test]
-    fn prop_rotate_large_amount_roundtrip(x in any::<u64>(), n in 65u32..200u32) {
-        let rotated = rol64(x, n);
-        let restored = ror64(rotated, n);
-        prop_assert_eq!(restored, x,
-            "ROL/ROR roundtrip with n={} (mod 64 = {}) failed",
-            n, n % 64);
+#[test]
+fn prop_rotate_large_amount_roundtrip() {
+    for &x in ROT_X_VALUES {
+        for &n in ROT_LARGE_AMOUNTS {
+            let rotated = rol64(x, n);
+            let restored = ror64(rotated, n);
+            assert_eq!(
+                restored, x,
+                "ROL/ROR roundtrip with n={} (mod 64 = {}) failed",
+                n,
+                n % 64
+            );
+        }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: ABI Consistency
+// Tests: ABI Consistency
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Build a simple IR function with `n` i64 parameters that returns the first
 /// parameter (or 0 if no params).  This mirrors the helper in
 /// `abi_conformance.rs`.
 fn build_ir_function_with_n_args(name: &str, n: usize) -> vuma_codegen::ir::IRFunction {
-    use vuma_codegen::ir::{
-        IRFunction, IRType, IRValue, IRTerminator, VirtualRegister,
-    };
+    use vuma_codegen::ir::{IRFunction, IRType, IRValue, IRTerminator, VirtualRegister};
 
     let mut func = IRFunction::new(name);
     for i in 0..n {
         func.param_types.push(IRType::I64);
         func.params.push(IRValue::Register(i as u32));
-        func.vregs.insert(i as u32, VirtualRegister::named(i as u32, format!("a{}", i)));
+        func.vregs
+            .insert(i as u32, VirtualRegister::named(i as u32, format!("a{}", i)));
     }
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(n as u32));
@@ -983,34 +969,33 @@ fn build_ir_function_with_n_args(name: &str, n: usize) -> vuma_codegen::ir::IRFu
     func
 }
 
-proptest! {
-    /// Functions with varying argument counts should compile without
-    /// panicking on any backend.  The register allocator should handle
-    /// register-pressure overflow by spilling.
-    #[test]
-    fn prop_abi_varying_arg_counts_compile(n in 0usize..16) {
-        use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
+#[test]
+fn prop_abi_varying_arg_counts_compile() {
+    use vuma_codegen::backend::{create_backend, AllocatedProgram, BackendKind};
 
-        let backends = [
-            BackendKind::AArch64,
-            BackendKind::X86_64,
-            BackendKind::RiscV64,
-            BackendKind::Arm32,
-            BackendKind::Mips64,
-            BackendKind::PowerPC64,
-            BackendKind::LoongArch64,
-        ];
+    let backends = [
+        BackendKind::AArch64,
+        BackendKind::X86_64,
+        BackendKind::RiscV64,
+        BackendKind::Arm32,
+        BackendKind::Mips64,
+        BackendKind::PowerPC64,
+        BackendKind::LoongArch64,
+    ];
 
+    for n in 0..16usize {
         let func = build_ir_function_with_n_args("test_fn", n);
 
         for kind in &backends {
             if let Ok(backend) = create_backend(*kind) {
                 // Should not panic.
                 let result = backend.allocate_registers(&func);
-                prop_assert!(
+                assert!(
                     result.is_ok(),
                     "Register allocation for {} args on {:?} should succeed: {:?}",
-                    n, kind, result.err()
+                    n,
+                    kind,
+                    result.err()
                 );
 
                 if let Ok(allocated) = result {
@@ -1021,23 +1006,25 @@ proptest! {
                     };
                     // Encoding should also not panic.
                     let encode_result = backend.encode_program(&program);
-                    prop_assert!(
+                    assert!(
                         encode_result.is_ok(),
                         "Encoding for {} args on {:?} should succeed: {:?}",
-                        n, kind, encode_result.err()
+                        n,
+                        kind,
+                        encode_result.err()
                     );
                 }
             }
         }
     }
+}
 
-    /// Two functions with the same argument count but different names
-    /// should produce the same binary size (codegen is deterministic).
-    #[test]
-    fn prop_abi_same_arg_count_same_size(n in 1usize..8) {
-        use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
+#[test]
+fn prop_abi_same_arg_count_same_size() {
+    use vuma_codegen::backend::{create_backend, AllocatedProgram, BackendKind};
 
-        if let Ok(backend) = create_backend(BackendKind::AArch64) {
+    if let Ok(backend) = create_backend(BackendKind::AArch64) {
+        for n in 1..8usize {
             let func_a = build_ir_function_with_n_args("fn_a", n);
             let func_b = build_ir_function_with_n_args("fn_b", n);
 
@@ -1058,9 +1045,11 @@ proptest! {
                 if let (Ok(bin_a), Ok(bin_b)) =
                     (backend.encode_program(&prog_a), backend.encode_program(&prog_b))
                 {
-                    prop_assert_eq!(
-                        bin_a.len(), bin_b.len(),
-                        "Same arg count ({}) should produce same binary size", n
+                    assert_eq!(
+                        bin_a.len(),
+                        bin_b.len(),
+                        "Same arg count ({}) should produce same binary size",
+                        n
                     );
                 }
             }
@@ -1069,7 +1058,7 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: DWARF Consistency
+// Tests: DWARF Consistency
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Extract the .text section bytes from an ELF binary by parsing section
@@ -1186,15 +1175,12 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-proptest! {
-    /// Compiling with and without --debug should produce the same .text
-    /// section.  Debug info adds .debug_* sections but must not change
-    /// the generated code.
-    #[test]
-    fn prop_dwarf_text_section_unchanged(program in arb_vuma_program()) {
-        use vuma::api::VumaCompiler;
-        use vuma::pipeline::CompileConfig;
+#[test]
+fn prop_dwarf_text_section_unchanged() {
+    use vuma::api::VumaCompiler;
+    use vuma::pipeline::CompileConfig;
 
+    for &program in SAMPLE_VUMA_PROGRAMS {
         let compiler_no_debug = VumaCompiler::with_config(CompileConfig {
             debug_info: false,
             section_headers: true,
@@ -1206,13 +1192,13 @@ proptest! {
             ..CompileConfig::default()
         });
 
-        let result_no_debug = compiler_no_debug.compile(&program);
-        let result_debug = compiler_debug.compile(&program);
+        let result_no_debug = compiler_no_debug.compile(program);
+        let result_debug = compiler_debug.compile(program);
 
         if !result_no_debug.success || !result_debug.success {
-            // If either compilation fails, skip (may be due to random
-            // program generation issues).
-            return Ok(());
+            // If either compilation fails, skip (may be due to a
+            // sample program not being supported by every config).
+            continue;
         }
 
         let bin_no_debug = result_no_debug.target.as_ref().map(|t| &t.binary);
@@ -1223,7 +1209,7 @@ proptest! {
             let text_d = extract_text_section(d);
 
             if let (Some(t_nd), Some(t_d)) = (text_nd, text_d) {
-                prop_assert_eq!(
+                assert_eq!(
                     t_nd, t_d,
                     "Debug info should not change .text section"
                 );
@@ -1235,7 +1221,7 @@ proptest! {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Property Tests: FFI Symbol Emission
+// Tests: FFI Symbol Emission
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Parse the ELF symbol table and return the names of symbols with
@@ -1384,85 +1370,72 @@ fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
     undef_syms
 }
 
-/// Generate a random extern function name (valid C identifier).
-fn arb_extern_fn_name() -> impl Strategy<Value = String> {
-    "[a-zA-Z_][a-zA-Z0-9_]{0,15}"
-}
+#[test]
+fn prop_ffi_extern_symbols_are_undef() {
+    use vuma::api::VumaCompiler;
+    use vuma::pipeline::CompileConfig;
 
-proptest! {
-    /// Extern functions declared in `extern "C"` blocks should produce
-    /// SHN_UNDEF symbols in the ELF output.
-    #[test]
-    fn prop_ffi_extern_symbols_are_undef(extern_name in arb_extern_fn_name()) {
-        use vuma::api::VumaCompiler;
-        use vuma::pipeline::CompileConfig;
-
-        let source = format!(
-            "extern \"C\" {{\n    fn {}(x: i64) -> i64;\n}}\nfn main() {{\n    {}(42);\n}}\n",
-            extern_name, extern_name
-        );
-
+    for &(extern_name, source) in SAMPLE_EXTERN_PROGRAMS {
         let compiler = VumaCompiler::with_config(CompileConfig {
             section_headers: true,
             ..CompileConfig::default()
         });
 
-        let result = compiler.compile(&source);
+        let result = compiler.compile(source);
 
         // If compilation succeeds, check the ELF for the undefined symbol.
         if result.success {
             if let Some(ref target) = result.target {
                 let undef_syms = find_undef_symbols(&target.binary);
-                prop_assert!(
-                    undef_syms.contains(&extern_name),
+                assert!(
+                    undef_syms.contains(&extern_name.to_string()),
                     "Extern function '{}' should appear as SHN_UNDEF in ELF. \
                      Found undefined symbols: {:?}",
-                    extern_name, undef_syms
+                    extern_name,
+                    undef_syms
                 );
             }
         }
         // If compilation fails (e.g., extern not fully supported for
         // some target), that's acceptable — we just verify no panic.
     }
+}
 
-    /// Multiple extern functions should each produce a separate
-    /// SHN_UNDEF entry.
-    #[test]
-    fn prop_ffi_multiple_extern_symbols(
-        name1 in arb_extern_fn_name(),
-        name2 in arb_extern_fn_name()
-    ) {
-        prop_assume!(name1 != name2, "Names must be different");
+#[test]
+fn prop_ffi_multiple_extern_symbols() {
+    use vuma::api::VumaCompiler;
+    use vuma::pipeline::CompileConfig;
 
-        use vuma::api::VumaCompiler;
-        use vuma::pipeline::CompileConfig;
+    // Two distinct extern names in one program.
+    let name1 = "write";
+    let name2 = "read";
+    let source = format!(
+        "extern \"C\" {{\n    fn {}(x: i64) -> i64;\n    fn {}(x: i64) -> i64;\n}}\nfn main() {{\n    let a = {}(1);\n    let b = {}(2);\n}}\n",
+        name1, name2, name1, name2
+    );
 
-        let source = format!(
-            "extern \"C\" {{\n    fn {}(x: i64) -> i64;\n    fn {}(x: i64) -> i64;\n}}\nfn main() {{\n    let a = {}(1);\n    let b = {}(2);\n}}\n",
-            name1, name2, name1, name2
-        );
+    let compiler = VumaCompiler::with_config(CompileConfig {
+        section_headers: true,
+        ..CompileConfig::default()
+    });
 
-        let compiler = VumaCompiler::with_config(CompileConfig {
-            section_headers: true,
-            ..CompileConfig::default()
-        });
+    let result = compiler.compile(&source);
 
-        let result = compiler.compile(&source);
-
-        if result.success {
-            if let Some(ref target) = result.target {
-                let undef_syms = find_undef_symbols(&target.binary);
-                prop_assert!(
-                    undef_syms.contains(&name1),
-                    "Extern function '{}' should be SHN_UNDEF. Found: {:?}",
-                    name1, undef_syms
-                );
-                prop_assert!(
-                    undef_syms.contains(&name2),
-                    "Extern function '{}' should be SHN_UNDEF. Found: {:?}",
-                    name2, undef_syms
-                );
-            }
+    if result.success {
+        if let Some(ref target) = result.target {
+            let undef_syms = find_undef_symbols(&target.binary);
+            assert!(
+                undef_syms.contains(&name1.to_string()),
+                "Extern function '{}' should be SHN_UNDEF. Found: {:?}",
+                name1,
+                undef_syms
+            );
+            assert!(
+                undef_syms.contains(&name2.to_string()),
+                "Extern function '{}' should be SHN_UNDEF. Found: {:?}",
+                name2,
+                undef_syms
+            );
         }
     }
 }
@@ -1473,7 +1446,7 @@ proptest! {
 //
 // These tests explicitly exercise the edge-case seed values defined above.
 // They serve as regression anchors and ensure that boundary conditions
-// are always tested regardless of proptest's random generation.
+// are always tested.
 
 #[test]
 fn fuzz_int_edge_cases_conversion() {
@@ -1558,7 +1531,7 @@ fn fuzz_rotation_edge_cases() {
 
 #[test]
 fn fuzz_arg_count_edge_cases() {
-    use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
+    use vuma_codegen::backend::{create_backend, AllocatedProgram, BackendKind};
 
     for &n in &ARG_COUNT_EDGE_CASES {
         let func = build_ir_function_with_n_args("test_fn", n);
