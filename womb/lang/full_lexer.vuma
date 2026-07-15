@@ -95,7 +95,8 @@ extern "C" {
     fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32;  // ir_builder.vuma
     fn bd_infer(ir_buf: Address) -> u32;                            // ir_builder.vuma (stub)
     fn ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
-    fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u32) -> u32;  // codegen.vuma
+    fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
+    fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32;  // codegen.vuma (Wave 52)
     fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) -> u32;  // elf.vuma
 }
 
@@ -682,10 +683,14 @@ fn main() -> i32 {
     ir_cap: u32 = 1024;            // 1024 IR instructions max
     ir_buf_size: i64 = 32776;      // 8 + 1024 * 32
     code_cap: u32 = 4096;          // 4 KiB code buffer
-    // PRINT_INT_SIZE = 86 (matches codegen.vuma's constant; duplicated here
-    // because VUMA cross-module const imports don't exist yet — the extern
-    // block above covers functions only).
-    print_int_size: u32 = 86;
+    // Wave 52: the bootstrap emits its own runtime stubs (_start, print_int,
+    // __vuma_alloc, etc.) at offset 0 of the code buffer via
+    // emit_runtime_stubs() (defined in codegen.vuma). The ELF entry point is
+    // offset 0 (_start), which calls main and exits with main's return value.
+    // PRINT_INT_OFFSET = 15 (print_int is the 2nd stub, right after the
+    // 15-byte _start stub); duplicated here because VUMA cross-module const
+    // imports don't exist yet — the extern block above covers functions only.
+    print_int_offset: u32 = 15;
 
     // Linux open(2) flags for write mode (O_WRONLY|O_CREAT|O_TRUNC = 577).
     o_wronly_creat_trunc: i32 = 577;
@@ -767,22 +772,33 @@ fn main() -> i32 {
     ive_verify(ir_buf);
 
     // ── 8. x86_64 codegen (IR → machine code) ──
+    //   Wave 52: the bootstrap emits its own runtime stubs (_start, print_int,
+    //   __vuma_alloc, __vuma_free, print_newline, print_hex, __vuma_argc,
+    //   __vuma_argv, write, read, open, close) at offset 0 of the code buffer
+    //   via emit_runtime_stubs() — previously these were injected by the
+    //   Rust-side x86_64 backend. codegen_emit() then emits the user's main
+    //   function starting at offset stubs_size (= STUBS_SIZE = 337).
+    //
     //   print_int_hash = FNV-1a("print_int"). codegen_emit uses this to
     //   dispatch IR_CALL targets: a call whose callee_hash matches
     //   print_int_hash emits a relative CALL to the print_int routine at
-    //   offset 0 of the code buffer; any other callee is skipped silently
-    //   (real calls are a TODO).
+    //   offset print_int_offset (= 15) in the code buffer; any other callee
+    //   is skipped silently (real calls are a TODO).
     pistr = print_int_str();
     print_int_hash: u32 = name_hash(pistr, 0, 9);
     __vuma_free(pistr, 10);
 
     code = __vuma_alloc(code_cap);
-    code_size: u32 = codegen_emit(ir_buf, code, code_cap, print_int_hash);
+    // 8a. Emit runtime stubs at offset 0 (returns stubs_size = 337).
+    stubs_size: u32 = emit_runtime_stubs(code, code_cap);
+    // 8b. Emit user code (main) starting at offset stubs_size. codegen_emit
+    //     returns the total code size (stubs + user code).
+    code_size: u32 = codegen_emit(ir_buf, code, code_cap, stubs_size, print_int_offset, print_int_hash);
 
 
     // ── 9. ELF64 emission (machine code → a.out) ──
-    //   The ELF entry point is at code offset PRINT_INT_SIZE (= 86), which
-    //   skips the print_int routine and lands on main. See elf.vuma's
+    //   The ELF entry point is at code offset 0 (the _start stub), which
+    //   calls main and exits with main's return value. See elf.vuma's
     //   write_elf64 for the entry_offset math.
     out_path = output_path();
     out_fd: i32 = open(out_path, o_wronly_creat_trunc, mode_755);
@@ -795,7 +811,7 @@ fn main() -> i32 {
         __vuma_free(code, code_cap);
         return 1;
     }
-    success: u32 = write_elf64(code, code_size, out_fd, print_int_size);
+    success: u32 = write_elf64(code, code_size, out_fd, 0);
     close(out_fd);
 
 
