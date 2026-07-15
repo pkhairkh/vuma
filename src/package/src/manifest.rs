@@ -18,9 +18,11 @@
 //! src = "src/main.vuma"
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::PackageError;
+use crate::toml_lite::{self, Value};
 
 // ---------------------------------------------------------------------------
 // PackageManifest
@@ -45,17 +47,17 @@ impl PackageManifest {
     /// Parse a manifest from a TOML string.
     ///
     /// Wave 43 serde-migration: this previously used `#[derive(Deserialize)]`
-    /// helper structs (`RawManifest`/`RawPackage`) and `toml::from_str::<RawManifest>`
-    /// to drive TOML parsing. It now parses into a `toml::Value` first and
-    /// then navigates the value tree by hand. The on-disk TOML format is
+    /// helper structs (`RawManifest`/`RawPackage`) and a third-party TOML
+    /// deserializer. It now uses the in-tree `toml_lite` parser and
+    /// navigates the value tree by hand. The on-disk TOML format is
     /// unchanged.
     ///
-    /// The error type changed from `toml::de::Error` to `PackageError` —
-    /// `PackageError::ManifestParse` carries the human-readable message for
-    /// both low-level TOML syntax errors and high-level missing-field
-    /// validation errors.
+    /// The error type changed from a third-party deserialize error to
+    /// `PackageError` — `PackageError::ManifestParse` carries the
+    /// human-readable message for both low-level TOML syntax errors and
+    /// high-level missing-field validation errors.
     pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {
-        let root: toml::Value = toml::from_str(toml_str)
+        let root = toml_lite::parse(toml_str)
             .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
         let package = root
             .get("package")
@@ -85,13 +87,13 @@ impl PackageManifest {
         let dependencies_value = root
             .get("dependencies")
             .cloned()
-            .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+            .unwrap_or_else(Value::table);
         let dependencies = Self::parse_dependencies(&dependencies_value)?;
 
         let target_value = root
             .get("target")
             .cloned()
-            .unwrap_or(toml::Value::Array(Vec::new()));
+            .unwrap_or_else(Value::array);
         let targets = Self::parse_targets(&target_value)?;
 
         Ok(PackageManifest {
@@ -106,79 +108,81 @@ impl PackageManifest {
     /// Serialize the manifest to a TOML string.
     ///
     /// Wave 43 serde-migration: this previously used `#[derive(Serialize)]`
-    /// helper structs (`RawManifest`/`RawPackage`/`RawTarget`) and
-    /// `toml::to_string_pretty(&raw)`. It now builds a `toml::Value::Table`
-    /// by hand and serializes that. The on-disk TOML format is unchanged.
+    /// helper structs (`RawManifest`/`RawPackage`/`RawTarget`) and a
+    /// third-party TOML serializer. It now builds a `toml_lite::Value::Table`
+    /// by hand and serializes that with the in-tree `toml_lite` serializer.
+    /// The on-disk TOML format is unchanged.
     ///
-    /// The error type changed from `toml::ser::Error` to `PackageError` —
-    /// `PackageError::Other` carries the human-readable message.
+    /// The error type changed from a third-party serialize error to
+    /// `PackageError` — `PackageError::Other` carries the human-readable
+    /// message.
     pub fn to_toml(&self) -> Result<String, PackageError> {
-        let mut package_table = toml::map::Map::new();
-        package_table.insert("name".to_string(), toml::Value::String(self.name.clone()));
+        let mut package_table = BTreeMap::new();
+        package_table.insert("name".to_string(), Value::String(self.name.clone()));
         package_table.insert(
             "version".to_string(),
-            toml::Value::String(self.version.clone()),
+            Value::String(self.version.clone()),
         );
         if let Some(ref desc) = self.description {
-            package_table.insert("description".to_string(), toml::Value::String(desc.clone()));
+            package_table.insert("description".to_string(), Value::String(desc.clone()));
         }
 
         // Build dependencies as a TOML table
-        let mut dep_table = toml::map::Map::new();
+        let mut dep_table = BTreeMap::new();
         for dep in &self.dependencies {
             if let Some(ref registry) = dep.registry {
-                let mut dep_table_inner = toml::map::Map::new();
+                let mut dep_table_inner = BTreeMap::new();
                 dep_table_inner.insert(
                     "version".to_string(),
-                    toml::Value::String(dep.version.clone()),
+                    Value::String(dep.version.clone()),
                 );
                 dep_table_inner.insert(
                     "registry".to_string(),
-                    toml::Value::String(registry.clone()),
+                    Value::String(registry.clone()),
                 );
-                dep_table.insert(dep.name.clone(), toml::Value::Table(dep_table_inner));
+                dep_table.insert(dep.name.clone(), Value::Table(dep_table_inner));
             } else {
-                dep_table.insert(dep.name.clone(), toml::Value::String(dep.version.clone()));
+                dep_table.insert(dep.name.clone(), Value::String(dep.version.clone()));
             }
         }
 
         // Build targets as a TOML array of tables
-        let targets_arr: Vec<toml::Value> = self
+        let targets_arr: Vec<Value> = self
             .targets
             .iter()
             .map(|t| {
-                let mut tbl = toml::map::Map::new();
-                tbl.insert("name".to_string(), toml::Value::String(t.name.clone()));
-                tbl.insert("kind".to_string(), toml::Value::String(t.kind.to_string()));
-                tbl.insert("src".to_string(), toml::Value::String(t.src.clone()));
-                toml::Value::Table(tbl)
+                let mut tbl = BTreeMap::new();
+                tbl.insert("name".to_string(), Value::String(t.name.clone()));
+                tbl.insert("kind".to_string(), Value::String(t.kind.to_string()));
+                tbl.insert("src".to_string(), Value::String(t.src.clone()));
+                Value::Table(tbl)
             })
             .collect();
 
-        let mut root = toml::map::Map::new();
-        root.insert("package".to_string(), toml::Value::Table(package_table));
-        root.insert("dependencies".to_string(), toml::Value::Table(dep_table));
-        root.insert("target".to_string(), toml::Value::Array(targets_arr));
+        let mut root = BTreeMap::new();
+        root.insert("package".to_string(), Value::Table(package_table));
+        root.insert("dependencies".to_string(), Value::Table(dep_table));
+        root.insert("target".to_string(), Value::Array(targets_arr));
 
-        toml::to_string_pretty(&toml::Value::Table(root))
+        toml_lite::to_string_pretty(&Value::Table(root))
             .map_err(|e| PackageError::Other(e.to_string()))
     }
 
     /// Parse the `[dependencies]` section.
-    fn parse_dependencies(value: &toml::Value) -> Result<Vec<Dependency>, PackageError> {
+    fn parse_dependencies(value: &Value) -> Result<Vec<Dependency>, PackageError> {
         let mut deps = Vec::new();
 
-        if let toml::Value::Table(table) = value {
+        if let Value::Table(table) = value {
             for (name, val) in table {
                 match val {
-                    toml::Value::String(version) => {
+                    Value::String(version) => {
                         deps.push(Dependency {
                             name: name.clone(),
                             version: version.clone(),
                             registry: None,
                         });
                     }
-                    toml::Value::Table(inner) => {
+                    Value::Table(inner) => {
                         let version = inner
                             .get("version")
                             .and_then(|v| v.as_str())
@@ -203,12 +207,12 @@ impl PackageManifest {
     }
 
     /// Parse the `[[target]]` array.
-    fn parse_targets(value: &toml::Value) -> Result<Vec<PackageTarget>, PackageError> {
+    fn parse_targets(value: &Value) -> Result<Vec<PackageTarget>, PackageError> {
         let mut targets = Vec::new();
 
-        if let toml::Value::Array(arr) = value {
+        if let Value::Array(arr) = value {
             for item in arr {
-                if let toml::Value::Table(table) = item {
+                if let Value::Table(table) = item {
                     let name = table
                         .get("name")
                         .and_then(|v| v.as_str())
