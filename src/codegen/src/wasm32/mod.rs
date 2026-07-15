@@ -3287,11 +3287,10 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // backend's native numbering. No-op on wasm32 (host imports).
             // `native_nr` is reserved for future wiring (e.g. a host-import
             // index table); currently unused, so discarded alongside `args`.
-            let native_nr = crate::syscall_abi::translate(
+            let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::Wasm32,
                 *nr,
-            )
-            .unwrap_or(*nr);
+            );
             let _ = (native_nr, args);
             if let Some(d) = dst {
                 if let IRValue::Register(id) = d {

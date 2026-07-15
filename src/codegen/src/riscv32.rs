@@ -5781,11 +5781,10 @@ impl Backend for RiscV32Backend {
                         let mut code = Vec::new();
                         // Translate VUMA-generic (asm-generic) syscall number to
                         // the backend's native numbering. Identity on RISC-V.
-                        let native_nr = crate::syscall_abi::translate(
+                        let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::RiscV32,
                             *nr,
-                        )
-                        .unwrap_or(*nr);
+                        );
                         let syscall_arg_regs =
                             [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());

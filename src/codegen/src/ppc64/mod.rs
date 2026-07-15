@@ -3825,11 +3825,10 @@ impl Backend for PPC64Backend {
                         let mut code = Vec::new();
                         // Translate VUMA-generic (asm-generic) syscall number to the
                         // backend's native numbering. TODO(P1-b): per-arch table.
-                        let native_nr = crate::syscall_abi::translate(
+                        let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::PowerPC64,
                             *nr,
-                        )
-                        .unwrap_or(*nr);
+                        );
                         let syscall_arg_regs =
                             [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());

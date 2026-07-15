@@ -3084,11 +3084,10 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     // (named $t0-$t1 in the Gpr enum).
                     // Translate VUMA-generic (asm-generic) syscall number to the
                     // backend's native numbering. TODO(P1-b): per-arch table.
-                    let native_nr = crate::syscall_abi::translate(
+                    let native_nr = crate::syscall_abi::translate_or_warn(
                         crate::backend::BackendKind::Mips64,
                         *nr,
-                    )
-                    .unwrap_or(*nr);
+                    );
                     let syscall_arg_regs = [
                         Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                         Gpr::T0, Gpr::T1,
