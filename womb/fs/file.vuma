@@ -1,12 +1,13 @@
 // womb/fs/file.vuma — File I/O via raw Linux syscalls
 // Provides: open, read, write, close, read_to_string, write_file
-// All functions use extern "C" to invoke syscall stubs.
+// Uses the vuma-native syscall() intrinsic for read/write/open/close
+// (asm-generic nrs 63/64/56/57). `open` is reshaped to `openat(AT_FDCWD, ...)`
+// because asm-generic has no `open` syscall.
+// __vuma_alloc/__vuma_free remain extern "C" stubs (P2 work).
+
+const AT_FDCWD: i64 = -100;
 
 extern "C" {
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn open(path: Address, flags: i64, mode: i64) -> i64;
-    fn close(fd: i64) -> i64;
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
 }
@@ -39,7 +40,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 // On error, len = 0 and data_ptr = 0.
 fn file_read_to_buffer(path: Address, path_len: u32) -> Address {
     // Open file (need null-terminated path — assume caller provides one)
-    fd: i64 = open(path, 0, 0);  // O_RDONLY
+    fd: i64 = syscall(56, AT_FDCWD, path, 0, 0);  // openat(AT_FDCWD, path, O_RDONLY, 0)
     if fd < 0 { return 0; }
     
     // Allocate initial buffer (will grow as needed)
@@ -64,11 +65,11 @@ fn file_read_to_buffer(path: Address, path_len: u32) -> Address {
             buf_size = new_size;
             remaining = buf_size - total;
         }
-        n: i64 = read(fd, buf + total, remaining);
+        n: i64 = syscall(63, fd, buf + total, remaining as i64);
         if n <= 0 { done = 1; }
         else { total = total + (n & 0xFFFFFFFF); }
     }
-    close(fd);
+    syscall(57, fd);
     
     // Return result struct
     result = __vuma_alloc(16);
@@ -90,24 +91,24 @@ fn file_result_len(result: Address) -> u32 {
 
 // Write data to a file path. Returns bytes written, or -1 on error.
 fn file_write(path: Address, data: Address, data_len: u32) -> i32 {
-    fd: i64 = open(path, 577, 420);  // O_WRONLY|O_CREAT|O_TRUNC, 0644
+    fd: i64 = syscall(56, AT_FDCWD, path, 577, 420);  // openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
     if fd < 0 { return -1; }
-    n: i64 = write(fd, data, data_len);
-    close(fd);
+    n: i64 = syscall(64, fd, data, data_len as i64);
+    syscall(57, fd);
     if n < 0 { return -1; }
     return n & 0xFFFFFFFF;
 }
 
 // Write to stdout (fd=1)
 fn stdout_write(buf: Address, len: u32) -> i32 {
-    n: i64 = write(1, buf, len);
+    n: i64 = syscall(64, 1, buf, len as i64);
     if n < 0 { return -1; }
     return n & 0xFFFFFFFF;
 }
 
 // Write to stderr (fd=2)
 fn stderr_write(buf: Address, len: u32) -> i32 {
-    n: i64 = write(2, buf, len);
+    n: i64 = syscall(64, 2, buf, len as i64);
     if n < 0 { return -1; }
     return n & 0xFFFFFFFF;
 }
