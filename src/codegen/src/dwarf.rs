@@ -612,8 +612,6 @@ impl DwarfBuilder {
             BackendKind::PowerPC64LE => self.set_cie_ppc64(),
             BackendKind::RiscV32 => self.set_cie_riscv64(),
             BackendKind::X86_32 => self.set_cie_x86_64(),
-            BackendKind::RiscV32 => self.set_cie_riscv64(),
-            BackendKind::X86_32 => self.set_cie_x86_64(),
             BackendKind::LoongArch64 => self.set_cie_loongarch64(),
             BackendKind::Wasm32 => {
                 // Wasm32 doesn't use .debug_frame — stack unwinding is
