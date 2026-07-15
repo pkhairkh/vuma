@@ -19,7 +19,6 @@ members = [
     "src/cor",
     "src/parser",
     "src/codegen",
-    "src/std",
     "src/proof",
     "src/tests",
     "src/package",
