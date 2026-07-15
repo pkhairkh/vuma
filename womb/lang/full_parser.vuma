@@ -280,13 +280,14 @@ fn parse_primary_full(p: Address) -> u32 {
         return parse_closure(p);
     }
 
-    // Wave P1-c-8: syscall() intrinsic.
+    // Wave P1-c-8 / P1-c-8b: syscall() intrinsic (multi-arg, up to 4 args).
     //   syscall ( <int_literal_nr> , <arg_expr> , ... )
     // The nr MUST be an integer literal (peek_type == 2, INT_LIT). We read
     // its value via peek_val, advance past it, then parse the comma-separated
     // arg list exactly like NK_CALL. The nr is stashed in c1 (NOT a name
-    // hash like NK_CALL); arg_count in c3; arg0 AST node index in val (lower
-    // 32). Multi-arg stashing shares NK_CALL's single-arg limitation.
+    // hash like NK_CALL); arg_count in c3; arg AST node indices packed into
+    // val/aux (P1-c-8b): val.lo = arg0_idx, val.hi = arg1_idx,
+    // aux.lo = arg2_idx, aux.hi = arg3_idx. Unused slots are 0.
     if t == 37 {  // SYSCALL keyword
         advance(p);
         expect(p, 61);  // LPAREN
@@ -299,21 +300,31 @@ fn parse_primary_full(p: Address) -> u32 {
         nr: u32 = nr_val & 0xFFFFFFFF;
         arg_count: u32 = 0;
         arg0_idx: u32 = 0;
+        arg1_idx: u32 = 0;
+        arg2_idx: u32 = 0;
+        arg3_idx: u32 = 0;
         if peek_type(p) == 68 {  // COMMA — at least one arg follows
             advance(p);
             done: u32 = 0;
             while done == 0 {
                 arg_idx: u32 = parse_expr_full(p);
+                // P1-c-8b: stash each arg's AST node index in the correct
+                // slot based on its position (arg_count pre-increment).
                 if arg_count == 0 { arg0_idx = arg_idx; }
+                else { if arg_count == 1 { arg1_idx = arg_idx; }
+                else { if arg_count == 2 { arg2_idx = arg_idx; }
+                else { if arg_count == 3 { arg3_idx = arg_idx; } } } }
                 arg_count = arg_count + 1;
                 if peek_type(p) == 68 { advance(p); }  // COMMA → another arg
                 else { done = 1; }
             }
         }
         expect(p, 62);  // RPAREN
-        // NK_SYSCALL: c1 = nr (VUMA/asm-generic syscall number),
-        //             c3 = arg_count, val (lower 32) = arg0 AST node index.
-        return ast_node(p, NK_SYSCALL, nr, 0, arg_count, arg0_idx, 0);
+        // NK_SYSCALL: c1 = nr, c3 = arg_count, val = arg0_idx | (arg1_idx << 32),
+        // aux = arg2_idx | (arg3_idx << 32). P1-c-8b multi-arg packing.
+        packed_val: u64 = (arg0_idx as u64) | ((arg1_idx as u64) << 32);
+        packed_aux: u64 = (arg2_idx as u64) | ((arg3_idx as u64) << 32);
+        return ast_node(p, NK_SYSCALL, nr, 0, arg_count, packed_val, packed_aux);
     }
 
     return ast_node(p, 0, 0, 0, 0, 0, 0);  // error

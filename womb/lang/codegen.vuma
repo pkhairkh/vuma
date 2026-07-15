@@ -167,6 +167,34 @@ fn enc_load_rdi(code: Address, pos: u32, offset: u32) -> u32 {
     return pos + 4;
 }
 
+// MOV rsi, [rbp+disp8]: 48 8B 75 <disp8>  (Wave P1-c-8b: syscall arg1)
+fn enc_load_rsi(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x75);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
+// MOV rdx, [rbp+disp8]: 48 8B 55 <disp8>  (Wave P1-c-8b: syscall arg2)
+fn enc_load_rdx(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x55);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
+// MOV r10, [rbp+disp8]: 4C 8B 55 <disp8>  (Wave P1-c-8b: syscall arg3)
+// (REX.WR for r10: W=1 64-bit operand, R=1 extends ModR/M reg field to r10.)
+fn enc_load_r10(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x4C);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x55);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
 // IMUL rax, rcx: 48 0F AF C1
 fn enc_imul_rax_rcx(code: Address, pos: u32) -> u32 {
     emit_byte(code, pos, 0x48);
@@ -966,6 +994,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
         lhs: u32 = load_u32(ir_buf, op_off + 8);
         rhs: u32 = load_u32(ir_buf, op_off + 12);
         imm: u64 = load_u64(ir_buf, op_off + 16);
+        aux: u64 = load_u64(ir_buf, op_off + 24);  // P1-c-8b: needed for IR_SYSCALL multi-arg
 
         if op == 16 {  // IR_MOV: dst = imm
             pos = enc_mov_rax_imm64(code, pos, imm);
@@ -1003,17 +1032,31 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             }
             // else: real calls not supported in bootstrap; skip silently.
         }}
-        else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8)
+        else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8 / P1-c-8b)
             // x86_64 syscall ABI: nr in EAX, args in RDI/RSI/RDX/R10/R8/R9,
             // result in RAX. lhs = VUMA/asm-generic nr (translate first),
-            // rhs = arg_count, imm (lower 32) = arg0_vreg.
-            // TODO: multi-arg — bootstrap only stashes arg0 (same single-arg
-            // limitation as IR_CALL). For arg_count >= 1 we load arg0 into
-            // RDI. arg1..arg5 (RSI/RDX/R10/R8/R9) need a side buffer.
+            // rhs = arg_count, imm.lo=arg0_vreg, imm.hi=arg1_vreg,
+            // aux.lo=arg2_vreg, aux.hi=arg3_vreg. P1-c-8b multi-arg.
+            // Load args in REVERSE order (arg3 → arg2 → arg1 → arg0) so
+            // no later load clobbers an earlier-loaded register: every
+            // load reads from a distinct stack slot, so order doesn't
+            // strictly matter, but reverse order is the defensive choice.
             native_nr: u32 = translate_syscall_nr_x86_64(lhs);
+            arg0_v: u32 = imm & 0xFFFFFFFF;
+            arg1_v: u32 = (imm >> 32) & 0xFFFFFFFF;
+            arg2_v: u32 = aux & 0xFFFFFFFF;
+            arg3_v: u32 = (aux >> 32) & 0xFFFFFFFF;
+            if rhs >= 4 {
+                pos = enc_load_r10(code, pos, vreg_offset(arg3_v));
+            }
+            if rhs >= 3 {
+                pos = enc_load_rdx(code, pos, vreg_offset(arg2_v));
+            }
+            if rhs >= 2 {
+                pos = enc_load_rsi(code, pos, vreg_offset(arg1_v));
+            }
             if rhs >= 1 {
-                arg0: u32 = imm & 0xFFFFFFFF;
-                pos = enc_load_rdi(code, pos, vreg_offset(arg0));
+                pos = enc_load_rdi(code, pos, vreg_offset(arg0_v));
             }
             pos = enc_mov_eax_imm32(code, pos, native_nr);
             pos = enc_syscall(code, pos);
