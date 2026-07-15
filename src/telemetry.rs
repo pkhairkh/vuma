@@ -284,7 +284,7 @@ impl TelemetryCollector {
     /// Produce the final telemetry report.
     pub fn finalize(self) -> TelemetryReport {
         let total_time_ms = self.start_time.elapsed().as_millis() as u64;
-        let timestamp = chrono::Utc::now().to_rfc3339();
+        let timestamp = crate::time::now_utc_rfc3339();
 
         TelemetryReport {
             version: env!("CARGO_PKG_VERSION").to_string(),
