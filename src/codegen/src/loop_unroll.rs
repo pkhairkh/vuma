@@ -449,7 +449,8 @@ pub fn unroll_loops(mut func: IRFunction) -> IRFunction {
         }
     }
 
-    // Phase 3: Unroll-and-jam (Wave 30 stub — no-op, TODO).
+    // Phase 3: Unroll-and-jam (Wave 30) — delegates to the real
+    // conservative `try_unroll_and_jam` implementation below.
     func = try_unroll_and_jam(func);
 
     func

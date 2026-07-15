@@ -17,7 +17,6 @@
 //! | `vuma-codegen`  | IR lowering, register allocation, 10 backends    |
 //! | `vuma-proof`    | Proof generation and checking                    |
 //! | `vuma-cor`      | Continuous Optimization Runtime                  |
-//! | `vuma-std`      | Standard library (host-side)                     |
 //! | `vuma-tests`    | Integration tests and benchmarks                 |
 //! | `vuma-package`  | Package manager                                  |
 //!

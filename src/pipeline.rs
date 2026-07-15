@@ -5373,12 +5373,12 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 /// equality (Task 7-c).
 ///
 /// Two fn definitions are "equivalent" iff their ASTs are identical
-/// **modulo source spans**. We achieve this by serializing both `FnDef`s
-/// to JSON via `serde_json` (which both `FnDef` and every type it
-/// transitively contains derive `Serialize` for — see
-/// `src/parser/src/ast.rs`), recursively stripping every `"span"` field
-/// from the resulting JSON trees via [`strip_spans`], and then comparing
-/// the two normalised JSON values with `PartialEq<serde_json::Value>`.
+/// **modulo source spans**. We achieve this by formatting both `FnDef`s
+/// with the `Debug` trait (`format!("{:?}", …)`), normalising every
+/// `Span { start: N, end: M }` sub-string in each Debug string to the
+/// fixed placeholder `Span { start: 0, end: 0 }` via
+/// [`normalize_spans_in_debug`], and then comparing the two normalised
+/// strings for equality.
 ///
 /// # Why span-agnostic?
 ///
@@ -5395,7 +5395,7 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 ///
 /// Span-agnostic equality is the correct relation: two fns are "the same
 /// preamble helper" iff their source text (modulo whitespace and span
-/// positions) parses to the same AST. The `serde_json` + `strip_spans`
+/// positions) parses to the same AST. The Debug-string + span-normalisation
 /// approach gives us exactly this relation without requiring us to add
 /// `#[derive(PartialEq)]` to ~30 AST types and write a span-erasing
 /// visitor pass.
@@ -5423,12 +5423,12 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 ///
 /// # Failure mode
 ///
-/// If either `FnDef` fails to serialize (which should never happen —
-/// every AST type derives `Serialize` and contains only serialisable
-/// fields), the function returns `false` (treat as "not equivalent",
-/// which causes [`merge_module_asts`] to emit a conflict error). This is
-/// a fail-safe default: if the comparison itself crashes, the user gets
-/// an error rather than a silently-wrong dedup.
+/// `format!("{:?}", …)` is infallible for `FnDef` (every AST type
+/// derives `Debug` and contains only `Debug`-able fields), so this
+/// function has no failure path: it always returns `true` (the two
+/// normalised Debug strings are byte-identical) or `false` (they
+/// differ in some non-`span` field). There is no "comparison crashed"
+/// case to fall back from.
 fn fn_defs_equivalent(a: &vuma_parser::ast::FnDef, b: &vuma_parser::ast::FnDef) -> bool {
     // Span-agnostic comparison via Debug-string normalization (Task 8-a).
     //
