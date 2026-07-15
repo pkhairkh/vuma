@@ -5,9 +5,7 @@
 // Unlike the stack-local `let` slots, heap buffers survive function returns.
 // This enables cross-function dynamic data structures.
 
-extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-}
+// (No extern "C" declarations — write syscall is invoked via syscall() intrinsic where needed.)
 
 // ── Store/load helpers (little-endian) ──
 
