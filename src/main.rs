@@ -1807,18 +1807,10 @@ fn main() {
     };
 
     // Initialize the VUMA structured logger.
+    // `vuma_log!` (and the `log_error!` / `log_warn!` / `log_info!` /
+    // `log_debug!` / `log_trace!` macros) is the sole logging mechanism in
+    // this self-hosted compiler — there is no third-party `log` crate bridge.
     init_logger(log_level);
-
-    // Also set up the `log` crate bridge so that internal log::info! etc.
-    // go through our structured logger.
-    let _ = log::set_boxed_logger(Box::new(vuma::logging::VumaLogBridge));
-    log::set_max_level(match log_level {
-        LogLevel::Error => log::LevelFilter::Error,
-        LogLevel::Warn => log::LevelFilter::Warn,
-        LogLevel::Info => log::LevelFilter::Info,
-        LogLevel::Debug => log::LevelFilter::Debug,
-        LogLevel::Trace => log::LevelFilter::Trace,
-    });
 
     let cli = Cli::parse();
 
