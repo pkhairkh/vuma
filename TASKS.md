@@ -729,8 +729,11 @@
 
 # Wave 48 — Bootstrap: full pipeline (lexer → parser → AST → IR → codegen → ELF)
 
-> Currently `src/bootstrap/vuma_compiler.vuma` (730 LOC) is a lexer POC that
-> hardcodes a 47-byte input.
+> The bootstrap compiler lives in `womb/lang/full_lexer.vuma` (811 lines) — the
+> entry point of a 5-file self-hosted VUMA compiler pipeline
+> (`full_lexer` + `full_parser` + `ir_builder` + `codegen` + `elf`). It reads
+> `argv[1]` via `__vuma_argc`/`__vuma_argv` runtime stubs (Wave 47) and compiles
+> the named `.vuma` file through lex → parse → AST → IR → x86_64 codegen → ELF64.
 
 - [x] **[BOOT]** Implement a real parser (not just `lex_next_token`) in the bootstrap compiler.
 - [x] **[BOOT]** Implement AST construction.
