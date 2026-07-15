@@ -20,7 +20,7 @@
 //! | `ControlNode::Continue` | `Branch` to loop header                           |
 //! | `ControlNode::Switch` | Cascading `Cmp`+`CondBranch` for each arm + merge   |
 //! | `AllocationNode::Stack` | `Alloc` + stack slot registration                  |
-//! | `AllocationNode::Heap`  | `Call` to `__vuma_alloc`                           |
+//! | `AllocationNode::Heap`  | `Syscall` (mmap, nr 222) — P2 native lowering       |
 //! | `AccessNode::Load`    | Optional `Offset` + `Load`                           |
 //! | `AccessNode::Store`   | Optional `Offset` + `Store`                          |
 //! | `CastNode`            | `Cast` (zext / sext / trunc / bitcast)               |
@@ -2610,7 +2610,7 @@ impl IRBuilder {
     /// Lower an allocation node.
     ///
     /// - `AllocationNode::Stack` → `IRInstruction::Alloc` + stack slot tracking
-    /// - `AllocationNode::Heap` → `IRInstruction::Call` to the runtime allocator
+    /// - `AllocationNode::Heap` → `IRInstruction::Syscall` (mmap, nr 222) — P2
     fn lower_allocation(
         &mut self,
         alloc: &AllocationNode,
@@ -2641,11 +2641,30 @@ impl IRBuilder {
                 names.insert(name.clone(), vreg);
                 // Mark this vreg as a pointer for Store/Load width
                 self.pointer_vregs.insert(vreg);
-                ir_func.current_block().push(IRInstruction::Call {
+                // P2: Lower allocate() directly to IRInstr::Syscall (mmap)
+                // instead of a Call to the Rust-emitted `__vuma_alloc` runtime
+                // stub. This eliminates the last Rust-wrapper dependency in
+                // the heap-allocation path.
+                //
+                // mmap syscall (asm-generic nr 222 on aarch64/riscv64/...):
+                //   mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+                //   args in positional order X0..X5: addr, length, prot, flags, fd, offset
+                //   PROT_READ|PROT_WRITE = 1|2 = 3
+                //   MAP_PRIVATE|MAP_ANONYMOUS = 2|0x20 = 0x22
+                //   fd = -1 (required with MAP_ANONYMOUS)
+                // The dst vreg receives the returned pointer (or MAP_FAILED=-1
+                // on error, matching the prior stub's no-error-check behavior).
+                ir_func.current_block().push(IRInstruction::Syscall {
+                    nr: 222,
+                    args: vec![
+                        IRValue::Immediate(0),    // addr = NULL
+                        size_val,                 // length = size
+                        IRValue::Immediate(3),    // prot = PROT_READ|PROT_WRITE
+                        IRValue::Immediate(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                        IRValue::Immediate(-1),   // fd = -1 (MAP_ANONYMOUS)
+                        IRValue::Immediate(0),    // offset = 0
+                    ],
                     dst: Some(IRValue::Register(vreg)),
-                    func: "__vuma_alloc".to_string(),
-                    args: vec![size_val],
-                    is_extern: true,
                 });
             }
         }
@@ -4631,7 +4650,7 @@ mod tests {
             .any(|i| matches!(i, IRInstruction::Alloc { .. })));
     }
 
-    // ── Test 9: Heap allocation (call to allocator) ──────────────────
+    // ── Test 9: Heap allocation (lowers to mmap syscall) ─────────────
 
     #[test]
     fn test_heap_allocation() {
@@ -4650,14 +4669,38 @@ mod tests {
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let call_instr = block
+        // P2: `allocate(size)` (heap path) now lowers directly to
+        // `IRInstr::Syscall { nr: 222 (mmap), args: [0, size, 3, 0x22, -1, 0],
+        // dst: Some(vreg) }` instead of a Call to `__vuma_alloc`.
+        let syscall_instr = block
             .instructions
             .iter()
-            .find(|i| matches!(i, IRInstruction::Call { func, .. } if func == "__vuma_alloc"));
+            .find(|i| matches!(i, IRInstruction::Syscall { nr: 222, .. }));
         assert!(
-            call_instr.is_some(),
-            "heap allocation should call __vuma_alloc"
+            syscall_instr.is_some(),
+            "heap allocation should lower to IRInstr::Syscall {{ nr: 222 (mmap) }}"
         );
+        if let Some(IRInstruction::Syscall { nr, args, dst }) = syscall_instr {
+            assert_eq!(*nr, 222, "mmap syscall number");
+            assert_eq!(args.len(), 6, "mmap takes 6 positional args");
+            assert_eq!(args[0], IRValue::Immediate(0), "addr = NULL");
+            assert_eq!(args[1], IRValue::Immediate(128), "length = size");
+            assert_eq!(
+                args[2],
+                IRValue::Immediate(3),
+                "prot = PROT_READ|PROT_WRITE"
+            );
+            assert_eq!(
+                args[3],
+                IRValue::Immediate(0x22),
+                "flags = MAP_PRIVATE|MAP_ANONYMOUS"
+            );
+            assert_eq!(args[4], IRValue::Immediate(-1), "fd = -1 (MAP_ANONYMOUS)");
+            assert_eq!(args[5], IRValue::Immediate(0), "offset = 0");
+            assert!(dst.is_some(), "mmap dst should be Some (the vreg)");
+        } else {
+            panic!("expected IRInstr::Syscall {{ nr: 222 }} for heap allocation");
+        }
     }
 
     // ── Test 10: Load and store with offset ──────────────────────────
