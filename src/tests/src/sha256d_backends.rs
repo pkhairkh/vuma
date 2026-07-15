@@ -930,6 +930,7 @@ mod x86_64_execution {
     /// Execute raw x86_64 machine code by mapping it into executable memory.
     fn execute_native(code: &[u8]) -> i64 {
         use std::ptr;
+        use crate::ffi_types as ffi;
 
         let len = code.len();
         let page_size = 4096usize;
@@ -937,30 +938,30 @@ mod x86_64_execution {
         let aligned_len = ((len + page_size - 1) / page_size) * page_size;
 
         unsafe {
-            let mem = libc::mmap(
+            let mem = ffi::mmap(
                 ptr::null_mut(),
                 aligned_len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                ffi::PROT_READ | ffi::PROT_WRITE,
+                ffi::MAP_PRIVATE | ffi::MAP_ANONYMOUS,
                 -1,
                 0,
             );
 
-            assert!(mem != libc::MAP_FAILED, "mmap failed in test");
+            assert!(mem != ffi::MAP_FAILED, "mmap failed in test");
 
             ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
 
-            let mprotect_result = libc::mprotect(
+            let mprotect_result = ffi::mprotect(
                 mem,
                 aligned_len,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                ffi::PROT_READ | ffi::PROT_WRITE | ffi::PROT_EXEC,
             );
             assert_eq!(mprotect_result, 0, "mprotect failed in test");
 
             let func: extern "C" fn() -> i64 = std::mem::transmute(mem);
             let result = func();
 
-            libc::munmap(mem, aligned_len);
+            ffi::munmap(mem, aligned_len);
 
             result
         }

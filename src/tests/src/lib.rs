@@ -57,6 +57,12 @@
 pub mod bd_inference;
 pub mod benchmarks;
 
+/// Local C type aliases, POSIX constants, and raw FFI veneers for
+/// `mmap`/`mprotect`/`munmap` — replaces the `libc` crate dependency.
+///
+/// See [`ffi_types`] for the full module documentation.
+pub mod ffi_types;
+
 #[cfg(test)]
 pub mod codegen;
 #[cfg(test)]
