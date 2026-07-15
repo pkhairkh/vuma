@@ -868,7 +868,7 @@ impl FunctionSummary {
             ("return_type".to_string(), json_str(&self.return_type)),
             ("node_count".to_string(), JsonValue::U64(self.node_count as u64)),
             ("calls".to_string(), JsonValue::Array(
-                self.calls.iter().map(|c| json_str(c)).collect(),
+                self.calls.iter().map(json_str).collect(),
             )),
         ])
     }
@@ -897,10 +897,10 @@ impl AstSummary {
         JsonValue::Object(vec![
             ("item_count".to_string(), JsonValue::U64(self.item_count as u64)),
             ("function_names".to_string(), JsonValue::Array(
-                self.function_names.iter().map(|s| json_str(s)).collect(),
+                self.function_names.iter().map(json_str).collect(),
             )),
             ("region_names".to_string(), JsonValue::Array(
-                self.region_names.iter().map(|s| json_str(s)).collect(),
+                self.region_names.iter().map(json_str).collect(),
             )),
             ("import_count".to_string(), JsonValue::U64(self.import_count as u64)),
         ])
@@ -1087,7 +1087,7 @@ impl CounterexampleInfo {
         JsonValue::Object(vec![
             ("description".to_string(), json_str(&self.description)),
             ("execution_trace".to_string(), JsonValue::Array(
-                self.execution_trace.iter().map(|s| json_str(s)).collect(),
+                self.execution_trace.iter().map(json_str).collect(),
             )),
         ])
     }
@@ -1207,7 +1207,7 @@ impl VerificationReport {
                 self.invariants.iter().map(|i| i.to_json_value()).collect(),
             )),
             ("diagnostics".to_string(), JsonValue::Array(
-                self.diagnostics.iter().map(|s| json_str(s)).collect(),
+                self.diagnostics.iter().map(json_str).collect(),
             )),
             ("metadata".to_string(), self.metadata.to_json_value()),
         ])
