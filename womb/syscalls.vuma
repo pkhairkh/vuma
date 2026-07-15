@@ -1,0 +1,252 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/syscalls.vuma — VUMA-generic syscall number reference (DOCUMENTATION)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is a DOCUMENTATION-ONLY reference. It contains no `fn` definitions
+// and no `extern` blocks — only `//` comments and a handful of `const`
+// declarations for argument-flag values. Womb has no `import` mechanism yet
+// (Open Work §7), so this file is NOT imported by other womb modules. Programmers
+// consult this table to look up the literal syscall number, then write the call
+// site inline:
+//
+//     let written: i64 = syscall(64, fd, buf, len);   // write(fd, buf, len)
+//
+// ── VUMA-generic numbering ─────────────────────────────────────────────────
+//
+// The `syscall(nr, args...)` intrinsic uses the VUMA-generic syscall numbering,
+// which is the Linux `asm-generic/unistd.h` table (the modern unified Linux
+// ABI). All numbers in this file are asm-generic numbers.
+//
+// These numbers are used as the FIRST argument to the `syscall(nr, ...)` intrinsic.
+//
+// ── Parser constraint: `nr` MUST be an integer literal ─────────────────────
+//
+// The VUMA parser (src/parser/src/parser.rs, `syscall` parsing branch around
+// line 2387) requires `nr` — the first argument — to be an INTEGER LITERAL.
+// It rejects consts, variables, and any non-literal expression with the error
+// "syscall number (first argument) must be an integer literal". Therefore every
+// call site MUST inline the literal number directly: write `syscall(64, ...)`,
+// NOT `syscall(NR_WRITE, ...)`. (The remaining arguments — args 2..N — may be
+// consts or variables; only `nr` is restricted to a literal.)
+//
+// ── Codegen translates generic → native per-arch automatically ─────────────
+//
+// The codegen backends translate the VUMA-generic number to the target arch's
+// native syscall number automatically, via
+// `src/codegen/src/syscall_abi.rs::translate(backend, generic_nr)`. The womb
+// programmer writes ONLY the generic number — never the native number.
+//
+//   * Identity arches (native number == generic number, no translation):
+//       aarch64, riscv64, riscv32, loongarch64, arm32 (EABI).
+//   * Translated arches (codegen remaps generic → native):
+//       x86_64 — e.g. write 64 → 1, read 63 → 0, mmap 222 → 9.
+//       x86_32 — e.g. write 64 → 4, read 63 → 3, mmap 222 → 90.
+//   * wasm32 — does NOT use syscalls at all. The wasm32 backend uses `vuma.*`
+//       host imports instead; the `syscall` intrinsic returns -ENOSYS (-38)
+//       there and is not meaningful on that target.
+//
+// ── Signature note: asm-generic is the MODERN Linux ABI ────────────────────
+//
+// asm-generic/unistd.h is the modern Linux syscall ABI. Several legacy syscall
+// NAMES do NOT exist in this ABI and must NOT be used. Use the modern
+// replacement instead:
+//
+//     legacy `open`    → use `openat(AT_FDCWD, pathname, flags, mode)`     (nr 56)
+//     legacy `stat`    → use `newfstatat(AT_FDCWD, pathname, statbuf, 0)`  (nr 79)
+//     legacy `lstat`   → use `newfstatat(AT_FDCWD, pathname, statbuf, AT_SYMLINK_NOFOLLOW)` (nr 79)
+//     legacy `fork`    → use `clone(flags, ...)` (nr 220) or `clone3(...)` (nr 435)
+//     legacy `poll`    → use `ppoll(fds, nfds, timeout_ts, sigmask)`       (nr 73)
+//     legacy `getdents`→ use `getdents64(fd, dirp, count)`                 (nr 61)
+//
+// `AT_FDCWD = -100` (declared as a `const` below) is the special dirfd value
+// meaning "interpret pathname relative to the current working directory".
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Argument-flag constants (NOT syscall numbers)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The constants below are ARGUMENT VALUES passed to syscalls (e.g. the `prot`
+// arg of mmap, the `dirfd` arg of openat). They are NOT syscall numbers and
+// MUST NOT be passed as the first argument to `syscall(nr, ...)`. Only `nr`
+// (the first arg) must be an integer literal; these consts are usable as the
+// 2nd..Nth arguments.
+
+const AT_FDCWD: i64 = -100;          // special dirfd: cwd-relative path (for openat/newfstatat/...)
+const PROT_READ: i32 = 1;            // mmap prot: pages readable
+const PROT_WRITE: i32 = 2;           // mmap prot: pages writable
+const MAP_PRIVATE: i32 = 2;          // mmap flags: private copy-on-write mapping
+const MAP_ANONYMOUS: i32 = 32;       // mmap flags: not backed by any file (Linux asm-generic)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Syscall reference table (Linux asm-generic/unistd.h numbers)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each entry:
+//   <nr>  <name>(<arg types>) -> <ret type>   // <one-line note>
+//
+// `Address` is the VUMA pointer/raw-address type. `!` means the call does not
+// return. `void` means the call returns no value (discard).
+//
+// ── Process / exit ─────────────────────────────────────────────────────────
+//   93   exit(code: i64) -> !                                                       // process exit (does not return)
+//   94   exit_group(code: i64) -> !                                                 // exit whole thread group
+//   172  getpid() -> i64
+//   173  getppid() -> i64
+//   220  clone(flags: u64, stack: Address, ptid: Address, ctid: Address, tls: Address) -> i64
+//   221  execve(filename: Address, argv: Address, envp: Address) -> i64
+//   281  execveat(dirfd: i32, filename: Address, argv: Address, envp: Address, flags: i32) -> i64
+//   129  kill(pid: i64, sig: i64) -> i64
+//   435  clone3(cl_args: Address, size: u64) -> i64
+//
+// ── Memory ──────────────────────────────────────────────────────────────────
+//   222  mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address   // returns MAP_FAILED(-1) on error
+//   215  munmap(addr: Address, length: u64) -> i64
+//   226  mprotect(addr: Address, len: u64, prot: i32) -> i64
+//   214  brk(addr: Address) -> Address
+//   216  mremap(old_addr: Address, old_size: u64, new_size: u64, flags: i32, new_addr: Address) -> Address
+//   227  msync(start: Address, len: u64, flags: i32) -> i64
+//   233  madvise(addr: Address, length: u64, advice: i32) -> i64
+//   232  mincore(addr: Address, length: u64, vec: Address) -> i64
+//   228  mlock(addr: Address, len: u64) -> i64
+//   229  munlock(addr: Address, len: u64) -> i64
+//
+// ── File I/O (modern — use openat, NOT open) ───────────────────────────────
+//   63   read(fd: i32, buf: Address, count: u64) -> i64
+//   64   write(fd: i32, buf: Address, count: u64) -> i64
+//   56   openat(dirfd: i32, pathname: Address, flags: i32, mode: u32) -> i32         // use AT_FDCWD for cwd-relative
+//   57   close(fd: i32) -> i32
+//   62   lseek(fd: i32, offset: i64, whence: i32) -> i64
+//   67   pread64(fd: i32, buf: Address, count: u64, offset: i64) -> i64              // asm-generic name: pread
+//   68   pwrite64(fd: i32, buf: Address, count: u64, offset: i64) -> i64             // asm-generic name: pwrite
+//   65   readv(fd: i32, iov: Address, iovcnt: i32) -> i64
+//   66   writev(fd: i32, iov: Address, iovcnt: i32) -> i64
+//   69   preadv(fd: i32, iov: Address, iovcnt: i32, offset: i64) -> i64
+//   70   pwritev(fd: i32, iov: Address, iovcnt: i32, offset: i64) -> i64
+//   46   ftruncate(fd: i32, length: i64) -> i32
+//   82   fsync(fd: i32) -> i32
+//   83   fdatasync(fd: i32) -> i32
+//   81   sync() -> void
+//   306  syncfs(fd: i32) -> i32
+//
+// ── File metadata (modern — use newfstatat, NOT stat) ──────────────────────
+//   79   newfstatat(dirfd: i32, pathname: Address, statbuf: Address, flags: i32) -> i32   // use AT_FDCWD
+//   80   fstat(fd: i32, statbuf: Address) -> i32
+//   17   getcwd(buf: Address, size: u64) -> i64
+//   49   chdir(path: Address) -> i32
+//   50   fchdir(fd: i32) -> i32
+//   51   chroot(path: Address) -> i32
+//   166  umask(mask: u32) -> u32
+//
+// ── File system (modern — *at variants) ────────────────────────────────────
+//   35   unlinkat(dirfd: i32, pathname: Address, flags: i32) -> i32
+//   38   renameat(olddirfd: i32, oldpath: Address, newdirfd: i32, newpath: Address) -> i32
+//   37   linkat(olddirfd: i32, oldpath: Address, newdirfd: i32, newpath: Address, flags: i32) -> i32
+//   36   symlinkat(target: Address, newdirfd: i32, linkpath: Address) -> i32
+//   78   readlinkat(dirfd: i32, pathname: Address, buf: Address, bufsiz: i32) -> i64
+//   48   faccessat(dirfd: i32, pathname: Address, mode: i32, flags: i32) -> i32
+//   53   fchmodat(dirfd: i32, pathname: Address, mode: u32, flags: i32) -> i32
+//   54   fchownat(dirfd: i32, pathname: Address, owner: u32, group: u32, flags: i32) -> i32
+//   52   fchmod(fd: i32, mode: u32) -> i32
+//   55   fchown(fd: i32, owner: u32, group: u32) -> i32
+//
+// ── Directory ───────────────────────────────────────────────────────────────
+//   61   getdents64(fd: i32, dirp: Address, count: u32) -> i64                       // modern; legacy getdents absent
+//
+// ── Sockets / networking ──────────────────────────────────────────────────
+//   198  socket(domain: i32, type: i32, protocol: i32) -> i32
+//   203  connect(sockfd: i32, addr: Address, addrlen: u32) -> i32
+//   202  accept(sockfd: i32, addr: Address, addrlen: Address) -> i32
+//   200  bind(sockfd: i32, addr: Address, addrlen: u32) -> i32
+//   201  listen(sockfd: i32, backlog: i32) -> i32
+//   206  sendto(sockfd: i32, buf: Address, len: u64, flags: i32, dest_addr: Address, addrlen: u32) -> i64   // dest_addr=0 for send
+//   207  recvfrom(sockfd: i32, buf: Address, len: u64, flags: i32, src_addr: Address, addrlen: Address) -> i64   // src_addr=0 for recv
+//   208  setsockopt(sockfd: i32, level: i32, optname: i32, optval: Address, optlen: u32) -> i32
+//   209  getsockopt(sockfd: i32, level: i32, optname: i32, optval: Address, optlen: Address) -> i32
+//   210  shutdown(sockfd: i32, how: i32) -> i32
+//   72   socketpair(domain: i32, type: i32, protocol: i32, sv: Address) -> i32       // asm-generic: 72
+//
+// ── I/O multiplexing ───────────────────────────────────────────────────────
+//   73   ppoll(fds: Address, nfds: u32, timeout_ts: Address, sigmask: Address) -> i32   // modern; legacy poll absent
+//   7    poll(fds: Address, nfds: u32, timeout: i32) -> i32                          // NOTE: present on x86_64 legacy; ABSENT on asm-generic — use ppoll instead
+//   23   dup(oldfd: i32) -> i32
+//   24   dup3(oldfd: i32, newfd: i32, flags: i32) -> i32
+//   25   fcntl(fd: i32, cmd: i32, arg: u64) -> i32
+//   29   ioctl(fd: i32, request: u32, arg: u64) -> i32
+//   22   pipe(fds: Address) -> i32                                                   // asm-generic: 22; use pipe2(59) for flags
+//
+// ── Signals ────────────────────────────────────────────────────────────────
+//   134  rt_sigaction(signum: i32, act: Address, oldact: Address, sigsetsize: u64) -> i32
+//   135  rt_sigprocmask(how: i32, set: Address, oldset: Address, sigsetsize: u64) -> i32
+//   130  tkill(tid: i64, sig: i64) -> i32
+//   131  tgkill(tgid: i64, tid: i64, sig: i64) -> i32
+//
+// ── Time ───────────────────────────────────────────────────────────────────
+//   113  clock_gettime(clk_id: i32, tp: Address) -> i32
+//   169  gettimeofday(tv: Address, tz: Address) -> i32
+//   101  nanosleep(req: Address, rem: Address) -> i32
+//
+// ── Identity ───────────────────────────────────────────────────────────────
+//   174  getuid() -> u32
+//   175  geteuid() -> u32
+//   176  getgid() -> u32
+//   177  getegid() -> u32
+//   146  setuid(uid: u32) -> i32
+//   144  setgid(gid: u32) -> i32
+//   147  setresuid(ruid: u32, euid: u32, suid: u32) -> i32
+//   149  setresgid(rgid: u32, egid: u32, sgid: u32) -> i32
+//   154  setpgid(pid: i64, pgid: i64) -> i32
+//   155  getpgid(pid: i64) -> i64
+//   156  getsid(pid: i64) -> i64
+//   157  setsid() -> i64
+//
+// ── Threading / futex ──────────────────────────────────────────────────────
+//   98   futex(uaddr: Address, op: i32, val: u32, timeout: Address, uaddr2: Address, val3: u32) -> i64
+//
+// ── epoll / eventfd / timerfd / signalfd / inotify ─────────────────────────
+//   20   epoll_create1(flags: i32) -> i32
+//   21   epoll_ctl(epfd: i32, op: i32, fd: i32, event: Address) -> i32
+//   22   epoll_wait(epfd: i32, events: Address, maxevents: i32, timeout: i32) -> i32   // NOTE: 22 is also pipe on asm-generic; epoll_wait uses 22 on aarch64 — verify; prefer epoll_pwait(22)
+//   19   eventfd2(count: u32, flags: i32) -> i32
+//   85   timerfd_create(clockid: i32, flags: i32) -> i32
+//   86   timerfd_settime(fd: i32, flags: i32, new_value: Address, old_value: Address) -> i32
+//   87   timerfd_gettime(fd: i32, curr_value: Address) -> i32
+//   74   signalfd4(fd: i32, mask: Address, sizemask: u32, flags: i32) -> i32
+//   26   inotify_init1(flags: i32) -> i32
+//   27   inotify_add_watch(fd: i32, path: Address, mask: u32) -> i32
+//   28   inotify_rm_watch(fd: i32, wd: i32) -> i32
+//
+// ── Wait ───────────────────────────────────────────────────────────────────
+//   260  wait4(pid: i64, wstatus: Address, options: i32, rusage: Address) -> i64
+//   95   waitid(idtype: i32, id: i64, infop: Address, options: i32, rusage: Address) -> i32
+//
+// ── Misc system ────────────────────────────────────────────────────────────
+//   117  ptrace(request: i32, pid: i64, addr: Address, data: Address) -> i64
+//   153  times(buf: Address) -> i64
+//   163  getrlimit(resource: u32, rlim: Address) -> i32
+//   164  setrlimit(resource: u32, rlim: Address) -> i32
+//   261  prlimit64(pid: i32, resource: u32, new_rlim: Address, old_rlim: Address) -> i32
+//   165  getrusage(who: i32, usage: Address) -> i32
+//   278  getrandom(buf: Address, buflen: u64, flags: u32) -> i64
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Footer
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Return value convention: Linux syscalls return a negative errno on failure
+// (e.g. -EBADF = -9) and a non-negative value on success. Always check
+// `ret < 0` for errors. Common errnos: -EPERM=-1, -ENOENT=-2, -EIO=-5,
+// -EBADF=-9, -ENOMEM=-12, -EACCES=-13, -EBUSY=-16, -EEXIST=-17, -ENOTDIR=-20,
+// -EISDIR=-21, -EINVAL=-22, -ENOSYS=-38, -EPIPE=-32.
+//
+// This file is documentation. Actual call sites use `syscall(<nr>, <args>)`
+// directly with the LITERAL number — e.g. `syscall(64, fd, buf, len)` for
+// write. Do NOT pass a const or variable as the first argument: the parser
+// rejects it.
+//
+// For syscalls NOT listed here, consult Linux `include/uapi/asm-generic/unistd.h`
+// (the authoritative source for VUMA-generic numbers) and add them to BOTH:
+//   1. this table (womb/syscalls.vuma), AND
+//   2. the Rust match table in `src/codegen/src/syscall_abi.rs::vuma_generic_name`
+//      (and, if the arch is translated, the per-arch table in the same file).
+// Keeping the two tables in sync is required for the codegen to emit correct
+// native syscall numbers on x86_64 / x86_32.
