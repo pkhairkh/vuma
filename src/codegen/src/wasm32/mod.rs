@@ -1803,24 +1803,6 @@ fn emit_section(module: &mut Vec<u8>, section_id: u8, content: &[u8]) {
     module.extend_from_slice(content);
 }
 
-/// Skip `count` unsigned LEB128 values in the byte slice, advancing `offset`.
-fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
-    for _ in 0..count {
-        while *offset < bytes.len() && (bytes[*offset] & 0x80) != 0 {
-            *offset += 1;
-        }
-        if *offset < bytes.len() {
-            *offset += 1;
-        }
-    }
-}
-
-/// Skip `count` signed LEB128 values in the byte slice, advancing `offset`.
-fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
-    // Signed and unsigned LEB128 have the same encoding structure for skipping
-    skip_leb128(bytes, offset, count);
-}
-
 /// Convert a WasmType (from this module) to the serializable WasmValueType
 /// (from the backend module).
 fn wasm_type_to_backend(ty: WasmType) -> crate::backend::WasmValueType {
@@ -1843,126 +1825,6 @@ fn backend_to_wasm_type(ty: &crate::backend::WasmValueType) -> WasmType {
     }
 }
 
-/// Skip a single Wasm instruction starting at `offset`, advancing past it.
-///
-/// This is used by `allocate_registers` to split the body bytecode into
-/// per-instruction `AllocatedInstruction` entries with real opcode names.
-fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
-    if *offset >= bytes.len() {
-        return;
-    }
-    let byte = bytes[*offset];
-    *offset += 1;
-
-    match byte {
-        // ── Multi-byte opcodes ────────────────────────────────────
-        0xFC => {
-            // Bulk memory / saturated arithmetic prefix
-            skip_leb128(bytes, offset, 1); // sub-opcode
-            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
-            match subop {
-                0x08 => skip_leb128(bytes, offset, 2), // memory.init
-                0x0A => skip_leb128(bytes, offset, 2), // memory.copy
-                0x0B => skip_leb128(bytes, offset, 1), // memory.fill
-                _ => {}                                // other sub-ops may have 0 or more operands
-            }
-        }
-        0xFD => {
-            // SIMD prefix
-            skip_leb128(bytes, offset, 1); // sub-opcode
-            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
-            if subop == 0x0C {
-                // v128.const: skip 16 bytes of payload
-                *offset += 16;
-            }
-        }
-        0xFE => {
-            // Atomic memory prefix (Wasm Threads proposal).
-            // Layout: 0xFE, LEB128(sub-opcode), then either:
-            //   - a memarg (LEB128(align) + LEB128(offset)) for all atomic
-            //     load/store/rmw/cmpxchg ops, OR
-            //   - a single reserved 0x00 byte for memory.atomic.fence (0x1E).
-            skip_leb128(bytes, offset, 1); // sub-opcode
-            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
-            if subop == 0x1E {
-                // memory.atomic.fence: skip the reserved 0x00 byte
-                *offset += 1;
-            } else {
-                // memarg: align + offset (both LEB128)
-                skip_leb128(bytes, offset, 2);
-            }
-        }
-
-        // ── Control flow ─────────────────────────────────────────
-        0x00 => {} // unreachable
-        0x01 => {} // nop
-        0x02..=0x04 => {
-            *offset += 1;
-        } // block/loop/if + blocktype
-        0x05 | 0x0B => {} // else, end
-        0x0C | 0x0D => {
-            skip_leb128(bytes, offset, 1);
-        } // br, br_if
-        0x0E => {
-            // br_table: count + labels + default
-            let (count, size) = decode_unsigned_leb128(&bytes[*offset..]);
-            *offset += size;
-            skip_leb128(bytes, offset, count as usize + 1);
-        }
-        0x0F => {} // return
-        0x10 => {
-            skip_leb128(bytes, offset, 1);
-        } // call
-        0x11 => {
-            skip_leb128(bytes, offset, 2);
-        } // call_indirect
-
-        // ── Parametric ───────────────────────────────────────────
-        0x1A | 0x1B => {} // drop, select
-
-        // ── Variable ─────────────────────────────────────────────
-        0x20..=0x24 => {
-            skip_leb128(bytes, offset, 1);
-        } // local.get/set/tee, global.get/set
-
-        // ── Memory ───────────────────────────────────────────────
-        0x28..=0x3E => {
-            skip_leb128(bytes, offset, 2);
-        } // loads/stores: align + offset
-        0x3F | 0x40 => {
-            skip_leb128(bytes, offset, 1);
-        } // memory.size, memory.grow
-
-        // ── Numeric ──────────────────────────────────────────────
-        0x41 => {
-            skip_signed_leb128(bytes, offset, 1);
-        } // i32.const
-        0x42 => {
-            skip_signed_leb128(bytes, offset, 1);
-        } // i64.const
-        0x43 => {
-            *offset += 4;
-        } // f32.const
-        0x44 => {
-            *offset += 8;
-        } // f64.const
-
-        // All other single-byte opcodes (comparisons, arithmetic, conversions)
-        0x45..=0x4F
-        | 0x50..=0x5A
-        | 0x5B..=0x66
-        | 0x67..=0x78
-        | 0x79..=0x8A
-        | 0x8C
-        | 0x91..=0x95
-        | 0x9A
-        | 0x9F..=0xA3
-        | 0xA7..=0xBF => {}
-
-        _ => {} // Unknown opcode; nothing more to skip
-    }
-}
-
 // ===========================================================================
 // IR → Wasm lowering
 // ===========================================================================
@@ -1977,8 +1839,6 @@ struct LoweringContext {
     num_locals: u32,
     /// Local declarations (for the function body).
     locals: Vec<(u32, WasmType)>,
-    /// Map from block label to its label depth index for branch targets.
-    block_labels: HashMap<String, u32>,
     /// Accumulated Wasm instructions.
     instrs: Vec<WasmInstr>,
     /// Expected result types for the function (used for return type coercion).
@@ -2002,7 +1862,6 @@ impl LoweringContext {
             vreg_types: HashMap::new(),
             num_locals: 0,
             locals: Vec::new(),
-            block_labels: HashMap::new(),
             instrs: Vec::new(),
             result_types,
             call_targets: Vec::new(),
@@ -3620,78 +3479,6 @@ fn lower_terminator_trampoline(
             ctx.emit(WasmInstr::I32Const(default_idx));
             ctx.emit(WasmInstr::LocalSet(pc_local));
             ctx.emit(WasmInstr::Br(trampoline_depth));
-        }
-        IRTerminator::Invoke { .. }
-        | IRTerminator::TailCall { .. }
-        | IRTerminator::Resume { .. } => {
-            // These are lowered to Call instructions; terminators are handled at a higher level
-        }
-    }
-    Ok(())
-}
-
-/// Lower an IR terminator to Wasm control flow.
-fn lower_terminator(
-    term: &IRTerminator,
-    ctx: &mut LoweringContext,
-    _block_idx: usize,
-) -> Result<(), BackendError> {
-    match term {
-        IRTerminator::Return(values) => {
-            // Store the return value (if any) at memory address 0 so the
-            // _start wrapper can read it and pass to proc_exit.
-            // wasm i32.store expects stack: [addr, value] (addr deeper)
-            if let Some(val) = values.first() {
-                // Push address first
-                ctx.emit(WasmInstr::I32Const(0));
-                ctx.stack_depth += 1;
-                // Push value
-                ctx.push_value(val, Some(&WasmType::I32));
-                // i32.store: pops [addr, value], stores value at addr
-                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
-                ctx.stack_depth -= 2;
-            }
-            ctx.emit(WasmInstr::Return);
-        }
-        IRTerminator::Jump(target) => {
-            // br to the target block label depth
-            if let Some(&depth) = ctx.block_labels.get(target) {
-                ctx.emit(WasmInstr::Br(depth));
-            }
-        }
-        IRTerminator::Branch {
-            cond,
-            true_block,
-            false_block,
-        } => {
-            ctx.push_value(cond, None);
-            // br_if pops 1 (the condition)
-            if let Some(&true_depth) = ctx.block_labels.get(true_block) {
-                ctx.emit(WasmInstr::BrIf(true_depth));
-                ctx.stack_depth -= 1;
-            }
-            if let Some(&false_depth) = ctx.block_labels.get(false_block) {
-                ctx.emit(WasmInstr::Br(false_depth));
-            }
-        }
-        IRTerminator::Unreachable => {
-            ctx.emit(WasmInstr::Unreachable);
-        }
-        IRTerminator::Switch {
-            discr,
-            targets,
-            default,
-        } => {
-            ctx.push_value(discr, None);
-            let labels: Vec<u32> = targets
-                .iter()
-                .filter_map(|(_, lbl)| ctx.block_labels.get(lbl).copied())
-                .collect();
-            let default_label = ctx.block_labels.get(default).copied().unwrap_or(0);
-            ctx.emit(WasmInstr::BrTable {
-                labels,
-                default: default_label,
-            });
         }
         IRTerminator::Invoke { .. }
         | IRTerminator::TailCall { .. }

@@ -297,16 +297,6 @@ fn encode_agfi(r1: Gpr, imm: i32) -> Vec<u8> {
     code
 }
 
-/// Encode SGFI R1, imm32 (Subtract Fullword Immediate from 64-bit register).
-/// Format: RIL-b, 6 bytes. op1=0xC0, op2=0xA.
-fn encode_sgfi(r1: Gpr, imm: i32) -> [u8; 6] {
-    let op1: u8 = 0xC0;
-    let op2: u8 = 0xA;
-    let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
-    let imm_be = imm.to_be_bytes();
-    [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
-}
-
 /// Encode a 6-byte RXY-a instruction.
 ///
 /// Format (per IBM s390x PoP):
@@ -476,24 +466,6 @@ fn encode_lgfr(r1: Gpr, r2: Gpr) -> [u8; 4] {
     encode_rre(0xB9, 0x14, r1, r2)
 }
 
-/// Encode a 4-byte RRF-a instruction (3-register, with M4=0).
-///
-/// Format:
-///   byte 0: opcode1 (8 bits)
-///   byte 1: opcode2 (8 bits)
-///   byte 2: R1 (4 bits, high nibble) | R2 (4 bits, low nibble)
-///   byte 3: R3 (4 bits, high nibble) | M4=0 (4 bits, low nibble)
-fn encode_rrf_a(op1: u8, op2: u8, r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    // RRF-a format: | op1 | R1 | R3 | op2 | R2 | 0 |
-    //   byte 0: op1
-    //   byte 1: (R1 << 4) | R3
-    //   byte 2: op2
-    //   byte 3: (R2 << 4) | 0
-    let byte1 = ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF);
-    let byte3 = (r2.encoding() & 0xF) << 4;
-    [op1, byte1, op2, byte3]
-}
-
 /// Encode ARK R1, R2, R3 (Add 32-bit). R1[31:0] = R2[31:0] + R3[31:0].
 /// Since QEMU doesn't support RRF-a format, use AR (RR format, 2 bytes) + NOP.
 /// AR R1, R3: op=0x1A. When R1==R2, AR R1,R3 == ARK R1,R1,R3.
@@ -512,18 +484,6 @@ fn encode_srk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
 fn encode_nrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
     let _ = r2;
     [0x14, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
-}
-
-/// Encode ORK R1, R2, R3 (OR 32-bit). Use OR (RR, 2 bytes) + NOP.
-fn encode_ork(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    let _ = r2;
-    [0x16, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
-}
-
-/// Encode XRK R1, R2, R3 (XOR 32-bit). Use XR (RR, 2 bytes) + NOP.
-fn encode_xrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
-    let _ = r2;
-    [0x17, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
 }
 
 /// Encode a 6-byte RSY-a instruction (used for shifts).
@@ -693,73 +653,6 @@ fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
         code.extend(ss_load_imm(S5, offset as i64));
         code.extend_from_slice(&encode_agr(S5, FP));
         code.extend_from_slice(&encode_stg(src, S5, 0));
-    }
-    code
-}
-
-/// Load a typed value from stack slot at [FP + offset] into dst.
-fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
-    let mut code = Vec::new();
-    if (-524288..=524287).contains(&offset) {
-        match ty {
-            IRType::I8 => code.extend_from_slice(&encode_lgb(dst, FP, offset)),
-            IRType::U8 => {
-                // No zero-extending byte load; use LGB then clear high bits via NRK.
-                code.extend_from_slice(&encode_lgb(dst, FP, offset));
-                // (LGB sign-extends; for u8, values 0-127 are fine. For 128-255,
-                // the sign-extension would set the high bits. We need LLGC instead.)
-                // LLGC R1, D2(X2, B2): op1=0xE3, op2=0x90 — Load Logical Character.
-                code.clear();
-                code.extend_from_slice(&encode_rxy_a(0xE3, 0x90, dst, Gpr::R0, FP, offset));
-            }
-            IRType::I16 => code.extend_from_slice(&encode_lgh(dst, FP, offset)),
-            IRType::U16 => {
-                // LLGH R1, D2(X2, B2): op1=0xE3, op2=0x91 — Load Logical Halfword.
-                code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, dst, Gpr::R0, FP, offset));
-            }
-            IRType::I32 => code.extend_from_slice(&encode_lgf(dst, FP, offset)),
-            IRType::U32 => code.extend_from_slice(&encode_llgf(dst, FP, offset)),
-            _ => code.extend_from_slice(&encode_lg(dst, FP, offset)),
-        }
-    } else {
-        code.extend(ss_load_imm(S5, offset as i64));
-        code.extend_from_slice(&encode_agr(S5, FP));
-        match ty {
-            IRType::I8 => code.extend_from_slice(&encode_lgb(dst, S5, 0)),
-            IRType::U8 => {
-                code.extend_from_slice(&encode_rxy_a(0xE3, 0x90, dst, Gpr::R0, S5, 0));
-            }
-            IRType::I16 => code.extend_from_slice(&encode_lgh(dst, S5, 0)),
-            IRType::U16 => {
-                code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, dst, Gpr::R0, S5, 0));
-            }
-            IRType::I32 => code.extend_from_slice(&encode_lgf(dst, S5, 0)),
-            IRType::U32 => code.extend_from_slice(&encode_llgf(dst, S5, 0)),
-            _ => code.extend_from_slice(&encode_lg(dst, S5, 0)),
-        }
-    }
-    code
-}
-
-/// Store a typed value from src to stack slot at [FP + offset].
-fn ss_st_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
-    let mut code = Vec::new();
-    if (-524288..=524287).contains(&offset) {
-        match ty {
-            IRType::I8 | IRType::U8 => code.extend_from_slice(&encode_stc(src, FP, offset)),
-            IRType::I16 | IRType::U16 => code.extend_from_slice(&encode_sth(src, FP, offset)),
-            IRType::I32 | IRType::U32 => code.extend_from_slice(&encode_sty(src, FP, offset)),
-            _ => code.extend_from_slice(&encode_stg(src, FP, offset)),
-        }
-    } else {
-        code.extend(ss_load_imm(S5, offset as i64));
-        code.extend_from_slice(&encode_agr(S5, FP));
-        match ty {
-            IRType::I8 | IRType::U8 => code.extend_from_slice(&encode_stc(src, S5, 0)),
-            IRType::I16 | IRType::U16 => code.extend_from_slice(&encode_sth(src, S5, 0)),
-            IRType::I32 | IRType::U32 => code.extend_from_slice(&encode_sty(src, S5, 0)),
-            _ => code.extend_from_slice(&encode_stg(src, S5, 0)),
-        }
     }
     code
 }
