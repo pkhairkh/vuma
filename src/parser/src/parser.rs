@@ -1456,28 +1456,77 @@ impl<'src> Parser<'src> {
             let lbrace = self.current.clone();
             self.advance(); // consume `{`
             if self.at(TokenKind::If) {
-                // `else { if X { } } [else …]` — parse the inner if
-                // directly. The inner if's parse_else_clause will see
-                // `}` (the closing brace of THIS block), so its
-                // else_block will be None. We then consume the `}` and
-                // attach any trailing `else` to the inner if via a
-                // recursive call to parse_else_clause.
+                // `else { if X { } ... }` — the block opens with an `if`.
+                // Parse the inner if directly (NOT via parse_block) so that
+                // any INNER `else` (e.g. `else { if X { } else { … } … }`)
+                // is consumed by the inner if's own parse_else_clause.
+                //
+                // Two sub-cases arise after the inner if is parsed:
+                //
+                //   (a) `else { if X { } } [else …]` — the inner if is the
+                //       ONLY statement in the block. The next token is `}`.
+                //       This is the dangling-else-across-block-boundary
+                //       pattern used by the `womb/lang` self-hosting files:
+                //       a trailing `else` (if any) must attach to the INNER
+                //       if, not the outer one. Existing behaviour.
+                //
+                //   (b) `else { if X { } stmt … } [else …]` — the inner if
+                //       is the first of multiple statements. The next token
+                //       is NOT `}`. This is a normal multi-statement else
+                //       block; the inner if is just its first statement.
+                //       Any trailing `else` after the closing `}` belongs to
+                //       the OUTER if (the natural reading) and is consumed
+                //       by the outer parse_else_clause that called us.
                 let mut if_stmt = self.parse_if_stmt()?;
-                self.expect(TokenKind::RBrace)?;
-                // Dangling-else across block boundary: attach a
-                // trailing `else` (if any) to the inner if. Recursion
-                // handles arbitrarily long `else { if … } else { if … }`
-                // chains.
-                if let Stmt::If(ref mut inner_if) = if_stmt {
-                    if inner_if.else_block.is_none() {
-                        inner_if.else_block = self.parse_else_clause()?;
+                if self.at(TokenKind::RBrace) {
+                    // Sub-case (a): single-statement dangling-else pattern.
+                    self.expect(TokenKind::RBrace)?;
+                    // Attach a trailing `else` (if any) to the inner if.
+                    // Recursion handles arbitrarily long
+                    // `else { if … } else { if … }` chains.
+                    if let Stmt::If(ref mut inner_if) = if_stmt {
+                        if inner_if.else_block.is_none() {
+                            inner_if.else_block = self.parse_else_clause()?;
+                        }
                     }
+                    let span = if_stmt.span();
+                    Ok(Some(Block {
+                        statements: vec![if_stmt],
+                        span,
+                    }))
+                } else {
+                    // Sub-case (b): multi-statement else block. Parse the
+                    // remaining statements, then close the block. Any
+                    // trailing `else` is left for the outer parse_else_clause
+                    // (the natural outer-if attachment).
+                    let mut statements = vec![if_stmt];
+                    while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                        match self.parse_stmt() {
+                            Ok(stmt) => statements.push(stmt),
+                            Err(err) => {
+                                self.errors.push(err);
+                                self.recover_to_statement_boundary();
+                            }
+                        }
+                    }
+                    if self.at(TokenKind::Eof) {
+                        self.errors.push(ParseError::expected(
+                            "'}'",
+                            "end of file",
+                            self.current.span,
+                        ));
+                        return Ok(Some(Block {
+                            statements,
+                            span: Span::new(lbrace.span.start, self.current.span.end),
+                        }));
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    let end = self.current.span.end;
+                    Ok(Some(Block {
+                        statements,
+                        span: Span::new(lbrace.span.start, end),
+                    }))
                 }
-                let span = if_stmt.span();
-                Ok(Some(Block {
-                    statements: vec![if_stmt],
-                    span,
-                }))
             } else {
                 // Normal `else { … }` block — rewind to `{` and let
                 // parse_block handle the full block (multi-statement
@@ -4645,6 +4694,99 @@ fn main() -> i32 {
             }
             other => panic!("expected FnDef, got {:?}", other),
         }
+    }
+
+    // ---- Test 32c: else { if X { } stmt … } multi-statement else block ----
+    //
+    // Regression test for the parser bug unblocked by P1-c-5: an `else`
+    // block whose FIRST statement is an `if` (with more statements after
+    // it) used to fail with "expected '}', found '<stmt>'" because the
+    // dangling-else-across-block-boundary handler assumed the inner `if`
+    // was the ONLY statement in the else block. Real-world example:
+    //   womb/lib/net_protocols.vuma::rtsp_parse_response has
+    //   `else { if ch < 48 { break; } if ch > 57 { break; } val = …; }`.
+    // After the fix, the inner `if` is treated as the first statement of
+    // a normal multi-statement block, and any trailing `else` after the
+    // closing `}` attaches to the OUTER if (the natural reading).
+    #[test]
+    fn parse_else_block_with_if_then_more_stmts() {
+        let source = r#"
+            fn test(a: u32) -> u32 {
+                if a == 32 {
+                    return 1;
+                } else {
+                    if a < 48 { return 2; }
+                    if a > 57 { return 3; }
+                    val = val * 10 + (a - 48);
+                    return val;
+                }
+                return 0;
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        assert!(
+            result.errors.is_empty(),
+            "expected no parse errors, got: {:?}",
+            result.errors
+        );
+        let program = result.expect("should have a parsed program");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.body.statements.len(), 2);
+                match &f.body.statements[0] {
+                    Stmt::If(outer) => {
+                        let outer_else = outer
+                            .else_block
+                            .as_ref()
+                            .expect("outer if must have an else block");
+                        // Multi-statement else block: 4 statements
+                        // (if, if, assign, return).
+                        assert_eq!(outer_else.statements.len(), 4);
+                        match &outer_else.statements[0] {
+                            Stmt::If(_) => {}
+                            other => panic!("expected first stmt to be If, got {:?}", other),
+                        }
+                        // Outer if must NOT have a second else (the trailing
+                        // `return 0;` is the second statement of the function
+                        // body, not an else clause).
+                        assert!(
+                            outer.else_block.as_ref().unwrap().statements.len() == 4,
+                            "else block must contain exactly 4 statements"
+                        );
+                    }
+                    other => panic!("expected outer If, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // ---- Test 32d: `else { if X { } stmt … } else { … }` — multi-statement
+    // else block followed by a trailing `else`. The trailing `else` cannot
+    // attach to the inner if (multi-statement mode leaves it for the outer
+    // if), but the outer if already has an else block, so the trailing
+    // `else` is an orphan and MUST be reported as a parse error. ----
+    #[test]
+    fn parse_else_block_with_if_then_more_stmts_orphan_else() {
+        let source = r#"
+            fn test(a: u32) -> u32 {
+                if a == 32 {
+                    return 1;
+                } else {
+                    if a < 48 { return 2; }
+                    return 4;
+                } else {
+                    return 5;
+                }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        assert!(
+            !result.errors.is_empty(),
+            "expected an orphan-else parse error, but parsing succeeded"
+        );
     }
 
     // =======================================================================

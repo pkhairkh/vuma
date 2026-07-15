@@ -89,16 +89,10 @@ const EPOLL_MAX_EVENTS: i64 = 64;
 // ===========================================================================
 // Linux x86_64 syscalls
 // ===========================================================================
-
-extern "C" {
-    fn epoll_create1(flags: i64) -> i64;
-    fn epoll_ctl(epfd: i64, op: i64, fd: i64, event: Address) -> i64;
-    fn epoll_wait(epfd: i64, events: Address, maxevents: i64, timeout: i64) -> i64;
-    fn close(fd: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for epoll_create1 / epoll_ctl /
+// epoll_wait / close / fcntl (asm-generic nrs 20 / 21 / 22 / 57 / 25). read
+// and write were declared in the legacy extern block but are not invoked
+// anywhere in this module, so they are dropped.
 
 // ===========================================================================
 // Internal byte-level load/store helpers (little-endian)
@@ -236,7 +230,7 @@ fn handler_clear(entry: Address) {
 //
 // Total allocation: 16 + (max_handlers * 32) bytes, zero-initialised.
 fn evloop_create(max_handlers: u32) -> Address {
-    let epfd: i64 = epoll_create1(0);
+    let epfd: i64 = syscall(20, 0);
     if epfd < 0 {
         return 0;
     }
@@ -244,7 +238,7 @@ fn evloop_create(max_handlers: u32) -> Address {
     let total: u32 = EVLOOP_TABLE_OFF + table_bytes;
     let lp: Address = allocate(total);
     if lp == 0 {
-        close(epfd);
+        syscall(57, epfd);
         return 0;
     }
     // Zero-initialise the whole structure so all handler slots start free.
@@ -264,7 +258,7 @@ fn evloop_create(max_handlers: u32) -> Address {
 fn evloop_free(lp: Address) {
     let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
     if epfd > 0 {
-        close(epfd);
+        syscall(57, epfd);
     }
     free(lp);
     return;
@@ -301,7 +295,7 @@ fn evloop_add(lp: Address, fd: i64, events: u32, callback: Address,
     }
     epoll_event_set(ev, events, fd);
     let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
-    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
+    let rc: i64 = syscall(21, epfd, EPOLL_CTL_ADD, fd, ev);
     free(ev);
     if rc < 0 {
         return 0;
@@ -335,7 +329,7 @@ fn evloop_remove(lp: Address, fd: i64) -> u32 {
     if ev != 0 {
         epoll_event_set(ev, 0, fd);
     }
-    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, ev);
+    let rc: i64 = syscall(21, epfd, EPOLL_CTL_DEL, fd, ev);
     if ev != 0 {
         free(ev);
     }
@@ -365,7 +359,7 @@ fn evloop_modify(lp: Address, fd: i64, events: u32) -> u32 {
     }
     epoll_event_set(ev, events, fd);
     let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
-    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, ev);
+    let rc: i64 = syscall(21, epfd, EPOLL_CTL_MOD, fd, ev);
     free(ev);
     if rc < 0 {
         return 0;
@@ -381,7 +375,7 @@ fn evloop_modify(lp: Address, fd: i64, events: u32) -> u32 {
 // Set `fd` to non-blocking mode via fcntl(F_SETFL, O_NONBLOCK).
 // Returns the fcntl return value (0 on success, -1 on error).
 fn evloop_set_nonblock(fd: i64) -> i64 {
-    return fcntl(fd, F_SETFL, O_NONBLOCK);
+    return syscall(25, fd, F_SETFL, O_NONBLOCK);
 }
 
 // ===========================================================================
@@ -451,7 +445,7 @@ fn evloop_run(lp: Address, timeout_ms: i64) -> u32 {
             break;
         }
         // Block in epoll_wait for ready events.
-        let n: i64 = epoll_wait(epfd, events_buf, EPOLL_MAX_EVENTS, timeout_ms);
+        let n: i64 = syscall(22, epfd, events_buf, EPOLL_MAX_EVENTS, timeout_ms);
         if n < 0 {
             rc = 1;
             break;
