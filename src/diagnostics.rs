@@ -324,6 +324,7 @@ pub struct Suggestion {
 
 /// How likely a suggestion is to be the right fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SuggestionApplicability {
     /// The suggestion is definitely what the user intended (machine-applicable).
     MachineApplicable,
@@ -332,14 +333,10 @@ pub enum SuggestionApplicability {
     /// The suggestion may or may not be correct — requires human judgment.
     HasPlaceholders,
     /// The suggestion is a rough hint, not a precise fix.
+    #[default]
     Unspecified,
 }
 
-impl Default for SuggestionApplicability {
-    fn default() -> Self {
-        SuggestionApplicability::Unspecified
-    }
-}
 
 impl SuggestionApplicability {
     /// Returns the JSON snake_case string representation.
@@ -830,7 +827,7 @@ impl VumaDiagnostic {
         ];
         if !self.legacy_suggestions.is_empty() {
             entries.push(("suggestions_legacy".to_string(), JsonValue::Array(
-                self.legacy_suggestions.iter().map(|s| json_str(s)).collect(),
+                self.legacy_suggestions.iter().map(json_str).collect(),
             )));
         }
         JsonValue::Object(entries)
