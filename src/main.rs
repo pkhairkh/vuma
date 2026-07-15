@@ -16,8 +16,6 @@ use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use clap::{Parser, Subcommand, ValueEnum};
-
 use vuma::pipeline::{
     bridge_ast_to_codegen_scg, compile_modules, compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel,
     VerificationLevel, VumaError,
@@ -28,51 +26,47 @@ use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CLI definition (clap derive)
+// CLI definition (hand-written argv parser)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language
-#[derive(Parser, Debug)]
-#[command(name = "vuma", version, about = "VUMA compiler and toolchain")]
+///
+/// Hand-written: all field-level parsing/validation is done in
+/// `parse_cli_from` further down in this file. The struct itself only
+/// describes the parsed result.
+#[derive(Debug)]
 struct Cli {
-    /// Optimization level (overrides subcommand default)
-    #[arg(long, global = true, value_enum, default_value = "O2")]
+    /// Optimization level (overrides subcommand default) [default: O2]
     opt_level: OptLevelArg,
 
     /// Verification level (overrides subcommand default).
     /// Default is `normal` (strict — all five invariants run).
     /// `--verification none` is NO LONGER accepted; use `--no-verify`
     /// to explicitly bypass verification (Wave 19 escape-hatch closure).
-    #[arg(long, global = true, value_enum, default_value = "normal")]
+    /// [default: normal]
     verification: VerificationArg,
 
     /// Explicitly skip all verification (escape hatch).
     /// This is the ONLY way to bypass verification. A compile-time
     /// warning is emitted when this flag is used. (Wave 19)
-    #[arg(long = "no-verify", global = true)]
     no_verify: bool,
 
     /// Strict verification: treat `Inconclusive` verdicts as compilation-
     /// blocking errors (Wave 19). By default `Inconclusive` (unverified
     /// but no proven violation) is allowed; `--strict-verification` makes
     /// it a hard error.
-    #[arg(long = "strict-verification", global = true)]
     strict_verification: bool,
 
     /// Include debug info in output (alias: --debug-info)
-    #[arg(long, global = true, visible_alias = "debug-info")]
     debug: bool,
 
     /// Emit full ELF section headers in the output binary
-    #[arg(long, global = true)]
     sections: bool,
 
     /// Launch the interactive REPL (shorthand for `vuma repl`)
-    #[arg(long, global = true)]
     repl: bool,
 
     /// Enable runtime memory safety checks (bounds checking, --safe mode)
-    #[arg(long, global = true)]
     safe: bool,
 
     /// Disable compile-time memory-safety analysis (use-after-free, double-
@@ -81,40 +75,45 @@ struct Cli {
     /// or corrupt memory at runtime.  Use only for debugging the analyzer
     /// itself or for prototyping unsafe code.  A compile-time warning is
     /// emitted when this flag is set.
-    #[arg(long, global = true)]
     no_memory_safety: bool,
 
     /// Run performance benchmarks instead of compiling
-    #[arg(long, global = true)]
     bench: bool,
 
     /// Enable verbose/debug logging
-    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 
     /// Suppress non-error output
-    #[arg(short = 'q', long, global = true)]
     quiet: bool,
 
     /// Output telemetry data as JSON
-    #[arg(long, global = true)]
     telemetry: bool,
 
-    #[command(subcommand)]
     command: Option<Commands>,
 }
 
 /// Optimization level CLI argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptLevelArg {
-    #[value(name = "O0")]
     O0,
-    #[value(name = "O1")]
     O1,
-    #[value(name = "O2")]
     O2,
-    #[value(name = "O3")]
     O3,
+}
+
+impl OptLevelArg {
+    /// Parse a value for `--opt-level`.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "O0" => Ok(OptLevelArg::O0),
+            "O1" => Ok(OptLevelArg::O1),
+            "O2" => Ok(OptLevelArg::O2),
+            "O3" => Ok(OptLevelArg::O3),
+            other => Err(format!(
+                "error: invalid value '{other}' for '--opt-level <OPT_LEVEL>'\n  [possible values: O0, O1, O2, O3]"
+            )),
+        }
+    }
 }
 
 impl From<OptLevelArg> for OptLevel {
@@ -134,14 +133,25 @@ impl From<OptLevelArg> for OptLevel {
 /// bypass verification is the explicit `--no-verify` flag, which emits a
 /// compile-time warning. This prevents users from silently disabling
 /// verification via `--verification none`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerificationArg {
-    #[value(name = "quick")]
     Quick,
-    #[value(name = "normal")]
     Normal,
-    #[value(name = "exhaustive")]
     Exhaustive,
+}
+
+impl VerificationArg {
+    /// Parse a value for `--verification`.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "quick" => Ok(VerificationArg::Quick),
+            "normal" => Ok(VerificationArg::Normal),
+            "exhaustive" => Ok(VerificationArg::Exhaustive),
+            other => Err(format!(
+                "error: invalid value '{other}' for '--verification <VERIFICATION>'\n  [possible values: quick, normal, exhaustive]"
+            )),
+        }
+    }
 }
 
 impl From<VerificationArg> for VerificationLevel {
@@ -155,40 +165,51 @@ impl From<VerificationArg> for VerificationLevel {
 }
 
 /// Target ISA for the `emit` subcommand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IsaArg {
-    #[value(name = "aarch64")]
     Aarch64,
-    #[value(name = "x86_64")]
     X86_64,
-    #[value(name = "riscv64")]
     Riscv64,
-    #[value(name = "wasm32")]
     Wasm32,
-    #[value(name = "loongarch64")]
     Loongarch64,
-    #[value(name = "arm32")]
     Arm32,
-    #[value(name = "mips64")]
     Mips64,
-    #[value(name = "ppc64")]
     Ppc64,
-    #[value(name = "ppc64le")]
     Ppc64le,
-    #[value(name = "sparc64")]
     Sparc64,
-    #[value(name = "s390x")]
     S390x,
-    #[value(name = "alpha")]
     Alpha,
-    #[value(name = "hppa")]
     Hppa,
-    #[value(name = "m68k")]
     M68k,
-    #[value(name = "riscv32")]
     Riscv32,
-    #[value(name = "x86_32")]
     X86_32,
+}
+
+impl IsaArg {
+    /// Parse a value for `--isa` / `--target`.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "aarch64" => Ok(IsaArg::Aarch64),
+            "x86_64" => Ok(IsaArg::X86_64),
+            "riscv64" => Ok(IsaArg::Riscv64),
+            "wasm32" => Ok(IsaArg::Wasm32),
+            "loongarch64" => Ok(IsaArg::Loongarch64),
+            "arm32" => Ok(IsaArg::Arm32),
+            "mips64" => Ok(IsaArg::Mips64),
+            "ppc64" => Ok(IsaArg::Ppc64),
+            "ppc64le" => Ok(IsaArg::Ppc64le),
+            "sparc64" => Ok(IsaArg::Sparc64),
+            "s390x" => Ok(IsaArg::S390x),
+            "alpha" => Ok(IsaArg::Alpha),
+            "hppa" => Ok(IsaArg::Hppa),
+            "m68k" => Ok(IsaArg::M68k),
+            "riscv32" => Ok(IsaArg::Riscv32),
+            "x86_32" => Ok(IsaArg::X86_32),
+            other => Err(format!(
+                "error: invalid value '{other}' for '--isa <ISA>'\n  [possible values: aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64, ppc64le, sparc64, s390x, alpha, hppa, m68k, riscv32, x86_32]"
+            )),
+        }
+    }
 }
 
 impl From<IsaArg> for BackendKind {
@@ -243,7 +264,7 @@ fn resolve_isa(isa: &Option<IsaArg>) -> IsaArg {
     isa.or_else(host_isa).unwrap_or(IsaArg::Aarch64)
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 enum Commands {
     /// Parse + compile to ELF (host ISA by default), save to output file
     Build {
@@ -251,11 +272,9 @@ enum Commands {
         file: PathBuf,
 
         /// Output file path (default: <input>.o)
-        #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Target platform
-        #[arg(long, value_enum, default_value = "linux")]
+        /// Target platform [default: linux]
         target: TargetArg,
 
         /// Target ISA. Defaults to the host architecture so the emitted
@@ -263,7 +282,6 @@ enum Commands {
         /// cross-compile for AArch64 (uses the canonical pipeline with
         /// full verification + telemetry). Non-AArch64 targets use the
         /// direct AST→codegen bridge path.
-        #[arg(long, value_enum)]
         isa: Option<IsaArg>,
     },
 
@@ -271,16 +289,16 @@ enum Commands {
     Run {
         /// Target ISA. Defaults to the host architecture so the emitted
         /// binary can be executed natively. NOTE: because `args` uses
-        /// `trailing_var_arg`, `--isa` must appear BEFORE the input file:
+        /// trailing-var-arg semantics, `--isa` must appear BEFORE the
+        /// input file:
         ///   `vuma run --isa x86_64 hello.vuma arg1 arg2`
-        #[arg(long, value_enum)]
         isa: Option<IsaArg>,
 
         /// Input VUMA source file
         file: PathBuf,
 
-        /// Arguments to pass to the executed program
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        /// Arguments to pass to the executed program (trailing var-arg;
+        /// hyphen-leading args after the file are NOT re-parsed as flags).
         args: Vec<String>,
     },
 
@@ -299,7 +317,6 @@ enum Commands {
         file: PathBuf,
 
         /// Output file path (default: <input>.o)
-        #[arg(short, long)]
         output: Option<PathBuf>,
     },
 
@@ -309,15 +326,12 @@ enum Commands {
         file: PathBuf,
 
         /// Output file path (default: <input>.o)
-        #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Target ISA (default: aarch64)
-        #[arg(long, value_enum, default_value = "aarch64")]
+        /// Target ISA [default: aarch64]
         target: IsaArg,
 
-        /// Output format (elf, obj, raw, wasm)
-        #[arg(long, value_enum, default_value = "obj")]
+        /// Output format (elf, obj, raw, wasm) [default: obj]
         format: FormatArg,
     },
 
@@ -326,12 +340,10 @@ enum Commands {
         /// Binary file to disassemble
         file: PathBuf,
 
-        /// ISA to use for disassembly (default: aarch64)
-        #[arg(long, value_enum, default_value = "aarch64")]
+        /// ISA to use for disassembly [default: aarch64]
         isa: IsaArg,
 
-        /// Starting virtual address (default: 0x400000)
-        #[arg(long, default_value = "0x400000")]
+        /// Starting virtual address [default: 0x400000]
         base_addr: String,
     },
 
@@ -359,11 +371,9 @@ enum Commands {
         /// entry-point module (the one that defines `fn main`); subsequent
         /// files are sibling modules whose `fn` definitions resolve
         /// `extern` declarations in the entry module.
-        #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
 
         /// Output file path (default: a.out)
-        #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Target ISA. Defaults to the host architecture so the emitted
@@ -372,14 +382,12 @@ enum Commands {
         /// flag is accepted for forward-compatibility and to mirror
         /// `vuma build`/`vuma run`'s CLI shape); a future wave will
         /// thread it through to the pipeline.
-        #[arg(long, value_enum)]
         isa: Option<IsaArg>,
 
         /// After linking, `chmod +x` the output and execute it, forwarding
         /// stdout/stderr to the terminal. The linked binary is invoked
         /// with no argv; to pass argv, run the binary directly after
         /// `vuma link` writes it.
-        #[arg(long)]
         run: bool,
     },
 
@@ -397,13 +405,12 @@ enum Commands {
 
     /// Package manager subcommands
     Pkg {
-        #[command(subcommand)]
         cmd: PkgCommand,
     },
 }
 
 /// Package manager subcommands.
-#[derive(Subcommand, Debug)]
+#[derive(Debug)]
 enum PkgCommand {
     /// Initialize a new VUMA package in the current directory
     Init {
@@ -416,17 +423,27 @@ enum PkgCommand {
     Add {
         /// Dependency name
         dep: String,
-        /// Version requirement (e.g. "0.1", "^1.0")
-        #[arg(default_value = "*")]
+        /// Version requirement (e.g. "0.1", "^1.0") [default: *]
         version: String,
     },
 }
 
 /// Target platform CLI argument for the `build` subcommand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetArg {
-    #[value(name = "linux")]
     Linux,
+}
+
+impl TargetArg {
+    /// Parse a value for `--target`.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "linux" => Ok(TargetArg::Linux),
+            other => Err(format!(
+                "error: invalid value '{other}' for '--target <TARGET>'\n  [possible values: linux]"
+            )),
+        }
+    }
 }
 
 impl From<TargetArg> for CompileTarget {
@@ -438,16 +455,943 @@ impl From<TargetArg> for CompileTarget {
 }
 
 /// Output format for the `compile` subcommand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormatArg {
-    #[value(name = "elf")]
     Elf,
-    #[value(name = "obj")]
     Obj,
-    #[value(name = "raw")]
     Raw,
-    #[value(name = "wasm")]
     Wasm,
+}
+
+impl FormatArg {
+    /// Parse a value for `--format`.
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "elf" => Ok(FormatArg::Elf),
+            "obj" => Ok(FormatArg::Obj),
+            "raw" => Ok(FormatArg::Raw),
+            "wasm" => Ok(FormatArg::Wasm),
+            other => Err(format!(
+                "error: invalid value '{other}' for '--format <FORMAT>'\n  [possible values: elf, obj, raw, wasm]"
+            )),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hand-written argv parser
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Iterator type used by the argv parser.
+type ArgIter = std::iter::Peekable<std::vec::IntoIter<String>>;
+
+/// Parse error returned by `parse_cli_from`.
+#[derive(Debug)]
+enum ParseError {
+    /// `--help` / `-h` was encountered.
+    Help,
+    /// `--version` / `-V` was encountered.
+    Version,
+    /// A parse error with a human-readable message.
+    Msg(String),
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Help => write!(f, "help requested"),
+            ParseError::Version => write!(f, "version requested"),
+            ParseError::Msg(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Print top-level usage to stdout.
+fn print_usage() {
+    println!(
+        "VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language\n\n\
+         Usage: vuma [OPTIONS] [COMMAND]\n\n\
+         Commands:\n\
+         \x20  build     Parse + compile to ELF, save to output file\n\
+         \x20  run       Build + execute (native on host arch, or via qemu-<isa>)\n\
+         \x20  check     Parse + SCG + BD inference + IVE verification only\n\
+         \x20  emit      Compile to a specific ISA target\n\
+         \x20  compile   Compile to a relocatable object file (ET_REL)\n\
+         \x20  disasm    Read a binary file and disassemble it\n\
+         \x20  link      Link multiple .vuma files into a single ELF binary\n\
+         \x20  verify    Run IVE 5-invariant verification\n\
+         \x20  repl      Interactive REPL: parse expressions and print AST\n\
+         \x20  lsp       Start the Language Server (LSP) for IDE/LLM integration\n\
+         \x20  pkg       Package manager subcommands\n\
+         \x20  help      Print this message or the help of the given subcommand(s)\n\n\
+         Options:\n\
+         \x20      --opt-level <OPT_LEVEL>        Optimization level [default: O2] [possible values: O0, O1, O2, O3]\n\
+         \x20      --verification <VERIFICATION>  Verification level [default: normal] [possible values: quick, normal, exhaustive]\n\
+         \x20      --no-verify                    Explicitly skip all verification (escape hatch)\n\
+         \x20      --strict-verification          Treat Inconclusive verdicts as compilation-blocking errors\n\
+         \x20      --debug                        Include debug info in output (alias: --debug-info)\n\
+         \x20      --sections                     Emit full ELF section headers in the output binary\n\
+         \x20      --repl                         Launch the interactive REPL (shorthand for `vuma repl`)\n\
+         \x20      --safe                         Enable runtime memory safety checks\n\
+         \x20      --no-memory-safety             Disable compile-time memory-safety analysis (escape hatch)\n\
+         \x20      --bench                        Run performance benchmarks instead of compiling\n\
+         \x20  -v, --verbose                     Enable verbose/debug logging\n\
+         \x20  -q, --quiet                       Suppress non-error output\n\
+         \x20      --telemetry                    Output telemetry data as JSON\n\
+         \x20  -h, --help                        Print help\n\
+         \x20  -V, --version                     Print version"
+    );
+}
+
+/// Parse `argv` from `std::env::args()`. On `--help`/`-h` prints usage and
+/// exits with code 0; on `--version`/`-V` prints the version and exits with
+/// code 0; on any parse error prints the message to stderr and exits with
+/// code 2.
+fn parse_cli() -> Cli {
+    let args: Vec<String> = std::env::args().collect();
+    match parse_cli_from(args) {
+        Ok(cli) => cli,
+        Err(ParseError::Help) => {
+            print_usage();
+            std::process::exit(0);
+        }
+        Err(ParseError::Version) => {
+            println!("{}", version_long());
+            std::process::exit(0);
+        }
+        Err(ParseError::Msg(msg)) => {
+            eprintln!("{}", msg);
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Parse the supplied argument vector. Index 0 is the program name and is
+/// skipped. Used by both `parse_cli()` and the test suite (which calls it
+/// directly with synthetic argv vectors).
+fn parse_cli_from<I>(args: I) -> Result<Cli, ParseError>
+where
+    I: IntoIterator<Item: Into<String>>,
+{
+    let mut iter: ArgIter = args
+        .into_iter()
+        .map(|s| s.into())
+        .skip(1) // skip program name (args[0])
+        .collect::<Vec<_>>()
+        .into_iter()
+        .peekable();
+
+    let mut cli = Cli {
+        opt_level: OptLevelArg::O2,
+        verification: VerificationArg::Normal,
+        no_verify: false,
+        strict_verification: false,
+        debug: false,
+        sections: false,
+        repl: false,
+        safe: false,
+        no_memory_safety: false,
+        bench: false,
+        verbose: false,
+        quiet: false,
+        telemetry: false,
+        command: None,
+    };
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, &mut iter, &mut cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}'\n\n\
+                 Usage: vuma [OPTIONS] [COMMAND]\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        // First non-flag argument is the subcommand name.
+        iter.next(); // consume the subcommand name
+        let cmd = parse_subcommand(&arg, &mut iter, &mut cli)?;
+        cli.command = Some(cmd);
+        break;
+    }
+
+    Ok(cli)
+}
+
+/// Try to consume `arg` as a global CLI flag (a flag that may appear before
+/// or after the subcommand). Returns `Ok(true)` if it matched and was
+/// consumed (possibly along with its value); `Ok(false)` if it didn't match
+/// a global flag (and wasn't consumed); `Err` on a parse error.
+fn try_consume_global_flag(
+    arg: &str,
+    iter: &mut ArgIter,
+    cli: &mut Cli,
+) -> Result<bool, ParseError> {
+    match arg {
+        "--opt-level" => {
+            iter.next();
+            let val = take_value(iter, "--opt-level <OPT_LEVEL>")?;
+            cli.opt_level = OptLevelArg::parse(&val).map_err(ParseError::Msg)?;
+            Ok(true)
+        }
+        "--verification" => {
+            iter.next();
+            let val = take_value(iter, "--verification <VERIFICATION>")?;
+            cli.verification = VerificationArg::parse(&val).map_err(ParseError::Msg)?;
+            Ok(true)
+        }
+        "--no-verify" => {
+            iter.next();
+            cli.no_verify = true;
+            Ok(true)
+        }
+        "--strict-verification" => {
+            iter.next();
+            cli.strict_verification = true;
+            Ok(true)
+        }
+        "--debug" | "--debug-info" => {
+            iter.next();
+            cli.debug = true;
+            Ok(true)
+        }
+        "--sections" => {
+            iter.next();
+            cli.sections = true;
+            Ok(true)
+        }
+        "--repl" => {
+            iter.next();
+            cli.repl = true;
+            Ok(true)
+        }
+        "--safe" => {
+            iter.next();
+            cli.safe = true;
+            Ok(true)
+        }
+        "--no-memory-safety" => {
+            iter.next();
+            cli.no_memory_safety = true;
+            Ok(true)
+        }
+        "--bench" => {
+            iter.next();
+            cli.bench = true;
+            Ok(true)
+        }
+        "-v" | "--verbose" => {
+            iter.next();
+            cli.verbose = true;
+            Ok(true)
+        }
+        "-q" | "--quiet" => {
+            iter.next();
+            cli.quiet = true;
+            Ok(true)
+        }
+        "--telemetry" => {
+            iter.next();
+            cli.telemetry = true;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Take the next value from the iterator, or return an error if there is none.
+fn take_value(iter: &mut ArgIter, name: &str) -> Result<String, ParseError> {
+    match iter.next() {
+        Some(v) => Ok(v),
+        None => Err(ParseError::Msg(format!(
+            "error: a value is required for '{name}' but none was supplied"
+        ))),
+    }
+}
+
+/// Dispatch to a subcommand-specific parser. The subcommand name has
+/// already been consumed from `iter`.
+fn parse_subcommand(
+    name: &str,
+    iter: &mut ArgIter,
+    cli: &mut Cli,
+) -> Result<Commands, ParseError> {
+    match name {
+        "build" => parse_build(iter, cli),
+        "run" => parse_run(iter, cli),
+        "check" => parse_check(iter, cli),
+        "emit" => parse_emit(iter, cli),
+        "compile" => parse_compile(iter, cli),
+        "disasm" => parse_disasm(iter, cli),
+        "link" => parse_link(iter, cli),
+        "verify" => parse_verify(iter, cli),
+        "repl" => parse_repl(iter, cli),
+        "lsp" => parse_lsp(iter, cli),
+        "pkg" => parse_pkg(iter, cli),
+        "help" => Err(ParseError::Help),
+        other => Err(ParseError::Msg(format!(
+            "error: unrecognized subcommand '{other}'\n\n\
+             Usage: vuma [OPTIONS] [COMMAND]\n\n\
+             For more information, try '--help'."
+        ))),
+    }
+}
+
+/// `vuma build <file> [-o <out>] [--target linux] [--isa <isa>]`
+fn parse_build(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut file: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut target: TargetArg = TargetArg::Linux;
+    let mut isa: Option<IsaArg> = None;
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        match arg.as_str() {
+            "-o" | "--output" => {
+                iter.next();
+                let val = take_value(iter, "--output <OUTPUT>")?;
+                output = Some(PathBuf::from(val));
+                continue;
+            }
+            "--target" => {
+                iter.next();
+                let val = take_value(iter, "--target <TARGET>")?;
+                target = TargetArg::parse(&val).map_err(ParseError::Msg)?;
+                continue;
+            }
+            "--isa" => {
+                iter.next();
+                let val = take_value(iter, "--isa <ISA>")?;
+                isa = Some(IsaArg::parse(&val).map_err(ParseError::Msg)?);
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma build'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if file.is_none() {
+            file = Some(PathBuf::from(arg));
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma build'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma build <FILE> [OPTIONS]\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Build { file, output, target, isa })
+}
+
+/// `vuma run [--isa <isa>] <file> [args...]` (trailing-var-arg).
+///
+/// Once the file positional has been consumed, every remaining arg
+/// (including flag-shaped ones) becomes a trailing program argument.
+fn parse_run(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut isa: Option<IsaArg> = None;
+    let mut file: Option<PathBuf> = None;
+    let mut trailing_args: Vec<String> = Vec::new();
+
+    while let Some(arg) = iter.peek().cloned() {
+        // Once the file positional has been consumed, every remaining arg
+        // (including flag-shaped ones) becomes a trailing program argument.
+        if file.is_some() {
+            // Drain everything remaining into trailing_args.
+            while let Some(a) = iter.next() {
+                trailing_args.push(a);
+            }
+            break;
+        }
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg == "--isa" {
+            iter.next();
+            let val = take_value(iter, "--isa <ISA>")?;
+            isa = Some(IsaArg::parse(&val).map_err(ParseError::Msg)?);
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma run'\n  note: `--isa` must appear BEFORE the input file (trailing_var_arg)\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        file = Some(PathBuf::from(arg));
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma run [OPTIONS] <FILE> [ARGS]...\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Run { isa, file, args: trailing_args })
+}
+
+/// `vuma check <file>`
+fn parse_check(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut file: Option<PathBuf> = None;
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma check'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if file.is_none() {
+            file = Some(PathBuf::from(arg));
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma check'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma check <FILE>\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Check { file })
+}
+
+/// `vuma emit <isa> <file> [-o <out>]`
+fn parse_emit(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut output: Option<PathBuf> = None;
+    let mut positionals: Vec<String> = Vec::new();
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg == "-o" || arg == "--output" {
+            iter.next();
+            let val = take_value(iter, "--output <OUTPUT>")?;
+            output = Some(PathBuf::from(val));
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma emit'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        positionals.push(arg);
+    }
+
+    if positionals.len() < 2 {
+        let missing = if positionals.is_empty() { "<ISA> <FILE>" } else { "<FILE>" };
+        return Err(ParseError::Msg(format!(
+            "error: the following required arguments were not provided:\n  {missing}\n\n\
+             Usage: vuma emit <ISA> <FILE> [OPTIONS]\n\n\
+             For more information, try '--help'."
+        )));
+    }
+    if positionals.len() > 2 {
+        return Err(ParseError::Msg(format!(
+            "error: unexpected argument '{}' for 'vuma emit'\n\n\
+             For more information, try '--help'.",
+            positionals[2]
+        )));
+    }
+    let isa = IsaArg::parse(&positionals[0]).map_err(ParseError::Msg)?;
+    let file = PathBuf::from(&positionals[1]);
+
+    Ok(Commands::Emit { isa, file, output })
+}
+
+/// `vuma compile <file> [-o <out>] [--target aarch64] [--format obj]`
+fn parse_compile(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut file: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut target: IsaArg = IsaArg::Aarch64;
+    let mut format: FormatArg = FormatArg::Obj;
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        match arg.as_str() {
+            "-o" | "--output" => {
+                iter.next();
+                let val = take_value(iter, "--output <OUTPUT>")?;
+                output = Some(PathBuf::from(val));
+                continue;
+            }
+            "--target" => {
+                iter.next();
+                let val = take_value(iter, "--target <TARGET>")?;
+                target = IsaArg::parse(&val).map_err(ParseError::Msg)?;
+                continue;
+            }
+            "--format" => {
+                iter.next();
+                let val = take_value(iter, "--format <FORMAT>")?;
+                format = FormatArg::parse(&val).map_err(ParseError::Msg)?;
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma compile'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if file.is_none() {
+            file = Some(PathBuf::from(arg));
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma compile'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma compile <FILE> [OPTIONS]\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Compile { file, output, target, format })
+}
+
+/// `vuma disasm <file> [--isa aarch64] [--base-addr 0x400000]`
+fn parse_disasm(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut file: Option<PathBuf> = None;
+    let mut isa: IsaArg = IsaArg::Aarch64;
+    let mut base_addr: String = "0x400000".to_string();
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        match arg.as_str() {
+            "--isa" => {
+                iter.next();
+                let val = take_value(iter, "--isa <ISA>")?;
+                isa = IsaArg::parse(&val).map_err(ParseError::Msg)?;
+                continue;
+            }
+            "--base-addr" => {
+                iter.next();
+                let val = take_value(iter, "--base-addr <BASE_ADDR>")?;
+                base_addr = val;
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma disasm'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if file.is_none() {
+            file = Some(PathBuf::from(arg));
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma disasm'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma disasm <FILE> [OPTIONS]\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Disasm { file, isa, base_addr })
+}
+
+/// `vuma link <file1> <file2> ... [-o <out>] [--isa <isa>] [--run]`
+fn parse_link(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut output: Option<PathBuf> = None;
+    let mut isa: Option<IsaArg> = None;
+    let mut run: bool = false;
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        match arg.as_str() {
+            "-o" | "--output" => {
+                iter.next();
+                let val = take_value(iter, "--output <OUTPUT>")?;
+                output = Some(PathBuf::from(val));
+                continue;
+            }
+            "--isa" => {
+                iter.next();
+                let val = take_value(iter, "--isa <ISA>")?;
+                isa = Some(IsaArg::parse(&val).map_err(ParseError::Msg)?);
+                continue;
+            }
+            "--run" => {
+                iter.next();
+                run = true;
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma link'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        files.push(PathBuf::from(arg));
+    }
+
+    if files.is_empty() {
+        return Err(ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILES>...\n\n\
+             Usage: vuma link <FILES>... [OPTIONS]\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        ));
+    }
+
+    Ok(Commands::Link { files, output, isa, run })
+}
+
+/// `vuma verify <file>`
+fn parse_verify(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut file: Option<PathBuf> = None;
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma verify'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if file.is_none() {
+            file = Some(PathBuf::from(arg));
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma verify'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let file = file.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <FILE>\n\n\
+             Usage: vuma verify <FILE>\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Verify { file })
+}
+
+/// `vuma repl` (no further args)
+fn parse_repl(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        return Err(ParseError::Msg(format!(
+            "error: unexpected argument '{arg}' for 'vuma repl'\n\n\
+             For more information, try '--help'."
+        )));
+    }
+    Ok(Commands::Repl)
+}
+
+/// `vuma lsp` (no further args)
+fn parse_lsp(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        return Err(ParseError::Msg(format!(
+            "error: unexpected argument '{arg}' for 'vuma lsp'\n\n\
+             For more information, try '--help'."
+        )));
+    }
+    Ok(Commands::Lsp)
+}
+
+/// `vuma pkg <subcommand>` — package manager dispatch.
+fn parse_pkg(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    // Consume any leading global flags (they may appear between the
+    // subcommand and its first positional).
+    let mut sub_name: Option<String> = None;
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma pkg'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        sub_name = Some(arg);
+        break;
+    }
+
+    let sub_name = sub_name.ok_or_else(|| {
+        ParseError::Msg(
+            "error: a subcommand is required for 'vuma pkg'\n  [possible subcommands: init, build, add]\n\n\
+             Usage: vuma pkg <COMMAND>\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    match sub_name.as_str() {
+        "init" => parse_pkg_init(iter, cli),
+        "build" => parse_pkg_build(iter, cli),
+        "add" => parse_pkg_add(iter, cli),
+        "help" => Err(ParseError::Help),
+        other => Err(ParseError::Msg(format!(
+            "error: unrecognized subcommand '{other}' for 'vuma pkg'\n  [possible subcommands: init, build, add]\n\n\
+             Usage: vuma pkg <COMMAND>\n\n\
+             For more information, try '--help'."
+        ))),
+    }
+}
+
+/// `vuma pkg init <name>`
+fn parse_pkg_init(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut name: Option<String> = None;
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma pkg init'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        if name.is_none() {
+            name = Some(arg);
+        } else {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma pkg init'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+    }
+
+    let name = name.ok_or_else(|| {
+        ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <NAME>\n\n\
+             Usage: vuma pkg init <NAME>\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        )
+    })?;
+
+    Ok(Commands::Pkg { cmd: PkgCommand::Init { name } })
+}
+
+/// `vuma pkg build`
+fn parse_pkg_build(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        return Err(ParseError::Msg(format!(
+            "error: unexpected argument '{arg}' for 'vuma pkg build'\n\n\
+             For more information, try '--help'."
+        )));
+    }
+    Ok(Commands::Pkg { cmd: PkgCommand::Build })
+}
+
+/// `vuma pkg add <dep> [version]` (default version "*")
+fn parse_pkg_add(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
+    let mut positionals: Vec<String> = Vec::new();
+
+    while let Some(arg) = iter.peek().cloned() {
+        if arg == "--help" || arg == "-h" {
+            return Err(ParseError::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Err(ParseError::Version);
+        }
+        if try_consume_global_flag(&arg, iter, cli)? {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return Err(ParseError::Msg(format!(
+                "error: unexpected argument '{arg}' for 'vuma pkg add'\n\n\
+                 For more information, try '--help'."
+            )));
+        }
+        iter.next();
+        positionals.push(arg);
+    }
+
+    if positionals.is_empty() {
+        return Err(ParseError::Msg(
+            "error: the following required arguments were not provided:\n  <DEP>\n\n\
+             Usage: vuma pkg add <DEP> [VERSION]\n\n\
+             For more information, try '--help'."
+                .to_string(),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(ParseError::Msg(format!(
+            "error: unexpected argument '{}' for 'vuma pkg add'\n\n\
+             For more information, try '--help'.",
+            positionals[2]
+        )));
+    }
+    let dep = positionals[0].clone();
+    let version = if positionals.len() == 2 {
+        positionals[1].clone()
+    } else {
+        "*".to_string()
+    };
+
+    Ok(Commands::Pkg {
+        cmd: PkgCommand::Add { dep, version },
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1812,13 +2756,7 @@ fn main() {
     // this self-hosted compiler — there is no third-party `log` crate bridge.
     init_logger(log_level);
 
-    let cli = Cli::parse();
-
-    // Handle --version with extended info.
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("{}", version_long());
-        return;
-    }
+    let cli = parse_cli();
 
     // Handle --bench flag: run the benchmark suite.
     if cli.bench {
@@ -1921,12 +2859,11 @@ fn cmd_pkg(cmd: &PkgCommand) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     /// Test 1: `vuma build hello.vuma` parses correctly.
     #[test]
     fn test_build_basic() {
-        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "build", "hello.vuma"]).unwrap();
         match cli.command {
             Some(Commands::Build {
                 ref file,
@@ -1946,7 +2883,7 @@ mod tests {
     /// Test 2: `vuma build hello.vuma -o out.o --target linux` parses correctly.
     #[test]
     fn test_build_with_options() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_from([
             "vuma",
             "build",
             "hello.vuma",
@@ -1974,7 +2911,7 @@ mod tests {
     /// Test 2b: `vuma build hello.vuma --isa x86_64` parses the --isa flag.
     #[test]
     fn test_build_with_isa() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_from([
             "vuma",
             "build",
             "hello.vuma",
@@ -1994,7 +2931,7 @@ mod tests {
     /// Test 3: `vuma run hello.vuma` parses correctly.
     #[test]
     fn test_run_basic() {
-        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "run", "hello.vuma"]).unwrap();
         match cli.command {
             Some(Commands::Run { ref file, ref args, isa: _ }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
@@ -2007,7 +2944,7 @@ mod tests {
     /// Test 4: `vuma run hello.vuma arg1 arg2` passes trailing args.
     #[test]
     fn test_run_with_args() {
-        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
+        let cli = parse_cli_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
         match cli.command {
             Some(Commands::Run { ref file, ref args, .. }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
@@ -2021,7 +2958,7 @@ mod tests {
     /// (must come BEFORE the file because of `trailing_var_arg`).
     #[test]
     fn test_run_with_isa() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_from([
             "vuma", "run", "--isa", "aarch64", "hello.vuma", "arg1",
         ])
         .unwrap();
@@ -2053,7 +2990,7 @@ mod tests {
     /// Test 5: `vuma check hello.vuma` parses correctly.
     #[test]
     fn test_check() {
-        let cli = Cli::try_parse_from(["vuma", "check", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "check", "hello.vuma"]).unwrap();
         match cli.command {
             Some(Commands::Check { ref file }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
@@ -2065,7 +3002,7 @@ mod tests {
     /// Test 6: `vuma emit aarch64 hello.vuma` parses correctly.
     #[test]
     fn test_emit_aarch64() {
-        let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
         match cli.command {
             Some(Commands::Emit {
                 isa,
@@ -2084,7 +3021,7 @@ mod tests {
     #[test]
     fn test_emit_x86_64_with_output() {
         let cli =
-            Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+            parse_cli_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
         match cli.command {
             Some(Commands::Emit {
                 isa,
@@ -2102,7 +3039,7 @@ mod tests {
     /// Test 8: `vuma disasm hello.o --isa riscv64 --base-addr 0x1000` parses correctly.
     #[test]
     fn test_disasm() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_from([
             "vuma",
             "disasm",
             "hello.o",
@@ -2129,7 +3066,7 @@ mod tests {
     /// Test 9: `vuma verify hello.vuma` parses correctly.
     #[test]
     fn test_verify() {
-        let cli = Cli::try_parse_from(["vuma", "verify", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "verify", "hello.vuma"]).unwrap();
         match cli.command {
             Some(Commands::Verify { ref file }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
@@ -2141,7 +3078,7 @@ mod tests {
     /// Test 10: `vuma repl` parses correctly.
     #[test]
     fn test_repl_subcommand() {
-        let cli = Cli::try_parse_from(["vuma", "repl"]).unwrap();
+        let cli = parse_cli_from(["vuma", "repl"]).unwrap();
         match cli.command {
             Some(Commands::Repl) => {}
             _ => panic!("expected Repl command"),
@@ -2151,7 +3088,7 @@ mod tests {
     /// Test 10b: `vuma --repl` parses correctly.
     #[test]
     fn test_repl_flag() {
-        let cli = Cli::try_parse_from(["vuma", "--repl"]).unwrap();
+        let cli = parse_cli_from(["vuma", "--repl"]).unwrap();
         assert!(cli.repl, "--repl flag should be true");
     }
 
@@ -2159,14 +3096,14 @@ mod tests {
     #[test]
     fn test_global_opt_level() {
         let cli =
-            Cli::try_parse_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
+            parse_cli_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.opt_level, OptLevelArg::O0);
     }
 
     /// Test 12: Global --verification flag works.
     #[test]
     fn test_global_verification_level() {
-        let cli = Cli::try_parse_from([
+        let cli = parse_cli_from([
             "vuma",
             "--verification",
             "exhaustive",
@@ -2180,14 +3117,14 @@ mod tests {
     /// Test 13: Global --debug flag works.
     #[test]
     fn test_global_debug_flag() {
-        let cli = Cli::try_parse_from(["vuma", "--debug", "build", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "--debug", "build", "hello.vuma"]).unwrap();
         assert!(cli.debug);
     }
 
     /// Test 14: Default values are correct.
     #[test]
     fn test_defaults() {
-        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.opt_level, OptLevelArg::O2);
         assert_eq!(cli.verification, VerificationArg::Normal);
         assert!(!cli.debug);
@@ -2207,7 +3144,7 @@ mod tests {
             "ppc64",
         ];
         for name in isa_names {
-            let cli = Cli::try_parse_from(["vuma", "emit", name, "test.vuma"]).unwrap();
+            let cli = parse_cli_from(["vuma", "emit", name, "test.vuma"]).unwrap();
             match cli.command {
                 Some(Commands::Emit { isa, .. }) => {
                     // Verify it parsed without error.
@@ -2269,7 +3206,7 @@ mod tests {
     /// Test 20: Invalid subcommand is rejected.
     #[test]
     fn test_invalid_subcommand() {
-        let result = Cli::try_parse_from(["vuma", "invalid"]);
+        let result = parse_cli_from(["vuma", "invalid"]);
         assert!(result.is_err());
     }
 }
