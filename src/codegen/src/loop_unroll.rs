@@ -1835,6 +1835,11 @@ pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
             new_instrs.push(cloned);
         }
     }
+    // Suppress unused-must-use: next_vreg is advanced inside the loop as a
+    // vreg allocator. After the loop, next_vreg is not read (the caller
+    // recomputes vregs from the IR). The variable exists to make the vreg
+    // allocation pattern explicit and auditable.
+    let _ = next_vreg;
 
     new_instrs.push(IRInstr::BinOp {
         op: BinOpKind::Add,
