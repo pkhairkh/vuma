@@ -97,7 +97,7 @@ extern "C" {
     fn ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
     fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
     fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32;  // codegen.vuma (Wave 52)
-    fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32) -> u32;  // elf.vuma
+    fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32;  // elf.vuma
 }
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
@@ -814,7 +814,7 @@ fn main() -> i32 {
         __vuma_free(code, code_cap);
         return 1;
     }
-    success: u32 = write_elf64(code, code_size, out_fd, 0);
+    success: u32 = write_elf64(code, code_size, out_fd, 0, 0);
     close(out_fd);
 
 
