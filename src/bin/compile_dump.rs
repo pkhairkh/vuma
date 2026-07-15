@@ -33,7 +33,7 @@ where
     if num_threads == 1 {
         return items.iter().map(&f).collect();
     }
-    let chunk_size = (n + num_threads - 1) / num_threads;
+    let chunk_size = n.div_ceil(num_threads);
     let chunk_results: Result<Vec<Vec<U>>, E> = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
         for chunk in items.chunks(chunk_size) {

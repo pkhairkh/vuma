@@ -427,10 +427,10 @@ impl SemanticTokensLegend {
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
             ("tokenTypes".to_string(), JsonValue::Array(
-                self.token_types.iter().map(|s| json_str(s)).collect(),
+                self.token_types.iter().map(json_str).collect(),
             )),
             ("tokenModifiers".to_string(), JsonValue::Array(
-                self.token_modifiers.iter().map(|s| json_str(s)).collect(),
+                self.token_modifiers.iter().map(json_str).collect(),
             )),
         ])
     }

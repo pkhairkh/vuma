@@ -827,7 +827,7 @@ fn parse_run(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> 
         // (including flag-shaped ones) becomes a trailing program argument.
         if file.is_some() {
             // Drain everything remaining into trailing_args.
-            while let Some(a) = iter.next() {
+            for a in iter.by_ref() {
                 trailing_args.push(a);
             }
             break;
