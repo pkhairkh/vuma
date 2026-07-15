@@ -11,14 +11,9 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# serde/serde_json removed in Wave 43 — `PackageManifest` and `RegistryIndex`
-# now use the `toml::Value` API directly (`toml::from_str::<toml::Value>` +
-# hand-written navigation, `toml::to_string_pretty(&toml::Value::Table(...))`)
-# instead of `#[derive(Serialize, Deserialize)]` + `toml::from_str::<T>`.
-# The on-disk TOML format is unchanged. `PackageManifest::from_toml` /
-# `to_toml` now return `Result<_, PackageError>` instead of
-# `Result<_, toml::de::Error>` / `Result<_, toml::ser::Error>` — callers in
-# `lib.rs` and `registry.rs` that previously wrapped the toml error via
-# `.map_err(|e| PackageError::ManifestParse(e.to_string()))` were simplified
-# to use the `?` operator directly.
-toml.workspace = true
+# serde/serde_json and the third-party `toml` crate were removed in Wave 43.
+# `PackageManifest` and `RegistryIndex` now use the in-tree `toml_lite` module
+# (`src/package/src/toml_lite.rs`) — a hand-written TOML parser/serializer that
+# supports the subset of TOML used by `vuma.pkg` manifests and the registry
+# `index.toml` file (sections, array-of-tables, key=value strings, arrays of
+# strings). The on-disk TOML format is unchanged.
