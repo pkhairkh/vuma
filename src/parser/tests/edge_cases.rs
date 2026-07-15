@@ -722,3 +722,76 @@ fn test_bd_keyword_as_identifier_in_assign_and_expr() {
         result.errors
     );
 }
+
+// ---- Wave 48 (Task A): additional context-aware dispatch edge cases ----
+//
+// The earlier tests in this file cover the common cases (let-with-ascription,
+// assignment, BD-directive form).  These three additional tests pin down
+// edge cases that the bootstrap `womb/lang/*.vuma` files also exercise:
+//
+//   * `repd + 1;`  — keyword used as a bare expression statement (next
+//     token is `+`, not `(` or `:`).  Must parse as an expression statement,
+//     NOT as a BD directive (which would expect `(`).
+//   * `capd += 1;` — keyword used as the LHS of a compound assignment.
+//     Must parse as `Stmt::CompoundAssign`, NOT as a BD directive.
+//   * mixed usage in one function — a single function that declares
+//     `reld: u32 = 5;`, then calls `bd(Secure);`, then reassigns
+//     `reld = reld + 1;`.  Verifies the parser doesn't get "stuck" in
+//     BD-directive mode after seeing one `bd(...)` call.
+
+/// `repd + 1;` parses as an expression statement (next token `+`).
+#[test]
+fn test_wave48_repd_as_expression_statement() {
+    let source = "fn f() { repd + 1; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "repd + 1; should parse as expression statement, errors: {:?}",
+        result.errors
+    );
+}
+
+/// `capd` used as the LHS of a compound assignment (`capd += 1;`).
+#[test]
+fn test_wave48_capd_as_compound_assignment() {
+    let source = "fn f() { capd += 1; }";
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "capd += 1; should parse as compound assignment, errors: {:?}",
+        result.errors
+    );
+}
+
+/// Mixed usage in one function: `reld: u32 = 5;` (let), `bd(Secure);`
+/// (real directive), `reld = reld + 1;` (assignment).  Verifies the parser
+/// doesn't confuse the dispatch after seeing a real BD directive.
+#[test]
+fn test_wave48_reld_as_variable_mixed_with_bd_directive() {
+    let source = r#"
+        fn f() {
+            reld: u32 = 5;
+            bd(Secure);
+            reld = reld + 1;
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(
+        result.is_ok(),
+        "mixed reld-as-variable and bd(...) directive should parse, errors: {:?}",
+        result.errors
+    );
+    let program = result.unwrap();
+    if let vuma_parser::ast::Item::FnDef(f) = &program.items[0] {
+        assert_eq!(
+            f.body.statements.len(),
+            3,
+            "should have three statements (let, bd-directive, assign)"
+        );
+    } else {
+        panic!("expected FnDef, got {:?}", program.items[0]);
+    }
+}
