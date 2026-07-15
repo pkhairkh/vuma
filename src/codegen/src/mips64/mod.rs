@@ -1826,42 +1826,6 @@ fn mips64_compute_frame_size(func: &IRFunction) -> usize {
     total as usize
 }
 
-/// Allocatable GPR registers for MIPS64, in priority order.
-///
-/// Order: temporaries first, then argument registers, then callee-saved.
-const ALLOCATABLE_GPRS: &[Gpr] = &[
-    // Caller-saved temporaries (highest priority — no save/restore needed)
-    Gpr::T0,
-    Gpr::T1,
-    Gpr::T2,
-    Gpr::T3,
-    Gpr::T4,
-    Gpr::T5,
-    Gpr::T6,
-    Gpr::T7,
-    Gpr::T8,
-    Gpr::T9,
-    // Return value registers (also caller-saved)
-    Gpr::V0,
-    Gpr::V1,
-    // Argument registers (also caller-saved)
-    Gpr::A0,
-    Gpr::A1,
-    Gpr::A2,
-    Gpr::A3,
-    // Callee-saved (require save/restore)
-    Gpr::S0,
-    Gpr::S1,
-    Gpr::S2,
-    Gpr::S3,
-    Gpr::S4,
-    Gpr::S5,
-    Gpr::S6,
-    Gpr::S7,
-    // Frame pointer is last — we prefer not to use it
-    Gpr::Fp,
-];
-
 /// Map from virtual register ID to a physical GPR using a simple linear scan.
 ///
 /// Argument virtual registers are mapped to a0–a3 first.  Remaining virtual
@@ -1871,6 +1835,41 @@ fn map_vreg_to_gpr(
     arg_index: Option<usize>,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
 ) -> Gpr {
+    /// Allocatable GPR registers for MIPS64, in priority order.
+    ///
+    /// Order: temporaries first, then argument registers, then callee-saved.
+    const ALLOCATABLE_GPRS: &[Gpr] = &[
+        // Caller-saved temporaries (highest priority — no save/restore needed)
+        Gpr::T0,
+        Gpr::T1,
+        Gpr::T2,
+        Gpr::T3,
+        Gpr::T4,
+        Gpr::T5,
+        Gpr::T6,
+        Gpr::T7,
+        Gpr::T8,
+        Gpr::T9,
+        // Return value registers (also caller-saved)
+        Gpr::V0,
+        Gpr::V1,
+        // Argument registers (also caller-saved)
+        Gpr::A0,
+        Gpr::A1,
+        Gpr::A2,
+        Gpr::A3,
+        // Callee-saved (require save/restore)
+        Gpr::S0,
+        Gpr::S1,
+        Gpr::S2,
+        Gpr::S3,
+        Gpr::S4,
+        Gpr::S5,
+        Gpr::S6,
+        Gpr::S7,
+        // Frame pointer is last — we prefer not to use it
+        Gpr::Fp,
+    ];
     if let Some(gpr) = vreg_map.get(&vreg_id) {
         return *gpr;
     }
@@ -5069,7 +5068,6 @@ impl Backend for Mips64Backend {
 
         const R_MIPS_26: &str = "R_MIPS_26";
         const BASE_ADDR: u64 = 0x400000;
-        const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
 
         // Compute text_offset (must match build_mips64_elf_2seg)
         let elf_header_size: u64 = 64;

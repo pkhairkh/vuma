@@ -223,8 +223,6 @@ const S2: Gpr = Gpr::R8;
 const S3: Gpr = Gpr::R9;
 const S4: Gpr = Gpr::R10;
 const S5: Gpr = Gpr::R12;
-const S6: Gpr = Gpr::R0;  // R0 can be used for non-base-register purposes
-const S7: Gpr = Gpr::R1;
 
 /// Frame pointer (R11).
 const FP: Gpr = Gpr::R11;

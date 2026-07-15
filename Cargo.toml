@@ -8,7 +8,7 @@ license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 authors.workspace = true
-rust-version = "1.75"
+rust-version = "1.87"
 
 [workspace]
 members = [
@@ -34,7 +34,7 @@ keywords = ["compiler", "verification", "memory-safety", "codegen", "ai-native"]
 categories = ["compilers", "development-tools", "memory-management"]
 authors = ["Parham Khairkhah"]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.87"
 
 [workspace.dependencies]
 # Internal crates
@@ -62,7 +62,7 @@ rayon = "1"
 [workspace.metadata]
 release = "alpha"
 release-channel = "pre-release"
-min-rust-version = "1.75"
+min-rust-version = "1.87"
 msrv-policy = "latest-stable"
 homepage = "https://github.com/pkhairkh/vuma"
 documentation = "https://github.com/pkhairkh/vuma/tree/main/docs"
