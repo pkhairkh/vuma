@@ -141,17 +141,17 @@ showed the inliner creates IR shapes that expose scheduler/LICM bugs.
 With inliner + scheduler + LICM all disabled, O2 works. With any one
 enabled, O2 crashes. Investigation continues.
 
-### 2. Runtime stubs not emitted by bootstrap
+### 2. Runtime stubs — partially emitted by bootstrap (Wave 52)
 
-The bootstrap compiler (`womb/lang/codegen.vuma`) cannot emit:
-- `_start` (process entry point)
-- `__vuma_argc` / `__vuma_argv` (argv access stubs)
-- `__vuma_alloc` / `__vuma_free` (heap allocator stubs)
-- `print_int` / `print_hex` / `print_newline` (debug output stubs)
+The bootstrap compiler (`womb/lang/codegen.vuma`) now emits its own
+`_start`, `print_int`, `__vuma_alloc`, `__vuma_free`, `print_newline`,
+`print_hex`, `__vuma_argc`, `__vuma_argv`, and syscall stubs (`write`,
+`read`, `open`, `close`). 337 bytes of runtime stubs at offset 0 of the
+code section, entry point at offset 0.
 
-These are currently emitted by the Rust-side x86_64 backend
-(`src/codegen/src/x86_64/mod.rs`). A real self-hosted `vumac` must emit
-its own runtime stubs. Move the stub emitters into `womb/lang/codegen.vuma`.
+**Remaining:** `__vuma_argc`/`__vuma_argv` use a BSS placeholder that is
+NOT patched (elf.vuma doesn't allocate BSS). The full `_start` stub
+(argc/argv BSS save) requires BSS support in `write_elf64`.
 
 ### 3. `merge_module_asts` is not a real linker
 
