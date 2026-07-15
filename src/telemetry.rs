@@ -29,10 +29,10 @@
 //! collector.increment_error_count();
 //!
 //! let report = collector.finalize();
-//! println!("{}", serde_json::to_string_pretty(&report).unwrap());
+//! println!("{}", report.to_json_pretty());
 //! ```
 
-use serde::{Deserialize, Serialize};
+use crate::json_value::{json_bool, json_str, json_u64, json_usize, JsonValue};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -44,7 +44,7 @@ use std::time::Instant;
 ///
 /// Contains only aggregate metrics — no source code, file paths, or
 /// user-identifiable data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TelemetryReport {
     /// VUMA version string.
     pub version: String,
@@ -78,8 +78,51 @@ pub struct TelemetryReport {
     pub timestamp: String,
 }
 
+impl TelemetryReport {
+    /// Serialize this report as a compact JSON string.
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string_compact()
+    }
+
+    /// Serialize this report as a pretty-printed JSON string.
+    pub fn to_json_pretty(&self) -> String {
+        self.to_json_value().to_string_pretty()
+    }
+
+    /// Build the [`JsonValue`] representation of this report.
+    pub fn to_json_value(&self) -> JsonValue {
+        // Stage timings — sorted by key for deterministic output (matches
+        // serde_json's behavior when serializing a BTreeMap). We sort the
+        // HashMap's entries here.
+        let mut stage_entries: Vec<(String, JsonValue)> = self
+            .stage_timings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_json_value()))
+            .collect();
+        stage_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        JsonValue::Object(vec![
+            ("version".to_string(), json_str(&self.version)),
+            ("total_time_ms".to_string(), json_u64(self.total_time_ms)),
+            ("stage_timings".to_string(), JsonValue::Object(stage_entries)),
+            ("peak_memory_bytes".to_string(), json_u64(self.peak_memory_bytes)),
+            ("error_count".to_string(), json_usize(self.error_count)),
+            ("warning_count".to_string(), json_usize(self.warning_count)),
+            ("scg_node_count".to_string(), json_usize(self.scg_node_count)),
+            ("ir_function_count".to_string(), json_usize(self.ir_function_count)),
+            ("ir_instruction_count".to_string(), json_usize(self.ir_instruction_count)),
+            ("binary_size_bytes".to_string(), json_usize(self.binary_size_bytes)),
+            ("opt_level".to_string(), json_str(&self.opt_level)),
+            ("verification_level".to_string(), json_str(&self.verification_level)),
+            ("debug_info".to_string(), json_bool(self.debug_info)),
+            ("target".to_string(), json_str(&self.target)),
+            ("timestamp".to_string(), json_str(&self.timestamp)),
+        ])
+    }
+}
+
 /// Metrics for a single compilation stage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StageMetrics {
     /// Wall-clock time for this stage in milliseconds.
     pub time_ms: u64,
@@ -89,6 +132,18 @@ pub struct StageMetrics {
     pub warning_count: usize,
     /// Memory delta (approximate) in bytes during this stage.
     pub memory_delta_bytes: i64,
+}
+
+impl StageMetrics {
+    /// Build the [`JsonValue`] representation of these stage metrics.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("time_ms".to_string(), json_u64(self.time_ms)),
+            ("error_count".to_string(), json_usize(self.error_count)),
+            ("warning_count".to_string(), json_usize(self.warning_count)),
+            ("memory_delta_bytes".to_string(), JsonValue::from(self.memory_delta_bytes)),
+        ])
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -394,7 +449,7 @@ mod tests {
         collector.stage_end("test-stage");
 
         let report = collector.finalize();
-        let json = serde_json::to_string(&report).unwrap();
+        let json = report.to_json();
         assert!(json.contains("version"));
         assert!(json.contains("total_time_ms"));
         assert!(json.contains("error_count"));
@@ -426,7 +481,7 @@ mod tests {
     fn test_telemetry_report_pretty_json() {
         let collector = TelemetryCollector::new();
         let report = collector.finalize();
-        let pretty = serde_json::to_string_pretty(&report).unwrap();
+        let pretty = report.to_json_pretty();
         assert!(pretty.contains("\"version\""));
         assert!(pretty.contains("\"total_time_ms\""));
     }

@@ -1678,7 +1678,7 @@ fn cmd_build(
             // Output telemetry if requested.
             if let Some(tc) = telemetry {
                 let report = tc.finalize();
-                println!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+                println!("\n{}", report.to_json_pretty());
             }
 
             Ok(())
@@ -1689,7 +1689,7 @@ fn cmd_build(
             if cli.telemetry {
                 if let Some(tc) = telemetry {
                     let report = tc.finalize();
-                    eprintln!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+                    eprintln!("\n{}", report.to_json_pretty());
                 }
             }
 

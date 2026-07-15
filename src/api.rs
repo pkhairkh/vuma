@@ -42,11 +42,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
-
 use crate::diagnostics::{
     self, DiagnosticSeverity, DiagnosticSourceLocation, VumaDiagnostic,
 };
+use crate::json_value::{json_str, JsonValue};
 use crate::pipeline::{self, CompileConfig, VerificationLevel};
 use vuma_ive::{
     InvariantAggregator,
@@ -719,7 +718,7 @@ impl Default for VumaCompiler {
 /// This is the primary return type for `VumaCompiler::compile()` and
 /// `VumaCompiler::compile_for_target()`. It always contains a value —
 /// check `success` to determine the outcome.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompileResult {
     /// Whether compilation succeeded (produced a binary).
     pub success: bool,
@@ -737,8 +736,38 @@ pub struct CompileResult {
     pub metadata: CompileMetadata,
 }
 
+impl CompileResult {
+    /// Serialize this result as a compact JSON string.
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string_compact()
+    }
+
+    /// Serialize this result as a pretty-printed JSON string.
+    pub fn to_json_pretty(&self) -> String {
+        self.to_json_value().to_string_pretty()
+    }
+
+    /// Build the [`JsonValue`] representation of this result.
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("success".to_string(), JsonValue::Bool(self.success)),
+            ("diagnostics".to_string(), JsonValue::Array(
+                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
+            )),
+            ("metadata".to_string(), self.metadata.to_json_value()),
+        ];
+        if let Some(s) = &self.scg {
+            entries.push(("scg".to_string(), s.to_json_value()));
+        }
+        if let Some(t) = &self.target {
+            entries.push(("target".to_string(), t.to_json_value()));
+        }
+        JsonValue::Object(entries)
+    }
+}
+
 /// Result of parsing (without codegen).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ParseResult {
     /// Whether parsing succeeded.
     pub success: bool,
@@ -752,6 +781,31 @@ pub struct ParseResult {
     pub metadata: CompileMetadata,
 }
 
+impl ParseResult {
+    /// Serialize this result as a compact JSON string.
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string_compact()
+    }
+
+    /// Build the [`JsonValue`] representation of this result.
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("success".to_string(), JsonValue::Bool(self.success)),
+            ("diagnostics".to_string(), JsonValue::Array(
+                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
+            )),
+            ("metadata".to_string(), self.metadata.to_json_value()),
+        ];
+        if let Some(s) = &self.ast_summary {
+            entries.push(("ast_summary".to_string(), s.to_json_value()));
+        }
+        if let Some(s) = &self.scg {
+            entries.push(("scg".to_string(), s.to_json_value()));
+        }
+        JsonValue::Object(entries)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SCG Summary Types
 // ═══════════════════════════════════════════════════════════════════════════
@@ -760,7 +814,7 @@ pub struct ParseResult {
 ///
 /// The SCG summary provides a structured overview of the program's semantic
 /// computation graph without exposing the full graph representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ScgSummary {
     /// Number of functions in the SCG.
     pub function_count: usize,
@@ -772,8 +826,22 @@ pub struct ScgSummary {
     pub total_edges: usize,
 }
 
+impl ScgSummary {
+    /// Build the [`JsonValue`] representation of this summary.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("function_count".to_string(), JsonValue::U64(self.function_count as u64)),
+            ("functions".to_string(), JsonValue::Array(
+                self.functions.iter().map(|f| f.to_json_value()).collect(),
+            )),
+            ("total_nodes".to_string(), JsonValue::U64(self.total_nodes as u64)),
+            ("total_edges".to_string(), JsonValue::U64(self.total_edges as u64)),
+        ])
+    }
+}
+
 /// Summary of a single function in the SCG.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FunctionSummary {
     /// Function name.
     pub name: String,
@@ -787,12 +855,31 @@ pub struct FunctionSummary {
     pub calls: Vec<String>,
 }
 
+impl FunctionSummary {
+    /// Build the [`JsonValue`] representation of this function summary.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("name".to_string(), json_str(&self.name)),
+            ("params".to_string(), JsonValue::Array(
+                self.params.iter().map(|(n, t)| JsonValue::Array(vec![
+                    json_str(n), json_str(t),
+                ])).collect(),
+            )),
+            ("return_type".to_string(), json_str(&self.return_type)),
+            ("node_count".to_string(), JsonValue::U64(self.node_count as u64)),
+            ("calls".to_string(), JsonValue::Array(
+                self.calls.iter().map(|c| json_str(c)).collect(),
+            )),
+        ])
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // AST Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Summary of the parsed AST.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AstSummary {
     /// Total number of top-level items.
     pub item_count: usize,
@@ -804,22 +891,34 @@ pub struct AstSummary {
     pub import_count: usize,
 }
 
+impl AstSummary {
+    /// Build the [`JsonValue`] representation of this summary.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("item_count".to_string(), JsonValue::U64(self.item_count as u64)),
+            ("function_names".to_string(), JsonValue::Array(
+                self.function_names.iter().map(|s| json_str(s)).collect(),
+            )),
+            ("region_names".to_string(), JsonValue::Array(
+                self.region_names.iter().map(|s| json_str(s)).collect(),
+            )),
+            ("import_count".to_string(), JsonValue::U64(self.import_count as u64)),
+        ])
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Target Output
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Compiled output for a specific target backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TargetOutput {
     /// Backend name (e.g., "x86_64", "aarch64", "riscv64").
     pub backend: String,
     /// Raw binary output (ELF, Wasm, or raw binary depending on target).
     ///
     /// Serialized as a hex string for compact JSON representation.
-    #[serde(
-        serialize_with = "serialize_binary_hex",
-        deserialize_with = "deserialize_binary_hex"
-    )]
     pub binary: Vec<u8>,
     /// Size of the binary in bytes.
     pub binary_size: usize,
@@ -827,12 +926,26 @@ pub struct TargetOutput {
     pub disassembly: String,
 }
 
+impl TargetOutput {
+    /// Build the [`JsonValue`] representation of this output. The `binary`
+    /// field is encoded as a hex string for compact JSON representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        let hex: String = self.binary.iter().map(|b| format!("{:02x}", b)).collect();
+        JsonValue::Object(vec![
+            ("backend".to_string(), json_str(&self.backend)),
+            ("binary".to_string(), json_str(hex)),
+            ("binary_size".to_string(), JsonValue::U64(self.binary_size as u64)),
+            ("disassembly".to_string(), json_str(&self.disassembly)),
+        ])
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Metadata Types
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Metadata about a compilation run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompileMetadata {
     /// Wall-clock compilation time in milliseconds.
     pub compile_time_ms: u64,
@@ -842,11 +955,22 @@ pub struct CompileMetadata {
     pub source_bytes: usize,
 }
 
+impl CompileMetadata {
+    /// Build the [`JsonValue`] representation of this metadata.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("compile_time_ms".to_string(), JsonValue::U64(self.compile_time_ms)),
+            ("source_lines".to_string(), JsonValue::U64(self.source_lines as u64)),
+            ("source_bytes".to_string(), JsonValue::U64(self.source_bytes as u64)),
+        ])
+    }
+}
+
 /// Information about a supported compilation target.
 ///
 /// Named `ApiTargetInfo` to avoid collision with
 /// `vuma_codegen::backend::TargetInfo`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ApiTargetInfo {
     /// ISA name (e.g., "x86_64", "aarch64").
     pub name: String,
@@ -860,42 +984,17 @@ pub struct ApiTargetInfo {
     pub output_format: String,
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Binary Serde Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Serialize `Vec<u8>` as a hex string for compact JSON representation.
-fn serialize_binary_hex<S: serde::Serializer>(data: &[u8], s: S) -> Result<S::Ok, S::Error> {
-    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
-    s.serialize_str(&hex)
-}
-
-/// Deserialize `Vec<u8>` from a hex string.
-fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-    struct HexVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for HexVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "a hex-encoded string")
-        }
-
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            if !v.len().is_multiple_of(2) {
-                return Err(E::custom("hex string has odd length"));
-            }
-            (0..v.len())
-                .step_by(2)
-                .map(|i| {
-                    u8::from_str_radix(&v[i..i + 2], 16)
-                        .map_err(|e| E::custom(format!("hex decode error: {}", e)))
-                })
-                .collect()
-        }
+impl ApiTargetInfo {
+    /// Build the [`JsonValue`] representation of this target info.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("name".to_string(), json_str(&self.name)),
+            ("triple".to_string(), json_str(&self.triple)),
+            ("pointer_width".to_string(), JsonValue::U64(self.pointer_width as u64)),
+            ("endianness".to_string(), json_str(&self.endianness)),
+            ("output_format".to_string(), json_str(&self.output_format)),
+        ])
     }
-
-    d.deserialize_str(HexVisitor)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -903,7 +1002,7 @@ fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Overall verdict of the verification run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerificationVerdict {
     /// All five invariants passed.
     Pass,
@@ -913,6 +1012,18 @@ pub enum VerificationVerdict {
     Inconclusive,
     /// An error occurred before verification could run (e.g., parse error).
     Error,
+}
+
+impl VerificationVerdict {
+    /// Returns the JSON string representation.
+    pub fn as_json_str(&self) -> &'static str {
+        match self {
+            VerificationVerdict::Pass => "pass",
+            VerificationVerdict::Fail => "fail",
+            VerificationVerdict::Inconclusive => "inconclusive",
+            VerificationVerdict::Error => "error",
+        }
+    }
 }
 
 impl fmt::Display for VerificationVerdict {
@@ -927,7 +1038,7 @@ impl fmt::Display for VerificationVerdict {
 }
 
 /// Status of a single invariant verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InvariantVerificationStatus {
     /// The invariant was proven to hold.
     Pass,
@@ -935,6 +1046,17 @@ pub enum InvariantVerificationStatus {
     Fail,
     /// The invariant could not be verified (insufficient information).
     Unverified,
+}
+
+impl InvariantVerificationStatus {
+    /// Returns the JSON string representation.
+    pub fn as_json_str(&self) -> &'static str {
+        match self {
+            InvariantVerificationStatus::Pass => "pass",
+            InvariantVerificationStatus::Fail => "fail",
+            InvariantVerificationStatus::Unverified => "unverified",
+        }
+    }
 }
 
 impl fmt::Display for InvariantVerificationStatus {
@@ -951,7 +1073,7 @@ impl fmt::Display for InvariantVerificationStatus {
 ///
 /// Provides a human-readable description and an execution trace that
 /// demonstrates how the violation can be reached.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CounterexampleInfo {
     /// Human-readable description of the violation.
     pub description: String,
@@ -959,8 +1081,20 @@ pub struct CounterexampleInfo {
     pub execution_trace: Vec<String>,
 }
 
+impl CounterexampleInfo {
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("description".to_string(), json_str(&self.description)),
+            ("execution_trace".to_string(), JsonValue::Array(
+                self.execution_trace.iter().map(|s| json_str(s)).collect(),
+            )),
+        ])
+    }
+}
+
 /// Result of verifying a single invariant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct InvariantVerification {
     /// Name of the invariant (e.g., "liveness", "exclusivity").
     pub kind: String,
@@ -974,8 +1108,24 @@ pub struct InvariantVerification {
     pub counterexample: Option<CounterexampleInfo>,
 }
 
+impl InvariantVerification {
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("kind".to_string(), json_str(&self.kind)),
+            ("status".to_string(), json_str(self.status.as_json_str())),
+            ("message".to_string(), json_str(&self.message)),
+            ("elapsed_ms".to_string(), JsonValue::U64(self.elapsed_ms)),
+        ];
+        if let Some(c) = &self.counterexample {
+            entries.push(("counterexample".to_string(), c.to_json_value()));
+        }
+        JsonValue::Object(entries)
+    }
+}
+
 /// Metadata about a verification run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VerificationMetadata {
     /// Total wall-clock time for the verification run (milliseconds).
     pub total_elapsed_ms: u64,
@@ -985,11 +1135,22 @@ pub struct VerificationMetadata {
     pub source_bytes: usize,
 }
 
+impl VerificationMetadata {
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("total_elapsed_ms".to_string(), JsonValue::U64(self.total_elapsed_ms)),
+            ("source_lines".to_string(), JsonValue::U64(self.source_lines as u64)),
+            ("source_bytes".to_string(), JsonValue::U64(self.source_bytes as u64)),
+        ])
+    }
+}
+
 /// The full verification report produced by `VumaCompiler::verify()`.
 ///
 /// Contains per-invariant results with pass/fail status and counterexamples
 /// for any violations, plus an overall verdict and metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VerificationReport {
     /// The overall verification verdict.
     pub overall_verdict: VerificationVerdict,
@@ -1026,6 +1187,30 @@ impl VerificationReport {
             .iter()
             .filter(|i| i.status == InvariantVerificationStatus::Fail)
             .count()
+    }
+
+    /// Serialize this report as a compact JSON string.
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string_compact()
+    }
+
+    /// Serialize this report as a pretty-printed JSON string.
+    pub fn to_json_pretty(&self) -> String {
+        self.to_json_value().to_string_pretty()
+    }
+
+    /// Build the [`JsonValue`] representation of this report.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("overall_verdict".to_string(), json_str(self.overall_verdict.as_json_str())),
+            ("invariants".to_string(), JsonValue::Array(
+                self.invariants.iter().map(|i| i.to_json_value()).collect(),
+            )),
+            ("diagnostics".to_string(), JsonValue::Array(
+                self.diagnostics.iter().map(|s| json_str(s)).collect(),
+            )),
+            ("metadata".to_string(), self.metadata.to_json_value()),
+        ])
     }
 }
 
@@ -1961,8 +2146,8 @@ mod tests {
         let compiler = VumaCompiler::new();
         let source = "fn main() {}";
         let result = compiler.compile(source);
-        let json = serde_json::to_string(&result);
-        assert!(json.is_ok(), "CompileResult should be serializable");
+        let json = result.to_json();
+        assert!(!json.is_empty(), "CompileResult should be serializable");
     }
 
     #[test]
@@ -1999,8 +2184,8 @@ mod tests {
         let compiler = VumaCompiler::new();
         let source = "fn main() {}";
         let report = compiler.verify(source);
-        let json = serde_json::to_string(&report);
-        assert!(json.is_ok(), "VerificationReport should be serializable");
+        let json = report.to_json();
+        assert!(!json.is_empty(), "VerificationReport should be serializable");
     }
 
     #[test]

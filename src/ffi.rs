@@ -30,7 +30,6 @@
 //! }
 //! ```
 
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -39,7 +38,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// An `extern "C" { ... }` block declaring external functions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternBlock {
     /// The calling convention (e.g. "C", "system").
     pub convention: CallingConvention,
@@ -48,7 +47,7 @@ pub struct ExternBlock {
 }
 
 /// A function declared inside an `extern` block.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternFn {
     /// Function name (as it appears in VUMA source and in the linker symbol table).
     pub name: String,
@@ -59,7 +58,7 @@ pub struct ExternFn {
 }
 
 /// Calling convention for extern blocks.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallingConvention {
     /// C calling convention (System V ABI on Linux, Microsoft on Windows).
     C,
@@ -80,7 +79,7 @@ impl fmt::Display for CallingConvention {
 }
 
 /// Types used in extern function declarations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternType {
     /// `i8`
     I8,
@@ -317,7 +316,7 @@ impl ExternBlock {
 ///
 /// Instead of emitting a local `BL <symbol>` instruction, the codegen
 /// emits a relocation that the linker will resolve at link time.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Relocation {
     /// Offset in the code section where the relocation applies.
     pub offset: u64,
@@ -330,7 +329,7 @@ pub struct Relocation {
 }
 
 /// The kind of relocation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocationKind {
     /// AArch64: R_AARCH64_CALL26 — 26-bit relative call.
     AArch64Call26,
@@ -413,7 +412,7 @@ impl RelocationKind {
 // ---------------------------------------------------------------------------
 
 /// The target architecture for syscall number lookup.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arch {
     /// x86_64 (AMD64)
     X86_64,
@@ -474,7 +473,7 @@ impl Arch {
 }
 
 /// Well-known Linux syscall names used by VUMA programs.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SyscallName {
     /// `read` — read from a file descriptor.
     Read,

@@ -20,5 +20,3 @@ vuma-parser.workspace = true
 vuma-codegen.workspace = true
 vuma-cor.workspace = true
 vuma = { path = "../.." }
-serde.workspace = true
-serde_json.workspace = true
