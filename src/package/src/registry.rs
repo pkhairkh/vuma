@@ -348,6 +348,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> PackageResult<()> {
     Ok(())
 }
 
+/// Create a unique temporary directory under `std::env::temp_dir()`.
+///
+/// Replaces the `tempfile::tempdir()` call previously used in tests. The
+/// directory name embeds the process id plus a per-process monotonic counter
+/// to guarantee uniqueness, and creation uses `std::fs::create_dir` — the
+/// directory analogue of `open(O_CREAT | O_EXCL)`, which fails atomically if
+/// the path already exists. The caller is responsible for removing the
+/// directory (e.g. with `std::fs::remove_dir_all`) when done, since the
+/// `tempfile::TempDir` auto-cleanup-on-drop behaviour is no longer available.
+#[cfg(test)]
+fn create_temp_dir() -> PackageResult<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir()
+        .join(format!("vuma-{}-{}.tmp", std::process::id(), n));
+    std::fs::create_dir(&path)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_find_version_prefix_match() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let registry = PackageRegistry::new(tmp_dir.path().to_path_buf());
+        let tmp_dir = create_temp_dir().unwrap();
+        let registry = PackageRegistry::new(tmp_dir.clone());
         registry.init().unwrap();
 
         // Write an index manually
@@ -383,5 +403,9 @@ mod tests {
         assert_eq!(registry.find_version("vuma-std", "0.1").unwrap(), "0.1.3");
         // Exact match
         assert_eq!(registry.find_version("vuma-std", "0.2.0").unwrap(), "0.2.0");
+
+        // Clean up the hand-rolled temp directory (tempfile::TempDir did
+        // this automatically on drop).
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

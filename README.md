@@ -216,7 +216,7 @@ The LSP server (`src/lsp/mod.rs`, 2,055 LOC) implements 6 capabilities: `textDoc
 - `src/lsp/` — `mod.rs` (2,055 LOC), LSP server
 - `src/bootstrap/` — `vuma_compiler.vuma` (730 LOC, VUMA-in-VUMA lexer proof-of-concept)
 
-**External dependencies** (from `Cargo.toml`): petgraph 0.6, serde 1, serde_json 1, hashbrown 0.14, indexmap 2, smallvec 1, clap 4, chrono 0.4, toml 0.8, tempfile 3, proptest 1, thiserror 1, anyhow 1, log 0.4, env_logger 0.10, colored 2, libc 0.2
+**External dependencies** (from `Cargo.toml`): petgraph 0.6, serde 1, serde_json 1, hashbrown 0.14, indexmap 2, smallvec 1, clap 4, chrono 0.4, toml 0.8, proptest 1, thiserror 1, anyhow 1, log 0.4, env_logger 0.10, colored 2, libc 0.2
 
 **Total:** 205 Rust source files, ~283K lines.
 
