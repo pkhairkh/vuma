@@ -1552,13 +1552,20 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // hppa Linux syscall: args in R26-R23 (reversed),
                         // nr in R20, `gate` (ble 0x100(%sr2,%r0)), result in R28.
                         // HPPA has only 4 register arg slots (R26-R23).
+                        // Translate VUMA-generic (asm-generic) syscall number to the
+                        // backend's native numbering. TODO(P1-b): per-arch table.
+                        let native_nr = crate::syscall_abi::translate(
+                            crate::backend::BackendKind::Hppa,
+                            *nr,
+                        )
+                        .unwrap_or(*nr);
                         let syscall_arg_regs = [R26, R25, R24, R23];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());
                         for (i, arg) in args.iter().take(num_reg_args).enumerate() {
                             code.extend(ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]));
                         }
                         // LDI R20, nr
-                        code.extend(ss_load_imm(R20, *nr as i64));
+                        code.extend(ss_load_imm(R20, native_nr as i64));
                         // GATE (ble 0x100(%sr2,%r0))
                         code.extend_from_slice(&encode_gate());
                         // Store result (R28) to dst's stack slot

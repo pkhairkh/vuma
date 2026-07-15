@@ -2212,6 +2212,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // Max 5 args (EBP/arg6 is the frame pointer; avoid clobbering).
                 IRInstr::Syscall { nr, args, dst } => {
                     let mut code = Vec::new();
+                    // Translate VUMA-generic (asm-generic) syscall number to the
+                    // backend's native numbering. Translated on x86_32.
+                    let native_nr = crate::syscall_abi::translate(
+                        crate::backend::BackendKind::X86_32,
+                        *nr,
+                    )
+                    .unwrap_or(*nr);
                     // Save EBX (callee-saved, outermost).
                     code.extend(encode_push(Gpr::Rbx));
                     // i386 syscall arg registers (args 1-5).
@@ -2225,7 +2232,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(load_value(arg, syscall_arg_regs[i]));
                     }
                     // MOV EAX, nr  (syscall number)
-                    code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, native_nr as i32));
                     // INT 0x80
                     code.extend(encode_syscall());
                     // Store return value (EAX) to dst's stack slot

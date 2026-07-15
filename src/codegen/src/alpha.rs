@@ -1242,6 +1242,13 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // alpha Linux syscall: args in R16-R21, nr in R0,
             // `call_pal 0x83` (callsys), result in R0.
+            // Translate VUMA-generic (asm-generic) syscall number to the
+            // backend's native numbering. TODO(P1-b): per-arch table.
+            let native_nr = crate::syscall_abi::translate(
+                crate::backend::BackendKind::Alpha,
+                *nr,
+            )
+            .unwrap_or(*nr);
             let syscall_arg_regs =
                 [Gpr::R16, Gpr::R17, Gpr::R18, Gpr::R19, Gpr::R20, Gpr::R21];
             let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -1249,7 +1256,7 @@ fn emit_instr(
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
             // LDI R0, nr
-            code.extend(ss_load_imm(Gpr::R0, *nr as i64));
+            code.extend(ss_load_imm(Gpr::R0, native_nr as i64));
             // CALL_PAL 0x83 (callsys)
             code.extend_from_slice(&Instruction::CallPal { palcode: 0x83 }.encode());
             // Store result (R0) to dst's stack slot

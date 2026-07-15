@@ -1475,6 +1475,13 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // m68k Linux syscall: args in D1-D5, nr in D0,
             // `trap #0`, result in D0.
+            // Translate VUMA-generic (asm-generic) syscall number to the
+            // backend's native numbering. TODO(P1-b): per-arch table.
+            let native_nr = crate::syscall_abi::translate(
+                crate::backend::BackendKind::M68k,
+                *nr,
+            )
+            .unwrap_or(*nr);
             let syscall_arg_regs =
                 [Gpr::D1, Gpr::D2, Gpr::D3, Gpr::D4, Gpr::D5];
             let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -1482,7 +1489,7 @@ fn emit_instr(
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
             // MOVEQ #nr, D0  (or ss_load_imm for large numbers)
-            code.extend(ss_load_imm(Gpr::D0, *nr as i64));
+            code.extend(ss_load_imm(Gpr::D0, native_nr as i64));
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // Store result (D0) to dst's stack slot

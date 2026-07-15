@@ -1647,6 +1647,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // the kernel clobbers RCX and R11). No stack args (max 6).
                 IRInstr::Syscall { nr, args, dst } => {
                     let mut code = Vec::new();
+                    // Translate VUMA-generic (asm-generic) syscall number to the
+                    // backend's native numbering. Translated on x86_64.
+                    let native_nr = crate::syscall_abi::translate(
+                        crate::backend::BackendKind::X86_64,
+                        *nr,
+                    )
+                    .unwrap_or(*nr);
                     let syscall_arg_regs =
                         [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::R10, Gpr::R8, Gpr::R9];
                     let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -1654,7 +1661,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(load_value(arg, syscall_arg_regs[i]));
                     }
                     // MOV EAX, nr  (syscall number; all __NR_* fit in 32 bits)
-                    code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, native_nr as i32));
                     // SYSCALL
                     code.extend(encode_syscall());
                     // Store return value (RAX) to dst's stack slot
