@@ -102,11 +102,36 @@ fn btreemap_bsearch(m: Address, key: Address, key_len: u32) -> i32 {
     return -(lo as i32) - 1;
 }
 
+// Grow the entries buffer to double its current capacity.
+// Allocates a new buffer, copies the old contents, frees the old buffer,
+// and updates the map header. Mirrors the vec_reserve pattern.
+fn btreemap_grow(m: Address) {
+    cap: u32 = load_u32(m, 12);
+    key_max_len: u32 = load_u32(m, 16);
+    entry_size: u32 = key_max_len + 8;
+    new_cap: u32 = cap * 2;
+    if new_cap == 0 { new_cap = 64; }
+    old_entries: u64 = load_u64(m, 0);
+    new_entries = __vuma_alloc(new_cap * entry_size);
+    // Copy the entire old buffer (cap * entry_size bytes) byte-by-byte.
+    // The old buffer is exactly cap * entry_size bytes (allocated in
+    // btreemap_new), so this read is provably in-bounds.
+    i: u32 = 0;
+    old_bytes: u32 = cap * entry_size;
+    while i < old_bytes {
+        *(new_entries + i) = *(old_entries + i) & 255;
+        i = i + 1;
+    }
+    __vuma_free(old_entries, old_bytes);
+    store_u64(m, 0, new_entries);
+    store_u32(m, 12, new_cap);
+}
+
 // Insert key->val. If key exists, update value.
 fn btreemap_insert(m: Address, key: Address, key_len: u32, val: u64) {
     count: u32 = load_u32(m, 8);
     cap: u32 = load_u32(m, 12);
-    if count >= cap { return; }  // TODO: grow
+    if count >= cap { btreemap_grow(m); }
     
     idx: i32 = btreemap_bsearch(m, key, key_len);
     

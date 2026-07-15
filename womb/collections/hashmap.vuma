@@ -72,9 +72,68 @@ fn hashmap_count(m: Address) -> u32 {
     return load_u32(m, 12);
 }
 
+// Grow the hash table: double capacity, rehash all entries into the new table.
+// Recomputes each entry's slot with the new capacity mask (h & (new_cap - 1)).
+// Count is unchanged by rehash (same entries, just relocated).
+fn hashmap_grow(m: Address) {
+    old_cap: u32 = load_u32(m, 8);
+    old_entries: u64 = load_u64(m, 0);
+    new_cap: u32 = old_cap * 2;
+    if new_cap == 0 { new_cap = 16; }
+    new_entries = __vuma_alloc(new_cap * ENTRY_SIZE);
+    // Zero all new entries (mmap-backed __vuma_alloc may return garbage).
+    zi: u32 = 0;
+    new_total: u32 = new_cap * ENTRY_SIZE;
+    while zi < new_total {
+        *(new_entries + zi) = 0;
+        zi = zi + 1;
+    }
+    // Rehash: walk old occupied slots, recompute slot with new mask, insert.
+    old_i: u32 = 0;
+    while old_i < old_cap {
+        old_off: u32 = old_i * ENTRY_SIZE;
+        occupied: u32 = load_u32(old_entries, old_off + 24);
+        if occupied == 1 {
+            old_hash: u32 = load_u32(old_entries, old_off);
+            old_key: u64 = load_u64(old_entries, old_off + 4);
+            old_key_len: u32 = load_u32(old_entries, old_off + 12);
+            old_val: u64 = load_u64(old_entries, old_off + 16);
+            new_idx: u32 = old_hash & (new_cap - 1);
+            placed: u32 = 0;
+            probe: u32 = 0;
+            while probe < new_cap && placed == 0 {
+                new_off: u32 = new_idx * ENTRY_SIZE;
+                new_occupied: u32 = load_u32(new_entries, new_off + 24);
+                if new_occupied == 0 {
+                    store_u32(new_entries, new_off, old_hash);
+                    store_u64(new_entries, new_off + 4, old_key);
+                    store_u32(new_entries, new_off + 12, old_key_len);
+                    store_u64(new_entries, new_off + 16, old_val);
+                    store_u32(new_entries, new_off + 24, 1);
+                    placed = 1;
+                } else {
+                    new_idx = (new_idx + 1) & (new_cap - 1);
+                    probe = probe + 1;
+                }
+            }
+        }
+        old_i = old_i + 1;
+    }
+    __vuma_free(old_entries, old_cap * ENTRY_SIZE);
+    store_u64(m, 0, new_entries);
+    store_u32(m, 8, new_cap);
+}
+
 // Insert key->val. Key is a (ptr, len) pair. Val is a u64.
 fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
     cap: u32 = load_u32(m, 8);
+    cur_count: u32 = load_u32(m, 12);
+    // Grow when load factor >= 75% to avoid the silent-drop bug (the
+    // original code fell through without inserting when the table was full).
+    if cur_count * 4 >= cap * 3 {
+        hashmap_grow(m);
+        cap = load_u32(m, 8);
+    }
     entries: u64 = load_u64(m, 0);
     h: u32 = hash_fnv1a(key, key_len);
     idx: u32 = h & (cap - 1);  // Assuming cap is power of 2
@@ -103,13 +162,13 @@ fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
             if existing_len == key_len {
                 // Compare bytes
                 existing_key: u64 = load_u64(entries, entry_offset + 4);
-                match: u32 = 1;
+                is_match: u32 = 1;
                 j: u32 = 0;
                 while j < key_len {
-                    if *(existing_key + j) != *(key + j) { match = 0; }
+                    if *(existing_key + j) != *(key + j) { is_match = 0; }
                     j = j + 1;
                 }
-                if match == 1 {
+                if is_match == 1 {
                     // Same key — update value
                     store_u64(entries, entry_offset + 16, val);
                     return;
@@ -141,13 +200,13 @@ fn hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
             existing_len: u32 = load_u32(entries, entry_offset + 12);
             if existing_len == key_len {
                 existing_key: u64 = load_u64(entries, entry_offset + 4);
-                match: u32 = 1;
+                is_match: u32 = 1;
                 j: u32 = 0;
                 while j < key_len {
-                    if *(existing_key + j) != *(key + j) { match = 0; }
+                    if *(existing_key + j) != *(key + j) { is_match = 0; }
                     j = j + 1;
                 }
-                if match == 1 {
+                if is_match == 1 {
                     return load_u64(entries, entry_offset + 16);
                 }
             }
