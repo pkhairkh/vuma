@@ -6769,11 +6769,10 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         // Translate VUMA-generic (asm-generic) syscall number to
                         // the backend's native numbering. Identity on Arm32.
-                        let native_nr = crate::syscall_abi::translate(
+                        let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::Arm32,
                             *nr,
-                        )
-                        .unwrap_or(*nr);
+                        );
                         let num_args = args.len();
                         let num_stack_args = num_args.saturating_sub(4);
                         let stack_bytes = num_stack_args * 4;

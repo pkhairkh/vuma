@@ -1803,7 +1803,7 @@ impl Emitter {
                 // Translate VUMA-generic (asm-generic) syscall number to the
                 // backend's native numbering. Identity on AArch64.
                 let native_nr =
-                    crate::syscall_abi::translate(BackendKind::AArch64, *nr).unwrap_or(*nr);
+                    crate::syscall_abi::translate_or_warn(BackendKind::AArch64, *nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
@@ -3850,7 +3850,7 @@ impl Emitter {
                 // Translate VUMA-generic (asm-generic) syscall number to the
                 // backend's native numbering. Identity on AArch64.
                 let native_nr =
-                    crate::syscall_abi::translate(BackendKind::AArch64, *nr).unwrap_or(*nr);
+                    crate::syscall_abi::translate_or_warn(BackendKind::AArch64, *nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {

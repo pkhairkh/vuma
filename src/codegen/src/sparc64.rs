@@ -2868,11 +2868,10 @@ fn emit_instr(
             // `ta 0x6d`, result in %o0.
             // Translate VUMA-generic (asm-generic) syscall number to the
             // backend's native numbering. TODO(P1-b): per-arch table.
-            let native_nr = crate::syscall_abi::translate(
+            let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::Sparc64,
                 *nr,
-            )
-            .unwrap_or(*nr);
+            );
             let syscall_arg_regs =
                 [Gpr::O0, Gpr::O1, Gpr::O2, Gpr::O3, Gpr::O4, Gpr::O5];
             let num_reg_args = args.len().min(syscall_arg_regs.len());

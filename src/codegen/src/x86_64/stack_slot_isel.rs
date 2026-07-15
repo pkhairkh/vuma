@@ -1649,11 +1649,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     // Translate VUMA-generic (asm-generic) syscall number to the
                     // backend's native numbering. Translated on x86_64.
-                    let native_nr = crate::syscall_abi::translate(
+                    let native_nr = crate::syscall_abi::translate_or_warn(
                         crate::backend::BackendKind::X86_64,
                         *nr,
-                    )
-                    .unwrap_or(*nr);
+                    );
                     let syscall_arg_regs =
                         [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::R10, Gpr::R8, Gpr::R9];
                     let num_reg_args = args.len().min(syscall_arg_regs.len());

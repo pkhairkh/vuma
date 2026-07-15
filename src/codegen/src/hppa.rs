@@ -1554,11 +1554,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // HPPA has only 4 register arg slots (R26-R23).
                         // Translate VUMA-generic (asm-generic) syscall number to the
                         // backend's native numbering. TODO(P1-b): per-arch table.
-                        let native_nr = crate::syscall_abi::translate(
+                        let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::Hppa,
                             *nr,
-                        )
-                        .unwrap_or(*nr);
+                        );
                         let syscall_arg_regs = [R26, R25, R24, R23];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());
                         for (i, arg) in args.iter().take(num_reg_args).enumerate() {
