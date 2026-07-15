@@ -304,8 +304,8 @@ fn read_vec<T: BinaryRead, R: Read>(r: &mut R) -> Result<Vec<T>, BinaryError> {
     Ok(out)
 }
 
-fn write_box<T: BinaryWrite, W: Write>(w: &mut W, b: &Box<T>) -> Result<(), BinaryError> {
-    b.as_ref().write_binary(w)
+fn write_box<T: BinaryWrite, W: Write>(w: &mut W, b: &T) -> Result<(), BinaryError> {
+    b.write_binary(w)
 }
 
 fn read_box<T: BinaryRead, R: Read>(r: &mut R) -> Result<Box<T>, BinaryError> {
@@ -868,8 +868,8 @@ impl BinaryWrite for ProofStep {
             }
             ProofStep::Induction { base, step } => {
                 write_u8(w, 3)?;
-                write_box(w, base)?;
-                write_box(w, step)?;
+                write_box(w, &**base)?;
+                write_box(w, &**step)?;
             }
             ProofStep::Contradiction {
                 assumption,

@@ -156,13 +156,7 @@ impl VumaLogger {
             let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
             let output = format!("[{}] [{}] [{}] {}", timestamp, level.tag(), stage, message);
 
-            if level == LogLevel::Error {
-                let _ = writeln!(std::io::stderr(), "{}", output);
-            } else if level <= LogLevel::Warn {
-                let _ = writeln!(std::io::stderr(), "{}", output);
-            } else {
-                let _ = writeln!(std::io::stderr(), "{}", output);
-            }
+            let _ = writeln!(std::io::stderr(), "{}", output);
         }
     }
 
@@ -222,6 +216,7 @@ macro_rules! log_error {
     };
 }
 
+/// Convenience macro for logging a warning to the global logger.
 #[macro_export]
 macro_rules! log_warn {
     ($stage:expr, $($arg:tt)*) => {
@@ -229,6 +224,7 @@ macro_rules! log_warn {
     };
 }
 
+/// Convenience macro for logging an informational message to the global logger.
 #[macro_export]
 macro_rules! log_info {
     ($stage:expr, $($arg:tt)*) => {
@@ -236,6 +232,7 @@ macro_rules! log_info {
     };
 }
 
+/// Convenience macro for logging a debug message to the global logger.
 #[macro_export]
 macro_rules! log_debug {
     ($stage:expr, $($arg:tt)*) => {
@@ -243,6 +240,7 @@ macro_rules! log_debug {
     };
 }
 
+/// Convenience macro for logging a trace message to the global logger.
 #[macro_export]
 macro_rules! log_trace {
     ($stage:expr, $($arg:tt)*) => {

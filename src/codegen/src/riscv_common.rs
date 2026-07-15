@@ -36,7 +36,7 @@ impl Gpr {
     pub fn from_encoding(enc: u32) -> Option<Self> {
         if enc > 31 { return None; }
         // SAFETY: Gpr is a fieldless enum with repr(u32) and 32 variants 0..31
-        Some(unsafe { std::mem::transmute(enc) })
+        Some(unsafe { std::mem::transmute::<u32, Gpr>(enc) })
     }
 
     pub fn is_callee_saved(&self) -> bool {
@@ -104,7 +104,7 @@ impl Fpr {
 
     pub fn from_encoding(enc: u32) -> Option<Self> {
         if enc > 31 { return None; }
-        Some(unsafe { std::mem::transmute(enc) })
+        Some(unsafe { std::mem::transmute::<u32, Fpr>(enc) })
     }
 
     pub fn is_callee_saved(&self) -> bool {
