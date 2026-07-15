@@ -51,8 +51,6 @@ const OP_LOAD: u32 = 0b0000011;
 const OP_STORE: u32 = 0b0100011;
 const OP_IMM: u32 = 0b0010011;
 const OP_REG: u32 = 0b0110011;
-const OP_IMM32: u32 = 0b0011011;
-const OP_REG32: u32 = 0b0111011;
 const OP_SYSTEM: u32 = 0b1110011;
 const OP_MISC_MEM: u32 = 0b0001111;
 const OP_FP: u32 = 0b1010011;
@@ -899,13 +897,6 @@ impl Instruction {
                 rd.encoding(),
                 OP_LOAD,
             ),
-            Instruction::Lw { rd, rs1, imm } => encode_i_type(
-                (*imm as u32) & 0xFFF,
-                rs1.encoding(),
-                0b011,
-                rd.encoding(),
-                OP_LOAD,
-            ),
             Instruction::Lbu { rd, rs1, imm } => encode_i_type(
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
@@ -917,13 +908,6 @@ impl Instruction {
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
                 0b101,
-                rd.encoding(),
-                OP_LOAD,
-            ),
-            Instruction::Lw { rd, rs1, imm } => encode_i_type(
-                (*imm as u32) & 0xFFF,
-                rs1.encoding(),
-                0b110,
                 rd.encoding(),
                 OP_LOAD,
             ),
@@ -948,13 +932,6 @@ impl Instruction {
                 rs2.encoding(),
                 rs1.encoding(),
                 0b010,
-                OP_STORE,
-            ),
-            Instruction::Sw { rs1, rs2, imm } => encode_s_type(
-                (*imm as u32) & 0xFFF,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b011,
                 OP_STORE,
             ),
 
@@ -1114,83 +1091,6 @@ impl Instruction {
                 rd.encoding(),
                 OP_REG,
             ),
-
-            // ── Word-level Arithmetic (RV32) ────────────────────────
-            Instruction::Add { rd, rs1, rs2 } => encode_r_type(
-                0b0000000,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b000,
-                rd.encoding(),
-                OP_REG32,
-            ),
-            Instruction::Sub { rd, rs1, rs2 } => encode_r_type(
-                0b0100000,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b000,
-                rd.encoding(),
-                OP_REG32,
-            ),
-            Instruction::Sll { rd, rs1, rs2 } => encode_r_type(
-                0b0000000,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b001,
-                rd.encoding(),
-                OP_REG32,
-            ),
-            Instruction::Srl { rd, rs1, rs2 } => encode_r_type(
-                0b0000000,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b101,
-                rd.encoding(),
-                OP_REG32,
-            ),
-            Instruction::Sra { rd, rs1, rs2 } => encode_r_type(
-                0b0100000,
-                rs2.encoding(),
-                rs1.encoding(),
-                0b101,
-                rd.encoding(),
-                OP_REG32,
-            ),
-            Instruction::Addi { rd, rs1, imm } => encode_i_type(
-                (*imm as u32) & 0xFFF,
-                rs1.encoding(),
-                0b000,
-                rd.encoding(),
-                OP_IMM32,
-            ),
-            Instruction::Slli { rd, rs1, shamt } => {
-                // funct7 = 0b0000000, funct3 = 0b001, shamt is 5 bits
-                let funct7_and_shamt = (*shamt & 0x1F) << 20;
-                let word = funct7_and_shamt
-                    | (rs1.encoding() << 15)
-                    | (0b001 << 12)
-                    | (rd.encoding() << 7)
-                    | OP_IMM32;
-                word.to_le_bytes()
-            }
-            Instruction::Srli { rd, rs1, shamt } => {
-                let funct7_and_shamt = (*shamt & 0x1F) << 20;
-                let word = funct7_and_shamt
-                    | (rs1.encoding() << 15)
-                    | (0b101 << 12)
-                    | (rd.encoding() << 7)
-                    | OP_IMM32;
-                word.to_le_bytes()
-            }
-            Instruction::Srai { rd, rs1, shamt } => {
-                let funct7_and_shamt = (0b0100000u32 << 25) | ((*shamt & 0x1F) << 20);
-                let word = funct7_and_shamt
-                    | (rs1.encoding() << 15)
-                    | (0b101 << 12)
-                    | (rd.encoding() << 7)
-                    | OP_IMM32;
-                word.to_le_bytes()
-            }
 
             // ── M Extension ─────────────────────────────────────────
             Instruction::Mul { rd, rs1, rs2 } => encode_r_type(
@@ -1671,13 +1571,10 @@ impl Instruction {
             Instruction::Lb { .. } => "lb",
             Instruction::Lh { .. } => "lh",
             Instruction::Lw { .. } => "lw",
-            Instruction::Lw { .. } => "lw",
             Instruction::Lbu { .. } => "lbu",
             Instruction::Lhu { .. } => "lhu",
-            Instruction::Lw { .. } => "lw",
             Instruction::Sb { .. } => "sb",
             Instruction::Sh { .. } => "sh",
-            Instruction::Sw { .. } => "sw",
             Instruction::Sw { .. } => "sw",
             Instruction::Addi { .. } => "addi",
             Instruction::Slti { .. } => "slti",
@@ -1698,15 +1595,6 @@ impl Instruction {
             Instruction::Sra { .. } => "sra",
             Instruction::Or { .. } => "or",
             Instruction::And { .. } => "and",
-            Instruction::Add { .. } => "add",
-            Instruction::Sub { .. } => "sub",
-            Instruction::Sll { .. } => "sll",
-            Instruction::Srl { .. } => "srl",
-            Instruction::Sra { .. } => "sra",
-            Instruction::Addi { .. } => "addi",
-            Instruction::Slli { .. } => "slli",
-            Instruction::Srli { .. } => "srli",
-            Instruction::Srai { .. } => "srai",
             Instruction::Mul { .. } => "mul",
             Instruction::Mulh { .. } => "mulh",
             Instruction::Mulhsu { .. } => "mulhsu",
@@ -2469,14 +2357,11 @@ impl std::fmt::Display for Instruction {
             Instruction::Lb { rd, rs1, imm } => write!(f, "lb {}, {}({})", rd, imm, rs1),
             Instruction::Lh { rd, rs1, imm } => write!(f, "lh {}, {}({})", rd, imm, rs1),
             Instruction::Lw { rd, rs1, imm } => write!(f, "lw {}, {}({})", rd, imm, rs1),
-            Instruction::Lw { rd, rs1, imm } => write!(f, "ld {}, {}({})", rd, imm, rs1),
             Instruction::Lbu { rd, rs1, imm } => write!(f, "lbu {}, {}({})", rd, imm, rs1),
             Instruction::Lhu { rd, rs1, imm } => write!(f, "lhu {}, {}({})", rd, imm, rs1),
-            Instruction::Lw { rd, rs1, imm } => write!(f, "lwu {}, {}({})", rd, imm, rs1),
             Instruction::Sb { rs1, rs2, imm } => write!(f, "sb {}, {}({})", rs2, imm, rs1),
             Instruction::Sh { rs1, rs2, imm } => write!(f, "sh {}, {}({})", rs2, imm, rs1),
             Instruction::Sw { rs1, rs2, imm } => write!(f, "sw {}, {}({})", rs2, imm, rs1),
-            Instruction::Sw { rs1, rs2, imm } => write!(f, "sd {}, {}({})", rs2, imm, rs1),
             Instruction::Addi { rd, rs1, imm } => write!(f, "addi {}, {}, {}", rd, rs1, imm),
             Instruction::Slti { rd, rs1, imm } => write!(f, "slti {}, {}, {}", rd, rs1, imm),
             Instruction::Sltiu { rd, rs1, imm } => write!(f, "sltiu {}, {}, {}", rd, rs1, imm),
@@ -2496,15 +2381,6 @@ impl std::fmt::Display for Instruction {
             Instruction::Sra { rd, rs1, rs2 } => write!(f, "sra {}, {}, {}", rd, rs1, rs2),
             Instruction::Or { rd, rs1, rs2 } => write!(f, "or {}, {}, {}", rd, rs1, rs2),
             Instruction::And { rd, rs1, rs2 } => write!(f, "and {}, {}, {}", rd, rs1, rs2),
-            Instruction::Add { rd, rs1, rs2 } => write!(f, "addw {}, {}, {}", rd, rs1, rs2),
-            Instruction::Sub { rd, rs1, rs2 } => write!(f, "subw {}, {}, {}", rd, rs1, rs2),
-            Instruction::Sll { rd, rs1, rs2 } => write!(f, "sllw {}, {}, {}", rd, rs1, rs2),
-            Instruction::Srl { rd, rs1, rs2 } => write!(f, "srlw {}, {}, {}", rd, rs1, rs2),
-            Instruction::Sra { rd, rs1, rs2 } => write!(f, "sraw {}, {}, {}", rd, rs1, rs2),
-            Instruction::Addi { rd, rs1, imm } => write!(f, "addiw {}, {}, {}", rd, rs1, imm),
-            Instruction::Slli { rd, rs1, shamt } => write!(f, "slliw {}, {}, {}", rd, rs1, shamt),
-            Instruction::Srli { rd, rs1, shamt } => write!(f, "srliw {}, {}, {}", rd, rs1, shamt),
-            Instruction::Srai { rd, rs1, shamt } => write!(f, "sraiw {}, {}, {}", rd, rs1, shamt),
             Instruction::Mul { rd, rs1, rs2 } => write!(f, "mul {}, {}, {}", rd, rs1, rs2),
             Instruction::Mulh { rd, rs1, rs2 } => write!(f, "mulh {}, {}, {}", rd, rs1, rs2),
             Instruction::Mulhsu { rd, rs1, rs2 } => write!(f, "mulhsu {}, {}, {}", rd, rs1, rs2),
