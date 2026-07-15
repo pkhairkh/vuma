@@ -346,6 +346,7 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::AtomicLoad { .. }
         | IRInstr::AtomicCas { .. }
         | IRInstr::Call { .. }
+        | IRInstr::Syscall { .. }
         | IRInstr::Free { .. }
         | IRInstr::Ret { .. }
         | IRInstr::Branch { .. }
@@ -374,6 +375,7 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
         IRInstr::AtomicStore { .. } => false,
         IRInstr::AtomicCas { .. } => false,
         IRInstr::Call { .. } => false,
+        IRInstr::Syscall { .. } => false,
         IRInstr::Free { .. } => false,
         IRInstr::Alloc { .. } => false,
         IRInstr::Ret { .. } => false,
@@ -4082,6 +4084,47 @@ mod working_tests {
             all_calls_canonical,
             "all call sites in main should target the canonical function `{}`",
             canonical
+        );
+    }
+
+    // ── Syscall DCE regression (P1-c-2) ──────────────────────────────
+    //
+    // IRInstr::Syscall has side effects (it invokes the kernel) and must
+    // NOT be removed by DCE even when its destination vreg is unused.
+    // Before the fix, has_side_effects() did not list IRInstr::Syscall,
+    // so a `syscall(64, 1, buf, 3)` whose result was unused was deleted.
+
+    #[test]
+    fn test_dce_preserves_syscall_with_unused_result() {
+        // %v1 = syscall(64, 1, 0, 3)   // write(1, NULL, 3) — result unused
+        // ret 0
+        let mut func = IRFunction::new("dce_syscall");
+        func.blocks[0].label = "entry".to_string();
+        func.blocks[0].instructions = vec![
+            IRInstr::Syscall {
+                nr: 64,
+                args: vec![
+                    IRValue::Immediate(1),
+                    IRValue::Immediate(0),
+                    IRValue::Immediate(3),
+                ],
+                dst: Some(IRValue::Register(1)),
+            },
+            IRInstr::Ret {
+                values: vec![IRValue::Immediate(0)],
+            },
+        ];
+        // vreg 1 (the syscall result) is never used.
+
+        let result = dead_code_eliminate(func);
+
+        let syscall_present = result.blocks[0]
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Syscall { .. }));
+        assert!(
+            syscall_present,
+            "DCE must NOT remove IRInstr::Syscall even when its result is unused — syscalls have side effects"
         );
     }
 }
