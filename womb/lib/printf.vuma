@@ -32,9 +32,7 @@
 // Memory is managed with allocate() / free(); byte-level loads/stores
 // use the *(ptr + offset) primitive.
 
-extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for write (asm-generic nr 64).
 
 // ===========================================================================
 // Constants
@@ -1719,7 +1717,7 @@ fn snprintf_str(buf: Address, max_len: u32, fmt: Address, s1: Address) -> u32 {
 fn printf_str(fmt: Address, s1: Address) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str(temp, fmt, s1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1727,7 +1725,7 @@ fn printf_str(fmt: Address, s1: Address) -> i64 {
 fn printf_int(fmt: Address, v1: i64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_int(temp, fmt, v1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1735,7 +1733,7 @@ fn printf_int(fmt: Address, v1: i64) -> i64 {
 fn printf_uint(fmt: Address, v1: u64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_uint(temp, fmt, v1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1743,7 +1741,7 @@ fn printf_uint(fmt: Address, v1: u64) -> i64 {
 fn printf_hex(fmt: Address, v1: u64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_hex(temp, fmt, v1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1751,7 +1749,7 @@ fn printf_hex(fmt: Address, v1: u64) -> i64 {
 fn printf_float(fmt: Address, v1: f64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_float(temp, fmt, v1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1759,7 +1757,7 @@ fn printf_float(fmt: Address, v1: f64) -> i64 {
 fn printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str_int(temp, fmt, s1, v1);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
@@ -1767,7 +1765,7 @@ fn printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
 fn printf_str_str(fmt: Address, s1: Address, s2: Address) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str_str(temp, fmt, s1, s2);
-    let wr: i64 = write(STDOUT_FD, temp, n);
+    let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
     free(temp);
     return wr;
 }
