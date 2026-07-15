@@ -249,47 +249,6 @@ macro_rules! log_trace {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Integration with the `log` crate
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// A `log::Log` implementation that forwards to the VUMA structured logger.
-pub struct VumaLogBridge;
-
-impl log::Log for VumaLogBridge {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        let level = match metadata.level() {
-            log::Level::Error => LogLevel::Error,
-            log::Level::Warn => LogLevel::Warn,
-            log::Level::Info => LogLevel::Info,
-            log::Level::Debug => LogLevel::Debug,
-            log::Level::Trace => LogLevel::Trace,
-        };
-        level <= global_logger().level()
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-        if self.enabled(record.metadata()) {
-            let level = match record.level() {
-                log::Level::Error => LogLevel::Error,
-                log::Level::Warn => LogLevel::Warn,
-                log::Level::Info => LogLevel::Info,
-                log::Level::Debug => LogLevel::Debug,
-                log::Level::Trace => LogLevel::Trace,
-            };
-            let stage = record
-                .target()
-                .strip_prefix("vuma::")
-                .unwrap_or(record.target());
-            global_logger().log(level, stage, &format!("{}", record.args()));
-        }
-    }
-
-    fn flush(&self) {
-        let _ = std::io::stderr().flush();
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 

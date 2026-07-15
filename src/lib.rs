@@ -111,7 +111,7 @@ pub use lsp::DiagnosticSeverity as LspDiagnosticSeverity;
 pub use telemetry::{TelemetryCollector, TelemetryReport, StageMetrics};
 
 // Re-export logging types for convenience.
-pub use logging::{LogLevel, VumaLogger, VumaLogBridge, init_logger, global_logger};
+pub use logging::{LogLevel, VumaLogger, init_logger, global_logger};
 
 // Re-export LLM API types for convenience.
 pub use llm_api::{LLMCompileResult, LLMTargetInfo, VumaForLLM};
