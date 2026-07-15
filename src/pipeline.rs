@@ -789,7 +789,6 @@ fn node_var(id: NodeId, _prefix: &str) -> String {
 /// If the source node is a Control node (FunctionEntry, etc.) that does not
 /// produce a named variable, falls back to `ScgExpr::Int(0)` to avoid
 /// referencing a non-existent variable in the codegen IR.
-
 /// Check if a node has a Derivation edge to an Allocation node.
 fn has_derivation_to_allocation(
     node_id: NodeId,
@@ -3568,7 +3567,6 @@ fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
 /// - A variable name (matched to a DataFlow source)
 /// - A literal number (converted to ScgExpr::Int)
 /// - A complex expression (recursively parsed — for now, returns Int(0))
-
 fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
     match op {
         IrBinOpKind::Add => vuma_codegen::ir::BinOpKind::Add,
@@ -4255,7 +4253,6 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 ///    patterns (loops).
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
-
 fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
     let label = label.trim();
     if !label.starts_with("for ") { return None; }

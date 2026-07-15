@@ -337,7 +337,7 @@ fn op_br(op: u32, ra: Gpr, disp: i32) -> u32 {
 /// `pos` is the byte offset of the 4-byte branch instruction.  `op` is the
 /// branch opcode (e.g. 0x39 for BEQ, 0x3D for BNE, 0x3F for BLT, 0x30 for BR).
 /// `ra` is the test register.  `disp` is the 21-bit signed word displacement.
-fn patch_alpha_branch(code: &mut Vec<u8>, pos: usize, op: u32, ra: Gpr, disp: i32) {
+fn patch_alpha_branch(code: &mut [u8], pos: usize, op: u32, ra: Gpr, disp: i32) {
     let word = op_br(op, ra, disp);
     code[pos..pos + 4].copy_from_slice(&word.to_le_bytes());
 }

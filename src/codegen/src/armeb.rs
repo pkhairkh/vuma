@@ -69,7 +69,7 @@ fn swap_u64(buf: &mut [u8], off: usize) {
     buf.swap(off + 2, off + 5); buf.swap(off + 3, off + 4);
 }
 
-fn swap_le_elf32_to_be(elf: &mut Vec<u8>) {
+fn swap_le_elf32_to_be(elf: &mut [u8]) {
     if elf.len() < 52 { return; } // ELF32 header is 52 bytes
 
     // Read offsets BEFORE swapping (they're still LE at this point)
