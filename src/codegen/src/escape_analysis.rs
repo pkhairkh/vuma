@@ -63,7 +63,8 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
     let mut allocs: HashSet<u32> = HashSet::new();
     let mut escapes: HashSet<u32> = HashSet::new();
 
-    // Phase 1: Find all allocations (stack Alloc + heap alloc calls).
+    // Phase 1: Find all allocations (stack Alloc + heap alloc calls +
+    // direct mmap syscalls from P2's allocate() lowering).
     for block in &func.blocks {
         for instr in &block.instructions {
             match instr {
@@ -75,6 +76,15 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
                 IRInstr::Call { dst: Some(dst), func: fname, .. }
                     if is_alloc_call(fname) =>
                 {
+                    if let Some(vreg) = dst.as_register() {
+                        allocs.insert(vreg);
+                    }
+                }
+                // P2: allocate() lowers to syscall(222, mmap). The result
+                // vreg is a heap allocation that must be tracked for escape
+                // analysis (otherwise the buffer passed to write() wouldn't
+                // be marked as escaping, and SROA/elision could remove it).
+                IRInstr::Syscall { nr: 222, dst: Some(dst), .. } => {
                     if let Some(vreg) = dst.as_register() {
                         allocs.insert(vreg);
                     }
@@ -1054,6 +1064,57 @@ mod tests {
         assert_eq!(
             elided, 0,
             "alloc passed to syscall must NOT be elided"
+        );
+    }
+
+    /// P2 regression: allocate() lowers to Syscall{nr:222 (mmap)}. The mmap
+    /// result vreg must be recognized as an allocation by analyze_escapes,
+    /// and when passed to another syscall (e.g. write) it must be marked
+    /// as escaping (not elided).
+    #[test]
+    fn test_mmap_syscall_alloc_escapes() {
+        // %v1 = syscall(222, 0, 3, 3, 0x22, -1, 0)   // mmap(NULL, 3, RW, PRIVATE|ANON, -1, 0)
+        // store 72 -> [%v1 + 0]
+        // %v2 = syscall(64, 1, %v1, 3)               // write(1, v1, 3)
+        // syscall(215, %v1, 0)                        // munmap(%v1, 0)
+        // ret
+        let instrs = vec![
+            IRInstr::Syscall {
+                nr: 222,
+                args: vec![
+                    IRValue::Immediate(0),
+                    IRValue::Immediate(3),
+                    IRValue::Immediate(3),
+                    IRValue::Immediate(0x22),
+                    IRValue::Immediate(-1),
+                    IRValue::Immediate(0),
+                ],
+                dst: Some(r(1)),
+            },
+            IRInstr::Store {
+                value: IRValue::Immediate(72),
+                addr: r(1),
+                offset: 0,
+                ty: IRType::U8,
+            },
+            IRInstr::Syscall {
+                nr: 64,
+                args: vec![IRValue::Immediate(1), r(1), IRValue::Immediate(3)],
+                dst: Some(r(2)),
+            },
+            IRInstr::Syscall {
+                nr: 215,
+                args: vec![r(1), IRValue::Immediate(0)],
+                dst: None,
+            },
+        ];
+        let func = fn_with("mmap_escape", instrs, IRTerminator::Return(vec![]));
+
+        let info = analyze_escapes(&func);
+        assert_eq!(
+            info.get(&1).copied(),
+            Some(EscapeResult::Escapes),
+            "mmap-allocated buffer passed to write syscall MUST escape"
         );
     }
 
