@@ -862,6 +862,24 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
         }
     }
 
+    // If there are 0 or 1 accesses, the pair loop above never runs and
+    // `sub_proofs` is empty.  Concluding `Proven` with zero steps is
+    // unsound — `ProofChecker::check` returns `Invalid{step:0}` because
+    // there are no steps to verify.  Fix: add an explicit vacuous-truth
+    // step so the proof has at least one verifiable step.
+    if sub_proofs.is_empty() {
+        fact_id += 1;
+        proof.add_step(ProofStep::Assume {
+            fact: Fact::checked(
+                fact_id,
+                format!(
+                    "exclusivity holds vacuously — {} access(es), no conflicting pairs to check",
+                    msg.accesses.len()
+                ),
+            ),
+        });
+    }
+
     proof.conclude(Conclusion::Proven);
 
     Ok(ExclusivityProof {
@@ -869,4 +887,48 @@ pub fn prove_exclusivity(msg: &ProofMSG) -> Result<ExclusivityProof, ProofFailur
         sub_proofs,
         tactics_used,
     })
+}
+
+#[cfg(test)]
+mod vacuous_truth_tests {
+    use super::*;
+    use crate::models::{ProofMSG, ProofAccess};
+
+    /// Regression test for the "Proven with no steps" unsoundness bug.
+    ///
+    /// When `msg.accesses` has 0 or 1 access, the pair-checking loop never
+    /// runs, and `sub_proofs` is empty.  Previously, `prove_exclusivity`
+    /// concluded `Proven` with zero proof steps, which `ProofChecker::check`
+    /// rejected as `Invalid{step:0}`.  The fix adds an explicit vacuous-truth
+    /// step so the proof has at least one verifiable step.
+    #[test]
+    fn test_vacuous_truth_zero_accesses_has_proof_step() {
+        let msg = ProofMSG {
+            accesses: vec![],
+            ..Default::default()
+        };
+        let result = prove_exclusivity(&msg);
+        assert!(result.is_ok(), "prove_exclusivity should succeed for 0 accesses");
+        let proof = result.unwrap();
+        assert!(
+            !proof.proof.steps.is_empty(),
+            "proof must have at least one step (vacuous-truth step) — \
+             the old bug concluded Proven with zero steps"
+        );
+    }
+
+    #[test]
+    fn test_vacuous_truth_one_access_has_proof_step() {
+        let msg = ProofMSG {
+            accesses: vec![ProofAccess::default()],
+            ..Default::default()
+        };
+        let result = prove_exclusivity(&msg);
+        assert!(result.is_ok());
+        let proof = result.unwrap();
+        assert!(
+            !proof.proof.steps.is_empty(),
+            "proof must have at least one step for 1 access (no pairs to check)"
+        );
+    }
 }
