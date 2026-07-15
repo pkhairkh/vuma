@@ -37,6 +37,7 @@ mod vuma_log_w44 {
 pub mod manifest;
 pub mod registry;
 pub mod resolver;
+mod toml_lite;
 
 pub use manifest::{PackageManifest, PackageTarget, Dependency, TargetKind, parse_manifest};
 pub use registry::PackageRegistry;

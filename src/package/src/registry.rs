@@ -19,8 +19,9 @@
 //! ```
 
 use crate::manifest::PackageManifest;
+use crate::toml_lite::{self, Value};
 use crate::{PackageError, PackageResult};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -59,36 +60,37 @@ impl RegistryIndex {
     /// Serialize the index to a TOML string.
     ///
     /// Wave 43 serde-migration: previously used `#[derive(Serialize)]` +
-    /// `toml::to_string_pretty(&self)`. Now builds a `toml::Value::Table`
-    /// by hand. The on-disk TOML format is unchanged: a top-level
-    /// `[packages]` table whose keys are package names and whose values are
-    /// arrays of version strings.
+    /// a third-party TOML serializer. Now builds a `toml_lite::Value::Table`
+    /// by hand and serializes that with the in-tree `toml_lite` serializer.
+    /// The on-disk TOML format is unchanged: a top-level `[packages]` table
+    /// whose keys are package names and whose values are arrays of version
+    /// strings.
     pub fn to_toml(&self) -> Result<String, PackageError> {
-        let mut packages_table = toml::map::Map::new();
+        let mut packages_table = BTreeMap::new();
         // Sort keys for deterministic output
         let mut sorted: Vec<(&String, &Vec<String>)> = self.packages.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(b.0));
         for (name, versions) in sorted {
-            let arr: Vec<toml::Value> = versions
+            let arr: Vec<Value> = versions
                 .iter()
-                .map(|v| toml::Value::String(v.clone()))
+                .map(|v| Value::String(v.clone()))
                 .collect();
-            packages_table.insert(name.clone(), toml::Value::Array(arr));
+            packages_table.insert(name.clone(), Value::Array(arr));
         }
-        let mut root = toml::map::Map::new();
-        root.insert("packages".to_string(), toml::Value::Table(packages_table));
-        toml::to_string_pretty(&toml::Value::Table(root))
+        let mut root = BTreeMap::new();
+        root.insert("packages".to_string(), Value::Table(packages_table));
+        toml_lite::to_string_pretty(&Value::Table(root))
             .map_err(|e| PackageError::Other(e.to_string()))
     }
 
     /// Deserialize the index from a TOML string.
     ///
     /// Wave 43 serde-migration: previously used `#[derive(Deserialize)]` +
-    /// `toml::from_str::<Self>`. Now parses into a `toml::Value` first and
-    /// navigates the value tree by hand.
+    /// a third-party TOML deserializer. Now uses the in-tree `toml_lite`
+    /// parser and navigates the value tree by hand.
     pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {
-        let root: toml::Value =
-            toml::from_str(toml_str).map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+        let root =
+            toml_lite::parse(toml_str).map_err(|e| PackageError::ManifestParse(e.to_string()))?;
         let mut packages = HashMap::new();
         if let Some(table) = root.get("packages").and_then(|v| v.as_table()) {
             for (name, val) in table {
