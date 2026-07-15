@@ -4627,7 +4627,7 @@ fn resolve_call_relocations(
     // Process relocations in reverse order (highest offset first) so that
     // splicing earlier relocations doesn't invalidate later offsets.
     let mut sorted_relocs: Vec<&RelocationEntry> = relocations.iter().collect();
-    sorted_relocs.sort_by(|a, b| b.offset.cmp(&a.offset));
+    sorted_relocs.sort_by_key(|b| std::cmp::Reverse(b.offset));
     for reloc in &sorted_relocs {
         if reloc.reloc_type != "R_WASM_FUNCTION_INDEX_LEB" {
             continue;

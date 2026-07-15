@@ -97,7 +97,7 @@ use std::fmt;
 /// s390x general-purpose registers (R0–R15).
 ///
 /// - R0   — scratch (cannot be used as base/index in load/store encoding;
-///           encoding 0 in B2/X2 fields means "no register")
+///   encoding 0 in B2/X2 fields means "no register")
 /// - R1   — syscall number (Linux s390x); scratch otherwise
 /// - R2–R6 — argument registers
 /// - R7–R10 — scratch / volatile

@@ -234,7 +234,7 @@ fn encode_cmpiclr(imm5: u8, r1: Reg, dst: Reg, cond: u32, f: bool) -> [u8; 4] {
         | ((imm5 as u32 & 0x1F) << 16)
         | ((cond & 0x7) << 13);
     if f { word |= 1 << 12; }
-    word | (dst as u32 & 0x1F);
+    word |= dst as u32 & 0x1F;
     word.to_be_bytes()
 }
 

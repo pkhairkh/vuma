@@ -492,7 +492,7 @@ impl MemorySafetyAnalyzer {
     /// Analyze a single function to track allocations, frees, and accesses.
     fn analyze_function(&self, func: &ScgFunction) -> HashMap<String, AllocationInfo> {
         let mut allocations: HashMap<String, AllocationInfo> = HashMap::new();
-        self.walk_statements(&func.body, &mut allocations, None);
+        self.walk_statements(&func.body, &mut allocations);
         allocations
     }
 
@@ -501,7 +501,6 @@ impl MemorySafetyAnalyzer {
         &self,
         stmts: &[ScgStatement],
         allocations: &mut HashMap<String, AllocationInfo>,
-        scope_name: Option<&str>,
     ) {
         for stmt in stmts {
             match stmt {
@@ -592,21 +591,21 @@ impl MemorySafetyAnalyzer {
                             else_body,
                             ..
                         } => {
-                            self.walk_statements(then_body, allocations, scope_name);
+                            self.walk_statements(then_body, allocations);
                             if let Some(else_body) = else_body {
-                                self.walk_statements(else_body, allocations, scope_name);
+                                self.walk_statements(else_body, allocations);
                             }
                         }
                         ControlNode::Loop { body, .. } => {
-                            self.walk_statements(body, allocations, scope_name);
+                            self.walk_statements(body, allocations);
                         }
                         ControlNode::Switch {
                             arms, default_body, ..
                         } => {
                             for arm in arms {
-                                self.walk_statements(&arm.body, allocations, scope_name);
+                                self.walk_statements(&arm.body, allocations);
                             }
-                            self.walk_statements(default_body, allocations, scope_name);
+                            self.walk_statements(default_body, allocations);
                         }
                         ControlNode::Break | ControlNode::Continue => {}
                     }

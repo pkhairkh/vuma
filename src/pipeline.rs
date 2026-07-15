@@ -939,13 +939,12 @@ fn resolve_df_input(
                         // references in match/Switch contexts, where the
                         // variable's value comes from a phi/merge node (not
                         // an assignment).
-                        let is_var_ref = !label.is_empty()
-                            && label.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                            && label.chars().all(|c| c.is_alphanumeric() || c == '_')
-                            && !(label.starts_with("v_") && label[2..].chars().all(|c| c.is_ascii_digit()))
-                            && !label.starts_with("lit_")
-                            && !label.starts_with("param ")
-                            && !label.starts_with("match_arm")
+                        let is_var_ref = !(!label.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                            || !label.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            || label.starts_with("lit_")
+                            || label.starts_with("param ")
+                            || label.starts_with("match_arm")
+                            || label.starts_with("v_") && label[2..].chars().all(|c| c.is_ascii_digit()))
                             && !label.starts_with("const ")
                             && !label.contains(" = ")
                             && !label.contains("(");
@@ -8579,6 +8578,11 @@ fn infer_load_type_from_ptr(ptr: &ScgExpr) -> Option<vuma_codegen::ir::IRType> {
     None
 }
 
+/// Convert a VUMA parser AST statement into a sequence of SCG
+/// (Semantic Code Graph) statements, using `ctx` to track variable
+/// types and other bridging state.
+///
+/// This is the bridge entry point used by the parser→SCG frontend.
 pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
     use vuma_parser::ast::Stmt as PStmt;
 

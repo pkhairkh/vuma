@@ -912,8 +912,8 @@ impl IRBuilder {
         // then-branch to fall through instead of returning early.
         // Source order is correct for all cases because the SCG walk
         // already produces statements in the right order.
-        for idx in 0..stmts.len() {
-            self.lower_statement(&stmts[idx], ir_func, names)?;
+        for stmt in stmts {
+            self.lower_statement(stmt, ir_func, names)?;
         }
 
         Ok(())
@@ -983,9 +983,9 @@ impl IRBuilder {
         }
 
         // Append any remaining (cyclic) statements in original order
-        for k in 0..n {
-            if !result.contains(&indices[k]) {
-                result.push(indices[k]);
+        for &idx in indices {
+            if !result.contains(&idx) {
+                result.push(idx);
             }
         }
 
