@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 // Thread-local set of function names that return 64-bit values (I64/U64).
 // Global set of function names that return 64-bit values (I64/U64).
-// Uses RwLock instead of thread_local! because compile_dump uses rayon
-// par_iter for parallel allocation.
+// Uses RwLock instead of thread_local! because compile_dump uses
+// std::thread::scope for parallel allocation.
 static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
 
 fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {
