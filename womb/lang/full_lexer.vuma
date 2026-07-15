@@ -333,11 +333,14 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
                     if match_keyword(src, start, len, 101, 120, 112, 111, 114, 116) == 1 { ttype = 24; }
                 }}
             }
+            // "syscall" = 7 chars: s(115) y(121) s(115) c(99) a(97) l(108) l(108).
+            // Wave P1-c-8: bootstrap syscall() intrinsic support. ttype 37.
+            // (match_keyword is hardcoded for len==6, so use the inline
+            //  char-by-char pattern like "continue"/"sizeof" above.)
             if len == 7 {
                 f = *(src + start);
-                if f == 109 {  // m → match
-                    if match_keyword(src, start, len, 109, 97, 116, 99, 104, 0) == 1 { }
-                    // Actually "match" is 5 chars, not 7. Fix:
+                if f == 115 {  // s → syscall
+                    if *(src + start + 1) == 121 { if *(src + start + 2) == 115 { if *(src + start + 3) == 99 { if *(src + start + 4) == 97 { if *(src + start + 5) == 108 { if *(src + start + 6) == 108 { ttype = 37; } } } } } }
                 }
             }
             // "match" = 5 chars

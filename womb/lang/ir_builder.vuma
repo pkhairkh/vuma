@@ -53,6 +53,10 @@ const IR_ALLOC: u32 = 15;
 const IR_MOV: u32 = 16;
 const IR_BRANCH: u32 = 17;
 const IR_COND_BRANCH: u32 = 18;
+// Wave P1-c-8: raw syscall intrinsic. dst = result vreg, lhs = syscall nr
+// (VUMA/asm-generic — codegen translates to per-ISA native), rhs = arg_count,
+// imm (lower 32) = arg0_vreg. Same single-arg limitation as IR_CALL.
+const IR_SYSCALL: u32 = 20;
 
 const IR_SIZE: u32 = 32;
 
@@ -208,6 +212,25 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         // IR_CALL: dst=result vreg, lhs=callee_hash, rhs=arg_count,
         //          imm (lower 32)=arg0_vreg.
         irb_emit(b, IR_CALL, dst, c1, c3, arg0_vreg, 0);
+        return dst;
+    }
+    
+    // NK_SYSCALL (8): c1=syscall_nr (VUMA/asm-generic), c3=arg_count,
+    // val (lower 32)=arg0_node_idx. Wave P1-c-8. Lower arg0 (the only
+    // arg the bootstrap stashes) into a vreg, then emit IR_SYSCALL with
+    // the nr in lhs, arg_count in rhs, arg0_vreg in imm (lower 32).
+    // (arg0_vreg / dst are function-scoped — declared in the NK_INT /
+    // NK_CALL blocks above — so we reassign without re-annotating,
+    // matching the NK_ASSIGN pattern. sc_arg0_node uses a unique name to
+    // avoid any nested-scope collision with NK_CALL's inner arg0_node.)
+    if kind == 8 {
+        arg0_vreg = 0;
+        if c3 >= 1 {
+            sc_arg0_node: u32 = val & 0xFFFFFFFF;
+            arg0_vreg = irb_lower_expr(b, ast, sc_arg0_node);
+        }
+        dst = irb_alloc_vreg(b);
+        irb_emit(b, IR_SYSCALL, dst, c1, c3, arg0_vreg, 0);
         return dst;
     }
     
