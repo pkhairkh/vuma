@@ -58,18 +58,15 @@
 // the only `return` inside an `if` is the trailing
 // `if status != 0 { return <error>; } return <ok>;` at function tail.
 
-extern "C" {
-    fn sha256_oneshot(data: Address, len: u32, out: Address);
-    fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
-    fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address);
-    fn hkdf_expand_sha256(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32);
-    fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address);
-    fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32;
-    fn aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32;
-    fn drbg_init(state: Address, entropy: Address, entropy_len: u32, nonce: Address, nonce_len: u32);
-    fn drbg_reseed(state: Address, entropy: Address, entropy_len: u32);
-    fn drbg_generate(state: Address, out: Address, out_len: u32) -> u32;
-}
+// Sibling-module imports — these resolve to pure-VUMA implementations in
+// womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
+// directory (womb/net/).  See resolver.rs::resolve_import_path.
+import "../crypto/hqc.vuma"        { sha256_oneshot };
+import "../crypto/hmac.vuma"       { hmac_sha256 };
+import "../crypto/hkdf.vuma"       { hkdf_extract_sha256, hkdf_expand_sha256 };
+import "../crypto/aes256.vuma"     { aes256_encrypt_block };
+import "../crypto/aes_modes.vuma"  { aes256_gcm_encrypt, aes256_gcm_decrypt };
+import "../crypto/drbg.vuma"       { drbg_init, drbg_reseed, drbg_generate };
 
 // ===========================================================================
 // Constants (RFC 9000 §17 / §18, RFC 9001 §5)
