@@ -57,14 +57,13 @@
 //   * smtp_data performs RFC 5321 dot-stuffing on outbound bodies.
 //   * pop3_retr undoes dot-stuffing on inbound message bodies.
 
-extern "C" {
-    fn tcp_connect(server_ip: u32, port: u32) -> i64;
-    fn tcp_send_str(fd: i64, s: Address) -> i64;
-    fn tcp_recv(fd: i64, buf: Address, max_len: u32) -> i64;
-    fn tcp_close(fd: i64);
-    fn base64_encode(input: Address, in_len: u32, output: Address) -> u32;
-    fn sha256_oneshot(input: Address, in_len: u32, output: Address) -> u32;
-}
+// Sibling-module imports — these resolve to pure-VUMA implementations in
+// womb/lib/ (tcp_*) and womb/{encoding,crypto}/ (no C/Rust wrappers).  The
+// path is relative to this file's directory (womb/lib/).  See
+// resolver.rs::resolve_import_path.
+import "socket.vuma"            { tcp_connect, tcp_send_str, tcp_recv, tcp_close };
+import "../encoding/base64.vuma" { base64_encode };
+import "../crypto/hqc.vuma"     { sha256_oneshot };
 
 // ===========================================================================
 // Constants

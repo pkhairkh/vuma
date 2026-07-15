@@ -63,13 +63,12 @@
 // `if status != 0 { return 0; }` at function exit (after all free()
 // cleanup), followed by the final `return <value>;`.
 
-extern "C" {
-    fn sha1_oneshot(data: Address, len: u32, out: Address);
-    fn base64_encode(input: Address, in_len: u32, output: Address) -> u32;
-    fn drbg_init(state: Address, entropy: Address, entropy_len: u32,
-                nonce: Address, nonce_len: u32);
-    fn drbg_generate(state: Address, out: Address, out_len: u32) -> u32;
-}
+// Sibling-module imports — these resolve to pure-VUMA implementations in
+// womb/{crypto,encoding}/ (no C/Rust wrappers).  The path is relative to
+// this file's directory (womb/lib/).  See resolver.rs::resolve_import_path.
+import "../crypto/sha1.vuma"        { sha1_oneshot };
+import "../encoding/base64.vuma"    { base64_encode };
+import "../crypto/drbg.vuma"        { drbg_init, drbg_generate };
 
 // Opcodes (RFC 6455 §5.2)
 const WS_OPCODE_CONTINUATION: u32 = 0;
