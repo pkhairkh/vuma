@@ -882,7 +882,7 @@ fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<
         }
 
         fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            if v.len() % 2 != 0 {
+            if !v.len().is_multiple_of(2) {
                 return Err(E::custom("hex string has odd length"));
             }
             (0..v.len())

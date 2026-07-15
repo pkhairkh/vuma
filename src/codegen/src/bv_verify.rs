@@ -126,7 +126,7 @@ pub fn eval_binop(op: BinOpKind, lhs: u64, rhs: u64) -> u64 {
             (lhs % m).checked_div(rhs % m).unwrap_or(0)
         }
         BinOpKind::SRem | BinOpKind::URem => {
-            if rhs % m == 0 { 0 } else { (lhs % m) % (rhs % m) }
+            if rhs.is_multiple_of(m) { 0 } else { (lhs % m) % (rhs % m) }
         }
         BinOpKind::And => (lhs & rhs) % m,
         BinOpKind::Or => (lhs | rhs) % m,

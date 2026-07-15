@@ -2405,7 +2405,7 @@ impl Instruction {
             Instruction::LDR { rt, rn, offset } => {
                 let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
                 let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
-                if *offset >= 0 && (*offset as u32) % align == 0 {
+                if *offset >= 0 && (*offset as u32).is_multiple_of(align) {
                     let imm12 = (*offset as u32) / align;
                     Ok((sf << 31)
                         | 0xB9400000u32
@@ -2427,7 +2427,7 @@ impl Instruction {
             Instruction::STR { rt, rn, offset } => {
                 let scale = width.scale(); // 3 for 64-bit, 2 for 32-bit
                 let align = 1u32 << scale; // 8 for 64-bit, 4 for 32-bit
-                if *offset >= 0 && (*offset as u32) % align == 0 {
+                if *offset >= 0 && (*offset as u32).is_multiple_of(align) {
                     let imm12 = (*offset as u32) / align;
                     Ok((sf << 31)
                         | 0xB9000000u32

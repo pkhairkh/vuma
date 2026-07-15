@@ -194,7 +194,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // the callee enters with RSP at 8 mod 16 as required by SysV).
     // Therefore: frame_size % 16 == 0.
     let aligned = ((current_offset + 15) & !15) as usize;
-    let frame_size = if aligned % 16 == 0 {
+    let frame_size = if aligned.is_multiple_of(16) {
         aligned.max(16)
     } else {
         (aligned + 16 - (aligned % 16)).max(16)  // Round up to 16-byte boundary
