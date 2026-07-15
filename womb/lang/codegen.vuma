@@ -425,17 +425,406 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
     return max;
 }
 
+// ============================================================================
+// Wave 52 — runtime stub emitters
+// ============================================================================
+// The bootstrap compiler emits its own runtime stubs (previously these were
+// injected by the Rust-side x86_64 backend). The stubs are written at the
+// START of the code buffer by emit_runtime_stubs(), called from
+// full_lexer.vuma::main() BEFORE codegen_emit() (which emits the user's
+// main function after the stubs).
+//
+// Layout (offsets in the full code buffer):
+//   [0..15)     _start stub        (15 bytes — call main; exit(ret_val))
+//   [15..101)   print_int routine  (86 bytes — existing emit_print_int_routine)
+//   [101..141)  __vuma_alloc       (40 bytes — mmap wrapper)
+//   [141..151)  __vuma_free        (10 bytes — munmap syscall 11)
+//   [151..181)  print_newline      (30 bytes — write newline to stdout)
+//   [181..268)  print_hex          (87 bytes — write bytes as hex)
+//   [268..282)  __vuma_argc        (14 bytes — reads argc from BSS slot)
+//   [282..297)  __vuma_argv        (15 bytes — reads argv from BSS slot)
+//   [297..307)  write              (10 bytes — syscall 1)
+//   [307..317)  read               (10 bytes — syscall 0)
+//   [317..327)  open               (10 bytes — syscall 2)
+//   [327..337)  close              (10 bytes — syscall 3)
+//   [337..)     user code (main)   — emitted by codegen_emit
+//
+// The ELF entry point is offset 0 (_start), which calls main and exits with
+// main's return value. print_int is at offset PRINT_INT_OFFSET = 15, so
+// codegen_emit's IR_CALL handler passes print_int_offset = 15 to
+// enc_call_rel32 when emitting a call to print_int.
+//
+// LIMITATIONS (documented TODOs for a future wave):
+//   - __vuma_argc/__vuma_argv use a BSS placeholder (0xDEADBEEFCAFEBABE)
+//     that is NOT patched by the bootstrap (elf.vuma's write_elf64 does not
+//     allocate a BSS segment). Calls to these stubs will trap. hello.vuma
+//     does not call them, so the Wave 48 self-host test passes. A future
+//     wave should add BSS allocation to write_elf64 and patch the
+//     placeholder (mirroring src/codegen/src/x86_64/mod.rs::encode_program).
+//   - _start does not save argc/argv to a BSS slot (would trap without BSS).
+//     The full _start stub (43 bytes, with BSS argv save) lives in the Rust
+//     backend's encode_program; the bootstrap uses a 15-byte minimal _start.
+
+const START_STUB_SIZE: u32 = 15;
+const PRINT_INT_OFFSET: u32 = 15;  // = START_STUB_SIZE (print_int is right after _start)
+const STUBS_SIZE: u32 = 337;       // total bytes emitted by emit_runtime_stubs
+
+// ── _start stub (15 bytes) ──
+// Minimal process entry: call main; mov rdi, rax (exit code = main's return);
+// mov eax, 60 (sys_exit); syscall.
+//
+// The full _start stub in the Rust backend (43 bytes) also saves argc/argv
+// to a BSS slot so __vuma_argc/__vuma_argv can retrieve them later. The
+// bootstrap's elf.vuma does not allocate BSS, so we skip the argv save
+// (calls to __vuma_argc/__vuma_argv will trap — documented limitation).
+fn emit_start_stub(code: Address, pos: u32, main_offset: u32) -> u32 {
+    // E8 <rel32> — call main. rel32 = main_offset - (pos + 5).
+    emit_byte(code, pos, 0xE8);
+    rel: u32 = main_offset - (pos + 5);
+    emit_u32(code, pos + 1, rel);
+    // 48 89 C7 — mov rdi, rax (exit code = main's return value)
+    emit_byte(code, pos + 5, 0x48);
+    emit_byte(code, pos + 6, 0x89);
+    emit_byte(code, pos + 7, 0xC7);
+    // B8 3C 00 00 00 — mov eax, 60 (sys_exit)
+    emit_byte(code, pos + 8, 0xB8);
+    emit_byte(code, pos + 9, 0x3C);
+    emit_byte(code, pos + 10, 0x00);
+    emit_byte(code, pos + 11, 0x00);
+    emit_byte(code, pos + 12, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 13, 0x0F);
+    emit_byte(code, pos + 14, 0x05);
+    return pos + 15;
+}
+
+// ── __vuma_alloc (40 bytes) ──
+// mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+// args: RDI = size → RSI. Returns mapped address in RAX.
+fn emit_vuma_alloc(code: Address, pos: u32) -> u32 {
+    // 48 89 FE — mov rsi, rdi (size)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0x89);
+    emit_byte(code, pos + 2, 0xFE);
+    // 48 31 FF — xor rdi, rdi (NULL addr)
+    emit_byte(code, pos + 3, 0x48); emit_byte(code, pos + 4, 0x31);
+    emit_byte(code, pos + 5, 0xFF);
+    // 48 C7 C2 03 00 00 00 — mov rdx, 3 (PROT_READ|PROT_WRITE)
+    emit_byte(code, pos + 6, 0x48); emit_byte(code, pos + 7, 0xC7);
+    emit_byte(code, pos + 8, 0xC2); emit_byte(code, pos + 9, 0x03);
+    emit_byte(code, pos + 10, 0x00); emit_byte(code, pos + 11, 0x00);
+    emit_byte(code, pos + 12, 0x00);
+    // 49 C7 C2 22 00 00 00 — mov r10, 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+    emit_byte(code, pos + 13, 0x49); emit_byte(code, pos + 14, 0xC7);
+    emit_byte(code, pos + 15, 0xC2); emit_byte(code, pos + 16, 0x22);
+    emit_byte(code, pos + 17, 0x00); emit_byte(code, pos + 18, 0x00);
+    emit_byte(code, pos + 19, 0x00);
+    // 49 C7 C0 FF FF FF FF — mov r8, -1 (fd)
+    emit_byte(code, pos + 20, 0x49); emit_byte(code, pos + 21, 0xC7);
+    emit_byte(code, pos + 22, 0xC0); emit_byte(code, pos + 23, 0xFF);
+    emit_byte(code, pos + 24, 0xFF); emit_byte(code, pos + 25, 0xFF);
+    emit_byte(code, pos + 26, 0xFF);
+    // 4D 31 C9 — xor r9, r9 (offset 0)
+    emit_byte(code, pos + 27, 0x4D); emit_byte(code, pos + 28, 0x31);
+    emit_byte(code, pos + 29, 0xC9);
+    // 48 C7 C0 09 00 00 00 — mov rax, 9 (sys_mmap)
+    emit_byte(code, pos + 30, 0x48); emit_byte(code, pos + 31, 0xC7);
+    emit_byte(code, pos + 32, 0xC0); emit_byte(code, pos + 33, 0x09);
+    emit_byte(code, pos + 34, 0x00); emit_byte(code, pos + 35, 0x00);
+    emit_byte(code, pos + 36, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 37, 0x0F); emit_byte(code, pos + 38, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 39, 0xC3);
+    return pos + 40;
+}
+
+// ── __vuma_free (10 bytes) — simple "mov rax, 11; syscall; ret" stub ──
+fn emit_vuma_free(code: Address, pos: u32) -> u32 {
+    // 48 C7 C0 0B 00 00 00 — mov rax, 11 (sys_munmap)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xC7);
+    emit_byte(code, pos + 2, 0xC0); emit_byte(code, pos + 3, 0x0B);
+    emit_byte(code, pos + 4, 0x00); emit_byte(code, pos + 5, 0x00);
+    emit_byte(code, pos + 6, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 7, 0x0F); emit_byte(code, pos + 8, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 9, 0xC3);
+    return pos + 10;
+}
+
+// ── print_newline (30 bytes) ──
+// Writes a single '\n' (0x0A) byte to stdout via write(1, &newline, 1).
+fn emit_print_newline(code: Address, pos: u32) -> u32 {
+    // 6A 0A — push 0x0A (newline char, sign-extended to 8 bytes on stack)
+    emit_byte(code, pos + 0, 0x6A); emit_byte(code, pos + 1, 0x0A);
+    // 48 C7 C7 01 00 00 00 — mov rdi, 1 (stdout)
+    emit_byte(code, pos + 2, 0x48); emit_byte(code, pos + 3, 0xC7);
+    emit_byte(code, pos + 4, 0xC7); emit_byte(code, pos + 5, 0x01);
+    emit_byte(code, pos + 6, 0x00); emit_byte(code, pos + 7, 0x00);
+    emit_byte(code, pos + 8, 0x00);
+    // 48 89 E6 — mov rsi, rsp (buf = &newline on stack)
+    emit_byte(code, pos + 9, 0x48); emit_byte(code, pos + 10, 0x89);
+    emit_byte(code, pos + 11, 0xE6);
+    // 48 C7 C2 01 00 00 00 — mov rdx, 1 (count)
+    emit_byte(code, pos + 12, 0x48); emit_byte(code, pos + 13, 0xC7);
+    emit_byte(code, pos + 14, 0xC2); emit_byte(code, pos + 15, 0x01);
+    emit_byte(code, pos + 16, 0x00); emit_byte(code, pos + 17, 0x00);
+    emit_byte(code, pos + 18, 0x00);
+    // 48 C7 C0 01 00 00 00 — mov rax, 1 (sys_write)
+    emit_byte(code, pos + 19, 0x48); emit_byte(code, pos + 20, 0xC7);
+    emit_byte(code, pos + 21, 0xC0); emit_byte(code, pos + 22, 0x01);
+    emit_byte(code, pos + 23, 0x00); emit_byte(code, pos + 24, 0x00);
+    emit_byte(code, pos + 25, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 26, 0x0F); emit_byte(code, pos + 27, 0x05);
+    // 58 — pop rax (restore stack)
+    emit_byte(code, pos + 28, 0x58);
+    // C3 — ret
+    emit_byte(code, pos + 29, 0xC3);
+    return pos + 30;
+}
+
+// ── print_hex (87 bytes) ──
+// Prints `count` bytes from `buf` as hex to stdout.
+// Args: RDI = buf pointer, RSI = count.
+fn emit_print_hex(code: Address, pos: u32) -> u32 {
+    // 55 — push rbp
+    emit_byte(code, pos + 0, 0x55);
+    // 48 89 E5 — mov rbp, rsp
+    emit_byte(code, pos + 1, 0x48); emit_byte(code, pos + 2, 0x89);
+    emit_byte(code, pos + 3, 0xE5);
+    // 49 89 F8 — mov r8, rdi (buf)
+    emit_byte(code, pos + 4, 0x49); emit_byte(code, pos + 5, 0x89);
+    emit_byte(code, pos + 6, 0xF8);
+    // 49 89 F1 — mov r9, rsi (count)
+    emit_byte(code, pos + 7, 0x49); emit_byte(code, pos + 8, 0x89);
+    emit_byte(code, pos + 9, 0xF1);
+    // 4D 85 C9 — test r9, r9
+    emit_byte(code, pos + 10, 0x4D); emit_byte(code, pos + 11, 0x85);
+    emit_byte(code, pos + 12, 0xC9);
+    // 74 3C — jz +60 (to pop rbp; ret)
+    emit_byte(code, pos + 13, 0x74); emit_byte(code, pos + 14, 0x3C);
+    // loop_start (offset 15):
+    // 41 0F B6 00 — movzx eax, byte [r8]
+    emit_byte(code, pos + 15, 0x41); emit_byte(code, pos + 16, 0x0F);
+    emit_byte(code, pos + 17, 0xB6); emit_byte(code, pos + 18, 0x00);
+    // C1 E8 04 — shr eax, 4
+    emit_byte(code, pos + 19, 0xC1); emit_byte(code, pos + 20, 0xE8);
+    emit_byte(code, pos + 21, 0x04);
+    // 04 30 — add al, 0x30
+    emit_byte(code, pos + 22, 0x04); emit_byte(code, pos + 23, 0x30);
+    // 3C 3A — cmp al, 0x3A
+    emit_byte(code, pos + 24, 0x3C); emit_byte(code, pos + 25, 0x3A);
+    // 7C 02 — jl +2
+    emit_byte(code, pos + 26, 0x7C); emit_byte(code, pos + 27, 0x02);
+    // 04 07 — add al, 7
+    emit_byte(code, pos + 28, 0x04); emit_byte(code, pos + 29, 0x07);
+    // 88 44 24 F8 — mov [rsp-8], al
+    emit_byte(code, pos + 30, 0x88); emit_byte(code, pos + 31, 0x44);
+    emit_byte(code, pos + 32, 0x24); emit_byte(code, pos + 33, 0xF8);
+    // 41 0F B6 00 — movzx eax, byte [r8]
+    emit_byte(code, pos + 34, 0x41); emit_byte(code, pos + 35, 0x0F);
+    emit_byte(code, pos + 36, 0xB6); emit_byte(code, pos + 37, 0x00);
+    // 83 E0 0F — and eax, 0xF
+    emit_byte(code, pos + 38, 0x83); emit_byte(code, pos + 39, 0xE0);
+    emit_byte(code, pos + 40, 0x0F);
+    // 04 30 — add al, 0x30
+    emit_byte(code, pos + 41, 0x04); emit_byte(code, pos + 42, 0x30);
+    // 3C 3A — cmp al, 0x3A
+    emit_byte(code, pos + 43, 0x3C); emit_byte(code, pos + 44, 0x3A);
+    // 7C 02 — jl +2
+    emit_byte(code, pos + 45, 0x7C); emit_byte(code, pos + 46, 0x02);
+    // 04 07 — add al, 7
+    emit_byte(code, pos + 47, 0x04); emit_byte(code, pos + 48, 0x07);
+    // 88 44 24 F9 — mov [rsp-7], al
+    emit_byte(code, pos + 49, 0x88); emit_byte(code, pos + 50, 0x44);
+    emit_byte(code, pos + 51, 0x24); emit_byte(code, pos + 52, 0xF9);
+    // BF 01 00 00 00 — mov edi, 1
+    emit_byte(code, pos + 53, 0xBF); emit_byte(code, pos + 54, 0x01);
+    emit_byte(code, pos + 55, 0x00); emit_byte(code, pos + 56, 0x00);
+    emit_byte(code, pos + 57, 0x00);
+    // 48 8D 74 24 F8 — lea rsi, [rsp-8]
+    emit_byte(code, pos + 58, 0x48); emit_byte(code, pos + 59, 0x8D);
+    emit_byte(code, pos + 60, 0x74); emit_byte(code, pos + 61, 0x24);
+    emit_byte(code, pos + 62, 0xF8);
+    // BA 02 00 00 00 — mov edx, 2
+    emit_byte(code, pos + 63, 0xBA); emit_byte(code, pos + 64, 0x02);
+    emit_byte(code, pos + 65, 0x00); emit_byte(code, pos + 66, 0x00);
+    emit_byte(code, pos + 67, 0x00);
+    // 48 C7 C0 01 00 00 00 — mov rax, 1 (sys_write)
+    emit_byte(code, pos + 68, 0x48); emit_byte(code, pos + 69, 0xC7);
+    emit_byte(code, pos + 70, 0xC0); emit_byte(code, pos + 71, 0x01);
+    emit_byte(code, pos + 72, 0x00); emit_byte(code, pos + 73, 0x00);
+    emit_byte(code, pos + 74, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 75, 0x0F); emit_byte(code, pos + 76, 0x05);
+    // 49 FF C0 — inc r8
+    emit_byte(code, pos + 77, 0x49); emit_byte(code, pos + 78, 0xFF);
+    emit_byte(code, pos + 79, 0xC0);
+    // 49 FF C9 — dec r9
+    emit_byte(code, pos + 80, 0x49); emit_byte(code, pos + 81, 0xFF);
+    emit_byte(code, pos + 82, 0xC9);
+    // 75 BA — jnz -70 (back to loop_start)
+    emit_byte(code, pos + 83, 0x75); emit_byte(code, pos + 84, 0xBA);
+    // 5D — pop rbp
+    emit_byte(code, pos + 85, 0x5D);
+    // C3 — ret
+    emit_byte(code, pos + 86, 0xC3);
+    return pos + 87;
+}
+
+// ── __vuma_argc (14 bytes) ──
+// Reads argc from a 16-byte BSS slot (offset 0) populated by _start.
+// NOTE: The bootstrap's elf.vuma does not allocate BSS, so the placeholder
+// (0xDEADBEEFCAFEBABE) is NOT patched. Calls to this stub will trap.
+fn emit_vuma_argc(code: Address, pos: u32) -> u32 {
+    // 48 B8 <8-byte placeholder> — mov rax, 0xDEADBEEFCAFEBABE
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xB8);
+    emit_byte(code, pos + 2, 0xBE); emit_byte(code, pos + 3, 0xBA);
+    emit_byte(code, pos + 4, 0xFE); emit_byte(code, pos + 5, 0xCA);
+    emit_byte(code, pos + 6, 0xEF); emit_byte(code, pos + 7, 0xBE);
+    emit_byte(code, pos + 8, 0xAD); emit_byte(code, pos + 9, 0xDE);
+    // 48 8B 00 — mov rax, [rax]
+    emit_byte(code, pos + 10, 0x48); emit_byte(code, pos + 11, 0x8B);
+    emit_byte(code, pos + 12, 0x00);
+    // C3 — ret
+    emit_byte(code, pos + 13, 0xC3);
+    return pos + 14;
+}
+
+// ── __vuma_argv (15 bytes) ──
+// Reads argv from the BSS slot (offset 8). Same placeholder caveat as
+// __vuma_argc — calls will trap without BSS patching.
+fn emit_vuma_argv(code: Address, pos: u32) -> u32 {
+    // 48 B8 <8-byte placeholder> — mov rax, 0xDEADBEEFCAFEBABE
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xB8);
+    emit_byte(code, pos + 2, 0xBE); emit_byte(code, pos + 3, 0xBA);
+    emit_byte(code, pos + 4, 0xFE); emit_byte(code, pos + 5, 0xCA);
+    emit_byte(code, pos + 6, 0xEF); emit_byte(code, pos + 7, 0xBE);
+    emit_byte(code, pos + 8, 0xAD); emit_byte(code, pos + 9, 0xDE);
+    // 48 8B 40 08 — mov rax, [rax+8]
+    emit_byte(code, pos + 10, 0x48); emit_byte(code, pos + 11, 0x8B);
+    emit_byte(code, pos + 12, 0x40); emit_byte(code, pos + 13, 0x08);
+    // C3 — ret
+    emit_byte(code, pos + 14, 0xC3);
+    return pos + 15;
+}
+
+// ── write (10 bytes) — simple "mov rax, 1; syscall; ret" stub (sys_write) ──
+fn emit_write(code: Address, pos: u32) -> u32 {
+    // 48 C7 C0 01 00 00 00 — mov rax, 1 (sys_write)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xC7);
+    emit_byte(code, pos + 2, 0xC0); emit_byte(code, pos + 3, 0x01);
+    emit_byte(code, pos + 4, 0x00); emit_byte(code, pos + 5, 0x00);
+    emit_byte(code, pos + 6, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 7, 0x0F); emit_byte(code, pos + 8, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 9, 0xC3);
+    return pos + 10;
+}
+
+// ── read (10 bytes) — simple "mov rax, 0; syscall; ret" stub (sys_read) ──
+fn emit_read(code: Address, pos: u32) -> u32 {
+    // 48 C7 C0 00 00 00 00 — mov rax, 0 (sys_read)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xC7);
+    emit_byte(code, pos + 2, 0xC0); emit_byte(code, pos + 3, 0x00);
+    emit_byte(code, pos + 4, 0x00); emit_byte(code, pos + 5, 0x00);
+    emit_byte(code, pos + 6, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 7, 0x0F); emit_byte(code, pos + 8, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 9, 0xC3);
+    return pos + 10;
+}
+
+// ── open (10 bytes) — simple "mov rax, 2; syscall; ret" stub (sys_open) ──
+fn emit_open(code: Address, pos: u32) -> u32 {
+    // 48 C7 C0 02 00 00 00 — mov rax, 2 (sys_open)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xC7);
+    emit_byte(code, pos + 2, 0xC0); emit_byte(code, pos + 3, 0x02);
+    emit_byte(code, pos + 4, 0x00); emit_byte(code, pos + 5, 0x00);
+    emit_byte(code, pos + 6, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 7, 0x0F); emit_byte(code, pos + 8, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 9, 0xC3);
+    return pos + 10;
+}
+
+// ── close (10 bytes) — simple "mov rax, 3; syscall; ret" stub (sys_close) ──
+fn emit_close(code: Address, pos: u32) -> u32 {
+    // 48 C7 C0 03 00 00 00 — mov rax, 3 (sys_close)
+    emit_byte(code, pos + 0, 0x48); emit_byte(code, pos + 1, 0xC7);
+    emit_byte(code, pos + 2, 0xC0); emit_byte(code, pos + 3, 0x03);
+    emit_byte(code, pos + 4, 0x00); emit_byte(code, pos + 5, 0x00);
+    emit_byte(code, pos + 6, 0x00);
+    // 0F 05 — syscall
+    emit_byte(code, pos + 7, 0x0F); emit_byte(code, pos + 8, 0x05);
+    // C3 — ret
+    emit_byte(code, pos + 9, 0xC3);
+    return pos + 10;
+}
+
+// emit_runtime_stubs: write all runtime stubs at the start of the code buffer.
+// Returns the total bytes written (= STUBS_SIZE = 337).
+//
+// The stubs are emitted in a fixed order (see the layout comment above).
+// The _start stub's `call main` rel32 points to offset STUBS_SIZE (where
+// codegen_emit will emit the user's main function).
+fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
+    pos: u32 = 0;
+    // 1. _start stub (15 bytes) — entry point, calls main at offset STUBS_SIZE
+    pos = emit_start_stub(code, pos, STUBS_SIZE);
+    // 2. print_int routine (86 bytes) — at offset PRINT_INT_OFFSET = 15
+    pos = emit_print_int_routine(code, pos);
+    // 3. __vuma_alloc (40 bytes) — mmap wrapper
+    pos = emit_vuma_alloc(code, pos);
+    // 4. __vuma_free (10 bytes) — munmap
+    pos = emit_vuma_free(code, pos);
+    // 5. print_newline (30 bytes)
+    pos = emit_print_newline(code, pos);
+    // 6. print_hex (87 bytes)
+    pos = emit_print_hex(code, pos);
+    // 7. __vuma_argc (14 bytes) — BSS placeholder, traps without patching
+    pos = emit_vuma_argc(code, pos);
+    // 8. __vuma_argv (15 bytes) — BSS placeholder, traps without patching
+    pos = emit_vuma_argv(code, pos);
+    // 9. write (10 bytes) — sys_write
+    pos = emit_write(code, pos);
+    // 10. read (10 bytes) — sys_read
+    pos = emit_read(code, pos);
+    // 11. open (10 bytes) — sys_open
+    pos = emit_open(code, pos);
+    // 12. close (10 bytes) — sys_close
+    pos = emit_close(code, pos);
+    // Total = STUBS_SIZE = 337. code_cap is a future safety check (TODO).
+    return pos;
+}
+
 // codegen_emit: walk the IR buffer and emit x86_64 machine code.
 //
-// Inputs:
-//   ir_buf          — heap pointer to the IR buffer (layout per ir.vuma:
-//                     [count: u32][cap: u32][instr * count: 32 bytes each])
-//   code            — heap pointer to the output code buffer (caller-owned)
-//   code_cap        — capacity of `code` in bytes
-//   print_int_hash  — FNV-1a 32-bit hash of "print_int" (computed by the
-//                     driver via name_hash); used to dispatch IR_CALL targets
+// codegen_emit emits ONLY the user's main function; runtime stubs (_start,
+// print_int, __vuma_alloc, etc.) are emitted separately by emit_runtime_stubs()
+// at offset 0. codegen_emit starts at offset `start_offset` (= STUBS_SIZE).
 //
-// Returns: total bytes emitted into `code`.
+// Inputs:
+//   ir_buf            — heap pointer to the IR buffer (layout per ir.vuma:
+//                       [count: u32][cap: u32][instr * count: 32 bytes each])
+//   code              — heap pointer to the output code buffer (caller-owned;
+//                       runtime stubs are already at code[0..start_offset])
+//   code_cap          — capacity of `code` in bytes
+//   start_offset      — byte offset where user code emission begins
+//                       (= STUBS_SIZE, set by emit_runtime_stubs)
+//   print_int_offset  — byte offset of the print_int routine within `code`
+//                       (= PRINT_INT_OFFSET = 15; used as the IR_CALL target
+//                       for calls to print_int)
+//   print_int_hash    — FNV-1a 32-bit hash of "print_int" (computed by the
+//                       driver via name_hash); used to dispatch IR_CALL targets
+//
+// Returns: total bytes emitted into `code` (== end offset; since emission
+// starts at start_offset, the return value is start_offset + user_code_size,
+// which is the total code size including runtime stubs).
 //
 // Supported IR opcodes (the hello.vuma subset):
 //   IR_MOV (16)   — mov rax, imm64; mov [rbp-vreg_off], rax
@@ -444,19 +833,21 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
 //   IR_MUL (3)    — same with imul
 //   IR_RET (14)   — load dst into rdi (or xor edi if dst==0); mov eax, 60; syscall
 //   IR_CALL (13)  — if callee_hash == print_int_hash and arg_count >= 1:
-//                     load arg0 into rdi; call print_int (rel32 to offset 0)
+//                     load arg0 into rdi; call print_int (rel32 to
+//                     print_int_offset = 15 in the stubs layout)
 //                   else: skip silently (real calls are a TODO)
 //
 // Unsupported (silently skipped — documented TODO):
 //   IR_NOP, IR_BRANCH, IR_COND_BRANCH, IR_CMP, IR_LOAD, IR_STORE, IR_ALLOC
 //   hello.vuma doesn't use these; if/while codegen + memory ops are future work.
-fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u32) -> u32 {
-    pos: u32 = 0;
+fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32 {
+    pos: u32 = start_offset;
 
-    // 1. Emit print_int routine at offset 0.
-    pos = emit_print_int_routine(code, pos);
-
-    // 2. Emit main prologue.
+    // 1. Emit main prologue.
+    //    (Runtime stubs — _start, print_int, __vuma_alloc, etc. — are emitted
+    //    at offset 0 by emit_runtime_stubs(), called from full_lexer.vuma::main
+    //    BEFORE codegen_emit. codegen_emit emits only the user's main function,
+    //    starting at offset start_offset = STUBS_SIZE.)
     //    Frame size: 8 bytes per vreg, rounded up to 16-byte alignment
     //    (System V ABI requires rsp % 16 == 0 at call boundaries; the
     //    prologue's `push rbp` misaligns by 8, so we need `sub rsp, frame`
@@ -467,7 +858,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u
     if frame_size == 0 { frame_size = 16; }  // minimum: keep rsp aligned
     pos = gen_prologue(code, pos, frame_size);
 
-    // 3. Walk IR and emit code per opcode.
+    // 2. Walk IR and emit code per opcode.
     count: u32 = load_u32(ir_buf, 0);
     i: u32 = 0;
     while i < count {
@@ -505,8 +896,11 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u
                 if rhs >= 1 {
                     arg0: u32 = imm & 0xFFFFFFFF;
                     pos = enc_load_rdi(code, pos, vreg_offset(arg0));
-                    // Backward call to print_int at offset 0.
-                    pos = enc_call_rel32(code, pos, 0);
+                    // Backward call to print_int at offset print_int_offset
+                    // (= PRINT_INT_OFFSET = 15 in the stubs layout). Since
+                    // codegen_emit's `pos` starts at start_offset = STUBS_SIZE,
+                    // this is a backward (negative) rel32.
+                    pos = enc_call_rel32(code, pos, print_int_offset);
                 }
             }
             // else: real calls not supported in bootstrap; skip silently.
@@ -519,7 +913,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, print_int_hash: u
         i = i + 1;
     }
 
-    // 4. Defensive exit(0) — in case the IR didn't end with IR_RET.
+    // 3. Defensive exit(0) — in case the IR didn't end with IR_RET.
     //    Unreachable for well-formed input (irb_lower_fn ensures a trailing
     //    RET), but guarantees the emitted binary never falls off .text.
     pos = enc_xor_edi(code, pos);
