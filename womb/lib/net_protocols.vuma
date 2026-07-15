@@ -21,10 +21,9 @@
 // ===========================================================================
 // Syscalls (only close — transport helpers are assumed provided)
 // ===========================================================================
-
-extern "C" {
-    fn close(fd: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for close (asm-generic nr 57).
+// Transport helpers (tcp_connect/tcp_send/tcp_recv/udp_socket/udp_sendto/
+// udp_recvfrom/udp_bind) are assumed to be provided by sibling net.vuma modules.
 
 // ===========================================================================
 // Constants
@@ -385,7 +384,7 @@ fn ntp_query(server_ip: u32, server_port: u32, out_secs: Address, out_frac: Addr
     free(req);
     free(dst);
     if sent < 0 {
-        close(fd);
+        syscall(57, fd);
         return 0;
     }
 
@@ -395,7 +394,7 @@ fn ntp_query(server_ip: u32, server_port: u32, out_secs: Address, out_frac: Addr
     store_u32_le(addrlen, 0, 16);
 
     let rlen: i64 = udp_recvfrom(fd, resp, NTP_PACKET_SIZE, 0, src, addrlen);
-    close(fd);
+    syscall(57, fd);
     free(src);
     free(addrlen);
 
@@ -488,11 +487,11 @@ fn ftp_connect(server_ip: u32, port: u32) -> i64 {
     let code: u32 = ftp_reply_code(resp);
     free(resp);
     if n == 0 {
-        close(fd);
+        syscall(57, fd);
         return -1;
     }
     if code != 220 {
-        close(fd);
+        syscall(57, fd);
         return -1;
     }
     return fd;
@@ -642,7 +641,7 @@ fn ftp_retr(fd: i64, filename: Address, out: Address, max_len: u32) -> u32 {
         if nread <= 0 { break; }
         total = total + (nread as u32);
     }
-    close(data_fd);
+    syscall(57, data_fd);
 
     // Read final 226
     let m: u32 = ftp_read_line(fd, resp, FTP_RESP_MAX);
@@ -693,7 +692,7 @@ fn ftp_stor(fd: i64, filename: Address, data: Address, data_len: u32) -> u32 {
         if n <= 0 { break; }
         sent = sent + (n as u32);
     }
-    close(data_fd);
+    syscall(57, data_fd);
 
     // Read final 226
     let m: u32 = ftp_read_line(fd, resp, FTP_RESP_MAX);
@@ -742,7 +741,7 @@ fn ftp_list(fd: i64, out: Address, max_len: u32) -> u32 {
         if nread <= 0 { break; }
         total = total + (nread as u32);
     }
-    close(data_fd);
+    syscall(57, data_fd);
 
     let m: u32 = ftp_read_line(fd, resp, FTP_RESP_MAX);
     free(resp);
@@ -759,7 +758,7 @@ fn ftp_quit(fd: i64) {
     let resp: Address = allocate(FTP_RESP_MAX);
     ftp_read_line(fd, resp, FTP_RESP_MAX);
     free(resp);
-    close(fd);
+    syscall(57, fd);
     return;
 }
 
