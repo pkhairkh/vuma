@@ -2171,10 +2171,25 @@ impl RegAllocator {
     ///
     /// Used to enforce calling conventions: function parameter virtual
     /// registers must be mapped to the correct argument registers (X0–X7).
+    ///
+    /// (Wave 53) Also used by `emit_function_regalloc` to seed the greedy
+    /// allocator with the `LinearScanAllocator`'s `vreg_to_preg` mapping so
+    /// that the emitted code uses the regalloc-assigned physical registers
+    /// rather than the greedy allocator's on-the-fly choices.  When `reg`
+    /// is a callee-saved GPR (X19–X28), it is removed from
+    /// `callee_saved_pool` and inserted into `callee_saved_used` so that
+    /// `used_callee_saved()` correctly reports it for prologue/epilogue
+    /// generation.
     pub fn preassign(&mut self, vreg: IRValueId, reg: Register) {
-        // Remove the physical register from free_regs if present
-        self.free_regs.retain(|r| *r != reg);
-        self.used_regs.insert(vreg, reg);
+        if reg.is_callee_saved() {
+            // Remove the physical register from callee_saved_pool if present
+            self.callee_saved_pool.retain(|r| *r != reg);
+            self.callee_saved_used.insert(vreg, reg);
+        } else {
+            // Remove the physical register from free_regs if present
+            self.free_regs.retain(|r| *r != reg);
+            self.used_regs.insert(vreg, reg);
+        }
     }
 
     /// Run allocation over an entire IR program.
