@@ -5376,11 +5376,11 @@ impl Backend for RiscV64Backend {
                         // Helper: determine whether the source integer is 32-bit
                         // (i32/u32) vs 64-bit (i64/u64).  Default to 64-bit
                         // when type info is unavailable.
-                        let src_is_32bit = match from_ty {
+                        let src_is_32bit = matches!(
+                            from_ty,
                             Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32)
-                            | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32) => true,
-                            _ => false,
-                        };
+                                | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32)
+                        );
                         // Helper: determine whether the destination float is
                         // f32 vs f64.  Default to f64 when type info is
                         // unavailable.
@@ -5391,11 +5391,11 @@ impl Backend for RiscV64Backend {
                         let src_is_f32 = matches!(from_ty, Some(IRType::F32));
                         // Helper: determine whether the destination integer is
                         // 32-bit vs 64-bit.  Default to 64-bit.
-                        let dst_is_32bit = match to_ty {
+                        let dst_is_32bit = matches!(
+                            to_ty,
                             Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32)
-                            | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32) => true,
-                            _ => false,
-                        };
+                                | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32)
+                        );
 
                         match kind {
                             CastKind::BitCast | CastKind::Trunc => {}

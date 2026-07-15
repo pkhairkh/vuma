@@ -1183,11 +1183,9 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
             if !is_safe_for_unroll(instr) {
                 return func; // (a) unsafe instruction.
             }
-            if let IRInstr::Store { addr, .. } = instr {
-                if let IRValue::Register(r) = addr {
-                    if outer_tainted.contains(r) {
-                        return func; // (b) outer-loop-carried store.
-                    }
+            if let IRInstr::Store { addr: IRValue::Register(r), .. } = instr {
+                if outer_tainted.contains(r) {
+                    return func; // (b) outer-loop-carried store.
                 }
             }
             if matches!(instr, IRInstr::Phi { .. }) {
@@ -1409,11 +1407,9 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
                 // Also update the cmp's lhs (which is inner_iv_next) to
                 // inner_iv_next_k for k > 0.
                 if k > 0 {
-                    if let IRInstr::Cmp { lhs, .. } = &mut cloned {
-                        if let IRValue::Register(r) = lhs {
-                            if *r == inner_iv_next {
-                                *r = inner_iv_next_k;
-                            }
+                    if let IRInstr::Cmp { lhs: IRValue::Register(r), .. } = &mut cloned {
+                        if *r == inner_iv_next {
+                            *r = inner_iv_next_k;
                         }
                     }
                 }
@@ -1779,14 +1775,12 @@ pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
 
     let mut cmp_idx = None;
     for (i, instr) in instrs.iter().enumerate() {
-        if let IRInstr::Cmp { dst, lhs, .. } = instr {
-            if let IRValue::Register(d) = dst {
-                if *d == cond_vreg {
-                    if let IRValue::Register(l) = lhs {
-                        if *l == i_new_vreg {
-                            cmp_idx = Some(i);
-                            break;
-                        }
+        if let IRInstr::Cmp { dst: IRValue::Register(d), lhs, .. } = instr {
+            if *d == cond_vreg {
+                if let IRValue::Register(l) = lhs {
+                    if *l == i_new_vreg {
+                        cmp_idx = Some(i);
+                        break;
                     }
                 }
             }
@@ -1979,10 +1973,8 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
                 *r = fresh;
             }
         }
-        IRInstr::Cmp { dst, .. } => {
-            if let IRValue::Register(r) = dst {
-                *r = fresh;
-            }
+        IRInstr::Cmp { dst: IRValue::Register(r), .. } => {
+            *r = fresh;
         }
         IRInstr::Phi { dst: _, .. } => {
             // Don't renumber the header's Phi (it's the loop-carried IV).

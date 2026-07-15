@@ -2033,7 +2033,6 @@ impl Backend for AlphaBackend {
             code.extend(Instruction::Ret.encode());
             code
         };
-        let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
         // ── Compute function offsets ──

@@ -863,10 +863,8 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
                 *r = fresh;
             }
         }
-        IRInstr::Cmp { dst, .. } => {
-            if let IRValue::Register(r) = dst {
-                *r = fresh;
-            }
+        IRInstr::Cmp { dst: IRValue::Register(r), .. } => {
+            *r = fresh;
         }
         _ => {}
     }
