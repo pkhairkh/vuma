@@ -6767,6 +6767,13 @@ impl Backend for Arm32Backend {
                     // R7, SVC #0, result (32-bit, sign-extended) in R0.
                     crate::ir::IRInstr::Syscall { nr, args, dst } => {
                         let mut code = Vec::new();
+                        // Translate VUMA-generic (asm-generic) syscall number to
+                        // the backend's native numbering. Identity on Arm32.
+                        let native_nr = crate::syscall_abi::translate(
+                            crate::backend::BackendKind::Arm32,
+                            *nr,
+                        )
+                        .unwrap_or(*nr);
                         let num_args = args.len();
                         let num_stack_args = num_args.saturating_sub(4);
                         let stack_bytes = num_stack_args * 4;
@@ -6794,7 +6801,7 @@ impl Backend for Arm32Backend {
                             ));
                         }
                         // MOV R7, nr  (syscall number)
-                        code.extend(load_immediate_arm32(Gpr::R7, *nr));
+                        code.extend(load_immediate_arm32(Gpr::R7, native_nr));
                         // SVC #0
                         code.extend_from_slice(&encode_svc(Condition::Al, 0));
                         // Clean up stack args
