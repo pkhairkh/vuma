@@ -1663,6 +1663,14 @@ fn run_optimizations_inner(
         // instrs on critical-path ties) so it doesn't push the regalloc
         // toward spilling.
         let mut f = f;
+        // `VUMA_NO_SCHED` disables the entire instruction-scheduling pass
+        // (Wave 27) — `schedule_function` is skipped altogether. It is set
+        // by the O2 bootstrap test (wave48_self_host.rs:705) because the
+        // cast-aware TBAA still miscompiles on inlined-function scale
+        // (Open Work §1). For finer-grained control of within-block
+        // reordering only, see `VUMA_NO_SCHED_REORDER` in `scheduler.rs`.
+        // Both are intended as temporary debugging escape hatches, not
+        // production knobs.
         if std::env::var("VUMA_NO_SCHED").is_err() {
             crate::scheduler::schedule_function(&mut f.blocks, latency_table);
         }

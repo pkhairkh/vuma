@@ -259,6 +259,10 @@ fn schedule_block_inner_with_alias(
     if n <= 2 {
         return (0..n).collect();
     }
+    // `VUMA_NO_SCHED_REORDER` disables within-block instruction reordering
+    // while keeping the function-level scheduling pass running — each block
+    // becomes a pass-through (instructions stay in original order). For
+    // disabling scheduling entirely, use `VUMA_NO_SCHED` (see `opt.rs`).
     if std::env::var("VUMA_NO_SCHED_REORDER").is_ok() {
         return (0..n).collect();
     }
