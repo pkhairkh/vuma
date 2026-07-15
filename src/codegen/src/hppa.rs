@@ -2378,7 +2378,7 @@ impl Backend for HppaBackend {
         // Pad start_stub + ffi_stub to 16-byte alignment.
         // PA-RISC BL displacement has 16-byte granularity, so ALL code positions
         // must be 16-byte aligned relative to the text segment start.
-        while all_code.len() % 16 != 0 {
+        while !all_code.len().is_multiple_of(16) {
             all_code.extend_from_slice(&encode_nop());
         }
 
@@ -2411,7 +2411,7 @@ impl Backend for HppaBackend {
                 }
             }
             // Pad each function to 16-byte alignment (PA-RISC BL granularity).
-            while all_code.len() % 16 != 0 {
+            while !all_code.len().is_multiple_of(16) {
                 all_code.extend_from_slice(&encode_nop());
             }
         }
@@ -2421,7 +2421,7 @@ impl Backend for HppaBackend {
         all_code.extend_from_slice(&vuma_alloc_stub);
         func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
         // Pad to 16-byte alignment
-        while all_code.len() % 16 != 0 {
+        while !all_code.len().is_multiple_of(16) {
             all_code.extend_from_slice(&encode_nop());
         }
 
@@ -2430,7 +2430,7 @@ impl Backend for HppaBackend {
             func_offsets.insert(name.clone(), stub_offset);
             all_code.extend_from_slice(code);
             // Pad to 16-byte alignment
-            while all_code.len() % 16 != 0 {
+            while !all_code.len().is_multiple_of(16) {
                 all_code.extend_from_slice(&encode_nop());
             }
             stub_offset = all_code.len();
@@ -2501,7 +2501,7 @@ impl Backend for HppaBackend {
         let mut trampoline_offsets: Vec<usize> = Vec::new();
         for (_call_offset, target_offset) in &trampolines {
             // Align trampoline to 16 bytes
-            while all_code.len() % 16 != 0 {
+            while !all_code.len().is_multiple_of(16) {
                 all_code.extend_from_slice(&encode_nop());
             }
             let trampoline_start = all_code.len();
