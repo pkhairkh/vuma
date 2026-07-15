@@ -1009,3 +1009,84 @@ follow-up tasks.
   (`wave(50): clippy auto-fix — apply machine-applicable suggestions`)
   — pushed to `origin/main` (`1343f61..8e3d8cd`).
 
+---
+
+### Task 9-c — fix 39 `unreachable_pattern` clippy warnings in vuma-codegen
+
+**Command run:** `cargo clippy --workspace 2>&1 | grep "warning: unreachable pattern" -A1`
+
+**Root cause.** All 39 sites were genuine dead-code bugs: an earlier
+`match` arm had a more general pattern (or, in most cases, the *same*
+variant) that subsumed a later arm, making the later arm unreachable.
+Three files were affected:
+
+| File                          | Sites | Mechanism                                                                            |
+|-------------------------------|------:|--------------------------------------------------------------------------------------|
+| `src/codegen/src/dwarf.rs`    |     2 | `set_cie_for_backend` had two duplicate arms (`RiscV32`, `X86_32`) pasted twice.     |
+| `src/codegen/src/riscv32.rs`  |    35 | `Instruction::encode`, `Instruction::mnemonic`, and `Instruction::fmt` (Display) all  |
+|                               |       | carried a copy-pasted "Word-level Arithmetic (RV32)" / `Ld`/`Lwu`/`Sd` block whose    |
+|                               |       | variants were never added to the `Instruction` enum (only dangling `///` doc          |
+|                               |       | comments exist). The match arms reused existing variants (`Add`, `Sub`, `Lw`, `Sw`,  |
+|                               |       | …), so every arm in that block was unreachable.                                       |
+| `src/pipeline.rs`             |     1 | `parse_binop` had `"shr.a" \| "shr.l" \| ">>" => ShrA` immediately followed by a     |
+|                               |       | duplicate `"shr.a" => ShrA`; the `"shr.l"` branch was silently mis-mapped to `ShrA`  |
+|                               |       | instead of `ShrL` (the `IrBinOpKind::ShrL` variant exists and is used elsewhere).    |
+
+**Fix strategy (no `#[allow]`, no shortcuts):**
+
+1. **`dwarf.rs`** — deleted the two truly-duplicate arms at lines 615–616
+   (option (b): dead-code removal).
+2. **`riscv32.rs`** — deleted three blocks of dead arms:
+   - In `encode`: duplicate `Instruction::Lw` (funct3 `0b011`, would-be
+     `Ld`), duplicate `Instruction::Lw` (funct3 `0b110`, would-be `Lwu`),
+     duplicate `Instruction::Sw` (funct3 `0b011`, would-be `Sd`).
+   - In `encode`: the entire 9-arm "Word-level Arithmetic (RV32)" block
+     (`Add`, `Sub`, `Sll`, `Srl`, `Sra`, `Addi`, `Slli`, `Srli`, `Srai`
+     using `OP_REG32`/`OP_IMM32`). The corresponding enum variants
+     (`Addw`, `Subw`, …) do not exist; only dangling doc comments remain
+     in the enum declaration.
+   - In `mnemonic` and `Display::fmt`: same duplicate sets (12 arms each)
+     for the same reason.
+   - As a follow-on cleanup, the now-unused module constants `OP_IMM32`
+     and `OP_REG32` were removed from `riscv32.rs` (they remain defined
+     and used in `riscv64.rs`, which is a separate module).
+3. **`pipeline.rs`** — used option (c): made the earlier arm more
+   specific so the later arm became reachable *and* correctly mapped.
+   Split `"shr.a" | "shr.l" | ">>" => ShrA` into:
+   - `"shr.a" | ">>" => IrBinOpKind::ShrA`
+   - `"shr.l"        => IrBinOpKind::ShrL`
+   and deleted the duplicate `"shr.a" => ShrA` arm.
+
+   This is a real semantics fix: `IrBinOpKind::ShrL` is the variant the
+   rest of the pipeline expects for logical right shifts (see
+   `ir.rs:1018`: `BinOpKind::ShrL => "shr.l"`), and the original code
+   was silently mis-mapping the `"shr.l"` token to `ShrA`.
+
+**Diff stat:** 3 files changed, 2 insertions(+), 128 deletions(-).
+
+**Clippy verification:**
+- Before: 39 `warning: unreachable pattern` (and 2 `unreachable_pattern`
+  lint-tag mention lines).
+- After:  `cargo clippy --workspace 2>&1 | grep "warning: unreachable pattern" | wc -l` → `0`.
+- After:  `cargo clippy --workspace 2>&1 | grep "unreachable_pattern" | wc -l`          → `0`.
+
+No new warnings introduced (verified: `parse_binop` dead-code warning
+was pre-existing; `OP_IMM32`/`OP_REG32` removal did not surface as
+unused because the constants were deleted entirely).
+
+**Build & test:**
+- `cargo check --workspace`            → finished, 0 errors (only
+  pre-existing warnings about missing docs / dead code in other files).
+- `cargo test -p vuma-codegen --lib emit::`        → 68 passed / 0 failed (0.20s)
+- `cargo test -p vuma-codegen --lib backend::`     → 24 passed / 0 failed (0.09s)
+- `cargo test -p vuma-codegen --lib dwarf`         → 24 passed / 0 failed (0.03s)
+- `cargo test --lib pipeline`                      → 18 passed / 0 failed (0.92s)
+  (includes `test_shr_signed_uses_shra`,
+  `test_shr_unsigned_uses_shrl`, `test_shr_untyped_defaults_to_shrl` —
+  all green, confirming the `parse_binop` fix is consistent with the
+  type-aware ShrA/ShrL selection used elsewhere in the pipeline).
+
+**Commit:** `f92bdb7`
+  (`wave(50): fix 39 unreachable_pattern clippy warnings`)
+  — pushed to `origin/main` (`6577a04..f92bdb7`).
+
