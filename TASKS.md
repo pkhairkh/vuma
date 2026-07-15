@@ -1090,3 +1090,65 @@ unused because the constants were deleted entirely).
   (`wave(50): fix 39 unreachable_pattern clippy warnings`)
   — pushed to `origin/main` (`6577a04..f92bdb7`).
 
+---
+
+### Task 9-d — fix 34 `push immediately after creation` clippy warnings
+
+**Command run:** `cargo clippy --workspace 2>&1 | grep "calls to \`push\` immediately after creation" -A3`
+
+**Root cause.** All 34 sites were instances of `clippy::vec_init_then_push`:
+a `Vec` initialized with `Vec::new()` or `Vec::with_capacity(N)` followed
+immediately by one or more `push` calls. Clippy's machine suggestion is to
+fold the first `push` (or all of the initial pushes, when contiguous) into a
+`vec![]` macro literal.
+
+**Files changed (5) — 34 sites:**
+
+| File                                                 | Sites | Notes                                                                                                    |
+|------------------------------------------------------|------:|----------------------------------------------------------------------------------------------------------|
+| `src/scg/src/query.rs`                               |     2 | `query_data_flow_reachable` (`frontier` — kept `mut`, mutated in BFS loop); `query_function_summary` (`ids` — dropped `mut`, returned immediately). |
+| `src/codegen/src/dwarf.rs`                           |     1 | `emit_debug_frame` CIE body — kept `mut` (later passed `&mut` to `encode_uleb128`/`encode_sleb128`); folded 4 initial `push`es into a single `vec![…]` literal. |
+| `src/codegen/src/wasm32/mod.rs`                      |     1 | `emit` — dropped `mut` (single `AllocatedInstruction` pushed, never mutated after); folded struct literal into `vec![…]`. |
+| `src/codegen/src/x86_32/mod.rs`                      |    29 | 29 single-block encoder fns (`encode_imul_reg_reg`, `encode_cmovcc_reg_reg`, `encode_movzx_reg8`, `encode_movsx_reg8`, `encode_movsx_reg16`, `encode_neg_reg`, `encode_not_reg`, `encode_mul_reg`, `encode_movd_xmm_gpr`, `encode_movd_gpr_xmm`, `encode_cvtsi2sd_xmm_r32`, `encode_cvtsi2ss_xmm_r32`, `encode_cvtsd2si_r32_xmm`, `encode_cvtss2si_r32_xmm`, `encode_cvttsd2si_r32_xmm`, `encode_cvttss2si_r32_xmm`, `encode_cvtss2sd_xmm_xmm`, `encode_cvtsd2ss_xmm_xmm`, `encode_addsd_xmm_xmm`, `encode_addss_xmm_xmm`, `encode_subsd_xmm_xmm`, `encode_subss_xmm_xmm`, `encode_mulsd_xmm_xmm`, `encode_mulss_xmm_xmm`, `encode_divsd_xmm_xmm`, `encode_divss_xmm_xmm`, `encode_sqrtsd_xmm_xmm`, `encode_sqrtss_xmm_xmm`, `encode_ucomisd_xmm_xmm`) — each replaced `Vec::with_capacity(N)` + N `push`es with a single `let code = vec![…]` line; dropped `mut` (each `code` is returned immediately). Several of these had a copy-paste indentation glitch (`                code.push(…)` — 16-space indent on the first `push` only); the rewrite normalizes the indentation. |
+| `src/tests/src/benchmarks/backend_comparison.rs`     |     1 | `build_reference_program` — first `body.push(ScgStatement::Computation { … "a" … })` folded into `let mut body = vec![…]`; kept `mut` (the function pushes 7 more `ScgStatement`s after). This site was not present at the start of the task; it surfaced after `git pull --rebase origin main` brought in commits `8e3d8cd2`/`f92bdb70`/`3d455f41` from Tasks 9-a/9-b/9-c, which added the file. It was fixed in the same commit (amended before push) so the final `wc -l` is `0`. |
+
+**Fix strategy (no `#[allow]`, no shortcuts):**
+
+1. For each `Vec::new()` / `Vec::with_capacity(N)` immediately followed by
+   `push`es, replaced the init + initial `push`(es) with a `vec![…]`
+   literal containing those same elements in source order.
+2. Followed clippy's exact `mut`-retention hint at each site:
+   - Kept `mut` where the `Vec` is later mutated (passed `&mut`, reassigned,
+     or further `push`ed after the contiguous initial block).
+   - Dropped `mut` where the `Vec` is consumed (returned / moved) right
+     after the initial pushes — this keeps `unused_mut` from firing.
+3. Preserved all comments that were attached to individual `push` calls by
+   moving them inside the `vec![…]` literal as element-leading `//` comments
+   (see `dwarf.rs` CIE-body block).
+
+**Diff stat:** 5 files changed, 45 insertions(+), 159 deletions(-).
+
+**Clippy verification:**
+- Before (post-rebase, on the final commit's parent `3d455f41`):
+  `cargo clippy --workspace 2>&1 | grep "calls to \`push\` immediately after creation" | wc -l` → `34`
+  (33 from the original sweep + 1 added in `backend_comparison.rs` by
+  Task 9-b/9-c commits).
+- After:  `cargo clippy --workspace 2>&1 | grep "calls to \`push\` immediately after creation" | wc -l` → `0`.
+
+No new warnings introduced. Total workspace `^warning:` line count
+*decreased* by 34 (the 7 pre-existing `variable does not need to be mutable`
+warnings in `invariant_aggregator.rs`, `backend.rs`, `emit.rs`, and
+`opt.rs` are unrelated to this task and were already present before).
+
+**Build & test:**
+- `cargo check --workspace`            → finished, 0 errors (only the
+  pre-existing `redundant_semicolons` warning in `src/main.rs:782` and
+  pre-existing missing-docs / dead-code warnings in other files).
+- `cargo test -p vuma-codegen --lib emit`  → 104 passed / 0 failed / 0
+  ignored (0.01s).
+
+**Commit:** `70c2ab7c2f73bd2712c4de2b4e0131fd7ff2877f`
+  (`wave(50): fix 34 push-after-creation clippy warnings`)
+  — pushed to `origin/main` (`3d455f41..70c2ab7c`).
+
+
