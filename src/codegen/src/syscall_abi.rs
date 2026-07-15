@@ -29,10 +29,12 @@
 //!
 //! ## Translated arches
 //!
-//! `x86_64` and `x86_32` have per-arch `match` tables below. The remaining
-//! arches (`mips64`, `ppc64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`)
-//! return `None` for all numbers with a `TODO(P1-b)` marker — the intrinsic
-//! is not portable on these arches yet.
+//! `x86_64`, `x86_32`, `mips64`, `ppc64`, `s390x`, `sparc64`, `alpha`,
+//! `hppa`, and `m68k` each have a per-arch `match` table below. The 7
+//! non-x86 tables (filled in P1-d) cover the ~106 most common syscalls
+//! (process/memory/file I/O/sockets/signals/time/identity/wait/misc) and
+//! return `None` for numbers not in the table. Sources are the Linux UAPI
+//! headers shipped at `/usr/lib/linux/uapi/<arch>/asm/unistd_*.h`.
 //!
 //! ## wasm32
 //!
@@ -197,9 +199,9 @@ pub fn vuma_generic_name(nr: u32) -> Option<&'static str> {
 /// Returns `Some(native_nr)` if the translation is known, `None` otherwise.
 /// `None` indicates the intrinsic is not portable for that (backend, nr)
 /// pair — either because the backend does not use syscalls at all (wasm32),
-/// or because the per-arch table has not been filled in yet (mips64 / ppc64
-/// / s390x / sparc64 / alpha / hppa / m68k — TODO P1-b), or because the
-/// specific `nr` is not in the per-arch `match` table.
+/// or because the specific `nr` is not in the per-arch `match` table (which
+/// for the 9 translated arches covers ~106 common syscalls; rare or arch-
+/// specific syscalls return `None`).
 ///
 /// Identity arches (aarch64, riscv64, riscv32, loongarch64, arm32 EABI)
 /// always return `Some(generic_nr)` regardless of whether the number is in
@@ -235,32 +237,34 @@ pub fn translate(backend: BackendKind, generic_nr: u32) -> Option<u32> {
         BackendKind::X86_64 => translate_x86_64(generic_nr),
         BackendKind::X86_32 => translate_x86_32(generic_nr),
 
-        // ── TODO(P1-b): per-arch table ──
-        // The following arches have their own native syscall tables which
-        // differ from asm-generic. Translation tables are NOT yet filled
-        // in (foundation wave P1-a). The intrinsic is not portable on
-        // these arches yet — `translate` returns `None` for all numbers.
-        // P1-b will fill these in:
-        //   * mips64  — Linux `arch/mips/include/uapi/asm/unistd.h`
-        //   * ppc64   — Linux `arch/powerpc/include/uapi/asm/unistd.h`
-        //   * s390x   — Linux `arch/s390/include/uapi/asm/unistd.h`
-        //   * sparc64 — Linux `arch/sparc/include/uapi/asm/unistd.h`
-        //   * alpha   — Linux `arch/alpha/include/uapi/asm/unistd.h`
-        //   * hppa    — Linux `arch/parisc/include/uapi/asm/unistd.h`
-        //   * m68k    — Linux `arch/m68k/include/uapi/asm/unistd.h`
-        BackendKind::Mips64
-        | BackendKind::PowerPC64
-        | BackendKind::S390X
-        | BackendKind::Sparc64
-        | BackendKind::Alpha
-        | BackendKind::Hppa
-        | BackendKind::M68k => None,
+        // ── Translated arches: per-arch match table (filled in P1-d) ──
+        // Each of these 7 arches has its own native syscall table that
+        // differs from asm-generic. The per-arch functions cover ~106
+        // common syscalls and return `None` for unknown numbers; for
+        // arch-specific syscalls (e.g. `clone3` on sparc64, plain
+        // `accept` on s390x/m68k which only have `accept4`) the table
+        // returns `None` and the caller is responsible for using a
+        // portable alternative.
+        //   * mips64  — Linux `arch/mips/include/uapi/asm/unistd_n64.h`
+        //   * ppc64   — Linux `arch/powerpc/include/uapi/asm/unistd_64.h`
+        //   * s390x   — Linux `arch/s390/include/uapi/asm/unistd_64.h`
+        //   * sparc64 — Linux `arch/sparc/include/uapi/asm/unistd_64.h`
+        //   * alpha   — Linux `arch/alpha/include/uapi/asm/unistd_32.h`
+        //   * hppa    — Linux `arch/parisc/include/uapi/asm/unistd_64.h`
+        //   * m68k    — Linux `arch/m68k/include/uapi/asm/unistd_32.h`
+        BackendKind::Mips64 => translate_mips64(generic_nr),
+        BackendKind::PowerPC64 => translate_powerpc64(generic_nr),
+        BackendKind::S390X => translate_s390x(generic_nr),
+        BackendKind::Sparc64 => translate_sparc64(generic_nr),
+        BackendKind::Alpha => translate_alpha(generic_nr),
+        BackendKind::Hppa => translate_hppa(generic_nr),
+        BackendKind::M68k => translate_m68k(generic_nr),
 
         // ── BE wrappers: delegate to their LE (or bare) counterpart ──
         // aarch64_be → aarch64 (identity)
         // armeb      → arm32   (identity)
-        // mips64be   → mips64  (returns None — TODO P1-b)
-        // ppc64le    → ppc64   (returns None — TODO P1-b)
+        // mips64be   → mips64  (per-arch table — P1-d)
+        // ppc64le    → ppc64   (per-arch table — P1-d)
         BackendKind::AArch64Be => translate(BackendKind::AArch64, generic_nr),
         BackendKind::ArmEb => translate(BackendKind::Arm32, generic_nr),
         BackendKind::Mips64Be => translate(BackendKind::Mips64, generic_nr),
@@ -531,6 +535,848 @@ fn translate_x86_32(generic_nr: u32) -> Option<u32> {
     }
 }
 
+
+/// MIPS N64 ABI translation table (Linux `arch/mips/include/uapi/asm/unistd_n64.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/mips/asm/unistd_n64.h`.
+///
+/// The MIPS N64 ABI uses a base offset of 5000 (`__NR_Linux = 5000`) and its
+/// own historical numbering that differs from asm-generic. The N32 (base
+/// 6000) and O32 (base 4000) ABIs use different bases and are NOT yet
+/// supported - callers targeting mips32-o32 or mips32-n32 must translate
+/// manually.
+fn translate_mips64(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(5077),  // getcwd
+        19 => Some(5284),  // eventfd2
+        20 => Some(5285),  // epoll_create1
+        21 => Some(5208),  // epoll_ctl
+        22 => Some(5021),  // pipe
+        23 => Some(5031),  // dup
+        24 => Some(5286),  // dup3
+        25 => Some(5070),  // fcntl
+        26 => Some(5288),  // inotify_init1
+        27 => Some(5244),  // inotify_add_watch
+        28 => Some(5245),  // inotify_rm_watch
+        29 => Some(5015),  // ioctl
+        35 => Some(5253),  // unlinkat
+        36 => Some(5256),  // symlinkat
+        37 => Some(5255),  // linkat
+        38 => Some(5254),  // renameat
+        46 => Some(5075),  // ftruncate
+        48 => Some(5259),  // faccessat
+        52 => Some(5089),  // fchmod
+        53 => Some(5258),  // fchmodat
+        54 => Some(5250),  // fchownat
+        55 => Some(5091),  // fchown
+        56 => Some(5247),  // openat
+        57 => Some(5003),  // close
+        61 => Some(5308),  // getdents64
+        62 => Some(5008),  // lseek
+        63 => Some(5000),  // read
+        64 => Some(5001),  // write
+        65 => Some(5018),  // readv
+        66 => Some(5019),  // writev
+        67 => Some(5016),  // pread
+        68 => Some(5017),  // pwrite
+        69 => Some(5289),  // preadv
+        70 => Some(5290),  // pwritev
+        72 => Some(5052),  // socketpair
+        73 => Some(5261),  // ppoll
+        78 => Some(5257),  // readlinkat
+        79 => Some(5252),  // newfstatat
+        80 => Some(5005),  // fstat
+        81 => Some(5157),  // sync
+        82 => Some(5072),  // fsync
+        83 => Some(5073),  // fdatasync
+        85 => Some(5280),  // timerfd_create
+        86 => Some(5282),  // timerfd_settime
+        87 => Some(5281),  // timerfd_gettime
+        93 => Some(5058),  // exit
+        94 => Some(5205),  // exit_group
+        95 => Some(5237),  // waitid
+        98 => Some(5194),  // futex
+        101 => Some(5034),  // nanosleep
+        113 => Some(5222),  // clock_gettime
+        117 => Some(5099),  // ptrace
+        124 => Some(5023),  // sched_yield
+        129 => Some(5060),  // kill
+        130 => Some(5192),  // tkill
+        131 => Some(5225),  // tgkill
+        134 => Some(5013),  // rt_sigaction
+        135 => Some(5014),  // rt_sigprocmask
+        144 => Some(5104),  // setgid
+        146 => Some(5103),  // setuid
+        147 => Some(5115),  // setresuid
+        149 => Some(5117),  // setresgid
+        153 => Some(5098),  // times
+        154 => Some(5107),  // setpgid
+        155 => Some(5119),  // getpgid
+        156 => Some(5122),  // getsid
+        157 => Some(5110),  // setsid
+        163 => Some(5095),  // getrlimit
+        164 => Some(5155),  // setrlimit
+        165 => Some(5096),  // getrusage
+        166 => Some(5093),  // umask
+        169 => Some(5094),  // gettimeofday
+        172 => Some(5038),  // getpid
+        173 => Some(5108),  // getppid
+        174 => Some(5100),  // getuid
+        175 => Some(5105),  // geteuid
+        176 => Some(5102),  // getgid
+        177 => Some(5106),  // getegid
+        198 => Some(5040),  // socket
+        200 => Some(5048),  // bind
+        201 => Some(5049),  // listen
+        202 => Some(5042),  // accept
+        203 => Some(5041),  // connect
+        206 => Some(5043),  // sendto
+        207 => Some(5044),  // recvfrom
+        208 => Some(5053),  // setsockopt
+        209 => Some(5054),  // getsockopt
+        210 => Some(5047),  // shutdown
+        214 => Some(5012),  // brk
+        215 => Some(5011),  // munmap
+        216 => Some(5024),  // mremap
+        220 => Some(5055),  // clone
+        221 => Some(5057),  // execve
+        222 => Some(5009),  // mmap
+        226 => Some(5010),  // mprotect
+        227 => Some(5025),  // msync
+        228 => Some(5146),  // mlock
+        229 => Some(5147),  // munlock
+        232 => Some(5026),  // mincore
+        233 => Some(5027),  // madvise
+        260 => Some(5059),  // wait4
+        261 => Some(5297),  // prlimit64
+        278 => Some(5313),  // getrandom
+        281 => Some(5316),  // execveat
+        306 => Some(5301),  // syncfs
+        435 => Some(5435),  // clone3
+        _ => None,
+    }
+}
+
+/// PowerPC 64-bit translation table (Linux `arch/powerpc/include/uapi/asm/unistd_64.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/powerpc/asm/unistd_64.h`.
+///
+/// The PowerPC 64-bit table is also used (modulo endianness) by ppc64le via
+/// the BE-wrapper delegation in `translate`. The 32-bit PowerPC table
+/// (`unistd_32.h`) is NOT yet supported.
+fn translate_powerpc64(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(182),  // getcwd
+        19 => Some(314),  // eventfd2
+        20 => Some(315),  // epoll_create1
+        21 => Some(237),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(316),  // dup3
+        25 => Some(55),  // fcntl
+        26 => Some(318),  // inotify_init1
+        27 => Some(276),  // inotify_add_watch
+        28 => Some(277),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(292),  // unlinkat
+        36 => Some(295),  // symlinkat
+        37 => Some(294),  // linkat
+        38 => Some(293),  // renameat
+        46 => Some(93),  // ftruncate
+        48 => Some(298),  // faccessat
+        52 => Some(94),  // fchmod
+        53 => Some(297),  // fchmodat
+        54 => Some(289),  // fchownat
+        55 => Some(95),  // fchown
+        56 => Some(286),  // openat
+        57 => Some(6),  // close
+        61 => Some(202),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(145),  // readv
+        66 => Some(146),  // writev
+        67 => Some(179),  // pread
+        68 => Some(180),  // pwrite
+        69 => Some(320),  // preadv
+        70 => Some(321),  // pwritev
+        72 => Some(333),  // socketpair
+        73 => Some(281),  // ppoll
+        78 => Some(296),  // readlinkat
+        79 => Some(291),  // newfstatat
+        80 => Some(108),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(118),  // fsync
+        83 => Some(148),  // fdatasync
+        85 => Some(306),  // timerfd_create
+        86 => Some(311),  // timerfd_settime
+        87 => Some(312),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(234),  // exit_group
+        95 => Some(272),  // waitid
+        98 => Some(221),  // futex
+        101 => Some(162),  // nanosleep
+        113 => Some(246),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(158),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(208),  // tkill
+        131 => Some(250),  // tgkill
+        134 => Some(173),  // rt_sigaction
+        135 => Some(174),  // rt_sigprocmask
+        144 => Some(46),  // setgid
+        146 => Some(23),  // setuid
+        147 => Some(164),  // setresuid
+        149 => Some(169),  // setresgid
+        153 => Some(43),  // times
+        154 => Some(57),  // setpgid
+        155 => Some(132),  // getpgid
+        156 => Some(147),  // getsid
+        157 => Some(66),  // setsid
+        163 => Some(76),  // getrlimit
+        164 => Some(75),  // setrlimit
+        165 => Some(77),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(78),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(64),  // getppid
+        174 => Some(24),  // getuid
+        175 => Some(49),  // geteuid
+        176 => Some(47),  // getgid
+        177 => Some(50),  // getegid
+        198 => Some(326),  // socket
+        200 => Some(327),  // bind
+        201 => Some(329),  // listen
+        202 => Some(330),  // accept
+        203 => Some(328),  // connect
+        206 => Some(335),  // sendto
+        207 => Some(337),  // recvfrom
+        208 => Some(339),  // setsockopt
+        209 => Some(340),  // getsockopt
+        210 => Some(338),  // shutdown
+        214 => Some(45),  // brk
+        215 => Some(91),  // munmap
+        216 => Some(163),  // mremap
+        220 => Some(120),  // clone
+        221 => Some(11),  // execve
+        222 => Some(90),  // mmap
+        226 => Some(125),  // mprotect
+        227 => Some(144),  // msync
+        228 => Some(150),  // mlock
+        229 => Some(151),  // munlock
+        232 => Some(206),  // mincore
+        233 => Some(205),  // madvise
+        260 => Some(114),  // wait4
+        261 => Some(325),  // prlimit64
+        278 => Some(359),  // getrandom
+        281 => Some(362),  // execveat
+        306 => Some(348),  // syncfs
+        435 => Some(435),  // clone3
+        _ => None,
+    }
+}
+
+/// s390x (64-bit) translation table (Linux `arch/s390/include/uapi/asm/unistd_64.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/s390/asm/unistd_64.h`.
+///
+/// The s390x 64-bit table. Notable quirks: `getrlimit` is at 191 (not the
+/// legacy 75-position); plain `accept` is NOT exposed (use `accept4`
+/// instead). The 32-bit s390 table (`unistd_32.h`) is NOT yet supported.
+fn translate_s390x(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(183),  // getcwd
+        19 => Some(323),  // eventfd2
+        20 => Some(327),  // epoll_create1
+        21 => Some(250),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(326),  // dup3
+        25 => Some(55),  // fcntl
+        26 => Some(324),  // inotify_init1
+        27 => Some(285),  // inotify_add_watch
+        28 => Some(286),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(294),  // unlinkat
+        36 => Some(297),  // symlinkat
+        37 => Some(296),  // linkat
+        38 => Some(295),  // renameat
+        46 => Some(93),  // ftruncate
+        48 => Some(300),  // faccessat
+        52 => Some(94),  // fchmod
+        53 => Some(299),  // fchmodat
+        54 => Some(291),  // fchownat
+        55 => Some(207),  // fchown
+        56 => Some(288),  // openat
+        57 => Some(6),  // close
+        61 => Some(220),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(145),  // readv
+        66 => Some(146),  // writev
+        67 => Some(180),  // pread
+        68 => Some(181),  // pwrite
+        69 => Some(328),  // preadv
+        70 => Some(329),  // pwritev
+        72 => Some(360),  // socketpair
+        73 => Some(302),  // ppoll
+        78 => Some(298),  // readlinkat
+        79 => Some(293),  // newfstatat
+        80 => Some(108),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(118),  // fsync
+        83 => Some(148),  // fdatasync
+        85 => Some(319),  // timerfd_create
+        86 => Some(320),  // timerfd_settime
+        87 => Some(321),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(248),  // exit_group
+        95 => Some(281),  // waitid
+        98 => Some(238),  // futex
+        101 => Some(162),  // nanosleep
+        113 => Some(260),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(158),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(237),  // tkill
+        131 => Some(241),  // tgkill
+        134 => Some(174),  // rt_sigaction
+        135 => Some(175),  // rt_sigprocmask
+        144 => Some(214),  // setgid
+        146 => Some(213),  // setuid
+        147 => Some(208),  // setresuid
+        149 => Some(210),  // setresgid
+        153 => Some(43),  // times
+        154 => Some(57),  // setpgid
+        155 => Some(132),  // getpgid
+        156 => Some(147),  // getsid
+        157 => Some(66),  // setsid
+        163 => Some(191),  // getrlimit
+        164 => Some(75),  // setrlimit
+        165 => Some(77),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(78),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(64),  // getppid
+        174 => Some(199),  // getuid
+        175 => Some(201),  // geteuid
+        176 => Some(200),  // getgid
+        177 => Some(202),  // getegid
+        198 => Some(359),  // socket
+        200 => Some(361),  // bind
+        201 => Some(363),  // listen
+        203 => Some(362),  // connect
+        206 => Some(369),  // sendto
+        207 => Some(371),  // recvfrom
+        208 => Some(366),  // setsockopt
+        209 => Some(365),  // getsockopt
+        210 => Some(373),  // shutdown
+        214 => Some(45),  // brk
+        215 => Some(91),  // munmap
+        216 => Some(163),  // mremap
+        220 => Some(120),  // clone
+        221 => Some(11),  // execve
+        222 => Some(90),  // mmap
+        226 => Some(125),  // mprotect
+        227 => Some(144),  // msync
+        228 => Some(150),  // mlock
+        229 => Some(151),  // munlock
+        232 => Some(218),  // mincore
+        233 => Some(219),  // madvise
+        260 => Some(114),  // wait4
+        261 => Some(334),  // prlimit64
+        278 => Some(349),  // getrandom
+        281 => Some(354),  // execveat
+        306 => Some(338),  // syncfs
+        435 => Some(435),  // clone3
+        _ => None,
+    }
+}
+
+/// SPARC 64-bit translation table (Linux `arch/sparc/include/uapi/asm/unistd_64.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/sparc/asm/unistd_64.h`.
+///
+/// The SPARC 64-bit table. Notable quirks: early socket syscalls
+/// (`socket=97`, `connect=98`, `accept=99`) use SunOS-style numbering, while
+/// later ones (`bind=353`, `listen=354`) were added at higher numbers due to
+/// historical socketcall indirection. `clone3` is NOT yet exposed on sparc64.
+/// The 32-bit SPARC table (`unistd_32.h`) is NOT yet supported.
+fn translate_sparc64(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(119),  // getcwd
+        19 => Some(318),  // eventfd2
+        20 => Some(319),  // epoll_create1
+        21 => Some(194),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(320),  // dup3
+        25 => Some(92),  // fcntl
+        26 => Some(322),  // inotify_init1
+        27 => Some(152),  // inotify_add_watch
+        28 => Some(156),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(290),  // unlinkat
+        36 => Some(293),  // symlinkat
+        37 => Some(292),  // linkat
+        38 => Some(291),  // renameat
+        46 => Some(130),  // ftruncate
+        48 => Some(296),  // faccessat
+        52 => Some(124),  // fchmod
+        53 => Some(295),  // fchmodat
+        54 => Some(287),  // fchownat
+        55 => Some(123),  // fchown
+        56 => Some(284),  // openat
+        57 => Some(6),  // close
+        61 => Some(154),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(120),  // readv
+        66 => Some(121),  // writev
+        67 => Some(67),  // pread
+        68 => Some(68),  // pwrite
+        69 => Some(324),  // preadv
+        70 => Some(325),  // pwritev
+        72 => Some(135),  // socketpair
+        73 => Some(298),  // ppoll
+        78 => Some(294),  // readlinkat
+        79 => Some(289),  // newfstatat
+        80 => Some(62),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(95),  // fsync
+        83 => Some(253),  // fdatasync
+        85 => Some(312),  // timerfd_create
+        86 => Some(315),  // timerfd_settime
+        87 => Some(316),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(188),  // exit_group
+        95 => Some(279),  // waitid
+        98 => Some(142),  // futex
+        101 => Some(249),  // nanosleep
+        113 => Some(257),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(245),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(187),  // tkill
+        131 => Some(211),  // tgkill
+        134 => Some(102),  // rt_sigaction
+        135 => Some(103),  // rt_sigprocmask
+        144 => Some(46),  // setgid
+        146 => Some(23),  // setuid
+        147 => Some(108),  // setresuid
+        149 => Some(110),  // setresgid
+        153 => Some(43),  // times
+        154 => Some(185),  // setpgid
+        155 => Some(224),  // getpgid
+        156 => Some(252),  // getsid
+        157 => Some(175),  // setsid
+        163 => Some(144),  // getrlimit
+        164 => Some(145),  // setrlimit
+        165 => Some(117),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(116),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(197),  // getppid
+        174 => Some(24),  // getuid
+        175 => Some(49),  // geteuid
+        176 => Some(47),  // getgid
+        177 => Some(50),  // getegid
+        198 => Some(97),  // socket
+        200 => Some(353),  // bind
+        201 => Some(354),  // listen
+        202 => Some(99),  // accept
+        203 => Some(98),  // connect
+        206 => Some(133),  // sendto
+        207 => Some(125),  // recvfrom
+        208 => Some(355),  // setsockopt
+        209 => Some(118),  // getsockopt
+        210 => Some(134),  // shutdown
+        214 => Some(17),  // brk
+        215 => Some(73),  // munmap
+        216 => Some(250),  // mremap
+        220 => Some(217),  // clone
+        221 => Some(59),  // execve
+        222 => Some(71),  // mmap
+        226 => Some(74),  // mprotect
+        227 => Some(65),  // msync
+        228 => Some(237),  // mlock
+        229 => Some(238),  // munlock
+        232 => Some(78),  // mincore
+        233 => Some(75),  // madvise
+        260 => Some(7),  // wait4
+        261 => Some(331),  // prlimit64
+        278 => Some(347),  // getrandom
+        281 => Some(350),  // execveat
+        306 => Some(335),  // syncfs
+        _ => None,
+    }
+}
+
+/// Alpha translation table (Linux `arch/alpha/include/uapi/asm/unistd_32.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/alpha/asm/unistd_32.h`.
+///
+/// Alpha uses a unique early-OSF-derived numbering (it predates Linux 2.6
+/// asm-generic by a decade). Notable quirks: `getpid`/`getuid`/`getgid` are
+/// exposed as `getxpid`/`getxuid`/`getxgid` (the kernel headers alias them);
+/// `setgid` is at 132 (very late for a 32-bit-era syscall); `setrlimit` and
+/// `getrlimit` are at 145 and 144 (close together, unlike MIPS).
+fn translate_alpha(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(367),  // getcwd
+        19 => Some(485),  // eventfd2
+        20 => Some(486),  // epoll_create1
+        21 => Some(408),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(487),  // dup3
+        25 => Some(92),  // fcntl
+        26 => Some(489),  // inotify_init1
+        27 => Some(445),  // inotify_add_watch
+        28 => Some(446),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(456),  // unlinkat
+        36 => Some(459),  // symlinkat
+        37 => Some(458),  // linkat
+        38 => Some(457),  // renameat
+        46 => Some(130),  // ftruncate
+        48 => Some(462),  // faccessat
+        52 => Some(124),  // fchmod
+        53 => Some(461),  // fchmodat
+        54 => Some(453),  // fchownat
+        55 => Some(123),  // fchown
+        56 => Some(450),  // openat
+        57 => Some(6),  // close
+        61 => Some(377),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(120),  // readv
+        66 => Some(121),  // writev
+        67 => Some(349),  // pread
+        68 => Some(350),  // pwrite
+        69 => Some(490),  // preadv
+        70 => Some(491),  // pwritev
+        72 => Some(135),  // socketpair
+        73 => Some(464),  // ppoll
+        78 => Some(460),  // readlinkat
+        79 => Some(455),  // newfstatat
+        80 => Some(91),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(95),  // fsync
+        83 => Some(447),  // fdatasync
+        85 => Some(481),  // timerfd_create
+        86 => Some(482),  // timerfd_settime
+        87 => Some(483),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(405),  // exit_group
+        95 => Some(438),  // waitid
+        98 => Some(394),  // futex
+        101 => Some(340),  // nanosleep
+        113 => Some(420),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(334),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(381),  // tkill
+        131 => Some(424),  // tgkill
+        134 => Some(352),  // rt_sigaction
+        135 => Some(353),  // rt_sigprocmask
+        144 => Some(132),  // setgid
+        146 => Some(23),  // setuid
+        147 => Some(343),  // setresuid
+        149 => Some(371),  // setresgid
+        153 => Some(323),  // times
+        154 => Some(39),  // setpgid
+        155 => Some(233),  // getpgid
+        156 => Some(234),  // getsid
+        157 => Some(147),  // setsid
+        163 => Some(144),  // getrlimit
+        164 => Some(145),  // setrlimit
+        165 => Some(364),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(359),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(532),  // getppid
+        174 => Some(24),  // getuid
+        175 => Some(531),  // geteuid
+        176 => Some(47),  // getgid
+        177 => Some(530),  // getegid
+        198 => Some(97),  // socket
+        200 => Some(104),  // bind
+        201 => Some(106),  // listen
+        202 => Some(99),  // accept
+        203 => Some(98),  // connect
+        206 => Some(133),  // sendto
+        207 => Some(125),  // recvfrom
+        208 => Some(105),  // setsockopt
+        209 => Some(118),  // getsockopt
+        210 => Some(134),  // shutdown
+        214 => Some(17),  // brk
+        215 => Some(73),  // munmap
+        216 => Some(341),  // mremap
+        220 => Some(312),  // clone
+        221 => Some(59),  // execve
+        222 => Some(71),  // mmap
+        226 => Some(74),  // mprotect
+        227 => Some(217),  // msync
+        228 => Some(314),  // mlock
+        229 => Some(315),  // munlock
+        232 => Some(375),  // mincore
+        233 => Some(75),  // madvise
+        260 => Some(365),  // wait4
+        261 => Some(496),  // prlimit64
+        278 => Some(511),  // getrandom
+        281 => Some(513),  // execveat
+        306 => Some(500),  // syncfs
+        435 => Some(545),  // clone3
+        _ => None,
+    }
+}
+
+/// PA-RISC (HPPA) 64-bit translation table (Linux `arch/parisc/include/uapi/asm/unistd_64.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/parisc/asm/unistd_64.h`.
+///
+/// The PA-RISC 64-bit table. The 32-bit PA-RISC table (`unistd_32.h`) shares
+/// the same numbering for the entries covered here.
+fn translate_hppa(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(110),  // getcwd
+        19 => Some(310),  // eventfd2
+        20 => Some(311),  // epoll_create1
+        21 => Some(225),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(312),  // dup3
+        25 => Some(55),  // fcntl
+        26 => Some(314),  // inotify_init1
+        27 => Some(270),  // inotify_add_watch
+        28 => Some(271),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(281),  // unlinkat
+        36 => Some(284),  // symlinkat
+        37 => Some(283),  // linkat
+        38 => Some(282),  // renameat
+        46 => Some(93),  // ftruncate
+        48 => Some(287),  // faccessat
+        52 => Some(94),  // fchmod
+        53 => Some(286),  // fchmodat
+        54 => Some(278),  // fchownat
+        55 => Some(95),  // fchown
+        56 => Some(275),  // openat
+        57 => Some(6),  // close
+        61 => Some(201),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(145),  // readv
+        66 => Some(146),  // writev
+        67 => Some(108),  // pread
+        68 => Some(109),  // pwrite
+        69 => Some(315),  // preadv
+        70 => Some(316),  // pwritev
+        72 => Some(56),  // socketpair
+        73 => Some(274),  // ppoll
+        78 => Some(285),  // readlinkat
+        79 => Some(280),  // newfstatat
+        80 => Some(28),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(118),  // fsync
+        83 => Some(148),  // fdatasync
+        85 => Some(306),  // timerfd_create
+        86 => Some(307),  // timerfd_settime
+        87 => Some(308),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(222),  // exit_group
+        95 => Some(235),  // waitid
+        98 => Some(210),  // futex
+        101 => Some(162),  // nanosleep
+        113 => Some(256),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(158),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(208),  // tkill
+        131 => Some(259),  // tgkill
+        134 => Some(174),  // rt_sigaction
+        135 => Some(175),  // rt_sigprocmask
+        144 => Some(46),  // setgid
+        146 => Some(23),  // setuid
+        147 => Some(164),  // setresuid
+        149 => Some(170),  // setresgid
+        153 => Some(43),  // times
+        154 => Some(57),  // setpgid
+        155 => Some(132),  // getpgid
+        156 => Some(147),  // getsid
+        157 => Some(66),  // setsid
+        163 => Some(76),  // getrlimit
+        164 => Some(75),  // setrlimit
+        165 => Some(77),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(78),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(64),  // getppid
+        174 => Some(24),  // getuid
+        175 => Some(49),  // geteuid
+        176 => Some(47),  // getgid
+        177 => Some(50),  // getegid
+        198 => Some(17),  // socket
+        200 => Some(22),  // bind
+        201 => Some(32),  // listen
+        202 => Some(35),  // accept
+        203 => Some(31),  // connect
+        206 => Some(82),  // sendto
+        207 => Some(123),  // recvfrom
+        208 => Some(181),  // setsockopt
+        209 => Some(182),  // getsockopt
+        210 => Some(117),  // shutdown
+        214 => Some(45),  // brk
+        215 => Some(91),  // munmap
+        216 => Some(163),  // mremap
+        220 => Some(120),  // clone
+        221 => Some(11),  // execve
+        222 => Some(90),  // mmap
+        226 => Some(125),  // mprotect
+        227 => Some(144),  // msync
+        228 => Some(150),  // mlock
+        229 => Some(151),  // munlock
+        232 => Some(72),  // mincore
+        233 => Some(119),  // madvise
+        260 => Some(114),  // wait4
+        261 => Some(321),  // prlimit64
+        278 => Some(339),  // getrandom
+        281 => Some(342),  // execveat
+        306 => Some(327),  // syncfs
+        435 => Some(435),  // clone3
+        _ => None,
+    }
+}
+
+/// Motorola 68000 (m68k) translation table (Linux `arch/m68k/include/uapi/asm/unistd_32.h`).
+///
+/// Source: verified against the Linux kernel UAPI header shipped at
+/// `/usr/lib/linux/uapi/m68k/asm/unistd_32.h`.
+///
+/// The m68k table. Notable quirks: plain `accept` is NOT exposed (use
+/// `accept4` instead).
+fn translate_m68k(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        17 => Some(183),  // getcwd
+        19 => Some(324),  // eventfd2
+        20 => Some(325),  // epoll_create1
+        21 => Some(250),  // epoll_ctl
+        22 => Some(42),  // pipe
+        23 => Some(41),  // dup
+        24 => Some(326),  // dup3
+        25 => Some(55),  // fcntl
+        26 => Some(328),  // inotify_init1
+        27 => Some(285),  // inotify_add_watch
+        28 => Some(286),  // inotify_rm_watch
+        29 => Some(54),  // ioctl
+        35 => Some(294),  // unlinkat
+        36 => Some(297),  // symlinkat
+        37 => Some(296),  // linkat
+        38 => Some(295),  // renameat
+        46 => Some(93),  // ftruncate
+        48 => Some(300),  // faccessat
+        52 => Some(94),  // fchmod
+        53 => Some(299),  // fchmodat
+        54 => Some(291),  // fchownat
+        55 => Some(95),  // fchown
+        56 => Some(288),  // openat
+        57 => Some(6),  // close
+        61 => Some(220),  // getdents64
+        62 => Some(19),  // lseek
+        63 => Some(3),  // read
+        64 => Some(4),  // write
+        65 => Some(145),  // readv
+        66 => Some(146),  // writev
+        67 => Some(180),  // pread
+        68 => Some(181),  // pwrite
+        69 => Some(329),  // preadv
+        70 => Some(330),  // pwritev
+        72 => Some(357),  // socketpair
+        73 => Some(302),  // ppoll
+        78 => Some(298),  // readlinkat
+        79 => Some(293),  // newfstatat
+        80 => Some(108),  // fstat
+        81 => Some(36),  // sync
+        82 => Some(118),  // fsync
+        83 => Some(148),  // fdatasync
+        85 => Some(318),  // timerfd_create
+        86 => Some(321),  // timerfd_settime
+        87 => Some(322),  // timerfd_gettime
+        93 => Some(1),  // exit
+        94 => Some(247),  // exit_group
+        95 => Some(277),  // waitid
+        98 => Some(235),  // futex
+        101 => Some(162),  // nanosleep
+        113 => Some(260),  // clock_gettime
+        117 => Some(26),  // ptrace
+        124 => Some(158),  // sched_yield
+        129 => Some(37),  // kill
+        130 => Some(222),  // tkill
+        131 => Some(265),  // tgkill
+        134 => Some(174),  // rt_sigaction
+        135 => Some(175),  // rt_sigprocmask
+        144 => Some(46),  // setgid
+        146 => Some(23),  // setuid
+        147 => Some(164),  // setresuid
+        149 => Some(170),  // setresgid
+        153 => Some(43),  // times
+        154 => Some(57),  // setpgid
+        155 => Some(132),  // getpgid
+        156 => Some(147),  // getsid
+        157 => Some(66),  // setsid
+        163 => Some(76),  // getrlimit
+        164 => Some(75),  // setrlimit
+        165 => Some(77),  // getrusage
+        166 => Some(60),  // umask
+        169 => Some(78),  // gettimeofday
+        172 => Some(20),  // getpid
+        173 => Some(64),  // getppid
+        174 => Some(24),  // getuid
+        175 => Some(49),  // geteuid
+        176 => Some(47),  // getgid
+        177 => Some(50),  // getegid
+        198 => Some(356),  // socket
+        200 => Some(358),  // bind
+        201 => Some(360),  // listen
+        203 => Some(359),  // connect
+        206 => Some(366),  // sendto
+        207 => Some(368),  // recvfrom
+        208 => Some(363),  // setsockopt
+        209 => Some(362),  // getsockopt
+        210 => Some(370),  // shutdown
+        214 => Some(45),  // brk
+        215 => Some(91),  // munmap
+        216 => Some(163),  // mremap
+        220 => Some(120),  // clone
+        221 => Some(11),  // execve
+        222 => Some(90),  // mmap
+        226 => Some(125),  // mprotect
+        227 => Some(144),  // msync
+        228 => Some(150),  // mlock
+        229 => Some(151),  // munlock
+        232 => Some(237),  // mincore
+        233 => Some(238),  // madvise
+        260 => Some(114),  // wait4
+        261 => Some(339),  // prlimit64
+        278 => Some(352),  // getrandom
+        281 => Some(355),  // execveat
+        306 => Some(343),  // syncfs
+        435 => Some(435),  // clone3
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +1531,285 @@ mod tests {
         assert_eq!(translate(BackendKind::X86_32, 79), Some(300)); // newfstatat
     }
 
+    // ── translate: mips64 ──
+
+    #[test]
+    fn test_translate_mips64() {
+        // Verified against arch/mips/include/uapi/asm/unistd_n64.h (N64 ABI, base 5000).
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::Mips64, 64), Some(5001));  // write
+        assert_eq!(translate(BackendKind::Mips64, 63), Some(5000));  // read
+        assert_eq!(translate(BackendKind::Mips64, 57), Some(5003));  // close
+        assert_eq!(translate(BackendKind::Mips64, 56), Some(5247));  // openat
+        assert_eq!(translate(BackendKind::Mips64, 62), Some(5008));  // lseek
+        assert_eq!(translate(BackendKind::Mips64, 222), Some(5009));  // mmap
+        assert_eq!(translate(BackendKind::Mips64, 215), Some(5011));  // munmap
+        assert_eq!(translate(BackendKind::Mips64, 226), Some(5010));  // mprotect
+        assert_eq!(translate(BackendKind::Mips64, 214), Some(5012));  // brk
+        assert_eq!(translate(BackendKind::Mips64, 93), Some(5058));  // exit
+        assert_eq!(translate(BackendKind::Mips64, 94), Some(5205));  // exit_group
+        assert_eq!(translate(BackendKind::Mips64, 172), Some(5038));  // getpid
+        assert_eq!(translate(BackendKind::Mips64, 79), Some(5252));  // newfstatat
+        assert_eq!(translate(BackendKind::Mips64, 80), Some(5005));  // fstat
+        assert_eq!(translate(BackendKind::Mips64, 198), Some(5040));  // socket
+        assert_eq!(translate(BackendKind::Mips64, 203), Some(5041));  // connect
+        assert_eq!(translate(BackendKind::Mips64, 220), Some(5055));  // clone
+        assert_eq!(translate(BackendKind::Mips64, 221), Some(5057));  // execve
+        assert_eq!(translate(BackendKind::Mips64, 129), Some(5060));  // kill
+        assert_eq!(translate(BackendKind::Mips64, 98), Some(5194));  // futex
+        assert_eq!(translate(BackendKind::Mips64, 101), Some(5034));  // nanosleep
+        assert_eq!(translate(BackendKind::Mips64, 113), Some(5222));  // clock_gettime
+        assert_eq!(translate(BackendKind::Mips64, 134), Some(5013));  // rt_sigaction
+        assert_eq!(translate(BackendKind::Mips64, 260), Some(5059));  // wait4
+        assert_eq!(translate(BackendKind::Mips64, 278), Some(5313));  // getrandom
+        assert_eq!(translate(BackendKind::Mips64, 281), Some(5316));  // execveat
+        assert_eq!(translate(BackendKind::Mips64, 435), Some(5435));  // clone3
+        assert_eq!(translate(BackendKind::Mips64, 306), Some(5301));  // syncfs
+        assert_eq!(translate(BackendKind::Mips64, 17), Some(5077));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::Mips64, 99999), None);
+    }
+
+    // ── translate: powerpc64 ──
+
+    #[test]
+    fn test_translate_powerpc64() {
+        // Verified against arch/powerpc/include/uapi/asm/unistd_64.h.
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::PowerPC64, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::PowerPC64, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::PowerPC64, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::PowerPC64, 56), Some(286));  // openat
+        assert_eq!(translate(BackendKind::PowerPC64, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::PowerPC64, 222), Some(90));  // mmap
+        assert_eq!(translate(BackendKind::PowerPC64, 215), Some(91));  // munmap
+        assert_eq!(translate(BackendKind::PowerPC64, 226), Some(125));  // mprotect
+        assert_eq!(translate(BackendKind::PowerPC64, 214), Some(45));  // brk
+        assert_eq!(translate(BackendKind::PowerPC64, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::PowerPC64, 94), Some(234));  // exit_group
+        assert_eq!(translate(BackendKind::PowerPC64, 172), Some(20));  // getpid
+        assert_eq!(translate(BackendKind::PowerPC64, 79), Some(291));  // newfstatat
+        assert_eq!(translate(BackendKind::PowerPC64, 80), Some(108));  // fstat
+        assert_eq!(translate(BackendKind::PowerPC64, 198), Some(326));  // socket
+        assert_eq!(translate(BackendKind::PowerPC64, 203), Some(328));  // connect
+        assert_eq!(translate(BackendKind::PowerPC64, 220), Some(120));  // clone
+        assert_eq!(translate(BackendKind::PowerPC64, 221), Some(11));  // execve
+        assert_eq!(translate(BackendKind::PowerPC64, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::PowerPC64, 98), Some(221));  // futex
+        assert_eq!(translate(BackendKind::PowerPC64, 101), Some(162));  // nanosleep
+        assert_eq!(translate(BackendKind::PowerPC64, 113), Some(246));  // clock_gettime
+        assert_eq!(translate(BackendKind::PowerPC64, 134), Some(173));  // rt_sigaction
+        assert_eq!(translate(BackendKind::PowerPC64, 260), Some(114));  // wait4
+        assert_eq!(translate(BackendKind::PowerPC64, 278), Some(359));  // getrandom
+        assert_eq!(translate(BackendKind::PowerPC64, 281), Some(362));  // execveat
+        assert_eq!(translate(BackendKind::PowerPC64, 435), Some(435));  // clone3
+        assert_eq!(translate(BackendKind::PowerPC64, 306), Some(348));  // syncfs
+        assert_eq!(translate(BackendKind::PowerPC64, 17), Some(182));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::PowerPC64, 99999), None);
+    }
+
+    // ── translate: s390x ──
+
+    #[test]
+    fn test_translate_s390x() {
+        // Verified against arch/s390/include/uapi/asm/unistd_64.h.
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::S390X, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::S390X, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::S390X, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::S390X, 56), Some(288));  // openat
+        assert_eq!(translate(BackendKind::S390X, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::S390X, 222), Some(90));  // mmap
+        assert_eq!(translate(BackendKind::S390X, 215), Some(91));  // munmap
+        assert_eq!(translate(BackendKind::S390X, 226), Some(125));  // mprotect
+        assert_eq!(translate(BackendKind::S390X, 214), Some(45));  // brk
+        assert_eq!(translate(BackendKind::S390X, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::S390X, 94), Some(248));  // exit_group
+        assert_eq!(translate(BackendKind::S390X, 172), Some(20));  // getpid
+        assert_eq!(translate(BackendKind::S390X, 79), Some(293));  // newfstatat
+        assert_eq!(translate(BackendKind::S390X, 80), Some(108));  // fstat
+        assert_eq!(translate(BackendKind::S390X, 198), Some(359));  // socket
+        assert_eq!(translate(BackendKind::S390X, 203), Some(362));  // connect
+        assert_eq!(translate(BackendKind::S390X, 220), Some(120));  // clone
+        assert_eq!(translate(BackendKind::S390X, 221), Some(11));  // execve
+        assert_eq!(translate(BackendKind::S390X, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::S390X, 98), Some(238));  // futex
+        assert_eq!(translate(BackendKind::S390X, 101), Some(162));  // nanosleep
+        assert_eq!(translate(BackendKind::S390X, 113), Some(260));  // clock_gettime
+        assert_eq!(translate(BackendKind::S390X, 134), Some(174));  // rt_sigaction
+        assert_eq!(translate(BackendKind::S390X, 260), Some(114));  // wait4
+        assert_eq!(translate(BackendKind::S390X, 278), Some(349));  // getrandom
+        assert_eq!(translate(BackendKind::S390X, 281), Some(354));  // execveat
+        assert_eq!(translate(BackendKind::S390X, 435), Some(435));  // clone3
+        assert_eq!(translate(BackendKind::S390X, 306), Some(338));  // syncfs
+        assert_eq!(translate(BackendKind::S390X, 17), Some(183));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::S390X, 99999), None);
+    }
+
+    // ── translate: sparc64 ──
+
+    #[test]
+    fn test_translate_sparc64() {
+        // Verified against arch/sparc/include/uapi/asm/unistd_64.h.
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::Sparc64, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::Sparc64, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::Sparc64, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::Sparc64, 56), Some(284));  // openat
+        assert_eq!(translate(BackendKind::Sparc64, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::Sparc64, 222), Some(71));  // mmap
+        assert_eq!(translate(BackendKind::Sparc64, 215), Some(73));  // munmap
+        assert_eq!(translate(BackendKind::Sparc64, 226), Some(74));  // mprotect
+        assert_eq!(translate(BackendKind::Sparc64, 214), Some(17));  // brk
+        assert_eq!(translate(BackendKind::Sparc64, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::Sparc64, 94), Some(188));  // exit_group
+        assert_eq!(translate(BackendKind::Sparc64, 172), Some(20));  // getpid
+        assert_eq!(translate(BackendKind::Sparc64, 79), Some(289));  // newfstatat (fstatat64)
+        assert_eq!(translate(BackendKind::Sparc64, 80), Some(62));  // fstat
+        assert_eq!(translate(BackendKind::Sparc64, 198), Some(97));  // socket
+        assert_eq!(translate(BackendKind::Sparc64, 203), Some(98));  // connect
+        assert_eq!(translate(BackendKind::Sparc64, 220), Some(217));  // clone
+        assert_eq!(translate(BackendKind::Sparc64, 221), Some(59));  // execve
+        assert_eq!(translate(BackendKind::Sparc64, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::Sparc64, 98), Some(142));  // futex
+        assert_eq!(translate(BackendKind::Sparc64, 101), Some(249));  // nanosleep
+        assert_eq!(translate(BackendKind::Sparc64, 113), Some(257));  // clock_gettime
+        assert_eq!(translate(BackendKind::Sparc64, 134), Some(102));  // rt_sigaction
+        assert_eq!(translate(BackendKind::Sparc64, 260), Some(7));  // wait4
+        assert_eq!(translate(BackendKind::Sparc64, 278), Some(347));  // getrandom
+        assert_eq!(translate(BackendKind::Sparc64, 281), Some(350));  // execveat
+        assert_eq!(translate(BackendKind::Sparc64, 306), Some(335));  // syncfs
+        assert_eq!(translate(BackendKind::Sparc64, 17), Some(119));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::Sparc64, 99999), None);
+    }
+
+    // ── translate: alpha ──
+
+    #[test]
+    fn test_translate_alpha() {
+        // Verified against arch/alpha/include/uapi/asm/unistd_32.h (OSF-derived numbering).
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::Alpha, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::Alpha, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::Alpha, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::Alpha, 56), Some(450));  // openat
+        assert_eq!(translate(BackendKind::Alpha, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::Alpha, 222), Some(71));  // mmap
+        assert_eq!(translate(BackendKind::Alpha, 215), Some(73));  // munmap
+        assert_eq!(translate(BackendKind::Alpha, 226), Some(74));  // mprotect
+        assert_eq!(translate(BackendKind::Alpha, 214), Some(17));  // brk
+        assert_eq!(translate(BackendKind::Alpha, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::Alpha, 94), Some(405));  // exit_group
+        assert_eq!(translate(BackendKind::Alpha, 172), Some(20));  // getpid (getxpid)
+        assert_eq!(translate(BackendKind::Alpha, 79), Some(455));  // newfstatat (fstatat64)
+        assert_eq!(translate(BackendKind::Alpha, 80), Some(91));  // fstat
+        assert_eq!(translate(BackendKind::Alpha, 198), Some(97));  // socket
+        assert_eq!(translate(BackendKind::Alpha, 203), Some(98));  // connect
+        assert_eq!(translate(BackendKind::Alpha, 220), Some(312));  // clone
+        assert_eq!(translate(BackendKind::Alpha, 221), Some(59));  // execve
+        assert_eq!(translate(BackendKind::Alpha, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::Alpha, 98), Some(394));  // futex
+        assert_eq!(translate(BackendKind::Alpha, 101), Some(340));  // nanosleep
+        assert_eq!(translate(BackendKind::Alpha, 113), Some(420));  // clock_gettime
+        assert_eq!(translate(BackendKind::Alpha, 134), Some(352));  // rt_sigaction
+        assert_eq!(translate(BackendKind::Alpha, 260), Some(365));  // wait4
+        assert_eq!(translate(BackendKind::Alpha, 278), Some(511));  // getrandom
+        assert_eq!(translate(BackendKind::Alpha, 281), Some(513));  // execveat
+        assert_eq!(translate(BackendKind::Alpha, 435), Some(545));  // clone3
+        assert_eq!(translate(BackendKind::Alpha, 306), Some(500));  // syncfs
+        assert_eq!(translate(BackendKind::Alpha, 17), Some(367));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::Alpha, 99999), None);
+    }
+
+    // ── translate: hppa ──
+
+    #[test]
+    fn test_translate_hppa() {
+        // Verified against arch/parisc/include/uapi/asm/unistd_64.h (PA-RISC).
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::Hppa, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::Hppa, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::Hppa, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::Hppa, 56), Some(275));  // openat
+        assert_eq!(translate(BackendKind::Hppa, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::Hppa, 222), Some(90));  // mmap
+        assert_eq!(translate(BackendKind::Hppa, 215), Some(91));  // munmap
+        assert_eq!(translate(BackendKind::Hppa, 226), Some(125));  // mprotect
+        assert_eq!(translate(BackendKind::Hppa, 214), Some(45));  // brk
+        assert_eq!(translate(BackendKind::Hppa, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::Hppa, 94), Some(222));  // exit_group
+        assert_eq!(translate(BackendKind::Hppa, 172), Some(20));  // getpid
+        assert_eq!(translate(BackendKind::Hppa, 79), Some(280));  // newfstatat (fstatat64)
+        assert_eq!(translate(BackendKind::Hppa, 80), Some(28));  // fstat
+        assert_eq!(translate(BackendKind::Hppa, 198), Some(17));  // socket
+        assert_eq!(translate(BackendKind::Hppa, 203), Some(31));  // connect
+        assert_eq!(translate(BackendKind::Hppa, 220), Some(120));  // clone
+        assert_eq!(translate(BackendKind::Hppa, 221), Some(11));  // execve
+        assert_eq!(translate(BackendKind::Hppa, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::Hppa, 98), Some(210));  // futex
+        assert_eq!(translate(BackendKind::Hppa, 101), Some(162));  // nanosleep
+        assert_eq!(translate(BackendKind::Hppa, 113), Some(256));  // clock_gettime
+        assert_eq!(translate(BackendKind::Hppa, 134), Some(174));  // rt_sigaction
+        assert_eq!(translate(BackendKind::Hppa, 260), Some(114));  // wait4
+        assert_eq!(translate(BackendKind::Hppa, 278), Some(339));  // getrandom
+        assert_eq!(translate(BackendKind::Hppa, 281), Some(342));  // execveat
+        assert_eq!(translate(BackendKind::Hppa, 435), Some(435));  // clone3
+        assert_eq!(translate(BackendKind::Hppa, 306), Some(327));  // syncfs
+        assert_eq!(translate(BackendKind::Hppa, 17), Some(110));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::Hppa, 99999), None);
+    }
+
+    // ── translate: m68k ──
+
+    #[test]
+    fn test_translate_m68k() {
+        // Verified against arch/m68k/include/uapi/asm/unistd_32.h.
+        // Note: numbers come from the Linux UAPI header (no base offset
+        // except for mips64 which uses __NR_Linux = 5000).
+        assert_eq!(translate(BackendKind::M68k, 64), Some(4));  // write
+        assert_eq!(translate(BackendKind::M68k, 63), Some(3));  // read
+        assert_eq!(translate(BackendKind::M68k, 57), Some(6));  // close
+        assert_eq!(translate(BackendKind::M68k, 56), Some(288));  // openat
+        assert_eq!(translate(BackendKind::M68k, 62), Some(19));  // lseek
+        assert_eq!(translate(BackendKind::M68k, 222), Some(90));  // mmap
+        assert_eq!(translate(BackendKind::M68k, 215), Some(91));  // munmap
+        assert_eq!(translate(BackendKind::M68k, 226), Some(125));  // mprotect
+        assert_eq!(translate(BackendKind::M68k, 214), Some(45));  // brk
+        assert_eq!(translate(BackendKind::M68k, 93), Some(1));  // exit
+        assert_eq!(translate(BackendKind::M68k, 94), Some(247));  // exit_group
+        assert_eq!(translate(BackendKind::M68k, 172), Some(20));  // getpid
+        assert_eq!(translate(BackendKind::M68k, 79), Some(293));  // newfstatat (fstatat64)
+        assert_eq!(translate(BackendKind::M68k, 80), Some(108));  // fstat
+        assert_eq!(translate(BackendKind::M68k, 198), Some(356));  // socket
+        assert_eq!(translate(BackendKind::M68k, 203), Some(359));  // connect
+        assert_eq!(translate(BackendKind::M68k, 220), Some(120));  // clone
+        assert_eq!(translate(BackendKind::M68k, 221), Some(11));  // execve
+        assert_eq!(translate(BackendKind::M68k, 129), Some(37));  // kill
+        assert_eq!(translate(BackendKind::M68k, 98), Some(235));  // futex
+        assert_eq!(translate(BackendKind::M68k, 101), Some(162));  // nanosleep
+        assert_eq!(translate(BackendKind::M68k, 113), Some(260));  // clock_gettime
+        assert_eq!(translate(BackendKind::M68k, 134), Some(174));  // rt_sigaction
+        assert_eq!(translate(BackendKind::M68k, 260), Some(114));  // wait4
+        assert_eq!(translate(BackendKind::M68k, 278), Some(352));  // getrandom
+        assert_eq!(translate(BackendKind::M68k, 281), Some(355));  // execveat
+        assert_eq!(translate(BackendKind::M68k, 435), Some(435));  // clone3
+        assert_eq!(translate(BackendKind::M68k, 306), Some(343));  // syncfs
+        assert_eq!(translate(BackendKind::M68k, 17), Some(183));  // getcwd
+        // Unknown numbers return None.
+        assert_eq!(translate(BackendKind::M68k, 99999), None);
+    }
+
     // ── translate: wasm32 ──
 
     #[test]
@@ -719,19 +1844,21 @@ mod tests {
         );
         assert_eq!(translate(BackendKind::ArmEb, 64), Some(64));
 
-        // mips64be delegates to mips64 (returns None — TODO P1-b).
+        // mips64be delegates to mips64 — write (generic 64) = 5001 on
+        // MIPS N64 (filled in P1-d).
         assert_eq!(
             translate(BackendKind::Mips64Be, 64),
             translate(BackendKind::Mips64, 64)
         );
-        assert_eq!(translate(BackendKind::Mips64Be, 64), None);
+        assert_eq!(translate(BackendKind::Mips64Be, 64), Some(5001));
 
-        // ppc64le delegates to ppc64 (returns None — TODO P1-b).
+        // ppc64le delegates to ppc64 — write (generic 64) = 4 on powerpc64
+        // (filled in P1-d).
         assert_eq!(
             translate(BackendKind::PowerPC64LE, 64),
             translate(BackendKind::PowerPC64, 64)
         );
-        assert_eq!(translate(BackendKind::PowerPC64LE, 64), None);
+        assert_eq!(translate(BackendKind::PowerPC64LE, 64), Some(4));
     }
 
     // ── translate: unknown numbers ──
@@ -744,20 +1871,32 @@ mod tests {
         assert_eq!(translate(BackendKind::X86_64, 1), None); // 1 is not in our table
         // x86_32: same.
         assert_eq!(translate(BackendKind::X86_32, 99999), None);
-        // mips64 / ppc64 / s390x / sparc64 / alpha / hppa / m68k: TODO P1-b.
-        for backend in [
-            BackendKind::Mips64,
-            BackendKind::PowerPC64,
-            BackendKind::S390X,
-            BackendKind::Sparc64,
-            BackendKind::Alpha,
-            BackendKind::Hppa,
-            BackendKind::M68k,
-        ] {
+        // The 7 newly-translated arches (P1-d) now return Some for the common
+        // syscalls (here: nr=64 = write) and None for unknown numbers.
+        //   * mips64 write = 5001 (N64 base 5000 + 1)
+        //   * ppc64/s390x/sparc64/alpha/hppa/m68k write = 4 (legacy)
+        let cases = [
+            (BackendKind::Mips64, Some(5001)),
+            (BackendKind::PowerPC64, Some(4)),
+            (BackendKind::S390X, Some(4)),
+            (BackendKind::Sparc64, Some(4)),
+            (BackendKind::Alpha, Some(4)),
+            (BackendKind::Hppa, Some(4)),
+            (BackendKind::M68k, Some(4)),
+        ];
+        for (backend, expected) in cases {
             assert_eq!(
                 translate(backend, 64),
+                expected,
+                "{:?}: nr=64 (write) should translate to {:?}",
+                backend,
+                expected
+            );
+            // Unknown numbers still return None on translated arches.
+            assert_eq!(
+                translate(backend, 99999),
                 None,
-                "{:?} should return None for nr=64 (TODO P1-b)",
+                "{:?}: unknown nr=99999 should return None",
                 backend
             );
         }
