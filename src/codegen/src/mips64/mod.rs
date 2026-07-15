@@ -2599,7 +2599,6 @@ fn lower_binop_typed(
 // ===========================================================================
 // Stack-slot based register allocation for MIPS64
 // ===========================================================================
-
 /// Stack-slot based allocate_registers for MIPS64.
 /// Every vreg gets a stack slot; operations use scratch registers $t0-$t7.
 fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<AllocatedFunction, BackendError> {

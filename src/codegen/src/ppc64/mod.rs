@@ -1969,7 +1969,6 @@ const FP_SCRATCH_SIZE: u32 = 16;
 ///
 /// Sums `Alloc` instruction sizes, adds 32 bytes for the LR/CR save area
 /// (per ELFv2 ABI), and rounds up to 16-byte alignment.
-
 fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
     let mut total: u32 = 32; // LR save (8) + CR save (8) + back chain (8) + TOC save (8)
     for block in &func.blocks {

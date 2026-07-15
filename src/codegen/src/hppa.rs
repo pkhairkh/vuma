@@ -748,7 +748,7 @@ impl TargetInfo for HppaTargetInfo {
 /// 4. **Beyond 4-LDO range** (|disp| > 32764):
 ///    Redirect to a trampoline. Push to `trampolines` vec.
 fn patch_call_site(
-    all_code: &mut Vec<u8>,
+    all_code: &mut [u8],
     abs_offset: usize,
     target_offset: usize,
     trampolines: &mut Vec<(usize, usize)>,
