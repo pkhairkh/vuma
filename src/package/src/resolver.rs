@@ -38,6 +38,26 @@ pub struct ResolveResult {
 }
 
 // ---------------------------------------------------------------------------
+// ResolveContext
+// ---------------------------------------------------------------------------
+
+/// Borrowed mutable workspace threaded through `resolve_recursive` so its
+/// parameter list stays well below `clippy::too_many_arguments`' threshold.
+///
+/// All four fields are mutable borrows of the caller's local state and are
+/// mutated in place as the recursion walks the dependency graph.
+struct ResolveContext<'a> {
+    /// Adjacency list of the dependency graph (package → its deps).
+    graph: &'a mut HashMap<String, Vec<String>>,
+    /// Resolved package records keyed by name.
+    resolved: &'a mut HashMap<String, ResolvedPackage>,
+    /// Names currently being visited (used for cycle detection).
+    visiting: &'a mut HashSet<String>,
+    /// Names already fully processed (memoization).
+    visited: &'a mut HashSet<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DependencyResolver
 // ---------------------------------------------------------------------------
 
@@ -75,10 +95,12 @@ impl DependencyResolver {
             &root.name,
             &root.version,
             &root.dependencies,
-            &mut graph,
-            &mut resolved,
-            &mut visiting,
-            &mut visited,
+            &mut ResolveContext {
+                graph: &mut graph,
+                resolved: &mut resolved,
+                visiting: &mut visiting,
+                visited: &mut visited,
+            },
         )?;
 
         // Topological sort using Kahn's algorithm
@@ -99,25 +121,22 @@ impl DependencyResolver {
         name: &str,
         version: &str,
         deps: &[Dependency],
-        graph: &mut HashMap<String, Vec<String>>,
-        resolved: &mut HashMap<String, ResolvedPackage>,
-        visiting: &mut HashSet<String>,
-        visited: &mut HashSet<String>,
+        ctx: &mut ResolveContext<'_>,
     ) -> PackageResult<()> {
         let key = name.to_string();
         let _ = version; // version used for registry lookup below
 
         // Already fully processed
-        if visited.contains(&key) {
+        if ctx.visited.contains(&key) {
             return Ok(());
         }
 
         // Circular dependency detected
-        if visiting.contains(&key) {
+        if ctx.visiting.contains(&key) {
             return Err(PackageError::CircularDependency(key));
         }
 
-        visiting.insert(key.clone());
+        ctx.visiting.insert(key.clone());
 
         // Look up each dependency in the registry
         let mut dep_names = Vec::new();
@@ -131,7 +150,7 @@ impl DependencyResolver {
                 .ok();
 
             // Record the resolved package
-            resolved.insert(
+            ctx.resolved.insert(
                 dep.name.clone(),
                 ResolvedPackage {
                     name: dep.name.clone(),
@@ -148,17 +167,14 @@ impl DependencyResolver {
                     &dep.name,
                     &resolved_version,
                     &manifest.dependencies,
-                    graph,
-                    resolved,
-                    visiting,
-                    visited,
+                    ctx,
                 )?;
             }
         }
 
-        graph.insert(key.clone(), dep_names);
-        visiting.remove(&key);
-        visited.insert(key);
+        ctx.graph.insert(key.clone(), dep_names);
+        ctx.visiting.remove(&key);
+        ctx.visited.insert(key);
 
         Ok(())
     }

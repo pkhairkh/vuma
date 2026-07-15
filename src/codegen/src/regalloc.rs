@@ -3892,6 +3892,28 @@ impl GreedyRegCache {
 // Enhanced Target-Agnostic Allocator with Loop Awareness
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Borrowed workspace passed between `try_alloc_reg_enhanced` and
+/// `spill_or_evict_enhanced` so their parameter lists stay well below
+/// `clippy::too_many_arguments`' threshold.
+///
+/// All fields are mutable borrows of the caller's local state; the
+/// enhanced linear-scan algorithm mutates them in place as it makes
+/// allocation, eviction, and spill decisions.
+struct AllocContext<'a> {
+    /// Pool of free caller-saved physical registers.
+    free_caller: &'a mut Vec<crate::backend::PhysicalReg>,
+    /// Pool of free callee-saved physical registers.
+    free_callee: &'a mut Vec<crate::backend::PhysicalReg>,
+    /// Currently active intervals: `(vreg, phys_reg, end_pos, weight)`.
+    active: &'a mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
+    /// Counter for the next available spill-slot index.
+    next_spill_idx: &'a mut u32,
+    /// Accumulating register-allocation result (spill/reload code, etc.).
+    result: &'a mut RegAllocResult,
+    /// Enhanced weight of the interval currently being allocated.
+    current_weight: u32,
+}
+
 impl TargetAgnosticRegAlloc {
     /// Run enhanced register allocation with loop-aware prioritization.
     ///
@@ -4007,12 +4029,14 @@ impl TargetAgnosticRegAlloc {
                 RegClass::Gpr => {
                     let preg = self.try_alloc_reg_enhanced(
                         interval,
-                        &mut free_caller_gprs,
-                        &mut free_callee_gprs,
-                        &mut active_gprs,
-                        &mut next_spill_index,
-                        &mut result,
-                        weight,
+                        &mut AllocContext {
+                            free_caller: &mut free_caller_gprs,
+                            free_callee: &mut free_callee_gprs,
+                            active: &mut active_gprs,
+                            next_spill_idx: &mut next_spill_index,
+                            result: &mut result,
+                            current_weight: weight,
+                        },
                     )?;
                     if let Some(preg) = preg {
                         self.assign(interval, preg, &mut result);
@@ -4021,12 +4045,14 @@ impl TargetAgnosticRegAlloc {
                 RegClass::SimdFp => {
                     let preg = self.try_alloc_reg_enhanced(
                         interval,
-                        &mut free_caller_fps,
-                        &mut free_callee_fps,
-                        &mut active_fps,
-                        &mut next_spill_index,
-                        &mut result,
-                        weight,
+                        &mut AllocContext {
+                            free_caller: &mut free_caller_fps,
+                            free_callee: &mut free_callee_fps,
+                            active: &mut active_fps,
+                            next_spill_idx: &mut next_spill_index,
+                            result: &mut result,
+                            current_weight: weight,
+                        },
                     )?;
                     if let Some(preg) = preg {
                         self.assign(interval, preg, &mut result);
@@ -4044,50 +4070,38 @@ impl TargetAgnosticRegAlloc {
     fn try_alloc_reg_enhanced(
         &self,
         interval: &LiveInterval,
-        free_caller: &mut Vec<crate::backend::PhysicalReg>,
-        free_callee: &mut Vec<crate::backend::PhysicalReg>,
-        active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
-        next_spill_idx: &mut u32,
-        result: &mut RegAllocResult,
-        current_weight: u32,
+        ctx: &mut AllocContext<'_>,
     ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError>
     {
         // If the interval crosses a call, prefer callee-saved.
         let reg = if interval.crosses_call {
-            free_callee.pop().or_else(|| free_caller.pop())
+            ctx.free_callee.pop().or_else(|| ctx.free_caller.pop())
         } else {
-            free_caller.pop().or_else(|| free_callee.pop())
+            ctx.free_caller.pop().or_else(|| ctx.free_callee.pop())
         };
 
         if let Some(r) = reg {
-            active.push((interval.vreg, r, interval.end, current_weight));
+            ctx.active
+                .push((interval.vreg, r, interval.end, ctx.current_weight));
             return Ok(Some(r));
         }
 
         // No free register — spill or evict using enhanced weights.
-        self.spill_or_evict_enhanced(
-            interval,
-            active,
-            free_caller,
-            free_callee,
-            next_spill_idx,
-            result,
-            current_weight,
-        )
+        self.spill_or_evict_enhanced(interval, ctx)
     }
 
     /// Spill or evict with enhanced weight comparison.
     fn spill_or_evict_enhanced(
         &self,
         interval: &LiveInterval,
-        active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
-        free_caller: &mut Vec<crate::backend::PhysicalReg>,
-        free_callee: &mut Vec<crate::backend::PhysicalReg>,
-        next_spill_idx: &mut u32,
-        result: &mut RegAllocResult,
-        current_weight: u32,
+        ctx: &mut AllocContext<'_>,
     ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError>
     {
+        let active = &mut *ctx.active;
+        let next_spill_idx = &mut *ctx.next_spill_idx;
+        let result = &mut *ctx.result;
+        let current_weight = ctx.current_weight;
+
         if active.is_empty() {
             let slot_idx = *next_spill_idx;
             *next_spill_idx += 1;
@@ -4135,9 +4149,9 @@ impl TargetAgnosticRegAlloc {
 
         // Return the freed register to the appropriate pool.
         if self.is_callee_saved(evict_reg) {
-            free_callee.push(evict_reg);
+            ctx.free_callee.push(evict_reg);
         } else {
-            free_caller.push(evict_reg);
+            ctx.free_caller.push(evict_reg);
         }
 
         active.push((interval.vreg, evict_reg, interval.end, current_weight));
