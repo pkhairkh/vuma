@@ -68,8 +68,6 @@ fn make_program() -> Vec<IRFunction> {
 fn wave9_parallel_regalloc_matches_sequential() {
     // Run register allocation sequentially and in parallel, verify the
     // results are identical (same vreg→physical-reg mappings).
-    use rayon::prelude::*;
-
     let funcs = make_program();
     let allocator = LinearScanAllocator::new();
 
@@ -78,10 +76,13 @@ fn wave9_parallel_regalloc_matches_sequential() {
         .map(|f| allocator.allocate_function(f))
         .collect();
 
-    // Parallel
-    let parallel: Vec<_> = funcs.par_iter()
-        .map(|f| allocator.allocate_function(f))
-        .collect();
+    // Parallel (using std::thread::scope instead of rayon)
+    let parallel: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = funcs.iter()
+            .map(|f| s.spawn(|| allocator.allocate_function(f)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
     // Both must succeed
     for (s, p) in sequential.iter().zip(parallel.iter()) {
@@ -119,14 +120,15 @@ fn wave9_parallel_regalloc_matches_sequential() {
 fn wave9_parallel_regalloc_handles_errors() {
     // Parallel regalloc must correctly propagate errors (e.g., from a
     // function with too many live registers to allocate).
-    use rayon::prelude::*;
-
     let funcs = make_program();
     let allocator = LinearScanAllocator::new();
 
-    let results: Vec<_> = funcs.par_iter()
-        .map(|f| allocator.allocate_function(f))
-        .collect();
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = funcs.iter()
+            .map(|f| s.spawn(|| allocator.allocate_function(f)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
     // All should succeed (these are simple functions).
     assert_eq!(results.len(), 3);

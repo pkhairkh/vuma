@@ -2029,7 +2029,7 @@ mod tests {
             }),
         };
 
-        let added = DiffEntry::NodeAdded(node_data.clone());
+        let added = DiffEntry::NodeAdded(Box::new(node_data.clone()));
         assert!(added.is_addition());
         assert!(!added.is_removal());
         assert!(!added.is_modification());
@@ -2041,8 +2041,8 @@ mod tests {
 
         let modified = DiffEntry::NodeModified {
             id: NodeId::new(0),
-            old: node_data.clone(),
-            new: node_data,
+            old: Box::new(node_data.clone()),
+            new: Box::new(node_data),
         };
         assert!(!modified.is_addition());
         assert!(!modified.is_removal());
@@ -2090,7 +2090,7 @@ mod tests {
         .unwrap();
 
         // Try to add a node that already exists
-        let diff = SCGDiff::from_entries(vec![DiffEntry::NodeAdded(NodeData {
+        let diff = SCGDiff::from_entries(vec![DiffEntry::NodeAdded(Box::new(NodeData {
             id: NodeId::new(0),
             node_type: NodeType::Phantom,
             annotation: None,
@@ -2098,7 +2098,7 @@ mod tests {
             payload: NodePayload::Phantom(PhantomNode {
                 purpose: "dup".to_string(),
             }),
-        })]);
+        }))]);
 
         let result = apply_diff(&mut scg, &diff);
         assert!(matches!(result, Err(DiffError::DuplicateNode(_))));
