@@ -10,7 +10,8 @@
 //!   functions on [`VumaForLLM`].
 //! - **Always returns data**: Errors are captured as diagnostics rather than
 //!   panics or `Err` variants.
-//! - **JSON-friendly**: All result types derive `Serialize`/`Deserialize`.
+//! - **JSON-friendly**: All result types provide a `to_json_value()` method
+//!   that emits a [`JsonValue`](crate::json_value::JsonValue).
 //! - **Natural language**: Explanations and suggestions are in plain English,
 //!   suitable for LLM reasoning chains.
 //!
@@ -33,14 +34,13 @@
 //!
 //! // SCG analysis for LLM reasoning
 //! let scg = VumaForLLM::analyze(source).unwrap();
-//! println!("SCG: {}", serde_json::to_string_pretty(&scg).unwrap());
+//! println!("{}", scg.to_string_pretty());
 //! ```
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
-
 use crate::diagnostics::{code_description, VumaDiagnostic};
+use crate::json_value::{json_str, JsonValue};
 use crate::pipeline::{self, CompileConfig};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -90,7 +90,7 @@ impl VumaForLLM {
 
                 // Get SCG JSON if available (using the SCG's built-in LLM
                 // structured output rather than raw Serialize).
-                let scg_json = serde_json::from_str(&output.scg.to_json()).ok();
+                let scg_json = crate::json_value::parse(&output.scg.to_json()).ok();
 
                 // Try Wasm compilation as well.
                 let wasm_binary = match pipeline::compile_to_wasm(source) {
@@ -237,9 +237,9 @@ impl VumaForLLM {
     ///
     /// ```rust,ignore
     /// let scg_json = VumaForLLM::analyze("fn main() { x = 1 + 2; }").unwrap();
-    /// println!("{}", serde_json::to_string_pretty(&scg_json).unwrap());
+    /// println!("{}", scg_json.to_string_pretty());
     /// ```
-    pub fn analyze(source: &str) -> Result<serde_json::Value, String> {
+    pub fn analyze(source: &str) -> Result<JsonValue, String> {
         use vuma_parser::{AstToScg, Parser};
 
         // Parse
@@ -265,7 +265,7 @@ impl VumaForLLM {
 
         // Use the SCG's built-in structured output for LLMs.
         let json_str = scg.to_json();
-        serde_json::from_str(&json_str)
+        crate::json_value::parse(&json_str)
             .map_err(|e| format!("SCG JSON serialization failed: {}", e))
     }
 
@@ -510,7 +510,7 @@ impl VumaForLLM {
 /// Contains everything an LLM needs to reason about the compilation
 /// outcome: success status, diagnostics, natural language explanation,
 /// SCG analysis, Wasm binary, and binary sizes per target.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LLMCompileResult {
     /// Whether compilation succeeded.
     pub success: bool,
@@ -519,18 +519,57 @@ pub struct LLMCompileResult {
     /// Natural language summary of the compilation result.
     pub explanation: String,
     /// SCG serialised as JSON for LLM reasoning (present if parsing succeeded).
-    pub scg_json: Option<serde_json::Value>,
+    pub scg_json: Option<JsonValue>,
     /// Wasm binary for sandboxed execution (present if Wasm compilation succeeded).
     pub wasm_binary: Option<Vec<u8>>,
     /// Binary sizes per target (e.g., "aarch64-linux" → 1234).
     pub binary_sizes: HashMap<String, usize>,
 }
 
+impl LLMCompileResult {
+    /// Serialize this result as a compact JSON string.
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string_compact()
+    }
+
+    /// Serialize this result as a pretty-printed JSON string.
+    pub fn to_json_pretty(&self) -> String {
+        self.to_json_value().to_string_pretty()
+    }
+
+    /// Build the [`JsonValue`] representation of this result.
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut binary_sizes_entries: Vec<(String, JsonValue)> = self
+            .binary_sizes
+            .iter()
+            .map(|(k, v)| (k.clone(), JsonValue::U64(*v as u64)))
+            .collect();
+        binary_sizes_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut entries = vec![
+            ("success".to_string(), JsonValue::Bool(self.success)),
+            ("diagnostics".to_string(), JsonValue::Array(
+                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
+            )),
+            ("explanation".to_string(), json_str(&self.explanation)),
+            ("binary_sizes".to_string(), JsonValue::Object(binary_sizes_entries)),
+        ];
+        if let Some(s) = &self.scg_json {
+            entries.push(("scg_json".to_string(), s.clone()));
+        }
+        if let Some(w) = &self.wasm_binary {
+            let hex: String = w.iter().map(|b| format!("{:02x}", b)).collect();
+            entries.push(("wasm_binary".to_string(), json_str(hex)));
+        }
+        JsonValue::Object(entries)
+    }
+}
+
 /// Information about a supported compilation target.
 ///
 /// Simplified version of [`ApiTargetInfo`](crate::api::ApiTargetInfo)
 /// for the LLM API surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LLMTargetInfo {
     /// ISA name (e.g., "x86_64", "aarch64").
     pub name: String,
@@ -542,6 +581,19 @@ pub struct LLMTargetInfo {
     pub endianness: String,
     /// Output binary format ("elf64", "elf32", "wasm", "raw").
     pub output_format: String,
+}
+
+impl LLMTargetInfo {
+    /// Build the [`JsonValue`] representation of this target info.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("name".to_string(), json_str(&self.name)),
+            ("triple".to_string(), json_str(&self.triple)),
+            ("pointer_width".to_string(), JsonValue::U64(self.pointer_width as u64)),
+            ("endianness".to_string(), json_str(&self.endianness)),
+            ("output_format".to_string(), json_str(&self.output_format)),
+        ])
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

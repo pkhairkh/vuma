@@ -678,9 +678,9 @@ fn prop_verify_report_serializable() {
     for &program in SAMPLE_VUMA_PROGRAMS {
         let report = compiler.verify(program);
 
-        let json_result = serde_json::to_string(&report);
+        let json_result = report.to_json();
         assert!(
-            json_result.is_ok(),
+            !json_result.is_empty(),
             "VerificationReport should always be serializable"
         );
     }

@@ -28,16 +28,17 @@ pub mod compilation_speed;
 pub mod backend_comparison;
 pub mod codegen_quality;
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
+
+use vuma::json_value::JsonValue;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Core types
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The result of a single benchmark measurement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BenchmarkResult {
     /// Benchmark name (e.g., "sha256d/aarch64").
     pub name: String,
@@ -48,8 +49,7 @@ pub struct BenchmarkResult {
     /// Number of iterations measured.
     pub iterations: usize,
     /// Optional extra data (e.g., binary size, instruction count).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra: Option<serde_json::Value>,
+    pub extra: Option<JsonValue>,
 }
 
 impl BenchmarkResult {
@@ -65,10 +65,10 @@ impl BenchmarkResult {
     }
 
     /// Create with extra JSON data.
-    pub fn with_extra(mut self, key: &str, value: impl Serialize) -> Self {
-        let extra = self.extra.get_or_insert_with(|| serde_json::Value::Object(Default::default()));
-        if let serde_json::Value::Object(map) = extra {
-            map.insert(key.to_string(), serde_json::to_value(&value).unwrap_or_default());
+    pub fn with_extra(mut self, key: &str, value: impl Into<JsonValue>) -> Self {
+        let extra = self.extra.get_or_insert_with(|| JsonValue::Object(vec![]));
+        if let JsonValue::Object(entries) = extra {
+            entries.push((key.to_string(), value.into()));
         }
         self
     }
@@ -98,7 +98,7 @@ impl fmt::Display for BenchmarkResult {
 }
 
 /// A complete benchmark suite report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BenchmarkSuiteReport {
     /// All benchmark results.
     pub results: Vec<BenchmarkResult>,

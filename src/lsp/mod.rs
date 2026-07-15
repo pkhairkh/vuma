@@ -28,9 +28,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read as IoRead, Write as IoWrite};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use serde_json::json;
+use crate::json_value::{json_str, JsonValue};
 
 use vuma_parser::lexer::{Lexer, TokenKind};
 use vuma_parser::parser::Parser;
@@ -44,7 +42,7 @@ use vuma_parser::error::Span;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// A position in a text document (0-based line and character).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Position {
     /// Line position (0-based).
     pub line: u32,
@@ -57,10 +55,18 @@ impl Position {
     pub fn new(line: u32, character: u32) -> Self {
         Self { line, character }
     }
+
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("line".to_string(), JsonValue::U64(self.line as u64)),
+            ("character".to_string(), JsonValue::U64(self.character as u64)),
+        ])
+    }
 }
 
 /// A range in a text document expressed as (start, end) positions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Range {
     /// Start position (inclusive).
     pub start: Position,
@@ -79,11 +85,18 @@ impl Range {
         let pos = Position::new(line, character);
         Self { start: pos.clone(), end: pos }
     }
+
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("start".to_string(), self.start.to_json_value()),
+            ("end".to_string(), self.end.to_json_value()),
+        ])
+    }
 }
 
 /// Diagnostic severity levels (LSP spec).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticSeverity {
     /// Reports an error.
     Error = 1,
@@ -95,28 +108,50 @@ pub enum DiagnosticSeverity {
     Hint = 4,
 }
 
+impl DiagnosticSeverity {
+    /// Returns the LSP numeric severity value.
+    pub fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+}
+
 /// A diagnostic item (LSP spec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct Diagnostic {
     /// The range at which the message applies.
     pub range: Range,
     /// The diagnostic's severity.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<DiagnosticSeverity>,
     /// The diagnostic's code.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<Value>,
+    pub code: Option<JsonValue>,
     /// A human-readable source of this diagnostic.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// The diagnostic message.
     pub message: String,
 }
 
+impl Diagnostic {
+    /// Build the [`JsonValue`] representation (camelCase field names).
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("range".to_string(), self.range.to_json_value()),
+            ("message".to_string(), json_str(&self.message)),
+        ];
+        if let Some(s) = self.severity {
+            entries.push(("severity".to_string(), JsonValue::U64(s.as_u32() as u64)));
+        }
+        if let Some(c) = &self.code {
+            entries.push(("code".to_string(), c.clone()));
+        }
+        if let Some(s) = &self.source {
+            entries.push(("source".to_string(), json_str(s)));
+        }
+        JsonValue::Object(entries)
+    }
+}
+
 /// Completion item kind (LSP spec subset).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionItemKind {
     /// Text completion.
     Text = 1,
@@ -170,38 +205,67 @@ pub enum CompletionItemKind {
     TypeParameter = 25,
 }
 
+impl CompletionItemKind {
+    /// Returns the LSP numeric kind.
+    pub fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+}
+
 /// A completion item (LSP spec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct CompletionItem {
     /// The label of this completion item.
     pub label: String,
     /// The kind of this completion item.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<CompletionItemKind>,
     /// A human-readable string with additional information.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// A human-readable string that represents a doc-comment.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
     /// A string that should be used when comparing this item with others.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_text: Option<String>,
     /// A string that should be used when filtering a set of completion items.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_text: Option<String>,
     /// An edit which is applied to a document when selecting this completion.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text_edit: Option<Value>,
+    pub text_edit: Option<JsonValue>,
     /// Additional text edits.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_text_edits: Option<Vec<Value>>,
+    pub additional_text_edits: Option<Vec<JsonValue>>,
+}
+
+impl CompletionItem {
+    /// Build the [`JsonValue`] representation (camelCase field names).
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("label".to_string(), json_str(&self.label)),
+        ];
+        if let Some(k) = self.kind {
+            entries.push(("kind".to_string(), JsonValue::U64(k.as_u32() as u64)));
+        }
+        if let Some(d) = &self.detail {
+            entries.push(("detail".to_string(), json_str(d)));
+        }
+        if let Some(d) = &self.documentation {
+            entries.push(("documentation".to_string(), json_str(d)));
+        }
+        if let Some(s) = &self.sort_text {
+            entries.push(("sortText".to_string(), json_str(s)));
+        }
+        if let Some(f) = &self.filter_text {
+            entries.push(("filterText".to_string(), json_str(f)));
+        }
+        if let Some(t) = &self.text_edit {
+            entries.push(("textEdit".to_string(), t.clone()));
+        }
+        if let Some(a) = &self.additional_text_edits {
+            entries.push(("additionalTextEdits".to_string(), JsonValue::Array(a.clone())));
+        }
+        JsonValue::Object(entries)
+    }
 }
 
 /// Symbol kind (LSP spec subset).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     /// A file.
     File = 1,
@@ -237,9 +301,15 @@ pub enum SymbolKind {
     TypeParameter = 26,
 }
 
+impl SymbolKind {
+    /// Returns the LSP numeric kind.
+    pub fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+}
+
 /// A document symbol (LSP spec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct DocumentSymbol {
     /// The name of this symbol.
     pub name: String,
@@ -250,11 +320,30 @@ pub struct DocumentSymbol {
     /// The range that should be selected and revealed.
     pub selection_range: Range,
     /// Children of this symbol.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<DocumentSymbol>>,
     /// Detail string.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+impl DocumentSymbol {
+    /// Build the [`JsonValue`] representation (camelCase field names).
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("name".to_string(), json_str(&self.name)),
+            ("kind".to_string(), JsonValue::U64(self.kind.as_u32() as u64)),
+            ("range".to_string(), self.range.to_json_value()),
+            ("selectionRange".to_string(), self.selection_range.to_json_value()),
+        ];
+        if let Some(d) = &self.detail {
+            entries.push(("detail".to_string(), json_str(d)));
+        }
+        if let Some(c) = &self.children {
+            entries.push(("children".to_string(), JsonValue::Array(
+                c.iter().map(|x| x.to_json_value()).collect(),
+            )));
+        }
+        JsonValue::Object(entries)
+    }
 }
 
 /// Semantic token types (LSP spec).
@@ -325,12 +414,26 @@ impl SemanticTokenType {
 }
 
 /// The legend that defines the token types and modifiers used in semantic tokens.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SemanticTokensLegend {
     /// The token types a server uses.
     pub token_types: Vec<String>,
     /// The token modifiers a server uses.
     pub token_modifiers: Vec<String>,
+}
+
+impl SemanticTokensLegend {
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("tokenTypes".to_string(), JsonValue::Array(
+                self.token_types.iter().map(|s| json_str(s)).collect(),
+            )),
+            ("tokenModifiers".to_string(), JsonValue::Array(
+                self.token_modifiers.iter().map(|s| json_str(s)).collect(),
+            )),
+        ])
+    }
 }
 
 impl Default for SemanticTokensLegend {
@@ -373,15 +476,25 @@ impl Default for SemanticTokensLegend {
 }
 
 /// Semantic tokens result (LSP spec, relative encoding).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct SemanticTokens {
     /// The actual tokens data, using relative encoding (delta encoding).
     pub data: Vec<u32>,
 }
 
+impl SemanticTokens {
+    /// Build the [`JsonValue`] representation (camelCase field names).
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("data".to_string(), JsonValue::Array(
+                self.data.iter().map(|n| JsonValue::U64(*n as u64)).collect(),
+            )),
+        ])
+    }
+}
+
 /// Location in a document (LSP spec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Location {
     /// The URI of the document.
     pub uri: String,
@@ -389,15 +502,36 @@ pub struct Location {
     pub range: Range,
 }
 
+impl Location {
+    /// Build the [`JsonValue`] representation.
+    pub fn to_json_value(&self) -> JsonValue {
+        JsonValue::Object(vec![
+            ("uri".to_string(), json_str(&self.uri)),
+            ("range".to_string(), self.range.to_json_value()),
+        ])
+    }
+}
+
 /// Hover result (LSP spec).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct Hover {
     /// The hover's content.
-    pub contents: Value,
+    pub contents: JsonValue,
     /// An optional range.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<Range>,
+}
+
+impl Hover {
+    /// Build the [`JsonValue`] representation (camelCase field names).
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut entries = vec![
+            ("contents".to_string(), self.contents.clone()),
+        ];
+        if let Some(r) = &self.range {
+            entries.push(("range".to_string(), r.to_json_value()));
+        }
+        JsonValue::Object(entries)
+    }
 }
 
 /// A stored VUMA document.
@@ -520,7 +654,7 @@ impl LspServer {
         loop {
             match read_message() {
                 Ok(Some(msg)) => {
-                    if let Ok(value) = serde_json::from_str::<Value>(&msg) {
+                    if let Ok(value) = crate::json_value::parse(&msg) {
                         self.handle_message(value);
                     }
                 }
@@ -537,7 +671,7 @@ impl LspServer {
     }
 
     /// Dispatch an incoming JSON-RPC message.
-    fn handle_message(&mut self, value: Value) {
+    fn handle_message(&mut self, value: JsonValue) {
         let id = value.get("id").cloned();
         let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -547,7 +681,7 @@ impl LspServer {
         match method {
             "initialize" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_initialize(params);
                     self.send_response(id_val.clone(), Ok(result));
                 }
@@ -559,55 +693,55 @@ impl LspServer {
             "shutdown" => {
                 if let Some(ref id_val) = id {
                     self.shutting_down = true;
-                    self.send_response(id_val.clone(), Ok(Value::Null));
+                    self.send_response(id_val.clone(), Ok(JsonValue::Null));
                 }
             }
             "exit" => {
                 self.shutting_down = true;
             }
             "textDocument/didOpen" => {
-                let params = value.get("params").cloned().unwrap_or(Value::Null);
+                let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                 self.handle_text_document_did_open(params);
             }
             "textDocument/didChange" => {
-                let params = value.get("params").cloned().unwrap_or(Value::Null);
+                let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                 self.handle_text_document_did_change(params);
             }
             "textDocument/didClose" => {
-                let params = value.get("params").cloned().unwrap_or(Value::Null);
+                let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                 self.handle_text_document_did_close(params);
             }
             "textDocument/completion" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_text_document_completion(params);
                     self.send_response(id_val.clone(), Ok(result));
                 }
             }
             "textDocument/hover" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_text_document_hover(params);
                     self.send_response(id_val.clone(), result);
                 }
             }
             "textDocument/definition" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_text_document_definition(params);
                     self.send_response(id_val.clone(), Ok(result));
                 }
             }
             "textDocument/documentSymbol" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_text_document_symbols(params);
                     self.send_response(id_val.clone(), Ok(result));
                 }
             }
             "textDocument/semanticTokens/full" => {
                 if let Some(ref id_val) = id {
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned().unwrap_or(JsonValue::Null);
                     let result = self.handle_text_document_semantic_tokens_full(params);
                     self.send_response(id_val.clone(), Ok(result));
                 }
@@ -621,10 +755,13 @@ impl LspServer {
                     if let Some(ref id_val) = id {
                         self.send_response(
                             id_val.clone(),
-                            Err(json!({
-                                "code": -32601,
-                                "message": format!("Method not found: {}", method)
-                            })),
+                            Err(JsonValue::Object(vec![
+                                ("code".to_string(), JsonValue::I64(-32601)),
+                                ("message".to_string(), json_str(format!(
+                                    "Method not found: {}",
+                                    method
+                                ))),
+                            ])),
                         );
                     }
                 }
@@ -633,31 +770,31 @@ impl LspServer {
     }
 
     /// Send a JSON-RPC response.
-    fn send_response(&mut self, id: Value, result: Result<Value, Value>) {
-        let mut response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-        });
+    fn send_response(&mut self, id: JsonValue, result: Result<JsonValue, JsonValue>) {
+        let mut response = JsonValue::Object(vec![
+            ("jsonrpc".to_string(), json_str("2.0")),
+            ("id".to_string(), id),
+        ]);
         match result {
             Ok(val) => {
-                response["result"] = val;
+                response.insert("result", val);
             }
             Err(err) => {
-                response["error"] = err;
+                response.insert("error", err);
             }
         }
-        let msg = serde_json::to_string(&response).unwrap_or_default();
+        let msg = response.to_string_compact();
         let _ = write_message(&msg);
     }
 
     /// Send a JSON-RPC notification.
-    fn send_notification(&mut self, method: &str, params: Value) {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        let msg = serde_json::to_string(&notification).unwrap_or_default();
+    fn send_notification(&mut self, method: &str, params: JsonValue) {
+        let notification = JsonValue::Object(vec![
+            ("jsonrpc".to_string(), json_str("2.0")),
+            ("method".to_string(), json_str(method)),
+            ("params".to_string(), params),
+        ]);
+        let msg = notification.to_string_compact();
         let _ = write_message(&msg);
     }
 
@@ -666,38 +803,40 @@ impl LspServer {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Handle the `initialize` request.
-    pub fn handle_initialize(&mut self, _params: Value) -> Value {
+    pub fn handle_initialize(&mut self, _params: JsonValue) -> JsonValue {
         self.initialized = true;
-        json!({
-            "capabilities": {
-                "textDocumentSync": {
-                    "openClose": true,
-                    "change": 1, // Full document sync
-                },
-                "completionProvider": {
-                    "triggerCharacters": [".", ":"],
-                    "resolveProvider": false,
-                },
-                "hoverProvider": true,
-                "definitionProvider": true,
-                "documentSymbolProvider": true,
-                "semanticTokensProvider": {
-                    "full": true,
-                    "delta": false,
-                    "range": false,
-                    "legend": SemanticTokensLegend::default(),
-                },
-                "workspace": {
-                    "workspaceFolders": {
-                        "supported": true,
-                    }
-                },
-            }
-        })
+        JsonValue::Object(vec![
+            ("capabilities".to_string(), JsonValue::Object(vec![
+                ("textDocumentSync".to_string(), JsonValue::Object(vec![
+                    ("openClose".to_string(), JsonValue::Bool(true)),
+                    ("change".to_string(), JsonValue::U64(1)), // Full document sync
+                ])),
+                ("completionProvider".to_string(), JsonValue::Object(vec![
+                    ("triggerCharacters".to_string(), JsonValue::Array(vec![
+                        json_str("."), json_str(":"),
+                    ])),
+                    ("resolveProvider".to_string(), JsonValue::Bool(false)),
+                ])),
+                ("hoverProvider".to_string(), JsonValue::Bool(true)),
+                ("definitionProvider".to_string(), JsonValue::Bool(true)),
+                ("documentSymbolProvider".to_string(), JsonValue::Bool(true)),
+                ("semanticTokensProvider".to_string(), JsonValue::Object(vec![
+                    ("full".to_string(), JsonValue::Bool(true)),
+                    ("delta".to_string(), JsonValue::Bool(false)),
+                    ("range".to_string(), JsonValue::Bool(false)),
+                    ("legend".to_string(), SemanticTokensLegend::default().to_json_value()),
+                ])),
+                ("workspace".to_string(), JsonValue::Object(vec![
+                    ("workspaceFolders".to_string(), JsonValue::Object(vec![
+                        ("supported".to_string(), JsonValue::Bool(true)),
+                    ])),
+                ])),
+            ])),
+        ])
     }
 
     /// Handle `textDocument/didOpen` notification.
-    pub fn handle_text_document_did_open(&mut self, params: Value) {
+    pub fn handle_text_document_did_open(&mut self, params: JsonValue) {
         let text_doc = params.get("textDocument");
         if let Some(td) = text_doc {
             let uri = td.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -717,7 +856,7 @@ impl LspServer {
     }
 
     /// Handle `textDocument/didChange` notification.
-    pub fn handle_text_document_did_change(&mut self, params: Value) {
+    pub fn handle_text_document_did_change(&mut self, params: JsonValue) {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -753,7 +892,7 @@ impl LspServer {
     }
 
     /// Handle `textDocument/didClose` notification.
-    fn handle_text_document_did_close(&mut self, params: Value) {
+    fn handle_text_document_did_close(&mut self, params: JsonValue) {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -770,7 +909,7 @@ impl LspServer {
     }
 
     /// Handle `textDocument/completion` request.
-    pub fn handle_text_document_completion(&self, params: Value) -> Value {
+    pub fn handle_text_document_completion(&self, params: JsonValue) -> JsonValue {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -921,14 +1060,16 @@ impl LspServer {
             });
         }
 
-        json!({
-            "isIncomplete": false,
-            "items": items,
-        })
+        JsonValue::Object(vec![
+            ("isIncomplete".to_string(), JsonValue::Bool(false)),
+            ("items".to_string(), JsonValue::Array(
+                items.iter().map(|i| i.to_json_value()).collect(),
+            )),
+        ])
     }
 
     /// Handle `textDocument/hover` request.
-    pub fn handle_text_document_hover(&self, params: Value) -> Result<Value, Value> {
+    pub fn handle_text_document_hover(&self, params: JsonValue) -> Result<JsonValue, JsonValue> {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -948,19 +1089,28 @@ impl LspServer {
         // Get the word at position from document text
         let doc = match self.documents.get(uri) {
             Some(d) => d,
-            None => return Ok(Value::Null),
+            None => return Ok(JsonValue::Null),
         };
 
         let word = self.word_at_position(&doc.text, line, character);
 
         if word.is_empty() {
-            return Ok(Value::Null);
+            return Ok(JsonValue::Null);
         }
 
         // Look up in document info
         let info = match self.info_cache.get(uri) {
             Some(i) => i,
-            None => return Ok(Value::Null),
+            None => return Ok(JsonValue::Null),
+        };
+
+        // Helper to build a Hover value with markdown contents.
+        let build_hover = |markdown: String, range: Range| Hover {
+            contents: JsonValue::Object(vec![
+                ("kind".to_string(), json_str("markdown")),
+                ("value".to_string(), json_str(markdown)),
+            ]),
+            range: Some(range),
         };
 
         // Check functions
@@ -968,13 +1118,7 @@ impl LspServer {
             if name == &word {
                 let type_str = ret_ty.as_deref().unwrap_or("()");
                 let markdown = format!("```vuma\nfn {}(...) -> {}\n```", name, type_str);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -983,13 +1127,7 @@ impl LspServer {
             if name == &word {
                 let type_str = ty.as_deref().unwrap_or("unknown");
                 let markdown = format!("```vuma\nlet {}: {}\n```", name, type_str);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -998,13 +1136,7 @@ impl LspServer {
             if name == &word {
                 let type_str = ty.as_deref().unwrap_or("unknown");
                 let markdown = format!("```vuma\nconst {}: {}\n```", name, type_str);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -1012,13 +1144,7 @@ impl LspServer {
         for (name, range) in &info.structs {
             if name == &word {
                 let markdown = format!("```vuma\nstruct {}\n```", name);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -1026,13 +1152,7 @@ impl LspServer {
         for (name, range) in &info.enums {
             if name == &word {
                 let markdown = format!("```vuma\nenum {}\n```", name);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -1040,13 +1160,7 @@ impl LspServer {
         for (name, range) in &info.regions {
             if name == &word {
                 let markdown = format!("```vuma\nregion {}\n```", name);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
@@ -1054,21 +1168,15 @@ impl LspServer {
         for (name, range) in &info.traits {
             if name == &word {
                 let markdown = format!("```vuma\ntrait {}\n```", name);
-                return Ok(serde_json::to_value(Hover {
-                    contents: json!({
-                        "kind": "markdown",
-                        "value": markdown,
-                    }),
-                    range: Some(range.clone()),
-                }).unwrap_or(Value::Null));
+                return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
 
-        Ok(Value::Null)
+        Ok(JsonValue::Null)
     }
 
     /// Handle `textDocument/definition` request.
-    pub fn handle_text_document_definition(&self, params: Value) -> Value {
+    pub fn handle_text_document_definition(&self, params: JsonValue) -> JsonValue {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -1087,98 +1195,74 @@ impl LspServer {
 
         let doc = match self.documents.get(uri) {
             Some(d) => d,
-            None => return Value::Null,
+            None => return JsonValue::Null,
         };
 
         let word = self.word_at_position(&doc.text, line, character);
         if word.is_empty() {
-            return Value::Null;
+            return JsonValue::Null;
         }
 
         let info = match self.info_cache.get(uri) {
             Some(i) => i,
-            None => return Value::Null,
+            None => return JsonValue::Null,
         };
 
-        // Search all definition locations for matching name
+        // Helper to build a Location value.
+        let build_location = |range: Range| Location {
+            uri: uri.to_string(),
+            range,
+        };
 
         // For functions/constants/variables (3-tuples)
         for (name, range, _) in &info.functions {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         for (name, range, _) in &info.constants {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         for (name, range, _) in &info.variables {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         // For structs/enums/regions/traits (2-tuples)
         for (name, range) in &info.structs {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         for (name, range) in &info.enums {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         for (name, range) in &info.regions {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
         for (name, range) in &info.traits {
             if name == &word {
-                return serde_json::to_value(Location {
-                    uri: uri.to_string(),
-                    range: range.clone(),
-                })
-                .unwrap_or(Value::Null);
+                return build_location(range.clone()).to_json_value();
             }
         }
 
-        Value::Null
+        JsonValue::Null
     }
 
     /// Handle `textDocument/documentSymbol` request.
-    pub fn handle_text_document_symbols(&self, params: Value) -> Value {
+    pub fn handle_text_document_symbols(&self, params: JsonValue) -> JsonValue {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -1187,7 +1271,7 @@ impl LspServer {
 
         let info = match self.info_cache.get(uri) {
             Some(i) => i,
-            None => return json!([]),
+            None => return JsonValue::Array(vec![]),
         };
 
         let mut symbols: Vec<DocumentSymbol> = Vec::new();
@@ -1266,11 +1350,11 @@ impl LspServer {
             });
         }
 
-        serde_json::to_value(&symbols).unwrap_or(json!([]))
+        JsonValue::Array(symbols.iter().map(|s| s.to_json_value()).collect())
     }
 
     /// Handle `textDocument/semanticTokens/full` request.
-    pub fn handle_text_document_semantic_tokens_full(&self, params: Value) -> Value {
+    pub fn handle_text_document_semantic_tokens_full(&self, params: JsonValue) -> JsonValue {
         let uri = params
             .get("textDocument")
             .and_then(|td| td.get("uri"))
@@ -1279,25 +1363,23 @@ impl LspServer {
 
         let doc = match self.documents.get(uri) {
             Some(d) => d,
-            None => {
-                return serde_json::to_value(SemanticTokens { data: vec![] })
-                    .unwrap_or(json!({ "data": [] }));
-            }
+            None => return SemanticTokens { data: vec![] }.to_json_value(),
         };
 
         let tokens = self.compute_semantic_tokens(&doc.text);
-        serde_json::to_value(SemanticTokens { data: tokens })
-            .unwrap_or(json!({ "data": [] }))
+        SemanticTokens { data: tokens }.to_json_value()
     }
 
     /// Publish diagnostics for a document.
     pub fn publish_diagnostics(&mut self, uri: &str, diagnostics: Vec<Diagnostic>) {
         self.send_notification(
             "textDocument/publishDiagnostics",
-            json!({
-                "uri": uri,
-                "diagnostics": diagnostics,
-            }),
+            JsonValue::Object(vec![
+                ("uri".to_string(), json_str(uri)),
+                ("diagnostics".to_string(), JsonValue::Array(
+                    diagnostics.iter().map(|d| d.to_json_value()).collect(),
+                )),
+            ]),
         );
     }
 
@@ -1719,11 +1801,11 @@ mod tests {
     #[test]
     fn test_initialize_response() {
         let mut server = LspServer::new();
-        let result = server.handle_initialize(Value::Null);
+        let result = server.handle_initialize(JsonValue::Null);
         assert!(server.initialized);
         assert!(result.get("capabilities").is_some());
 
-        let caps = &result["capabilities"];
+        let caps = result.get("capabilities").unwrap();
         assert!(caps.get("textDocumentSync").is_some());
         assert!(caps.get("completionProvider").is_some());
         assert!(caps.get("hoverProvider").is_some());
@@ -1738,14 +1820,14 @@ mod tests {
         server.initialized = true;
 
         // Open a document with a syntax error
-        let params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn main( { }"
-            }
-        });
+        let params = JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str("file:///test.vuma")),
+                ("languageId".to_string(), json_str("vuma")),
+                ("version".to_string(), JsonValue::U64(1)),
+                ("text".to_string(), json_str("fn main( { }")),
+            ])),
+        ]);
 
         server.handle_text_document_did_open(params);
         assert!(server.documents.contains_key("file:///test.vuma"));
@@ -1757,26 +1839,28 @@ mod tests {
         server.initialized = true;
 
         // Open document
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn main() {}"
-            }
-        });
+        let open_params = JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str("file:///test.vuma")),
+                ("languageId".to_string(), json_str("vuma")),
+                ("version".to_string(), JsonValue::U64(1)),
+                ("text".to_string(), json_str("fn main() {}")),
+            ])),
+        ]);
         server.handle_text_document_did_open(open_params);
 
         // Change document
-        let change_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "version": 2,
-            },
-            "contentChanges": [{
-                "text": "fn main() {\n    let x = 42;\n}"
-            }]
-        });
+        let change_params = JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str("file:///test.vuma")),
+                ("version".to_string(), JsonValue::U64(2)),
+            ])),
+            ("contentChanges".to_string(), JsonValue::Array(vec![
+                JsonValue::Object(vec![
+                    ("text".to_string(), json_str("fn main() {\n    let x = 42;\n}")),
+                ]),
+            ])),
+        ]);
         server.handle_text_document_did_change(change_params);
 
         let doc = server.documents.get("file:///test.vuma").unwrap();
@@ -1784,25 +1868,46 @@ mod tests {
         assert!(doc.text.contains("let x = 42"));
     }
 
+    fn make_text_document_params(uri: &str, text: &str) -> JsonValue {
+        JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str(uri)),
+                ("languageId".to_string(), json_str("vuma")),
+                ("version".to_string(), JsonValue::U64(1)),
+                ("text".to_string(), json_str(text)),
+            ])),
+        ])
+    }
+
+    fn make_position_params(uri: &str, line: u64, character: u64) -> JsonValue {
+        JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str(uri)),
+            ])),
+            ("position".to_string(), JsonValue::Object(vec![
+                ("line".to_string(), JsonValue::U64(line)),
+                ("character".to_string(), JsonValue::U64(character)),
+            ])),
+        ])
+    }
+
+    fn make_doc_only_params(uri: &str) -> JsonValue {
+        JsonValue::Object(vec![
+            ("textDocument".to_string(), JsonValue::Object(vec![
+                ("uri".to_string(), json_str(uri)),
+            ])),
+        ])
+    }
+
     #[test]
     fn test_completion_keywords() {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn main() {}"
-            }
-        });
+        let open_params = make_text_document_params("file:///test.vuma", "fn main() {}");
         server.handle_text_document_did_open(open_params);
 
-        let completion_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" },
-            "position": { "line": 0, "character": 0 }
-        });
+        let completion_params = make_position_params("file:///test.vuma", 0, 0);
         let result = server.handle_text_document_completion(completion_params);
         let items = result.get("items").unwrap().as_array().unwrap();
 
@@ -1823,20 +1928,13 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn hello() {}\nstruct Foo {}\nregion pool = allocate(256);"
-            }
-        });
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn hello() {}\nstruct Foo {}\nregion pool = allocate(256);",
+        );
         server.handle_text_document_did_open(open_params);
 
-        let completion_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" },
-            "position": { "line": 0, "character": 0 }
-        });
+        let completion_params = make_position_params("file:///test.vuma", 0, 0);
         let result = server.handle_text_document_completion(completion_params);
         let items = result.get("items").unwrap().as_array().unwrap();
 
@@ -1853,25 +1951,18 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn add(a: u32, b: u32) -> u32 {\n    a + b\n}"
-            }
-        });
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn add(a: u32, b: u32) -> u32 {\n    a + b\n}",
+        );
         server.handle_text_document_did_open(open_params);
 
-        let hover_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" },
-            "position": { "line": 0, "character": 3 }
-        });
+        let hover_params = make_position_params("file:///test.vuma", 0, 3);
         let result = server.handle_text_document_hover(hover_params);
         assert!(result.is_ok());
         let value = result.unwrap();
         // Should contain function info
-        if value != Value::Null {
+        if value != JsonValue::Null {
             let contents = value.get("contents").unwrap();
             let markdown = contents.get("value").unwrap().as_str().unwrap();
             assert!(markdown.contains("fn add"));
@@ -1884,22 +1975,15 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "struct NodeHeader {\n    size: u32,\n}\nfn main() {}"
-            }
-        });
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "struct NodeHeader {\n    size: u32,\n}\nfn main() {}",
+        );
         server.handle_text_document_did_open(open_params);
 
-        let def_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" },
-            "position": { "line": 0, "character": 7 }
-        });
+        let def_params = make_position_params("file:///test.vuma", 0, 7);
         let result = server.handle_text_document_definition(def_params);
-        assert!(result != Value::Null);
+        assert!(result != JsonValue::Null);
         let uri = result.get("uri").unwrap().as_str().unwrap();
         assert_eq!(uri, "file:///test.vuma");
     }
@@ -1909,19 +1993,13 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn main() {}\nfn helper() {}\nstruct Data {\n    x: u32,\n}\nenum Color { Red, Blue }"
-            }
-        });
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn main() {}\nfn helper() {}\nstruct Data {\n    x: u32,\n}\nenum Color { Red, Blue }",
+        );
         server.handle_text_document_did_open(open_params);
 
-        let symbols_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" }
-        });
+        let symbols_params = make_doc_only_params("file:///test.vuma");
         let result = server.handle_text_document_symbols(symbols_params);
         let symbols = result.as_array().unwrap();
         // Should have: main, helper, Data, x, Color
@@ -1941,19 +2019,13 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = json!({
-            "textDocument": {
-                "uri": "file:///test.vuma",
-                "languageId": "vuma",
-                "version": 1,
-                "text": "fn main() {\n    let x = 42;\n}"
-            }
-        });
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn main() {\n    let x = 42;\n}",
+        );
         server.handle_text_document_did_open(open_params);
 
-        let tokens_params = json!({
-            "textDocument": { "uri": "file:///test.vuma" }
-        });
+        let tokens_params = make_doc_only_params("file:///test.vuma");
         let result = server.handle_text_document_semantic_tokens_full(tokens_params);
         let data = result.get("data").unwrap().as_array().unwrap();
         // Should have some tokens (at least fn, main, let, x, 42)

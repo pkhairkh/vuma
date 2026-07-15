@@ -58,6 +58,7 @@ mod vuma_log_w44 {
 pub mod api;
 pub mod diagnostics;
 pub mod ffi;
+pub mod json_value;
 pub mod llm_api;
 pub mod logging;
 pub mod lsp;

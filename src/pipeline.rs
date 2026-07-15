@@ -134,7 +134,7 @@ where
 
 /// The compilation target platform.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
 )]
 pub enum CompileTarget {
     /// Generic Linux user-space on AArch64.
@@ -156,7 +156,7 @@ impl fmt::Display for CompileTarget {
 
 /// Optimization level.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
 )]
 pub enum OptLevel {
     /// No optimisation — fastest compilation, best debuggability.
@@ -183,7 +183,7 @@ impl fmt::Display for OptLevel {
 
 /// Verification thoroughness level.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
 )]
 pub enum VerificationLevel {
     /// Skip verification entirely.
@@ -218,7 +218,7 @@ impl fmt::Display for VerificationLevel {
 }
 
 /// Full compilation configuration.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompileConfig {
     /// Target platform.
     pub target: CompileTarget,

@@ -600,8 +600,8 @@ fn test_llm_analyze_returns_scg_json() {
     let json = result.unwrap();
     assert!(json.is_object(), "SCG JSON should be an object");
     // Verify it's serialisable (round-trip test)
-    let serialized = serde_json::to_string(&json);
-    assert!(serialized.is_ok(), "SCG JSON should be serializable");
+    let serialized = json.to_string_compact();
+    assert!(!serialized.is_empty(), "SCG JSON should be serializable");
 }
 
 /// Test: VumaForLLM::to_wasm() returns valid Wasm binary.

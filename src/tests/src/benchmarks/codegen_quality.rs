@@ -50,7 +50,7 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
 }
 
 /// Results of codegen quality analysis.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CodegenQualityMetrics {
     /// Total number of IR load instructions.
     pub total_loads: usize,
