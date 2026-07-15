@@ -965,4 +965,47 @@ notes. The updated verdict tally below reflects the post-remediation state.
    switched from `OptLevel::O0` back to `OptLevel::O2` (the production
    default).
 
+---
+
+## Worklog — Wave 50 clippy paydown (post-remediation batch)
+
+### Task 9-b — clippy auto-fix (round 2)
+
+**Command run:** `cargo clippy --workspace --fix --allow-dirty --allow-staged`
+
+**Files changed (2):**
+- `src/codegen/src/sparc64.rs` — removed redundant outer-paren grouping in
+  `Instruction::Membar` and `Instruction::Movcc` word-encoding expressions
+  (clippy::double_parens machine-applicable).
+- `src/parser/src/to_scg.rs` — replaced two `for (_name, layout) in &table`
+  iteration patterns with `for layout in table.values()` (clippy::unused_variables
+  / explicit_values iteration).
+
+**Diff stat:** 2 files changed, 6 insertions(+), 6 deletions(-)
+
+**Clippy warnings (workspace, including per-crate `generated N warnings` summary lines):**
+- Before: 390
+- After:  385
+- Net reduction: 5
+
+**No `#[allow]` added. No shortcuts.** Remaining warnings are non-machine-
+applicable (e.g. `clippy::new_without_default` requires synthesizing a `Default`
+impl, MSRV-related lints, large-enum-variant lints) and are deferred to
+follow-up tasks.
+
+**Verification:**
+- `cargo check --workspace` → 0 errors (1 `redundant_semicolons` warning in
+  `src/main.rs:782`, pre-existing, not machine-applicable to clippy auto-fix
+  pipeline since it surfaces under `rustc` not `clippy`).
+- `cargo clippy --workspace` → 385 `^warning:` lines (down from 390).
+- `cargo test -p vuma-scg --lib`     → 218 passed / 0 failed (0.01s)
+- `cargo test -p vuma-bd --lib`      → 354 passed / 0 failed (0.01s)
+- `cargo test -p vuma-proof --lib`   → 126 passed / 0 failed (0.01s)
+- `cargo test -p vuma-tests --lib wave48`         → 9 passed / 0 failed (0.34s)
+- `cargo test -p vuma-tests --lib wave50`         → 9 passed / 0 failed (0.16s)
+- `cargo test -p vuma-codegen --lib vectorize`    → 11 passed / 0 failed (0.00s)
+
+**Commit:** `8e3d8cd294a7835ef655bc6c38da148f52efc3f4`
+  (`wave(50): clippy auto-fix — apply machine-applicable suggestions`)
+  — pushed to `origin/main` (`1343f61..8e3d8cd`).
 
