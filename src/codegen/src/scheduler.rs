@@ -75,10 +75,6 @@ impl BackendLatencyTable for UniformLatencyTable {
 /// A node in the data-dependence graph.
 #[derive(Debug, Clone)]
 struct DDGNode {
-    /// Index in the original instruction list.
-    idx: usize,
-    /// Instruction category for latency lookup.
-    category: &'static str,
     /// Latency of this instruction.
     latency: u8,
     /// Predecessors (instructions that must complete before this one).
@@ -87,8 +83,6 @@ struct DDGNode {
     succs: Vec<usize>,
     /// Critical-path length: longest latency path from this node to any leaf.
     critical_path: u32,
-    /// Earliest cycle this instruction can be issued.
-    earliest_start: u32,
 }
 
 /// Priority queue entry: higher critical_path = higher priority.
@@ -334,13 +328,10 @@ fn schedule_block_inner(
         }
 
         nodes.push(DDGNode {
-            idx: i,
-            category,
             latency,
             preds: preds.clone(),
             succs: Vec::new(),
             critical_path: 0,
-            earliest_start: 0,
         });
 
         // Update last_def for this instruction's defined registers.

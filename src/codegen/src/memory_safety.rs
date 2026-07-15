@@ -385,8 +385,6 @@ impl fmt::Display for MemorySafetyReport {
 /// Information about a tracked allocation within the codegen SCG.
 #[derive(Debug, Clone)]
 struct AllocationInfo {
-    /// Variable name of the allocation.
-    name: String,
     /// Whether this is a heap or stack allocation.
     is_heap: bool,
     /// Size in bytes (if known at compile time).
@@ -404,25 +402,15 @@ struct AllocationInfo {
 /// Information about a free/deallocation operation.
 #[derive(Debug, Clone)]
 struct FreeInfo {
-    /// Variable name being freed.
-    name: String,
     /// Source line number.
     line: Option<u32>,
-    /// Whether this is an explicit free or implicit (end of scope for stack).
-    is_explicit: bool,
 }
 
 /// Information about an access (load/store) to an allocation.
 #[derive(Debug, Clone)]
 struct AccessInfo {
-    /// Variable name being accessed.
-    name: String,
     /// Whether this is a read or write.
     is_read: bool,
-    /// Source line number.
-    line: Option<u32>,
-    /// Optional offset expression (for array indexing).
-    offset_expr: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -510,7 +498,6 @@ impl MemorySafetyAnalyzer {
                             allocations.insert(
                                 name.clone(),
                                 AllocationInfo {
-                                    name: name.clone(),
                                     is_heap: false,
                                     size: Some(*size),
                                     line: None,
@@ -524,7 +511,6 @@ impl MemorySafetyAnalyzer {
                             allocations.insert(
                                 name.clone(),
                                 AllocationInfo {
-                                    name: name.clone(),
                                     is_heap: true,
                                     size: None, // Dynamic size
                                     line: None,
@@ -538,25 +524,19 @@ impl MemorySafetyAnalyzer {
                 }
                 ScgStatement::Access(access) => {
                     match access {
-                        AccessNode::Load { dst, ptr, offset, .. } => {
+                        AccessNode::Load { ptr, .. } => {
                             let ptr_name = expr_to_name(ptr);
                             if let Some(info) = allocations.get_mut(&ptr_name) {
                                 info.accesses.push(AccessInfo {
-                                    name: dst.clone(),
                                     is_read: true,
-                                    line: None,
-                                    offset_expr: offset.as_ref().map(|e| format!("{:?}", e)),
                                 });
                             }
                         }
-                        AccessNode::Store { ptr, offset, value, .. } => {
+                        AccessNode::Store { ptr, .. } => {
                             let ptr_name = expr_to_name(ptr);
                             if let Some(info) = allocations.get_mut(&ptr_name) {
                                 info.accesses.push(AccessInfo {
-                                    name: expr_to_name(value),
                                     is_read: false,
-                                    line: None,
-                                    offset_expr: offset.as_ref().map(|e| format!("{:?}", e)),
                                 });
                             }
                         }
@@ -570,9 +550,7 @@ impl MemorySafetyAnalyzer {
                             let arg_name = expr_to_name(arg);
                             if let Some(info) = allocations.get_mut(&arg_name) {
                                 info.frees.push(FreeInfo {
-                                    name: arg_name.clone(),
                                     line: None,
-                                    is_explicit: true,
                                 });
                             }
                         }

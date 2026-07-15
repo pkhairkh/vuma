@@ -47,7 +47,9 @@ use crate::backend::{
     AllocatedFunction, AllocatedProgram, Backend,
     BackendError, LoongArch64TargetInfo, TargetInfo,
 };
-use crate::ir::{IRFunction, IRInstr};
+use crate::ir::IRFunction;
+#[cfg(test)]
+use crate::ir::IRInstr;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -388,14 +390,6 @@ fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
         | ((rk & 0x1F) << 10)
         | ((rj & 0x1F) << 5)
         | (rd & 0x1F);
-    word.to_le_bytes()
-}
-
-/// Encode a 2RI8 format instruction.
-///
-/// Format: `opcode[31:22] | I8[21:14] | rj[9:5] | rd[4:0]`
-fn encode_2ri8(opcode: u32, imm8: u32, rj: u32, rd: u32) -> [u8; 4] {
-    let word = ((opcode & 0x3FF) << 22) | ((imm8 & 0xFF) << 14) | ((rj & 0x1F) << 5) | (rd & 0x1F);
     word.to_le_bytes()
 }
 
@@ -2463,25 +2457,6 @@ impl Default for LoongArch64Backend {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Compute the stack frame size for an IR function on LoongArch64.
-///
-/// Sums `Alloc` instruction sizes, adds 16 bytes for the ra/fp save pair,
-/// and rounds up to 16-byte alignment.
-fn loongarch64_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: u32 = 16; // ra + fp save pair
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let IRInstr::Alloc { size, .. } = instr {
-                let aligned = (*size).div_ceil(16) * 16;
-                total += aligned;
-            }
-        }
-    }
-    // Round up to 16-byte alignment
-    total = (total + 15) & !15;
-    total as usize
 }
 
 impl Backend for LoongArch64Backend {

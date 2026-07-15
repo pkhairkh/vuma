@@ -719,6 +719,7 @@ fn slp_rewrite_block(block: &mut IRBlock) -> Vec<PackedOp> {
 ///
 /// **Read-only planning helper** — does NOT mutate `block`. Used by the SLP
 /// unit tests. The actual IR rewrite happens in `slp_rewrite_block` above.
+#[cfg(test)]
 fn slp_vectorize_block(block: &IRBlock) -> Vec<PackedOp> {
     let mut ops = Vec::new();
     let instrs = &block.instructions;

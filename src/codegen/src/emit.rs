@@ -83,8 +83,6 @@ enum BranchFormat {
     B26,
     /// CBZ / CBNZ: 19-bit offset in bits[23:5] (word-aligned, offset = imm19 * 4)
     Cond19,
-    /// B.cond: 19-bit offset in bits[23:5] (word-aligned)
-    BCond19,
 }
 
 
@@ -2416,11 +2414,6 @@ impl Emitter {
                 BranchFormat::Cond19 => {
                     // CBZ / CBNZ: imm19 in bits[23:5], word-aligned
                     // Clear bits[23:5], then set imm19 there
-                    let imm19 = offset & 0x7FFFF;
-                    (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5)
-                }
-                BranchFormat::BCond19 => {
-                    // B.cond: imm19 in bits[23:5], word-aligned
                     let imm19 = offset & 0x7FFFF;
                     (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5)
                 }
