@@ -1,11 +1,14 @@
 // womb/env/cli.vuma — CLI argument parsing
 // Accesses argc/argv via the stack (passed by the runtime).
 // Provides: cli_args_count, cli_arg_get, cli_parse_flags
+// Uses the vuma-native syscall() intrinsic for write (asm-generic nr 64).
+// __vuma_alloc/__vuma_free remain extern "C" stubs (P2 work).
+// NOTE: cli_read_cmdline is stubbed (returns 0 args) — P5 work to wire up
+// openat/read syscalls against /proc/self/cmdline.
 
 extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // On x86_64 Linux, the kernel places argc at [rsp] and argv at [rsp+8]
@@ -113,24 +116,24 @@ fn cli_parse_flag(result: Address, flag_name: Address, flag_len: u32) -> u64 {
     i: u32 = 0;
     while i < count {
         arg: u64 = cli_arg_get(result, i);
-        ptr: u64 = arg & 0xFFFFFFFF;
+        arg_ptr: u64 = arg & 0xFFFFFFFF;
         len: u32 = (arg >> 32) & 0xFFFFFFFF;
         
         // Check if arg starts with "--" + flag_name + "="
         if len > flag_len + 3 {
             // Check "--" prefix
-            if *(ptr + 0) == 45 && *(ptr + 1) == 45 {
+            if *(arg_ptr + 0) == 45 && *(arg_ptr + 1) == 45 {
                 // Compare flag name
-                match: u32 = 1;
+                flag_match: u32 = 1;
                 j: u32 = 0;
                 while j < flag_len {
-                    if *(ptr + 2 + j) != *(flag_name + j) { match = 0; }
+                    if *(arg_ptr + 2 + j) != *(flag_name + j) { flag_match = 0; }
                     j = j + 1;
                 }
-                if match == 1 {
+                if flag_match == 1 {
                     // Check "=" after flag name
-                    if *(ptr + 2 + flag_len) == 61 {  // '='
-                        val_ptr: u64 = ptr + 3 + flag_len;
+                    if *(arg_ptr + 2 + flag_len) == 61 {  // '='
+                        val_ptr: u64 = arg_ptr + 3 + flag_len;
                         val_len: u32 = len - 3 - flag_len;
                         return val_ptr | ((val_len as u64) << 32);
                     }
@@ -148,18 +151,18 @@ fn cli_has_flag(result: Address, flag_name: Address, flag_len: u32) -> u32 {
     i: u32 = 0;
     while i < count {
         arg: u64 = cli_arg_get(result, i);
-        ptr: u64 = arg & 0xFFFFFFFF;
+        arg_ptr: u64 = arg & 0xFFFFFFFF;
         len: u32 = (arg >> 32) & 0xFFFFFFFF;
         
         if len == flag_len + 2 {
-            if *(ptr + 0) == 45 && *(ptr + 1) == 45 {
-                match: u32 = 1;
+            if *(arg_ptr + 0) == 45 && *(arg_ptr + 1) == 45 {
+                flag_match: u32 = 1;
                 j: u32 = 0;
                 while j < flag_len {
-                    if *(ptr + 2 + j) != *(flag_name + j) { match = 0; }
+                    if *(arg_ptr + 2 + j) != *(flag_name + j) { flag_match = 0; }
                     j = j + 1;
                 }
-                if match == 1 { return 1; }
+                if flag_match == 1 { return 1; }
             }
         }
         i = i + 1;
