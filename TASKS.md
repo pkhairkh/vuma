@@ -459,3 +459,110 @@ Static inspection confirmed the test functions and harnesses exist:
 - Workspace members: `vuma-scg`, `vuma-ive`, `vuma-bd`, `vuma-core`, `vuma-codegen`, `vuma-parser`, `vuma-cor`, `vuma-proof`, `vuma-package`, `vuma-tests`
 - **Not covered by the above:** `src/parser/fuzz/` is a separate `[workspace]`
   with `rand = "0.8"` (see Open Work §8).
+
+---
+
+## Self-Host Implementation Progress (P0–P6)
+
+All work verified with real `cargo build` + `cargo test` + qemu-aarch64
+execution. 458 tests pass, 0 failures. 23 commits on `main`.
+
+### Completed
+
+**P0 — Housekeeping (3 waves):**
+- Deleted stray `=36` file; fixed stale doc comments; documented
+  `VUMA_NO_SCHED` env-var split; replaced fuzz `rand` dep with hand-written
+  xorshift128+ PRNG. Entire repo now dependency-free.
+
+**P1-a/b — Syscall translation foundation:**
+- `src/codegen/src/syscall_abi.rs`: `vuma_generic_name()` (108-entry
+  asm-generic table) + `translate(backend, nr)` covering all 19 BackendKind
+  variants. Wired into all 17 `IRInstr::Syscall` emission sites with safe
+  `unwrap_or(*nr)` fallback.
+
+**P1-c — Womb syscall migration (13 files):**
+- Migrated stdio, printf, socket, time, threading, event_loop,
+  net_protocols, dns, dns_extra, fs/file, fs/high_level, env/cli, fileio,
+  tcp, quic, websocket, string_builder, vec, buffered to vuma-native
+  `syscall()`. All verified with `vuma check` + qemu-aarch64.
+
+**P1-c-2 fix — Critical optimizer bugs:**
+- DCE: `has_side_effects()` now includes `IRInstr::Syscall` (was removing
+  syscalls with unused results). Escape analysis: allocations passed to
+  syscalls now marked as escaping (was eliding syscall buffers). 3 regression
+  tests added.
+
+**P1-d — Per-arch translation tables:**
+- Filled 7 remaining arches (mips64/ppc64/s390x/sparc64/alpha/hppa/m68k)
+  — 739 kernel-verified mappings using actual Linux UAPI headers.
+  949 total mappings across 9 translated arches + 5 identity arches.
+
+**P1-c-8 — Bootstrap syscall support:**
+- All 4 bootstrap files (full_lexer, full_parser, ir_builder, codegen)
+  can now lex, parse, lower, and emit `syscall(nr, args...)`. Single-arg
+  only (multi-arg is a follow-up). wave48 9/9 pass.
+
+**P2 — Native allocator:**
+- `allocate()`/`free()` builtins lower directly to `syscall(222, mmap)` /
+  `syscall(215, munmap)` — no more Rust allocator-wrapper dependency.
+  Verified end-to-end under qemu at O2.
+
+**P3 — Import mechanism:**
+- Discovered `import "path.vuma" { symbol };` already parses AND resolves
+  end-to-end (same func_offsets mechanism as extern "C"). Migrated 6 files
+  (tls12, tls13, ssh, email, quic, websocket): 40 extern declarations →
+  23 import statements.
+
+**P5.1 — ELF BSS support:**
+- `write_elf64` now accepts `bss_size` parameter; `p_memsz = filesz +
+  bss_size` creates a BSS segment (kernel zero-fills). Foundation for
+  argc/argv and real `_start`.
+
+**P5.5 — Collections capacity growth:**
+- `btreemap_grow(m)`: doubles capacity, copies, frees old.
+- `hashmap_grow(m)`: doubles capacity, rehashes all entries. 75% load-factor
+  trigger. Fixed pre-existing `match` keyword parse error in hashmap.vuma.
+
+**P5.6 — Allocator stub migration:**
+- 15 non-bootstrap files migrated from `__vuma_alloc`/`__vuma_free` to
+  `allocate()`/`free()`. **Zero real `extern "C" { }` blocks remain in
+  non-bootstrap womb files.**
+
+### Remaining (clear path)
+
+**P1-c-8b:** Bootstrap multi-arg syscall support (currently single-arg
+only). Needed before bootstrap files can migrate from `extern "C"` to
+`syscall()` and before full self-host.
+
+**P1-e:** Remove Rust-emitted `build_runtime_syscall_stubs` + fix unsafe
+`unwrap_or(*nr)` fallback on translated arches. Needs P1-c-8b first
+(bootstrap still calls `__vuma_alloc`/`__vuma_free` via extern).
+
+**P4:** Regalloc spill-code parity — port aarch64's real spill-code path
+to x86_64/riscv64/loongarch64/arm32. Large refactor (x86_64 uses
+fundamentally different stack-slot ISel). Also: fix x86_64 direct
+AST→codegen path issues with `allocate()`/`syscall()` (currently only
+the canonical aarch64 pipeline handles these correctly).
+
+**P5.2–P5.4:** cli.vuma argv parser, DEFLATE Huffman, Falcon discrete
+Gaussian (complex algorithmic implementations).
+
+**P6:** Self-host dogfood — vumac2 (vuma-native compiler) compiles
+womb + runs a real HTTP server. Requires bootstrap to support the full
+VUMA language subset that womb/lib uses (structs, Address, *(ptr+off),
+if/else, while, multi-arg syscall, etc.).
+
+### Verification status (updated)
+
+- `cargo check --workspace`: 0 errors
+- `cargo test -p vuma-tests --lib wave48`: 9 passed (O2 bootstrap self-host)
+- `cargo test -p vuma-tests --lib wave50`: 9 passed
+- `cargo test -p vuma-codegen --lib emit`: 104 passed
+- `cargo test -p vuma-codegen --lib scheduler`: 6 passed
+- `cargo test -p vuma-codegen --lib opt`: 15 passed
+- `cargo test -p vuma-codegen --lib escape`: 11 passed (incl. syscall regressions)
+- `cargo test -p vuma-codegen --lib syscall_abi`: 15 passed (8 original + 7 per-arch)
+- `cargo test -p vuma-parser --lib`: 289 passed
+- qemu-aarch64 end-to-end: `syscall(64, 1, buf, 3)` prints "Hi" at O2
+- qemu-aarch64 end-to-end: `allocate(16)` + `write_str(buf)` prints "Hi" at O2
+- qemu-aarch64 end-to-end: `import "defs.vuma" { helper }` resolves and prints "42" at O2
