@@ -88,17 +88,15 @@ fn benchmark_backend(scg: &Scg, kind: BackendKind, name: &str) -> Option<Benchma
 
 /// Build a reference program for consistent backend comparison.
 fn build_reference_program() -> Scg {
-    let mut body = Vec::new();
-
     // Arithmetic operations
-    body.push(ScgStatement::Computation(ComputationNode {
+    let mut body = vec![ScgStatement::Computation(ComputationNode {
         dst: "a".to_string(),
         op: BinOpKind::Add,
         lhs: ScgExpr::Int(1),
         rhs: ScgExpr::Int(2),
         tail_call: false,
         reassigns: None,
-    }));
+    })];
     body.push(ScgStatement::Computation(ComputationNode {
         dst: "b".to_string(),
         op: BinOpKind::Mul,

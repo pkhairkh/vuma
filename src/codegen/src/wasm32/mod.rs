@@ -3741,16 +3741,14 @@ impl Backend for Wasm32Backend {
 
         // Build an AllocatedFunction with the body bytes as a single instruction
         // and Wasm-specific metadata stored in typed fields.
-        let mut instructions = Vec::new();
-
         // Store the body bytes as a single instruction to preserve
         // exact byte offsets for call relocation patching.
-        instructions.push(AllocatedInstruction {
+        let instructions = vec![AllocatedInstruction {
             opcode: "wasm_body".to_string(),
             reads: vec![],
             writes: vec![],
             encoded: func_body.body.clone(),
-        });
+        }];
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
