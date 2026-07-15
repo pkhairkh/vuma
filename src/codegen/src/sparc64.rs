@@ -2866,6 +2866,13 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // sparc64 Linux syscall: args in %o0-%o5, nr in %g1,
             // `ta 0x6d`, result in %o0.
+            // Translate VUMA-generic (asm-generic) syscall number to the
+            // backend's native numbering. TODO(P1-b): per-arch table.
+            let native_nr = crate::syscall_abi::translate(
+                crate::backend::BackendKind::Sparc64,
+                *nr,
+            )
+            .unwrap_or(*nr);
             let syscall_arg_regs =
                 [Gpr::O0, Gpr::O1, Gpr::O2, Gpr::O3, Gpr::O4, Gpr::O5];
             let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -2873,7 +2880,7 @@ fn emit_instr(
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
             // OR %g0, nr, %g1  (move immediate to %g1)
-            code.extend(ss_load_imm(Gpr::G1, *nr as i64));
+            code.extend(ss_load_imm(Gpr::G1, native_nr as i64));
             // TA 0x6d
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
             // Store result (%o0) to dst's stack slot

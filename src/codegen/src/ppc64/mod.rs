@@ -3823,6 +3823,13 @@ impl Backend for PPC64Backend {
                         // ppc64 Linux syscall: args in R3-R8, nr in R0,
                         // `sc`, result in R3.
                         let mut code = Vec::new();
+                        // Translate VUMA-generic (asm-generic) syscall number to the
+                        // backend's native numbering. TODO(P1-b): per-arch table.
+                        let native_nr = crate::syscall_abi::translate(
+                            crate::backend::BackendKind::PowerPC64,
+                            *nr,
+                        )
+                        .unwrap_or(*nr);
                         let syscall_arg_regs =
                             [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8];
                         let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -3832,7 +3839,7 @@ impl Backend for PPC64Backend {
                             ));
                         }
                         // LI R0, nr
-                        code.extend(ss_load_imm(Gpr::R0, *nr as i64));
+                        code.extend(ss_load_imm(Gpr::R0, native_nr as i64));
                         // SC
                         code.extend_from_slice(&Instruction::Sc.encode());
                         // Store result (R3) to dst's stack slot

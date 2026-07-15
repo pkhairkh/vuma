@@ -3082,6 +3082,13 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     // nr in $v0, `syscall`, result in $v0.
                     // MIPS N64: first 4 args in $a0-$a3, args 5-6 in $a4-$a5
                     // (named $t0-$t1 in the Gpr enum).
+                    // Translate VUMA-generic (asm-generic) syscall number to the
+                    // backend's native numbering. TODO(P1-b): per-arch table.
+                    let native_nr = crate::syscall_abi::translate(
+                        crate::backend::BackendKind::Mips64,
+                        *nr,
+                    )
+                    .unwrap_or(*nr);
                     let syscall_arg_regs = [
                         Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                         Gpr::T0, Gpr::T1,
@@ -3093,7 +3100,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         ));
                     }
                     // LI $v0, nr
-                    code.extend(ss_load_imm(Gpr::V0, *nr as i64));
+                    code.extend(ss_load_imm(Gpr::V0, native_nr as i64));
                     // SYSCALL
                     code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
                     // Store result ($v0) to dst's stack slot

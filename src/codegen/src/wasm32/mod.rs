@@ -3283,7 +3283,16 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // We return -ENOSYS (-38), matching the wave-5 unknown-extern
             // fallback behavior. This lets callers detect the syscall is
             // unsupported on wasm32.
-            let _ = (nr, args);
+            // Translate VUMA-generic (asm-generic) syscall number to the
+            // backend's native numbering. No-op on wasm32 (host imports).
+            // `native_nr` is reserved for future wiring (e.g. a host-import
+            // index table); currently unused, so discarded alongside `args`.
+            let native_nr = crate::syscall_abi::translate(
+                crate::backend::BackendKind::Wasm32,
+                *nr,
+            )
+            .unwrap_or(*nr);
+            let _ = (native_nr, args);
             if let Some(d) = dst {
                 if let IRValue::Register(id) = d {
                     ctx.emit(WasmInstr::I32Const(-38)); // -ENOSYS

@@ -1748,6 +1748,13 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // s390x Linux syscall: args in R2-R7, nr in R1,
             // `SVC 0`, result in R2.
+            // Translate VUMA-generic (asm-generic) syscall number to the
+            // backend's native numbering. TODO(P1-b): per-arch table.
+            let native_nr = crate::syscall_abi::translate(
+                crate::backend::BackendKind::S390X,
+                *nr,
+            )
+            .unwrap_or(*nr);
             let syscall_arg_regs =
                 [Gpr::R2, Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7];
             let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -1755,7 +1762,7 @@ fn emit_instr(
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
             // LGFI R1, nr
-            code.extend(ss_load_imm(Gpr::R1, *nr as i64));
+            code.extend(ss_load_imm(Gpr::R1, native_nr as i64));
             // SVC 0
             code.extend_from_slice(&encode_svc(0));
             // Store result (R2) to dst's stack slot
