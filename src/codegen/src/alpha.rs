@@ -41,7 +41,8 @@
 
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+    BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, SectionHeader,
+    TargetInfo,
 };
 use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
@@ -2415,29 +2416,75 @@ fn append_alpha_elf_sections(
     while !elf.len().is_multiple_of(8) { elf.push(0); }
     let shdr_off = elf.len() as u64;
 
-    fn push_shdr(
-        elf: &mut Vec<u8>,
-        sh_name: u32, sh_type: u32, sh_flags: u64, sh_addr: u64,
-        sh_offset: u64, sh_size: u64, sh_link: u32, sh_info: u32,
-        sh_addralign: u64, sh_entsize: u64,
-    ) {
-        elf.extend_from_slice(&sh_name.to_le_bytes());
-        elf.extend_from_slice(&sh_type.to_le_bytes());
-        elf.extend_from_slice(&sh_flags.to_le_bytes());
-        elf.extend_from_slice(&sh_addr.to_le_bytes());
-        elf.extend_from_slice(&sh_offset.to_le_bytes());
-        elf.extend_from_slice(&sh_size.to_le_bytes());
-        elf.extend_from_slice(&sh_link.to_le_bytes());
-        elf.extend_from_slice(&sh_info.to_le_bytes());
-        elf.extend_from_slice(&sh_addralign.to_le_bytes());
-        elf.extend_from_slice(&sh_entsize.to_le_bytes());
+    fn push_shdr(elf: &mut Vec<u8>, shdr: &SectionHeader<u64>) {
+        elf.extend_from_slice(&shdr.sh_name.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_type.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_flags.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_addr.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_offset.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_size.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_link.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_info.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_addralign.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_entsize.to_le_bytes());
     }
 
-    push_shdr(elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
-    push_shdr(elf, name_text, SHT_PROGBITS, 0x6, 0x120000000 + text_offset, text_offset, text_size, 0, 0, 16, 0);
-    push_shdr(elf, name_symtab, SHT_SYMTAB, 0, 0, symtab_off, symtab_size, 3, 1, 8, SYM_SIZE);
-    push_shdr(elf, name_strtab, SHT_STRTAB, 0, 0, strtab_off, strtab.len() as u64, 0, 0, 1, 0);
-    push_shdr(elf, name_shstrtab, SHT_STRTAB, 0, 0, shstrtab_off, shstrtab.len() as u64, 0, 0, 1, 0);
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_type: SHT_NULL,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_text,
+            sh_type: SHT_PROGBITS,
+            sh_flags: 0x6,
+            sh_addr: 0x120000000 + text_offset,
+            sh_offset: text_offset,
+            sh_size: text_size,
+            sh_addralign: 16,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_symtab,
+            sh_type: SHT_SYMTAB,
+            sh_offset: symtab_off,
+            sh_size: symtab_size,
+            sh_link: 3,
+            sh_info: 1,
+            sh_addralign: 8,
+            sh_entsize: SYM_SIZE,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_strtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: strtab_off,
+            sh_size: strtab.len() as u64,
+            sh_addralign: 1,
+            ..Default::default()
+        },
+    );
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_name: name_shstrtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: shstrtab_off,
+            sh_size: shstrtab.len() as u64,
+            sh_addralign: 1,
+            ..Default::default()
+        },
+    );
 
     let shnum: u16 = 5;
     let shstrndx: u16 = 4;

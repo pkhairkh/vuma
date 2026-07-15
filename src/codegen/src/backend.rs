@@ -56,6 +56,62 @@ pub enum OutputFormat {
 }
 
 // ---------------------------------------------------------------------------
+// SectionHeader
+// ---------------------------------------------------------------------------
+
+/// An ELF section header (`Elf32_Shdr` or `Elf64_Shdr`).
+///
+/// Bundles the ten fixed fields of an ELF section header so that the
+/// per-ISA `push_shdr` helpers can accept a single `&SectionHeader`
+/// argument instead of a long positional parameter list (which would
+/// otherwise trip `clippy::too_many_arguments`).
+///
+/// `Addr` is the integer type used for the address / offset / size /
+/// alignment / entsize fields — `u32` for ELF32 and `u64` for ELF64.
+/// `sh_name`, `sh_type`, `sh_link`, and `sh_info` are always `u32`
+/// regardless of ELF class.
+#[derive(Clone, Copy, Debug)]
+pub struct SectionHeader<Addr = u64> {
+    /// Offset of the section name in `.shstrtab`.
+    pub sh_name: u32,
+    /// Section type (e.g. `SHT_NULL`, `SHT_PROGBITS`, `SHT_SYMTAB`).
+    pub sh_type: u32,
+    /// Section flags (e.g. `SHF_ALLOC | SHF_EXECINSTR = 0x6`).
+    pub sh_flags: Addr,
+    /// Virtual address where the section is loaded.
+    pub sh_addr: Addr,
+    /// Byte offset of the section in the file.
+    pub sh_offset: Addr,
+    /// Size of the section in bytes.
+    pub sh_size: Addr,
+    /// Section header table index link (meaning depends on `sh_type`).
+    pub sh_link: u32,
+    /// Extra information (meaning depends on `sh_type`).
+    pub sh_info: u32,
+    /// Address alignment constraint (must be a power of two).
+    pub sh_addralign: Addr,
+    /// Size of each entry for sections with fixed-size entries.
+    pub sh_entsize: Addr,
+}
+
+impl<Addr: Default> Default for SectionHeader<Addr> {
+    fn default() -> Self {
+        Self {
+            sh_name: 0,
+            sh_type: 0,
+            sh_flags: Addr::default(),
+            sh_addr: Addr::default(),
+            sh_offset: Addr::default(),
+            sh_size: Addr::default(),
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: Addr::default(),
+            sh_entsize: Addr::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PhysicalReg
 // ---------------------------------------------------------------------------
 
@@ -2232,90 +2288,81 @@ fn append_aarch64_elf_sections(
     // Helper to write one Elf64_Shdr (64 bytes). Defined as a nested fn
     // (rather than a closure) so the borrow-checker applies the standard
     // function-call reborrow rules to the `&mut Vec<u8>` parameter.
-    fn push_shdr(
-        elf: &mut Vec<u8>,
-        sh_name: u32,
-        sh_type: u32,
-        sh_flags: u64,
-        sh_addr: u64,
-        sh_offset: u64,
-        sh_size: u64,
-        sh_link: u32,
-        sh_info: u32,
-        sh_addralign: u64,
-        sh_entsize: u64,
-    ) {
-        elf.extend_from_slice(&sh_name.to_le_bytes());
-        elf.extend_from_slice(&sh_type.to_le_bytes());
-        elf.extend_from_slice(&sh_flags.to_le_bytes());
-        elf.extend_from_slice(&sh_addr.to_le_bytes());
-        elf.extend_from_slice(&sh_offset.to_le_bytes());
-        elf.extend_from_slice(&sh_size.to_le_bytes());
-        elf.extend_from_slice(&sh_link.to_le_bytes());
-        elf.extend_from_slice(&sh_info.to_le_bytes());
-        elf.extend_from_slice(&sh_addralign.to_le_bytes());
-        elf.extend_from_slice(&sh_entsize.to_le_bytes());
+    fn push_shdr(elf: &mut Vec<u8>, shdr: &SectionHeader<u64>) {
+        elf.extend_from_slice(&shdr.sh_name.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_type.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_flags.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_addr.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_offset.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_size.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_link.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_info.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_addralign.to_le_bytes());
+        elf.extend_from_slice(&shdr.sh_entsize.to_le_bytes());
     }
 
     // Index 0: SHT_NULL
-    push_shdr(elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    push_shdr(
+        elf,
+        &SectionHeader {
+            sh_type: SHT_NULL,
+            ..Default::default()
+        },
+    );
     // Index 1: .text (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR = 0x6)
     push_shdr(
         elf,
-        name_text,
-        SHT_PROGBITS,
-        0x6,
-        0x400000 + text_offset,
-        text_offset,
-        text_size,
-        0,
-        0,
-        16,
-        0,
+        &SectionHeader {
+            sh_name: name_text,
+            sh_type: SHT_PROGBITS,
+            sh_flags: 0x6,
+            sh_addr: 0x400000 + text_offset,
+            sh_offset: text_offset,
+            sh_size: text_size,
+            sh_addralign: 16,
+            ..Default::default()
+        },
     );
     // Index 2: .symtab (SHT_SYMTAB); sh_link = 3 (.strtab index);
     // sh_info = 1 (one local symbol — the NULL entry — so the first
     // global is at index 1; standard ELF convention).
     push_shdr(
         elf,
-        name_symtab,
-        SHT_SYMTAB,
-        0,
-        0,
-        symtab_off,
-        symtab_size,
-        3,
-        1,
-        8,
-        SYM_SIZE,
+        &SectionHeader {
+            sh_name: name_symtab,
+            sh_type: SHT_SYMTAB,
+            sh_offset: symtab_off,
+            sh_size: symtab_size,
+            sh_link: 3,
+            sh_info: 1,
+            sh_addralign: 8,
+            sh_entsize: SYM_SIZE,
+            ..Default::default()
+        },
     );
     // Index 3: .strtab (SHT_STRTAB)
     push_shdr(
         elf,
-        name_strtab,
-        SHT_STRTAB,
-        0,
-        0,
-        strtab_off,
-        strtab.len() as u64,
-        0,
-        0,
-        1,
-        0,
+        &SectionHeader {
+            sh_name: name_strtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: strtab_off,
+            sh_size: strtab.len() as u64,
+            sh_addralign: 1,
+            ..Default::default()
+        },
     );
     // Index 4: .shstrtab (SHT_STRTAB)
     push_shdr(
         elf,
-        name_shstrtab,
-        SHT_STRTAB,
-        0,
-        0,
-        shstrtab_off,
-        shstrtab.len() as u64,
-        0,
-        0,
-        1,
-        0,
+        &SectionHeader {
+            sh_name: name_shstrtab,
+            sh_type: SHT_STRTAB,
+            sh_offset: shstrtab_off,
+            sh_size: shstrtab.len() as u64,
+            sh_addralign: 1,
+            ..Default::default()
+        },
     );
 
     // ── Patch the ELF header: e_shoff (offset 40), e_shnum (offset 60),
