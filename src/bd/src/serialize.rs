@@ -235,8 +235,8 @@ fn read_hashset<T: BinaryRead + std::hash::Hash + Eq, R: Read>(
     Ok(out)
 }
 
-fn write_box<T: BinaryWrite, W: Write>(w: &mut W, b: &Box<T>) -> Result<(), BinaryError> {
-    b.as_ref().write_binary(w)
+fn write_box<T: BinaryWrite, W: Write>(w: &mut W, b: &T) -> Result<(), BinaryError> {
+    b.write_binary(w)
 }
 
 fn read_box<T: BinaryRead, R: Read>(r: &mut R) -> Result<Box<T>, BinaryError> {
@@ -588,7 +588,7 @@ impl BinaryRead for StructRep {
 
 impl BinaryWrite for ArrayRep {
     fn write_binary<W: Write>(&self, w: &mut W) -> Result<(), BinaryError> {
-        write_box(w, &self.element)?;
+        write_box(w, &*self.element)?;
         write_u64(w, self.count)
     }
 }
@@ -624,7 +624,7 @@ impl BinaryRead for EnumRep {
 
 impl BinaryWrite for PtrRep {
     fn write_binary<W: Write>(&self, w: &mut W) -> Result<(), BinaryError> {
-        write_box(w, &self.pointee)
+        write_box(w, &*self.pointee)
     }
 }
 
@@ -659,7 +659,7 @@ impl BinaryRead for UnionRep {
 impl BinaryWrite for FuncRep {
     fn write_binary<W: Write>(&self, w: &mut W) -> Result<(), BinaryError> {
         write_vec(w, &self.params)?;
-        write_box(w, &self.result)
+        write_box(w, &*self.result)
     }
 }
 

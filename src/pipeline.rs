@@ -4448,14 +4448,14 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
             depth -= 1;
         } else if depth == 0
             && bytes[i..i + op_bytes.len()] == *op_bytes {
-                // Avoid matching "<" inside "<=" or ">" inside ">=".
-                if op == "<" && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    i += 1;
-                } else if op == ">" && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    i += 1;
-                } else if op == "<" && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
-                    i += 1;
-                } else if op == ">" && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                // Avoid matching "<" inside "<=" or ">" inside ">=", or inside
+                // "<<"/">>" shift operators.
+                let next_is = |b: u8| i + 1 < bytes.len() && bytes[i + 1] == b;
+                if (op == "<" && next_is(b'='))
+                    || (op == ">" && next_is(b'='))
+                    || (op == "<" && next_is(b'<'))
+                    || (op == ">" && next_is(b'>'))
+                {
                     i += 1;
                 } else {
                     return Some(i);

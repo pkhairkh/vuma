@@ -69,7 +69,7 @@ impl Gpr {
     pub fn from_encoding(enc: u8) -> Option<Self> {
         if enc <= 31 {
             // SAFETY: enc is in 0..=31, matching the enum's #[repr(u8)] representation.
-            Some(unsafe { std::mem::transmute(enc) })
+            Some(unsafe { std::mem::transmute::<u8, Gpr>(enc) })
         } else {
             None
         }
