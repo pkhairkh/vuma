@@ -62,12 +62,12 @@
 //! `BL` instruction and the target function name; once function addresses
 //! are known, the branch offsets are patched into the encoded instructions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::arm64::{Condition, Instruction, Operand, RegWidth, Register};
 use crate::backend::{BackendKind, RelocationEntry};
 use crate::ir::*;
-use crate::regalloc::{AllocationResult, RegAllocator};
+use crate::regalloc::{AllocationResult, PhysReg, RegAllocator, SpillCode, SpillSlot};
 use crate::CodegenError;
 use crate::Result;
 
@@ -665,108 +665,267 @@ impl Emitter {
         self.emit_function_greedy(func)
     }
 
-    /// (Wave 21) Emit a single IR function using a pre-computed
+    /// (Wave 21 / Wave 53) Emit a single IR function using a pre-computed
     /// `AllocationResult` from the `LinearScanAllocator`.
     ///
-    /// **Metadata-only path (audit-resolved Task 4-c, Wave 21):** this
-    /// method delegates *entirely* to [`emit_function_greedy`](Self::
-    /// emit_function_greedy) for instruction selection, encoding, and
-    /// physical-register assignment. The greedy emitter performs its own
-    /// on-the-fly register allocation using caller-saved GPRs (X0–X18)
-    /// and X29/X30 (FP/LR); it does **not** consult
-    /// [`AllocationResult::vreg_to_preg`],
-    /// [`AllocationResult::spill_code`],
-    /// [`AllocationResult::coalesced_map`], or
-    /// [`AllocationResult::eliminated_copies`].
+    /// **Real spill-code emission (Wave 53):** this method now consumes
+    /// the `AllocationResult` and produces emitted bytes that *differ*
+    /// from [`emit_function_greedy`](Self::emit_function_greedy) when the
+    /// allocator indicates callee-saved register usage, spill code, or
+    /// coalesced copies.  Specifically, for each function it:
     ///
-    /// The `AllocationResult` passed in here is used **only for
-    /// diagnostic logging**: when `used_callee_saved_gprs` is non-empty,
-    /// a `debug`-level log line is emitted reporting
-    /// `used_callee_saved_gprs.len()`, `total_spill_slots`, and
-    /// `eliminated_copies.len()`. The encoded machine bytes returned by
-    /// this method are byte-for-byte identical to what
-    /// `emit_function_greedy(func)` would produce on its own — the
-    /// `AllocationResult` does not influence the emitted code.
+    /// 1. **Prologue (callee-saved saves):** when
+    ///    [`AllocationResult::used_callee_saved_gprs`] is non-empty,
+    ///    emits `SUB SP, SP, #N` (where `N = ceil(count/2)*16`) followed
+    ///    by `STP Xi, Xi+1, [SP, #k*16]` pairs (and a trailing `STR` for
+    ///    an odd count) *before* the standard `SUB SP, SP, #16` /
+    ///    `STP X29, X30, [SP]` / `ADD X29, SP, #0` FP/LR prologue.
+    /// 2. **Register assignment (`vreg_to_preg`):** before emitting the
+    ///    body, each entry in [`AllocationResult::vreg_to_preg`] is
+    ///    fed to [`RegAllocator::preassign`] so that the greedy emitter's
+    ///    `resolve_reg` returns the regalloc-assigned physical register
+    ///    for that vreg (rather than picking one on-the-fly from the
+    ///    caller-saved pool).  Callee-saved GPRs (X19–X28) are routed to
+    ///    `callee_saved_used` so they appear in `used_callee_saved()`.
+    /// 3. **Per-instruction spill/reload:** for each IR instruction at
+    ///    linear-scan position `P` (where `P = 2*N` for instruction index
+    ///    `N`), the method emits `LDR` reloads from
+    ///    `alloc.spill_code.get(&P)` *before* the instruction and `STR`
+    ///    spills from `alloc.spill_code.get(&(P + 1))` *after* the
+    ///    instruction.  Spill slots are addressed at `[X29, #slot.offset]`
+    ///    (the slot's `offset` field is negative, pointing into the
+    ///    spill area below the FP/LR save pair).
+    /// 4. **Eliminated copies:** `Cast` instructions with `BitCast` kind
+    ///    whose `src` vreg appears in
+    ///    [`AllocationResult::eliminated_copies`] (or whose `src` and
+    ///    `dst` resolve to the same `PhysReg` via `get_phys_reg`) are
+    ///    skipped entirely — the coalescing made the move a no-op.
+    /// 5. **Epilogue (callee-saved restores):** for each
+    ///    `IRTerminator::Return`, the method emits the standard
+    ///    `ADD SP, X29, #0` / `LDP X29, X30, [SP]` / `ADD SP, SP, #16`
+    ///    sequence, then inserts `LDP`/`LDR` restores for every
+    ///    callee-saved GPR (in the same pair order as the prologue),
+    ///    followed by `ADD SP, SP, #N` to deallocate the callee-saved
+    ///    area, and finally `RET`.
     ///
-    /// # What is *not* implemented (and why)
+    /// The frame layout (low → high addresses) is:
     ///
-    /// A "real" register-allocated emit path would, for each IR
-    /// instruction at position `P`:
+    /// ```text
+    ///   [spill area]            ← SP after prologue (greedy emitter's slot spills)
+    ///   [FP/LR save pair]       ← X29 points here (16 bytes)
+    ///   [callee-saved save area]← N bytes (only if used_callee_saved_gprs non-empty)
+    ///   [caller's frame]        ← SP on entry
+    /// ```
     ///
-    /// 1. Look up `alloc.spill_code.get(&P)` and emit `Reload` words
-    ///    *before* the instruction.
-    /// 2. Emit the instruction using the physical register assigned by
-    ///    `alloc.vreg_to_preg` (rather than the greedy allocator's
-    ///    on-the-fly assignment).
-    /// 3. Look up `alloc.spill_code.get(&(P + 1))` and emit `Spill`
-    ///    words *after* the instruction.
-    /// 4. Skip moves listed in `alloc.eliminated_copies`.
-    /// 5. Emit prologue saves (e.g. `STP X19, X20, [SP, #16]!`) for
-    ///    every register in `alloc.used_callee_saved_gprs` and matching
-    ///    epilogue restores.
+    /// # Backward compatibility
     ///
-    /// Implementing step 5 in isolation (the "Option C" minimal
-    /// prologue/epilogue approach) would be **incorrect**: the greedy
-    /// emitter never touches callee-saved GPRs (X19–X28), so
-    /// `alloc.used_callee_saved_gprs` reflects what the
-    /// `LinearScanAllocator` *would* use, not what the emitted code
-    /// *actually* uses. Saving/restoring those registers would produce
-    /// larger binaries with no functional benefit and could mislead
-    /// downstream tooling about the code's actual register usage.
-    ///
-    /// Implementing steps 1–4 requires restructuring `emit_function_greedy`
-    /// (or writing a new emit path that bypasses the greedy allocator),
-    /// which is a substantial undertaking explicitly deferred to a future
-    /// wave. Wave 22's per-backend `emit_function_regalloc` (in
-    /// `regalloc_emit.rs` and the tier-1 backend modules) takes a
-    /// different approach: it runs the stack-slot ISel for the encoded
-    /// bytes and only adds conservative `reads`/`writes` annotations
-    /// from `RegAllocResult::used_callee_saved` — the encoded bytes are
-    /// still produced by the stack-slot path, not by consuming
-    /// `spill_code`.
-    ///
-    /// The `AllocationResult::spill_code` BTreeMap IS populated by
-    /// `LinearScanAllocator::gen_spill_reload` (regalloc.rs:1614) and
-    /// `gen_eviction_spill_reload` (regalloc.rs:1651) when register
-    /// pressure is high — see the `linear_scan_eviction_generates_spill_code`
-    /// test (regalloc.rs:5051). But because the AArch64 emit path never
-    /// consults it, the spill-code metadata is currently write-only with
-    /// respect to the emitted binary.
+    /// When `alloc.used_callee_saved_gprs`, `alloc.spill_code`, and
+    /// `alloc.eliminated_copies` are *all* empty (the common case for
+    /// trivial functions), the emitted bytes are identical to
+    /// `emit_function_greedy(func)` — no prologue/epilogue additions,
+    /// no spill/reload insertions, no copy elision.  This preserves the
+    /// behavior expected by the `emit_binary_with_regalloc_results`
+    /// test and any caller that passes an empty `AllocationResult`.
     fn emit_function_regalloc(
         &mut self,
         func: &IRFunction,
         alloc: &AllocationResult,
     ) -> Result<Vec<u32>> {
-        // Delegate to the greedy allocator for instruction emission.
-        // The greedy allocator assigns physical registers on-the-fly
-        // using caller-saved GPRs + FP/LR; it does NOT consult any field
-        // of `alloc` (vreg_to_preg / spill_code / coalesced_map /
-        // eliminated_copies). The `alloc` parameter is used only for
-        // the diagnostic log below.
-        let code = self.emit_function_greedy(func)?;
+        // If the AllocationResult carries no information that this emit
+        // path knows how to consume, fall back to the greedy emitter
+        // entirely.  This keeps trivial functions byte-for-byte identical
+        // to the greedy path (no prologue bloat) while still allowing
+        // `emit_function` callers to pass an `AllocationResult` unconditionally.
+        let has_callee_saved = !alloc.used_callee_saved_gprs.is_empty();
+        let has_spill_code = !alloc.spill_code.is_empty();
+        let has_eliminated_copies = !alloc.eliminated_copies.is_empty();
+        let has_vreg_mapping = !alloc.vreg_to_preg.is_empty();
+        if !has_callee_saved && !has_spill_code && !has_eliminated_copies && !has_vreg_mapping {
+            return self.emit_function_greedy(func);
+        }
 
-        // (Wave 21, Task 4-c) Metadata-only post-pass: log the
-        // LinearScanAllocator's spill / callee-saved / coalescing
-        // statistics for diagnostics. The greedy emitter's prologue
-        // already saves X29/X30 (FP/LR); the AllocationResult's
-        // `used_callee_saved_gprs` reflects what the *LinearScanAllocator*
-        // would use, NOT what the greedy emitter *actually* uses, so we
-        // do NOT emit additional prologue saves here. See the method
-        // doc-comment for why a partial implementation would be
-        // incorrect.
-        if !alloc.used_callee_saved_gprs.is_empty() {
+        // Reset emitter state — mirrors `emit_function_greedy`.
+        self.code.clear();
+        self.fixups.clear();
+        self.label_offsets.clear();
+        self.call_relocs.clear();
+        self.relocations.clear();
+        self.current_func_name = func.name.clone();
+        self.reg_alloc.reset();
+
+        // Pre-allocate argument registers (AAPCS64: X0–X7) — same as the
+        // greedy emitter.  Parameter vregs MUST land in the correct
+        // argument registers regardless of what `alloc.vreg_to_preg` says.
+        let arg_regs = [
+            Register::X0, Register::X1, Register::X2, Register::X3,
+            Register::X4, Register::X5, Register::X6, Register::X7,
+        ];
+        for (i, param) in func.params.iter().enumerate() {
+            if let IRValue::Register(vreg_id) = param {
+                if i < 8 {
+                    self.reg_alloc.preassign(*vreg_id, arg_regs[i]);
+                }
+            }
+        }
+
+        // (Step 4) Seed the greedy allocator with the LinearScanAllocator's
+        // vreg → physreg mapping.  This makes `resolve_reg` return the
+        // regalloc-assigned physical register for each vreg rather than
+        // picking one on-the-fly from the caller-saved pool.  The updated
+        // `RegAllocator::preassign` (Wave 53) routes callee-saved GPRs
+        // (X19–X28) into `callee_saved_used` and removes them from
+        // `callee_saved_pool`, so the greedy allocator won't double-assign
+        // them.
+        for (&vreg, &preg) in &alloc.vreg_to_preg {
+            if let PhysReg::Gpr(r) = preg {
+                self.reg_alloc.preassign(vreg, r);
+            }
+            // SIMD/FP mappings are skipped for now — the greedy emitter's
+            // resolve_reg only returns GPRs, and SIMD spill/reload is
+            // handled conservatively by the greedy path.
+        }
+
+        // ── Compute frame sizes ───────────────────────────────────────
+        // Callee-saved save area: ceil(count/2)*16 bytes (STP stores pairs).
+        let callee_saved_count = alloc.used_callee_saved_gprs.len() as u32;
+        let callee_saved_size = callee_saved_count.div_ceil(2) * 16;
+
+        // Spill area: max of the greedy emitter's estimate and the
+        // regalloc's total_spill_slots * 8.
+        let aligned_stack = compute_frame_size(func);
+        let mut alloc_total: u32 = 0;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Alloc { size, .. } = instr {
+                    let aligned = (*size).div_ceil(16) * 16;
+                    alloc_total += aligned;
+                }
+            }
+        }
+        let greedy_spill_area = if aligned_stack > alloc_total {
+            aligned_stack - alloc_total
+        } else {
+            16
+        };
+        let regalloc_spill_bytes = alloc.total_spill_slots.saturating_mul(8);
+        let spill_area = greedy_spill_area.max(regalloc_spill_bytes);
+        let spill_area_aligned = (spill_area + 15) & !15;
+        self.frame_size = spill_area_aligned + callee_saved_size;
+
+        // ── Prologue ──────────────────────────────────────────────────
+        // (Step 2) Callee-saved register saves — emitted FIRST so the
+        // callee-saved area lives just below the caller's frame (highest
+        // addresses), above the FP/LR save pair.
+        if callee_saved_count > 0 {
+            self.emit_callee_saved_saves(&alloc.used_callee_saved_gprs, callee_saved_size)?;
+        }
+
+        // Standard FP/LR save (identical to emit_function_greedy):
+        //   SUB SP, SP, #16
+        //   STP X29, X30, [SP]
+        //   ADD X29, SP, #0       (set frame pointer)
+        self.emit_instruction(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(16),
+        })?;
+        self.emit_instruction(Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0,
+        })?;
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0),
+        })?;
+
+        // Spill area reservation (identical to emit_function_greedy).
+        if spill_area_aligned > 0 {
+            if spill_area_aligned <= 4095 {
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(spill_area_aligned as u16),
+                })?;
+            } else {
+                self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Reg {
+                        reg: Register::X9,
+                        shift: None,
+                    },
+                })?;
+            }
+        }
+
+        // ── Body ──────────────────────────────────────────────────────
+        // Iterate over blocks/instructions in the same order as
+        // `LiveRangeComputer::compute` so positions match
+        // `alloc.spill_code` keys (position = 2*instruction_index).
+        let mut pos: u32 = 0;
+        for block in &func.blocks {
+            self.label_offsets
+                .insert(block.label.clone(), self.code.len());
+            for instr in &block.instructions {
+                // (Step 5) Skip eliminated copies.
+                if is_eliminated_copy(instr, alloc) {
+                    pos += 2;
+                    continue;
+                }
+
+                // (Step 3) Emit reloads BEFORE the instruction.
+                if let Some(codes) = alloc.spill_code.get(&pos) {
+                    for sc in codes {
+                        if let SpillCode::Reload { preg, slot, .. } = sc {
+                            self.emit_spill_reload(preg, slot, /*is_spill=*/ false)?;
+                        }
+                    }
+                }
+
+                // Emit the instruction itself (uses the greedy emitter's
+                // emit_ir_instr, which consults reg_alloc — now seeded
+                // with alloc.vreg_to_preg via preassign).
+                self.emit_ir_instr(instr)?;
+                for reg in self.instr_pinned_regs.drain(..) {
+                    self.reg_alloc.unpin(reg);
+                }
+
+                // (Step 3) Emit spills AFTER the instruction.
+                if let Some(codes) = alloc.spill_code.get(&(pos + 1)) {
+                    for sc in codes {
+                        if let SpillCode::Spill { preg, slot, .. } = sc {
+                            self.emit_spill_reload(preg, slot, /*is_spill=*/ true)?;
+                        }
+                    }
+                }
+
+                pos += 2;
+            }
+            // Terminator — Return gets callee-saved restores injected.
+            self.emit_terminator_regalloc(&block.terminator, alloc, callee_saved_size)?;
+            pos += 2;
+        }
+
+        // Apply fixups — resolve intra-function branch targets.
+        self.apply_fixups()?;
+
+        if has_callee_saved {
             vuma_log!(debug,
-                "emit_function_regalloc: {} callee-saved GPRs in AllocationResult for '{}' \
-                 (spill slots: {}, coalesced copies: {}) — metadata only, \
-                 emitted bytes come from emit_function_greedy",
+                "emit_function_regalloc: emitted {} callee-saved GPR saves/restores + \
+                 {} spill-code entries for '{}' (frame_size={}, spill_area={})",
                 alloc.used_callee_saved_gprs.len(),
+                alloc.spill_code.len(),
                 func.name,
-                alloc.total_spill_slots,
-                alloc.eliminated_copies.len(),
+                self.frame_size,
+                spill_area_aligned,
             );
         }
 
-        Ok(code)
+        Ok(self.code.clone())
     }
 
     /// Emit a single IR function using the greedy register allocator.
@@ -1938,6 +2097,263 @@ impl Emitter {
                 return Err(CodegenError::InvalidInstruction(
                     "Resume terminator must be lowered before emission".to_string(),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Wave 53: Real spill-code emission helpers
+    // -----------------------------------------------------------------------
+
+    /// (Wave 53, Step 2) Emit callee-saved GPR saves in the prologue.
+    ///
+    /// Emits `SUB SP, SP, #frame_bytes` followed by `STP` pairs (and a
+    /// trailing `STR` for an odd count) to save each callee-saved GPR to
+    /// the stack.  The save area lives just below the caller's frame
+    /// (above the FP/LR save pair that the standard prologue emits next).
+    ///
+    /// Registers are saved in sorted order so the epilogue can restore
+    /// them in the same order without needing to re-sort.
+    fn emit_callee_saved_saves(
+        &mut self,
+        callee_saved: &HashSet<Register>,
+        frame_bytes: u32,
+    ) -> Result<()> {
+        // SUB SP, SP, #frame_bytes
+        if frame_bytes <= 4095 {
+            self.emit_instruction(Instruction::SUB {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Imm12(frame_bytes as u16),
+            })?;
+        } else {
+            self.emit_load_immediate(Register::X9, frame_bytes as i64)?;
+            self.emit_instruction(Instruction::SUB {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Reg {
+                    reg: Register::X9,
+                    shift: None,
+                },
+            })?;
+        }
+
+        // Sort registers for deterministic save order.
+        let mut regs: Vec<Register> = callee_saved.iter().copied().collect();
+        regs.sort_by_key(|r| *r as u32);
+
+        // STP pairs: STP Xi, Xi+1, [SP, #k*16]
+        let mut offset: i32 = 0;
+        let mut i = 0;
+        while i + 1 < regs.len() {
+            self.emit_instruction(Instruction::STP {
+                rt1: regs[i],
+                rt2: regs[i + 1],
+                rn: Register::SP,
+                offset,
+            })?;
+            i += 2;
+            offset += 16;
+        }
+        // Trailing STR for odd count: STR Xi, [SP, #offset]
+        if i < regs.len() {
+            self.emit_instruction(Instruction::STR {
+                rt: regs[i],
+                rn: Register::SP,
+                offset,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// (Wave 53, Step 2) Emit callee-saved GPR restores in the epilogue.
+    ///
+    /// Emits `LDP` pairs (and a trailing `LDR` for an odd count) to
+    /// restore each callee-saved GPR from the stack, followed by
+    /// `ADD SP, SP, #frame_bytes` to deallocate the save area.
+    /// Called AFTER the standard `ADD SP, X29, #0` / `LDP X29, X30, [SP]`
+    /// / `ADD SP, SP, #16` FP/LR restore sequence, so SP points at the
+    /// callee-saved save area.
+    fn emit_callee_saved_restores(
+        &mut self,
+        callee_saved: &HashSet<Register>,
+        frame_bytes: u32,
+    ) -> Result<()> {
+        let mut regs: Vec<Register> = callee_saved.iter().copied().collect();
+        regs.sort_by_key(|r| *r as u32);
+
+        let mut offset: i32 = 0;
+        let mut i = 0;
+        while i + 1 < regs.len() {
+            self.emit_instruction(Instruction::LDP {
+                rt1: regs[i],
+                rt2: regs[i + 1],
+                rn: Register::SP,
+                offset,
+            })?;
+            i += 2;
+            offset += 16;
+        }
+        if i < regs.len() {
+            self.emit_instruction(Instruction::LDR {
+                rt: regs[i],
+                rn: Register::SP,
+                offset,
+            })?;
+        }
+
+        // ADD SP, SP, #frame_bytes
+        if frame_bytes <= 4095 {
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Imm12(frame_bytes as u16),
+            })?;
+        } else {
+            self.emit_load_immediate(Register::X9, frame_bytes as i64)?;
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Reg {
+                    reg: Register::X9,
+                    shift: None,
+                },
+            })?;
+        }
+        Ok(())
+    }
+
+    /// (Wave 53, Step 3) Emit a single spill or reload instruction.
+    ///
+    /// For `is_spill = false` (Reload): emits `LDR preg, [X29, #slot.offset]`.
+    /// For `is_spill = true`  (Spill):  emits `STR preg, [X29, #slot.offset]`.
+    ///
+    /// The slot's `offset` field is negative (pointing into the spill
+    /// area below the FP/LR save pair), so we use `emit_address_with_offset`
+    /// to compute the effective address in X9 when the offset doesn't fit
+    /// the LDR/STR unsigned-immediate encoding.
+    fn emit_spill_reload(
+        &mut self,
+        preg: &PhysReg,
+        slot: &SpillSlot,
+        is_spill: bool,
+    ) -> Result<()> {
+        let rt = match preg {
+            PhysReg::Gpr(r) => *r,
+            // SIMD/FP spill/reload is not yet implemented in the greedy
+            // emitter's load/store path — skip conservatively (the
+            // greedy path's own spill mechanism handles SIMD).
+            PhysReg::SimdFp(_) => return Ok(()),
+        };
+
+        let offset = slot.offset;
+        // LDR/STR 64-bit unsigned-offset immediate range: 0..=32760, multiple of 8.
+        if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+            if is_spill {
+                self.emit_instruction(Instruction::STR {
+                    rt,
+                    rn: Register::X29,
+                    offset,
+                })?;
+            } else {
+                self.emit_instruction(Instruction::LDR {
+                    rt,
+                    rn: Register::X29,
+                    offset,
+                })?;
+            }
+        } else {
+            // Negative or out-of-range offset: compute address in X9.
+            self.emit_address_with_offset(Register::X29, offset)?;
+            if is_spill {
+                self.emit_instruction(Instruction::STR {
+                    rt,
+                    rn: Register::X9,
+                    offset: 0,
+                })?;
+            } else {
+                self.emit_instruction(Instruction::LDR {
+                    rt,
+                    rn: Register::X9,
+                    offset: 0,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// (Wave 53, Step 2 + Step 5) Emit a terminator with regalloc-aware
+    /// callee-saved restores injected into `IRTerminator::Return`.
+    ///
+    /// For non-`Return` terminators, this delegates to [`emit_terminator`]
+    /// unchanged.  For `Return`, it emits the standard return-value moves
+    /// and FP/LR restore sequence, then inserts callee-saved restores
+    /// (via [`emit_callee_saved_restores`]) before the final `RET`.
+    fn emit_terminator_regalloc(
+        &mut self,
+        term: &IRTerminator,
+        alloc: &AllocationResult,
+        callee_saved_size: u32,
+    ) -> Result<()> {
+        match term {
+            IRTerminator::Return(vals) => {
+                // Move return values into X0–X7 (identical to emit_terminator).
+                for (i, val) in vals.iter().enumerate() {
+                    if i >= 8 {
+                        break;
+                    }
+                    let src = self.resolve_reg(val)?;
+                    let dst_reg = match i {
+                        0 => Register::X0,
+                        1 => Register::X1,
+                        2 => Register::X2,
+                        3 => Register::X3,
+                        4 => Register::X4,
+                        5 => Register::X5,
+                        6 => Register::X6,
+                        7 => Register::X7,
+                        _ => unreachable!(),
+                    };
+                    if src != dst_reg {
+                        self.emit_instruction(Instruction::MOV {
+                            rd: dst_reg,
+                            rm: src,
+                        })?;
+                    }
+                }
+                // Restore SP to the FP/LR save area.
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X29,
+                    rm: Operand::Imm12(0),
+                })?;
+                // Restore FP/LR.
+                self.emit_instruction(Instruction::LDP {
+                    rt1: Register::X29,
+                    rt2: Register::X30,
+                    rn: Register::SP,
+                    offset: 0,
+                })?;
+                // Deallocate the FP/LR save area — SP now points at the
+                // callee-saved save area (if any).
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::SP,
+                    rm: Operand::Imm12(16),
+                })?;
+                // (Step 2) Restore callee-saved GPRs.
+                if !alloc.used_callee_saved_gprs.is_empty() {
+                    self.emit_callee_saved_restores(
+                        &alloc.used_callee_saved_gprs,
+                        callee_saved_size,
+                    )?;
+                }
+                self.emit_instruction(Instruction::RET { rn: None })?;
+            }
+            // All other terminators delegate to the standard path.
+            _ => {
+                self.emit_terminator(term)?;
             }
         }
         Ok(())
@@ -4172,6 +4588,59 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
         BinOpKind::Ne => Condition::NE,
         _ => Condition::EQ, // fallback — should not be reached
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 53: Real spill-code emission — copy-elision helper
+// ---------------------------------------------------------------------------
+
+/// (Wave 53, Step 5) Check whether an IR instruction is a `Cast::BitCast`
+/// whose move was eliminated by the `LinearScanAllocator`'s coalescing
+/// pass.
+///
+/// Returns `true` when the emitter should *skip* emitting a `MOV` for
+/// this instruction because the source and destination vregs were
+/// coalesced to the same physical register (making the move a no-op).
+///
+/// The check has two paths:
+///
+/// 1. **Explicit record:** `alloc.eliminated_copies` is a list of
+///    `(src_vreg, src_preg)` pairs recorded by
+///    `LinearScanAllocator::coalesce_copies_post_alloc`.  If the
+///    instruction's `src` vreg appears in this list, the copy was
+///    coalesced.
+/// 2. **Physical-register equality:** even without an explicit record,
+///    if `alloc.get_phys_reg(src) == alloc.get_phys_reg(dst)`, the
+///    move is a no-op (the allocator assigned both vregs to the same
+///    physical register, e.g. via pre-allocation coalescing in
+///    `LiveRangeComputer::coalesce_intervals`).
+///
+/// Non-`Cast` instructions and non-`BitCast` casts always return
+/// `false` — only `BitCast` between two register operands is a
+/// candidate for copy elision.
+fn is_eliminated_copy(instr: &IRInstr, alloc: &AllocationResult) -> bool {
+    if let IRInstr::Cast {
+        kind: CastKind::BitCast,
+        dst,
+        src,
+        ..
+    } = instr
+    {
+        let (Some(dst_id), Some(src_id)) = (dst.as_register(), src.as_register()) else {
+            return false;
+        };
+        // Path 1: src appears in eliminated_copies.
+        for (s, _) in &alloc.eliminated_copies {
+            if *s == src_id {
+                return true;
+            }
+        }
+        // Path 2: src and dst resolve to the same physical register.
+        if let (Some(sp), Some(dp)) = (alloc.get_phys_reg(src_id), alloc.get_phys_reg(dst_id)) {
+            return sp == dp;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -6700,73 +7169,156 @@ mod tests {
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "should be a valid ELF");
     }
 
-    /// (Wave 21, Task 4-c) Lock in the **metadata-only** behavior of
-    /// `emit_function_regalloc`: passing an `AllocationResult` must NOT
-    /// change the emitted bytes relative to the greedy path.
+    /// (Wave 53) Verify that `emit_function_regalloc` consumes the
+    /// `AllocationResult` and produces emitted bytes that *differ* from
+    /// `emit_function_greedy`, and that the emitted bytes contain
+    /// callee-saved register save/restore instructions (STP/LDP pairs
+    /// targeting X19-X28 - the ARM64 equivalent of PUSH/POP).
     ///
-    /// This guards against accidental regressions where a future change
-    /// starts consuming `spill_code` / `vreg_to_preg` / `coalesced_map`
-    /// without a complete (correct) implementation. If the emitted bytes
-    /// ever differ between the `Some(alloc)` and `None` paths, this test
-    /// will fail loudly, surfacing the divergence for review.
+    /// This test replaces the Wave 21 `emit_function_regalloc_is_metadata_only`
+    /// guard, which asserted the *opposite* (that the bytes were identical).
+    /// Wave 53 changes the contract: `emit_function_regalloc` now really
+    /// consumes `alloc.used_callee_saved_gprs`, `alloc.spill_code`, and
+    /// `alloc.eliminated_copies`, so the emitted bytes MUST differ when
+    /// the allocator reports callee-saved usage.
+    ///
+    /// # Test function
+    ///
+    /// The IR function is a chain of 30 `BinOp::Add` instructions that
+    /// keep every previously-defined vreg live until the return (all 31
+    /// vregs are returned).  This forces the `LinearScanAllocator` to
+    /// exhaust the 15 caller-saved GPRs and spill into the 10
+    /// callee-saved GPRs (X19-X28), producing a non-empty
+    /// `used_callee_saved_gprs` set and (typically) non-empty
+    /// `spill_code`.
+    ///
+    /// # Assertions
+    ///
+    /// 1. The `AllocationResult` has non-empty `used_callee_saved_gprs`
+    ///    OR non-empty `spill_code` (sanity check that the test function
+    ///    actually exercises the allocator).
+    /// 2. `emit_function_regalloc(func, &alloc)` produces bytes that
+    ///    DIFFER from `emit_function_greedy(func)` (proving the
+    ///    `AllocationResult` influenced the output).
+    /// 3. The regalloc-emitted bytes contain at least one STP or LDP
+    ///    instruction (64-bit signed-offset form, base 0xA9000000 /
+    ///    0xA9400000) with `rt1` or `rt2` in X19-X28 (register encoding
+    ///    19-28), proving callee-saved registers are being saved/restored.
     #[test]
-    fn emit_function_regalloc_is_metadata_only() {
-        use crate::regalloc::{AllocationResult, LinearScanAllocator, SpillCode, SpillSlot};
+    fn test_wave53_real_spill_code_emission() {
+        use crate::regalloc::LinearScanAllocator;
 
-        let func = make_return_function("metadata_only_probe");
+        // Build a function with high register pressure: 30 chained Add
+        // instructions, each defining a new vreg that depends on the
+        // previous one.  All 31 vregs are returned, keeping them all
+        // live simultaneously.
+        let mut func = IRFunction::new("wave53_high_pressure");
+        func.params.push(IRValue::Register(0));
+        let block = func.current_block();
+        for i in 0..30u32 {
+            block.push(IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(i + 1),
+                lhs: IRValue::Register(i),
+                rhs: IRValue::Immediate(1),
+                ty: None,
+            });
+        }
+        let ret_vals: Vec<IRValue> = (0..=30u32).map(IRValue::Register).collect();
+        block.terminator = IRTerminator::Return(ret_vals);
+
+        // Run the LinearScanAllocator to get a real AllocationResult.
         let allocator = LinearScanAllocator::new();
-        let mut alloc = allocator
+        let alloc = allocator
             .allocate_function(&func)
-            .expect("regalloc should succeed");
+            .expect("regalloc should succeed on high-pressure function");
 
-        // Synthesize a non-empty `spill_code` map so we can verify the
-        // emit path does NOT act on it. If the path were ever changed to
-        // consume spill_code, this fake entry would surface as a
-        // divergence in the emitted bytes.
-        let fake_slot = SpillSlot::new(0, -8, crate::regalloc::RegClass::Gpr);
-        let fake_preg = crate::regalloc::PhysReg::Gpr(Register::X19);
-        alloc.spill_code.insert(
-            0,
-            vec![SpillCode::Reload {
-                vreg: 0,
-                preg: fake_preg,
-                slot: fake_slot.clone(),
-            }],
+        // Sanity: the allocator must have produced SOMETHING we can consume.
+        assert!(
+            !alloc.used_callee_saved_gprs.is_empty() || !alloc.spill_code.is_empty(),
+            "test function should force the allocator to use callee-saved GPRs or generate \
+             spill code, but AllocationResult was empty (used_callee_saved_gprs={:?}, \
+             spill_code entries={}, total_spill_slots={})",
+            alloc.used_callee_saved_gprs,
+            alloc.spill_code.len(),
+            alloc.total_spill_slots,
         );
-        alloc.spill_code.insert(
-            1,
-            vec![SpillCode::Spill {
-                vreg: 0,
-                preg: fake_preg,
-                slot: fake_slot,
-            }],
-        );
-        // Also synthesize a fake callee-saved GPR so the diagnostic log
-        // branch fires — verifying that logging alone doesn't perturb
-        // the emitted bytes.
-        alloc.used_callee_saved_gprs.insert(Register::X19);
-        alloc.total_spill_slots = 1;
-        alloc.eliminated_copies.push((0, fake_preg));
 
-        // Emit once with the (populated) AllocationResult and once with
-        // None (pure greedy path).
-        let mut em_with_alloc = Emitter::new();
-        let code_with_alloc = em_with_alloc
+        // Emit with the AllocationResult (regalloc path).
+        let mut em_regalloc = Emitter::new();
+        let code_regalloc = em_regalloc
             .emit_function(&func, Some(&alloc))
-            .expect("emission with alloc should succeed");
+            .expect("regalloc emission should succeed");
 
-        let mut em_no_alloc = Emitter::new();
-        let code_no_alloc = em_no_alloc
+        // Emit without the AllocationResult (greedy path).
+        let mut em_greedy = Emitter::new();
+        let code_greedy = em_greedy
             .emit_function(&func, None)
-            .expect("emission without alloc should succeed");
+            .expect("greedy emission should succeed");
 
-        assert_eq!(
-            code_with_alloc, code_no_alloc,
-            "emit_function_regalloc must be metadata-only: passing an AllocationResult with \
-             populated spill_code / used_callee_saved_gprs / eliminated_copies must NOT change \
-             the emitted bytes relative to the greedy path. If this test fails, a future change \
-             started consuming AllocationResult fields without a complete implementation — see \
-             the doc-comment on emit_function_regalloc."
+        // Assertion 2: the bytes MUST differ - proves the AllocationResult
+        // influenced the emitted code.
+        assert_ne!(
+            code_regalloc, code_greedy,
+            "Wave 53: emit_function_regalloc must produce bytes that DIFFER from \
+             emit_function_greedy when the AllocationResult reports callee-saved GPRs \
+             or spill code. Got identical bytes (len={}), which means the emit path \
+             is still metadata-only.",
+            code_regalloc.len(),
+        );
+
+        // Assertion 3: the regalloc-emitted bytes must contain at least one
+        // STP or LDP instruction targeting a callee-saved GPR (X19-X28).
+        //
+        // ARM64 STP/LDP (64-bit signed offset) encoding:
+        //   bits[31:23] = 10_1010_010  (mask 0xFF800000, value 0xA9000000)
+        //   bit[22]     = 0 (STP) / 1 (LDP)
+        //   Rt1 = bits[4:0]
+        //   Rt2 = bits[14:10]
+        // Callee-saved GPRs: X19-X28 (encoding 19..=28).
+        let mut found_callee_saved_stp_ldp = false;
+        for &word in &code_regalloc {
+            let is_stp_ldp_64 = (word & 0xFF800000) == 0xA9000000;
+            if !is_stp_ldp_64 {
+                continue;
+            }
+            let rt1 = word & 0x1F;
+            let rt2 = (word >> 10) & 0x1F;
+            if (19..=28).contains(&rt1) || (19..=28).contains(&rt2) {
+                found_callee_saved_stp_ldp = true;
+                break;
+            }
+        }
+        assert!(
+            found_callee_saved_stp_ldp,
+            "Wave 53: regalloc-emitted bytes must contain at least one STP or LDP \
+             instruction targeting a callee-saved GPR (X19-X28). The emitted bytes \
+             (len={}) contained no such instruction - prologue/epilogue callee-saved \
+             saves/restores were not emitted.",
+            code_regalloc.len(),
+        );
+
+        // Also verify the greedy path does NOT contain callee-saved STP/LDP
+        // (the greedy emitter never touches X19-X28).  This confirms the
+        // callee-saved saves/restores are genuinely added by the regalloc
+        // path, not by some other change.
+        let mut greedy_has_callee_saved = false;
+        for &word in &code_greedy {
+            let is_stp_ldp_64 = (word & 0xFF800000) == 0xA9000000;
+            if !is_stp_ldp_64 {
+                continue;
+            }
+            let rt1 = word & 0x1F;
+            let rt2 = (word >> 10) & 0x1F;
+            if (19..=28).contains(&rt1) || (19..=28).contains(&rt2) {
+                greedy_has_callee_saved = true;
+                break;
+            }
+        }
+        assert!(
+            !greedy_has_callee_saved,
+            "Wave 53: greedy path should NOT contain callee-saved STP/LDP (the greedy \
+             emitter never touches X19-X28), but found one - test premise is invalid."
         );
     }
 
