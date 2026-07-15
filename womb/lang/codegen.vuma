@@ -211,6 +211,104 @@ fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
     return pos + 5;
 }
 
+// Wave P1-c-8: translate a VUMA/asm-generic syscall number to the x86_64
+// native syscall number. The bootstrap targets x86_64, so the generic nr
+// coming out of the AST (c1 of NK_SYSCALL) must be remapped before being
+// loaded into EAX. Unknown nrs fall through verbatim (same fallback as the
+// Rust codegen's unwrap_or(nr)). The table mirrors the per-arch tables in
+// src/codegen/*/syscall_*.rs (x86_64 column).
+fn translate_syscall_nr_x86_64(vuma_nr: u32) -> u32 {
+    // File I/O
+    if vuma_nr == 64 { return 1; }    // write
+    if vuma_nr == 63 { return 0; }    // read
+    if vuma_nr == 57 { return 3; }    // close
+    if vuma_nr == 56 { return 257; }  // openat
+    if vuma_nr == 62 { return 8; }    // lseek
+    if vuma_nr == 80 { return 5; }    // fstat
+    if vuma_nr == 79 { return 262; }  // newfstatat
+    if vuma_nr == 78 { return 267; }  // readlinkat
+    if vuma_nr == 67 { return 17; }   // pread64
+    if vuma_nr == 68 { return 18; }   // pwrite64
+    if vuma_nr == 65 { return 19; }   // readv
+    if vuma_nr == 66 { return 20; }   // writev
+    if vuma_nr == 46 { return 46; }   // ftruncate
+    if vuma_nr == 82 { return 74; }   // fsync
+    if vuma_nr == 83 { return 75; }   // fdatasync
+    if vuma_nr == 81 { return 162; }  // sync
+    if vuma_nr == 306 { return 306; } // syncfs
+    // Path I/O
+    if vuma_nr == 35 { return 263; }  // unlinkat
+    if vuma_nr == 38 { return 264; }  // renameat
+    if vuma_nr == 37 { return 265; }  // linkat
+    if vuma_nr == 36 { return 266; }  // symlinkat
+    if vuma_nr == 48 { return 269; }  // faccessat
+    if vuma_nr == 53 { return 268; }  // fchmodat
+    if vuma_nr == 54 { return 260; }  // fchownat
+    if vuma_nr == 52 { return 91; }   // fchmod
+    if vuma_nr == 55 { return 93; }   // fchown
+    if vuma_nr == 17 { return 79; }   // getcwd
+    if vuma_nr == 49 { return 80; }   // chdir
+    // Process / signals
+    if vuma_nr == 93 { return 60; }   // exit
+    if vuma_nr == 94 { return 231; }  // exit_group
+    if vuma_nr == 172 { return 39; }  // getpid
+    if vuma_nr == 129 { return 62; }  // kill
+    if vuma_nr == 124 { return 24; }  // sched_yield
+    if vuma_nr == 134 { return 13; }  // rt_sigaction
+    if vuma_nr == 135 { return 14; }  // rt_sigprocmask
+    if vuma_nr == 260 { return 61; }  // wait4
+    if vuma_nr == 220 { return 56; }  // clone
+    if vuma_nr == 221 { return 59; }  // execve
+    // Memory
+    if vuma_nr == 222 { return 9; }   // mmap
+    if vuma_nr == 215 { return 11; }  // munmap
+    if vuma_nr == 214 { return 12; }  // brk
+    if vuma_nr == 226 { return 10; }  // mprotect
+    if vuma_nr == 278 { return 318; } // getrandom
+    // Time / sleep
+    if vuma_nr == 113 { return 228; } // clock_gettime
+    if vuma_nr == 101 { return 35; }  // nanosleep
+    if vuma_nr == 153 { return 100; } // times
+    // Futex / sync
+    if vuma_nr == 98 { return 202; }  // futex
+    // UID / GID
+    if vuma_nr == 174 { return 102; } // getuid
+    if vuma_nr == 175 { return 107; } // geteuid
+    if vuma_nr == 176 { return 104; } // getgid
+    if vuma_nr == 177 { return 108; } // getegid
+    if vuma_nr == 146 { return 105; } // setuid
+    if vuma_nr == 144 { return 106; } // setgid
+    // Resource limits
+    if vuma_nr == 261 { return 302; } // prlimit64
+    if vuma_nr == 163 { return 97; }  // getrlimit
+    if vuma_nr == 164 { return 160; } // setrlimit
+    if vuma_nr == 165 { return 98; }  // getrusage
+    // FD management
+    if vuma_nr == 22 { return 22; }   // pipe
+    if vuma_nr == 23 { return 32; }   // dup
+    if vuma_nr == 24 { return 292; }  // dup3
+    if vuma_nr == 25 { return 72; }   // fcntl
+    if vuma_nr == 29 { return 16; }   // ioctl
+    // Sockets
+    if vuma_nr == 198 { return 41; }  // socket
+    if vuma_nr == 203 { return 42; }  // connect
+    if vuma_nr == 200 { return 49; }  // bind
+    if vuma_nr == 201 { return 50; }  // listen
+    if vuma_nr == 202 { return 43; }  // accept
+    if vuma_nr == 206 { return 44; }  // sendto
+    if vuma_nr == 207 { return 45; }  // recvfrom
+    if vuma_nr == 210 { return 48; }  // shutdown
+    if vuma_nr == 208 { return 54; }  // setsockopt
+    // epoll / eventfd / timerfd / signalfd
+    if vuma_nr == 20 { return 291; }  // epoll_create1
+    if vuma_nr == 21 { return 233; }  // epoll_ctl
+    if vuma_nr == 19 { return 290; }  // eventfd2
+    if vuma_nr == 85 { return 283; }  // timerfd_create
+    if vuma_nr == 74 { return 289; }  // signalfd4
+    // Fallback: unknown nr → pass through verbatim (matches Rust codegen).
+    return vuma_nr;
+}
+
 // Generate function prologue
 fn gen_prologue(code: Address, pos: u32, frame_size: u32) -> u32 {
     pos = enc_push_rbp(code, pos);
@@ -904,6 +1002,22 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
                 }
             }
             // else: real calls not supported in bootstrap; skip silently.
+        }}
+        else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8)
+            // x86_64 syscall ABI: nr in EAX, args in RDI/RSI/RDX/R10/R8/R9,
+            // result in RAX. lhs = VUMA/asm-generic nr (translate first),
+            // rhs = arg_count, imm (lower 32) = arg0_vreg.
+            // TODO: multi-arg — bootstrap only stashes arg0 (same single-arg
+            // limitation as IR_CALL). For arg_count >= 1 we load arg0 into
+            // RDI. arg1..arg5 (RSI/RDX/R10/R8/R9) need a side buffer.
+            native_nr: u32 = translate_syscall_nr_x86_64(lhs);
+            if rhs >= 1 {
+                arg0: u32 = imm & 0xFFFFFFFF;
+                pos = enc_load_rdi(code, pos, vreg_offset(arg0));
+            }
+            pos = enc_mov_eax_imm32(code, pos, native_nr);
+            pos = enc_syscall(code, pos);
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
         // IR_NOP (0), IR_BRANCH (17), IR_COND_BRANCH (18), IR_CMP (10),
         // IR_LOAD (11), IR_STORE (12), IR_ALLOC (15), etc.: not handled

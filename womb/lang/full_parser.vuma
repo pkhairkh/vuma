@@ -175,6 +175,10 @@ const NK_BINOP: u32 = 3;
 const NK_CALL: u32 = 5;
 const NK_DEREF: u32 = 6;
 const NK_ASSIGN: u32 = 7;
+// Wave P1-c-8: syscall() intrinsic. c1 = syscall nr (VUMA/asm-generic),
+// c3 = arg_count, val (lower 32) = arg0 AST node index (same stashing
+// pattern as NK_CALL; multi-arg needs a side buffer — TODO).
+const NK_SYSCALL: u32 = 8;
 const NK_RETURN: u32 = 10;
 const NK_LET: u32 = 11;
 const NK_IF: u32 = 12;
@@ -275,7 +279,43 @@ fn parse_primary_full(p: Address) -> u32 {
     if t == 124 {  // '|' pipe
         return parse_closure(p);
     }
-    
+
+    // Wave P1-c-8: syscall() intrinsic.
+    //   syscall ( <int_literal_nr> , <arg_expr> , ... )
+    // The nr MUST be an integer literal (peek_type == 2, INT_LIT). We read
+    // its value via peek_val, advance past it, then parse the comma-separated
+    // arg list exactly like NK_CALL. The nr is stashed in c1 (NOT a name
+    // hash like NK_CALL); arg_count in c3; arg0 AST node index in val (lower
+    // 32). Multi-arg stashing shares NK_CALL's single-arg limitation.
+    if t == 37 {  // SYSCALL keyword
+        advance(p);
+        expect(p, 61);  // LPAREN
+        // The syscall number MUST be an integer literal.
+        nr_val: u64 = 0;
+        if peek_type(p) == 2 {  // INT_LIT
+            nr_val = peek_val(p);
+            advance(p);
+        }
+        nr: u32 = nr_val & 0xFFFFFFFF;
+        arg_count: u32 = 0;
+        arg0_idx: u32 = 0;
+        if peek_type(p) == 68 {  // COMMA — at least one arg follows
+            advance(p);
+            done: u32 = 0;
+            while done == 0 {
+                arg_idx: u32 = parse_expr_full(p);
+                if arg_count == 0 { arg0_idx = arg_idx; }
+                arg_count = arg_count + 1;
+                if peek_type(p) == 68 { advance(p); }  // COMMA → another arg
+                else { done = 1; }
+            }
+        }
+        expect(p, 62);  // RPAREN
+        // NK_SYSCALL: c1 = nr (VUMA/asm-generic syscall number),
+        //             c3 = arg_count, val (lower 32) = arg0 AST node index.
+        return ast_node(p, NK_SYSCALL, nr, 0, arg_count, arg0_idx, 0);
+    }
+
     return ast_node(p, 0, 0, 0, 0, 0, 0);  // error
 }
 
