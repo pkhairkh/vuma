@@ -22,4 +22,3 @@ rust-version.workspace = true
 # `.map_err(|e| PackageError::ManifestParse(e.to_string()))` were simplified
 # to use the `?` operator directly.
 toml.workspace = true
-tempfile.workspace = true
