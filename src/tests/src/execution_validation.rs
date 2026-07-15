@@ -131,6 +131,7 @@ mod x86_64_native {
     /// `extern "C" fn() -> i64`, munmap.
     fn execute_native(code: &[u8]) -> i64 {
         use std::ptr;
+        use crate::ffi_types as ffi;
 
         let len = code.len();
         let page_size = 4096usize;
@@ -139,25 +140,25 @@ mod x86_64_native {
 
         unsafe {
             // Allocate anonymous RW memory.
-            let mem = libc::mmap(
+            let mem = ffi::mmap(
                 ptr::null_mut(),
                 aligned_len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                ffi::PROT_READ | ffi::PROT_WRITE,
+                ffi::MAP_PRIVATE | ffi::MAP_ANONYMOUS,
                 -1,
                 0,
             );
 
-            assert!(mem != libc::MAP_FAILED, "mmap failed in test");
+            assert!(mem != ffi::MAP_FAILED, "mmap failed in test");
 
             // Copy machine code into the mapped region.
             ptr::copy_nonoverlapping(code.as_ptr(), mem as *mut u8, len);
 
             // Switch to read + write + execute.
-            let mprotect_result = libc::mprotect(
+            let mprotect_result = ffi::mprotect(
                 mem,
                 aligned_len,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                ffi::PROT_READ | ffi::PROT_WRITE | ffi::PROT_EXEC,
             );
             assert_eq!(mprotect_result, 0, "mprotect failed in test");
 
@@ -167,7 +168,7 @@ mod x86_64_native {
             let result = func();
 
             // Unmap the executable memory.
-            libc::munmap(mem, aligned_len);
+            ffi::munmap(mem, aligned_len);
 
             result
         }
