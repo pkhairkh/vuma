@@ -932,15 +932,15 @@ fn single_diagnostic_json_is_valid() {
     ));
 
     let json_str = diag.to_json();
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
+    let parsed = vuma::json_value::parse(&json_str)
         .expect("Diagnostic JSON should be parseable");
-    assert_eq!(parsed["code"], "E002");
-    assert_eq!(parsed["severity"], "error");
-    assert_eq!(parsed["message"], "undefined variable `x`");
-    assert_eq!(parsed["source"], "parser");
-    assert!(parsed["location"].is_object());
-    assert!(parsed["suggestions"].is_array());
-    assert!(parsed["related"].is_array());
+    assert_eq!(parsed.get("code").unwrap().as_str(), Some("E002"));
+    assert_eq!(parsed.get("severity").unwrap().as_str(), Some("error"));
+    assert_eq!(parsed.get("message").unwrap().as_str(), Some("undefined variable `x`"));
+    assert_eq!(parsed.get("source").unwrap().as_str(), Some("parser"));
+    assert!(parsed.get("location").unwrap().is_object());
+    assert!(parsed.get("suggestions").unwrap().is_array());
+    assert!(parsed.get("related").unwrap().is_array());
 }
 
 #[test]
@@ -952,7 +952,7 @@ fn diagnostic_array_json_is_valid() {
         undefined_variable("y", loc2),
     ];
     let json_str = diagnostics_to_json(&diags);
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
+    let parsed = vuma::json_value::parse(&json_str)
         .expect("Diagnostics array JSON should be parseable");
     assert!(parsed.is_array());
     assert_eq!(parsed.as_array().unwrap().len(), 2);
@@ -962,7 +962,7 @@ fn diagnostic_array_json_is_valid() {
 fn diagnostic_pretty_json_is_valid() {
     let diags = vec![compilation_started("main.vu")];
     let json_str = diagnostics_to_json_pretty(&diags);
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
+    let parsed = vuma::json_value::parse(&json_str)
         .expect("Pretty JSON should be parseable");
     assert!(parsed.is_array());
 }
@@ -985,7 +985,7 @@ fn diagnostic_json_roundtrip() {
     .with_suggestion("check types");
 
     let json_str = original.to_json();
-    let restored: VumaDiagnostic = serde_json::from_str(&json_str)
+    let restored = VumaDiagnostic::from_json_str(&json_str)
         .expect("Roundtrip deserialization should succeed");
     assert_eq!(restored.code, original.code);
     assert_eq!(restored.severity, original.severity);
@@ -1003,12 +1003,12 @@ fn diagnostic_summary_json_is_valid() {
     summary.add(&compilation_started("main.vu"));
 
     let json_str = summary.to_json();
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
+    let parsed = vuma::json_value::parse(&json_str)
         .expect("Summary JSON should be parseable");
-    assert_eq!(parsed["total"], 3);
-    assert_eq!(parsed["errors"], 1);
-    assert_eq!(parsed["warnings"], 1);
-    assert_eq!(parsed["infos"], 1);
+    assert_eq!(parsed.get("total").unwrap().as_u64(), Some(3));
+    assert_eq!(parsed.get("errors").unwrap().as_u64(), Some(1));
+    assert_eq!(parsed.get("warnings").unwrap().as_u64(), Some(1));
+    assert_eq!(parsed.get("infos").unwrap().as_u64(), Some(1));
 }
 
 #[test]
@@ -1023,10 +1023,10 @@ fn lsp_output_is_valid_json() {
     );
     let lsp = diag.to_lsp();
     assert!(lsp.is_object());
-    assert!(lsp["range"].is_object());
-    assert_eq!(lsp["severity"], 1); // Error = 1
-    assert_eq!(lsp["code"], "E002");
-    assert_eq!(lsp["source"], "parser");
+    assert!(lsp.get("range").unwrap().is_object());
+    assert_eq!(lsp.get("severity").unwrap().as_u64(), Some(1)); // Error = 1
+    assert_eq!(lsp.get("code").unwrap().as_str(), Some("E002"));
+    assert_eq!(lsp.get("source").unwrap().as_str(), Some("parser"));
 }
 
 #[test]
@@ -1035,16 +1035,18 @@ fn lsp_warning_tags() {
     let d = unused_variable("x", loc.clone());
     let lsp = d.to_lsp();
     // W001 should have Unnecessary tag (1)
-    assert!(lsp["tags"].is_array());
-    let tags = lsp["tags"].as_array().unwrap();
-    assert!(tags.contains(&serde_json::Value::Number(serde_json::Number::from(1))));
+    let tags = lsp.get("tags").unwrap();
+    assert!(tags.is_array());
+    let tags = tags.as_array().unwrap();
+    assert!(tags.contains(&vuma::json_value::JsonValue::U64(1)));
 
     let d = deprecated_feature("old", None, loc.clone());
     let lsp = d.to_lsp();
     // W008 should have Deprecated tag (2)
-    assert!(lsp["tags"].is_array());
-    let tags = lsp["tags"].as_array().unwrap();
-    assert!(tags.contains(&serde_json::Value::Number(serde_json::Number::from(2))));
+    let tags = lsp.get("tags").unwrap();
+    assert!(tags.is_array());
+    let tags = tags.as_array().unwrap();
+    assert!(tags.contains(&vuma::json_value::JsonValue::U64(2)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1389,8 +1391,8 @@ fn compile_for_target_valid_source_serializable() {
     let compiler = VumaCompiler::new();
     let source = "fn main() {}";
     let result = compiler.compile_for_target(source, "x86_64");
-    let json = serde_json::to_string(&result);
-    assert!(json.is_ok(), "CompileResult should be serializable for target output");
+    let json = result.to_json();
+    assert!(!json.is_empty(), "CompileResult should be serializable for target output");
 }
 
 #[test]
