@@ -72,7 +72,11 @@ pub fn vuma_generic_name(nr: u32) -> Option<&'static str> {
         // ── epoll ──
         20 => Some("epoll_create1"),
         21 => Some("epoll_ctl"),
-        22 => Some("epoll_wait"),
+        // NOTE: asm-generic has NO epoll_wait syscall (userspace uses
+        // epoll_pwait, nr 22 on some legacy arches but 441 on asm-generic).
+        // Nr 22 on asm-generic is `pipe`. The epoll_wait name is intentionally
+        // absent here to avoid a collision with pipe.
+        22 => Some("pipe"),
         // ── fd ops ──
         23 => Some("dup"),
         24 => Some("dup3"),
@@ -282,7 +286,8 @@ fn translate_x86_64(generic_nr: u32) -> Option<u32> {
         // ── epoll ──
         20 => Some(291),   // epoll_create1
         21 => Some(233),   // epoll_ctl
-        22 => Some(232),   // epoll_wait
+        // Nr 22 = pipe on asm-generic. x86_64 pipe = 22.
+        22 => Some(22),    // pipe
         // ── fd ops ──
         23 => Some(32),    // dup
         24 => Some(292),   // dup3

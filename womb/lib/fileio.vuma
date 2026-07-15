@@ -4,9 +4,24 @@
 //
 // Task ID: womb-fileio
 //
-// This module wraps Linux x86_64 syscalls behind high-level VUMA functions.
-// Memory is managed with allocate()/free(); byte-level loads/stores use
-// the *(ptr + offset) primitive.
+// This module wraps Linux asm-generic syscalls behind high-level VUMA functions
+// using the vuma-native `syscall(nr, args...)` intrinsic. Memory is managed
+// with allocate()/free(); byte-level loads/stores use the *(ptr + offset)
+// primitive.
+//
+// Several legacy syscall NAMES do not exist in the modern asm-generic/unistd.h
+// ABI and are reshaped to their modern *at / 3-arg / 4-arg replacements:
+//   open(path, flags, mode)              -> openat(AT_FDCWD, path, flags, mode)        (nr 56)
+//   unlink(path)                         -> unlinkat(AT_FDCWD, path, 0)                (nr 35)
+//   rmdir(path)                          -> unlinkat(AT_FDCWD, path, AT_REMOVEDIR)     (nr 35)
+//   mkdir(path, mode)                    -> mkdirat(AT_FDCWD, path, mode)              (nr 34)
+//   rename(old, new)                     -> renameat(AT_FDCWD, old, AT_FDCWD, new)     (nr 38)
+//   stat(path, sb)                       -> newfstatat(AT_FDCWD, path, sb, 0)          (nr 79)
+//   dup2(old, new)                       -> dup3(old, new, 0)                         (nr 24)
+//   fork()                               -> clone(SIGCHLD=17, 0, 0, 0, 0)             (nr 220)
+//   waitpid(pid, status, opts)           -> wait4(pid, status, opts, rusage=0)        (nr 260)
+// fstat, close, read, write, lseek, getcwd, chdir, pipe, execve, kill, exit
+// exist natively in asm-generic and are passed through with their literal nr.
 
 // ===========================================================================
 // Constants
@@ -30,33 +45,10 @@ const STAT_SIZE: i64 = 144;
 // Offset of st_size (off_t, 8 bytes) within struct stat on x86_64 Linux.
 const STAT_ST_SIZE_OFF: i64 = 48;
 
-// ===========================================================================
-// Linux x86_64 syscalls
-// ===========================================================================
-
-extern "C" {
-    fn open(pathname: Address, flags: i64, mode: i64) -> i64;
-    fn close(fd: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn lseek(fd: i64, offset: i64, whence: i64) -> i64;
-    fn unlink(pathname: Address) -> i64;
-    fn mkdir(pathname: Address, mode: i64) -> i64;
-    fn rmdir(pathname: Address) -> i64;
-    fn rename(oldpath: Address, newpath: Address) -> i64;
-    fn stat(pathname: Address, statbuf: Address) -> i64;
-    fn fstat(fd: i64, statbuf: Address) -> i64;
-    fn getcwd(buf: Address, size: i64) -> Address;
-    fn chdir(path: Address) -> i64;
-    fn dup2(oldfd: i64, newfd: i64) -> i64;
-    fn pipe(pipefd: Address) -> i64;
-    fn fork() -> i64;
-    fn execve(path: Address, argv: Address, envp: Address) -> i64;
-    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
-    fn kill(pid: i64, sig: i64) -> i64;
-    // exit() is required to implement proc_exit(). Linux x86_64 syscall #60.
-    fn exit(code: i64) -> i64;
-}
+// Special dirfd for *at syscalls: interpret pathname relative to cwd.
+const AT_FDCWD: i64 = -100;
+// Flag for unlinkat(2) to remove a directory instead of a file (rmdir emulation).
+const AT_REMOVEDIR: i64 = 512;
 
 // ===========================================================================
 // Internal helpers
@@ -83,25 +75,26 @@ fn mem_load_i64(ptr: Address) -> i64 {
 
 // Open `path` with `flags`. Returns fd on success, -1 on error.
 fn file_open(path: Address, flags: i64) -> i64 {
-    let fd: i64 = open(path, flags, 0);
+    // openat(AT_FDCWD, path, flags, 0)
+    let fd: i64 = syscall(56, AT_FDCWD, path, flags, 0);
     return fd;
 }
 
 // Close a file descriptor. Errors are ignored.
 fn file_close(fd: i64) {
-    close(fd);
+    syscall(57, fd);
     return;
 }
 
 // Read up to `len` bytes into `buf`. Returns bytes read, or -1 on error.
 fn file_read(fd: i64, buf: Address, len: u32) -> i64 {
-    let n: i64 = read(fd, buf, len as i64);
+    let n: i64 = syscall(63, fd, buf, len as i64);
     return n;
 }
 
 // Write `len` bytes from `buf`. Returns bytes written, or -1 on error.
 fn file_write(fd: i64, buf: Address, len: u32) -> i64 {
-    let n: i64 = write(fd, buf, len as i64);
+    let n: i64 = syscall(64, fd, buf, len as i64);
     return n;
 }
 
@@ -116,7 +109,7 @@ fn file_read_all(path: Address, buf: Address, max_len: u32) -> i64 {
     let remaining: i64 = max_len as i64;
     let cursor: Address = buf;
     while remaining > 0 {
-        let n: i64 = read(fd, cursor, remaining);
+        let n: i64 = syscall(63, fd, cursor, remaining);
         if n < 0 {
             file_close(fd);
             return -1;
@@ -143,7 +136,7 @@ fn file_write_all(path: Address, buf: Address, len: u32) -> i64 {
     let remaining: i64 = len as i64;
     let cursor: Address = buf;
     while remaining > 0 {
-        let n: i64 = write(fd, cursor, remaining);
+        let n: i64 = syscall(64, fd, cursor, remaining);
         if n < 0 {
             file_close(fd);
             return -1;
@@ -161,14 +154,15 @@ fn file_write_all(path: Address, buf: Address, len: u32) -> i64 {
 
 // Reposition the file offset. Returns the new offset, or -1 on error.
 fn file_lseek(fd: i64, offset: i64, whence: i64) -> i64 {
-    return lseek(fd, offset, whence);
+    return syscall(62, fd, offset, whence);
 }
 
 // Return the size of `path` in bytes (via stat), or -1 on error.
 // On x86_64 Linux, struct stat.st_size is at offset 48, 8 bytes, little-endian.
 fn file_size(path: Address) -> i64 {
     let sb: Address = allocate(STAT_SIZE);
-    let rc: i64 = stat(path, sb);
+    // newfstatat(AT_FDCWD, path, sb, 0)
+    let rc: i64 = syscall(79, AT_FDCWD, path, sb, 0);
     if rc < 0 {
         free(sb);
         return -1;
@@ -181,7 +175,8 @@ fn file_size(path: Address) -> i64 {
 // Return 1 if `path` exists (stat succeeds), 0 otherwise.
 fn file_exists(path: Address) -> u32 {
     let sb: Address = allocate(STAT_SIZE);
-    let rc: i64 = stat(path, sb);
+    // newfstatat(AT_FDCWD, path, sb, 0)
+    let rc: i64 = syscall(79, AT_FDCWD, path, sb, 0);
     free(sb);
     if rc == 0 {
         return 1;
@@ -191,12 +186,14 @@ fn file_exists(path: Address) -> u32 {
 
 // Delete a file via unlink(). Returns 0 on success, -1 on error.
 fn file_delete(path: Address) -> i64 {
-    return unlink(path);
+    // unlinkat(AT_FDCWD, path, 0)
+    return syscall(35, AT_FDCWD, path, 0);
 }
 
 // Rename `old_path` to `new_path`. Returns 0 on success, -1 on error.
 fn file_rename(old_path: Address, new_path: Address) -> i64 {
-    return rename(old_path, new_path);
+    // renameat(AT_FDCWD, old_path, AT_FDCWD, new_path)
+    return syscall(38, AT_FDCWD, old_path, AT_FDCWD, new_path);
 }
 
 // ===========================================================================
@@ -205,24 +202,27 @@ fn file_rename(old_path: Address, new_path: Address) -> i64 {
 
 // Create a directory at `path` with `mode`. Returns 0 on success, -1 on error.
 fn dir_create(path: Address, mode: i64) -> i64 {
-    return mkdir(path, mode);
+    // mkdirat(AT_FDCWD, path, mode)
+    return syscall(34, AT_FDCWD, path, mode);
 }
 
 // Remove an empty directory at `path`. Returns 0 on success, -1 on error.
 fn dir_delete(path: Address) -> i64 {
-    return rmdir(path);
+    // unlinkat(AT_FDCWD, path, AT_REMOVEDIR) — rmdir emulation
+    return syscall(35, AT_FDCWD, path, AT_REMOVEDIR);
 }
 
 // Get the current working directory into `buf` (up to `size` bytes).
 // Returns `buf` on success, or a null Address on error.
 fn dir_getcwd(buf: Address, size: u32) -> Address {
-    return getcwd(buf, size as i64);
+    // getcwd returns the buffer pointer (or null on error); cast i64 -> Address.
+    return syscall(17, buf, size as i64) as Address;
 }
 
 // Change the current working directory to `path`.
 // Returns 0 on success, -1 on error.
 fn dir_chdir(path: Address) -> i64 {
-    return chdir(path);
+    return syscall(49, path);
 }
 
 // ===========================================================================
@@ -232,32 +232,38 @@ fn dir_chdir(path: Address) -> i64 {
 // Fork the current process.
 // Returns child pid in parent, 0 in child, -1 on error.
 fn proc_fork() -> i64 {
-    return fork();
+    // fork() is absent on asm-generic; use clone(SIGCHLD=17, stack=0,
+    // ptid=0, ctid=0, tls=0) which reproduces fork semantics (child gets
+    // its own address space via COW, parent gets child pid, child gets 0).
+    return syscall(220, 17, 0, 0, 0, 0);
 }
 
 // Execute `path` with argv and envp.
 // Does not return on success; returns -1 on error.
 fn proc_exec(path: Address, argv: Address, envp: Address) -> i64 {
-    return execve(path, argv, envp);
+    return syscall(221, path, argv, envp);
 }
 
 // Wait for child `pid` (blocking, no options). Returns the reaped pid,
 // or -1 on error. The child's exit status is discarded internally.
 fn proc_wait(pid: i64) -> i64 {
     let status: Address = allocate(4);
-    let rc: i64 = waitpid(pid, status, 0);
+    // waitpid is absent on asm-generic; use wait4(pid, status, opts=0, rusage=0).
+    let rc: i64 = syscall(260, pid, status, 0, 0);
     free(status);
     return rc;
 }
 
 // Send signal `sig` to process `pid`. Returns 0 on success, -1 on error.
 fn proc_kill(pid: i64, sig: i64) -> i64 {
-    return kill(pid, sig);
+    return syscall(129, pid, sig);
 }
 
 // Terminate this process with exit `code`. Does not return.
+// Uses asm-generic exit (nr 93); on x86_64 this translates to native nr 60
+// (matching the legacy extern `exit` which was documented as syscall #60).
 fn proc_exit(code: i64) {
-    exit(code);
+    syscall(93, code);
     return;
 }
 
@@ -269,5 +275,10 @@ fn proc_exit(code: i64) {
 // the 8-byte buffer at `pipefd`: pipefd[0] is the read end, pipefd[1] the
 // write end. Returns 0 on success, -1 on error.
 fn pipe_create(pipefd: Address) -> i64 {
-    return pipe(pipefd);
+    // pipe is nr 22 on asm-generic. (NOTE: src/codegen/src/syscall_abi.rs
+    // currently mis-names nr 22 as "epoll_wait" and translates it to native
+    // x86_64 nr 232 on the emit path — a pre-existing codegen bug to be
+    // fixed in a follow-up wave. The asm-generic number itself is correct
+    // per womb/syscalls.vuma:175.)
+    return syscall(22, pipefd);
 }
