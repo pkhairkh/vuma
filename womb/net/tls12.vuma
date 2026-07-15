@@ -92,15 +92,17 @@ const TLS_MAC_HEADER_LEN: u32 = 13;                       // seq(8)+type(1)+ver(
 // the call sites in this file use.
 // ===========================================================================
 
-extern "C" {
-    fn sha256_oneshot(data: Address, len: u32, out: Address);
-    fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
-    fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32;
-    fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32;
-    fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address);
-    fn aes256_decrypt_block(ciphertext: Address, key: Address, plaintext: Address);
-    fn ct_memcmp(a: Address, b: Address, n: u32) -> u32;
-}
+// Sibling-module imports — these resolve to pure-VUMA implementations in
+// womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
+// directory (womb/net/).  See resolver.rs::resolve_import_path.
+import "../crypto/hqc.vuma"   { sha256_oneshot };
+import "../crypto/hmac.vuma"  { hmac_sha256, ct_memcmp };
+import "../crypto/aes256.vuma" {
+    aes256_cbc_encrypt,
+    aes256_cbc_decrypt,
+    aes256_encrypt_block,
+    aes256_decrypt_block,
+};
 
 // ===========================================================================
 // Big-endian (network byte order) store / load helpers.

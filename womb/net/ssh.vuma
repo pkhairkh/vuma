@@ -51,15 +51,18 @@
 // External cryptographic primitives
 // ===========================================================================
 
-extern "C" {
-    fn sha256_oneshot(data: Address, data_len: u32, out: Address);
-    fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
-    fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address);
-    fn bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address);
-    fn bn2048_set_u32(r: Address, v: u32);
-    fn bn2048_zero(a: Address);
-    fn bn2048_copy(r: Address, a: Address);
-}
+// Sibling-module imports — these resolve to pure-VUMA implementations in
+// womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
+// directory (womb/net/).  See resolver.rs::resolve_import_path.
+import "../crypto/hqc.vuma"        { sha256_oneshot };
+import "../crypto/hmac.vuma"       { hmac_sha256 };
+import "../crypto/aes256.vuma"     { aes256_ctr_crypt };
+import "../crypto/bignum2048.vuma" {
+    bn2048_mod_exp,
+    bn2048_set_u32,
+    bn2048_zero,
+    bn2048_copy,
+};
 
 // ===========================================================================
 // Constants
