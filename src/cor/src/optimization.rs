@@ -928,9 +928,7 @@ impl OptimizationPass for LoopOptimization {
                         ),
                     });
                 }
-            } else {
-                let body_entry = body_entry.unwrap();
-
+            } else if let Some(body_entry) = body_entry {
                 // Snapshot back-edges (body node → loop header) from scg.edges.
                 let back_edges: Vec<(EdgeId, NodeId, u64)> = scg
                     .edges
