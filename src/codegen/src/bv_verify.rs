@@ -119,13 +119,11 @@ pub fn eval_binop(op: BinOpKind, lhs: u64, rhs: u64) -> u64 {
         BinOpKind::Add => (lhs.wrapping_add(rhs)) % m,
         BinOpKind::Sub => (lhs.wrapping_sub(rhs)) % m,
         BinOpKind::Mul => (lhs.wrapping_mul(rhs)) % m,
-        BinOpKind::UDiv => {
-            if rhs % m == 0 { 0 } else { (lhs % m) / (rhs % m) }
-        }
+        BinOpKind::UDiv => (lhs % m).checked_div(rhs % m).unwrap_or(0),
         BinOpKind::SDiv => {
             // Treat as unsigned for verification simplicity (the rules
             // we verify are sign-independent).
-            if rhs % m == 0 { 0 } else { (lhs % m) / (rhs % m) }
+            (lhs % m).checked_div(rhs % m).unwrap_or(0)
         }
         BinOpKind::SRem | BinOpKind::URem => {
             if rhs % m == 0 { 0 } else { (lhs % m) % (rhs % m) }

@@ -4348,7 +4348,7 @@ pub fn emit_elf(
     // BOTH ET_REL (object files, where relocations are deferred to the
     // linker) and ET_EXEC (executables, where the BL offset is left as a
     // trap/trampoline but the symbol name is still recorded for tooling).
-    let mut external_symbols: Vec<String> = Vec::new();
+    let mut external_symbols: Vec<String>;
     let mut rela_entries: Vec<RelaEntry> = Vec::new();
     {
         let mut extern_set: std::collections::HashSet<String> = std::collections::HashSet::new();

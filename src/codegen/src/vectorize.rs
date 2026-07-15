@@ -398,8 +398,8 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
         new_instrs.push(instrs[cmp_idx].clone());
     }
     // Copy any instructions between the Cmp and the terminator.
-    for i in (cmp_idx + 1)..instrs.len() {
-        new_instrs.push(instrs[i].clone());
+    for instr in instrs.iter().skip(cmp_idx + 1) {
+        new_instrs.push(instr.clone());
     }
 
     // Terminator: exit edge now goes to the remainder loop (not the original
@@ -417,11 +417,13 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
     new_block.source_line = block.source_line;
 
     // ── Build the plan ────────────────────────────────────────────────
-    let mut plan = VectorizationPlan::default();
-    plan.vf = vf;
-    plan.elem_size = elem_size;
-    plan.vector_loop_block = Some(self_label.clone());
-    plan.remainder_loop_block = Some(remainder_label);
+    let mut plan = VectorizationPlan {
+        vf,
+        elem_size,
+        vector_loop_block: Some(self_label.clone()),
+        remainder_loop_block: Some(remainder_label),
+        ..Default::default()
+    };
 
     // Find the body's primary BinOp (the op we want to pack into a SIMD add).
     for instr in body {
@@ -469,7 +471,6 @@ fn build_remainder_loop(orig: &IRBlock, new_label: &str) -> IRBlock {
     let j_vreg = next_vreg;
     next_vreg += 1;
     let j_next_vreg = next_vreg;
-    next_vreg += 1;
 
     // j = phi(i_from_vec, vector_loop), (j_next, self)
     new_instrs.push(IRInstr::Phi {

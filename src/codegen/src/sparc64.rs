@@ -4961,7 +4961,6 @@ impl Backend for Sparc64Backend {
         let print_hex_offset = stub_offset;
         func_offsets.insert("print_hex".to_string(), print_hex_offset);
         func_offsets.insert("__vuma_print_hex".to_string(), print_hex_offset);
-        stub_offset += print_hex_stub.len();
 
         // ── Build _start stub bytes ──
         // QEMU-sparc64 sets %sp = start_stack - 16*sizeof(abi_ulong) - STACK_BIAS
