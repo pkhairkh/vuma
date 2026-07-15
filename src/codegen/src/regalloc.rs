@@ -2737,17 +2737,6 @@ impl TargetAgnosticRegAlloc {
     }
 }
 
-/// Check if a physical register appears in the callee-saved lists.
-fn self_is_callee_saved(
-    _caller_gprs: &[crate::backend::PhysicalReg],
-    callee_gprs: &[crate::backend::PhysicalReg],
-    _caller_fps: &[crate::backend::PhysicalReg],
-    callee_fps: &[crate::backend::PhysicalReg],
-    preg: &crate::backend::PhysicalReg,
-) -> bool {
-    callee_gprs.contains(preg) || callee_fps.contains(preg)
-}
-
 /// Convert the local `RegClass` to `backend::RegClass`.
 impl From<RegClass> for crate::backend::RegClass {
     fn from(class: RegClass) -> Self {
@@ -3458,8 +3447,6 @@ pub struct GreedyRegCache {
     callee_saved: HashSet<u32>,
     /// Monotonic timestamp counter for LRU.
     timestamp: u32,
-    /// Number of physical registers total.
-    num_regs: usize,
 }
 
 impl GreedyRegCache {
@@ -3495,7 +3482,6 @@ impl GreedyRegCache {
             caller_saved,
             callee_saved,
             timestamp: 0,
-            num_regs,
         }
     }
 

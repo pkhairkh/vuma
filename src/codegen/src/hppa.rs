@@ -204,34 +204,6 @@ fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes:
     word.to_be_bytes()
 }
 
-/// Encode cmpiclr (compare-immediate-and-clear, no branch) — materializes a boolean.
-///
-/// `imm5` is a 5-bit immediate.
-/// `r1` is the register to compare against.
-/// `dst` is the destination register (cleared if condition true).
-/// `cond` is the 3-bit condition code (same encoding as cmpb).
-/// `f` is the flag that inverts the condition (bit 12).
-///
-/// Effect: dst = (cond(r1, imm5) XOR f) ? 0 : dst
-/// i.e., if (cond == true && !f) || (cond == false && f), then dst = 0.
-///
-/// Format (empirically determined):
-///   bits 31-26: 100100 (major 0x24)
-///   bits 25-21: r1 (register to compare)
-///   bits 20-16: imm5 (5-bit immediate)
-///   bits 15-13: cond
-///   bit 12: f (inverts condition)
-///   bits 4-0: dst
-fn encode_cmpiclr(imm5: u8, r1: Reg, dst: Reg, cond: u32, f: bool) -> [u8; 4] {
-    let mut word = 0x90000000u32
-        | ((r1 as u32 & 0x1F) << 21)
-        | ((imm5 as u32 & 0x1F) << 16)
-        | ((cond & 0x7) << 13);
-    if f { word |= 1 << 12; }
-    word |= dst as u32 & 0x1F;
-    word.to_be_bytes()
-}
-
 /// Encode LDIL (Load Immediate Lower) — `LDIL imm, reg`.
 /// Loads a 21-bit immediate into the LEFT of the register (upper 21 bits).
 /// Format: 0010 10ss bbb 0 t aaaa aaa ddddd iiiiiiiiiiiiiiiiiii
@@ -244,19 +216,6 @@ fn encode_ldil(reg: Reg, imm: u32) -> [u8; 4] {
     let word = 0x20000000u32
         | ((reg as u32) << 21)
         | imm21;
-    word.to_be_bytes()
-}
-
-/// Encode ADDIL (Add Immediate Lower) — `ADDIL imm, reg, reg`.
-/// Adds a 21-bit immediate (shifted left 11) to a register.
-fn encode_addil(reg: Reg, imm: u32, dst: Reg) -> [u8; 4] {
-    let imm21 = imm & 0x1FFFFF;
-    let word = 0x28000000u32
-        | ((reg as u32) << 21)
-        | ((dst as u32) << 16)
-        | imm21;
-    // Actually format: 0010 1000 bbbbb 0 t aaaaaaa ddddd iiiiiiiiiiiiiiiiiii
-    // Hmm, this is getting complex. Let me use a simpler approach.
     word.to_be_bytes()
 }
 
@@ -363,28 +322,6 @@ fn encode_add(r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
-/// Encode ADD,I (Add Immediate) — `ADDI imm, r1, dst`.
-/// Adds a 11-bit immediate to r1, stores in dst.
-fn encode_addi(imm: i16, r1: Reg, dst: Reg) -> [u8; 4] {
-    let imm11 = (imm as u16 as u32) & 0x7FF;
-    // Arithmetic immediate format: 000010 01 bbbbb 0 t aaaa aaa ddddd iiiiiiiiiii
-    // ADDI: 000010 01 r1 0 0 0000000 dst iiiiiiiiiii
-    let _word = 0x08000000u32
-        | (1u32 << 25)  // ss=01 (immediate)
-        | ((r1 as u32 & 0x1F) << 21)
-        | ((dst as u32 & 0x1F) << 16) // wrong position
-        | imm11;
-    // Hmm, the format is: 000010 01 bbbbb 0 t aaaa aaa ddddd iiiiiiiiiii
-    // where b=r1, d=dst, i=imm11
-    // But d is at bits 4-0, not bits 20-16. Let me fix.
-    let word = 0x08000000u32
-        | (1u32 << 25)
-        | ((r1 as u32 & 0x1F) << 21)
-        | (dst as u32 & 0x1F)
-        | (imm11 << 1); // imm11 at bits 11-1... no
-    word.to_be_bytes()
-}
-
 /// Encode SHLADD (Shift Left and Add) — `SHLADD sa, r1, r2, dst`.
 /// Computes dst = (r1 << sa) + r2. sa must be 1, 2, or 3.
 /// Format: same as ADD (0x08000600) with sa at bits 7-6.
@@ -429,25 +366,6 @@ fn encode_copy(src: Reg, dst: Reg) -> [u8; 4] {
         | ((src as u32 & 0x1F) << 16)
         | (dst as u32 & 0x1F);
     word.to_be_bytes()
-}
-
-/// Patch a BL instruction's displacement field.
-///
-/// PA-RISC BL has an 8-bit displacement field at bits 12-5 (QEMU empirically
-/// verified). The displacement is in units of 16 bytes, giving a maximum
-/// reach of 255 * 16 = 4080 bytes forward.
-///
-/// Bits 17-13 are NOT part of the displacement:
-///   - Bit 13 is the GATE flag (1 = GATE instruction, not BL)
-///   - Bits 17-14 change the instruction type (e.g., BLR)
-///
-/// If `disp > 255`, the caller MUST use a trampoline-based call pattern
-/// (BL +0, R1 + LDO + BV) instead of a direct BL.
-fn patch_bl_disp(word: u32, disp: i32) -> u32 {
-    debug_assert!(disp >= 0 && disp <= 255,
-                 "BL displacement {} out of range [0, 255]", disp);
-    let base = word & 0xFFFFC01F; // clear bits 17-5 (disp + flags)
-    base | ((disp as u32 & 0xFF) << 5)
 }
 
 /// Encode SHRPW (Shift Right Pair Word) — `SHRPW r1, r2, sa, t`.
@@ -634,16 +552,6 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     code.extend_from_slice(&encode_bv_real(R1));
     code.extend_from_slice(&encode_nop());  // delay slot
     code
-}
-
-/// Emit a forward unconditional branch using BL+LDO+BV (same as backward).
-///
-/// We use the same BL+LDO+BV pattern for both forward and backward branches
-/// because PA-RISC BL has 16-byte displacement granularity, which doesn't
-/// align with our code offsets. The BL+LDO+BV pattern gives byte-exact targeting.
-fn emit_forward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
-    // Same as backward — BL+LDO+BV works for both directions.
-    emit_backward_branch(target_offset, bl_offset)
 }
 
 /// Emit an unconditional branch (forward or backward).

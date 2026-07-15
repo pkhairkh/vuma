@@ -63,11 +63,6 @@ impl Default for ArmEbBackend {
 fn swap_u16(buf: &mut [u8], off: usize) { buf.swap(off, off + 1); }
 #[inline]
 fn swap_u32(buf: &mut [u8], off: usize) { buf.swap(off, off + 3); buf.swap(off + 1, off + 2); }
-#[inline]
-fn swap_u64(buf: &mut [u8], off: usize) {
-    buf.swap(off, off + 7); buf.swap(off + 1, off + 6);
-    buf.swap(off + 2, off + 5); buf.swap(off + 3, off + 4);
-}
 
 fn swap_le_elf32_to_be(elf: &mut [u8]) {
     if elf.len() < 52 { return; } // ELF32 header is 52 bytes

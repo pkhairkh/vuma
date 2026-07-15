@@ -78,11 +78,6 @@ fn emit(code: Vec<u8>, name: &str) -> AllocatedInstruction {
     }
 }
 
-/// Encode a single instruction into an AllocatedInstruction.
-fn emit_instr(inst: Instruction, name: &str) -> AllocatedInstruction {
-    emit(inst.encode().to_vec(), name)
-}
-
 /// Load a 64-bit immediate into a register using the canonical LoongArch sequence.
 ///
 /// Strategy:

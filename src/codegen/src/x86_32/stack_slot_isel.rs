@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 #[allow(unused_imports)]
 use super::{
-    binop_cmp_to_cc, cmp_kind_to_cc, modrm, rex_prefix,
+    binop_cmp_to_cc, cmp_kind_to_cc, modrm,
     Cc, Gpr, Xmm,
     R_X86_64_64, R_X86_64_PLT32,
     encode_add_reg_imm32, encode_add_reg_reg,

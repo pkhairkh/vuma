@@ -3197,79 +3197,6 @@ fn load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8> {
     code
 }
 
-/// Resolve an `IRValue` to a physical ARM32 GPR.
-///
-/// For register values, looks up the virtual register in `reg_map`. For
-/// immediate values, loads the constant into `scratch` and returns the
-/// scratch register. For address/label values, loads into `scratch` as well.
-///
-/// Returns `(Gpr, Vec<u8>)` where the bytes are any pre-code that must be
-/// emitted before the main instruction (e.g., immediate loads).
-fn resolve_gpr_arm32(
-    val: &crate::ir::IRValue,
-    reg_map: &std::collections::HashMap<u32, Gpr>,
-    spill_map: &std::collections::HashMap<u32, i32>,
-    scratch: Gpr,
-) -> (Gpr, Vec<u8>) {
-    match val {
-        crate::ir::IRValue::Register(id) => {
-            if let Some(&gpr) = reg_map.get(id) {
-                (gpr, Vec::new())
-            } else if let Some(&offset) = spill_map.get(id) {
-                // Spilled vreg: load from stack slot [R11, #offset] into scratch
-                let mut code = Vec::new();
-                // LDR scratch, [R11, #offset]
-                if offset >= 0 {
-                    code.extend_from_slice(&encode_ls_imm(
-                        Condition::Al, true, true, false, false, true,
-                        Gpr::R11.encoding(), scratch.encoding(), offset as u32,
-                    ));
-                } else {
-                    code.extend_from_slice(&encode_ls_imm(
-                        Condition::Al, true, false, false, false, true,
-                        Gpr::R11.encoding(), scratch.encoding(), (-offset) as u32,
-                    ));
-                }
-                (scratch, code)
-            } else {
-                (Gpr::R0, Vec::new())
-            }
-        }
-        crate::ir::IRValue::Immediate(imm) => {
-            let code = load_immediate_arm32(scratch, *imm as u32);
-            (scratch, code)
-        }
-        crate::ir::IRValue::Address(addr) => {
-            let code = load_immediate_arm32(scratch, *addr as u32);
-            (scratch, code)
-        }
-        crate::ir::IRValue::Label(name) => {
-            // Labels need relocation; emit a placeholder MOV Rd, #0
-            vuma_log!(warn, "IRValue::Label('{}') emitting placeholder 0", name);
-            let code = load_immediate_arm32(scratch, 0);
-            (scratch, code)
-        }
-    }
-}
-
-/// Compute the stack frame size for an IR function on ARM32.
-///
-/// Sums `Alloc` instruction sizes, adds 8 bytes for the FP/LR save pair,
-/// and rounds up to 8-byte alignment.
-fn arm32_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: usize = 8; // FP/LR save pair
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = (*size as usize).div_ceil(8) * 8;
-                total += aligned;
-            }
-        }
-    }
-    // Round up to 8-byte alignment
-    (total + 7) & !7
-}
-
 // ===========================================================================
 // ARM32 Mnemonic Decoder
 // ===========================================================================
@@ -3993,8 +3920,6 @@ impl Backend for Arm32Backend {
             instr_idx: usize,
             abs_byte_offset: u64,
             target_label: String,
-            is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
-            condition: Condition,   // condition code (AL for unconditional)
             branch_offset_in_enc: usize, // byte offset of this branch within the instruction's encoded output
         }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
@@ -5857,8 +5782,6 @@ impl Backend for Arm32Backend {
                             instr_idx: instructions.len(),
                             abs_byte_offset: branch_offset_in_func,
                             target_label: target.clone(),
-                            is_unconditional: true,
-                            condition: Condition::Al,
                             branch_offset_in_enc,
                         });
                         code
@@ -5906,8 +5829,6 @@ impl Backend for Arm32Backend {
                                 instr_idx: instructions.len(),
                                 abs_byte_offset: bne_offset_in_func,
                                 target_label: true_target.clone(),
-                                is_unconditional: false,
-                                condition: Condition::Ne,
                                 branch_offset_in_enc: bne_offset_in_enc,
                             });
                             // B false_target (placeholder)
@@ -5918,8 +5839,6 @@ impl Backend for Arm32Backend {
                                 instr_idx: instructions.len(),
                                 abs_byte_offset: b_offset_in_func,
                                 target_label: false_target.clone(),
-                                is_unconditional: true,
-                                condition: Condition::Al,
                                 branch_offset_in_enc: b_offset_in_enc,
                             });
                         } else {
@@ -5941,8 +5860,6 @@ impl Backend for Arm32Backend {
                                 instr_idx: instructions.len(),
                                 abs_byte_offset: b_false_offset_in_func,
                                 target_label: false_target.clone(),
-                                is_unconditional: true,
-                                condition: Condition::Al,
                                 branch_offset_in_enc: b_false_offset_in_enc,
                             });
                             // True path (BNE target)
@@ -5954,8 +5871,6 @@ impl Backend for Arm32Backend {
                                 instr_idx: instructions.len(),
                                 abs_byte_offset: b_true_offset_in_func,
                                 target_label: true_target.clone(),
-                                is_unconditional: true,
-                                condition: Condition::Al,
                                 branch_offset_in_enc: b_true_offset_in_enc,
                             });
                         }
@@ -8732,108 +8647,6 @@ fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
         | 0b0110 << 16
         | (vd << 12)
         | 0b101 << 9)
-        | (1 << 6)
-        | (m_bit << 5))
-        | vm;
-    word.to_le_bytes()
-}
-
-/// Encode VCVT.F64.U32 Dd, Sm — convert unsigned 32-bit int (in Sm) to f64.
-///
-/// ARM VFP encoding (A1):
-///   cond 1110 1D11 1000 Vd 101 1 11 M 0 Vm
-///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=1 (unsigned)
-fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
-    let d_bit = ((dd >> 4) & 1) as u32;
-    let vd = (dd & 0xF) as u32;
-    let m_bit = ((sm >> 4) & 1) as u32;
-    let vm = (sm & 0xF) as u32;
-    let word = ((Condition::Al.encoding() as u32) << 28
-        | 0b1110 << 24
-        | (1 << 23)
-        | (d_bit << 22)
-        | 0b11 << 20
-        | 0b1000 << 16
-        | (vd << 12)
-        | 0b101 << 9
-        | (1 << 8)      // sz = 1 (f64 dest)
-        | (1 << 7)      // unsigned
-        | (1 << 6)
-        | (m_bit << 5))
-        | vm;
-    word.to_le_bytes()
-}
-
-/// Encode VCVT.F64.S32 Dd, Sm — convert signed 32-bit int (in Sm) to f64.
-///
-/// ARM VFP encoding (A1):
-///   cond 1110 1D11 1000 Vd 101 1 01 M 0 Vm
-///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=0 (signed)
-fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
-    let d_bit = ((dd >> 4) & 1) as u32;
-    let vd = (dd & 0xF) as u32;
-    let m_bit = ((sm >> 4) & 1) as u32;
-    let vm = (sm & 0xF) as u32;
-    let word = (((Condition::Al.encoding() as u32) << 28
-        | 0b1110 << 24
-        | (1 << 23)
-        | (d_bit << 22)
-        | 0b11 << 20
-        | 0b1000 << 16
-        | (vd << 12)
-        | 0b101 << 9
-        | (1 << 8))      // signed
-        | (1 << 6)
-        | (m_bit << 5))
-        | vm;
-    word.to_le_bytes()
-}
-
-/// Encode VCVT.U32.F64 Sd, Dm — convert f64 to unsigned 32-bit int (in Sd).
-///
-/// ARM VFP encoding (A1):
-///   cond 1110 1D11 1101 Vd 101 1 11 M 0 Vm
-///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=1 (unsigned)
-fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
-    let d_bit = ((sd >> 4) & 1) as u32;
-    let vd = (sd & 0xF) as u32;
-    let m_bit = ((dm >> 4) & 1) as u32;
-    let vm = (dm & 0xF) as u32;
-    let word = ((Condition::Al.encoding() as u32) << 28
-        | 0b1110 << 24
-        | (1 << 23)
-        | (d_bit << 22)
-        | 0b11 << 20
-        | 0b1101 << 16
-        | (vd << 12)
-        | 0b101 << 9
-        | (1 << 8)      // sz = 1 (f64 source)
-        | (1 << 7)      // unsigned
-        | (1 << 6)
-        | (m_bit << 5))
-        | vm;
-    word.to_le_bytes()
-}
-
-/// Encode VCVT.S32.F64 Sd, Dm — convert f64 to signed 32-bit int (in Sd).
-///
-/// ARM VFP encoding (A1):
-///   cond 1110 1D11 1101 Vd 101 1 01 M 0 Vm
-///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=0 (signed)
-fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
-    let d_bit = ((sd >> 4) & 1) as u32;
-    let vd = (sd & 0xF) as u32;
-    let m_bit = ((dm >> 4) & 1) as u32;
-    let vm = (dm & 0xF) as u32;
-    let word = (((Condition::Al.encoding() as u32) << 28
-        | 0b1110 << 24
-        | (1 << 23)
-        | (d_bit << 22)
-        | 0b11 << 20
-        | 0b1101 << 16
-        | (vd << 12)
-        | 0b101 << 9
-        | (1 << 8))      // signed
         | (1 << 6)
         | (m_bit << 5))
         | vm;

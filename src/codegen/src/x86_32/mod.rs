@@ -35,7 +35,9 @@ use crate::backend::{
     AllocatedFunction, AllocatedProgram, Backend,
     BackendError, TargetInfo, X86_32TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, IRValue};
+use crate::ir::{BinOpKind, CmpKind, IRFunction};
+#[cfg(test)]
+use crate::ir::IRValue;
 #[cfg(test)]
 use crate::ir::{CastKind, IRInstr, IRType, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
@@ -236,23 +238,6 @@ impl Cc {
 // ===========================================================================
 // REX Prefix
 // ===========================================================================
-
-/// Generate a REX prefix byte.
-///
-/// - `w`: REX.W — 64-bit operand size
-/// - `r`: Extension of the ModR/M `reg` field (for R8–R15 / XMM8–XMM15)
-/// - `x`: Extension of the SIB `index` field
-/// - `b`: Extension of the ModR/M `rm` field or SIB `base` field
-///
-/// Returns `None` if no REX byte is needed (all bits are 0).
-fn rex_prefix(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
-    let byte = 0x40 | (w as u8) << 3 | (r as u8) << 2 | (x as u8) << 1 | b as u8;
-    if byte > 0x40 {
-        Some(byte)
-    } else {
-        None
-    }
-}
 
 // ===========================================================================
 // ModR/M + SIB Encoding
@@ -3021,24 +3006,6 @@ impl Default for X86_32Backend {
     }
 }
 
-/// Compute the stack frame size for an IR function on x86_32.
-///
-/// Sums `Alloc` instruction sizes, adds 8 bytes for the RBP save,
-/// and rounds up to 16-byte alignment.
-fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: usize = 8; // Saved RBP
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = (*size as usize).div_ceil(16) * 16;
-                total += aligned;
-            }
-        }
-    }
-    // Round up to 16-byte alignment
-    (total + 15) & !15
-}
-
 // ── x86_32 ELF Relocation Types ─────────────────────────────────────────
 
 /// R_X86_64_64 — S + A, 64-bit absolute relocation.
@@ -3047,33 +3014,6 @@ const R_X86_64_64: &str = "R_386_32";
 const R_X86_64_PLT32: &str = "R_386_PC32";
 
 // ── ISel helpers ─────────────────────────────────────────────────────────
-
-/// Resolve an IRValue to a physical GPR.
-/// For registers, looks up in the reg_map. For immediates, loads the value
-/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
-fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
-    match val {
-        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
-        IRValue::Immediate(imm) => {
-            let imm = *imm;
-            let code = if (-2147483648..=2147483647).contains(&imm) {
-                encode_mov_reg_imm32(scratch, imm as i32)
-            } else {
-                encode_mov_reg_imm64(scratch, imm as u64)
-            };
-            (scratch, code)
-        }
-        IRValue::Address(addr) => {
-            let code = encode_mov_reg_imm64(scratch, *addr);
-            (scratch, code)
-        }
-        IRValue::Label(_) => {
-            // Labels need relocation; emit a placeholder mov for now
-            let code = encode_mov_reg_imm64(scratch, 0);
-            (scratch, code)
-        }
-    }
-}
 
 /// Map an IR CmpKind to an x86_32 condition code.
 fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
@@ -3106,17 +3046,6 @@ fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
         BinOpKind::UGe => Cc::AboveEqual,
         _ => Cc::Equal, // fallback, shouldn't be reached
     }
-}
-
-/// Emit a CMP + SETcc + zero-extend sequence for a comparison that produces
-/// a boolean (0 or 1) in the destination register.
-fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
-    let mut code = Vec::new();
-    code.extend(encode_cmp_reg_reg(lhs, rhs));
-    code.extend(encode_setcc(cc, dst));
-    // Zero-extend the byte result to 64 bits to clear upper bits
-    code.extend(encode_movzx_reg8(dst, dst));
-    code
 }
 
 impl Backend for X86_32Backend {
@@ -3480,50 +3409,6 @@ impl Backend for X86_32Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── REX Prefix Tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_rex_prefix_no_bits() {
-        // No REX needed when all bits are 0
-        assert_eq!(rex_prefix(false, false, false, false), None);
-    }
-
-    #[test]
-    fn test_rex_prefix_w_only() {
-        // REX.W only: 0x48
-        assert_eq!(rex_prefix(true, false, false, false), Some(0x48));
-    }
-
-    #[test]
-    fn test_rex_prefix_r_only() {
-        // REX.R only: 0x44
-        assert_eq!(rex_prefix(false, true, false, false), Some(0x44));
-    }
-
-    #[test]
-    fn test_rex_prefix_x_only() {
-        // REX.X only: 0x42
-        assert_eq!(rex_prefix(false, false, true, false), Some(0x42));
-    }
-
-    #[test]
-    fn test_rex_prefix_b_only() {
-        // REX.B only: 0x41
-        assert_eq!(rex_prefix(false, false, false, true), Some(0x41));
-    }
-
-    #[test]
-    fn test_rex_prefix_wrb() {
-        // REX.WRB: 0x4D
-        assert_eq!(rex_prefix(true, true, false, true), Some(0x4D));
-    }
-
-    #[test]
-    fn test_rex_prefix_all() {
-        // All bits: 0x4F
-        assert_eq!(rex_prefix(true, true, true, true), Some(0x4F));
-    }
 
     // ── ModR/M Tests ────────────────────────────────────────────────────
 
