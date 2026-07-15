@@ -4252,11 +4252,10 @@ impl Backend for Arm32Backend {
                                 // Otherwise (32-bit-or-narrower types and the
                                 // default `None`), fall back to the 32-bit
                                 // software-division loop.
-                                let is_64bit = match ty.as_ref() {
-                                    Some(crate::ir::IRType::I64)
-                                    | Some(crate::ir::IRType::U64) => true,
-                                    _ => false,
-                                };
+                                let is_64bit = matches!(
+                                    ty.as_ref(),
+                                    Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64)
+                                );
 
                                 if is_64bit {
                                     // === 64-bit SDiv / UDiv ===
@@ -4537,11 +4536,10 @@ impl Backend for Arm32Backend {
                                 // and return the remainder instead of the
                                 // quotient. Otherwise, fall back to the 32-bit
                                 // software-division loop.
-                                let is_64bit = match ty.as_ref() {
-                                    Some(crate::ir::IRType::I64)
-                                    | Some(crate::ir::IRType::U64) => true,
-                                    _ => false,
-                                };
+                                let is_64bit = matches!(
+                                    ty.as_ref(),
+                                    Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64)
+                                );
 
                                 if is_64bit {
                                     // === 64-bit SRem / URem ===
@@ -6276,11 +6274,10 @@ impl Backend for Arm32Backend {
                         // between full 64-bit values. Otherwise (32-bit-or-
                         // narrower types and the default `None`), select
                         // between the low 32 bits and zero-extend the result.
-                        let is_64bit = match ty.as_ref() {
-                            Some(crate::ir::IRType::I64)
-                            | Some(crate::ir::IRType::U64) => true,
-                            _ => false,
-                        };
+                        let is_64bit = matches!(
+                            ty.as_ref(),
+                            Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64)
+                        );
 
                         if is_64bit {
                             // === 64-bit Select ===
@@ -6396,11 +6393,10 @@ impl Backend for Arm32Backend {
                         // Detect 64-bit comparison: when ty is I64/U64,
                         // compare both low and high words. Otherwise, compare
                         // only the low 32 bits.
-                        let is_64bit = match ty.as_ref() {
-                            Some(crate::ir::IRType::I64)
-                            | Some(crate::ir::IRType::U64) => true,
-                            _ => false,
-                        };
+                        let is_64bit = matches!(
+                            ty.as_ref(),
+                            Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64)
+                        );
 
                         if is_64bit {
                             // === 64-bit CtEq (constant-time, NO BRANCHES) ===
@@ -6916,11 +6912,12 @@ impl Backend for Arm32Backend {
                 // splitting pass in Phase 5 will surface the VCVT mnemonic
                 // via `Instruction::decode`).
                 let (cast_reads, cast_writes) = match instr {
-                    crate::ir::IRInstr::Cast { kind, .. } if matches!(kind,
-                        CastKind::IntToFloat | CastKind::UIntToFloat
-                        | CastKind::FloatToInt | CastKind::FloatToUInt
-                        | CastKind::FloatToFloat) =>
-                    {
+                    crate::ir::IRInstr::Cast {
+                        kind: CastKind::IntToFloat | CastKind::UIntToFloat
+                            | CastKind::FloatToInt | CastKind::FloatToUInt
+                            | CastKind::FloatToFloat,
+                        ..
+                    } => {
                         let gpr_r0 = PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding());
                         let simd_s0 = PhysicalReg::new(RegClass::SimdFp, 0);
                         (vec![gpr_r0, simd_s0], vec![gpr_r0, simd_s0])
