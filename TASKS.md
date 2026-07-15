@@ -129,17 +129,25 @@ shows only the 10 internal workspace crates.
 
 ## Open Work
 
-### 1. O2 codegen bug — partial fix, remaining inliner issue
+### 1. O2 codegen bug — inliner fixed, scheduler remaining
 
 Wave 51 made three fixes:
 - Cast-aware alias analysis (`alias_analysis.rs` tracks `IRInstr::Cast`)
 - Function-wide alias info shared across blocks (`schedule_function`)
 - `IRInstr::Ret` stripping in inlined bodies + `threshold=0` guard
 
-**Remaining:** O2 still crashes when the inliner is active. Bisecting
-showed the inliner creates IR shapes that expose scheduler/LICM bugs.
-With inliner + scheduler + LICM all disabled, O2 works. With any one
-enabled, O2 crashes. Investigation continues.
+Wave 54 fixed the inliner's param-clobbering bug:
+- Callee params were mapped directly to caller arg vregs
+- Callee reassignments (e.g. `pos = pos + 1`) overwrote caller variables
+- Fix: map each callee param to a fresh vreg + insert copy instruction
+
+**Result:** O2 self-host now works with inliner + LICM + constant fold +
+DCE + cross-function const prop. The bootstrap self-host test passes at
+O2 (production default) for the first time.
+
+**Remaining:** The instruction scheduler still has an alias analysis bug
+when reordering inlined code. Disabled via `VUMA_NO_SCHED` env var until
+the Cast-aware TBAA handles the larger functions created by inlining.
 
 ### 2. Runtime stubs — partially emitted by bootstrap (Wave 52)
 
@@ -226,7 +234,7 @@ vuma/
 - `cargo check --workspace`: 0 errors
 - `cargo clippy --workspace`: 0 warnings
 - `cargo test --workspace --no-run`: compiles cleanly
-- `cargo test -p vuma-tests --lib wave48`: 9 passed (bootstrap self-host at O0)
+- `cargo test -p vuma-tests --lib wave48`: 9 passed (bootstrap self-host at **O2**)
 - `cargo test -p vuma-tests --lib wave50`: 9 passed (final hardening)
 - `cargo test -p vuma-codegen --lib emit`: 104 passed (regalloc + emit)
 - `cargo test -p vuma-codegen --lib scheduler`: 6 passed
