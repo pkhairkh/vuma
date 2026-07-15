@@ -5,7 +5,8 @@
 //! invariant under test is that the parser **never panics** — it must always
 //! return either `Ok` or `Err` (including recoverable errors).
 
-use rand::Rng;
+mod prng;
+use prng::Prng;
 use std::panic;
 
 // ---------------------------------------------------------------------------
@@ -629,7 +630,7 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(1000);
 
-    let mut rng = rand::thread_rng();
+    let mut rng = Prng::from_seed(0x9E37_79B9_7F4A_7C15);
     let mut panics = 0usize;
     let mut ok_count = 0usize;
 
@@ -637,9 +638,9 @@ fn main() {
 
     for i in 0..iterations {
         // Generate random input of varying sizes
-        let input_len = rng.gen_range(16..512);
+        let input_len = rng.gen_range(16usize, 512usize);
         let mut input = vec![0u8; input_len];
-        rng.fill(&mut input[..]);
+        rng.fill_bytes(&mut input[..]);
 
         if !fuzz_one(&input) {
             panics += 1;
