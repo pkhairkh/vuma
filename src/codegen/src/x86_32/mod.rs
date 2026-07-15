@@ -487,10 +487,7 @@ pub fn encode_sbb_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
 /// Encode IMUL r32, r32 (0F AF /r) — 32-bit multiply.
 /// No REX prefix needed for x86_32.
 pub fn encode_imul_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(3);
-    code.push(0x0F);
-    code.push(0xAF);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x0F, 0xAF, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -630,11 +627,8 @@ pub fn encode_jcc_rel32(cc: Cc, offset: i32) -> Vec<u8> {
 
 /// Encode CMOVcc r64, r64 (REX.W + 0F 4x /r)
 pub fn encode_cmovcc_reg_reg(cc: Cc, dst: Gpr, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(3);
     // x86_32: No REX prefix. CMOVcc r32, r32 = 0F 40+cc /r
-    code.push(0x0F);
-    code.push(0x40 + cc as u8);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x0F, 0x40 + cc as u8, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -690,11 +684,8 @@ pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 
 /// Encode MOVZX r64, r8 (REX.W + 0F B6 /r) — zero-extend byte to 64 bits
 pub fn encode_movzx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(3);
     // x86_32: No REX prefix. MOVZX r32, r8 = 0F B6 /r
-    code.push(0x0F);
-    code.push(0xB6);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x0F, 0xB6, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -710,21 +701,15 @@ pub fn encode_movzx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
 
 /// Encode MOVSX r64, r8 (REX.W + 0F BE /r) — sign-extend byte to 64 bits
 pub fn encode_movsx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(3);
     // x86_32: No REX prefix. MOVSX r32, r8 = 0F BE /r
-    code.push(0x0F);
-    code.push(0xBE);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x0F, 0xBE, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
 /// Encode MOVSX r64, r16 (REX.W + 0F BF /r) — sign-extend word to 64 bits
 pub fn encode_movsx_reg16(dst: Gpr, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(3);
     // x86_32: MOVSX r32, r16 = 0F BF /r
-    code.push(0x0F);
-    code.push(0xBF);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x0F, 0xBF, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -758,28 +743,22 @@ pub fn encode_int3() -> Vec<u8> {
 
 /// Encode NEG r64 (REX.W + F7 /3)
 pub fn encode_neg_reg(dst: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(2);
     // x86_32: NEG r32 = F7 /3
-    code.push(0xF7);
-    code.push(modrm(3, 3, dst.encoding() & 7));
+    let code = vec![0xF7, modrm(3, 3, dst.encoding() & 7)];
     code
 }
 
 /// Encode NOT r64 (REX.W + F7 /2)
 pub fn encode_not_reg(dst: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(2);
     // x86_32: NOT r32 = F7 /2
-    code.push(0xF7);
-    code.push(modrm(3, 2, dst.encoding() & 7));
+    let code = vec![0xF7, modrm(3, 2, dst.encoding() & 7)];
     code
 }
 
 /// Encode MUL r64 (REX.W + F7 /4) — unsigned multiply, result in RDX:RAX
 pub fn encode_mul_reg(src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(2);
     // x86_32: MUL r32 = F7 /4 (unsigned multiply, EDX:EAX = EAX * r32)
-    code.push(0xF7);
-    code.push(modrm(3, 4, src.encoding() & 7));
+    let code = vec![0xF7, modrm(3, 4, src.encoding() & 7)];
     code
 }
 
@@ -990,21 +969,13 @@ pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 
 /// Encode MOVD xmm, r32 (66 0F 6E /r) — move 32-bit GPR low dword into XMM.
 pub fn encode_movd_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0x66);
-    code.push(0x0F);
-    code.push(0x6E);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0x66, 0x0F, 0x6E, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
 /// Encode MOVD r32, xmm (66 0F 7E /r) — move low dword from XMM to GPR.
 pub fn encode_movd_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0x66);
-    code.push(0x0F);
-    code.push(0x7E);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0x66, 0x0F, 0x7E, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1030,11 +1001,7 @@ pub fn encode_movq_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 
 /// Encode CVTSI2SD xmm, r32 (F2 0F 2A /r) — convert signed 32-bit int to f64.
 pub fn encode_cvtsi2sd_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x2A);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x2A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -1050,11 +1017,7 @@ pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 
 /// Encode CVTSI2SS xmm, r32 (F3 0F 2A /r) — convert signed 32-bit int to f32.
 pub fn encode_cvtsi2ss_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x2A);
-    code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x2A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
     code
 }
 
@@ -1070,11 +1033,7 @@ pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 
 /// Encode CVTSD2SI r32, xmm (F2 0F 2D /r) — convert f64 to signed 32-bit int.
 pub fn encode_cvtsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x2D);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x2D, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1090,11 +1049,7 @@ pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 
 /// Encode CVTSS2SI r32, xmm (F3 0F 2D /r) — convert f32 to signed 32-bit int.
 pub fn encode_cvtss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x2D);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x2D, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1113,11 +1068,7 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// `encode_cvtsd2si_r32_xmm`; it matches the C-style float->int cast
 /// semantics represented by the IR's `FloatToInt` / `FloatToUInt`.
 pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x2C);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x2C, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1135,11 +1086,7 @@ pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTTSS2SI r32, xmm (F3 0F 2C /r) — convert f32 to signed 32-bit int
 /// with truncation (toward zero).
 pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x2C);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x2C, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1156,121 +1103,73 @@ pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 
 /// Encode CVTSS2SD xmm, xmm (F3 0F 5A /r) — convert f32 to f64 (widen).
 pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x5A);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x5A, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode CVTSD2SS xmm, xmm (F2 0F 5A /r) — convert f64 to f32 (narrow).
 pub fn encode_cvtsd2ss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x5A);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x5A, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode ADDSD xmm, xmm (F2 0F 58 /r) — add scalar double-precision floats.
 pub fn encode_addsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x58);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x58, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode ADDSS xmm, xmm (F3 0F 58 /r) — add scalar single-precision floats.
 pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-                code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x58);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x58, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode SUBSD xmm, xmm (F2 0F 5C /r) — subtract scalar double-precision floats.
 pub fn encode_subsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x5C);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x5C, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode SUBSS xmm, xmm (F3 0F 5C /r) — subtract scalar single-precision floats.
 pub fn encode_subss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x5C);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x5C, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode MULSD xmm, xmm (F2 0F 59 /r) — multiply scalar double-precision floats.
 pub fn encode_mulsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x59);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x59, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode MULSS xmm, xmm (F3 0F 59 /r) — multiply scalar single-precision floats.
 pub fn encode_mulss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x59);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x59, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode DIVSD xmm, xmm (F2 0F 5E /r) — divide scalar double-precision floats.
 pub fn encode_divsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x5E);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x5E, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode DIVSS xmm, xmm (F3 0F 5E /r) — divide scalar single-precision floats.
 pub fn encode_divss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x5E);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x5E, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode SQRTSD xmm, xmm (F2 0F 51 /r) — square root of scalar double.
 pub fn encode_sqrtsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF2);
-    code.push(0x0F);
-    code.push(0x51);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF2, 0x0F, 0x51, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
 /// Encode SQRTSS xmm, xmm (F3 0F 51 /r) — square root of scalar single.
 pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0xF3);
-    code.push(0x0F);
-    code.push(0x51);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0xF3, 0x0F, 0x51, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
@@ -1278,11 +1177,7 @@ pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
 /// Sets EFLAGS: ZF=1, PF=1, CF=1 if unordered (NaN); otherwise standard
 /// comparison flags (ZF=1 iff equal, CF=1 iff dst < src).
 pub fn encode_ucomisd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let mut code = Vec::with_capacity(4);
-    code.push(0x66);
-    code.push(0x0F);
-    code.push(0x2E);
-    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    let code = vec![0x66, 0x0F, 0x2E, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
     code
 }
 
