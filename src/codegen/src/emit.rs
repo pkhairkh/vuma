@@ -4830,7 +4830,7 @@ pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config:
     for section in data_sections {
         let align = section.align.max(1) as usize;
         let padding = (align - (text_section.len() % align)) % align;
-        text_section.extend(std::iter::repeat(0u8).take(padding));
+        text_section.extend(std::iter::repeat_n(0u8, padding));
         text_section.extend_from_slice(&section.data);
     }
 
@@ -5097,13 +5097,13 @@ fn collect_data_sections(data_sections: &[DataSection], backend: BackendKind) ->
             DataSectionKind::ReadOnly => {
                 // Pad rodata_section to `align` boundary before appending.
                 let padding = (align - (rodata_section.len() as u64 % align)) % align;
-                rodata_section.extend(std::iter::repeat(0u8).take(padding as usize));
+                rodata_section.extend(std::iter::repeat_n(0u8, padding as usize));
                 rodata_section.extend_from_slice(&ds.data);
             }
             DataSectionKind::Data => {
                 // Pad data_section to `align` boundary before appending.
                 let padding = (align - (data_section.len() as u64 % align)) % align;
-                data_section.extend(std::iter::repeat(0u8).take(padding as usize));
+                data_section.extend(std::iter::repeat_n(0u8, padding as usize));
                 data_section.extend_from_slice(&ds.data);
             }
             DataSectionKind::Bss => {

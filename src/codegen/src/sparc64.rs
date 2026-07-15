@@ -1174,21 +1174,21 @@ fn append_sparc64_elf_sections(
         symtab.extend_from_slice(&0u64.to_be_bytes()); // st_size
     }
 
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let shstrtab_off = elf.len() as u64;
     elf.extend_from_slice(&shstrtab);
     let strtab_off = elf.len() as u64;
     elf.extend_from_slice(&strtab);
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let symtab_off = elf.len() as u64;
     let symtab_size = symtab.len() as u64;
     elf.extend_from_slice(&symtab);
 
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let shdr_off = elf.len() as u64;

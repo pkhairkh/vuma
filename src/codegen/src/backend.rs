@@ -2209,14 +2209,14 @@ fn append_aarch64_elf_sections(
 
     // ── Append section data to the file ──
     // Align the .symtab to 8 bytes (Elf64_Sym's st_value is a u64).
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let shstrtab_off = elf.len() as u64;
     elf.extend_from_slice(&shstrtab);
     let strtab_off = elf.len() as u64;
     elf.extend_from_slice(&strtab);
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let symtab_off = elf.len() as u64;
@@ -2224,7 +2224,7 @@ fn append_aarch64_elf_sections(
     elf.extend_from_slice(&symtab);
 
     // ── Append the section header table ──
-    while (elf.len() % 8) != 0 {
+    while !elf.len().is_multiple_of(8) {
         elf.push(0);
     }
     let shdr_off = elf.len() as u64;
