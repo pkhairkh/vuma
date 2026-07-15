@@ -37,3 +37,4 @@ flamegraph.svg
 .vscode/
 *.iml
 wasmtime
+a.out
