@@ -1,13 +1,8 @@
 // womb/lib/dns.vuma — DNS Resolver (RFC 1035)
 // No main() — importable library module.
 // Builds and parses DNS query/response packets.
-
-extern "C" {
-    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
-    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
-    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
-    fn close(fd: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for socket / sendto / recvfrom /
+// close (asm-generic nrs 198 / 206 / 207 / 57).
 
 const AF_INET: i64 = 2;
 const SOCK_DGRAM: i64 = 2;
@@ -202,7 +197,7 @@ fn dns_parse_response_a(response: Address, resp_len: u32, ip_out: Address) -> u3
 
 fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
     // Create UDP socket
-    sockfd: i64 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockfd: i64 = syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if sockfd < 0 { return 0; }
 
     // Build query
@@ -224,12 +219,12 @@ fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
     while i < 8 { *(dest_addr + 8 + i) = 0; i = i + 1; }
 
     // Send query
-    sent: i64 = sendto(sockfd, query, query_len, 0, dest_addr, 16);
+    sent: i64 = syscall(206, sockfd, query, query_len as i64, 0, dest_addr, 16);
     free(query);
     free(dest_addr);
 
     if sent < 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return 0;
     }
 
@@ -239,9 +234,9 @@ fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
     addrlen = allocate(4);
     *(addrlen + 0) = 16;
 
-    recv_len: i64 = recvfrom(sockfd, response, DNS_RESPONSE_MAX, 0, src_addr, addrlen);
+    recv_len: i64 = syscall(207, sockfd, response, DNS_RESPONSE_MAX as i64, 0, src_addr, addrlen);
 
-    close(sockfd);
+    syscall(57, sockfd);
     free(src_addr);
     free(addrlen);
 

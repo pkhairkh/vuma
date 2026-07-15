@@ -20,13 +20,10 @@
 // VUMA memory model: *(ptr + offset) reads/writes a single byte (the LSB of
 // the RHS for stores). Multi-byte values are assembled byte-by-byte via
 // load_u32_le / store_u32_le helpers.
-
-extern "C" {
-    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
-    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
-    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
-    fn close(fd: i64) -> i64;
-}
+//
+// Uses the vuma-native syscall() intrinsic for socket / sendto / close
+// (asm-generic nrs 198 / 206 / 57). recvfrom was declared in the legacy
+// extern block but is not invoked anywhere in this module, so it is dropped.
 
 // ===========================================================================
 // Constants
@@ -559,7 +556,7 @@ fn dnssec_verify_rrset(rrset: Address, rrset_len: u32,
 
 fn mdns_query(name: Address, qtype: u32) -> u32 {
     // Create UDP socket
-    sockfd: i64 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockfd: i64 = syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if sockfd < 0 { return 0; }
 
     // Build mDNS query (transaction ID = 0, no RD, QDCOUNT=1)
@@ -606,11 +603,11 @@ fn mdns_query(name: Address, qtype: u32) -> u32 {
     while i < 8 { *(dest + 8 + i) = 0; i = i + 1; }
 
     // Send query via UDP multicast
-    sent: i64 = sendto(sockfd, query, pos, 0, dest, 16);
+    sent: i64 = syscall(206, sockfd, query, pos as i64, 0, dest, 16);
 
     free(query);
     free(dest);
-    close(sockfd);
+    syscall(57, sockfd);
 
     if sent < 0 { return 0; }
     return 1;
@@ -785,14 +782,14 @@ fn dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) 
     ok: u32 = dot_send_message(sockfd, query, query_len);
     free(query);
     if ok == 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return 0;
     }
 
     // 5. Receive length-prefixed response
     response = allocate(DNS_RESPONSE_MAX);
     resp_len: u32 = dot_recv_message(sockfd, response, DNS_RESPONSE_MAX);
-    close(sockfd);
+    syscall(57, sockfd);
     if resp_len == 0 {
         free(response);
         return 0;
@@ -1107,7 +1104,7 @@ fn doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
     free(host_buf);
     free(path_buf);
     if sent != hpos {
-        close(sockfd);
+        syscall(57, sockfd);
         return 0;
     }
 
@@ -1126,7 +1123,7 @@ fn doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
             break;
         }
     }
-    close(sockfd);
+    syscall(57, sockfd);
     if total == 0 {
         free(response);
         return 0;
