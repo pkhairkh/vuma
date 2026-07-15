@@ -1,8 +1,4 @@
 // womb/alloc/arena.vuma — Bump allocator using heap memory
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
@@ -28,8 +24,8 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 }
 
 fn arena_new(size: u32) -> Address {
-    arena = __vuma_alloc(16);
-    base = __vuma_alloc(size);
+    arena = allocate(16);
+    base = allocate(size);
     store_u64(arena, 0, base); store_u32(arena, 8, 0); store_u32(arena, 12, size);
     return arena;
 }
@@ -48,7 +44,7 @@ fn arena_reset(arena: Address) { store_u32(arena, 8, 0); }
 
 fn arena_free(arena: Address) {
     base: u64 = load_u64(arena, 0); size: u32 = load_u32(arena, 12);
-    __vuma_free(base, size); __vuma_free(arena, 16);
+    free(base); free(arena);
 }
 
 fn arena_used(arena: Address) -> u32 { return load_u32(arena, 8); }

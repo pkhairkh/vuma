@@ -1,10 +1,6 @@
 // womb/string/string_builder.vuma — Dynamic string builder using heap memory
 // Wraps DynamicVec for efficient string concatenation.
 
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
 // Uses the vuma-native syscall() intrinsic for write (asm-generic nr 64).
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
@@ -31,9 +27,9 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 }
 
 fn sb_new(cap: u32) -> Address {
-    sb = __vuma_alloc(16);
+    sb = allocate(16);
     if cap == 0 { cap = 64; }
-    data = __vuma_alloc(cap);
+    data = allocate(cap);
     store_u64(sb, 0, data); store_u32(sb, 8, 0); store_u32(sb, 12, cap);
     return sb;
 }
@@ -45,10 +41,11 @@ fn sb_reserve(sb: Address, needed: u32) {
     cap: u32 = sb_cap(sb); if needed <= cap { return; }
     new_cap: u32 = cap; if new_cap == 0 { new_cap = 64; }
     while new_cap < needed { new_cap = new_cap * 2; }
-    new_data = __vuma_alloc(new_cap);
+    new_data = allocate(new_cap);
     old_data: u64 = sb_data(sb); old_len: u32 = sb_len(sb);
     i: u32 = 0;
     while i < old_len { *(new_data + i) = *(old_data + i) & 255; i = i + 1; }
+    free(old_data);
     store_u64(sb, 0, new_data); store_u32(sb, 12, new_cap);
 }
 
@@ -67,7 +64,7 @@ fn sb_append(sb: Address, str: Address, str_len: u32) {
 
 fn sb_append_u64(sb: Address, val: u64) {
     if val == 0 { sb_push_char(sb, 48); return; }
-    digits = __vuma_alloc(32);
+    digits = allocate(32);
     n: u64 = val; pos: u32 = 0;
     while n > 0 {
         d: u32 = (n % 10) & 0xFFFFFFFF;
@@ -86,5 +83,5 @@ fn sb_clear(sb: Address) { store_u32(sb, 8, 0); }
 
 fn sb_free(sb: Address) {
     data: u64 = sb_data(sb); cap: u32 = sb_cap(sb);
-    __vuma_free(data, cap); __vuma_free(sb, 16);
+    free(data); free(sb);
 }

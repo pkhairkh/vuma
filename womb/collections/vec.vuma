@@ -1,13 +1,11 @@
 // womb/collections/vec.vuma — Dynamic array using heap-allocated memory
 // Layout: { data_ptr: u64, len: u32, cap: u32 } = 16 bytes
 //
-// Uses __vuma_alloc (mmap) for persistent heap memory.
-// Unlike allocate() (stack-local), heap buffers survive function returns.
+// Uses allocate() (mmap) for persistent heap memory.
+// Unlike the stack-local `let` slots, heap buffers survive function returns.
 // This enables cross-function dynamic data structures.
 
 extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
     fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
@@ -57,9 +55,9 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 // Create a new vector with initial capacity (in bytes).
 // The vector header and data buffer are both heap-allocated.
 fn vec_new(cap: u32) -> Address {
-    v = __vuma_alloc(16);
+    v = allocate(16);
     if cap == 0 { cap = 16; }
-    data = __vuma_alloc(cap);
+    data = allocate(cap);
     store_u64(v, 0, data);
     store_u32(v, 8, 0);     // len = 0
     store_u32(v, 12, cap);  // cap
@@ -83,7 +81,7 @@ fn vec_set_len(v: Address, len: u32) {
 }
 
 // Ensure capacity >= needed. Allocates new buffer on heap, copies data,
-// frees old buffer. Works across function calls because __vuma_alloc
+// frees old buffer. Works across function calls because allocate()
 // uses mmap (persistent heap memory).
 fn vec_reserve(v: Address, needed: u32) {
     cap: u32 = vec_cap(v);
@@ -93,7 +91,7 @@ fn vec_reserve(v: Address, needed: u32) {
     while new_cap < needed {
         new_cap = new_cap * 2;
     }
-    new_data = __vuma_alloc(new_cap);
+    new_data = allocate(new_cap);
     old_data: u64 = vec_data(v);
     old_len: u32 = vec_len(v);
     // Copy old data
@@ -104,7 +102,7 @@ fn vec_reserve(v: Address, needed: u32) {
         i = i + 1;
     }
     // Free old buffer (munmap)
-    __vuma_free(old_data, cap);
+    free(old_data);
     // Update vector header
     store_u64(v, 0, new_data);
     store_u32(v, 12, new_cap);
@@ -206,6 +204,6 @@ fn vec_is_empty(v: Address) -> u32 {
 fn vec_free(v: Address) {
     data: u64 = vec_data(v);
     cap: u32 = vec_cap(v);
-    __vuma_free(data, cap);
-    __vuma_free(v, 16);
+    free(data);
+    free(v);
 }

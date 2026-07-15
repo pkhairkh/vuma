@@ -1,7 +1,5 @@
 // womb/io/buffered.vuma — Buffered I/O (BufReader/BufWriter)
 extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
     fn read(fd: i64, buf: Address, count: i64) -> i64;
     fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
@@ -43,8 +41,8 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 
 fn bufreader_new(fd: i64, buf_cap: u32) -> Address {
     if buf_cap == 0 { buf_cap = 8192; }
-    r = __vuma_alloc(32);
-    buf = __vuma_alloc(buf_cap);
+    r = allocate(32);
+    buf = allocate(buf_cap);
     store_i64(r, 0, fd); store_u64(r, 8, buf);
     store_u32(r, 16, 0); store_u32(r, 20, 0);
     store_u32(r, 24, buf_cap); store_u32(r, 28, 0);
@@ -95,12 +93,12 @@ fn bufreader_read(r: Address, dst: Address, n: u32) -> u32 {
 }
 fn bufreader_free(r: Address) {
     buf: u64 = load_u64(r, 8); cap: u32 = load_u32(r, 24);
-    __vuma_free(buf, cap); __vuma_free(r, 32);
+    free(buf); free(r);
 }
 
 fn bufwriter_new(fd: i64, buf_cap: u32) -> Address {
     if buf_cap == 0 { buf_cap = 8192; }
-    w = __vuma_alloc(24); buf = __vuma_alloc(buf_cap);
+    w = allocate(24); buf = allocate(buf_cap);
     store_i64(w, 0, fd); store_u64(w, 8, buf);
     store_u32(w, 16, 0); store_u32(w, 20, buf_cap);
     return w;
@@ -147,5 +145,5 @@ fn bufwriter_write_byte(w: Address, byte: u32) {
 fn bufwriter_free(w: Address) {
     bufwriter_flush(w);
     buf: u64 = load_u64(w, 8); cap: u32 = load_u32(w, 20);
-    __vuma_free(buf, cap); __vuma_free(w, 24);
+    free(buf); free(w);
 }

@@ -2,11 +2,6 @@
 // Provides: DFS, topological sort, SCC (Tarjan's), cycle detection
 // Uses the digraph.vuma data structure.
 
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
-
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
@@ -42,7 +37,7 @@ fn graph_toposort(g: Address) -> Address {
     node_count: u32 = load_u32(g, 16);
     
     // Allocate in-degree array
-    indeg = __vuma_alloc(node_count * 4);
+    indeg = allocate(node_count * 4);
     // Initialize to 0
     i: u32 = 0;
     while i < node_count * 4 { *(indeg + i) = 0; i = i + 1; }
@@ -62,7 +57,7 @@ fn graph_toposort(g: Address) -> Address {
     }
     
     // Allocate queue (array of node IDs with 0 in-degree)
-    queue = __vuma_alloc(node_count * 4);
+    queue = allocate(node_count * 4);
     q_head: u32 = 0;
     q_tail: u32 = 0;
     
@@ -77,7 +72,7 @@ fn graph_toposort(g: Address) -> Address {
     }
     
     // Allocate result array
-    result_order = __vuma_alloc(node_count * 4);
+    result_order = allocate(node_count * 4);
     result_count: u32 = 0;
     
     // Process queue
@@ -108,7 +103,7 @@ fn graph_toposort(g: Address) -> Address {
     }
     
     // Build result struct
-    result = __vuma_alloc(16);
+    result = allocate(16);
     store_u64(result, 0, result_order);
     store_u32(result, 8, result_count);
     if result_count < node_count {
@@ -117,8 +112,8 @@ fn graph_toposort(g: Address) -> Address {
         store_u32(result, 12, 0);  // has_cycle = false
     }
     
-    __vuma_free(indeg, node_count * 4);
-    __vuma_free(queue, node_count * 4);
+    free(indeg);
+    free(queue);
     return result;
 }
 
@@ -130,8 +125,8 @@ fn toposort_free(result: Address) {
     order: u64 = load_u64(result, 0);
     // We don't know the exact allocated size, but it was node_count * 4.
     // Use a reasonable default for free (the OS will handle it).
-    __vuma_free(order, 0);  // munmap with 0 size is OK on Linux
-    __vuma_free(result, 16);
+    free(order);  // munmap with 0 size is OK on Linux
+    free(result);
 }
 
 // ── Cycle detection (DFS-based) ──
@@ -139,12 +134,12 @@ fn toposort_free(result: Address) {
 fn graph_has_cycle(g: Address) -> u32 {
     node_count: u32 = load_u32(g, 16);
     // state: 0=unvisited, 1=in-progress, 2=done
-    state = __vuma_alloc(node_count);
+    state = allocate(node_count);
     i: u32 = 0;
     while i < node_count { *(state + i) = 0; i = i + 1; }
     
     // Iterative DFS using a stack
-    stack = __vuma_alloc(node_count * 8);  // stack of (node, edge_index) pairs
+    stack = allocate(node_count * 8);  // stack of (node, edge_index) pairs
     sp: u32 = 0;
     
     i = 0;
@@ -180,8 +175,8 @@ fn graph_has_cycle(g: Address) -> u32 {
                 
                 // Check dst
                 if *(state + dst) == 1 {  // back edge → cycle!
-                    __vuma_free(state, node_count);
-                    __vuma_free(stack, node_count * 8);
+                    free(state);
+                    free(stack);
                     return 1;
                 }
                 if *(state + dst) == 0 {
@@ -197,7 +192,7 @@ fn graph_has_cycle(g: Address) -> u32 {
         i = i + 1;
     }
     
-    __vuma_free(state, node_count);
-    __vuma_free(stack, node_count * 8);
+    free(state);
+    free(stack);
     return 0;
 }

@@ -6,11 +6,6 @@
 //   Header: { entries_ptr: u64, count: u32, capacity: u32, _pad: u32, _pad: u32 }
 //   Entry:  [tag: u32][payload: 32 bytes] = 36 bytes (round to 40 for alignment)
 
-extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-}
-
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
@@ -39,8 +34,8 @@ const ENTRY_SIZE: u32 = 40;  // 4 (tag) + 32 (payload) + 4 (padding)
 // Create a new enum_map with given capacity
 fn enum_map_new(capacity: u32) -> Address {
     if capacity == 0 { capacity = 256; }
-    m = __vuma_alloc(24);
-    entries = __vuma_alloc(capacity * ENTRY_SIZE);
+    m = allocate(24);
+    entries = allocate(capacity * ENTRY_SIZE);
     // Zero
     i: u32 = 0;
     while i < capacity * ENTRY_SIZE { *(entries + i) = 0; i = i + 1; }
@@ -57,14 +52,14 @@ fn enum_map_grow(m: Address) {
     old_cap: u32 = load_u32(m, 12);
     new_cap: u32 = old_cap * 2;
     old_entries: u64 = load_u64(m, 0);
-    new_entries = __vuma_alloc(new_cap * ENTRY_SIZE);
+    new_entries = allocate(new_cap * ENTRY_SIZE);
     i: u32 = 0;
     while i < old_cap * ENTRY_SIZE {
         *(new_entries + i) = *(old_entries + i) & 255;
         i = i + 1;
     }
     while i < new_cap * ENTRY_SIZE { *(new_entries + i) = 0; i = i + 1; }
-    __vuma_free(old_entries, old_cap * ENTRY_SIZE);
+    free(old_entries);
     store_u64(m, 0, new_entries);
     store_u32(m, 12, new_cap);
 }
@@ -125,6 +120,6 @@ fn enum_map_count(m: Address) -> u32 { return load_u32(m, 8); }
 fn enum_map_free(m: Address) {
     entries: u64 = load_u64(m, 0);
     cap: u32 = load_u32(m, 12);
-    __vuma_free(entries, cap * ENTRY_SIZE);
-    __vuma_free(m, 24);
+    free(entries);
+    free(m);
 }
