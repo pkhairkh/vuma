@@ -153,7 +153,7 @@ impl VumaLogger {
     pub fn log(&self, level: LogLevel, stage: &str, message: &str) {
         let min_level = self.level();
         if level <= min_level {
-            let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
+            let timestamp = crate::time::now_utc_iso8601_millis();
             let output = format!("[{}] [{}] [{}] {}", timestamp, level.tag(), stage, message);
 
             let _ = writeln!(std::io::stderr(), "{}", output);
