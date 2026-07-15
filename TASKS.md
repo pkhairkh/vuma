@@ -129,20 +129,17 @@ shows only the 10 internal workspace crates.
 
 ## Open Work
 
-### 1. O2 codegen bug — bootstrap SIGSEGV under optimization
+### 1. O2 codegen bug — partial fix, remaining inliner issue
 
-The bootstrap self-host test uses `OptLevel::O0` because the production O2
-pipeline (inliner + LICM + scheduler) miscompiles the bootstrap source,
-causing the emitted `vumac` to SIGSEGV during its own `parse` stage.
+Wave 51 made three fixes:
+- Cast-aware alias analysis (`alias_analysis.rs` tracks `IRInstr::Cast`)
+- Function-wide alias info shared across blocks (`schedule_function`)
+- `IRInstr::Ret` stripping in inlined bodies + `threshold=0` guard
 
-**Root cause (suspected):** The scheduler's type-based alias analysis
-(TBAA) in `src/codegen/src/alias_analysis.rs` doesn't model `Cast` through
-typed pointers. The bootstrap freely casts between `Address` (void*) and
-typed pointers (`u32*`, `u64*`) via `Cast`, which TBAA doesn't track,
-allowing Load-after-Store reorders through aliased buffers.
-
-**Fix:** Implement Cast-aware points-to analysis (replacing or augmenting
-the current TBAA). Once fixed, the test can switch from `O0` to `O2`.
+**Remaining:** O2 still crashes when the inliner is active. Bisecting
+showed the inliner creates IR shapes that expose scheduler/LICM bugs.
+With inliner + scheduler + LICM all disabled, O2 works. With any one
+enabled, O2 crashes. Investigation continues.
 
 ### 2. Runtime stubs not emitted by bootstrap
 
