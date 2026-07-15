@@ -1317,3 +1317,115 @@ No new warnings introduced.
   (`wave(50): fix Vec-slice + doc-comment clippy warnings`)
   — pushed to `origin/main` (`5ac8e6b0..bac9f021`).
 
+
+### Task 9-g — fix identical-blocks + transmute + macro-docs + `&Box<T>` clippy warnings
+
+**Commands run:**
+
+```
+cargo clippy --workspace 2>&1 | grep "this \`if\` has identical blocks" -A5 | head -50
+cargo clippy --workspace 2>&1 | grep "transmute used without annotations" -A3 | head -30
+cargo clippy --workspace 2>&1 | grep "missing documentation for a macro" -A3 | head -30
+cargo clippy --workspace 2>&1 | grep "&Box<T>" -A3 | head -20
+```
+
+**Root cause.** Four unrelated clippy lint families, totalling 14 sites
+across 6 files:
+
+1. `clippy::if_same_then_else` ("this `if` has identical blocks") — 5
+   sites. In `src/logging.rs::VumaLogger::log`, the if/else-if/else
+   chain for `LogLevel::Error` / `≤ Warn` / else all three called
+   `writeln!(std::io::stderr(), …)` with the same `output` argument, so
+   the branches were textually identical. In `src/pipeline.rs` (a
+   helper that scans a byte slice while skipping parenthesised
+   sub-expressions), four consecutive `else if` arms each did `i += 1;`
+   to skip past a `<=`, `>=`, `<<`, or `>>` operator tail; only the
+   *condition* differed, not the *body*.
+2. `clippy::missing_transmute_annotations` ("transmute used without
+   annotations") — 3 sites in `src/codegen/src/alpha.rs::Gpr::from_encoding`
+   and `src/codegen/src/riscv_common.rs::{Gpr,Fpr}::from_encoding`. Each
+   called `std::mem::transmute(enc)` to convert a `u8`/`u32` into the
+   enum's `#[repr(u8)]`/`#[repr(u32)]` fieldless form, relying on
+   inference to pick the target type.
+3. `clippy::missing_docs_in_private_items` ("missing documentation for a
+   macro") — 4 sites in `src/logging.rs`. The `log_warn`, `log_info`,
+   `log_debug`, and `log_trace` macros were exported via
+   `#[macro_export]` but lacked the `///` doc comment that their
+   sibling `log_error` already had.
+4. `clippy::borrowed_box` ("you seem to be trying to use `&Box<T>`.
+   Consider using just `&T`") — 2 sites, both named `write_box`, one
+   in `src/bd/src/serialize.rs:238` and one in
+   `src/proof/src/serialization.rs:307`. Each helper took
+   `b: &Box<T>` only to immediately call `b.as_ref().write_binary(w)`,
+   which is exactly what `&T` gives you directly.
+
+**Files changed (6) — 14 sites:**
+
+| File                                       | Sites | Lint family                  | Notes                                                                                                                                                                                                                                                                                       |
+|--------------------------------------------|------:|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `src/logging.rs`                           |     1 | if_same_then_else            | `VumaLogger::log` — collapsed the 3-branch if/else-if/else (all three bodies `let _ = writeln!(std::io::stderr(), "{}", output);`) to a single unconditional `let _ = writeln!(…);`.                                                                                                          |
+| `src/logging.rs`                           |     4 | missing_docs (macro)         | Added `/// Convenience macro for logging a {warning,informational,debug,trace} message to the global logger.` above each of `log_warn!`, `log_info!`, `log_debug!`, `log_trace!`, mirroring the pre-existing doc on `log_error!`.                                                            |
+| `src/pipeline.rs`                          |     1 | if_same_then_else (4 sub-arms) | Operator-tail skip helper — replaced the 4-arm `else if` chain (`op == "<" && … b'='`, `op == ">" && … b'='`, `op == "<" && … b'<'`, `op == ">" && … b'>'`) with a single `if (cond1) || (cond2) || (cond3) || (cond4) { i += 1; } else { return Some(i); }`, factoring the byte-test into a `next_is` closure. |
+| `src/codegen/src/alpha.rs`                 |     1 | missing_transmute_annotations| `Gpr::from_encoding` — `std::mem::transmute(enc)` → `std::mem::transmute::<u8, Gpr>(enc)`.                                                                                                                                                                                                   |
+| `src/codegen/src/riscv_common.rs`          |     2 | missing_transmute_annotations| `Gpr::from_encoding` — `transmute(enc)` → `transmute::<u32, Gpr>(enc)`; `Fpr::from_encoding` — `transmute(enc)` → `transmute::<u32, Fpr>(enc)`.                                                                                                                                                |
+| `src/bd/src/serialize.rs`                  |     1 | borrowed_box                 | `write_box<T: BinaryWrite, W: Write>(w: &mut W, b: &Box<T>)` → `b: &T`; body simplified from `b.as_ref().write_binary(w)` to `b.write_binary(w)`. Three call sites updated to pass `&*self.{element,pointee,result}` (yielding `&RepD`) instead of `&self.{field}` (which would yield `&Box<RepD>` and fail to infer `T = RepD`). |
+| `src/proof/src/serialization.rs`           |     1 | borrowed_box                 | Same `write_box` signature change (`&Box<T>` → `&T`); two call sites in `ProofStep::write_binary` (`Induction { base, step }` arm) updated to pass `&**base` / `&**step` (here `base`/`step` are already `&Box<Proof>` bindings from the `match self` arm, so a double-deref yields `&Proof`). |
+
+**Fix strategy (no `#[allow]`, no shortcuts):**
+
+1. For each `if_same_then_else` site, collapsed the duplicated branches
+   into a single block. In `logging.rs` the entire if/else-if/else
+   became a single statement (the three branches were textually
+   identical including the format string). In `pipeline.rs` the four
+   `else if` arms differed only in their condition (each tested a
+   different `(op, next_byte)` pair) but shared the same body `i += 1;`,
+   so they were combined into a single `if (c1) || (c2) || (c3) || (c4)`
+   with the byte-comparison factored into a `next_is` closure for
+   readability; the trailing `else { return Some(i); }` arm was
+   preserved unchanged.
+2. For each `missing_transmute_annotations` site, added explicit type
+   arguments to `std::mem::transmute::<FromType, ToType>(x)`. The
+   `unsafe` block and SAFETY comment were preserved verbatim; only the
+   type ascription changed.
+3. For each `missing_docs_in_private_items` (macro) site, added a
+   one-line `///` doc comment above the `macro_rules!` definition,
+   matching the style and wording of the pre-existing `log_error!`
+   doc comment.
+4. For each `borrowed_box` site, changed only the helper's signature
+   (`&Box<T>` → `&T`) and simplified the body accordingly. Call sites
+   were updated to pass a `&T` directly: in `bd/serialize.rs`, the
+   fields are `Box<RepD>` accessed through `&self`, so `&*self.field`
+   yields `&RepD`; in `proof/serialization.rs`, the `match self` arm
+   binds `base`/`step` as `&Box<Proof>`, so `&**base` yields `&Proof`.
+
+**Diff stat:** 6 files changed, 25 insertions(+), 27 deletions(-)
+(net −2 lines: the if/else-if/else collapse in `logging.rs` removes
+5 lines, the 4-arm `else if` collapse in `pipeline.rs` is roughly
+neutral, the 4 macro doc comments add 4 lines, and the `&Box` → `&T`
+edits and call-site rewrites net out to roughly −6).
+
+**Clippy verification:**
+
+- Before: `cargo clippy --workspace 2>&1 | grep "^warning:" | wc -l` → `271`.
+- After:  `cargo clippy --workspace 2>&1 | grep "^warning:" | wc -l` → `257`.
+- Net reduction: **14** (5 if_same_then_else + 3 missing_transmute_annotations
+  + 4 missing_docs macro + 2 borrowed_box = 14, exactly matching the
+  per-category site count).
+- Targeted re-check:
+  `cargo clippy --workspace 2>&1 | grep -E "this \`if\` has identical blocks|transmute used without annotations|missing documentation for a macro|you seem to be trying to use \`&Box<T>\`" | wc -l`
+  → `0` (all four lint families eliminated).
+
+No `#[allow]` added. No new warnings introduced.
+
+**Build & test:**
+
+- `cargo check --workspace`            → finished, 0 errors (only the
+  pre-existing `redundant_semicolons` warning in `src/main.rs:782`,
+  unchanged by this task).
+- `cargo test -p vuma-codegen --lib emit`  → 104 passed / 0 failed / 0
+  ignored (0.01s).
+
+**Commit:** `eeae0c38c3d0fb1722b21293c32099bef997f4ef`
+  (`wave(50): fix identical-blocks + transmute + macro-docs + &Box clippy warnings`)
+  — pushed to `origin/main` (`da46a556..eeae0c38`).
+
