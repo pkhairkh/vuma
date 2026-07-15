@@ -89,12 +89,10 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
         for instr in &block.instructions {
             match instr {
                 // Store: if value is an allocation, it escapes
-                IRInstr::Store { value, .. } => {
-                    if let IRValue::Register(vreg) = value {
-                        if allocs.contains(vreg) {
-                            escapes.insert(*vreg);
-                        }
-                    }
+                IRInstr::Store { value: IRValue::Register(vreg), .. }
+                    if allocs.contains(vreg) =>
+                {
+                    escapes.insert(*vreg);
                 }
 
                 // Call: if any argument is an allocation, it escapes

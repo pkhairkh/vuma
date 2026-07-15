@@ -1102,7 +1102,6 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     match kind {
                         CastKind::ZExt => {
                             if let IRValue::Immediate(imm) = *src {
-                                let imm = imm;
                                 if (-2147483648..=2147483647).contains(&imm) {
                                     code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
                                 } else {
@@ -1132,7 +1131,6 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         CastKind::SExt => {
                             if let IRValue::Immediate(imm) = *src {
-                                let imm = imm;
                                 if (-2147483648..=2147483647).contains(&imm) {
                                     code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
                                 } else {

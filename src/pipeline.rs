@@ -8045,11 +8045,9 @@ pub fn collect_global_constants(program: &AstProgram) -> HashMap<String, i64> {
                     consts.insert(s.name.clone(), val);
                 }
             }
-            Item::Stmt(stmt) => {
-                if let vuma_parser::ast::Stmt::Let(let_stmt) = stmt {
-                    if let Some(val) = eval_const_expr(&let_stmt.value, &consts) {
-                        consts.insert(let_stmt.name.clone(), val);
-                    }
+            Item::Stmt(vuma_parser::ast::Stmt::Let(let_stmt)) => {
+                if let Some(val) = eval_const_expr(&let_stmt.value, &consts) {
+                    consts.insert(let_stmt.name.clone(), val);
                 }
             }
             _ => {}
@@ -8618,10 +8616,12 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     if name == "allocate" {
                         let size: u32 = args.first()
                             .and_then(|a| {
-                                if let vuma_parser::ast::Expr::Lit { value, .. } = a {
-                                    if let vuma_parser::ast::Lit::Int(n) = value {
-                                        return Some(*n as u32);
-                                    }
+                                if let vuma_parser::ast::Expr::Lit {
+                                    value: vuma_parser::ast::Lit::Int(n),
+                                    ..
+                                } = a
+                                {
+                                    return Some(*n as u32);
                                 }
                                 None
                             })
@@ -8669,12 +8669,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // Check if the RHS is an Allocate expression → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
                 let size_val: u32 = match size.as_ref() {
-                    vuma_parser::ast::Expr::Lit { value, .. } => {
-                        if let vuma_parser::ast::Lit::Int(n) = value {
-                            *n as u32
-                        } else {
-                            8
-                        }
+                    vuma_parser::ast::Expr::Lit { value: vuma_parser::ast::Lit::Int(n), .. } => {
+                        *n as u32
                     }
                     _ => 8,
                 };
@@ -8801,12 +8797,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // Detect allocate() expression → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Allocate { size, .. } = &assign_stmt.value {
                 let size_val: u32 = match size.as_ref() {
-                    vuma_parser::ast::Expr::Lit { value, .. } => {
-                        if let vuma_parser::ast::Lit::Int(n) = value {
-                            *n as u32
-                        } else {
-                            8
-                        }
+                    vuma_parser::ast::Expr::Lit { value: vuma_parser::ast::Lit::Int(n), .. } => {
+                        *n as u32
                     }
                     _ => 8,
                 };
