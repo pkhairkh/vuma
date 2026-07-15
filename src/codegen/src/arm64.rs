@@ -4613,11 +4613,10 @@ impl InstructionSelector {
             IRInstr::Syscall { nr, args, dst } => {
                 // Translate VUMA-generic (asm-generic) syscall number to the
                 // backend's native numbering. Identity on AArch64.
-                let native_nr = crate::syscall_abi::translate(
+                let native_nr = crate::syscall_abi::translate_or_warn(
                     crate::backend::BackendKind::AArch64,
                     *nr,
-                )
-                .unwrap_or(*nr);
+                );
                 let arg_regs = [
                     Register::X0, Register::X1, Register::X2,
                     Register::X3, Register::X4, Register::X5,

@@ -1244,11 +1244,10 @@ fn emit_instr(
             // `call_pal 0x83` (callsys), result in R0.
             // Translate VUMA-generic (asm-generic) syscall number to the
             // backend's native numbering. TODO(P1-b): per-arch table.
-            let native_nr = crate::syscall_abi::translate(
+            let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::Alpha,
                 *nr,
-            )
-            .unwrap_or(*nr);
+            );
             let syscall_arg_regs =
                 [Gpr::R16, Gpr::R17, Gpr::R18, Gpr::R19, Gpr::R20, Gpr::R21];
             let num_reg_args = args.len().min(syscall_arg_regs.len());

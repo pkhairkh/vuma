@@ -272,6 +272,32 @@ pub fn translate(backend: BackendKind, generic_nr: u32) -> Option<u32> {
     }
 }
 
+/// Translate a VUMA-generic syscall number to the backend's native number,
+/// logging a warning if the number is not in the translation table.
+///
+/// On identity arches (aarch64, riscv, loongarch, arm32), this always
+/// returns the input verbatim (no warning — the number IS native).
+/// On translated arches, if the number is unknown, a warning is logged
+/// and the generic number is returned verbatim (which may be wrong, but
+/// preserves the current behavior for arch-specific syscalls).
+pub fn translate_or_warn(backend: BackendKind, generic_nr: u32) -> u32 {
+    match translate(backend, generic_nr) {
+        Some(native) => native,
+        None => {
+            // Unknown syscall number — may be arch-specific or a bug.
+            // Log a warning but don't abort (preserves current behavior).
+            vuma_log!(
+                warn,
+                "syscall number {} not in translation table for {:?} — \
+                 using generic number verbatim (may be wrong on this arch)",
+                generic_nr,
+                backend
+            );
+            generic_nr
+        }
+    }
+}
+
 /// x86_64 translation table (Linux `arch/x86/entry/syscalls/syscall_64.tbl`).
 ///
 /// Source of truth: the x86_64 `build_runtime_syscall_stubs` table at

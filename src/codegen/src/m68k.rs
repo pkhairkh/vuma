@@ -1477,11 +1477,10 @@ fn emit_instr(
             // `trap #0`, result in D0.
             // Translate VUMA-generic (asm-generic) syscall number to the
             // backend's native numbering. TODO(P1-b): per-arch table.
-            let native_nr = crate::syscall_abi::translate(
+            let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::M68k,
                 *nr,
-            )
-            .unwrap_or(*nr);
+            );
             let syscall_arg_regs =
                 [Gpr::D1, Gpr::D2, Gpr::D3, Gpr::D4, Gpr::D5];
             let num_reg_args = args.len().min(syscall_arg_regs.len());
