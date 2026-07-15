@@ -1,8 +1,5 @@
 // womb/io/buffered.vuma — Buffered I/O (BufReader/BufWriter)
-extern "C" {
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for read/write (asm-generic nrs 63/64).
 fn store_i64(ptr: Address, offset: u32, val: i64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
@@ -54,7 +51,7 @@ fn bufreader_fill(r: Address) -> u32 {
     eof: u32 = load_u32(r, 28);
     if eof == 1 { return 0; }
     fd: i64 = load_i64(r, 0); buf: u64 = load_u64(r, 8); cap: u32 = load_u32(r, 24);
-    n: i64 = read(fd, buf, cap);
+    n: i64 = syscall(63, fd, buf, cap as i64);
     if n <= 0 { store_u32(r, 28, 1); store_u32(r, 16, 0); store_u32(r, 20, 0); return 0; }
     store_u32(r, 16, n & 0xFFFFFFFF); store_u32(r, 20, 0); return 1;
 }
@@ -108,7 +105,7 @@ fn bufwriter_flush(w: Address) -> u32 {
     fd: i64 = load_i64(w, 0); buf: u64 = load_u64(w, 8);
     written: u32 = 0;
     while written < buf_len {
-        n: i64 = write(fd, buf + written, buf_len - written);
+        n: i64 = syscall(64, fd, buf + written, (buf_len - written) as i64);
         if n <= 0 { return 0; }
         written = written + (n & 0xFFFFFFFF);
     }
@@ -126,7 +123,7 @@ fn bufwriter_write(w: Address, data: Address, data_len: u32) -> u32 {
     if data_len > buf_cap {
         fd: i64 = load_i64(w, 0); written: u32 = 0;
         while written < data_len {
-            n: i64 = write(fd, data + written, data_len - written);
+            n: i64 = syscall(64, fd, data + written, (data_len - written) as i64);
             if n <= 0 { return written; }
             written = written + (n & 0xFFFFFFFF);
         }
