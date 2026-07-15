@@ -280,8 +280,7 @@ fn schedule_block_inner(
         };
 
         if is_load || is_store || is_barrier {
-            for j in 0..i {
-                let prev = &instructions[j];
+            for (j, prev) in instructions.iter().take(i).enumerate() {
                 let prev_is_load = matches!(prev,
                     IRInstr::Load { .. } | IRInstr::AtomicLoad { .. });
                 let prev_is_store = matches!(prev,

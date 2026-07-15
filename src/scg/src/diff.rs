@@ -529,7 +529,7 @@ impl LlmDiff {
 impl DiffStats {
     /// Serialize these stats to a `JsonValue`. Field order matches
     /// declaration order (matches `serde_json`'s struct serialization).
-    fn to_json_value(&self) -> crate::llm_json::JsonValue {
+    fn to_json_value(self) -> crate::llm_json::JsonValue {
         use crate::llm_json::{build_object, json_usize};
         build_object(vec![
             ("nodes_added".to_string(), json_usize(self.nodes_added)),

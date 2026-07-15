@@ -779,7 +779,7 @@ fn cmd_build_direct(
         backend_kind.isa_name(),
     );
 
-    let binary = compile_to_binary_direct(source, isa, OptLevel::from(cli.opt_level))?;;
+    let binary = compile_to_binary_direct(source, isa, OptLevel::from(cli.opt_level))?;
 
     let out_path = output
         .as_ref()

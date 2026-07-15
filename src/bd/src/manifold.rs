@@ -66,9 +66,9 @@ impl ZOrderCurve {
         let mut coords = vec![0u64; n];
         let bits_per_dim = 64 / n as u64;
         for bit in 0..bits_per_dim {
-            for dim in 0..n {
+            for (dim, coord) in coords.iter_mut().enumerate() {
                 let bit_val = (index >> (n as u64 * bit + dim as u64)) & 1;
-                coords[dim] |= bit_val << bit;
+                *coord |= bit_val << bit;
             }
         }
         coords
