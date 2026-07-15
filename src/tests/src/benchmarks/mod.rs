@@ -119,7 +119,7 @@ impl BenchmarkSuiteReport {
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: vuma::time::now_utc_rfc3339(),
             total_time_ms: 0,
         }
     }

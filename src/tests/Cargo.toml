@@ -20,7 +20,6 @@ vuma-parser.workspace = true
 vuma-codegen.workspace = true
 vuma-cor.workspace = true
 vuma = { path = "../.." }
-chrono.workspace = true
 libc.workspace = true
 proptest.workspace = true
 serde.workspace = true
