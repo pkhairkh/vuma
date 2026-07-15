@@ -108,6 +108,12 @@ pub struct BenchmarkSuiteReport {
     pub total_time_ms: u64,
 }
 
+impl Default for BenchmarkSuiteReport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BenchmarkSuiteReport {
     /// Create a new empty report.
     pub fn new() -> Self {

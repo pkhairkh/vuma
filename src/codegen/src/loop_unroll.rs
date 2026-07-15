@@ -1524,7 +1524,7 @@ fn renumber_dst(instr: &mut IRInstr, next_vreg: &mut u32) {
             // Phi dsts are handled by the caller (loop-carried IV).
             let _ = fresh;
         }
-        IRInstr::Store { .. } | IRInstr::Alloc { .. } | IRInstr::Ret { .. } | _ => {
+        _ => {
             // No dst to renumber, or not safe to renumber.
             let _ = fresh;
         }
@@ -1848,8 +1848,8 @@ pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
         new_instrs.push(instrs[cmp_idx].clone());
     }
 
-    for i in (cmp_idx + 1)..instrs.len() {
-        new_instrs.push(instrs[i].clone());
+    for instr in instrs.iter().skip(cmp_idx + 1) {
+        new_instrs.push(instr.clone());
     }
 
     let mut new_block = IRBlock::new(&block.label);

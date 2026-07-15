@@ -767,7 +767,7 @@ fn cmd_build(
 /// is generalised to other ISAs).
 fn cmd_build_direct(
     cli: &Cli,
-    file: &PathBuf,
+    file: &Path,
     output: &Option<PathBuf>,
     source: &str,
     isa: IsaArg,

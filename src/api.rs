@@ -865,15 +865,13 @@ pub struct ApiTargetInfo {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Serialize `Vec<u8>` as a hex string for compact JSON representation.
-fn serialize_binary_hex<S: serde::Serializer>(data: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+fn serialize_binary_hex<S: serde::Serializer>(data: &[u8], s: S) -> Result<S::Ok, S::Error> {
     let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
     s.serialize_str(&hex)
 }
 
 /// Deserialize `Vec<u8>` from a hex string.
 fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-    use serde::de::Error;
-
     struct HexVisitor;
 
     impl<'de> serde::de::Visitor<'de> for HexVisitor {

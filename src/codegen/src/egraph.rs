@@ -1438,7 +1438,6 @@ fn parse_profile_json(json: &str) -> Result<HashMap<EClassId, u32>, String> {
 
     // Allow empty top-level object: `{}`
     if peek_byte(bytes, pos) == Some(b'}') {
-        pos += 1;
         // No hotness key — return empty map (caller treats as "no profile").
         return Ok(hotness);
     }
