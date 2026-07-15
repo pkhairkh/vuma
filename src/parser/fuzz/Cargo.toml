@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 vuma-parser = { path = ".." }
-rand = "0.8"
 
 [[bin]]
 name = "parse_program"
