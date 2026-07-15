@@ -535,8 +535,6 @@ fn tag_to_deployment_target(
 /// a simple structure that can be serialized with serde.
 #[derive(Debug, Clone)]
 struct SerializedSCG {
-    /// Format version for forward/backward compatibility.
-    version: u32,
     /// All nodes in the graph.
     nodes: Vec<NodeData>,
     /// All edges in the graph.
@@ -563,7 +561,6 @@ fn scg_to_serialized(scg: &SCG) -> SerializedSCG {
     let next_edge_id = edges.iter().map(|e| e.id.as_u64() + 1).max().unwrap_or(0);
 
     SerializedSCG {
-        version: FORMAT_VERSION,
         nodes,
         edges,
         regions,
@@ -730,7 +727,6 @@ pub fn deserialize_scg(data: &[u8]) -> Result<SCG, DeserializeError> {
     }
 
     let serialized = SerializedSCG {
-        version,
         nodes,
         edges,
         regions,

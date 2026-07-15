@@ -33,8 +33,6 @@ pub struct QuerySystem {
     cache: HashMap<NodeId, QueryResult>,
     /// Reverse dependencies: node_id → set of nodes that depend on it
     reverse_deps: HashMap<NodeId, HashSet<NodeId>>,
-    /// Whether the system is in a consistent state.
-    consistent: bool,
 }
 
 impl Default for QuerySystem {
@@ -48,7 +46,6 @@ impl QuerySystem {
         QuerySystem {
             cache: HashMap::new(),
             reverse_deps: HashMap::new(),
-            consistent: true,
         }
     }
 
