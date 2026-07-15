@@ -186,7 +186,7 @@ const SHF_EXECINSTR: u64 = 0x4;
 /// be a complete ELF64 BE executable as currently emitted by the ppc64
 /// backend (ELF header at offset 0, program headers at `e_phoff`, section
 /// headers at `e_shoff`).
-fn swap_be_elf_to_le(elf: &mut Vec<u8>) {
+fn swap_be_elf_to_le(elf: &mut [u8]) {
     if elf.len() < 64 {
         // Not a complete ELF header — nothing sensible to do.
         return;
@@ -334,7 +334,7 @@ fn read_u32_at(buf: &[u8], off: usize) -> u32 {
 
 /// Byte-swap every 4-byte word in `bytes` (used for `return_stub` and
 /// `trampoline`, which return raw instruction bytes from the BE backend).
-fn swap_instruction_words(bytes: &mut Vec<u8>) {
+fn swap_instruction_words(bytes: &mut [u8]) {
     let mut q = 0usize;
     while q + 4 <= bytes.len() {
         swap_u32(bytes, q);

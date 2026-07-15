@@ -2034,7 +2034,6 @@ impl IRBuilder {
     // =======================================================================
     // Phi resolution — convert phi nodes to explicit copy instructions
     // =======================================================================
-
     /// Resolve all phi nodes in the function into explicit copy instructions.
     ///
     /// For each phi `dst = phi(val1 from block_A, val2 from block_B)`, we insert

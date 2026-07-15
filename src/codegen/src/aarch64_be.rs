@@ -62,7 +62,7 @@ fn swap_u64(buf: &mut [u8], off: usize) {
 }
 
 /// Convert a little-endian AArch64 ELF to big-endian (data only, not instructions).
-fn swap_le_elf_to_be(elf: &mut Vec<u8>) {
+fn swap_le_elf_to_be(elf: &mut [u8]) {
     if elf.len() < 64 { return; }
 
     // 0. Read PHDR offsets BEFORE swapping — the bytes are still LE here.
