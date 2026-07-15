@@ -1152,3 +1152,92 @@ warnings in `invariant_aggregator.rs`, `backend.rs`, `emit.rs`, and
   — pushed to `origin/main` (`3d455f41..70c2ab7c`).
 
 
+### Task 9-e — fix collapsible-if-let + matches! + redundant-binding clippy warnings
+
+**Command run:** `cargo clippy --workspace 2>&1 | grep -E "if let can be collapsed|matches!|redundant redefinition" -A3 | head -100`
+
+**Root cause.** Three separate clippy lint families, totalling 28 sites
+across 11 files (the task spec estimated "~26 total"), all flagged together
+because the same files (`arm32/mod.rs`, `loop_unroll.rs`, `regalloc.rs`,
+`pipeline.rs`) hosted multiple instances of each:
+
+1. `clippy::collapsible_if_let` (14 sites) + `clippy::collapsible_match`
+   (1 site in `arm32/mod.rs`) — 15 sites total where a `match` / `if let`
+   arm contained a single nested `if let` (or a guard `if matches!(...)`)
+   on a sub-field of the just-bound value. Clippy's machine suggestion is
+   to fold the inner pattern into the outer one as a sub-binder (e.g.
+   `if let Foo { x: Bar(y), .. } = e` or
+   `match e { Foo { x: Bar(y), .. } if cond => … }`).
+2. `clippy::match_like_matches_macro` — 8 sites of the form
+   `let flag = match e { Pat1 | Pat2 => true, _ => false };`. Clippy suggests
+   the `matches!(e, Pat1 | Pat2)` macro instead.
+3. `clippy::redundant_binding` / `clippy::redundant_locals` — 5 sites:
+   4 of the form `let x = x;` (no-op rebinding, often left over after a
+   `match` arm destructure that was simplified) in the x86 stack-slot
+   isels, plus 1 alpha-backend site of the form
+   `let mut syscall_stubs = syscall_stubs;` (the same no-op rebinding
+   with `mut` added).
+
+**Files changed (11) — 28 sites:**
+
+| File                                                 | Sites | Lint family           | Notes                                                                                                                                                                                                                                                                                                                                          |
+|------------------------------------------------------|------:|-----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `src/codegen/src/escape_analysis.rs`                 |     1 | collapsible_if_let    | `analyze_escapes` `Store` arm — collapsed `if let IRValue::Register(vreg) = value { if allocs.contains(vreg) { … } }` into a single match arm `IRInstr::Store { value: IRValue::Register(vreg), .. } if allocs.contains(vreg) => { … }`.                                                                                                       |
+| `src/codegen/src/loop_unroll.rs`                     |     4 | collapsible_if_let    | `try_unroll_and_jam` (2 sites — outer-tainted store check & Cmp-lhs rewrite) collapsed `if let Store { addr, .. } if let Register(r) = addr` and `if let Cmp { lhs, .. } if let Register(r) = lhs`; `try_unroll_block` Cmp-search collapsed a 4-deep `if let` chain into `if let Cmp { dst: Register(d), lhs: Register(l), .. }`; `renumbered_substitute` Cmp arm moved the `Register(r)` sub-pattern into the match arm. |
+| `src/codegen/src/regalloc.rs`                        |     4 | collapsible_if_let    | `compute_vreg_loop_depths` — `Branch { cond: Register(vreg), .. }` and `Switch { discr: Register(vreg), .. }` arms (collapsed one `if let` each). `LivenessAnalysis::run` — same two arms but with an additional `if !block_def[idx].contains(vreg)` guard, collapsed into a `match` arm with a `if`-guard (`Branch { cond: Register(vreg), .. } if !block_def[idx].contains(vreg) => …`). |
+| `src/codegen/src/vectorize.rs`                       |     1 | collapsible_if_let    | `renumbered_substitute` `Cmp` arm — collapsed `IRInstr::Cmp { dst, .. } => { if let Register(r) = dst { *r = fresh; } }` into `IRInstr::Cmp { dst: IRValue::Register(r), .. } => { *r = fresh; }`.                                                                                                                                              |
+| `src/pipeline.rs`                                    |     4 | collapsible_if_let    | `collect_global_constants` — `Item::Stmt(stmt) => if let Stmt::Let(…) if let Some(val) = …` collapsed to `Item::Stmt(Stmt::Let(let_stmt)) => if let Some(val) = …`. `bridge_stmt_to_scg` — 3 sites: `allocate()` size-arg extraction, let-stmt Allocate size, and assign-stmt Allocate size — each collapsed a nested `if let Lit { value, .. } if let Lit::Int(n) = value` into a single sub-binder `Lit { value: Lit::Int(n), .. }`. |
+| `src/codegen/src/arm32/mod.rs`                       |     5 | matches! + collapsible_match | `emit` — 4 helper bindings `let is_64bit = match ty.as_ref() { Some(I64) | Some(U64) => true, _ => false };` (SDiv, SRem, Select, CtEq) → `let is_64bit = matches!(ty.as_ref(), Some(IRType::I64) | Some(IRType::U64));`. Plus 1 `collapsible_match` site: the `Cast { kind, .. } if matches!(kind, IntToFloat | …)` arm was rewritten to inline the `kind:` sub-pattern (`Cast { kind: CastKind::IntToFloat | …, .. } => …`), eliminating the `matches!` guard entirely. |
+| `src/codegen/src/riscv32.rs`                         |     2 | matches!              | `emit` cast helpers `src_is_32bit` and `dst_is_32bit` — `match from_ty { Some(I8) | Some(I16) | … => true, _ => false }` → `matches!(from_ty, Some(IRType::I8) | Some(IRType::I16) | …)`.                                                                                                                                                       |
+| `src/codegen/src/riscv64.rs`                         |     2 | matches!              | `emit` cast helpers `src_is_32bit` and `dst_is_32bit` — same pattern as riscv32.                                                                                                                                                                                                                                                              |
+| `src/codegen/src/alpha.rs`                           |     1 | redundant_locals      | `emit` — removed `let mut syscall_stubs = syscall_stubs;` (no-op rebind that added `mut` to the just-bound value); the subsequent `syscall_stubs.push(...)` mutates the original binding directly.                                                                                                                                              |
+| `src/codegen/src/x86_32/stack_slot_isel.rs`          |     2 | redundant_binding     | `allocate_registers` — removed `let imm = imm;` inside `CastKind::ZExt` and `CastKind::SExt` arms (the inner rebind was a no-op: the outer `if let IRValue::Immediate(imm) = *src` already bound `imm`).                                                                                                                                       |
+| `src/codegen/src/x86_64/stack_slot_isel.rs`          |     2 | redundant_binding     | `allocate_registers` — same two `let imm = imm;` removals in `CastKind::ZExt` / `CastKind::SExt` arms as in x86_32.                                                                                                                                                                                                                            |
+
+**Fix strategy (no `#[allow]`, no shortcuts):**
+
+1. For each `collapsible_if_let` site, applied clippy's exact suggestion:
+   moved the inner `if let`'s binding pattern into the outer arm as a
+   sub-binder. Where the inner `if let` was the *only* statement in the
+   outer arm, the entire outer arm became a single sub-binder pattern
+   (e.g. `IRInstr::Cmp { dst: IRValue::Register(r), .. } => { *r = fresh; }`).
+   Where the inner `if let` was followed by an `if cond` predicate, the
+   predicate became a `match`-arm `if`-guard (e.g.
+   `IRInstr::Store { value: IRValue::Register(vreg), .. } if allocs.contains(vreg) => …`).
+2. For each `match_like_matches_macro` site, replaced the `match … { … => true, _ => false }`
+   with `matches!(scrutinee, Pat1 | Pat2)`, preserving the original
+   parenthesisation / line-break style of the pattern list.
+3. For each `redundant_binding` / `redundant_locals` site, simply deleted
+   the no-op `let x = x;` line; the subsequent uses of `x` resolve to the
+   outer binding unchanged.
+4. Where the deletion of a `let x = x;` left an `if let` body starting
+   with another `if` (the original purpose of the rebind was apparently
+   to narrow mutability or shadow a binding — but in these specific sites
+   it was a pure no-op), applied the same `collapsible_if_let` sub-binder
+   transform to avoid introducing a *new* `collapsible_if` warning.
+
+**Diff stat:** 11 files changed, 85 insertions(+), 121 deletions(-)
+(net −36 lines, because the `matches!` macro and sub-binder patterns
+are more compact than the original `match … { … => true, _ => false }`
+and nested `if let` forms).
+
+**Clippy verification:**
+- Before: `cargo clippy --workspace 2>&1 | grep -E "if let can be collapsed|matches!|redundant redefinition" | wc -l` → `26`.
+- After:  `cargo clippy --workspace 2>&1 | grep -E "if let can be collapsed|matches!|redundant redefinition" | wc -l` → `0`.
+
+No new warnings introduced. The 2 remaining `clippy::collapsible_if`
+warnings (in `src/tests/src/property_tests.rs` lines 1157 & 1177) are
+about nested *plain* `if` blocks (not `if let`), so they are out of
+scope for this task and were left untouched.
+
+**Build & test:**
+- `cargo check --workspace`            → finished, 0 errors (only the
+  pre-existing `redundant_semicolons` warning in `src/main.rs:782` and
+  pre-existing missing-docs / dead-code / MSRV warnings in other files).
+- `cargo test -p vuma-codegen --lib emit`  → 104 passed / 0 failed / 0
+  ignored (0.01s).
+
+**Commit:** `dbe8ba6940e1d537e351d94986748df37101c6ca`
+  (`wave(50): fix collapsible-if-let + matches! + redundant-binding clippy warnings`)
+  — pushed to `origin/main` (`0a4aed29..dbe8ba69`).
+
