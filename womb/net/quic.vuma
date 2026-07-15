@@ -38,6 +38,14 @@
 //   drbg_reseed(state, entropy, entropy_len)                        — drbg.vuma
 //   drbg_generate(state, out, out_len) -> u32                       — drbg.vuma
 //
+// UDP transport syscalls are invoked directly via the vuma-native
+// `syscall(nr, args...) -> i64` intrinsic against asm-generic syscall
+// numbers:
+//   socket(domain, sock_type, protocol)                                -> syscall(198, ...)
+//   sendto(sockfd, buf, len, flags, dest_addr, addrlen)                -> syscall(206, ...)
+//   recvfrom(sockfd, buf, len, flags, src_addr, addrlen)               -> syscall(207, ...)
+//   close(fd)                                                          -> syscall(57, fd)   (unused in body)
+//
 // Memory is managed with allocate() / free(); byte-level loads / stores use
 // the *(ptr + offset) primitive. Multi-byte integers are assembled byte-by-byte
 // in big-endian (network) order via the quic_store_u* / quic_load_u* helpers.
@@ -51,11 +59,6 @@
 // `if status != 0 { return <error>; } return <ok>;` at function tail.
 
 extern "C" {
-    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
-    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
-    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
-    fn close(fd: i64) -> i64;
-
     fn sha256_oneshot(data: Address, len: u32, out: Address);
     fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
     fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address);
@@ -1692,7 +1695,7 @@ fn quic_conn_setup_initial_server(conn: Address, dcid: Address, dcid_len: u32) {
 
 // Create a UDP socket and store its fd in conn. Returns the fd, or -1.
 fn quic_conn_open_socket(conn: Address) -> i64 {
-    let fd: i64 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    let fd: i64 = syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     let result: i64 = -1;
     if fd >= 0 {
         let fdu: u32 = fd & 4294967295;
@@ -1766,7 +1769,7 @@ fn quic_conn_send(conn: Address, data: Address, len: u32) -> i64 {
     if status == 0 {
         let fd_i: i64 = quic_load_u32(conn + OFF_CONN_FD);
         let len_i: i64 = enc_len;
-        sent = sendto(fd_i, enc, len_i, 0, conn + OFF_CONN_PEER_ADDR, 16);
+        sent = syscall(206, fd_i, enc, len_i, 0, conn + OFF_CONN_PEER_ADDR, 16);
         if sent < 0 { status = 3; }
     }
 
@@ -1794,7 +1797,7 @@ fn quic_conn_recv(conn: Address, buf: Address, max_len: u32) -> i64 {
     *(addrlen_ptr + 2) = 0; *(addrlen_ptr + 3) = 0;
 
     let fd_i: i64 = quic_load_u32(conn + OFF_CONN_FD);
-    let n: i64 = recvfrom(fd_i, enc, 2048, 0, src_addr, addrlen_ptr);
+    let n: i64 = syscall(207, fd_i, enc, 2048, 0, src_addr, addrlen_ptr);
     free(src_addr);
     free(addrlen_ptr);
     if n < 0 { status = 1; }

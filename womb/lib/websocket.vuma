@@ -52,7 +52,9 @@
 //   base64_encode(in, in_len, out) -> u32
 //   drbg_init(state, entropy, entropy_len, nonce, nonce_len)
 //   drbg_generate(state, out, out_len) -> u32
-//   write(fd, buf, count) -> i64   (libc)
+// The write() fd syscall is invoked directly via the vuma-native
+// `syscall(nr, args...) -> i64` intrinsic against asm-generic syscall
+// numbers: write(fd, buf, count) -> syscall(64, fd, buf, count).
 //
 // Memory is managed with allocate()/free(); byte-level loads/stores use
 // the *(ptr + offset) primitive. No function uses early returns — loop
@@ -62,7 +64,6 @@
 // cleanup), followed by the final `return <value>;`.
 
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn sha1_oneshot(data: Address, len: u32, out: Address);
     fn base64_encode(input: Address, in_len: u32, output: Address) -> u32;
     fn drbg_init(state: Address, entropy: Address, entropy_len: u32,
@@ -473,7 +474,7 @@ fn ws_send_frame(sockfd: i64, opcode: u32, payload: Address, len: u32, mask: u32
     frame = allocate(len + 14);
     flen: u32 = ws_build_frame(opcode, 1, mask, payload, len, frame);
     ret: i64 = -1;
-    if flen > 0 { ret = write(sockfd, frame, flen); }
+    if flen > 0 { ret = syscall(64, sockfd, frame, flen as i64); }
     free(frame);
     return ret;
 }
