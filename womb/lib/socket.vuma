@@ -2,21 +2,7 @@
 // No main() — importable library module.
 // Provides: full TCP/UDP socket API + inet_pton/ntop + htons/ntohs
 // Requires: import "../lib/string.vuma"::{htons, ntohs, htonl, ntohl};
-
-extern "C" {
-    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
-    fn connect(sockfd: i64, addr: Address, addrlen: i64) -> i64;
-    fn bind(sockfd: i64, addr: Address, addrlen: i64) -> i64;
-    fn listen(sockfd: i64, backlog: i64) -> i64;
-    fn accept(sockfd: i64, addr: Address, addrlen: Address) -> i64;
-    fn send(sockfd: i64, buf: Address, len: i64, flags: i64) -> i64;
-    fn recv(sockfd: i64, buf: Address, len: i64, flags: i64) -> i64;
-    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
-    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
-    fn shutdown(sockfd: i64, how: i64) -> i64;
-    fn setsockopt(sockfd: i64, level: i64, optname: i64, optval: Address, optlen: i64) -> i64;
-    fn close(fd: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for all socket syscalls (asm-generic nrs).
 
 // Constants
 const AF_INET: i64 = 2;
@@ -66,7 +52,7 @@ fn make_sockaddr_in(addr: Address, port: u32, ip: u32) {
 // ===========================================================================
 
 fn tcp_socket() -> i64 {
-    return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    return syscall(198, AF_INET, SOCK_STREAM, IPPROTO_TCP);
 }
 
 fn tcp_connect(ip: u32, port: u32) -> i64 {
@@ -74,10 +60,10 @@ fn tcp_connect(ip: u32, port: u32) -> i64 {
     if sockfd < 0 { return -1; }
     addr = allocate(16);
     make_sockaddr_in(addr, port, ip);
-    ret: i64 = connect(sockfd, addr, 16);
+    ret: i64 = syscall(203, sockfd, addr, 16);
     free(addr);
     if ret < 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return -1;
     }
     return sockfd;
@@ -99,21 +85,21 @@ fn tcp_listen(port: u32) -> i64 {
     // SO_REUSEADDR
     optval = allocate(4);
     *(optval + 0) = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
+    syscall(208, sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
     free(optval);
 
     addr = allocate(16);
     make_sockaddr_in(addr, port, 0);
-    ret: i64 = bind(sockfd, addr, 16);
+    ret: i64 = syscall(200, sockfd, addr, 16);
     free(addr);
     if ret < 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return -1;
     }
 
-    ret = listen(sockfd, 128);
+    ret = syscall(201, sockfd, 128);
     if ret < 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return -1;
     }
     return sockfd;
@@ -123,7 +109,7 @@ fn tcp_accept(listen_fd: i64) -> i64 {
     client_addr = allocate(16);
     addrlen = allocate(4);
     *(addrlen + 0) = 16;
-    client_fd: i64 = accept(listen_fd, client_addr, addrlen);
+    client_fd: i64 = syscall(202, listen_fd, client_addr, addrlen);
     free(client_addr);
     free(addrlen);
     return client_fd;
@@ -133,7 +119,7 @@ fn tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
     client_addr = allocate(16);
     addrlen = allocate(4);
     *(addrlen + 0) = 16;
-    client_fd: i64 = accept(listen_fd, client_addr, addrlen);
+    client_fd: i64 = syscall(202, listen_fd, client_addr, addrlen);
     if client_fd >= 0 {
         // Extract IP (bytes 4-7, network byte order)
         b0: u32 = *(client_addr + 4);
@@ -157,17 +143,17 @@ fn tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
 // ===========================================================================
 
 fn tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
-    return send(sockfd, data, len, MSG_NOSIGNAL);
+    return syscall(206, sockfd, data, len as i64, MSG_NOSIGNAL, 0, 0);
 }
 
 fn tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
-    return recv(sockfd, buf, len, 0);
+    return syscall(207, sockfd, buf, len as i64, 0, 0, 0);
 }
 
 fn tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
     sent: u32 = 0;
     while sent < len {
-        n: i64 = send(sockfd, data + sent, len - sent, MSG_NOSIGNAL);
+        n: i64 = syscall(206, sockfd, data + sent, (len - sent) as i64, MSG_NOSIGNAL, 0, 0);
         if n <= 0 { return -1; }
         sent = sent + n;
     }
@@ -177,7 +163,7 @@ fn tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
 fn tcp_recv_all(sockfd: i64, buf: Address, len: u32) -> i64 {
     received: u32 = 0;
     while received < len {
-        n: i64 = recv(sockfd, buf + received, len - received, 0);
+        n: i64 = syscall(207, sockfd, buf + received, (len - received) as i64, 0, 0, 0);
         if n <= 0 { return received; }
         received = received + n;
     }
@@ -191,8 +177,8 @@ fn tcp_send_str(sockfd: i64, s: Address) -> i64 {
 }
 
 fn tcp_close(sockfd: i64) {
-    shutdown(sockfd, SHUT_RDWR);
-    close(sockfd);
+    syscall(210, sockfd, SHUT_RDWR);
+    syscall(57, sockfd);
 }
 
 // ===========================================================================
@@ -202,7 +188,7 @@ fn tcp_close(sockfd: i64) {
 fn set_reuseaddr(sockfd: i64) -> i64 {
     optval = allocate(4);
     *(optval + 0) = 1;
-    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
+    ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
     free(optval);
     return ret;
 }
@@ -210,7 +196,7 @@ fn set_reuseaddr(sockfd: i64) -> i64 {
 fn set_keepalive(sockfd: i64) -> i64 {
     optval = allocate(4);
     *(optval + 0) = 1;
-    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, optval, 4);
+    ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_KEEPALIVE, optval, 4);
     free(optval);
     return ret;
 }
@@ -221,7 +207,7 @@ fn set_recv_bufsize(sockfd: i64, size: u32) -> i64 {
     *(optval + 1) = (size >> 8) & 255;
     *(optval + 2) = (size >> 16) & 255;
     *(optval + 3) = (size >> 24) & 255;
-    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, optval, 4);
+    ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_RCVBUF, optval, 4);
     free(optval);
     return ret;
 }
@@ -232,7 +218,7 @@ fn set_send_bufsize(sockfd: i64, size: u32) -> i64 {
     *(optval + 1) = (size >> 8) & 255;
     *(optval + 2) = (size >> 16) & 255;
     *(optval + 3) = (size >> 24) & 255;
-    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, optval, 4);
+    ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_SNDBUF, optval, 4);
     free(optval);
     return ret;
 }
@@ -242,7 +228,7 @@ fn set_send_bufsize(sockfd: i64, size: u32) -> i64 {
 // ===========================================================================
 
 fn udp_socket() -> i64 {
-    return socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    return syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 }
 
 fn udp_bind(port: u32) -> i64 {
@@ -251,10 +237,10 @@ fn udp_bind(port: u32) -> i64 {
     set_reuseaddr(sockfd);
     addr = allocate(16);
     make_sockaddr_in(addr, port, 0);
-    ret: i64 = bind(sockfd, addr, 16);
+    ret: i64 = syscall(200, sockfd, addr, 16);
     free(addr);
     if ret < 0 {
-        close(sockfd);
+        syscall(57, sockfd);
         return -1;
     }
     return sockfd;
@@ -263,7 +249,7 @@ fn udp_bind(port: u32) -> i64 {
 fn udp_sendto(sockfd: i64, data: Address, len: u32, ip: u32, port: u32) -> i64 {
     dest = allocate(16);
     make_sockaddr_in(dest, port, ip);
-    ret: i64 = sendto(sockfd, data, len, 0, dest, 16);
+    ret: i64 = syscall(206, sockfd, data, len as i64, 0, dest, 16);
     free(dest);
     return ret;
 }
@@ -272,7 +258,7 @@ fn udp_recvfrom(sockfd: i64, buf: Address, len: u32, src_ip: Address, src_port: 
     src_addr = allocate(16);
     addrlen = allocate(4);
     *(addrlen + 0) = 16;
-    n: i64 = recvfrom(sockfd, buf, len, 0, src_addr, addrlen);
+    n: i64 = syscall(207, sockfd, buf, len as i64, 0, src_addr, addrlen);
 
     if n >= 0 {
         // Extract IP
