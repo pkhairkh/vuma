@@ -52,9 +52,9 @@ use std::collections::HashMap;
 // Populated by compile_dump/compile_to_binary_direct before allocation,
 // used by allocate_registers to determine whether to store R1 (high word)
 // for non-extern call returns.
-// Uses RwLock instead of thread_local! because compile_dump uses rayon
-// par_iter for parallel allocation — thread_local values set on the main
-// thread are NOT visible in rayon worker threads.
+// Uses RwLock instead of thread_local! because compile_dump uses
+// std::thread::scope for parallel allocation — thread_local values set on
+// the main thread are NOT visible in scoped worker threads.
 static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
 
 fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {

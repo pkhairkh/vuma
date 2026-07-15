@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 // Wave 9: parallel register allocation across functions.
-use rayon::prelude::*;
+// Replaced rayon with std::thread::scope (no external dep).
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
@@ -84,6 +84,49 @@ use vuma_scg::{
     PipelineResult as ScgPipelineResult, SCG, SCGPass, StrengthReduction, TailCallOptDetection,
     ComputationKind,
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Parallel map helper (std::thread::scope based — replaces rayon)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Map a slice to a `Vec` in parallel using `std::thread::scope` with chunked
+/// work distribution across the available CPU cores.
+///
+/// Preserves input order in the output (chunks are processed in order and the
+/// per-chunk results are concatenated). Falls back to a sequential `iter().map()`
+/// when the slice is empty or when only one thread is available, avoiding the
+/// scope/thread-spawn overhead in those cases.
+fn par_map<T, U, F>(items: &[T], f: F) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+    F: Fn(&T) -> U + Sync,
+{
+    let n = items.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let num_threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+        .min(n);
+    if num_threads == 1 {
+        return items.iter().map(&f).collect();
+    }
+    let chunk_size = (n + num_threads - 1) / num_threads;
+    std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for chunk in items.chunks(chunk_size) {
+            let f_ref = &f;
+            handles.push(s.spawn(move || chunk.iter().map(f_ref).collect::<Vec<U>>()));
+        }
+        let mut out = Vec::with_capacity(n);
+        for h in handles {
+            out.extend(h.join().expect("worker thread panicked"));
+        }
+        out
+    })
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CompileConfig
@@ -5005,21 +5048,18 @@ pub fn compile_with_path(
 
     // ── Stage 9: Register Allocation (parallel across functions) ──────
     // Wave 9: Each function's register allocation is independent, so we
-    // parallelize across CPU cores using rayon. This gives a speedup
-    // proportional to core count for programs with multiple functions.
+    // parallelize across CPU cores using std::thread::scope. This gives a
+    // speedup proportional to core count for programs with multiple functions.
     let t = Instant::now();
     let allocator = LinearScanAllocator::new();
     // Parallel: map each function to its allocation result, then collect.
     // Errors are collected alongside successes so we can report all of them.
-    let par_results: Vec<(String, Result<AllocationResult, String>)> = ir_program
-        .functions
-        .par_iter()
-        .map(|func| {
+    let par_results: Vec<(String, Result<AllocationResult, String>)> =
+        par_map(&ir_program.functions, |func| {
             let r = allocator.allocate_function(func);
             let r = r.map_err(|e| format!("{}: {}", func.name, e));
             (func.name.clone(), r)
-        })
-        .collect();
+        });
     let mut regalloc_results = Vec::new();
     for (_name, result) in par_results {
         match result {
@@ -6089,18 +6129,15 @@ pub fn compile_with_recovery(
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 9: Register Allocation (parallel across functions) ──────
-    // Wave 9: parallelize per-function register allocation with rayon.
+    // Wave 9: parallelize per-function register allocation with std::thread::scope.
     let t = Instant::now();
     let allocator = LinearScanAllocator::new();
-    let par_results: Vec<(String, Result<AllocationResult, String>)> = ir_program
-        .functions
-        .par_iter()
-        .map(|func| {
+    let par_results: Vec<(String, Result<AllocationResult, String>)> =
+        par_map(&ir_program.functions, |func| {
             let r = allocator.allocate_function(func);
             let r = r.map_err(|e| format!("{}: {}", func.name, e));
             (func.name.clone(), r)
-        })
-        .collect();
+        });
     let mut regalloc_results = Vec::new();
     let mut regalloc_failed = false;
     for (_name, result) in par_results {

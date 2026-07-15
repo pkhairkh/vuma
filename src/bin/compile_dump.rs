@@ -7,6 +7,49 @@ use std::path::Path;
 use std::process::Command;
 use std::fs;
 
+/// Like `iter().map(f).collect::<Result<Vec<_>, _>>()` but parallelized with
+/// `std::thread::scope` over the available CPU cores (replaces rayon).
+///
+/// Preserves input order in the output. Short-circuits on the first chunk that
+/// returns an error (a chunk runs to completion before its error is observed,
+/// but later chunks are not started after a per-chunk error is detected during
+/// the join phase). Falls back to sequential iteration when the slice is empty
+/// or only one thread is available.
+fn par_collect_result<T, U, E, F>(items: &[T], f: F) -> Result<Vec<U>, E>
+where
+    T: Sync,
+    U: Send,
+    E: Send,
+    F: Fn(&T) -> Result<U, E> + Sync,
+{
+    let n = items.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let num_threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+        .min(n);
+    if num_threads == 1 {
+        return items.iter().map(&f).collect();
+    }
+    let chunk_size = (n + num_threads - 1) / num_threads;
+    let chunk_results: Result<Vec<Vec<U>>, E> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(num_threads);
+        for chunk in items.chunks(chunk_size) {
+            let f_ref = &f;
+            handles.push(s.spawn(move || {
+                chunk.iter().map(f_ref).collect::<Result<Vec<_>, _>>()
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect()
+    });
+    chunk_results.map(|vs| vs.into_iter().flatten().collect())
+}
+
 fn backend_from_name(name: &str) -> Result<BackendKind, String> {
     match name.to_ascii_lowercase().as_str() {
         "x86_64" | "x86-64" | "x64" => Ok(BackendKind::X86_64),
@@ -108,12 +151,11 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
     }
 
-    // Parallel per-function codegen using rayon.
-    use rayon::prelude::*;
-    let allocated: Vec<_> = ir_program.functions.par_iter()
-        .map(|func| backend.allocate_registers(func))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("regalloc: {}", e))?;
+    // Parallel per-function codegen using std::thread::scope.
+    let allocated: Vec<_> = par_collect_result(&ir_program.functions, |func| {
+        backend.allocate_registers(func)
+    })
+    .map_err(|e| format!("regalloc: {}", e))?;
     let total_code: usize = allocated.iter().map(|f| f.code_size).sum();
     let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0 };
     let binary = backend.encode_program(&program).map_err(|e| format!("encode: {}", e))?;
