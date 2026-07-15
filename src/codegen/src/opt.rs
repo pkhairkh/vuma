@@ -1024,7 +1024,13 @@ pub fn inline_with_threshold(
                     // aggressive inlining, and the per-instruction cost model
                     // in `function_inline_cost` was dead code. Use the cost
                     // model + threshold now.
-                    if callee.blocks.len() == 1
+                    //
+                    // (Wave 51): threshold == 0 disables inlining entirely.
+                    // This is needed because function_inline_cost can return 0
+                    // for functions with all-constant args (saturating_sub
+                    // brings the cost to 0), so `cost <= 0` would still inline.
+                    if threshold > 0
+                        && callee.blocks.len() == 1
                         && function_inline_cost(callee, args) <= threshold
                     {
                         call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
@@ -1094,6 +1100,43 @@ pub fn inline_with_threshold(
                 let mut new_block = IRBlock::new(&new_label);
 
                 for instr in &cblock.instructions {
+                    // (Wave 51) Strip instruction-level control-flow from
+                    // the cloned callee body. The IR builder emits BOTH an
+                    // `IRInstr::Ret { values }` *and* an `IRTerminator::Return(values)`
+                    // for every return (see `scg_to_ir.rs:1048-1052`). The
+                    // inliner handles the terminator below (replacing
+                    // `Return(vals)` with an `Add` that copies the return
+                    // value into `result_vreg` followed by a `Jump` to the
+                    // continuation block).
+                    //
+                    // If we left the cloned `IRInstr::Ret` in the body,
+                    // backends that lower it to a real machine return would
+                    // emit a `RET` instruction in the middle of the caller.
+                    // On x86_64 (`stack_slot_isel.rs:1427`) the lowered
+                    // `IRInstr::Ret` runs the entire epilogue (pop callee-
+                    // saved, restore RSP/RBP, `ret`) — so the caller would
+                    // return *immediately* at the inlined call site, before
+                    // the inliner's `Add { dst = rv + 0 }` and the
+                    // continuation block ever execute. The visible symptom
+                    // is that the emitted `vumac` exits with whatever value
+                    // happened to be in RAX at that point (in the bootstrap
+                    // this is `3` — the exit code of an early cleanup path
+                    // taken after the first inlined return) instead of the
+                    // real program exit code.
+                    //
+                    // The same logic applies to `IRInstr::Branch` and
+                    // `IRInstr::CondBranch`: on every backend they lower to
+                    // real `JMP` / `Jcc` instructions, which would jump out
+                    // of the inlined body. Single-block callees never
+                    // contain them (they'd create additional blocks), but
+                    // strip them defensively in case future IR-construction
+                    // passes leave any around.
+                    if matches!(
+                        instr,
+                        IRInstr::Ret { .. } | IRInstr::Branch { .. } | IRInstr::CondBranch { .. }
+                    ) {
+                        continue;
+                    }
                     let mut new_instr = substitute_instr(instr, &vreg_map);
                     // Fix Phi incoming labels: substitute_instr doesn't know
                     // about block renaming, so we fix up the labels here.
@@ -1585,7 +1628,9 @@ fn run_optimizations_inner(
         // instrs on critical-path ties) so it doesn't push the regalloc
         // toward spilling.
         let mut f = f;
-        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        if std::env::var("VUMA_NO_SCHED").is_err() {
+            crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        }
         program.functions[i] = f;
     }
 
@@ -3529,6 +3574,103 @@ mod working_tests {
             .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "eight_adds"))
             .count();
         assert_eq!(calls_hi, 0, "threshold=40 should inline eight_adds");
+    }
+
+    // ---- Wave 51 Inliner Regression Tests ----
+
+    /// Regression for the O2 bootstrap miscompilation: the IR builder emits
+    /// BOTH an `IRInstr::Ret { values }` *and* an `IRTerminator::Return(values)`
+    /// for every return (`scg_to_ir.rs:1048-1052`). The inliner used to
+    /// clone the `IRInstr::Ret` verbatim into the inlined body, which on
+    /// x86_64 (and most other backends) lowers to a real `RET` instruction
+    /// (full epilogue + `ret`) — causing the caller to return early at the
+    /// inlined call site instead of falling through to the continuation
+    /// block. The fix is to strip instruction-level control-flow
+    /// (`IRInstr::Ret` / `Branch` / `CondBranch`) from the cloned body —
+    /// the terminator's `Return` is converted to an `Add` + `Jump` to the
+    /// continuation block, which carries the return value.
+    #[test]
+    fn wave51_inline_strips_instruction_level_ret() {
+        // Callee mirrors what the IR builder actually emits:
+        //   fn add_one(x) { v1 = x + 1; ret v1 }   (both Ret instr and Return term)
+        let mut callee = IRFunction::new("add_one");
+        callee.params = vec![IRValue::Register(0)];
+        callee.param_types = vec![IRType::I64];
+        callee.blocks[0].instructions = vec![
+            IRInstr::Add {
+                dst: IRValue::Register(1),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(1),
+                ty: None,
+            },
+            // The IR builder emits this instruction-level Ret alongside
+            // the terminator-level Return.
+            IRInstr::Ret { values: vec![IRValue::Register(1)] },
+        ];
+        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+
+        // Caller: v0 = call add_one(42); v2 = v0 + 100; ret v2
+        // The `v2 = v0 + 100` is the canary: if the cloned `IRInstr::Ret`
+        // is left in the body, the caller would return early at the
+        // inlined call site and `v2 = v0 + 100` would never execute
+        // (in practice the backend would emit a real RET in the middle of
+        // the function). After the fix, the inlined body has no Ret and
+        // the Add + Jump + continuation block run normally.
+        let mut caller = IRFunction::new("main");
+        caller.blocks[0].instructions = vec![
+            IRInstr::Call {
+                dst: Some(IRValue::Register(0)),
+                func: "add_one".to_string(),
+                args: vec![IRValue::Immediate(42)],
+                is_extern: false,
+            },
+            IRInstr::Add {
+                dst: IRValue::Register(2),
+                lhs: IRValue::Register(0),
+                rhs: IRValue::Immediate(100),
+                ty: None,
+            },
+            IRInstr::Ret { values: vec![IRValue::Register(2)] },
+        ];
+        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let func_map: HashMap<String, &IRFunction> =
+            [("add_one".to_string(), &callee)].into_iter().collect();
+
+        let result = inline_with_threshold(caller, &func_map, DEFAULT_INLINE_THRESHOLD);
+
+        // No IRInstr::Ret should remain in the *inlined body* of `add_one`.
+        // The caller's own trailing `IRInstr::Ret` (for `v2`) is still
+        // present in the continuation block.
+        let inlined_rets = result
+            .blocks
+            .iter()
+            // The inlined body block is the one labelled `inl0_entry_entry`.
+            .filter(|b| b.label == "inl0_entry_entry")
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i, IRInstr::Ret { .. }))
+            .count();
+        assert_eq!(
+            inlined_rets, 0,
+            "inlined body must not contain a cloned IRInstr::Ret (would emit a real RET)"
+        );
+
+        // The continuation block must contain the canary `v2 = v0 + 100`
+        // and the caller's own trailing `Ret` — proving the inlined body
+        // falls through to the continuation instead of returning early.
+        let cont = result
+            .blocks
+            .iter()
+            .find(|b| b.label == "inl0_entry_cont")
+            .expect("continuation block must exist");
+        let has_canary = cont
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IRInstr::Add { dst, lhs, rhs, .. }
+                if matches!(dst, IRValue::Register(2))
+                && matches!(lhs, IRValue::Register(0))
+                && matches!(rhs, IRValue::Immediate(100))));
+        assert!(has_canary, "continuation block must contain the canary Add");
     }
 
     // ---- Wave 26 LICM Tests ----
