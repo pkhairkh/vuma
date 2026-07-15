@@ -39,10 +39,9 @@ are hard errors. `--no-memory-safety` escape hatch documented.
 removed. Per-backend `emit_function_regalloc` methods exist on all backends.
 `TargetAgnosticRegAlloc` wired. Coalescing and pressure-aware spill weight
 implemented. Register allocation metadata flows end-to-end.
-**Note:** The regalloc emit path is metadata-only — `emit_function_regalloc`
-delegates to `emit_function_greedy` for actual code generation. The
-`AllocationResult` does not influence emitted bytes. Real spill-code
-emission is deferred.
+**Wave 53:** `emit_function_regalloc` now consumes the `AllocationResult`
+for real — callee-saved prologue/epilogue, per-instruction spill/reload,
+`vreg_to_preg` mapping, and eliminated-copy skipping are all active.
 
 ### Waves 25–28: Re-enabled optimizers
 Inliner (with cost model + threshold config), LICM (with preheader emission),
@@ -81,9 +80,10 @@ root-crate `JsonValue` enum with recursive-descent parser.
 All 10 core crates are serde-free. `log` crate removed — `vuma_log!` macro
 is the sole logging mechanism.
 
-### Wave 45: libc removal from cor + std
-`cor` and the former `vuma-std` used raw `extern "C"` syscalls instead of
-`libc::`. (Note: `vuma-std` has since been deleted entirely — see below.)
+### Wave 45: libc removal
+`cor` used raw `extern "C"` syscalls instead of `libc::`. `vuma-std`
+(formerly at `src/std/`) was also cleaned up before being deleted entirely
+in Wave 46.
 
 ### Wave 46: vuma-std deleted
 `vuma-std` (24,819 LOC, 19 modules) has been **deleted entirely**. It was
@@ -226,6 +226,11 @@ vuma/
 - `cargo check --workspace`: 0 errors
 - `cargo clippy --workspace`: 0 warnings
 - `cargo test --workspace --no-run`: compiles cleanly
-- `cargo test -p vuma-tests --lib wave48`: 9 passed (bootstrap self-host)
+- `cargo test -p vuma-tests --lib wave48`: 9 passed (bootstrap self-host at O0)
 - `cargo test -p vuma-tests --lib wave50`: 9 passed (final hardening)
-- `cargo tree --depth 1`: zero external dependencies
+- `cargo test -p vuma-codegen --lib emit`: 104 passed (regalloc + emit)
+- `cargo test -p vuma-codegen --lib scheduler`: 6 passed
+- `cargo test -p vuma-proof --lib`: 132 passed (including vacuous-truth regression)
+- `cargo test -p vuma-package --lib`: 24 passed (including toml_lite)
+- `cargo tree --depth 1 -e normal`: zero external dependencies (10 internal crates only)
+- Workspace members: `vuma-scg`, `vuma-ive`, `vuma-bd`, `vuma-core`, `vuma-codegen`, `vuma-parser`, `vuma-cor`, `vuma-proof`, `vuma-package`, `vuma-tests`
