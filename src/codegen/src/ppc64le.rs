@@ -257,8 +257,8 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
         swap_u64(elf, q); q += 8; // p_paddr
         swap_u64(elf, q); q += 8; // p_filesz
         swap_u64(elf, q); q += 8; // p_memsz
-        swap_u64(elf, q); q += 8; // p_align
-        // q == base + 56
+        swap_u64(elf, q); // p_align (final field — no increment needed)
+        // q == base + 48 (p_align is at offset 48)
     }
 
     // ── 4. Section headers (Elf64_Shdr, 64 bytes each) ────────────────
@@ -293,8 +293,8 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
         swap_u32(elf, q); q += 4; // sh_link
         swap_u32(elf, q); q += 4; // sh_info
         swap_u64(elf, q); q += 8; // sh_addralign
-        swap_u64(elf, q); q += 8; // sh_entsize
-        // q == base + 64
+        swap_u64(elf, q); // sh_entsize (final field — no increment needed)
+        // q == base + 56 (sh_entsize is at offset 56)
 
         // Read sh_type / sh_flags / sh_offset / sh_size (now LE) to identify
         // the executable .text section.

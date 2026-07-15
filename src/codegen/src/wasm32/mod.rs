@@ -2170,6 +2170,11 @@ fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmTy
     }
 }
 
+/// Result of lowering an IR function to Wasm bytecode:
+/// `(body, type, call_relocations)` where each relocation is
+/// `(byte_offset, func_name)`.
+type LoweredWasmFunction = (WasmFuncBody, WasmFuncType, Vec<(usize, String)>);
+
 /// Lower an IR function to Wasm bytecode, returning the function body,
 /// type, and a list of call relocations that must be patched during
 /// `encode_program`.
@@ -2179,7 +2184,7 @@ fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmTy
 /// index starts (i.e., one byte past the `0x10` Call opcode).
 fn lower_function(
     func: &IRFunction,
-) -> Result<(WasmFuncBody, WasmFuncType, Vec<(usize, String)>), BackendError> {
+) -> Result<LoweredWasmFunction, BackendError> {
     // Compute result types.
     // In Wasm32, all integer results are i32 since it's a 32-bit target.
     let result_types: Vec<WasmType> = func
