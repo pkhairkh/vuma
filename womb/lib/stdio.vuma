@@ -1,12 +1,7 @@
 // womb/lib/stdio.vuma — Standard I/O (POSIX stdio.h equivalent)
 // No main() — importable library module.
 // Provides: write_str, write_int, write_hex, write_u64, read_line, file ops
-// Uses extern "C" FFI for write/read syscalls.
-
-extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-}
+// Uses the vuma-native syscall() intrinsic for write & read syscalls (asm-generic nrs 64/63).
 
 const STDOUT: i64 = 1;
 const STDERR: i64 = 2;
@@ -19,23 +14,23 @@ const STDIN: i64 = 0;
 fn write_str(s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
-    return write(STDOUT, s, n);
+    return syscall(64, STDOUT, s, n as i64);
 }
 
 fn write_str_fd(fd: i64, s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
-    return write(fd, s, n);
+    return syscall(64, fd, s, n as i64);
 }
 
 fn write_bytes(fd: i64, buf: Address, len: u32) -> i64 {
-    return write(fd, buf, len);
+    return syscall(64, fd, buf, len as i64);
 }
 
 fn write_char(c: u32) -> i64 {
     buf = allocate(1);
     *(buf + 0) = c & 255;
-    ret: i64 = write(STDOUT, buf, 1);
+    ret: i64 = syscall(64, STDOUT, buf, 1);
     free(buf);
     return ret;
 }
@@ -43,7 +38,7 @@ fn write_char(c: u32) -> i64 {
 fn write_newline() -> i64 {
     buf = allocate(1);
     *(buf + 0) = 10;
-    ret: i64 = write(STDOUT, buf, 1);
+    ret: i64 = syscall(64, STDOUT, buf, 1);
     free(buf);
     return ret;
 }
@@ -255,7 +250,7 @@ fn read_line(buf: Address, max_len: u32) -> u32 {
     pos: u32 = 0;
     while pos < max_len - 1 {
         char_buf = allocate(1);
-        n: i64 = read(STDIN, char_buf, 1);
+        n: i64 = syscall(63, STDIN, char_buf, 1);
         if n <= 0 {
             free(char_buf);
             break;
@@ -274,12 +269,12 @@ fn read_line(buf: Address, max_len: u32) -> u32 {
 }
 
 fn read_bytes(buf: Address, max_len: u32) -> i64 {
-    return read(STDIN, buf, max_len);
+    return syscall(63, STDIN, buf, max_len as i64);
 }
 
 fn read_byte() -> u32 {
     char_buf = allocate(1);
-    n: i64 = read(STDIN, char_buf, 1);
+    n: i64 = syscall(63, STDIN, char_buf, 1);
     if n <= 0 {
         free(char_buf);
         return 4294967295;  // EOF
@@ -296,7 +291,7 @@ fn read_byte() -> u32 {
 fn eprint_str(s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
-    return write(STDERR, s, n);
+    return syscall(64, STDERR, s, n as i64);
 }
 
 fn eprint_int(val: i64) -> i64 {
@@ -336,7 +331,7 @@ fn eprintln_str(s: Address) -> i64 {
     eprint_str(s);
     nl = allocate(1);
     *(nl + 0) = 10;
-    ret: i64 = write(STDERR, nl, 1);
+    ret: i64 = syscall(64, STDERR, nl, 1);
     free(nl);
     return ret;
 }
