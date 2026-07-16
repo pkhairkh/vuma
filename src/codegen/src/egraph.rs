@@ -194,7 +194,9 @@ impl EGraph {
         //    references so that parents whose children were merged become
         //    equal under the hashcons key.
         let mut groups: HashMap<ENode, Vec<EClassId>> = HashMap::new();
-        let class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+        // DETERMINISM: sort class IDs (HashMap.keys() is randomized).
+        let mut class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+        class_ids.sort_unstable();
         for cid in &class_ids {
             let canon = self.find(*cid);
             if canon != *cid {
@@ -211,8 +213,14 @@ impl EGraph {
         //    e-classes produced it, merge them. This catches congruences
         //    like (a+b) and (b+a) when a~b, or (x+0)+c and (VReg(x_class))+c
         //    when x~x+0.
+        // DETERMINISM: sort the groups by their canonical-node key so merge
+        // order is stable across runs. HashMap.values() is randomized;
+        // different merge order can produce different canonical
+        // representatives, changing extraction results.
         let mut merged = false;
-        for classes in groups.values() {
+        let mut sorted_groups: Vec<(&ENode, &Vec<EClassId>)> = groups.iter().collect();
+        sorted_groups.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+        for (_key, classes) in sorted_groups {
             let mut iter = classes.iter().copied();
             if let Some(first) = iter.next() {
                 for other in iter {
@@ -336,15 +344,26 @@ impl EGraph {
 
         for _ in 0..budget {
             let mut changed = false;
-            let class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+            // DETERMINISM: sort class IDs so the saturation round visits
+            // e-classes in a stable order (HashMap.keys() is randomized).
+            let mut class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+            class_ids.sort_unstable();
             for class_id in class_ids {
                 let canonical = self.find(class_id);
                 // Collect nodes first to avoid borrow issues: `apply`
                 // takes `&mut self`, so we cannot hold a borrow on
                 // `self.classes` while calling it.
-                let nodes: Vec<ENode> = self.classes.get(&canonical)
+                // DETERMINISM: sort the nodes so rule application order is
+                // stable across runs. HashSet iteration is randomized per
+                // process; without sorting, the same e-graph could apply
+                // rewrites in a different order each run, yielding a
+                // different saturated e-graph and thus a different extracted
+                // IR (the float_math nondeterminism root cause).
+                let mut nodes: Vec<ENode> = self.classes.get(&canonical)
                     .map(|s| s.iter().cloned().collect())
                     .unwrap_or_default();
+                nodes.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+                nodes.dedup();
                 for node in &nodes {
                     for rule in rules {
                         // Wave 31: `apply` now takes `&mut EGraph` (so rules
@@ -461,13 +480,37 @@ impl EGraph {
         let mut best_node: HashMap<EClassId, ENode> = HashMap::new();
         for _ in 0..EXTRACT_MAX_ITERS {
             let mut changed = false;
-            for (cid, nodes) in &self.classes {
+            // DETERMINISM (critical): iterate e-classes and e-nodes in a
+            // SORTED order. `self.classes` is a HashMap and each class's
+            // `nodes` is a HashSet — both have RANDOMIZED iteration order
+            // per process (Rust's RandomState). The extraction picks the
+            // lowest-cost node, breaking ties by "first seen" (strict `<`).
+            // With random iteration, ties resolve differently each run →
+            // different extracted IR → different binaries → flaky
+            // miscompiles (the float_math nondeterminism: same source
+            // produced 5 different binaries in 5 runs, some MM). Sorting
+            // makes tie-breaking deterministic. We sort class IDs, and
+            // within each class we sort the nodes by a stable key.
+            let mut class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+            class_ids.sort_unstable();
+            for cid in &class_ids {
                 let cid_canon = self.find(*cid);
                 if cid_canon != *cid {
                     continue; // skip merged-away classes
                 }
+                let nodes = self.classes.get(cid).unwrap();
+                // Sort nodes for deterministic tie-breaking. ENode derives
+                // Ord if its fields do; if not, we sort by a derived key.
+                // Use a stable sort by (cost, debug-format) so equal-cost
+                // nodes break ties consistently across runs.
+                let mut sorted_nodes: Vec<&ENode> = nodes.iter().collect();
+                sorted_nodes.sort_unstable_by(|a, b| {
+                    let ca = cost_fn(a);
+                    let cb = cost_fn(b);
+                    ca.cmp(&cb).then_with(|| format!("{:?}", a).cmp(&format!("{:?}", b)))
+                });
                 let mut local_best: Option<(usize, ENode)> = None;
-                for node in nodes {
+                for node in sorted_nodes {
                     let node_cost = cost_fn(node);
                     let child_cost: usize = match node {
                         ENode::Lit(_) => 0,
