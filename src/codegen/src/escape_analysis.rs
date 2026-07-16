@@ -472,10 +472,33 @@ pub fn scalar_replace_aggregates(
                         }
                     }
                     IRInstr::Store { value, addr, offset, .. } => {
-                        if let (Some(val_v), Some(addr_v)) =
-                            (value.as_register(), addr.as_register())
-                        {
+                        if let Some(addr_v) = addr.as_register() {
                             if addr_v == alloc_vreg {
+                                // SROA's rename framework can only handle
+                                // register-typed store values (it renames
+                                // the value vreg to the field vreg). An
+                                // Immediate/Address store value cannot be
+                                // renamed — SROA would need to materialize
+                                // the immediate into the field vreg, which
+                                // the current implementation does not do.
+                                // BAIL on any alloc with an immediate store
+                                // to preserve correctness (the alloc keeps
+                                // its memory representation).
+                                //
+                                // Without this bail, SROA would skip the
+                                // immediate store in `accesses`, under-count
+                                // stores_per_offset, and promote the alloc
+                                // while the immediate store remains — the
+                                // promoted field vreg never receives the
+                                // immediate value, loads read undef → SIGSEGV.
+                                // (This was the conc_swap/ptr_swap crash
+                                // cluster: `*ptr = 2; ... *ptr = reg + 0`
+                                // has an immediate store SROA missed.)
+                                if value.as_register().is_none() {
+                                    has_indirection = true;
+                                    break 'outer;
+                                }
+                                let val_v = value.as_register().unwrap();
                                 accesses.push(Access {
                                     block_idx: bi,
                                     instr_idx: ii,
