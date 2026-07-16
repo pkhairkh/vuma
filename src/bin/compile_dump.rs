@@ -2,7 +2,7 @@
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::IRBuilder;
 use vuma_parser::{Parser, AstToScg, ModuleResolver};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
+use vuma::pipeline::{CompileConfig, run_scg_transforms, run_ir_pipeline, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
 use std::path::Path;
 use std::process::Command;
 use std::fs;
@@ -100,20 +100,34 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     use vuma_scg::SCGPass;
     let _ = vuma_scg::InterproceduralAllocFlow::new().run(&mut scg);
 
+    // Wave 2: Run SCG-level O2 transforms BEFORE IVE verification and IR
+    // building, mirroring `compile_with_path` Stage 7 (which runs at the
+    // config's opt_level). The O2 config constructed here is also reused
+    // for `run_ir_pipeline` below so the entire post-IR-build O2 pipeline
+    // uses one consistent config (matching the production compile path).
+    let o2_config = CompileConfig {
+        target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
+        opt_level: OptLevel::O2,
+        verification_level: VerificationLevel::Normal,
+        ..Default::default()
+    };
+    let _ = run_scg_transforms(&mut scg, &o2_config);
+
     // Optionally run IVE verification (non-fatal — report to stderr).
     // Skip verification for programs marked with "// ive_skip" in the
     // source header. This is used for tests that intentionally don't
     // manage memory (e.g., pure arithmetic tests that allocate a buffer
     // for computation but never free it — the leak is intentional and
     // not the focus of the test).
+    //
+    // Wave 2: IVE now verifies the O2-optimized SCG (run_scg_transforms
+    // was already applied above at O2). The previous local O0 config +
+    // redundant O0 run_scg_transforms call have been removed so there is
+    // a single consistent SCG state. Wave 7 double-checks IVE
+    // correctness on the optimized SCG.
     let mut ive_status: Option<String> = None;
     let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
     if verify && !ive_skip {
-        let config = CompileConfig {
-            target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
-            opt_level: OptLevel::O0, verification_level: VerificationLevel::Normal, ..Default::default()
-        };
-        let _ = run_scg_transforms(&mut scg, &config);
         let ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
         let aggregator = vuma_ive::invariant_aggregator::InvariantAggregator::new()
             .with_level(vuma_ive::invariant_aggregator::VerificationLevel::Normal);
@@ -136,8 +150,19 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
 
-    // Run IR-level optimizations (e-graph, alias analysis, scheduler, etc.)
-    let ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+    // Wave 2: Run the full post-IR-build O2 pipeline via the shared
+    // `run_ir_pipeline` helper (same path as `compile_with_path`). This
+    // runs Wave 34 lowering (monomorphize, closures, switches, tail-calls,
+    // loop-normalize), Wave 36 bv_verify, the Wave 10 syscall allowlist,
+    // Stage 8b codegen-opt with the REAL backend latency table, and Wave
+    // 32 escape+effects/SROA. Previously compile_dump only ran
+    // `run_optimizations` (IR-level opts, default latency table) — skipping
+    // ~half the production O2 pipeline. A syscall-allowlist violation or
+    // bv_verify abort (none currently fatal) becomes a compile error here
+    // (test marked CE) — triaged in Waves 3-5.
+    let mut timings: Vec<(String, u64)> = Vec::new();
+    let ir_program = run_ir_pipeline(ir_program, &o2_config, kind, &mut timings)
+        .map_err(|e| format!("ir_pipeline: {:?}", e))?;
 
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
 
