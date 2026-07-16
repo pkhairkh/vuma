@@ -191,9 +191,25 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         return dst;
     }
     
-    // NK_ASSIGN (7): evaluate rhs, store to lhs
+    // NK_ASSIGN (7): evaluate rhs, store to lhs.
+    // c1 = lhs node idx, c2 = rhs node idx.
+    // Wave P6.1: if the lhs is a NK_DEREF (`*(addr) = val`), emit IR_STORE
+    // so the bootstrap codegen can emit a byte store to memory. For simple
+    // assignments (`x = val`), the rhs vreg is the result (no IR emitted —
+    // the binding is handled by NK_LET's symtab insert).
     if kind == 7 {
         rhs_vreg = irb_lower_expr(b, ast, c2);
+        lhs_off: u32 = 8 + c1 * 40;
+        lhs_kind: u32 = load_u32(ast, lhs_off);
+        if lhs_kind == 6 {  // NK_DEREF: *(addr) = val → IR_STORE
+            // NK_DEREF layout: c1 = operand node idx (the address expression).
+            deref_operand: u32 = load_u32(ast, lhs_off + 4);
+            addr_vreg: u32 = irb_lower_expr(b, ast, deref_operand);
+            // IR_STORE: dst = value vreg, lhs = addr vreg, rhs = byte offset
+            // (0 — the current IR builder folds any `ptr + off` into a runtime
+            // ADD that produces the address vreg, so the static offset is 0).
+            irb_emit(b, IR_STORE, rhs_vreg, addr_vreg, 0, 0, 0);
+        }
         // For simple assignment, rhs is the result
         return rhs_vreg;
     }
