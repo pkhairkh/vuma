@@ -271,36 +271,52 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         free_h: u32 = load_u32(b, 32);
         valloc_h: u32 = load_u32(b, 36);
         vfree_h: u32 = load_u32(b, 40);
-        // allocate(size) → IR_CALL to __vuma_alloc runtime stub.
-        // Uses IR_CALL (same pattern as print_int) instead of IR_SYSCALL
-        // because the u64 arg-packing for mmap's 4+ args is broken in the
-        // x86_64 codegen (both << and * produce wrong 64-bit values).
+        // allocate(size) → IR_SYSCALL(222, mmap) with 4 args.
+        // mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        // The bootstrap codegen loads 4 args into RDI/RSI/RDX/R10. On x86_64,
+        // MAP_ANONYMOUS ignores fd (R8) and offset (R9), so 4 args suffice.
         if c1 == alloc_h {
             if alloc_h != 0 {
+                addr_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, addr_vreg, 0, 0, 0, 0);
+                prot_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, prot_vreg, 0, 0, 3, 0);
+                flags_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);
                 dst = irb_alloc_vreg(b);
-                irb_emit(b, IR_CALL, dst, alloc_h, 1, arg0_vreg, 0);
+                packed_imm: u64 = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
+                packed_aux: u64 = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
                 return dst;
             }
         }
         // __vuma_alloc(size) → same as allocate.
         if c1 == valloc_h {
             if valloc_h != 0 {
+                addr_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, addr_vreg, 0, 0, 0, 0);
+                prot_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, prot_vreg, 0, 0, 3, 0);
+                flags_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);
                 dst = irb_alloc_vreg(b);
-                irb_emit(b, IR_CALL, dst, valloc_h, 1, arg0_vreg, 0);
+                packed_imm = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
+                packed_aux = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
                 return dst;
             }
         }
-        // free(addr) → IR_CALL to __vuma_free runtime stub.
+        // free(addr) → IR_SYSCALL(215, munmap).
         if c1 == free_h {
             if free_h != 0 {
-                irb_emit(b, IR_CALL, 0, free_h, 1, arg0_vreg, 0);
+                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
                 return 0;
             }
         }
         // __vuma_free(addr, size) → same as free.
         if c1 == vfree_h {
             if vfree_h != 0 {
-                irb_emit(b, IR_CALL, 0, vfree_h, 1, arg0_vreg, 0);
+                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
                 return 0;
             }
         }
@@ -311,9 +327,10 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         return dst;
     }
     
-    // NK_SYSCALL (8): c1=syscall_nr, c2=arg2_node (for 3+ args),
+    // NK_SYSCALL (8): c1=syscall_nr, c2=arg2_node (for 3 args),
     // c3=arg_count, val.lo=arg0_node, val.hi=arg1_node.
-    // arg3+ not supported (aux field not loaded by irb_lower_expr).
+    // Supports up to 3 args. 4-arg syscalls need the aux field which
+    // triggers a Rust vumac x86_64 codegen bug when compiling the bootstrap.
     if kind == 8 {
         arg0_vreg = 0;
         arg1_vreg: u32 = 0;
