@@ -2577,6 +2577,16 @@ pub fn dead_store_eliminate(
                         // Function calls may read or write any memory.
                         break;
                     }
+                    IRInstr::Syscall { .. } => {
+                        // Syscalls may read or write any memory through
+                        // pointer arguments (e.g. write(fd, buf, n) reads
+                        // buf, read(fd, buf, n) writes buf). Conservatively
+                        // treat all syscalls as potential memory accesses,
+                        // same as Call. Without this, DSE would remove
+                        // stores to a buffer that is later passed to a
+                        // syscall (e.g. *(buf+0) = 72 before write(1, buf, 3)).
+                        break;
+                    }
                     IRInstr::Free { .. } => {
                         // Free may invalidate the memory.
                         break;
