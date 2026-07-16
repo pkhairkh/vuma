@@ -239,6 +239,82 @@ fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
     return pos + 5;
 }
 
+// ── Wave P6.1: memory-op encoders (IR_ALLOC / IR_LOAD / IR_STORE) ──
+// These three encoders back the IR_ALLOC (15), IR_LOAD (11), and IR_STORE
+// (12) handlers in codegen_emit. They use the same [rbp - disp] vreg-slot
+// addressing convention as enc_load_rax / enc_store_rax, plus a [rcx + disp]
+// form for the actual memory access (the address vreg is loaded into RCX).
+
+// LEA rax, [rbp - offset]:
+//   48 8D 45 <disp8>          (if offset <= 127 — 4 bytes)
+//   48 8D 85 <disp32 LE>      (otherwise — 7 bytes)
+// `offset` is the vreg's stack-slot displacement (a positive value that
+// represents a NEGATIVE displacement from rbp; vreg_offset returns the
+// two's-complement byte for the disp8 form, and we pass that same byte
+// value here). For the disp32 form, the caller passes the raw u32
+// two's-complement encoding of the negative displacement.
+//
+// Used by IR_ALLOC: the dst vreg's stack slot IS the allocation; we
+// compute the slot's address with LEA and store it back into the slot.
+fn enc_lea_rax_rbp_offset(code: Address, pos: u32, offset: u32) -> u32 {
+    if offset <= 127 {
+        emit_byte(code, pos, 0x48);
+        emit_byte(code, pos + 1, 0x8D);
+        emit_byte(code, pos + 2, 0x45);
+        emit_byte(code, pos + 3, offset & 255);  // disp8 (two's-complement negative)
+        return pos + 4;
+    }
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8D);
+    emit_byte(code, pos + 2, 0x85);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
+}
+
+// MOVZBL eax, [rax + offset] (zero-extend byte load):
+//   0F B6 40 <disp8>          (if offset <= 127 — 4 bytes)
+//   0F B6 80 <disp32 LE>      (otherwise — 7 bytes)
+// Loads one byte from [rax + offset], zero-extends to 32 bits into EAX
+// (which implicitly zero-extends to 64-bit RAX). Used by IR_LOAD.
+fn enc_movzbl_eax_rax_offset(code: Address, pos: u32, offset: u32) -> u32 {
+    if offset <= 127 {
+        emit_byte(code, pos, 0x0F);
+        emit_byte(code, pos + 1, 0xB6);
+        emit_byte(code, pos + 2, 0x40);
+        emit_byte(code, pos + 3, offset & 255);  // disp8 (positive offset)
+        return pos + 4;
+    }
+    emit_byte(code, pos, 0x0F);
+    emit_byte(code, pos + 1, 0xB6);
+    emit_byte(code, pos + 2, 0x80);
+    emit_u32(code, pos + 3, offset);  // disp32 (positive offset)
+    return pos + 7;
+}
+
+// MOV [rcx + offset], al (byte store):
+//   88 01                     (if offset == 0 — 2 bytes, no displacement)
+//   88 41 <disp8>             (if 0 < offset <= 127 — 3 bytes)
+//   88 81 <disp32 LE>         (otherwise — 6 bytes)
+// Stores the low byte of RAX to [RCX + offset]. The address vreg is loaded
+// into RCX by the caller (via enc_load_rcx). Used by IR_STORE.
+fn enc_store_byte_rcx_rax(code: Address, pos: u32, offset: u32) -> u32 {
+    if offset == 0 {
+        emit_byte(code, pos, 0x88);
+        emit_byte(code, pos + 1, 0x01);
+        return pos + 2;
+    }
+    if offset <= 127 {
+        emit_byte(code, pos, 0x88);
+        emit_byte(code, pos + 1, 0x41);
+        emit_byte(code, pos + 2, offset & 255);  // disp8 (positive offset)
+        return pos + 3;
+    }
+    emit_byte(code, pos, 0x88);
+    emit_byte(code, pos + 1, 0x81);
+    emit_u32(code, pos + 2, offset);  // disp32 (positive offset)
+    return pos + 6;
+}
+
 // Wave P1-c-8: translate a VUMA/asm-generic syscall number to the x86_64
 // native syscall number. The bootstrap targets x86_64, so the generic nr
 // coming out of the AST (c1 of NK_SYSCALL) must be remapped before being
@@ -515,6 +591,13 @@ fn vreg_offset(vreg: u32) -> u32 {
 //   IR_RET (14): dst is the returned vreg (or 0 for void return).
 //   IR_CALL (13): dst = result vreg; lhs = callee_hash (NOT a vreg!);
 //                 rhs = arg_count (NOT a vreg!); imm (lower 32) = arg0_vreg.
+//   IR_LOAD (11): dst = result vreg; lhs = addr vreg; rhs = byte offset
+//                 (NOT a vreg — must skip). Wave P6.1.
+//   IR_STORE (12): dst = value vreg; lhs = addr vreg; rhs = byte offset
+//                  (NOT a vreg — must skip). Wave P6.1.
+//   IR_ALLOC (15): dst = result vreg (the allocated pointer); imm = size
+//                  (NOT a vreg — must skip). Wave P6.1.
+//   IR_SYSCALL (20): dst = result vreg; imm.lo/hi, aux.lo/hi = arg vregs.
 //   Other ops: not supported in the bootstrap codegen; skip.
 fn codegen_max_vreg(ir_buf: Address) -> u32 {
     count: u32 = load_u32(ir_buf, 0);
@@ -544,7 +627,31 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
             imm_lo: u32 = imm & 0xFFFFFFFF;
             if imm_lo > max { max = imm_lo; }
         }}
-        // Other ops (NOP, BRANCH, COND_BRANCH, CMP, LOAD, STORE, ALLOC):
+        else { if op == 11 {  // IR_LOAD: dst = result, lhs = addr (rhs = offset, skip).
+            if dst > max { max = dst; }
+            if lhs > max { max = lhs; }
+        }}
+        else { if op == 12 {  // IR_STORE: dst = value, lhs = addr (rhs = offset, skip).
+            if dst > max { max = dst; }
+            if lhs > max { max = lhs; }
+        }}
+        else { if op == 15 {  // IR_ALLOC: dst = result ptr (imm = size, skip).
+            if dst > max { max = dst; }
+        }}
+        else { if op == 20 {  // IR_SYSCALL: dst, imm.lo/hi, aux.lo/hi are vregs.
+            if dst > max { max = dst; }
+            sc_imm: u64 = load_u64(ir_buf, op_off + 16);
+            sc_aux: u64 = load_u64(ir_buf, op_off + 24);
+            sc_a0: u32 = sc_imm & 0xFFFFFFFF;
+            sc_a1: u32 = (sc_imm >> 32) & 0xFFFFFFFF;
+            sc_a2: u32 = sc_aux & 0xFFFFFFFF;
+            sc_a3: u32 = (sc_aux >> 32) & 0xFFFFFFFF;
+            if sc_a0 > max { max = sc_a0; }
+            if sc_a1 > max { max = sc_a1; }
+            if sc_a2 > max { max = sc_a2; }
+            if sc_a3 > max { max = sc_a3; }
+        }}
+        // Other ops (NOP, BRANCH, COND_BRANCH, CMP, DIV/AND/OR/...):
         // not supported in the bootstrap codegen; skip.
         i = i + 1;
     }
@@ -1062,10 +1169,44 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_syscall(code, pos);
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
+        else { if op == 15 {  // IR_ALLOC (Wave P6.1) — stack allocation.
+            // IR layout: op=15, dst=vreg, imm=size. The stack frame is
+            // already allocated in the prologue (sub rsp, frame_size); each
+            // vreg has an 8-byte slot at [rbp - vreg_offset(n)]. For
+            // IR_ALLOC, the dst vreg's slot IS the allocation — we store
+            // the slot's own address into the slot so subsequent loads of
+            // dst yield a pointer to the allocated space. Emit:
+            //   lea rax, [rbp - vreg_offset(dst)]   ; rax = &slot
+            //   mov [rbp - vreg_offset(dst)], rax   ; slot = &slot
+            pos = enc_lea_rax_rbp_offset(code, pos, vreg_offset(dst));
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
+        else { if op == 12 {  // IR_STORE (Wave P6.1) — byte store to memory.
+            // IR layout: op=12, dst=value_vreg, lhs=addr_vreg, rhs=byte_offset.
+            // Emit: load value into RAX, load addr into RCX, store low byte
+            // of RAX to [RCX + offset].
+            //   mov rax, [rbp - vreg_offset(dst)]   ; rax = value
+            //   mov rcx, [rbp - vreg_offset(lhs)]   ; rcx = addr
+            //   mov [rcx + rhs], al                  ; *(addr + off) = value & 0xFF
+            pos = enc_load_rax(code, pos, vreg_offset(dst));
+            pos = enc_load_rcx(code, pos, vreg_offset(lhs));
+            pos = enc_store_byte_rcx_rax(code, pos, rhs);
+        }}
+        else { if op == 11 {  // IR_LOAD (Wave P6.1) — byte load from memory.
+            // IR layout: op=11, dst=result_vreg, lhs=addr_vreg, rhs=byte_offset.
+            // Emit: load addr into RAX, zero-extend byte load from [RAX + offset]
+            // into EAX (which zero-extends to RAX), store result to dst's slot.
+            //   mov rax, [rbp - vreg_offset(lhs)]   ; rax = addr
+            //   movzbl eax, [rax + rhs]              ; eax = *(addr + off) (zero-extended)
+            //   mov [rbp - vreg_offset(dst)], rax   ; dst = result
+            pos = enc_load_rax(code, pos, vreg_offset(lhs));
+            pos = enc_movzbl_eax_rax_offset(code, pos, rhs);
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
         // IR_NOP (0), IR_BRANCH (17), IR_COND_BRANCH (18), IR_CMP (10),
-        // IR_LOAD (11), IR_STORE (12), IR_ALLOC (15), etc.: not handled
-        // in the bootstrap codegen. hello.vuma doesn't use them; if/while
-        // codegen + memory ops are documented TODO for a future wave.
+        // IR_DIV/AND/OR/XOR/SHL/SHR (4-9), etc.: not handled in the bootstrap
+        // codegen. hello.vuma doesn't use them; if/while codegen + remaining
+        // ALU ops are documented TODO for a future wave.
 
         i = i + 1;
     }
