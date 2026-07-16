@@ -936,9 +936,6 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
             cost = cost.saturating_add(inline_cost(instr));
         }
     }
-    // (Wave 25) Per-argument overhead: 2 cycles per arg, modeling
-    // regalloc pressure + inliner remap cost.
-    cost = cost.saturating_add((args.len() as u32).saturating_mul(2));
     // Savings: each constant argument reduces cost (will be constant-folded).
     // This models the fact that `fn add(x, y) { x + y }` called with
     // `add(3, 4)` becomes `3 + 4` which folds to `7` — the entire function
@@ -1634,28 +1631,16 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // (Wave 25) Re-enabled inliner. The "caller never inlined" bug was
-        // that `inline_with_threshold` ignored its `threshold` parameter
-        // and hard-coded `instruction_count() <= 5`, so callers that bumped
-        // the threshold from CompileConfig had no effect. Fixed above to
-        // use `function_inline_cost(callee, args) <= threshold`.
-        let f = inline_with_threshold(f, &func_refs, inline_threshold);
-        // (Wave 26) Re-enabled LICM. The "preheader not emitted" bug was
-        // resolved by the existing LICM implementation: it (a) creates the
-        // preheader block with `terminator = Jump(header_label)`, (b)
-        // removes the invariant instructions from the header, and (c)
-        // redirects ALL non-loop predecessors of the header to the
-        // preheader via `redirect_terminator`. The codegen emitter
-        // (`emit_function_greedy` in `emit.rs`) iterates `func.blocks` in
-        // layout order and emits every block whose label is in
-        // `label_offsets`, so the preheader is emitted as long as it's in
-        // `func.blocks` — which the LICM ensures by inserting it just
-        // before the header. The earlier miscompilation (entry jumped
-        // directly to header, bypassing the preheader) was a stale comment
-        // — the redirect is sound.
-        let f = licm(f);
-        let f = constant_fold(f);
-        let f = dead_code_eliminate(f);
+        // Inliner, LICM, and cross-function constant prop are DISABLED.
+        // These passes were re-enabled in our changes but produce IR that
+        // exposes codegen bugs (greedy allocator exhaustion on aarch64,
+        // stack-slot ISel issues on other backends). The baseline (99.98%
+        // pass rate) had these disabled. They need proper codegen fixes
+        // before they can be safely re-enabled.
+        // let f = inline_with_threshold(f, &func_refs, inline_threshold);
+        // let f = licm(f);
+        // let f = constant_fold(f);
+        // let f = dead_code_eliminate(f);
         // (Wave 27) Re-enabled instruction scheduler. The old "skip any
         // block with memory ops" bail-out in `scheduler::schedule_block`
         // and `scheduler::schedule_function` is GONE — memory dependencies
@@ -1680,29 +1665,14 @@ fn run_optimizations_inner(
     }
 
     // ── Whole-program passes ──
-    // (Wave 28) Re-enabled cross-function constant propagation. The
-    // historical miscompilation ("propagated constants trigger e-graph
-    // rewrites that remove vreg defs while leaving uses in place") was a
-    // CLEANUP gap: cross_function_constant_prop substituted constants
-    // into callee bodies but no follow-up constant_fold + DCE ran to
-    // fold the now-constant expressions and remove the dead param-arg
-    // references. We now run a per-function constant_fold + DCE sweep
-    // AFTER cross_function_constant_prop, which:
-    //   - folds the substituted constants (`x + 1` with `x = 5` → `6`),
-    //   - DCEs the dead Add that previously held the param's value,
-    //   - leaves the param vreg in the signature (preserves ABI), and
-    //   - re-runs the scheduler on the cleaned-up IR.
-    program = cross_function_constant_prop(program);
-
-    // (Wave 28) Follow-up cleanup: per-function constant_fold + DCE so
-    // the substituted constants actually fold. This is the root-cause
-    // fix for the historical miscompilation.
-    for i in 0..program.functions.len() {
-        let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
-        let f = constant_fold(f);
-        let f = dead_code_eliminate(f);
-        program.functions[i] = f;
-    }
+    // cross_function_constant_prop is DISABLED (see comment above).
+    // program = cross_function_constant_prop(program);
+    // for i in 0..program.functions.len() {
+    //     let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
+    //     let f = constant_fold(f);
+    //     let f = dead_code_eliminate(f);
+    //     program.functions[i] = f;
+    // }
 
     // (Wave 28) Wire identical_function_merge — hash each function's
     // normalized body, merge duplicates, rewrite call sites. This is
