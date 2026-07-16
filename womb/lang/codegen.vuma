@@ -257,6 +257,9 @@ fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
 // Used by IR_ALLOC: the dst vreg's stack slot IS the allocation; we
 // compute the slot's address with LEA and store it back into the slot.
 fn enc_lea_rax_rbp_offset(code: Address, pos: u32, offset: u32) -> u32 {
+    // offset is a two's-complement byte from vreg_offset (e.g. 240 = -16).
+    // For disp8: use as-is (works for offsets -128..127, i.e. vregs 1-16).
+    // For disp32: sign-extend the byte to 32 bits (0xFFFFFF00 | offset).
     if offset <= 127 {
         emit_byte(code, pos, 0x48);
         emit_byte(code, pos + 1, 0x8D);
@@ -264,10 +267,12 @@ fn enc_lea_rax_rbp_offset(code: Address, pos: u32, offset: u32) -> u32 {
         emit_byte(code, pos + 3, offset & 255);  // disp8 (two's-complement negative)
         return pos + 4;
     }
+    // Sign-extend the 8-bit two's-complement value to 32 bits.
+    disp32: u32 = 0xFFFFFF00 | offset;
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8D);
     emit_byte(code, pos + 2, 0x85);
-    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    emit_u32(code, pos + 3, disp32);  // disp32 (sign-extended negative)
     return pos + 7;
 }
 
