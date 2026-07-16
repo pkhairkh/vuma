@@ -1631,36 +1631,18 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // Inliner, LICM, and cross-function constant prop are DISABLED.
-        // These passes were re-enabled in our changes but produce IR that
-        // exposes codegen bugs (greedy allocator exhaustion on aarch64,
-        // stack-slot ISel issues on other backends). The baseline (99.98%
-        // pass rate) had these disabled. They need proper codegen fixes
-        // before they can be safely re-enabled.
-        // let f = inline_with_threshold(f, &func_refs, inline_threshold);
-        // let f = licm(f);
-        // let f = constant_fold(f);
-        // let f = dead_code_eliminate(f);
-        // (Wave 27) Re-enabled instruction scheduler. The old "skip any
-        // block with memory ops" bail-out in `scheduler::schedule_block`
-        // and `scheduler::schedule_function` is GONE — memory dependencies
-        // are now modeled by `schedule_block_inner` using
-        // `codegen::alias_analysis::AliasAnalysis`. The scheduler also
-        // carries a register-pressure heuristic (prefer pressure-reducing
-        // instrs on critical-path ties) so it doesn't push the regalloc
-        // toward spilling.
+        // Inliner is ENABLED (was enabled in the 99.87% run).
+        // LICM and cross-function constant prop remain DISABLED
+        // (they were disabled in the baseline).
+        let f = inline_with_threshold(f, &func_refs, inline_threshold);
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+        // Scheduler is DISABLED (was disabled in the baseline).
+        // The scheduler causes pass-interaction miscompilations.
+        // if std::env::var("VUMA_NO_SCHED").is_err() {
+        //     crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        // }
         let mut f = f;
-        // `VUMA_NO_SCHED` disables the entire instruction-scheduling pass
-        // (Wave 27) — `schedule_function` is skipped altogether. It is set
-        // by the O2 bootstrap test (wave48_self_host.rs:705) because the
-        // cast-aware TBAA still miscompiles on inlined-function scale
-        // (Open Work §1). For finer-grained control of within-block
-        // reordering only, see `VUMA_NO_SCHED_REORDER` in `scheduler.rs`.
-        // Both are intended as temporary debugging escape hatches, not
-        // production knobs.
-        if std::env::var("VUMA_NO_SCHED").is_err() {
-            crate::scheduler::schedule_function(&mut f.blocks, latency_table);
-        }
         program.functions[i] = f;
     }
 
