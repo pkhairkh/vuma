@@ -272,9 +272,15 @@ impl Instruction {
             // Branch form: (op<<26) | (ra<<21) | disp21
             Instruction::Beq { ra, disp } => op_br(0x39, *ra, *disp),
             Instruction::Bne { ra, disp } => op_br(0x3D, *ra, *disp),
-            Instruction::Blt { ra, disp } => op_br(0x3F, *ra, *disp),
+            // Alpha branch opcodes (Alpha ARM §C.2):
+            //   0x38 BLBC, 0x39 BEQ, 0x3A BLT, 0x3B BLE,
+            //   0x3C BLBS, 0x3D BNE, 0x3E BGE, 0x3F BGT.
+            // (Wave-6 fix: Blt and Bgt were previously swapped — Blt used
+            // 0x3F=BGT and Bgt used 0x3A=BLT, which caused print_int to treat
+            // positive values as negative on QEMU-alpha.)
+            Instruction::Blt { ra, disp } => op_br(0x3A, *ra, *disp),
             Instruction::Ble { ra, disp } => op_br(0x3B, *ra, *disp),
-            Instruction::Bgt { ra, disp } => op_br(0x3A, *ra, *disp),
+            Instruction::Bgt { ra, disp } => op_br(0x3F, *ra, *disp),
             Instruction::Bge { ra, disp } => op_br(0x3E, *ra, *disp),
             Instruction::Br { ra, disp } => op_br(0x30, *ra, *disp),
             Instruction::Bsr { ra, disp } => op_br(0x34, *ra, *disp),
@@ -1859,6 +1865,13 @@ impl Backend for AlphaBackend {
         // Alpha: a0=R16=n.  Uses a 32-byte stack buffer.
         // Algorithm: negate if negative (emit '-'), divmod-10 loop backwards,
         // then write the digit string.  Handles n=0 by emitting a single '0'.
+        //
+        // Wave-6 fix: QEMU-alpha user-mode (10.x) does NOT implement DIVQ /
+        // DIVQU / CMPULE (they raise SIGILL).  The previous stub used DIVQ +
+        // MULQ to extract each decimal digit; this rewrite uses the same
+        // 64-bit shift-and-subtract division algorithm the main codegen uses
+        // for IRInstr::Div (which IS supported by QEMU-alpha).  The division
+        // produces both quotient (R3) and remainder (R6) in one pass.
         {
             let mut code = Vec::new();
             // LDA SP, -32(SP)
@@ -1866,7 +1879,7 @@ impl Backend for AlphaBackend {
             // R2 = n; R5 = 0 (sign flag)
             code.extend(Instruction::Or { ra: Gpr::R16, rb: Gpr::R31, rc: Gpr::R2 }.encode());
             code.extend(Instruction::Or { ra: Gpr::R31, rb: Gpr::R31, rc: Gpr::R5 }.encode());
-            // BLT R2, .neg  (placeholder)
+            // BLT R2, .neg  (placeholder)  [encoder fixed in Wave-6: 0x3A=BLT]
             code.extend(Instruction::Blt { ra: Gpr::R2, disp: 0 }.encode());
             let blt_pos = code.len() - 4;
             // BR .start  (skip .neg block)
@@ -1875,20 +1888,58 @@ impl Backend for AlphaBackend {
             // .neg: R5=1, R2=-R2
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 1, rc: Gpr::R5 }.encode());
             code.extend(Instruction::Subq { ra: Gpr::R31, rb: Gpr::R2, rc: Gpr::R2 }.encode());
-            // .start: R4=10, R1=&buf[31]
+            // .start: R4=10 (divisor), R1=&buf[31]
             let start_offset = code.len();
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R4 }.encode());
             code.extend(Instruction::Lda { ra: Gpr::R1, disp: 31, rb: Gpr::R30 }.encode());
             // .loop:
             let loop_offset = code.len();
-            code.extend(Instruction::Divq { ra: Gpr::R2, rb: Gpr::R4, rc: Gpr::R3 }.encode()); // R3 = R2/10
-            code.extend(Instruction::Mulq { ra: Gpr::R3, rb: Gpr::R4, rc: Gpr::R6 }.encode()); // R6 = R3*10
-            code.extend(Instruction::Subq { ra: Gpr::R2, rb: Gpr::R6, rc: Gpr::R7 }.encode()); // R7 = R2-R6 = digit
-            code.extend(Instruction::AddqLi { ra: Gpr::R7, lit: 48, rc: Gpr::R7 }.encode());   // R7 = digit + '0'
-            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 0, rb: Gpr::R1 }.encode());      // *R1 = digit
-            code.extend(Instruction::Lda { ra: Gpr::R1, disp: -1, rb: Gpr::R1 }.encode());     // R1--
-            code.extend(Instruction::Or { ra: Gpr::R3, rb: Gpr::R31, rc: Gpr::R2 }.encode());  // R2 = quotient
-            code.extend(Instruction::Bne { ra: Gpr::R2, disp: 0 }.encode());                   // BNE R2, .loop
+            // ── Shift-and-subtract 64-bit unsigned divide: R2 / R4 ──
+            //   produces R3 = quotient, R6 = remainder.
+            //   uses R7 (scratch), R8 (counter).
+            // R6 = 0 (remainder), R3 = 0 (quotient), R8 = 64 (counter)
+            code.extend(Instruction::Or { ra: Gpr::R31, rb: Gpr::R31, rc: Gpr::R6 }.encode());
+            code.extend(Instruction::Or { ra: Gpr::R31, rb: Gpr::R31, rc: Gpr::R3 }.encode());
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 64, rc: Gpr::R8 }.encode());
+            // .div_loop:
+            let div_loop_offset = code.len();
+            // R7 = R2 >> 63  (top bit of dividend, SRL literal-form, function 0x34)
+            code.extend_from_slice(&op_lit(0x12, Gpr::R2, 63, Gpr::R7, 0x34).to_le_bytes());
+            // R2 <<= 1  (SLL literal-form, function 0x39)
+            code.extend_from_slice(&op_lit(0x12, Gpr::R2, 1, Gpr::R2, 0x39).to_le_bytes());
+            // R6 <<= 1
+            code.extend_from_slice(&op_lit(0x12, Gpr::R6, 1, Gpr::R6, 0x39).to_le_bytes());
+            // R6 |= R7  (OR/BIS, opcode 0x11 function 0x20)
+            code.extend_from_slice(&op_reg(0x11, Gpr::R7, Gpr::R6, Gpr::R6, 0x20).to_le_bytes());
+            // R3 <<= 1
+            code.extend_from_slice(&op_lit(0x12, Gpr::R3, 1, Gpr::R3, 0x39).to_le_bytes());
+            // R8 -= 1  (SUBQ literal-form, opcode 0x10 function 0x29)
+            code.extend_from_slice(&op_lit(0x10, Gpr::R8, 1, Gpr::R8, 0x29).to_le_bytes());
+            // R7 = (R6 < R4)  (CMPULT, opcode 0x10 function 0x1D — supported by QEMU)
+            code.extend_from_slice(&op_reg(0x10, Gpr::R6, Gpr::R4, Gpr::R7, 0x1D).to_le_bytes());
+            // BNE R7, skip_sub  (if R6 < R4, skip the subtract)
+            code.extend(Instruction::Bne { ra: Gpr::R7, disp: 0 }.encode());
+            let bne_skip_pos = code.len() - 4;
+            // R6 -= R4
+            code.extend(Instruction::Subq { ra: Gpr::R6, rb: Gpr::R4, rc: Gpr::R6 }.encode());
+            // R3 += 1
+            code.extend(Instruction::AddqLi { ra: Gpr::R3, lit: 1, rc: Gpr::R3 }.encode());
+            // skip_sub:
+            let skip_sub_offset = code.len();
+            // BNE R8, .div_loop
+            code.extend(Instruction::Bne { ra: Gpr::R8, disp: 0 }.encode());
+            let bne_div_loop_pos = code.len() - 4;
+            // ── Now R3 = quotient, R6 = remainder (digit) ──
+            // R7 = R6 + 48  (digit + '0')
+            code.extend(Instruction::AddqLi { ra: Gpr::R6, lit: 48, rc: Gpr::R7 }.encode());
+            // STB R7, 0(R1)  (store digit backward)
+            code.extend(Instruction::Stb { ra: Gpr::R7, disp: 0, rb: Gpr::R1 }.encode());
+            // R1--
+            code.extend(Instruction::Lda { ra: Gpr::R1, disp: -1, rb: Gpr::R1 }.encode());
+            // R2 = R3 (quotient becomes next dividend)
+            code.extend(Instruction::Or { ra: Gpr::R3, rb: Gpr::R31, rc: Gpr::R2 }.encode());
+            // BNE R2, .loop
+            code.extend(Instruction::Bne { ra: Gpr::R2, disp: 0 }.encode());
             let bne_loop_pos = code.len() - 4;
             // .after_loop: if R5 (neg), write '-'
             code.extend(Instruction::Beq { ra: Gpr::R5, disp: 0 }.encode()); // skip '-' if not negative
@@ -1915,10 +1966,16 @@ impl Backend for AlphaBackend {
             // BLT at blt_pos → .neg at br_start_pos+4
             let blt_target = br_start_pos + 4;
             let blt_disp = ((blt_target as i64) - (blt_pos as i64) - 4) / 4;
-            patch_alpha_branch(&mut code, blt_pos, 0x3F, Gpr::R2, blt_disp as i32);
+            patch_alpha_branch(&mut code, blt_pos, 0x3A, Gpr::R2, blt_disp as i32); // 0x3A = BLT (Wave-6 fix)
             // BR at br_start_pos → .start at start_offset
             let br_disp = ((start_offset as i64) - (br_start_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, br_start_pos, 0x30, Gpr::R31, br_disp as i32);
+            // BNE at bne_skip_pos → skip_sub at skip_sub_offset
+            let bne_skip_disp = ((skip_sub_offset as i64) - (bne_skip_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, bne_skip_pos, 0x3D, Gpr::R7, bne_skip_disp as i32);
+            // BNE at bne_div_loop_pos → .div_loop at div_loop_offset
+            let bne_div_disp = ((div_loop_offset as i64) - (bne_div_loop_pos as i64) - 4) / 4;
+            patch_alpha_branch(&mut code, bne_div_loop_pos, 0x3D, Gpr::R8, bne_div_disp as i32);
             // BNE at bne_loop_pos → .loop at loop_offset
             let bne_disp = ((loop_offset as i64) - (bne_loop_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, bne_loop_pos, 0x3D, Gpr::R2, bne_disp as i32);
@@ -1926,21 +1983,24 @@ impl Backend for AlphaBackend {
             let beq_disp = ((after_dash as i64) - (beq_skip_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, beq_skip_pos, 0x39, Gpr::R5, beq_disp as i32);
 
-            // print_int stub restored — calls now resolve to the real
-            // decimal-conversion runtime helper above instead of becoming
-            // no-op unresolved externs.  The stub saves/restores SP (R30)
-            // and only clobbers caller-saved scratch registers (R0-R10).
+            // print_int stub — saves/restores SP (R30) and only clobbers
+            // caller-saved scratch registers (R0-R10, R16-R18).
             syscall_stubs.push(("print_int".to_string(), code));
         }
 
         // ── print_hex(n) → void — hex conversion + write(1, buf, len)
         // Alpha: a0=R16=n.  Prints up to 16 hex digits + newline.
+        //
+        // Wave-6 fix: replaced CMPULE (opcode 0x10 fn 0x3F) with CMPULT
+        // (opcode 0x10 fn 0x1D) — QEMU-alpha does not implement CMPULE.
+        // The test "R3 <= 9" becomes "R3 < 10" (R9 now holds 10, not 9);
+        // the BEQ R8, .alpha branch logic is unchanged.
         {
             let mut code = Vec::new();
             code.extend(Instruction::Lda { ra: Gpr::R30, disp: -32, rb: Gpr::R30 }.encode()); // SP -= 32
             code.extend(Instruction::Or { ra: Gpr::R16, rb: Gpr::R31, rc: Gpr::R2 }.encode()); // R2 = n
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 15, rc: Gpr::R6 }.encode());  // R6 = 15 (mask)
-            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 9, rc: Gpr::R9 }.encode());   // R9 = 9
+            code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R9 }.encode());  // R9 = 10 (Wave-6: was 9)
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 39, rc: Gpr::R10 }.encode()); // R10 = 39
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 4, rc: Gpr::R12 }.encode());  // R12 = 4 (shift)
             code.extend(Instruction::AddqLi { ra: Gpr::R31, lit: 10, rc: Gpr::R7 }.encode());  // newline
@@ -1950,7 +2010,8 @@ impl Backend for AlphaBackend {
             let hx_loop = code.len();
             code.extend(Instruction::And { ra: Gpr::R2, rb: Gpr::R6, rc: Gpr::R3 }.encode());  // R3 = R2 & 15
             code.extend(Instruction::AddqLi { ra: Gpr::R3, lit: 48, rc: Gpr::R7 }.encode());   // R7 = R3 + '0'
-            code.extend(Instruction::Cmpule { ra: Gpr::R3, rb: Gpr::R9, rc: Gpr::R8 }.encode()); // R8 = (R3 <= 9)
+            // R8 = (R3 < R9) i.e. (R3 < 10)  — CMPULT (Wave-6: was CMPULE <= 9)
+            code.extend_from_slice(&op_reg(0x10, Gpr::R3, Gpr::R9, Gpr::R8, 0x1D).to_le_bytes());
             code.extend(Instruction::Beq { ra: Gpr::R8, disp: 0 }.encode()); // BEQ R8, .alpha (placeholder)
             let beq_alpha_pos = code.len() - 4;
             // .digit: R7 is already R3+48, fall through to store
@@ -1978,7 +2039,6 @@ impl Backend for AlphaBackend {
             code.extend(Instruction::Ret.encode());
 
             // Patch branches
-            let _beq_disp = ((store_offset as i64) - 4 - (beq_alpha_pos as i64) - 4) / 4;
             // BEQ target = .alpha (right after BR). .alpha is at br_store_pos + 4.
             let alpha_offset = br_store_pos + 4;
             let beq_d = ((alpha_offset as i64) - (beq_alpha_pos as i64) - 4) / 4;
@@ -1990,10 +2050,8 @@ impl Backend for AlphaBackend {
             let bne_d = ((hx_loop as i64) - (bne_hx_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, bne_hx_pos, 0x3D, Gpr::R2, bne_d as i32);
 
-            // print_hex stub restored — calls now resolve to the real
-            // hex-conversion runtime helper above instead of becoming
-            // no-op unresolved externs.  The stub saves/restores SP (R30)
-            // and only clobbers caller-saved scratch registers (R0-R10).
+            // print_hex stub — saves/restores SP (R30) and only clobbers
+            // caller-saved scratch registers (R0-R10, R16-R18).
             syscall_stubs.push(("print_hex".to_string(), code));
         }
 

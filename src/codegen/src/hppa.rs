@@ -109,28 +109,52 @@ fn encode_nop() -> [u8; 4] {
     0x08000240u32.to_be_bytes()
 }
 
-/// Encode BL (Branch and Link) — `BL target, R31`.
-/// This is a BLE with nullification, used for function calls.
-/// Format: 0xE8000000 | (r << 21) | (imm17 & 0x1FFFF)
-/// Actually PA-RISC BL format: 
-///   bits 31-30: 10 (major opcode for branch)
-///   ... complex format. Let me use the standard encoding.
-/// BL always uses R31 as link. `BL,n target` = branch with nullification.
+/// Encode BL (Branch and Link) — `BL,n target, R1`.
+///
+/// Wave-6 fix: completely rewritten to match QEMU's `%assemble_17` decoder
+/// (target/hppa/insns.decode).  The previous encoder had multiple bugs:
+///   - nullify bit was at bit 31 instead of bit 1 (a no-op since 0xE8
+///     already sets bit 31),
+///   - the 17-bit displacement was placed in bits 16-0 instead of the
+///     non-linear split QEMU expects (bit 0 = sign, bits 16-20 = high 5
+///     bits, bit 2 = bit 10, bits 3-12 = low 10 bits),
+///   - and D=0 (R0) was used instead of D=1 (R1).
+/// The buggy encoding produced `<unknown>` (illegal instruction) for any
+/// non-trivial displacement → SIGSEGV in print_int.
+///
+/// Correct format (verified against QEMU 10.x decode):
+///   bits 31-26: 0x3A (BL opcode `111010`)
+///   bits 25-21: l (5-bit link register; R1 here — R2 holds return addr)
+///   bits 20-16: bits 15-11 of disp17
+///   bits 15-13: 0 (reserved)
+///   bits 12-3:  bits 9-0 of disp17
+///   bit 2:      bit 10 of disp17
+///   bit 1:      n (nullify)
+///   bit 0:      bit 16 of disp17 (sign)
+///
+/// where `disp17 = target_offset / 4` (signed 17-bit two's complement),
+/// and `target = PC + 8 + (sign_extend(disp17) << 2)`.
+/// target_offset must be 4-byte aligned and within [-262144, 262140].
 fn encode_bl(target_offset: i32) -> [u8; 4] {
-    // BL,n target, %r31
-    // Format: 1110 100w DDDDD 0 lll llll llll llll lll
-    // w=1 (with nullification), D=31 (link), l=17-bit signed displacement / 4
-    let disp = (target_offset >> 2) as i32;
-    let w = 1u32; // nullify (execute delay slot)
-    let _word = 0xE8000000u32
-        | (w << 31)  // wait, this is wrong. Let me use the correct format.
-        | ((disp as u32) & 0x1FFFF);
-    // Actually the standard BL encoding:
-    // 1110 1000 nnnn nnnn nnnn nnnn nnn W DDDDD
-    // where n = 17-bit displacement, W = nullify, D = link reg
+    assert!(target_offset % 4 == 0,
+            "BL displacement must be 4-byte aligned, got {}", target_offset);
+    let disp17 = target_offset >> 2;
+    assert!(disp17 >= -65536 && disp17 <= 65535,
+            "BL displacement {} words out of [-65536, 65535]", disp17);
+    let disp17_u = (disp17 as u32) & 0x1FFFF;
+    let sign = (disp17_u >> 16) & 1;
+    let bits_15_11 = (disp17_u >> 11) & 0x1F;
+    let bit_10 = (disp17_u >> 10) & 1;
+    let bits_9_0 = disp17_u & 0x3FF;
+    let n = 1u32;       // nullify delay slot
+    let l = 1u32;       // link = R1 (free in print_int stub; R2 holds RA)
     let word = 0xE8000000u32
-        | ((disp as u32) & 0x1FFFF)
-        | (1u32 << 31); // W=1 (nullify delay slot)
+        | (l << 21)
+        | (bits_15_11 << 16)
+        | (bit_10 << 2)
+        | (bits_9_0 << 3)
+        | (n << 1)
+        | sign;
     word.to_be_bytes()
 }
 
