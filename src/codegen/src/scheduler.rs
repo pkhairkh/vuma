@@ -221,15 +221,45 @@ pub fn schedule_block_with_alias(
     }
 
     // The non-Phi instructions are instructions[phi_count..].
-    // We schedule only these, then prepend the Phi indices.
+    // We further partition non-Phi instructions into:
+    //   - Schedulable: data-flow instructions (arithmetic, memory, calls, etc.)
+    //   - Control-flow: Ret, Branch, CondBranch — these MUST stay at the end
+    //     of the block in their original order. Scheduling them would allow
+    //     the scheduler to move a Ret into the middle of a loop body, causing
+    //     the loop to exit immediately.
     let non_phi_instrs = &instructions[phi_count..];
-    let non_phi_order =
-        schedule_block_inner_with_alias(non_phi_instrs, latency_table, alias_info);
+
+    // Partition: collect indices of schedulable vs control-flow instructions.
+    let mut schedulable_indices: Vec<usize> = Vec::new();
+    let mut control_flow_indices: Vec<usize> = Vec::new();
+    for (i, instr) in non_phi_instrs.iter().enumerate() {
+        match instr {
+            IRInstr::Ret { .. } | IRInstr::Branch { .. } | IRInstr::CondBranch { .. } => {
+                control_flow_indices.push(i);
+            }
+            _ => {
+                schedulable_indices.push(i);
+            }
+        }
+    }
+
+    // Extract only the schedulable instructions for the inner scheduler.
+    let schedulable_instrs: Vec<IRInstr> = schedulable_indices
+        .iter()
+        .map(|&i| non_phi_instrs[i].clone())
+        .collect();
+
+    let schedulable_order =
+        schedule_block_inner_with_alias(&schedulable_instrs, latency_table, alias_info);
 
     // Build the full order: Phi indices (0..phi_count) in original order,
-    // then scheduled non-Phi indices (offset by phi_count).
+    // then scheduled non-Phi indices (offset by phi_count), then control-flow
+    // indices at the end in their original order.
     let mut full_order: Vec<usize> = (0..phi_count).collect();
-    for &idx in &non_phi_order {
+    for &idx in &schedulable_order {
+        full_order.push(schedulable_indices[idx] + phi_count);
+    }
+    for &idx in &control_flow_indices {
         full_order.push(idx + phi_count);
     }
     full_order
