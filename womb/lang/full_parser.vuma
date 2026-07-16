@@ -327,6 +327,9 @@ fn parse_primary_full(p: Address) -> u32 {
         return ast_node(p, NK_SYSCALL, nr, 0, arg_count, packed_val, packed_aux);
     }
 
+    // Unrecognized token: advance past it to avoid an infinite loop in
+    // parse_block_full (which would retry the same token forever).
+    advance(p);
     return ast_node(p, 0, 0, 0, 0, 0, 0);  // error
 }
 
@@ -608,6 +611,35 @@ fn parse_stmt_full(p: Address) -> u32 {
         expect(p, 67);  // SEMI
         // NK_LET: c1 = init expr node, val (lower 32) = var name hash.
         return ast_node(p, NK_LET, init_expr, 0, 0, var_hash, 0);
+    }
+    
+    // Declaration without 'let': ident (: type)? = expr;
+    // VUMA allows `buf: Address = allocate(3);` without the `let` keyword.
+    // The `: type` annotation is what distinguishes this from an assignment.
+    if t == 1 {  // IDENT
+        // Peek ahead: if the token after the ident is COLON (type annotation),
+        // treat this as a declaration (NK_LET).
+        // Save position to backtrack if it's not a declaration.
+        saved_pos: u32 = fparser_pos(p);
+        name_start: u32 = peek_start(p);
+        name_len: u32 = peek_len(p);
+        src: u64 = fparser_src(p);
+        decl_var_hash: u32 = name_hash(src, name_start, name_len);
+        advance(p);  // ident
+        if peek_type(p) == 70 {  // COLON — type annotation → declaration
+            advance(p);
+            // Skip type name (possibly qualified: A::B::C)
+            if peek_type(p) == 1 { advance(p); }
+            while peek_type(p) == 71 { advance(p); if peek_type(p) == 1 { advance(p); } }
+            // Skip generic params <T>
+            if peek_type(p) == 48 { advance(p); if peek_type(p) == 1 { advance(p); } if peek_type(p) == 49 { advance(p); } }
+            expect(p, 45);  // =
+            decl_init: u32 = parse_expr_full(p);
+            expect(p, 67);  // SEMI
+            return ast_node(p, NK_LET, decl_init, 0, 0, decl_var_hash, 0);
+        }
+        // Not a declaration — backtrack and fall through to expression statement.
+        fparser_set_pos(p, saved_pos);
     }
     
     // Expression statement

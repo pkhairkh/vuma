@@ -271,21 +271,42 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         free_h: u32 = load_u32(b, 32);
         valloc_h: u32 = load_u32(b, 36);
         vfree_h: u32 = load_u32(b, 40);
-        // allocate(size) → IR_ALLOC: dst=fresh vreg (the result pointer),
-        // imm=size_vreg (codegen ignores imm for IR_ALLOC — the dst vreg's
-        // 8-byte stack slot IS the allocation per Wave P6.1).
+        // allocate(size) → IR_SYSCALL(222, mmap). Emits 4 IR_MOV nodes for the
+        // immediate args (addr=0, prot=3, flags=0x22, and a 4th for fd=-1),
+        // then IR_SYSCALL with 4 args. On x86_64, MAP_ANONYMOUS ignores fd and
+        // offset, so we only need the first 4 args: addr(RDI), size(RSI),
+        // prot(RDX), flags(R10).
         if c1 == alloc_h {
             if alloc_h != 0 {
+                // Create vregs for immediate args.
+                addr_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, addr_vreg, 0, 0, 0, 0);  // addr = NULL
+                prot_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, prot_vreg, 0, 0, 3, 0);  // prot = PROT_READ|PROT_WRITE
+                flags_vreg: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);  // flags = MAP_PRIVATE|MAP_ANONYMOUS
                 dst = irb_alloc_vreg(b);
-                irb_emit(b, IR_ALLOC, dst, 0, 0, arg0_vreg, 0);
+                // IR_SYSCALL: nr=222 (mmap), arg0=addr_vreg, arg1=arg0_vreg (size),
+                // arg2=prot_vreg, arg3=flags_vreg.
+                packed_imm: u64 = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
+                packed_aux: u64 = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
                 return dst;
             }
         }
         // __vuma_alloc(size) → same as allocate.
         if c1 == valloc_h {
             if valloc_h != 0 {
+                addr_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, addr_vreg, 0, 0, 0, 0);
+                prot_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, prot_vreg, 0, 0, 3, 0);
+                flags_vreg = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);
                 dst = irb_alloc_vreg(b);
-                irb_emit(b, IR_ALLOC, dst, 0, 0, arg0_vreg, 0);
+                packed_imm = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
+                packed_aux = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
                 return dst;
             }
         }
