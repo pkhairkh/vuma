@@ -285,8 +285,19 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
                 irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);
                 dst = irb_alloc_vreg(b);
                 packed_imm: u64 = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
-                packed_aux: u64 = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
-                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
+                // NOTE: packed_aux (prot_vreg | flags_vreg<<32) is NOT passed
+                // as irb_emit's 7th arg. The Rust vumac miscompiles the 7th
+                // (stack-passed) argument when it is a complex u64 expression,
+                // silently dropping it (irb_emit receives dst instead). We
+                // emit the IR_SYSCALL with aux=0 and then patch the aux field
+                // directly in the IR buffer with two store_u32 calls, which
+                // avoids both the complex expression and the stack arg.
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, 0);
+                irb_irb: u64 = load_u64(b, 0);
+                irb_cnt: u32 = load_u32(irb_irb, 0);
+                irb_lo: u32 = 8 + (irb_cnt - 1) * 32;
+                store_u32(irb_irb, irb_lo + 24, prot_vreg);
+                store_u32(irb_irb, irb_lo + 28, flags_vreg);
                 return dst;
             }
         }
@@ -301,22 +312,40 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
                 irb_emit(b, IR_MOV, flags_vreg, 0, 0, 0x22, 0);
                 dst = irb_alloc_vreg(b);
                 packed_imm = (addr_vreg as u64) | ((arg0_vreg as u64) << 32);
-                packed_aux = (prot_vreg as u64) | ((flags_vreg as u64) << 32);
-                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, packed_aux);
+                // See allocate() above: patch aux directly to avoid the
+                // Rust vumac's 7th-arg miscompilation.
+                irb_emit(b, IR_SYSCALL, dst, 222, 4, packed_imm, 0);
+                irb_irb = load_u64(b, 0);
+                irb_cnt = load_u32(irb_irb, 0);
+                irb_lo = 8 + (irb_cnt - 1) * 32;
+                store_u32(irb_irb, irb_lo + 24, prot_vreg);
+                store_u32(irb_irb, irb_lo + 28, flags_vreg);
                 return dst;
             }
         }
-        // free(addr) → IR_SYSCALL(215, munmap).
+        // free(addr) → IR_SYSCALL(215, munmap). munmap needs (addr, length);
+        // free() only has addr, so we pass length=0 (munmap no-op per POSIX,
+        // which prevents the stale-rsi-as-length bug that would unmap the
+        // entire stack and crash the program after the write).
         if c1 == free_h {
             if free_h != 0 {
-                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
+                free_len_v: u32 = irb_alloc_vreg(b);
+                irb_emit(b, IR_MOV, free_len_v, 0, 0, 0, 0);
+                free_imm: u64 = (arg0_vreg as u64) | ((free_len_v as u64) << 32);
+                irb_emit(b, IR_SYSCALL, 0, 215, 2, free_imm, 0);
                 return 0;
             }
         }
-        // __vuma_free(addr, size) → same as free.
+        // __vuma_free(addr, size) → munmap(addr, size). 2-arg, size is arg1.
         if c1 == vfree_h {
             if vfree_h != 0 {
-                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
+                vfree_size_v: u32 = 0;
+                if c3 >= 2 {
+                    vfree_size_node: u32 = (val >> 32) & 0xFFFFFFFF;
+                    vfree_size_v = irb_lower_expr(b, ast, vfree_size_node);
+                }
+                vfree_imm: u64 = (arg0_vreg as u64) | ((vfree_size_v as u64) << 32);
+                irb_emit(b, IR_SYSCALL, 0, 215, 2, vfree_imm, 0);
                 return 0;
             }
         }
@@ -348,8 +377,14 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         }
         dst = irb_alloc_vreg(b);
         packed_imm: u64 = (arg0_vreg as u64) | ((arg1_vreg as u64) << 32);
-        packed_aux: u64 = arg2_vreg as u64;
-        irb_emit(b, IR_SYSCALL, dst, c1, c3, packed_imm, packed_aux);
+        // See allocate() above: the Rust vumac miscompiles irb_emit's 7th
+        // (stack-passed) arg, so we emit with aux=0 and patch the aux field
+        // (arg2_vreg in the lower 32 bits) directly in the IR buffer.
+        irb_emit(b, IR_SYSCALL, dst, c1, c3, packed_imm, 0);
+        irb_irb = load_u64(b, 0);
+        irb_cnt = load_u32(irb_irb, 0);
+        irb_lo = 8 + (irb_cnt - 1) * 32;
+        store_u32(irb_irb, irb_lo + 24, arg2_vreg);
         return dst;
     }
     
