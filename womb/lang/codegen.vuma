@@ -91,22 +91,26 @@ fn enc_mov_rax_imm64(code: Address, pos: u32, val: u64) -> u32 {
     return pos + 10;
 }
 
-// MOV [rbp-offset], rax: 0x48 0x89 0x45 <disp8>
+// MOV [rbp + disp32], rax: 0x48 0x89 0x85 <disp32 LE>  (7 bytes)
+// `offset` is the u32 two's-complement encoding of a negative displacement
+// (e.g. 0xFFFFFFF8 = -8). disp32 is used unconditionally so any vreg count
+// (>= 1) is handled correctly; for small frames the disp8 form would also
+// work, but using disp32 everywhere keeps the encoding uniform.
 fn enc_store_rax(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x89);
-    emit_byte(code, pos + 2, 0x45);
-    emit_byte(code, pos + 3, offset & 255);  // disp8 (negative offset)
-    return pos + 4;
+    emit_byte(code, pos + 2, 0x85);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
-// MOV rax, [rbp-offset]: 0x48 0x8B 0x45 <disp8>
+// MOV rax, [rbp + disp32]: 0x48 0x8B 0x85 <disp32 LE>  (7 bytes)
 fn enc_load_rax(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x45);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0x85);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
 // ADD rax, rcx: 0x48 0x01 0xC8
@@ -149,50 +153,50 @@ fn enc_mov_edi_imm32(code: Address, pos: u32, val: u32) -> u32 {
 
 // ── Wave 48: additional x86_64 encoders for the full pipeline ──
 
-// MOV rcx, [rbp+disp8]: 48 8B 4D <disp8>
+// MOV rcx, [rbp+disp32]: 48 8B 8D <disp32 LE>  (7 bytes)
 fn enc_load_rcx(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x4D);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0x8D);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
-// MOV rdi, [rbp+disp8]: 48 8B 7D <disp8>
+// MOV rdi, [rbp+disp32]: 48 8B BD <disp32 LE>  (7 bytes)
 fn enc_load_rdi(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x7D);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0xBD);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
-// MOV rsi, [rbp+disp8]: 48 8B 75 <disp8>  (Wave P1-c-8b: syscall arg1)
+// MOV rsi, [rbp+disp32]: 48 8B B5 <disp32 LE>  (7 bytes, syscall arg1)
 fn enc_load_rsi(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x75);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0xB5);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
-// MOV rdx, [rbp+disp8]: 48 8B 55 <disp8>  (Wave P1-c-8b: syscall arg2)
+// MOV rdx, [rbp+disp32]: 48 8B 95 <disp32 LE>  (7 bytes, syscall arg2)
 fn enc_load_rdx(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x55);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0x95);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
-// MOV r10, [rbp+disp8]: 4C 8B 55 <disp8>  (Wave P1-c-8b: syscall arg3)
+// MOV r10, [rbp+disp32]: 4C 8B 95 <disp32 LE>  (7 bytes, syscall arg3)
 // (REX.WR for r10: W=1 64-bit operand, R=1 extends ModR/M reg field to r10.)
 fn enc_load_r10(code: Address, pos: u32, offset: u32) -> u32 {
     emit_byte(code, pos, 0x4C);
     emit_byte(code, pos + 1, 0x8B);
-    emit_byte(code, pos + 2, 0x55);
-    emit_byte(code, pos + 3, offset & 255);
-    return pos + 4;
+    emit_byte(code, pos + 2, 0x95);
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
+    return pos + 7;
 }
 
 // IMUL rax, rcx: 48 0F AF C1
@@ -285,34 +289,18 @@ fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
 // addressing convention as enc_load_rax / enc_store_rax, plus a [rcx + disp]
 // form for the actual memory access (the address vreg is loaded into RCX).
 
-// LEA rax, [rbp - offset]:
-//   48 8D 45 <disp8>          (if offset <= 127 — 4 bytes)
-//   48 8D 85 <disp32 LE>      (otherwise — 7 bytes)
-// `offset` is the vreg's stack-slot displacement (a positive value that
-// represents a NEGATIVE displacement from rbp; vreg_offset returns the
-// two's-complement byte for the disp8 form, and we pass that same byte
-// value here). For the disp32 form, the caller passes the raw u32
-// two's-complement encoding of the negative displacement.
+// LEA rax, [rbp + disp32]: 48 8D 85 <disp32 LE>  (7 bytes)
+// `offset` is the u32 two's-complement encoding of a NEGATIVE displacement
+// from rbp (e.g. 0xFFFFFFF8 = -8), as returned by vreg_offset. disp32 is
+// used unconditionally so any vreg count (>= 1) is handled correctly.
 //
 // Used by IR_ALLOC: the dst vreg's stack slot IS the allocation; we
 // compute the slot's address with LEA and store it back into the slot.
 fn enc_lea_rax_rbp_offset(code: Address, pos: u32, offset: u32) -> u32 {
-    // offset is a two's-complement byte from vreg_offset (e.g. 240 = -16).
-    // For disp8: use as-is (works for offsets -128..127, i.e. vregs 1-16).
-    // For disp32: sign-extend the byte to 32 bits (0xFFFFFF00 | offset).
-    if offset <= 127 {
-        emit_byte(code, pos, 0x48);
-        emit_byte(code, pos + 1, 0x8D);
-        emit_byte(code, pos + 2, 0x45);
-        emit_byte(code, pos + 3, offset & 255);  // disp8 (two's-complement negative)
-        return pos + 4;
-    }
-    // Sign-extend the 8-bit two's-complement value to 32 bits.
-    disp32: u32 = 0xFFFFFF00 | offset;
     emit_byte(code, pos, 0x48);
     emit_byte(code, pos + 1, 0x8D);
     emit_byte(code, pos + 2, 0x85);
-    emit_u32(code, pos + 3, disp32);  // disp32 (sign-extended negative)
+    emit_u32(code, pos + 3, offset);  // disp32 (two's-complement negative)
     return pos + 7;
 }
 
@@ -623,14 +611,18 @@ fn emit_print_int_routine(code: Address, pos: u32) -> u32 {
     return pos + 86;
 }
 
-// vreg_offset(N): the signed disp8 byte for the stack slot of vreg N.
+// vreg_offset(N): the stack-slot displacement for vreg N, as a u32 holding
+// the two's-complement encoding of a NEGATIVE displacement from rbp.
 // Stack layout: [rbp - 8] is vreg 1, [rbp - 16] is vreg 2, etc.
 // (vreg 0 is reserved — see ir_builder.vuma's irb_new — and never loaded.)
-// LIMIT: only valid for vreg 1..15 (disp8 range -128..+127). For larger
-// frames, use a disp32 encoding (TODO — not needed for hello.vuma which
-// uses < 5 vregs). Returns the two's-complement byte value.
+// The callers feed this value into disp32-style load/store encoders, which
+// emit it as a 4-byte little-endian signed displacement. 0 - 8*vreg wraps in
+// u32 arithmetic, producing the correct two's-complement negative value
+// (e.g. vreg 1 -> 0xFFFFFFF8 = -8, vreg 17 -> 0xFFFFFF78 = -136).
 fn vreg_offset(vreg: u32) -> u32 {
-    return (256 - 8 * vreg) & 0xFF;
+    // 0 - 8*vreg wraps in u32 arithmetic, producing the correct
+    // two's complement negative value (e.g., vreg 1 -> 0xFFFFFFF8 = -8).
+    return 0 - 8 * vreg;
 }
 
 // Scan the IR buffer to find the highest vreg id used. Used to size the
