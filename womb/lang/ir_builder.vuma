@@ -60,16 +60,27 @@ const IR_SYSCALL: u32 = 20;
 
 const IR_SIZE: u32 = 32;
 
-// Builder state (32 bytes):
+// Builder state (48 bytes):
 //   0-7:   ir_buf ptr
 //   8-11:  next_vreg (u32)
 //   12-15: next_label (u32)
 //   16-23: symtab ptr (BTreeMap or simple array)
 //   24-27: symtab_count
-//   28-31: _pad
+//   28-31: alloc_hash      (FNV-1a of "allocate"       — Wave P6.3)
+//   32-35: free_hash       (FNV-1a of "free"            — Wave P6.3)
+//   36-39: vuma_alloc_hash (FNV-1a of "__vuma_alloc"   — Wave P6.3)
+//   40-43: vuma_free_hash  (FNV-1a of "__vuma_free"    — Wave P6.3)
+//   44-47: _pad
+//
+// Wave P6.3: the 4 callee-name hashes are set by the driver (full_lexer.vuma
+// via irb_set_alloc_hashes) before irb_lower_fn runs, so the NK_CALL handler
+// can intercept allocate/free calls and lower them to IR_ALLOC / IR_SYSCALL
+// instead of the generic IR_CALL (which the codegen skips for non-print_int
+// callees). 0 means "not set" (no interception); the FNV-1a hash of any
+// non-empty identifier is always non-zero (initial offset 0x811C9DC5).
 
 fn irb_new(ir_buf: Address) -> Address {
-    b = __vuma_alloc(32);
+    b = __vuma_alloc(48);
     store_u64(b, 0, ir_buf);
     store_u32(b, 8, 1);   // next_vreg starts at 1 (0 is reserved)
     store_u32(b, 12, 0);  // next_label
@@ -77,7 +88,24 @@ fn irb_new(ir_buf: Address) -> Address {
     symtab = __vuma_alloc(4096);  // 512 symbols max
     store_u64(b, 16, symtab);
     store_u32(b, 24, 0);  // symtab count
+    // Wave P6.3: hash slots default to 0 (no interception) until the driver
+    // calls irb_set_alloc_hashes. __vuma_alloc returns zeroed mmap memory,
+    // so this is belt-and-suspenders.
+    store_u32(b, 28, 0);  // alloc_hash
+    store_u32(b, 32, 0);  // free_hash
+    store_u32(b, 36, 0);  // vuma_alloc_hash
+    store_u32(b, 40, 0);  // vuma_free_hash
     return b;
+}
+
+// Wave P6.3: stash the 4 callee-name hashes computed by the driver
+// (full_lexer.vuma::main via name_hash) into the builder state. Must be
+// called after irb_new and before irb_lower_fn / irb_lower_expr.
+fn irb_set_alloc_hashes(b: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) {
+    store_u32(b, 28, alloc_h);
+    store_u32(b, 32, free_h);
+    store_u32(b, 36, valloc_h);
+    store_u32(b, 40, vfree_h);
 }
 
 fn irb_alloc_vreg(b: Address) -> u32 {
@@ -224,11 +252,60 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
     // Wave 48: lower arg0 (the only arg we support in the bootstrap) and
     // stash its vreg in the IR_CALL's `imm` field (lower 32 bits). The
     // codegen reads this when emitting the print_int syscall sequence.
+    //
+    // Wave P6.3: intercept allocate / __vuma_alloc / free / __vuma_free
+    // before the generic IR_CALL emission. The codegen skips IR_CALL for
+    // any callee whose hash != print_int_hash, so without this intercept,
+    // heap-allocating programs would silently no-op. We lower:
+    //   allocate(n) / __vuma_alloc(n) → IR_ALLOC (dst=fresh vreg, imm=n_vreg)
+    //   free(addr) / __vuma_free(addr, size) → IR_SYSCALL(215, [addr, ...])
+    // The 4 callee-name hashes are stashed in the builder state by the
+    // driver via irb_set_alloc_hashes (0 = not set, no interception).
     if kind == 5 {
         arg0_vreg: u32 = 0;
         if c3 >= 1 {
             arg0_node: u32 = val & 0xFFFFFFFF;
             arg0_vreg = irb_lower_expr(b, ast, arg0_node);
+        }
+        alloc_h: u32 = load_u32(b, 28);
+        free_h: u32 = load_u32(b, 32);
+        valloc_h: u32 = load_u32(b, 36);
+        vfree_h: u32 = load_u32(b, 40);
+        // allocate(size) → IR_ALLOC: dst=fresh vreg (the result pointer),
+        // imm=size_vreg (codegen ignores imm for IR_ALLOC — the dst vreg's
+        // 8-byte stack slot IS the allocation per Wave P6.1).
+        if c1 == alloc_h {
+            if alloc_h != 0 {
+                dst = irb_alloc_vreg(b);
+                irb_emit(b, IR_ALLOC, dst, 0, 0, arg0_vreg, 0);
+                return dst;
+            }
+        }
+        // __vuma_alloc(size) → same as allocate.
+        if c1 == valloc_h {
+            if valloc_h != 0 {
+                dst = irb_alloc_vreg(b);
+                irb_emit(b, IR_ALLOC, dst, 0, 0, arg0_vreg, 0);
+                return dst;
+            }
+        }
+        // free(addr) → IR_SYSCALL(215 = munmap): dst=0 (void return),
+        // lhs=215 (VUMA/asm-generic munmap nr), rhs=1 (arg_count),
+        // imm.lo=arg0_vreg (the addr). The codegen's IR_SYSCALL handler
+        // translates nr 215 → x86_64 nr 11 and loads arg0 into RDI.
+        if c1 == free_h {
+            if free_h != 0 {
+                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
+                return 0;
+            }
+        }
+        // __vuma_free(addr, size) → same as free (size arg ignored,
+        // matching the P2 behavior where free(addr) lowers to munmap(addr, 0)).
+        if c1 == vfree_h {
+            if vfree_h != 0 {
+                irb_emit(b, IR_SYSCALL, 0, 215, 1, arg0_vreg, 0);
+                return 0;
+            }
         }
         dst = irb_alloc_vreg(b);
         // IR_CALL: dst=result vreg, lhs=callee_hash, rhs=arg_count,
@@ -398,7 +475,7 @@ fn irb_lower_fn(b: Address, ast: u64, node_idx: u32) {
 fn irb_free(b: Address) {
     symtab: u64 = load_u64(b, 16);
     __vuma_free(symtab, 4096);
-    __vuma_free(b, 32);
+    __vuma_free(b, 48);  // Wave P6.3: builder state grew 32 → 48 bytes
 }
 
 // ============================================================================
@@ -595,9 +672,17 @@ fn scg_construct(ast: Address) -> u32 {
 // and passes the FNV-1a hash of "main" (computed by name_hash in
 // full_parser.vuma, or by an equivalent helper in the driver).
 //
+// Wave P6.3: the driver also passes the FNV-1a hashes of "allocate",
+// "free", "__vuma_alloc", and "__vuma_free" so the NK_CALL handler can
+// intercept those callees and lower them to IR_ALLOC / IR_SYSCALL(215)
+// instead of the generic IR_CALL (which the codegen skips for non-print_int
+// callees). The hashes are stashed in the builder state via
+// irb_set_alloc_hashes before lowering begins.
+//
 // Returns 1 if `main` was found and lowered, 0 otherwise.
-fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32 {
+fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) -> u32 {
     b: Address = irb_new(ir_buf);
+    irb_set_alloc_hashes(b, alloc_h, free_h, valloc_h, vfree_h);
     count: u32 = load_u32(ast, 0);
     i: u32 = 0;
     found: u32 = 0;

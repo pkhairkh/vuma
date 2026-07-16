@@ -92,7 +92,7 @@ extern "C" {
     fn name_hash(src: Address, start: u32, len: u32) -> u32;       // full_parser.vuma
     fn parse(tokens: Address, token_count: u32, src: Address, ast: Address, ast_cap: u32) -> u32;  // full_parser.vuma
     fn scg_construct(ast: Address) -> u32;                          // ir_builder.vuma (stub)
-    fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address) -> u32;  // ir_builder.vuma
+    fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) -> u32;  // ir_builder.vuma (Wave P6.3: +4 alloc/free callee hashes)
     fn bd_infer(ir_buf: Address) -> u32;                            // ir_builder.vuma (stub)
     fn ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
     fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
@@ -644,6 +644,77 @@ fn print_int_str() -> Address {
     return p;
 }
 
+// Wave P6.3: string-literal helpers for the 4 intercepted alloc/free
+// callee names. The driver computes their FNV-1a hashes via name_hash and
+// passes them to irb_build_main, which stashes them in the IR builder state
+// so the NK_CALL handler can lower allocate/free calls to IR_ALLOC /
+// IR_SYSCALL(215) instead of the generic IR_CALL (which the codegen skips
+// for non-print_int callees). Each helper builds a NUL-terminated string in
+// a heap buffer; the caller frees with __vuma_free(ptr, <len+1>).
+
+// "allocate" (8 chars + NUL = 9 bytes).
+fn allocate_str() -> Address {
+    p = __vuma_alloc(9);
+    *(p + 0) = 97;    // a
+    *(p + 1) = 108;   // l
+    *(p + 2) = 108;   // l
+    *(p + 3) = 111;   // o
+    *(p + 4) = 99;    // c
+    *(p + 5) = 97;    // a
+    *(p + 6) = 116;   // t
+    *(p + 7) = 101;   // e
+    *(p + 8) = 0;     // NUL
+    return p;
+}
+
+// "free" (4 chars + NUL = 5 bytes).
+fn free_str() -> Address {
+    p = __vuma_alloc(5);
+    *(p + 0) = 102;   // f
+    *(p + 1) = 114;   // r
+    *(p + 2) = 101;   // e
+    *(p + 3) = 101;   // e
+    *(p + 4) = 0;     // NUL
+    return p;
+}
+
+// "__vuma_alloc" (12 chars + NUL = 13 bytes).
+fn vuma_alloc_str() -> Address {
+    p = __vuma_alloc(13);
+    *(p + 0) = 95;    // _
+    *(p + 1) = 95;    // _
+    *(p + 2) = 118;   // v
+    *(p + 3) = 117;   // u
+    *(p + 4) = 109;   // m
+    *(p + 5) = 97;    // a
+    *(p + 6) = 95;    // _
+    *(p + 7) = 97;    // a
+    *(p + 8) = 108;   // l
+    *(p + 9) = 108;   // l
+    *(p + 10) = 111;  // o
+    *(p + 11) = 99;   // c
+    *(p + 12) = 0;    // NUL
+    return p;
+}
+
+// "__vuma_free" (11 chars + NUL = 12 bytes).
+fn vuma_free_str() -> Address {
+    p = __vuma_alloc(12);
+    *(p + 0) = 95;    // _
+    *(p + 1) = 95;    // _
+    *(p + 2) = 118;   // v
+    *(p + 3) = 117;   // u
+    *(p + 4) = 109;   // m
+    *(p + 5) = 97;    // a
+    *(p + 6) = 95;    // _
+    *(p + 7) = 102;   // f
+    *(p + 8) = 114;   // r
+    *(p + 9) = 101;   // e
+    *(p + 10) = 101;  // e
+    *(p + 11) = 0;    // NUL
+    return p;
+}
+
 // Build the NUL-terminated string "a.out" in a 6-byte heap buffer.
 // This is the output path for the emitted ELF executable. The caller frees
 // with __vuma_free(ptr, 6). The file is created with mode 0o755 so it's
@@ -746,15 +817,35 @@ fn main() -> i32 {
     //   main_hash = FNV-1a("main"). We build the literal "main" string,
     //   hash it via name_hash (defined in full_parser.vuma, declared as
     //   extern above), then free the string.
+    //
+    //   Wave P6.3: also compute the FNV-1a hashes of "allocate", "free",
+    //   "__vuma_alloc", and "__vuma_free" so the IR builder's NK_CALL
+    //   handler can intercept those callees and lower them to IR_ALLOC /
+    //   IR_SYSCALL(215) instead of the generic IR_CALL (which the codegen
+    //   skips for non-print_int callees). This unblocks heap-allocating
+    //   programs compiled via the bootstrap.
     mstr = main_str();
     main_hash: u32 = name_hash(mstr, 0, 4);
     __vuma_free(mstr, 5);
+
+    astr = allocate_str();
+    alloc_h: u32 = name_hash(astr, 0, 8);
+    __vuma_free(astr, 9);
+    fstr = free_str();
+    free_h: u32 = name_hash(fstr, 0, 4);
+    __vuma_free(fstr, 5);
+    vastr = vuma_alloc_str();
+    valloc_h: u32 = name_hash(vastr, 0, 12);
+    __vuma_free(vastr, 13);
+    vfstr = vuma_free_str();
+    vfree_h: u32 = name_hash(vfstr, 0, 11);
+    __vuma_free(vfstr, 12);
 
     //   IR buffer layout: [count: u32][cap: u32][instr * count: 32 bytes]
     ir_buf = __vuma_alloc(ir_buf_size);
     store_u32(ir_buf, 0, 0);       // count = 0
     store_u32(ir_buf, 4, ir_cap);  // capacity
-    found: u32 = irb_build_main(ast, main_hash, ir_buf);
+    found: u32 = irb_build_main(ast, main_hash, ir_buf, alloc_h, free_h, valloc_h, vfree_h);
     if found == 0 {
         __vuma_free(src, src_cap);
         __vuma_free(tokens, token_buf_size);
