@@ -1898,7 +1898,7 @@ impl Backend for M68kBackend {
             // `SLE D4` (Scc with cc=LE into D4) — a no-op on SP that left the
             // pushed pgoff on the stack, so RTS would pop pgoff(0) as the
             // return address and crash. Fixed in wave 6 to the real ADDQ.
-            code.extend_from_slice(&[0x58, 0x9F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
+            code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
             // Restore D3-D5: MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038
             code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
             // RTS
@@ -2127,7 +2127,7 @@ impl Backend for M68kBackend {
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, SP       (pop the pushed pgoff; restore SP before RTS)
             // Encoding: 0x58CF = ADDQ.L #4, A7  (data=4, size=long, mode=An, reg=A7)
-            code.extend_from_slice(&[0x58, 0x9F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
+            code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
             // RTS
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("mmap".to_string(), code));
@@ -2246,7 +2246,7 @@ impl Backend for M68kBackend {
             code.extend(Instruction::Link { reg: Gpr::A6, disp: -32 }.encode());
             // MOVEM.L D3-D7, -(SP) — save callee-saved
             // Encoding: 0x48E7 + 2-byte mask. Mask for D3-D7 = 0x00F8.
-            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x1F]);
+            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
 
             // D4 = D1 (save input value)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
@@ -2281,10 +2281,10 @@ impl Backend for M68kBackend {
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, A7 (pop the 4-byte '-' buffer)
             // ADDQ.L #4, An: 0101_100_0_11_001_111 = 0x58CF
-            code.extend_from_slice(&[0x58, 0x9F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
+            code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
             // NEG.L D4 (negate D4)
             // NEG.L Dn: 0x4480 | (dn<<9). For D4: 0x4480 | (4<<9) = 0x4C80
-            code.extend_from_slice(&[0x4C, 0x80]);
+            code.extend_from_slice(&[0x44, 0x84]);
 
             // ── positive: ──
             let positive_offset = code.len();
@@ -2329,7 +2329,7 @@ impl Backend for M68kBackend {
             code.extend_from_slice(&[0x06, 0x07, 0x00, 0x30]);
             // SUBQ.L #1, A0 (A0--)
             // SUBQ.L #1, An: 0101_001_1_11_001_000 = 0x53C8 for A0
-            code.extend_from_slice(&[0x53, 0x90]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
+            code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
             // MOVE.B D7, (A0) (store digit)
             // MOVE.B Dn, (An): 0x1000 | (dn<<9) | (2<<6) | an. For D7, A0: 0x1087
             code.extend_from_slice(&[0x10, 0x87]);
@@ -2354,7 +2354,7 @@ impl Backend for M68kBackend {
             // MOVEQ #48, D7 ('0')
             code.extend(Instruction::Moveq { dst: Gpr::D7, imm: 48 }.encode());
             // SUBQ.L #1, A0
-            code.extend_from_slice(&[0x53, 0x90]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
+            code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
             // MOVE.B D7, (A0)
             code.extend_from_slice(&[0x10, 0x87]);
             // ADDQ.L #1, D5
@@ -2412,7 +2412,7 @@ impl Backend for M68kBackend {
             // LINK A6, #-16
             code.extend(Instruction::Link { reg: Gpr::A6, disp: -16 }.encode());
             // MOVEM.L D3-D7, -(SP)
-            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x1F]);
+            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
 
             // D4 = D1 (save value)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
@@ -2439,7 +2439,7 @@ impl Backend for M68kBackend {
             // ADDI.B #39, D7 (alpha adjust: 'a'-'9' = 39)
             code.extend_from_slice(&[0x06, 0x07, 0x00, 0x27]);
             // store: SUBQ.L #1, A0
-            code.extend_from_slice(&[0x53, 0x90]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
+            code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
             // MOVE.B D7, (A0)
             code.extend_from_slice(&[0x10, 0x87]);
             // LSR.L #4, D4 (shift value right by 4)
@@ -2505,7 +2505,7 @@ impl Backend for M68kBackend {
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, A7 (pop the 4-byte newline buffer) — 0x58CF
-            code.extend_from_slice(&[0x58, 0x9F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
+            code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
             // RTS
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("print_newline".to_string(), code));
