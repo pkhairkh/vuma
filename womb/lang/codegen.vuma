@@ -1185,7 +1185,22 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
                     pos = enc_call_rel32(code, pos, print_int_offset);
                 }
             }
-            // else: real calls not supported in bootstrap; skip silently.
+            // allocate/__vuma_alloc → call __vuma_alloc stub (mmap wrapper)
+            if lhs == ALLOC_HASH {
+                if rhs >= 1 {
+                    arg0: u32 = imm & 0xFFFFFFFF;
+                    pos = enc_load_rdi(code, pos, vreg_offset(arg0));
+                }
+                pos = enc_call_rel32(code, pos, VUMA_ALLOC_OFFSET);
+                pos = enc_store_rax(code, pos, vreg_offset(dst));
+            }
+            // free/__vuma_free → call __vuma_free stub (munmap wrapper)
+            if lhs == FREE_HASH {
+                if rhs >= 1 {
+                    pos = enc_load_rdi(code, pos, vreg_offset(imm & 0xFFFFFFFF));
+                }
+                pos = enc_call_rel32(code, pos, VUMA_FREE_OFFSET);
+            }
         }}
         else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8 / P1-c-8b)
             // x86_64 syscall ABI: nr in EAX, args in RDI/RSI/RDX/R10/R8/R9,
