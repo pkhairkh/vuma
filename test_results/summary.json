@@ -1,20 +1,15 @@
 {
-  "timestamp": "2026-07-16 18:14:36 UTC",
+  "timestamp": "2026-07-16 18:46:45 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
-  "matches": 109065,
+  "matches": 109073,
   "skipped": 0,
   "pass_rate": "99.92%",
   "per_backend": {
     "aarch64": {
       "total": 5745,
-      "match": 5705,
-      "skipped": 0
-    },
-    "aarch64_be": {
-      "total": 5745,
-      "match": 5704,
+      "match": 5708,
       "skipped": 0
     },
     "x86_64": {
@@ -27,14 +22,9 @@
       "match": 5745,
       "skipped": 0
     },
-    "mips64": {
+    "aarch64_be": {
       "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "arm32": {
-      "total": 5745,
-      "match": 5744,
+      "match": 5708,
       "skipped": 0
     },
     "armeb": {
@@ -42,12 +32,7 @@
       "match": 5745,
       "skipped": 0
     },
-    "ppc64": {
-      "total": 5745,
-      "match": 5745,
-      "skipped": 0
-    },
-    "ppc64le": {
+    "mips64": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -57,12 +42,17 @@
       "match": 5745,
       "skipped": 0
     },
-    "m68k": {
+    "ppc64le": {
       "total": 5745,
-      "match": 5742,
+      "match": 5745,
       "skipped": 0
     },
-    "loongarch64": {
+    "ppc64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "arm32": {
       "total": 5745,
       "match": 5745,
       "skipped": 0
@@ -75,6 +65,16 @@
     "alpha": {
       "total": 5745,
       "match": 5742,
+      "skipped": 0
+    },
+    "loongarch64": {
+      "total": 5745,
+      "match": 5745,
+      "skipped": 0
+    },
+    "riscv32": {
+      "total": 5745,
+      "match": 5745,
       "skipped": 0
     },
     "x86_32": {
@@ -92,9 +92,9 @@
       "match": 5745,
       "skipped": 0
     },
-    "riscv32": {
+    "m68k": {
       "total": 5745,
-      "match": 5745,
+      "match": 5742,
       "skipped": 0
     },
     "wasm32": {
@@ -104,8 +104,8 @@
     }
   },
   "ive_verification": {
-    "total": 109154,
-    "pass": 109154,
+    "total": 109155,
+    "pass": 109155,
     "fail": 0,
     "pass_rate": "100.00%"
   }
