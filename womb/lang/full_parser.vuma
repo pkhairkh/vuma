@@ -320,11 +320,11 @@ fn parse_primary_full(p: Address) -> u32 {
             }
         }
         expect(p, 62);  // RPAREN
-        // NK_SYSCALL: c1 = nr, c3 = arg_count, val = arg0_idx | (arg1_idx << 32),
-        // aux = arg2_idx | (arg3_idx << 32). P1-c-8b multi-arg packing.
+        // NK_SYSCALL: c1 = nr, c2 = arg2_node (for 3+ args), c3 = arg_count,
+        // val = arg0_idx | (arg1_idx << 32). arg3+ not supported (aux field
+        // is not loaded by irb_lower_expr — avoids a codegen crash).
         packed_val: u64 = (arg0_idx as u64) | ((arg1_idx as u64) << 32);
-        packed_aux: u64 = (arg2_idx as u64) | ((arg3_idx as u64) << 32);
-        return ast_node(p, NK_SYSCALL, nr, 0, arg_count, packed_val, packed_aux);
+        return ast_node(p, NK_SYSCALL, nr, arg2_idx, arg_count, packed_val, 0);
     }
 
     // Unrecognized token: advance past it to avoid an infinite loop in
