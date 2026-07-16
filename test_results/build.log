@@ -1,20 +1,22 @@
+   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
+   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
-warning: unused variable: `inline_threshold`
-    --> src/codegen/src/opt.rs:1605:5
+   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
+   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+warning: variable does not need to be mutable
+    --> src/codegen/src/opt.rs:1645:13
      |
-1605 |     inline_threshold: u32,
-     |     ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inline_threshold`
+1645 |         let mut f = f;
+     |             ----^
+     |             |
+     |             help: remove this `mut`
      |
-     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused variable: `func_refs`
-    --> src/codegen/src/opt.rs:1614:9
-     |
-1614 |     let func_refs: HashMap<String, &IRFunction> =
-     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_func_refs`
-
+   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
+   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-warning: `vuma-codegen` (lib) generated 2 warnings (run `cargo fix --lib -p vuma-codegen` to apply 2 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 37.02s
+warning: `vuma-codegen` (lib) generated 1 warning (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
+    Finished `release-fast` profile [optimized] target(s) in 1m 34s
