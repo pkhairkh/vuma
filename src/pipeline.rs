@@ -6805,8 +6805,10 @@ pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffect
     // in-place between analysis and transform.
     for func in &mut program.functions {
         let escape_info = escape_analysis::analyze_escapes(func);
-        summary.sroa_promoted += escape_analysis::scalar_replace_aggregates(func, &escape_info);
-        summary.allocs_elided += escape_analysis::elide_non_escaping_allocs(func, &escape_info);
+        let sroa = escape_analysis::scalar_replace_aggregates(func, &escape_info);
+        let elided = escape_analysis::elide_non_escaping_allocs(func, &escape_info);
+        summary.sroa_promoted += sroa;
+        summary.allocs_elided += elided;
     }
 
     // Phase 2: interprocedural effect analysis on the post-transform IR.
