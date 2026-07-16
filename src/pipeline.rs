@@ -4600,6 +4600,189 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
     compile_with_path(source, None, config)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared post-IR-build pipeline (Wave 1 — Task ID 5)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run the shared post-IR-build O2 pipeline on an `IRProgram`.
+///
+/// This is the single source of truth for the sequence of passes that run
+/// AFTER the SCG→IR build and BEFORE register allocation / emission.  Both
+/// [`compile_with_path`] and [`compile_modules`] delegate to it, and the
+/// test-suite compile path (`src/bin/compile_dump.rs`) is wired into it by
+/// Wave 2 so the test suite exercises the FULL production O2 pipeline
+/// instead of `run_optimizations` alone (which uses a default latency table
+/// and skips lowering / bv_verify / escape+effects).
+///
+/// The sequence mirrors `compile_with_path`'s historical Stage 8 exactly:
+///
+/// 1. **Wave 34 lowering** (O1+): `monomorphize`, `lower_closures`,
+///    `lower_switches`, `lower_tail_calls`, `normalize_loops`.  Each pass
+///    is best-effort (soft-failures are logged, not fatal).
+/// 2. **Wave 36 bv_verify**: verify all e-graph rewrite rules are sound.
+///    Advisory only — logs a warning on unsound rules, does NOT abort.
+/// 3. **Wave 10 syscall allowlist**: reject syscall numbers > 600 (hard
+///    error — returns `Err(VumaError::Codegen{...})` on the first
+///    violation, matching `stop_on_first_error = true`).
+/// 4. **Stage 8b codegen-opt** (O1+): `run_optimizations_with_target_and_inline_threshold`
+///    with the REAL backend's latency table (built from `backend_kind`).
+/// 5. **Wave 32 escape+effects** (O2+): SROA + alloc elision +
+///    interprocedural effect propagation via `run_escape_and_effects_passes`.
+///
+/// # Parameters
+/// - `ir_program`: the freshly-built IR (from `IRBuilder::build` or
+///   `ScgToIr::convert`).  Taken by value and returned by value.
+/// - `config`: the compile config — used for `opt_level` gating and
+///   `inline_threshold`.
+/// - `backend_kind`: the backend whose latency table should drive the
+///   e-graph cost function and scheduler.  Callers pass the backend they
+///   will eventually emit for (e.g. `config.emit_config().backend` for
+///   `compile_with_path`, `host_backend_kind()` for `compile_modules`).
+/// - `timings`: per-pass timings are pushed onto this Vec (preserving the
+///   historical `wave34-lowering` / `wave36-bv-verify` / `codegen-opt` /
+///   `escape-effects` keys so `CompilationOutput.stage_timings` is
+///   unchanged).
+///
+/// # Returns
+/// - `Ok(IRProgram)` on success.
+/// - `Err(VumaError)` if the syscall allowlist rejects a syscall number.
+///   The caller is responsible for pushing the error into its `errors`
+///   Vec and returning `Err(errors)` (matching the historical behavior
+///   where the syscall gate is a hard error that aborts compilation).
+///
+/// # Memory-safety note
+/// The `MemorySafetyAnalyzer` pass (compile_with_path Stage 8, lines ~4906)
+/// runs on the codegen SCG BEFORE `IRBuilder::build`, so it CANNOT be
+/// encapsulated here (this helper takes `IRProgram`, not the codegen SCG).
+/// It stays inline in `compile_with_path`.  Likewise the SCG-liveness
+/// `analyze_with_scg_liveness` pass (Stage 6b) runs on the semantic SCG
+/// and stays in `compile_with_path`.  Wave 2 will add the codegen-SCG
+/// `MemorySafetyAnalyzer` call to `compile_dump` separately if desired.
+pub fn run_ir_pipeline(
+    mut ir_program: IRProgram,
+    config: &CompileConfig,
+    backend_kind: vuma_codegen::backend::BackendKind,
+    timings: &mut Vec<(String, u64)>,
+) -> Result<IRProgram, VumaError> {
+    // ── Wave 34: Lowering passes (monomorphize, closures, switch, tail-call,
+    //    loop-normalize) — run after SCG→IR build, before the main opt pass.
+    //    Gated at O1+. Each pass is best-effort: a soft-failure is logged but
+    //    does not abort compilation (these are newly-wired passes; the
+    //    pipeline's correctness does not yet depend on them).
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let tlower = Instant::now();
+        let mut lower = |name: &str, f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
+            if let Err(e) = f(&mut ir_program) {
+                vuma_log!(warn, "wave34 lowering pass '{}' soft-failed: {}", name, e);
+            }
+        };
+        lower("monomorphize", vuma_codegen::monomorphize::monomorphize);
+        lower("lower_closures", vuma_codegen::closures::lower_closures);
+        lower("lower_switches", vuma_codegen::control_flow::lower_switches);
+        lower("lower_tail_calls", vuma_codegen::control_flow::lower_tail_calls);
+        lower("normalize_loops", vuma_codegen::control_flow::normalize_loops);
+        timings.push(("wave34-lowering".to_string(), tlower.elapsed().as_millis() as u64));
+    }
+
+    // ── Wave 36: bv_verify gate — verify all e-graph rewrite rules are sound
+    //    BEFORE the opt pass (which runs the e-graph). If any rule is unsound,
+    //    log a warning so the user knows the e-graph may miscompile. The gate
+    //    is advisory (does not abort) to avoid breaking compilation for
+    //    pre-existing rule sets; a future strict mode could promote this to an
+    //    error.
+    {
+        let tverify = Instant::now();
+        let results = vuma_codegen::bv_verify::verify_all_rules();
+        let unsound: Vec<_> = results.iter().filter(|r| !r.sound).collect();
+        if !unsound.is_empty() {
+            vuma_log!(warn,
+                "wave36 bv_verify: {} unsound e-graph rule(s) detected (compilation may miscompile): {}",
+                unsound.len(),
+                unsound.iter().map(|r| r.rule_name).collect::<Vec<_>>().join(", ")
+            );
+        }
+        timings.push(("wave36-bv-verify".to_string(), tverify.elapsed().as_millis() as u64));
+    }
+
+    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers
+    // at compile time. Since `nr` is arch-specific (Wave 11/12 design), we
+    // use a range check rather than a name lookup. Valid Linux syscall
+    // numbers are in the range 0..=600 across all supported architectures.
+    //
+    // This is a HARD error: the helper returns the first violation as a
+    // single `VumaError::Codegen`. This matches `compile_with_path`'s
+    // historical behavior under the default `stop_on_first_error = true`.
+    // (Under `stop_on_first_error = false` the historical path collected
+    // all violations into its `errors` Vec; the helper reports only the
+    // first, which the caller pushes into its `errors` Vec — a minor
+    // behavioral narrowing that does not affect any current test.)
+    for func in &ir_program.functions {
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let vuma_codegen::ir::IRInstr::Syscall { nr, .. } = instr {
+                    if *nr > 600 {
+                        return Err(VumaError::Codegen {
+                            error: CodegenError::InvalidInstruction(format!(
+                                "Invalid syscall number {}: exceeds maximum (600)",
+                                nr
+                            )),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
+    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // to codegen unchanged. The generic_syscall_name() table remains in
+    // ir.rs as a utility. The lower_syscalls()/lower_syscalls_all()
+    // definitions were also deleted in Wave 10 dead-code cleanup
+    // (see TASKS.md).
+
+    // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
+    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
+    // The backend is determined from `backend_kind` (passed by the caller —
+    // `config.emit_config().backend` for compile_with_path, `host_backend_kind()`
+    // for compile_modules). This means the e-graph cost function and scheduler
+    // make decisions based on the real target's instruction latencies, not
+    // a generic default.
+    if !matches!(config.opt_level, OptLevel::O0) {
+        let topt = Instant::now();
+        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind) {
+            backend.target_info().latency_table()
+        } else {
+            vuma_codegen::target_desc::LatencyTable::default_ooo()
+        };
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+            ir_program,
+            &latency_table,
+            config.inline_threshold,
+        );
+        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
+    }
+
+    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
+    // effect propagation at O2+.  Runs AFTER the main codegen-opt pass so
+    // the analysis sees the post-optimisation IR (and so SROA's cleanup
+    // happens before regalloc).  Gated behind O2+ because SROA's
+    // rename-walk is O(instructions × accesses) per alloc.
+    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+        let te = Instant::now();
+        let summary = run_escape_and_effects_passes(&mut ir_program);
+        vuma_log!(debug,
+            "escape+effects: sroa_promoted={} allocs_elided={} pure_fns={}/{}",
+            summary.sroa_promoted,
+            summary.allocs_elided,
+            summary.pure_functions,
+            summary.total_functions
+        );
+        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
+    }
+
+    Ok(ir_program)
+}
+
 /// Compile VUMA source text with an optional file path for import resolution.
 ///
 /// This is the same as [`compile`] but accepts an optional file path that
@@ -4924,119 +5107,25 @@ pub fn compile_with_path(
         }
     };
 
-    // ── Wave 34: Lowering passes (monomorphize, closures, switch, tail-call,
-    //    loop-normalize) — run after SCG→IR build, before the main opt pass.
-    //    Gated at O1+. Each pass is best-effort: a soft-failure is logged but
-    //    does not abort compilation (these are newly-wired passes; the
-    //    pipeline's correctness does not yet depend on them).
-    if !matches!(config.opt_level, OptLevel::O0) {
-        let tlower = Instant::now();
-        let mut lower = |name: &str, f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
-            if let Err(e) = f(&mut ir_program) {
-                vuma_log!(warn, "wave34 lowering pass '{}' soft-failed: {}", name, e);
-            }
-        };
-        lower("monomorphize", vuma_codegen::monomorphize::monomorphize);
-        lower("lower_closures", vuma_codegen::closures::lower_closures);
-        lower("lower_switches", vuma_codegen::control_flow::lower_switches);
-        lower("lower_tail_calls", vuma_codegen::control_flow::lower_tail_calls);
-        lower("normalize_loops", vuma_codegen::control_flow::normalize_loops);
-        timings.push(("wave34-lowering".to_string(), tlower.elapsed().as_millis() as u64));
-    }
-
-    // ── Wave 36: bv_verify gate — verify all e-graph rewrite rules are sound
-    //    BEFORE the opt pass (which runs the e-graph). If any rule is unsound,
-    //    log a warning so the user knows the e-graph may miscompile. The gate
-    //    is advisory (does not abort) to avoid breaking compilation for
-    //    pre-existing rule sets; a future strict mode could promote this to an
-    //    error.
-    {
-        let tverify = Instant::now();
-        let results = vuma_codegen::bv_verify::verify_all_rules();
-        let unsound: Vec<_> = results.iter().filter(|r| !r.sound).collect();
-        if !unsound.is_empty() {
-            vuma_log!(warn,
-                "wave36 bv_verify: {} unsound e-graph rule(s) detected (compilation may miscompile): {}",
-                unsound.len(),
-                unsound.iter().map(|r| r.rule_name).collect::<Vec<_>>().join(", ")
-            );
+    // ── Stage 8b: Shared post-IR-build O2 pipeline ────────────────────
+    // Wave 1 (Task ID 5): the Wave 34 lowering passes (monomorphize,
+    // closures, switches, tail-calls, loop-normalize), Wave 36 bv_verify,
+    // Wave 10 syscall allowlist, Stage 8b codegen-opt (with the real
+    // backend's latency table), and Wave 32 escape+effects passes are now
+    // encapsulated in `run_ir_pipeline` — the single source of truth
+    // shared with `compile_modules` and (in Wave 2) the test-suite
+    // compile path. The backend kind for the latency table is derived
+    // from `config.emit_config().backend` (always AArch64 for the
+    // canonical Linux/ELF path — preserved exactly). Behavior is
+    // identical to the previous inline sequence.
+    let backend_kind = config.emit_config().backend;
+    ir_program = match run_ir_pipeline(ir_program, config, backend_kind, &mut timings) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(e);
+            return Err(errors);
         }
-        timings.push(("wave36-bv-verify".to_string(), tverify.elapsed().as_millis() as u64));
-    }
-
-    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers
-    // at compile time. Since `nr` is arch-specific (Wave 11/12 design), we
-    // use a range check rather than a name lookup. Valid Linux syscall
-    // numbers are in the range 0..=600 across all supported architectures.
-    for func in &ir_program.functions {
-        for block in &func.blocks {
-            for instr in &block.instructions {
-                if let vuma_codegen::ir::IRInstr::Syscall { nr, .. } = instr {
-                    if *nr > 600 {
-                        errors.push(VumaError::Codegen {
-                            error: CodegenError::InvalidInstruction(format!(
-                                "Invalid syscall number {}: exceeds maximum (600)",
-                                nr
-                            )),
-                        });
-                        if config.stop_on_first_error {
-                            return Err(errors);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-
-    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
-    // IRInstr::Syscall emission to all backends, so the IR flows through
-    // to codegen unchanged. The generic_syscall_name() table remains in
-    // ir.rs as a utility. The lower_syscalls()/lower_syscalls_all()
-    // definitions were also deleted in Wave 10 dead-code cleanup
-    // (see TASKS.md).
-
-    // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
-    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
-    // The backend is determined from the emit config (which derives from
-    // CompileConfig). This means the e-graph cost function and scheduler
-    // make decisions based on the real target's instruction latencies, not
-    // a generic default.
-    if !matches!(config.opt_level, OptLevel::O0) {
-        let topt = Instant::now();
-        let emit_config = config.emit_config();
-        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
-            backend.target_info().latency_table()
-        } else {
-            vuma_codegen::target_desc::LatencyTable::default_ooo()
-        };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
-            ir_program,
-            &latency_table,
-            config.inline_threshold,
-        );
-        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
-    }
-
-    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
-    // effect propagation at O2+.  Runs AFTER the main codegen-opt pass so
-    // the analysis sees the post-optimisation IR (and so SROA's cleanup
-    // happens before regalloc).  Gated behind O2+ because SROA's
-    // rename-walk is O(instructions × accesses) per alloc.
-    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
-        let te = Instant::now();
-        let summary = run_escape_and_effects_passes(&mut ir_program);
-        vuma_log!(debug, 
-            "escape+effects: sroa_promoted={} allocs_elided={} pure_fns={}/{}",
-            summary.sroa_promoted,
-            summary.allocs_elided,
-            summary.pure_functions,
-            summary.total_functions
-        );
-        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
-    }
+    };
 
     let ir_function_count = ir_program.functions.len();
     let ir_instruction_count: usize = ir_program
@@ -5615,22 +5704,25 @@ pub fn compile_modules(
     };
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 4b: Codegen-level IR optimization (mirror main.rs). ─────
-    // Uses the host backend's latency table for per-ISA optimization.
-    // Gated by opt level: O0 skips (matches pipeline.rs behavior).
+    // ── Stage 4b: Shared post-IR-build O2 pipeline ────────────────────
+    // Wave 1 (Task ID 5): compile_modules now delegates to the shared
+    // `run_ir_pipeline` helper — the same single source of truth used by
+    // `compile_with_path` and (in Wave 2) the test-suite compile path.
+    // This means compile_modules now runs the FULL O2 pipeline (Wave 34
+    // lowering, Wave 36 bv_verify, Wave 10 syscall allowlist, Stage 8b
+    // codegen-opt, Wave 32 escape+effects) instead of just codegen-opt,
+    // bringing it into alignment with the production path. The backend
+    // kind for the latency table is `host_backend_kind()` (preserved
+    // exactly from the previous inline Stage 4b — `backend_kind` is also
+    // reused below for the actual register-allocator backend).
     let backend_kind = host_backend_kind();
-    if !matches!(config.opt_level, OptLevel::O0) {
-        let topt = Instant::now();
-        if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind) {
-            let latency_table = backend.target_info().latency_table();
-            ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
-                ir_program,
-                &latency_table,
-                config.inline_threshold,
-            );
+    ir_program = match run_ir_pipeline(ir_program, config, backend_kind, &mut timings) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(e);
+            return Err(errors);
         }
-        timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
-    }
+    };
 
     let ir_function_count = ir_program.functions.len();
     let ir_instruction_count: usize = ir_program
