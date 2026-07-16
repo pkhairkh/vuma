@@ -45,7 +45,7 @@ use std::time::Instant;
 use vuma_bd::{repd::RepD, BD};
 use vuma_codegen::{
     emit::{emit_binary, EmitConfig},
-    ir::{BinOpKind as IrBinOpKind, IRProgram},
+    ir::{BinOpKind as IrBinOpKind, IRFunction, IRProgram},
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
@@ -4778,6 +4778,33 @@ pub fn run_ir_pipeline(
             summary.total_functions
         );
         timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
+    }
+
+    // (Wave 4) Auto-vectorization at O2+. Runs AFTER escape/effects (so it
+    // sees the post-optimization, post-SROA IR) and BEFORE regalloc. The
+    // vectorizer performs per-function loop vectorization (counted self-loops
+    // with safe bodies — vector loop + scalar remainder) and SLP planning
+    // (plan-only; IR is not mutated by SLP — see vectorize.rs docs). Target-
+    // agnostic IR rewriting — no latency table needed. Gated at O2+ like
+    // escape/effects.
+    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+        let tv = Instant::now();
+        let mut loops_vectorized = 0usize;
+        let mut slp_packs = 0usize;
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (new_f, plan) = vuma_codegen::vectorize::vectorize_function_with_plan(f);
+            if plan.vf > 0 {
+                loops_vectorized += 1;
+            }
+            slp_packs += plan.packed_ops.len();
+            *func = new_f;
+        }
+        vuma_log!(debug,
+            "vectorize: loops_vectorized={} slp_packs={}",
+            loops_vectorized, slp_packs
+        );
+        timings.push(("vectorize".to_string(), tv.elapsed().as_millis() as u64));
     }
 
     Ok(ir_program)
