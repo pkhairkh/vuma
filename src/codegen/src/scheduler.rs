@@ -130,7 +130,7 @@ fn classify_instr(instr: &IRInstr) -> &'static str {
         IRInstr::Load { .. } | IRInstr::AtomicLoad { .. } => "load",
         IRInstr::Store { .. } | IRInstr::AtomicStore { .. } => "store",
         IRInstr::Cmp { .. } => "arithmetic",
-        IRInstr::Call { .. } => "branch", // Conservative: calls are serializing
+        IRInstr::Call { .. } | IRInstr::Syscall { .. } => "branch", // Conservative: calls/syscalls are serializing
         IRInstr::Cast { .. } | IRInstr::Offset { .. } | IRInstr::Alloc { .. } => "arithmetic",
         IRInstr::Branch { .. } | IRInstr::CondBranch { .. } => "branch",
         _ => "arithmetic",
@@ -318,7 +318,8 @@ fn schedule_block_inner_with_alias(
         let is_store = matches!(instr,
             IRInstr::Store { .. } | IRInstr::AtomicStore { .. });
         let is_barrier = matches!(instr,
-            IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. });
+            IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. }
+            | IRInstr::Syscall { .. } | IRInstr::Ret { .. });
 
         let my_addr = match instr {
             IRInstr::Load { addr, .. } | IRInstr::Store { addr, .. }
@@ -333,7 +334,8 @@ fn schedule_block_inner_with_alias(
                 let prev_is_store = matches!(prev,
                     IRInstr::Store { .. } | IRInstr::AtomicStore { .. });
                 let prev_is_barrier = matches!(prev,
-                    IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. });
+                    IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. }
+                    | IRInstr::Syscall { .. } | IRInstr::Ret { .. });
 
                 let needs_edge = if is_barrier || prev_is_barrier {
                     // Barriers serialise against everything.
@@ -366,7 +368,7 @@ fn schedule_block_inner_with_alias(
         // nothing after it can use the freed memory, and everything
         // before it must have completed).
         // Calls also depend on all previous instructions (conservative).
-        if matches!(instr, IRInstr::Free { .. } | IRInstr::Call { .. }) {
+        if matches!(instr, IRInstr::Free { .. } | IRInstr::Call { .. } | IRInstr::Syscall { .. } | IRInstr::Ret { .. }) {
             for j in 0..i {
                 if !preds.contains(&j) {
                     preds.push(j);
