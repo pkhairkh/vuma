@@ -656,13 +656,31 @@ impl Emitter {
         if let Some(result) = alloc {
             return self.emit_function_regalloc(func, result);
         }
-        // No AllocationResult — use the greedy allocator.  (Wave 50: the
-        // previous `vreg_count > STACK_SLOT_VREG_THRESHOLD` check was
-        // always false because the threshold was `u32::MAX`, so the
-        // stack-slot emitter was unreachable from here.  Callers that want
-        // the stack-slot strategy must invoke `emit_function_stack_slot`
-        // directly.)
-        self.emit_function_greedy(func)
+        // (Wave 5) No AllocationResult — use the stack-slot emitter.
+        //
+        // The greedy allocator (`emit_function_greedy`) has a correctness
+        // bug on the fuller O2-pipeline IR (more vregs after
+        // monomorphize/SROA/escape-effects): when a vreg defined in an
+        // earlier block (e.g. a pointer derived from an Alloc) survives
+        // across several intervening blocks that are on a *different*
+        // control-flow path (loop-continue vs. loop-exit), the greedy
+        // allocator can hand back a physical register that still holds a
+        // *stale* value from a different vreg, without emitting the
+        // required reload. The downstream Load/Store then dereferences the
+        // stale (non-pointer) value → SIGSEGV. See `mem_copy_buffer.vuma`
+        // (aarch64): r53 (a pointer) is defined in the loop-exit block
+        // but read in the next loop's entry; the greedy emitter reads X6
+        // which by then holds the loop counter (1), crashing on
+        // `ldrb w0, [x2]`.
+        //
+        // The stack-slot emitter (`emit_function_stack_slot`) gives every
+        // vreg an explicit stack slot and loads/stores operands for every
+        // instruction — no spilling, no stale-register hazard. It is
+        // correct (if slower) and was the production path before Wave 21
+        // switched the default to greedy. Switching back here fixes the
+        // aarch64 memory/Alloc SIGSEGV cluster without affecting x86_64
+        // (which uses its own emitter in `x86_64/mod.rs`).
+        self.emit_function_stack_slot(func)
     }
 
     /// (Wave 21 / Wave 53) Emit a single IR function using a pre-computed
@@ -1072,6 +1090,18 @@ impl Emitter {
             }
         }
         self.emit_terminator(&block.terminator)?;
+        // (Wave 5) Also unpin any registers that were pinned while emitting
+        // the terminator (e.g. `resolve_reg(cond)` in a Branch). Without
+        // this, those regs stay pinned across the block boundary and into
+        // the next block's first instruction, where `spill()` cannot evict
+        // them. That can force the allocator to spill a *different* vreg
+        // that is about to be read, and — when that vreg had no prior spill
+        // slot — to hand back a physical register still holding a stale
+        // value, producing use-of-undefined-value crashes (SIGSEGV on a
+        // pointer vreg that picked up an integer constant's value).
+        for reg in self.instr_pinned_regs.drain(..) {
+            self.reg_alloc.unpin(reg);
+        }
         Ok(())
     }
 
