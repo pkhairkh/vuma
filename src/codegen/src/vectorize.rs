@@ -49,10 +49,10 @@
 //!   to real machine code.
 
 use crate::ir::{
-    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind, VectorOpKind,
+    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind,
 };
 #[cfg(test)]
-use crate::ir::IRType;
+use crate::ir::{IRType, VectorOpKind};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -157,17 +157,22 @@ pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, Vector
         }
     }
 
-    // Phase 2: SLP vectorization. Scans each block for isomorphic adjacent
-    // independent scalar ops, rewrites the IR by replacing the first op of
-    // each detected pair with an `IRInstr::VectorOp` (lanes=2) and removing
-    // the second, AND records the result in the plan.
+    // Phase 2: SLP vectorization (plan-only — IR is NOT rewritten). Scans
+    // each block for isomorphic adjacent independent scalar ops and records
+    // each detected pair as a `PackedOp` in the plan. The IR is left
+    // untouched: the backend's `IRInstr::VectorOp` lowering uses fixed XMM
+    // registers and does not preserve lane-1's dst vreg, so rewriting the
+    // IR (replacing the first op with `VectorOp` and removing the second)
+    // would leave both lanes' downstream uses undefined. The plan is the
+    // side-channel hook for future backend integration (per the module
+    // docs: "The IR is not rewritten by SLP — the plan is the hook the
+    // backend consumes").
     //
     // SLP is skipped on blocks the loop vectorizer already touched
     // (`vector_loop_block` / `remainder_loop_block`) — those blocks already
     // contain lane-duplicated bodies whose adjacent Adds SLP would pack,
-    // which would (a) be redundant (the loop vectorizer already recorded
-    // PackedOps for them) and (b) break the loop-vectorizer test
-    // assertions that count `IRInstr::Add` bodies.
+    // which would be redundant (the loop vectorizer already recorded
+    // PackedOps for them).
     let mut skip_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(lbl) = &plan.vector_loop_block {
         skip_labels.insert(lbl.clone());
@@ -175,7 +180,7 @@ pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, Vector
     if let Some(lbl) = &plan.remainder_loop_block {
         skip_labels.insert(lbl.clone());
     }
-    let slp_ops = slp_vectorize_function(&mut func, &skip_labels);
+    let slp_ops = slp_vectorize_function(&func, &skip_labels);
     plan.packed_ops.extend(slp_ops);
 
     // Final CFG rebuild so predecessors/successors are consistent.
@@ -353,6 +358,21 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
         return None;
     }
 
+    // TODO(wave4-triage): IV-unit soundness bug. The lane offset
+    // (`i + l*elem_size`) and IV step (`i + vf*elem_size`) below are in
+    // BYTE units. This is only correct when the matched IV (`i + 1`) is a
+    // BYTE-offset IV with stride 1 AND elem_size == 1 (byte access) — the
+    // only case where IV stride (1) equals elem_size. For the common case
+    // of an element-index IV (where `i + 1` means +1 element and the body
+    // multiplies `i` by elem_size to get the byte offset), the formula is
+    // elem_size× too large: lanes access non-adjacent elements and the
+    // loop processes vf*elem_size times fewer iterations than intended,
+    // miscompiling. The bug is latent in practice because the
+    // preconditions (single-block self-loop, ≤24 instrs, no Calls/Atomics/
+    // Free, no IV clobber) are strict enough that no current test triggers
+    // the vectorizer after loop_unroll + inlining. A proper fix requires
+    // IV stride analysis (detect element-index vs byte-offset IVs and
+    // adjust the lane/step formula accordingly) — deferred to a later wave.
     let iv_step = vf * elem_size; // The fix: was 1, now vf*elem_size.
 
     // ── Build the new vector-loop block ───────────────────────────────
@@ -610,105 +630,25 @@ fn is_safe_for_vectorization(instr: &IRInstr) -> bool {
 // SLP vectorization
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Scan a function's blocks for isomorphic adjacent independent scalar ops,
-/// rewrite the IR by replacing each detected pair with an `IRInstr::VectorOp`
-/// (lanes=2), and record the packed op in the plan.
+/// Scan a function's blocks for isomorphic adjacent independent scalar ops
+/// and record each detected pair as a `PackedOp` in the plan. The IR is NOT
+/// rewritten (see `slp_vectorize_block` for the read-only planning logic and
+/// the module docs for why SLP is plan-only).
 ///
-/// `skip_labels` lists block labels that should NOT be SLP-rewritten —
+/// `skip_labels` lists block labels that should NOT be SLP-scanned —
 /// typically the loop vectorizer's `vector_loop_block` and
 /// `remainder_loop_block`, which already contain lane-duplicated bodies
 /// whose adjacent Adds SLP would pack redundantly.
-///
-/// The read-only `slp_vectorize_block` helper (used by unit tests) is
-/// preserved as a separate function below.
 fn slp_vectorize_function(
-    func: &mut IRFunction,
+    func: &IRFunction,
     skip_labels: &std::collections::HashSet<String>,
 ) -> Vec<PackedOp> {
     let mut ops = Vec::new();
-    for block in &mut func.blocks {
+    for block in &func.blocks {
         if skip_labels.contains(&block.label) {
             continue;
         }
-        ops.extend(slp_rewrite_block(block));
-    }
-    ops
-}
-
-/// SLP-pack a single block IN PLACE: pair-wise scan, and for each adjacent
-/// isomorphic independent pair, (1) replace the first instr with
-/// `IRInstr::VectorOp { lanes: 2, .. }`, (2) remove the second instr, and
-/// (3) record the `PackedOp` in the returned plan.
-///
-/// This is the Wave 29 IR-rewriting SLP pass. The read-only
-/// `slp_vectorize_block` (below) is kept for the existing unit tests that
-/// assert against the planning output without mutating the IR.
-fn slp_rewrite_block(block: &mut IRBlock) -> Vec<PackedOp> {
-    let mut ops = Vec::new();
-    let mut i = 0;
-    while i + 1 < block.instructions.len() {
-        // Snapshot the classification of the pair BEFORE mutating. We clone
-        // the two instructions out so we can call the immutable
-        // `classify_packable_binop` + `binop_elem_size` helpers and still
-        // mutate `block.instructions` afterwards.
-        let (a_kind, a_dst, a_srcs) = match classify_packable_binop(&block.instructions[i]) {
-            Some(t) => t,
-            None => { i += 1; continue; }
-        };
-        let (b_kind, b_dst, b_srcs) = match classify_packable_binop(&block.instructions[i + 1]) {
-            Some(t) => t,
-            None => { i += 1; continue; }
-        };
-        if a_kind != b_kind {
-            i += 1;
-            continue;
-        }
-        // Independence: a's dst must not appear in b's sources, and vice versa.
-        let a_writes_b_reads = b_srcs.contains(&a_dst);
-        let b_writes_a_reads = a_srcs.contains(&b_dst);
-        if a_writes_b_reads || b_writes_a_reads {
-            i += 1;
-            continue;
-        }
-        // ── Pack: rewrite instr[i] as VectorOp, remove instr[i+1] ──
-        let elem_size = binop_elem_size(&block.instructions[i])
-            .max(binop_elem_size(&block.instructions[i + 1]));
-        let vop_kind = match a_kind {
-            PackedOpKind::Add => VectorOpKind::Add,
-            PackedOpKind::Sub => VectorOpKind::Sub,
-            PackedOpKind::Mul => VectorOpKind::Mul,
-        };
-        // Extract lane-0 operands (already validated as registers by
-        // classify_packable_binop — both srcs are registers).
-        let lhs_lane0 = IRValue::Register(a_srcs[0]);
-        let rhs_lane0 = if a_srcs.len() >= 2 {
-            IRValue::Register(a_srcs[1])
-        } else {
-            IRValue::Immediate(0)
-        };
-        let dst_lane0 = IRValue::Register(a_dst);
-        block.instructions[i] = IRInstr::VectorOp {
-            op: vop_kind,
-            lanes: 2,
-            elem_size,
-            dst: dst_lane0,
-            lhs: lhs_lane0,
-            rhs: rhs_lane0,
-        };
-        // Remove the second instr of the pair (its dst is now a dead lane-1
-        // vreg — the VectorOp supersedes it).
-        block.instructions.remove(i + 1);
-        ops.push(PackedOp {
-            kind: a_kind,
-            lanes: 2,
-            elem_size,
-            dst_lane0: a_dst,
-            src_lane0: a_srcs.clone(),
-            block: block.label.clone(),
-        });
-        // Advance past the packed pair (i+1 was removed, so the new instr at
-        // i+1 is what was previously at i+2).
-        i += 1;
+        ops.extend(slp_vectorize_block(block));
     }
     ops
 }
@@ -717,9 +657,12 @@ fn slp_rewrite_block(block: &mut IRBlock) -> Vec<PackedOp> {
 /// BinOps with matching kind, matching element type, and no cross-dependency,
 /// record a 2-lane `PackedOp`.
 ///
-/// **Read-only planning helper** — does NOT mutate `block`. Used by the SLP
-/// unit tests. The actual IR rewrite happens in `slp_rewrite_block` above.
-#[cfg(test)]
+/// **Read-only planning helper** — does NOT mutate `block`. The IR is left
+/// untouched: the backend's `IRInstr::VectorOp` lowering uses fixed XMM
+/// registers and does not preserve lane-1's dst vreg, so rewriting the IR
+/// (replacing the first op with `VectorOp` and removing the second) would
+/// leave both lanes' downstream uses undefined. The plan is the side-channel
+/// hook for future backend integration (per the module docs).
 fn slp_vectorize_block(block: &IRBlock) -> Vec<PackedOp> {
     let mut ops = Vec::new();
     let instrs = &block.instructions;
