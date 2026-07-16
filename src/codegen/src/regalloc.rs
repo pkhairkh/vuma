@@ -2073,6 +2073,17 @@ impl RegAllocator {
     }
 
     /// Free a physical register previously allocated to `vreg`.
+    /// Returns a list of all vregs currently allocated to a physical register
+    /// (either in the caller-saved pool or the callee-saved pool).
+    /// Used by the Emitter to free dead vregs at block boundaries.
+    pub fn allocated_vregs(&self) -> Vec<IRValueId> {
+        self.used_regs
+            .keys()
+            .chain(self.callee_saved_used.keys())
+            .copied()
+            .collect()
+    }
+
     pub fn free(&mut self, vreg: IRValueId) {
         if let Some(reg) = self.used_regs.remove(&vreg) {
             self.free_regs.push(reg);
