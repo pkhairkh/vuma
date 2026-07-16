@@ -1,11 +1,5 @@
-   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
-   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
-   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
-   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
-   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-    Finished `release-fast` profile [optimized] target(s) in 1m 33s
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
+    Finished `release-fast` profile [optimized] target(s) in 38.54s
