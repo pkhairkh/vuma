@@ -1,2 +1,5 @@
+   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-    Finished `release-fast` profile [optimized] target(s) in 6.34s
+    Finished `release-fast` profile [optimized] target(s) in 33.82s
