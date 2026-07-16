@@ -363,6 +363,8 @@ fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
     c1: u32 = load_u32(ast, node_offset + 4);
     c2: u32 = load_u32(ast, node_offset + 8);
     c3: u32 = load_u32(ast, node_offset + 12);
+    val: u64 = load_u64(ast, node_offset + 16);
+    aux: u64 = load_u64(ast, node_offset + 24);
     
     // NK_RETURN (10): RET expr
     if kind == 10 {
