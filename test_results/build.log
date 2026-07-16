@@ -11,4 +11,4 @@ warning: unused import: `Condition`
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: `vuma-codegen` (lib) generated 1 warning (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 39.70s
+    Finished `release-fast` profile [optimized] target(s) in 39.23s
