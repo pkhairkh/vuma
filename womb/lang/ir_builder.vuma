@@ -179,7 +179,13 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         else { if c1 == 50 { op = IR_CMP; } }  // <=
         else { if c1 == 51 { op = IR_CMP; } }  // >=
         else { op = IR_ADD; }  // default
-        irb_emit(b, op, dst, lhs_vreg, rhs_vreg, c1, 0);
+        // Wave P6.2: comparisons (==/!=/</>/>=/<=) carry the original token
+        // type (c1) in the IR instruction's `imm` field so the bootstrap
+        // codegen can emit the matching setCC opcode. Non-comparison ops
+        // (arithmetic / bitwise / shifts) leave imm=0.
+        imm_val: u64 = 0;
+        if op == IR_CMP { imm_val = c1; }
+        irb_emit(b, op, dst, lhs_vreg, rhs_vreg, imm_val, 0);
         return dst;
     }
     

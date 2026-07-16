@@ -485,6 +485,13 @@ fn gen_epilogue(code: Address, pos: u32) -> u32 {
 
 const PRINT_INT_SIZE: u32 = 86;
 
+// Wave P6.2: label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
+// Each label_id maps to a code offset (u64) in label_buf. Each branch
+// fixup records {fixup_pos:u32, target_label:u32} so we can back-patch the
+// rel32 once all labels have been resolved.
+const MAX_LABELS: u32 = 256;
+const MAX_FIXUPS: u32 = 256;
+
 // Emit the 86-byte print_int routine at `pos` in the code buffer.
 // Returns pos + 86.
 fn emit_print_int_routine(code: Address, pos: u32) -> u32 {
@@ -651,8 +658,20 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
             if sc_a2 > max { max = sc_a2; }
             if sc_a3 > max { max = sc_a3; }
         }}
-        // Other ops (NOP, BRANCH, COND_BRANCH, CMP, DIV/AND/OR/...):
+        else { if op == 10 {  // IR_CMP (Wave P6.2): dst, lhs, rhs are all vregs.
+            // (imm = cmp_type token, NOT a vreg — skip.)
+            if dst > max { max = dst; }
+            if lhs > max { max = lhs; }
+            if rhs > max { max = rhs; }
+        }}
+        else { if op == 18 {  // IR_COND_BRANCH (Wave P6.2): dst = cond_vreg.
+            // (lhs = 0, rhs = target_label — NOT vregs — skip both.)
+            if dst > max { max = dst; }
+        }}
+        // Other ops (NOP, BRANCH, DIV/AND/OR/XOR/SHL/SHR):
         // not supported in the bootstrap codegen; skip.
+        //   - IR_NOP (0): dst = label_id (NOT a vreg).
+        //   - IR_BRANCH (17): dst = target_label (NOT a vreg).
         i = i + 1;
     }
     return max;
@@ -1059,7 +1078,7 @@ fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
 // starts at start_offset, the return value is start_offset + user_code_size,
 // which is the total code size including runtime stubs).
 //
-// Supported IR opcodes (the hello.vuma subset):
+// Supported IR opcodes (the hello.vuma subset + Wave P6.2 control flow):
 //   IR_MOV (16)   — mov rax, imm64; mov [rbp-vreg_off], rax
 //   IR_ADD (1)    — load lhs,load rhs,add,store dst
 //   IR_SUB (2)    — same with sub
@@ -1069,12 +1088,36 @@ fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
 //                     load arg0 into rdi; call print_int (rel32 to
 //                     print_int_offset = 15 in the stubs layout)
 //                   else: skip silently (real calls are a TODO)
+//   IR_LOAD (11)  — byte load from [addr_vreg + offset]            (Wave P6.1)
+//   IR_STORE (12) — byte store to [addr_vreg + offset]             (Wave P6.1)
+//   IR_ALLOC (15) — stack allocation (lea slot addr into the slot)  (Wave P6.1)
+//   IR_SYSCALL(20)— x86_64 syscall with up to 4 args               (Wave P1-c-8b)
+//   IR_NOP (0)    — label marker (dst=label_id): record code offset (Wave P6.2)
+//                   true NOP (dst==0): emit nothing
+//   IR_CMP (10)   — cmp lhs,rhs; setCC al; movzx eax,al; store dst  (Wave P6.2)
+//                   (imm.lo = cmp_type token 46..51)
+//   IR_COND_BRANCH(18) — test cond; jz <rel32 to rhs=label>         (Wave P6.2)
+//                        (rel32 back-patched in a post-pass)
+//   IR_BRANCH (17)— jmp <rel32 to dst=label>                        (Wave P6.2)
+//                   (rel32 back-patched in a post-pass)
 //
 // Unsupported (silently skipped — documented TODO):
-//   IR_NOP, IR_BRANCH, IR_COND_BRANCH, IR_CMP, IR_LOAD, IR_STORE, IR_ALLOC
-//   hello.vuma doesn't use these; if/while codegen + memory ops are future work.
+//   IR_DIV/AND/OR/XOR/SHL/SHR (4-9) — remaining ALU ops.
 fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32 {
     pos: u32 = start_offset;
+
+    // Wave P6.2: label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
+    // label_buf[label_id] (u64) = code offset of the label marker (set when
+    //   IR_NOP with dst=label_id is seen).
+    // fixup_buf[fixup_count] = {fixup_pos:u32, target_label:u32} (recorded
+    //   when a branch is emitted; patched in a post-pass once all labels
+    //   are known). __vuma_alloc returns zeroed memory (mmap MAP_ANONYMOUS),
+    //   so unset label slots read as 0 (defensive: a branch to an undefined
+    //   label would target offset 0 = _start stub — should not happen for
+    //   well-formed IR).
+    label_buf: Address = __vuma_alloc(2048);   // 8 * MAX_LABELS = 8 * 256
+    fixup_buf: Address = __vuma_alloc(2048);   // 8 * MAX_FIXUPS = 8 * 256
+    fixup_count: u32 = 0;
 
     // 1. Emit main prologue.
     //    (Runtime stubs — _start, print_int, __vuma_alloc, etc. — are emitted
@@ -1203,15 +1246,110 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_movzbl_eax_rax_offset(code, pos, rhs);
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
-        // IR_NOP (0), IR_BRANCH (17), IR_COND_BRANCH (18), IR_CMP (10),
+        else { if op == 0 {  // IR_NOP (Wave P6.2) — label marker or true NOP.
+            // IR layout: op=0, dst=label_id (0 for a true NOP). When dst != 0,
+            // record the current code position as the label's target offset
+            // so subsequent IR_BRANCH / IR_COND_BRANCH fixups can resolve.
+            if dst != 0 {
+                store_u64(label_buf, dst * 8, pos);
+            }
+            // dst == 0: true NOP — emit nothing.
+        }}
+        else { if op == 10 {  // IR_CMP (Wave P6.2) — comparison.
+            // IR layout: op=10, dst=result_vreg, lhs=lhs_vreg, rhs=rhs_vreg,
+            // imm (lower 32)=cmp_type token (46===, 47=!=, 48=<, 49=>,
+            // 50=<=, 51=>=). Emit: load lhs→RAX, load rhs→RCX, cmp rax,rcx,
+            // setCC al, movzx eax,al, store RAX→dst.
+            cmp_type: u32 = imm & 0xFFFFFFFF;
+            pos = enc_load_rax(code, pos, vreg_offset(lhs));
+            pos = enc_load_rcx(code, pos, vreg_offset(rhs));
+            // cmp rax, rcx: 48 39 C8
+            emit_byte(code, pos, 0x48);
+            emit_byte(code, pos + 1, 0x39);
+            emit_byte(code, pos + 2, 0xC8);
+            pos = pos + 3;
+            // setCC al (3 bytes: 0F <cc> C0). Pick the condition byte by
+            // standalone ifs (avoids a deeply-nested else-if chain that
+            // vuma's parser rejects). Default to setge (>=) for unknown.
+            cc: u32 = 0x9D;  // setge (default for 51/>= or unknown)
+            if cmp_type == 46 { cc = 0x94; }  // ==  → sete
+            if cmp_type == 47 { cc = 0x95; }  // !=  → setne
+            if cmp_type == 48 { cc = 0x9C; }  // <   → setl
+            if cmp_type == 49 { cc = 0x9F; }  // >   → setg
+            if cmp_type == 50 { cc = 0x9E; }  // <=  → setle
+            emit_byte(code, pos, 0x0F);
+            emit_byte(code, pos + 1, cc);
+            emit_byte(code, pos + 2, 0xC0);
+            pos = pos + 3;
+            // movzx eax, al: 0F B6 C0  (zero-extend the setCC result into EAX/RAX)
+            emit_byte(code, pos, 0x0F);
+            emit_byte(code, pos + 1, 0xB6);
+            emit_byte(code, pos + 2, 0xC0);
+            pos = pos + 3;
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
+        else { if op == 18 {  // IR_COND_BRANCH (Wave P6.2) — conditional jump.
+            // IR layout: op=18, dst=cond_vreg, lhs=0, rhs=target_label.
+            // Emit: load cond→RAX, test rax,rax, jz <rel32 to target_label>.
+            // The rel32 is back-patched in the fixup walk once all labels
+            // are known. (Jump-if-zero semantics: skip the branch body when
+            // the condition is false / zero.)
+            pos = enc_load_rax(code, pos, vreg_offset(dst));
+            // test rax, rax: 48 85 C0
+            emit_byte(code, pos, 0x48);
+            emit_byte(code, pos + 1, 0x85);
+            emit_byte(code, pos + 2, 0xC0);
+            pos = pos + 3;
+            // jz rel32: 0F 84 <rel32>
+            emit_byte(code, pos, 0x0F);
+            emit_byte(code, pos + 1, 0x84);
+            cb_fixup_pos: u32 = pos + 2;       // start of rel32 bytes
+            cb_target_label: u32 = rhs;
+            emit_u32(code, cb_fixup_pos, 0);   // placeholder (patched later)
+            store_u32(fixup_buf, fixup_count * 8, cb_fixup_pos);
+            store_u32(fixup_buf, fixup_count * 8 + 4, cb_target_label);
+            fixup_count = fixup_count + 1;
+            pos = pos + 6;                      // 2 opcode bytes + 4 rel32
+        }}
+        else { if op == 17 {  // IR_BRANCH (Wave P6.2) — unconditional jump.
+            // IR layout: op=17, dst=target_label, lhs=0, rhs=0.
+            // Emit: jmp <rel32 to target_label>. Patched in the fixup walk.
+            // jmp rel32: E9 <rel32>
+            emit_byte(code, pos, 0xE9);
+            br_fixup_pos: u32 = pos + 1;        // start of rel32 bytes
+            br_target_label: u32 = dst;
+            emit_u32(code, br_fixup_pos, 0);    // placeholder (patched later)
+            store_u32(fixup_buf, fixup_count * 8, br_fixup_pos);
+            store_u32(fixup_buf, fixup_count * 8 + 4, br_target_label);
+            fixup_count = fixup_count + 1;
+            pos = pos + 5;                       // 1 opcode byte + 4 rel32
+        }}
         // IR_DIV/AND/OR/XOR/SHL/SHR (4-9), etc.: not handled in the bootstrap
-        // codegen. hello.vuma doesn't use them; if/while codegen + remaining
-        // ALU ops are documented TODO for a future wave.
+        // codegen. hello.vuma doesn't use them; remaining ALU ops are
+        // documented TODO for a future wave.
 
         i = i + 1;
     }
 
-    // 3. Defensive exit(0) — in case the IR didn't end with IR_RET.
+    // 3. Walk the fixup buffer and back-patch each branch rel32 now that
+    //    all label markers have been resolved. For each fixup entry:
+    //      rel32 = target_offset - (fixup_pos + 4)
+    //    (u32 subtraction wraps modulo 2^32, giving the correct two's-
+    //    complement bit pattern for both forward (positive) and backward
+    //    (negative) branches — same trick as enc_call_rel32). Written
+    //    little-endian into code[fixup_pos..fixup_pos+4].
+    j: u32 = 0;
+    while j < fixup_count {
+        fp: u32 = load_u32(fixup_buf, j * 8);
+        tl: u32 = load_u32(fixup_buf, j * 8 + 4);
+        target_off: u64 = load_u64(label_buf, tl * 8);
+        target_off_u32: u32 = target_off & 0xFFFFFFFF;
+        rel: u32 = target_off_u32 - (fp + 4);
+        emit_u32(code, fp, rel);
+        j = j + 1;
+    }
+
+    // 4. Defensive exit(0) — in case the IR didn't end with IR_RET.
     //    Unreachable for well-formed input (irb_lower_fn ensures a trailing
     //    RET), but guarantees the emitted binary never falls off .text.
     pos = enc_xor_edi(code, pos);
