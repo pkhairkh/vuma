@@ -1458,6 +1458,36 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
                 .iter().any(|s| *s == header_label);
             if jumps_to_header {
                 redirect_terminator(&mut block.terminator, &header_label, &preheader_label);
+                // CRITICAL: also rewrite the embodied IRInstr::Branch / CondBranch
+                // carried at the tail of this block's instruction list. The VUMA IR
+                // represents each block's exit BOTH as a trailing IRInstr branch AND
+                // as the block.terminator; backends (e.g. emit.rs greedy path,
+                // emit.rs stack-slot path) emit the IRInstr::Branch as a REAL
+                // machine jump (fixup → target). If only the IRTerminator is
+                // redirected, the stale IRInstr::Branch still jumps to the old
+                // header, bypassing the preheader and leaving hoisted values
+                // undefined → SIGSEGV / miscompile (the signal_hash / mmap_sha256d
+                // / self_exec regression). Rewrite both arms of CondBranch too.
+                for instr in block.instructions.iter_mut() {
+                    match instr {
+                        IRInstr::Branch { target } if *target == header_label => {
+                            *target = preheader_label.clone();
+                        }
+                        IRInstr::CondBranch {
+                            true_target,
+                            false_target,
+                            ..
+                        } => {
+                            if *true_target == header_label {
+                                *true_target = preheader_label.clone();
+                            }
+                            if *false_target == header_label {
+                                *false_target = preheader_label.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 redirected_preds.push(block_label);
             }
         }
@@ -1631,30 +1661,47 @@ fn run_optimizations_inner(
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         let f = dead_store_eliminate(f, &provenance);
         let f = dead_code_eliminate(f);
-        // Inliner is ENABLED (was enabled in the 99.87% run).
-        // LICM and cross-function constant prop remain DISABLED
-        // (they were disabled in the baseline).
+        // ── Inliner: ALWAYS enabled ──
+        // Inlines small callees (threshold-gated) into callers. Required for
+        // correctness of multi-function tests that rely on inlined calls.
         let f = inline_with_threshold(f, &func_refs, inline_threshold);
         let f = constant_fold(f);
         let f = dead_code_eliminate(f);
-        // Scheduler is DISABLED (was disabled in the baseline).
-        // The scheduler causes pass-interaction miscompilations.
-        // if std::env::var("VUMA_NO_SCHED").is_err() {
-        //     crate::scheduler::schedule_function(&mut f.blocks, latency_table);
-        // }
+        // ── LICM (Loop-Invariant Code Motion): ALWAYS enabled ──
+        // Hoists invariant computations out of loops. Runs after inlining so
+        // it sees the inlined body, and before the scheduler so the scheduler
+        // sees hoisted invariants. Creates preheader blocks; the redirect logic
+        // rewrites BOTH the IRTerminator and the embodied trailing
+        // IRInstr::Branch/CondBranch so backends never bypass the preheader.
+        let f = licm(f);
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+        // ── Instruction Scheduler: ALWAYS enabled ──
+        // Reorders independent instructions to hide latencies. Atomic ops
+        // (AtomicLoad/AtomicStore/AtomicCas), Calls, Syscalls, Alloc/Free, Ret
+        // are all classified as barriers (acquire/release / serializing) so
+        // they are never reordered relative to other memory ops. Unconditional —
+        // no env gate, per project requirement (ALL schedulers ALWAYS enabled).
         let mut f = f;
+        crate::scheduler::schedule_function(&mut f.blocks, latency_table);
+        // Schedule may reorder within blocks; run a final DCE to drop any
+        // instructions made dead by the reordering.
+        let f = dead_code_eliminate(f);
         program.functions[i] = f;
     }
 
     // ── Whole-program passes ──
-    // cross_function_constant_prop is DISABLED (see comment above).
-    // program = cross_function_constant_prop(program);
-    // for i in 0..program.functions.len() {
-    //     let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
-    //     let f = constant_fold(f);
-    //     let f = dead_code_eliminate(f);
-    //     program.functions[i] = f;
-    // }
+    // ── Cross-function constant propagation: ALWAYS enabled ──
+    // Propagates constants from callers into callees' formal parameters at
+    // call sites, enabling further constant folding and specialization.
+    // Unconditional — no env gate, per project requirement.
+    program = cross_function_constant_prop(program);
+    for i in 0..program.functions.len() {
+        let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
+        let f = constant_fold(f);
+        let f = dead_code_eliminate(f);
+        program.functions[i] = f;
+    }
 
     // (Wave 28) Wire identical_function_merge — hash each function's
     // normalized body, merge duplicates, rewrite call sites. This is
