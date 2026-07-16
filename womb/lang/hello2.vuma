@@ -1,0 +1,20 @@
+// womb/lang/hello2.vuma — extended bootstrap test input.
+//
+// Exercises the bootstrap's P6 capabilities:
+//   - allocate() + free() (P6.3 builtins)
+//   - *(ptr + off) = val (P6.1 IR_STORE)
+//   - syscall(64, 1, buf, 3) (P1-c-8b multi-arg syscall)
+//   - while loop (P6.2 control flow)
+//
+// Expected output: "Hi\n" (bytes 72, 105, 10)
+// Expected exit code: 0
+
+fn main() -> i32 {
+    buf: Address = allocate(3);
+    *(buf + 0) = 72;
+    *(buf + 1) = 105;
+    *(buf + 2) = 10;
+    syscall(64, 1, buf, 3);
+    free(buf);
+    return 0;
+}
