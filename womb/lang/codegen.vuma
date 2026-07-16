@@ -204,6 +204,46 @@ fn enc_imul_rax_rcx(code: Address, pos: u32) -> u32 {
     return pos + 4;
 }
 
+// AND rax, rcx: 48 21 C8
+fn enc_and_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x21);
+    emit_byte(code, pos + 2, 0xC8);
+    return pos + 3;
+}
+
+// OR rax, rcx: 48 09 C8
+fn enc_or_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x09);
+    emit_byte(code, pos + 2, 0xC8);
+    return pos + 3;
+}
+
+// XOR rax, rcx: 48 31 C8
+fn enc_xor_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x31);
+    emit_byte(code, pos + 2, 0xC8);
+    return pos + 3;
+}
+
+// SHL rax, cl: 48 D3 E0
+fn enc_shl_rax_cl(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0xD3);
+    emit_byte(code, pos + 2, 0xE0);
+    return pos + 3;
+}
+
+// SHR rax, cl: 48 D3 E8
+fn enc_shr_rax_cl(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0xD3);
+    emit_byte(code, pos + 2, 0xE8);
+    return pos + 3;
+}
+
 // MOV rdi, rax: 48 89 C7  (used to move a vreg's value into rdi for sys_exit)
 fn enc_mov_rdi_rax(code: Address, pos: u32) -> u32 {
     emit_byte(code, pos, 0x48);
@@ -673,10 +713,17 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
             // (lhs = 0, rhs = target_label — NOT vregs — skip both.)
             if dst > max { max = dst; }
         }}
-        // Other ops (NOP, BRANCH, DIV/AND/OR/XOR/SHL/SHR):
+        // AND/OR/XOR (5/6/7) and SHL/SHR (8/9): dst, lhs, rhs are all vregs.
+        else { if op == 5 || op == 6 || op == 7 || op == 8 || op == 9 {
+            if dst > max { max = dst; }
+            if lhs > max { max = lhs; }
+            if rhs > max { max = rhs; }
+        }}
+        // Other ops (NOP, BRANCH, DIV):
         // not supported in the bootstrap codegen; skip.
         //   - IR_NOP (0): dst = label_id (NOT a vreg).
         //   - IR_BRANCH (17): dst = target_label (NOT a vreg).
+        //   - IR_DIV (4): not yet implemented.
         i = i + 1;
     }
     return max;
@@ -1163,6 +1210,21 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             else { pos = enc_imul_rax_rcx(code, pos); } }
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
+        else { if op == 5 || op == 6 || op == 7 {  // AND / OR / XOR
+            pos = enc_load_rax(code, pos, vreg_offset(lhs));
+            pos = enc_load_rcx(code, pos, vreg_offset(rhs));
+            if op == 5 { pos = enc_and_rax_rcx(code, pos); }
+            else { if op == 6 { pos = enc_or_rax_rcx(code, pos); }
+            else { pos = enc_xor_rax_rcx(code, pos); } }
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
+        else { if op == 8 || op == 9 {  // SHL / SHR (shift amount in CL)
+            pos = enc_load_rax(code, pos, vreg_offset(lhs));
+            pos = enc_load_rcx(code, pos, vreg_offset(rhs));
+            if op == 8 { pos = enc_shl_rax_cl(code, pos); }
+            else { pos = enc_shr_rax_cl(code, pos); }
+            pos = enc_store_rax(code, pos, vreg_offset(dst));
+        }}
         else { if op == 14 {  // IR_RET: exit(dst)
             if dst == 0 {
                 pos = enc_xor_edi(code, pos);  // exit code 0
@@ -1178,29 +1240,12 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
                 if rhs >= 1 {
                     arg0: u32 = imm & 0xFFFFFFFF;
                     pos = enc_load_rdi(code, pos, vreg_offset(arg0));
-                    // Backward call to print_int at offset print_int_offset
-                    // (= PRINT_INT_OFFSET = 15 in the stubs layout). Since
-                    // codegen_emit's `pos` starts at start_offset = STUBS_SIZE,
-                    // this is a backward (negative) rel32.
                     pos = enc_call_rel32(code, pos, print_int_offset);
                 }
             }
-            // allocate/__vuma_alloc → call __vuma_alloc stub (mmap wrapper)
-            if lhs == ALLOC_HASH {
-                if rhs >= 1 {
-                    arg0: u32 = imm & 0xFFFFFFFF;
-                    pos = enc_load_rdi(code, pos, vreg_offset(arg0));
-                }
-                pos = enc_call_rel32(code, pos, VUMA_ALLOC_OFFSET);
-                pos = enc_store_rax(code, pos, vreg_offset(dst));
-            }
-            // free/__vuma_free → call __vuma_free stub (munmap wrapper)
-            if lhs == FREE_HASH {
-                if rhs >= 1 {
-                    pos = enc_load_rdi(code, pos, vreg_offset(imm & 0xFFFFFFFF));
-                }
-                pos = enc_call_rel32(code, pos, VUMA_FREE_OFFSET);
-            }
+            // Other calls are not supported in the bootstrap; skip silently.
+            // allocate()/free() are handled via IR_SYSCALL (mmap/munmap),
+            // not IR_CALL — no Rust-emitted wrapper stubs needed.
         }}
         else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8 / P1-c-8b)
             // x86_64 syscall ABI: nr in EAX, args in RDI/RSI/RDX/R10/R8/R9,
