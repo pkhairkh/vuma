@@ -335,21 +335,13 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         return dst;
     }
     
-    // NK_SYSCALL (8): c1=syscall_nr (VUMA/asm-generic), c3=arg_count,
-    // val.lo=arg0_node_idx, val.hi=arg1_node_idx, aux.lo=arg2_node_idx,
-    // aux.hi=arg3_node_idx. Wave P1-c-8b multi-arg: lower each present
-    // arg into a vreg, then pack the vregs into IR_SYSCALL's imm/aux
-    // (imm.lo=arg0_vreg, imm.hi=arg1_vreg, aux.lo=arg2_vreg,
-    // aux.hi=arg3_vreg). (arg0_vreg / dst are function-scoped — declared
-    // in the NK_INT / NK_CALL blocks above — so we reassign without
-    // re-annotating, matching the NK_ASSIGN pattern. sc_arg0_node and
-    // friends use unique names to avoid any nested-scope collision with
-    // NK_CALL's inner arg0_node.)
+    // NK_SYSCALL (8): c1=syscall_nr, c2=arg2_node (for 3+ args),
+    // c3=arg_count, val.lo=arg0_node, val.hi=arg1_node.
+    // arg3+ not supported (aux field not loaded by irb_lower_expr).
     if kind == 8 {
         arg0_vreg = 0;
         arg1_vreg: u32 = 0;
         arg2_vreg: u32 = 0;
-        arg3_vreg: u32 = 0;
         if c3 >= 1 {
             sc_arg0_node: u32 = val & 0xFFFFFFFF;
             arg0_vreg = irb_lower_expr(b, ast, sc_arg0_node);
@@ -359,16 +351,11 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
             arg1_vreg = irb_lower_expr(b, ast, sc_arg1_node);
         }
         if c3 >= 3 {
-            sc_arg2_node: u32 = aux & 0xFFFFFFFF;
-            arg2_vreg = irb_lower_expr(b, ast, sc_arg2_node);
-        }
-        if c3 >= 4 {
-            sc_arg3_node: u32 = (aux >> 32) & 0xFFFFFFFF;
-            arg3_vreg = irb_lower_expr(b, ast, sc_arg3_node);
+            arg2_vreg = irb_lower_expr(b, ast, c2);
         }
         dst = irb_alloc_vreg(b);
         packed_imm: u64 = (arg0_vreg as u64) | ((arg1_vreg as u64) << 32);
-        packed_aux: u64 = (arg2_vreg as u64) | ((arg3_vreg as u64) << 32);
+        packed_aux: u64 = arg2_vreg as u64;
         irb_emit(b, IR_SYSCALL, dst, c1, c3, packed_imm, packed_aux);
         return dst;
     }
