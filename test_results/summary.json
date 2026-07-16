@@ -1,28 +1,28 @@
 {
-  "timestamp": "2026-07-16 14:24:16 UTC",
+  "timestamp": "2026-07-16 15:21:42 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 109155,
-  "matches": 109013,
+  "matches": 109015,
   "skipped": 0,
   "pass_rate": "99.87%",
   "per_backend": {
     "aarch64": {
       "total": 5745,
-      "match": 5702,
+      "match": 5705,
       "skipped": 0
     },
     "aarch64_be": {
       "total": 5745,
-      "match": 5705,
+      "match": 5703,
       "skipped": 0
     },
-    "x86_64": {
+    "arm32": {
       "total": 5745,
       "match": 5741,
       "skipped": 0
     },
-    "mips64": {
+    "x86_64": {
       "total": 5745,
       "match": 5741,
       "skipped": 0
@@ -32,17 +32,17 @@
       "match": 5741,
       "skipped": 0
     },
-    "ppc64": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
     "armeb": {
       "total": 5745,
       "match": 5741,
       "skipped": 0
     },
-    "arm32": {
+    "ppc64": {
+      "total": 5745,
+      "match": 5741,
+      "skipped": 0
+    },
+    "mips64": {
       "total": 5745,
       "match": 5741,
       "skipped": 0
@@ -52,17 +52,7 @@
       "match": 5741,
       "skipped": 0
     },
-    "alpha": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
     "ppc64le": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
-    "x86_32": {
       "total": 5745,
       "match": 5741,
       "skipped": 0
@@ -77,19 +67,14 @@
       "match": 5744,
       "skipped": 0
     },
-    "sparc64": {
-      "total": 5745,
-      "match": 5744,
-      "skipped": 0
-    },
-    "m68k": {
-      "total": 5745,
-      "match": 5741,
-      "skipped": 0
-    },
     "loongarch64": {
       "total": 5745,
       "match": 5741,
+      "skipped": 0
+    },
+    "sparc64": {
+      "total": 5745,
+      "match": 5744,
       "skipped": 0
     },
     "hppa": {
@@ -97,15 +82,30 @@
       "match": 5742,
       "skipped": 0
     },
+    "alpha": {
+      "total": 5745,
+      "match": 5741,
+      "skipped": 0
+    },
+    "m68k": {
+      "total": 5745,
+      "match": 5741,
+      "skipped": 0
+    },
+    "x86_32": {
+      "total": 5745,
+      "match": 5741,
+      "skipped": 0
+    },
     "wasm32": {
       "total": 5745,
-      "match": 5743,
+      "match": 5744,
       "skipped": 0
     }
   },
   "ive_verification": {
-    "total": 109154,
-    "pass": 109154,
+    "total": 109155,
+    "pass": 109155,
     "fail": 0,
     "pass_rate": "100.00%"
   }
