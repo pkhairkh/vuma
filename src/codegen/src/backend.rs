@@ -2396,323 +2396,152 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
 
     // ── __vuma_print_hex ──
     let hex_offset = 0usize;
-    // Input: X0 = 64-bit value to print as 8 hex digits
-    // Clobbers: X1, X2, X3, X8, X9, X10
-    // Stack frame: 48 bytes (8 for pair save + 8 for hex chars + 32 padding)
-
-    // Prologue: save callee-saved and link register
-    // STP X29, X30, [SP, #-48]!  (pre-indexed, 48-byte frame)
-    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
-    // ADD X29, SP, #0
-    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
-
-    // Save X9, X10 on stack at [SP, #16]
-    // STP X9, X10, [SP, #16]
-    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
-
-    // Save X1, X2 on stack at [SP, #32]
-    // STP X1, X2, [SP, #32]
-    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
-
-    // Save X3, X8 on stack at [SP, #40]  (offset 40 = 5*8)
-    // Wait, 40 = 5*8 but STP needs offset/8 for signed-offset. 40/8 = 5.
-    // STP X3, X8, [SP, #40]
-    code.extend_from_slice(&0xA9052C63u32.to_le_bytes());
-
-    // Hex lookup table: we'll use ADD + LDRB pattern.
-    // Instead, compute hex digit directly:
-    // For each nibble: digit = nibble; if digit < 10 then char = digit + '0' else char = digit - 10 + 'a'
-
-    // We'll write 8 hex chars starting at SP+16 (reuse save area after we load saves)
-    // Actually, let's use SP+16 as the char buffer (8 bytes).
-    // First, save the important regs, then overwrite the buffer area.
-
-    // Process 8 nibbles from most significant to least significant
-    // X0 = value, iterate 8 times shifting right by 28, 24, 20, ..., 4, 0
-
-    // X9 = char buffer pointer = SP
-    // X10 = loop counter (0..8)
-
-    // ADD X9, SP, #16  (buffer starts at SP+16)
-    code.extend_from_slice(&0x910043E9u32.to_le_bytes());
-    // MOV X10, #0
-    code.extend_from_slice(&0xD280001Au32.to_le_bytes());
-    // MOV X3, #0  (bit shift amount, starts at 28)
-    code.extend_from_slice(&0xD280003Du32.to_le_bytes()); // MOVZ X3, #28>>4... wait
-    // MOV X3, #28
-    code.extend_from_slice(&0xD2800383u32.to_le_bytes()); // MOVZ X3, #28
-
-    // Loop label:
-    let loop_offset = code.len();
-
-    // Extract nibble: X2 = (X0 >> X3) & 0xF
-    // LSR X2, X0, X3
-    code.extend_from_slice(&0x9AC02482u32.to_le_bytes()); // LSR X2, X0, X3
-    // AND X2, X2, #0xF
-    code.extend_from_slice(&0x92400C42u32.to_le_bytes()); // AND X2, X2, #15
-
-    // Convert nibble to hex char:
-    // if X2 < 10: char = X2 + 48 ('0')
-    // else: char = X2 - 10 + 97 ('a')
-    // CMP X2, #10
-    code.extend_from_slice(&0xF100141Fu32.to_le_bytes()); // CMP X2, #10? No...
-    // CMP X2, #10: use ADD X1, X2, #0 then CMP... Actually:
-    // SUB X1, X2, #10 → if < 10, result is negative (borrow set)
-    // Let's use: CMP X2, #9; B.GT hex_alpha
-    // CMP X2, #9
-    code.extend_from_slice(&0xF100129Fu32.to_le_bytes()); // CMP X2, #9
-
-    // ADD X1, X2, #48  (default: '0' + digit)
-    code.extend_from_slice(&0x91000C41u32.to_le_bytes()); // ADD X1, X2, #48
-
-    // B.GT hex_alpha (placeholder, will be +1 instruction)
-    code.extend_from_slice(&0x54000069u32.to_le_bytes()); // B.GT +4*2 = +8 bytes
-
-    // B store_char
-    code.extend_from_slice(&0x14000002u32.to_le_bytes()); // B +2 instructions
-
-    // hex_alpha: ADD X1, X2, #87  (87 = 97-10, so digit-10+'a')
-    code.extend_from_slice(&0x91002AC1u32.to_le_bytes()); // ADD X1, X2, #87
-
-    // store_char: STRB W1, [X9, X10]
-    // STRB W1, [X9, X10] — register offset
-    code.extend_from_slice(&0x382A6821u32.to_le_bytes()); // STRB W1, [X9, X10]
-
-    // Increment: SUB X3, X3, #4; ADD X10, X10, #1; CMP X10, #8; B.LT loop
-    code.extend_from_slice(&0xD1000863u32.to_le_bytes()); // SUB X3, X3, #4
-    code.extend_from_slice(&0x9100054Au32.to_le_bytes()); // ADD X10, X10, #1
-    code.extend_from_slice(&0xF100151Fu32.to_le_bytes()); // CMP X10, #8
-
-    // Calculate branch back to loop start
-    let current_pos = code.len() as i64;
-    let loop_start = loop_offset as i64;
-    let back_offset = (loop_start - current_pos) / 4 - 1; // B.LT is relative to PC+4
-    let bcond = 0x5400000Bu32 | ((back_offset as u32) & 0x7FFFF); // B.LT
-    code.extend_from_slice(&bcond.to_le_bytes());
-
-    // ── sys_write(1, buf, 8) ──
-    // MOV X0, #1  (stdout fd)
-    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOVZ X0, #1
-    // ADD X1, SP, #16  (buffer pointer)
-    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
-    // MOV X2, #8  (length)
-    code.extend_from_slice(&0xD2800102u32.to_le_bytes()); // MOVZ X2, #8
-    // MOV X8, #64  (sys_write)
-    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOVZ X8, #64
-    // SVC #0
-    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
-
-    // Restore registers
-    // LDP X9, X10, [SP, #16]
-    code.extend_from_slice(&0xA94127E9u32.to_le_bytes());
-    // LDP X1, X2, [SP, #32]
-    code.extend_from_slice(&0xA9420441u32.to_le_bytes());
-    // LDP X3, X8, [SP, #40]
-    code.extend_from_slice(&0xA9452C63u32.to_le_bytes());
-    // LDP X29, X30, [SP], #48  (post-indexed load)
-    code.extend_from_slice(&0xA8C37BFDu32.to_le_bytes());
-
-    // RET
-    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+    // Input: X0 = 64-bit value to print as 8 hex digits (zero-padded).
+    // Clobbers X1, X2, X3, X8, X9, X10 (all caller-saved — only FP/LR saved).
+    // Strategy: iterate 8 nibbles MSB→LSB (shift 28,24,…,0), convert each to
+    // '0'-'9' or 'a'-'f', store in a buffer, then sys_write 8 bytes.
+    // All instructions via `Instruction::encode()` for correct encodings.
+    // Stack: 32 bytes (16 for FP/LR, 16 for buffer).
+    {
+        use crate::arm64::{Instruction, Register, Operand, Condition};
+        macro_rules! e {
+            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+        }
+        // ── Prologue ──
+        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });               // 0: SUB SP, SP, #32
+        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 1: STP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // 2: ADD X29, SP, #0
+        // ── Setup ──
+        e!(Instruction::ADD { rd: Register::X9, rn: Register::SP, rm: Operand::Imm12(16) });               // 3: ADD X9, SP, #16  (buffer)
+        e!(Instruction::MOVZ { rd: Register::X10, imm16: 0, shift: 0 });                                    // 4: MOVZ X10, #0  (counter)
+        e!(Instruction::MOVZ { rd: Register::X3, imm16: 28, shift: 0 });                                    // 5: MOVZ X3, #28  (shift amount)
+        e!(Instruction::MOVZ { rd: Register::X8, imm16: 15, shift: 0 });                                    // 6: MOVZ X8, #15  (mask 0xF)
+        // ── Loop (instruction 7 = loop_start) ──
+        e!(Instruction::LSR { rd: Register::X2, rn: Register::X0, rm: Operand::Reg { reg: Register::X3, shift: None } }); // 7: LSR X2, X0, X3
+        e!(Instruction::AND { rd: Register::X2, rn: Register::X2, rm: Register::X8 });                     // 8: AND X2, X2, X8  (nibble)
+        e!(Instruction::CMP { rn: Register::X2, rm: Operand::Imm12(9) });                                   // 9: CMP X2, #9
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::X2, rm: Operand::Imm12(48) });               // 10: ADD X1, X2, #48  ('0'+digit, default)
+        e!(Instruction::BCond { cond: Condition::GT, offset: 8 });                                          // 11: B.GT hex_alpha (+8 → instr 13)
+        e!(Instruction::B { offset: 8 });                                                                   // 12: B store_char (+8 → instr 14)
+        // hex_alpha:
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::X2, rm: Operand::Imm12(87) });               // 13: ADD X1, X2, #87  ('a'-10+digit)
+        // store_char: (reuse X8 as scratch addr — mask no longer needed)
+        e!(Instruction::ADD { rd: Register::X8, rn: Register::X9, rm: Operand::Reg { reg: Register::X10, shift: None } }); // 14: ADD X8, X9, X10  (addr)
+        e!(Instruction::STRB { rt: Register::X1, rn: Register::X8, offset: 0 });                            // 15: STRB W1, [X8]
+        e!(Instruction::SUB { rd: Register::X3, rn: Register::X3, rm: Operand::Imm12(4) });                // 16: SUB X3, X3, #4  (shift -= 4)
+        e!(Instruction::ADD { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 17: ADD X10, X10, #1  (counter++)
+        e!(Instruction::CMP { rn: Register::X10, rm: Operand::Imm12(8) });                                   // 18: CMP X10, #8
+        e!(Instruction::BCond { cond: Condition::LT, offset: -48 });                                         // 19: B.LT loop_start (-48 → instr 7)
+        // ── sys_write(1, SP+16, 8) ──
+        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 20: MOVZ X0, #1  (fd)
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // 21: ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ { rd: Register::X2, imm16: 8, shift: 0 });                                     // 22: MOVZ X2, #8  (len)
+        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 23: MOVZ X8, #64  (sys_write)
+        e!(Instruction::SVC { imm16: 0 });                                                                  // 24: SVC #0
+        // ── Epilogue ──
+        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 25: LDP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });              // 26: ADD SP, SP, #32
+        e!(Instruction::RET { rn: None });                                                                  // 27: RET
+    }
 
     // ── __vuma_print_int ──
     let int_offset = code.len();
-    // Input: X0 = 64-bit signed integer to print as decimal
-    // Strategy: Divide by 10 repeatedly, push digits onto stack, then write.
-    // X9 = digit count, X10 = buffer pointer (SP-based)
-    // Stack frame: 64 bytes (16 for save pair + 48 for digit buffer)
-
-    // STP X29, X30, [SP, #-64]!
-    code.extend_from_slice(&0xA9C27BFDu32.to_le_bytes());
-    // ADD X29, SP, #0
-    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
-    // STP X9, X10, [SP, #16]
-    code.extend_from_slice(&0xA90127E9u32.to_le_bytes());
-    // STP X1, X2, [SP, #32]
-    code.extend_from_slice(&0xA9020441u32.to_le_bytes());
-    // STP X3, X8, [SP, #48]
-    code.extend_from_slice(&0xA9030463u32.to_le_bytes());
-
-    // Handle negative numbers
-    // CMP X0, #0
-    code.extend_from_slice(&0xB100001Fu32.to_le_bytes());
-    // B.GE positive
-    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE +4
-
-    // Print '-' for negative
-    // MOV X1, #45  ('-')
-    code.extend_from_slice(&0xD28005A1u32.to_le_bytes()); // MOVZ X1, #45
-    // STRB W1, [SP, #16]
-    code.extend_from_slice(&0x390013E1u32.to_le_bytes());
-    // sys_write(1, SP+16, 1)
-    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
-    code.extend_from_slice(&0x910043E1u32.to_le_bytes()); // ADD X1, SP, #16
-    code.extend_from_slice(&0xD2800022u32.to_le_bytes()); // MOV X2, #1
-    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
-    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
-
-    // Negate X0
-    // NEG X0, X0 = SUB X0, XZR, X0
-    code.extend_from_slice(&0xCB0003E0u32.to_le_bytes()); // SUB X0, XZR, X0
-
-    // positive: convert digits
-    // X9 = digit count = 0
-    code.extend_from_slice(&0xD2800019u32.to_le_bytes()); // MOVZ X9, #0
-    // X10 = buffer pointer = SP + 17 (leave room for potential '-')
-    code.extend_from_slice(&0x910047EAu32.to_le_bytes()); // ADD X10, SP, #17
-
-    // div_loop: UDIV X2, X0, #10; MSUB X1, X2, #10, X0; add '0'; push; X0 = X2
-    let div_loop_start = code.len();
-
-    // CBZ X0, done_digits
-    code.extend_from_slice(&0xB4000080u32.to_le_bytes()); // CBZ X0, done_digits (+16 bytes = 4 instr)
-
-    // UDIV X2, X0, #10  → but UDIV takes 2 regs, no immediate.
-    // MOV X1, #10
-    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
-    // UDIV X2, X0, X1
-    code.extend_from_slice(&0x9AC10802u32.to_le_bytes()); // UDIV X2, X0, X1
-    // MSUB X3, X2, X1, X0  → X3 = X0 - X2 * X1 = remainder
-    code.extend_from_slice(&0x9B017C43u32.to_le_bytes()); // MSUB X3, X2, X1, X0
-    // ADD X3, X3, #48  ('0')
-    code.extend_from_slice(&0x91001863u32.to_le_bytes()); // ADD X3, X3, #48
-    // STRB W3, [X10, X9]  — store digit at buffer[count]
-    code.extend_from_slice(&0x382B6863u32.to_le_bytes()); // STRB W3, [X10, X9]
-    // ADD X9, X9, #1
-    code.extend_from_slice(&0x91000529u32.to_le_bytes()); // ADD X9, X9, #1
-    // MOV X0, X2  (quotient becomes new value)
-    code.extend_from_slice(&0xAA0203E0u32.to_le_bytes()); // MOV X0, X2
-    // B div_loop
-    let cur = code.len() as i64;
-    let back = (div_loop_start as i64 - cur as i64) / 4 - 1;
-    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
-
-    // done_digits: digits are in reverse order in buffer.
-    // Reverse them in-place using X1 and X3 as temp pointers.
-    // CBZ X9, write_digits  (if count == 0, print "0")
-    code.extend_from_slice(&0xB4000039u32.to_le_bytes()); // CBZ X9, write_digits (+6 instr = 24 bytes)
-
-    // If count == 0, print "0"
-    // MOV X1, #48  ('0')
-    code.extend_from_slice(&0xD2800601u32.to_le_bytes()); // MOVZ X1, #48
-    // STRB W1, [X10]
-    code.extend_from_slice(&0x39001501u32.to_le_bytes());
-    // MOV X9, #1
-    code.extend_from_slice(&0xD2800039u32.to_le_bytes());
-    // B write_digits
-    code.extend_from_slice(&0x14000003u32.to_le_bytes()); // B +3
-
-    // Reverse digits in buffer[X10..X10+X9]
-    // X1 = left index = 0, X3 = right index = X9 - 1
-    // SUB X3, X9, #1
-    code.extend_from_slice(&0xD1000563u32.to_le_bytes()); // SUB X3, X9, #1
-    // MOV X1, #0
-    code.extend_from_slice(&0xD2800001u32.to_le_bytes()); // MOVZ X1, #0
-
-    // rev_loop: CMP X1, X3; B.GE rev_done
-    let rev_loop = code.len();
-    code.extend_from_slice(&0xEB03003Fu32.to_le_bytes()); // CMP X1, X3
-    code.extend_from_slice(&0x5400002Au32.to_le_bytes()); // B.GE rev_done (+4)
-
-    // Load bytes: LDRB W2, [X10, X1]; LDRB W8, [X10, X3]
-    code.extend_from_slice(&0x386B6822u32.to_le_bytes()); // LDRB W2, [X10, X1]
-    code.extend_from_slice(&0x386B6C68u32.to_le_bytes()); // LDRB W8, [X10, X3]
-    // STRB W8, [X10, X1]; STRB W2, [X10, X3] (swap)
-    code.extend_from_slice(&0x382B6828u32.to_le_bytes()); // STRB W8, [X10, X1]
-    code.extend_from_slice(&0x382B6842u32.to_le_bytes()); // STRB W2, [X10, X3]
-    // ADD X1, X1, #1; SUB X3, X3, #1
-    code.extend_from_slice(&0x91000421u32.to_le_bytes()); // ADD X1, X1, #1
-    code.extend_from_slice(&0xD1000463u32.to_le_bytes()); // SUB X3, X3, #1
-    // B rev_loop
-    let cur = code.len() as i64;
-    let back = (rev_loop as i64 - cur as i64) / 4 - 1;
-    code.extend_from_slice(&(0x14000000u32 | ((back as u32) & 0x3FFFFFF)).to_le_bytes());
-
-    // write_digits: sys_write(1, X10, X9)
-    // rev_done:
-    code.extend_from_slice(&0xD2800020u32.to_le_bytes()); // MOV X0, #1
-    code.extend_from_slice(&0xAA0A03E1u32.to_le_bytes()); // MOV X1, X10
-    code.extend_from_slice(&0xAA0903E2u32.to_le_bytes()); // MOV X2, X9
-    code.extend_from_slice(&0xD2800808u32.to_le_bytes()); // MOV X8, #64
-    code.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
-
-    // Restore and return
-    code.extend_from_slice(&0xA94127E9u32.to_le_bytes()); // LDP X9, X10, [SP, #16]
-    code.extend_from_slice(&0xA9420441u32.to_le_bytes()); // LDP X1, X2, [SP, #32]
-    code.extend_from_slice(&0xA9430463u32.to_le_bytes()); // LDP X3, X8, [SP, #48]
-    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes()); // LDP X29, X30, [SP], #64
-    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes()); // RET
+    // Input: X0 = 64-bit signed integer to print as decimal.
+    // Clobbers X1, X2, X3, X8, X9, X10 (all caller-saved per AAPCS64 —
+    // only FP/LR are saved, the rest are freely clobbered).
+    // Strategy: repeatedly UDIV by 10, store digit chars backward from the
+    // END of a 32-byte buffer (so no in-place reversal is needed), then
+    // sys_write the buffer from (X10+1) for X9 bytes.
+    // Stack: 48 bytes (16 for FP/LR save, 32 for digit buffer).
+    //
+    // All instructions are emitted via `Instruction::encode()` to guarantee
+    // correct encodings. The previous hand-encoded version had wrong CBZ /
+    // B / STRB offsets (e.g. CBZ X0,done_digits branched into the middle of
+    // the div loop instead of to done_digits, causing an infinite loop that
+    // overwrote past the stack frame → SIGSEGV — the test_print crash on
+    // aarch64). This rewrite fixes all branch offsets by construction.
+    {
+        use crate::arm64::{Instruction, Register, Operand, Condition};
+        macro_rules! e {
+            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+        }
+        // ── Prologue ──
+        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(48) });               // 0: SUB SP, SP, #48
+        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 1: STP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // 2: ADD X29, SP, #0
+        // ── Handle negative ──
+        e!(Instruction::CMP { rn: Register::X0, rm: Operand::Imm12(0) });                                   // 3: CMP X0, #0
+        e!(Instruction::BCond { cond: Condition::GE, offset: 40 });                                         // 4: B.GE positive (+40 → instr 14)
+        // Save X0 in X9 before the write syscall clobbers it with fd=1
+        e!(Instruction::MOV { rd: Register::X9, rm: Register::X0 });                                        // 5: MOV X9, X0  (save value)
+        // Write '-' to stdout
+        e!(Instruction::MOVZ { rd: Register::X1, imm16: 45, shift: 0 });                                    // 6: MOVZ X1, #45  ('-')
+        e!(Instruction::STRB { rt: Register::X1, rn: Register::SP, offset: 16 });                           // 7: STRB W1, [SP, #16]
+        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 8: MOVZ X0, #1  (fd=stdout)
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // 9: ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ { rd: Register::X2, imm16: 1, shift: 0 });                                     // 10: MOVZ X2, #1  (len)
+        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 11: MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 });                                                                  // 12: SVC #0
+        e!(Instruction::SUB { rd: Register::X0, rn: Register::XZR, rm: Operand::Reg { reg: Register::X9, shift: None } }); // 13: NEG X0 (SUB X0, XZR, X9)
+        // ── positive: convert digits ──
+        e!(Instruction::MOVZ { rd: Register::X9, imm16: 0, shift: 0 });                                     // 14: MOVZ X9, #0  (count = 0)
+        e!(Instruction::ADD { rd: Register::X10, rn: Register::SP, rm: Operand::Imm12(47) });              // 15: ADD X10, SP, #47  (&buf[31], end of buffer)
+        // ── div_loop ──
+        e!(Instruction::CBZ { rt: Register::X0, offset: 40 });                                              // 16: CBZ X0, write_digits (+40 → instr 26)
+        e!(Instruction::MOVZ { rd: Register::X1, imm16: 10, shift: 0 });                                    // 17: MOVZ X1, #10  (divisor)
+        e!(Instruction::UDIV { rd: Register::X2, rn: Register::X0, rm: Register::X1 });                    // 18: UDIV X2, X0, X1  (quotient)
+        e!(Instruction::MSUB { rd: Register::X3, rn: Register::X2, rm: Register::X1, ra: Register::X0 });  // 19: MSUB X3, X2, X1, X0  (remainder)
+        e!(Instruction::ADD { rd: Register::X3, rn: Register::X3, rm: Operand::Imm12(48) });              // 20: ADD X3, X3, #48  ('0' + remainder)
+        e!(Instruction::STRB { rt: Register::X3, rn: Register::X10, offset: 0 });                           // 21: STRB W3, [X10]  (store digit backward)
+        e!(Instruction::SUB { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 22: SUB X10, X10, #1  (ptr--)
+        e!(Instruction::ADD { rd: Register::X9, rn: Register::X9, rm: Operand::Imm12(1) });               // 23: ADD X9, X9, #1  (count++)
+        e!(Instruction::MOV { rd: Register::X0, rm: Register::X2 });                                        // 24: MOV X0, X2  (X0 = quotient)
+        e!(Instruction::B { offset: -36 });                                                                 // 25: B div_loop (-36 → instr 16)
+        // ── write_digits ──
+        e!(Instruction::CBNZ { rt: Register::X9, offset: 20 });                                             // 26: CBNZ X9, do_write (+20 → instr 31)
+        // count == 0 (input was 0): store '0' as the sole digit
+        e!(Instruction::MOVZ { rd: Register::X1, imm16: 48, shift: 0 });                                    // 27: MOVZ X1, #48  ('0')
+        e!(Instruction::STRB { rt: Register::X1, rn: Register::X10, offset: 0 });                           // 28: STRB W1, [X10]
+        e!(Instruction::SUB { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 29: SUB X10, X10, #1
+        e!(Instruction::MOVZ { rd: Register::X9, imm16: 1, shift: 0 });                                     // 30: MOVZ X9, #1  (count = 1)
+        // ── do_write: sys_write(1, X10+1, X9) ──
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::X10, rm: Operand::Imm12(1) });              // 31: ADD X1, X10, #1  (buf = X10+1)
+        e!(Instruction::MOV { rd: Register::X2, rm: Register::X9 });                                        // 32: MOV X2, X9  (len = count)
+        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 33: MOVZ X0, #1  (fd=stdout)
+        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 34: MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 });                                                                  // 35: SVC #0
+        // ── Epilogue ──
+        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 36: LDP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(48) });              // 37: ADD SP, SP, #48
+        e!(Instruction::RET { rn: None });                                                                  // 38: RET
+    }
 
     // ── __vuma_print_newline ──
-    // Simple: write '\n' to stdout
-    // STP X29, X30, [SP, #-16]!
-    code.extend_from_slice(&0xA9BF7BFDu32.to_le_bytes());
-    // ADD X29, SP, #0
-    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
-
-    // MOV X1, #10  ('\n')
-    code.extend_from_slice(&0xD2800141u32.to_le_bytes()); // MOVZ X1, #10
-    // STRB W1, [SP, #16]  (use the 16 bytes we just freed)
-    // Actually, use stack at SP+16 which is the pre-indexed area...
-    // Better: use [SP, #0] since we already pushed 16 bytes
-    code.extend_from_slice(&0x3900001Fu32.to_le_bytes()); // STRB W1, [SP, #0]... no, that's the saved FP/LR area
-    // Use the area after our frame: we allocated 16 bytes for FP/LR.
-    // Put '\n' at [SP, #0]... no, that's where FP/LR are stored.
-    // Let's put it at a safe location. Actually, the STP wrote X29, X30 at [SP].
-    // Let's use X9 as scratch to hold the char, and a buffer on the stack.
-
-    // Actually, simplest: put the newline byte on the stack right at the frame.
-    // We'll use the save area as buffer. We already saved FP/LR there.
-    // Let's use a different approach: just write from a register-indirect with SP offset.
-
-    // MOV W1, #10  (already done above)
-    // STRB W1, [SP]   ← this overwrites saved FP/LR! Bad.
-    // Instead, let's use X9 as temp storage.
-
-    // Let me redo this more carefully.
-    // We'll save X9 too.
-    // Actually, let's just make a 32-byte frame to have room.
-
-    // Let me restart the newline function from scratch in the code buffer.
-    // Find the start of __vuma_print_newline by looking for the last STP.
-    // The simplest approach: use a dedicated stack frame.
-
-    // I'll overwrite the last few instructions I emitted for newline.
-    // Since this is getting complex, let me just build it cleanly.
-    // Remove the partial newline code and redo it.
-    let newline_start_offset = code.len() - 7 * 4; // remove 7 instructions back
-
-    code.truncate(newline_start_offset);
-
-    // __vuma_print_newline: clean implementation
+    // Write '\n' to stdout. Simple, no loops, no branches.
+    // Uses the Instruction encoder for correct encodings (the previous
+    // hand-encoded version had (a) a `code.truncate(len - 7*4)` that ate
+    // 3 instructions of the preceding print_int epilogue, and (b) a wrong
+    // STRB encoding 0x390021E1 = STRB W1,[X15,#8] instead of [SP,#16]).
     let newline_offset = code.len();
-    // STP X29, X30, [SP, #-32]!  (32-byte frame: 16 for save, 16 for buffer)
-    code.extend_from_slice(&0xA9BE7BFDu32.to_le_bytes());
-    // ADD X29, SP, #0
-    code.extend_from_slice(&0x910003FDu32.to_le_bytes());
-
-    // Store '\n' at SP+16 (safe area, not overlapping saved regs)
-    // MOV W1, #10
-    code.extend_from_slice(&0x52800141u32.to_le_bytes()); // MOVZ W1, #10
-    // STRB W1, [SP, #16]
-    code.extend_from_slice(&0x390021E1u32.to_le_bytes());
-
-    // sys_write(1, SP+16, 1)
-    // MOV X0, #1
-    code.extend_from_slice(&0xD2800020u32.to_le_bytes());
-    // ADD X1, SP, #16
-    code.extend_from_slice(&0x910043E1u32.to_le_bytes());
-    // MOV X2, #1
-    code.extend_from_slice(&0xD2800022u32.to_le_bytes());
-    // MOV X8, #64
-    code.extend_from_slice(&0xD2800808u32.to_le_bytes());
-    // SVC #0
-    code.extend_from_slice(&0xD4000001u32.to_le_bytes());
-
-    // LDP X29, X30, [SP], #32
-    code.extend_from_slice(&0xA8C27BFDu32.to_le_bytes());
-    // RET
-    code.extend_from_slice(&0xD65F03C0u32.to_le_bytes());
+    {
+        use crate::arm64::{Instruction, Register, Operand, Condition};
+        macro_rules! e {
+            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+        }
+        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });               // SUB SP, SP, #32
+        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // STP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // ADD X29, SP, #0
+        e!(Instruction::MOVZ { rd: Register::X1, imm16: 10, shift: 0 });                                    // MOVZ W1, #10  ('\n')
+        e!(Instruction::STRB { rt: Register::X1, rn: Register::SP, offset: 16 });                           // STRB W1, [SP, #16]
+        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // MOVZ X0, #1  (fd)
+        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ { rd: Register::X2, imm16: 1, shift: 0 });                                     // MOVZ X2, #1  (len)
+        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 });                                                                  // SVC #0
+        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // LDP X29, X30, [SP]
+        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });              // ADD SP, SP, #32
+        e!(Instruction::RET { rn: None });                                                                  // RET
+    }
 
     (code, hex_offset, int_offset, newline_offset)
 }
