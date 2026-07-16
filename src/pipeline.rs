@@ -8734,21 +8734,26 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         // runtime stub. Eliminates the last Rust-wrapper dependency in the
         // heap-deallocation path.
         //
-        // FreeStmt does not carry a size, so we pass length=0 to munmap.
-        // This matches the prior `__vuma_free` stub's behavior exactly:
-        //   backend.rs:2841  "__vuma_free(addr in X0) -> munmap(addr, 0)"
-        // Linux munmap(addr, 0) is a no-op (length=0 → nothing unmapped),
-        // which preserves the existing semantics where free() does not
-        // actually reclaim memory.
-        PStmt::Free(free_stmt) => {
-            let mut stmts = Vec::new();
-            let ptr_expr = flatten_expr(&free_stmt.ptr, &mut stmts, ctx);
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 215,
-                dst: None,
-                args: vec![ptr_expr, ScgExpr::Int(0)],
-            }));
-            stmts
+        // FreeStmt: free() is a no-op in VUMA's current memory model.
+        // Stack allocations (IRInstr::Alloc) are freed automatically when
+        // the function returns (stack frame deallocation). Heap allocations
+        // (via mmap) are freed automatically when the process exits.
+        //
+        // The previous implementation emitted Syscall(215, munmap, [ptr, 0]),
+        // but munmap(addr, 0) is a no-op (length=0 → nothing unmapped), so
+        // this was already a no-op. However, the Syscall instruction itself
+        // was treated as a barrier by the scheduler and DSE, causing
+        // incorrect reordering of atomic operations around free() calls.
+        // Removing the Syscall entirely eliminates this issue.
+        //
+        // When real per-allocation deallocation is needed (e.g. long-running
+        // servers), the memory model will need to track heap vs stack
+        // allocations and emit munmap only for heap allocations with the
+        // correct size.
+        PStmt::Free(_free_stmt) => {
+            // No-op: stack allocations are freed on function return,
+            // heap allocations are freed on process exit.
+            Vec::new()
         }
 
         // ── expr as Type;  (standalone cast) ──
