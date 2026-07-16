@@ -282,5 +282,13 @@ fn main() {
     let file_path = std::path::Path::new(path);
     let (binary, _ive_status) = compile_for_backend_with_path(&source, kind, Some(file_path), verify).unwrap();
     std::fs::write(out_path, &binary).unwrap();
+    // Set executable permissions (0o755) so QEMU can run the output.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(out_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(out_path, perms);
+    }
     eprintln!("Wrote {} bytes to {}", binary.len(), out_path);
 }
