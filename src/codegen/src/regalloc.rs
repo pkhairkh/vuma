@@ -2135,7 +2135,7 @@ impl RegAllocator {
         self.spill_map.insert(vreg_to_spill, slot);
         self.free_regs.push(reg);
 
-        vuma_log!(debug, 
+        vuma_log!(debug,
             "spilled vreg {} to stack slot {} (freed {})",
             vreg_to_spill,
             slot,
@@ -2146,6 +2146,42 @@ impl RegAllocator {
             reg,
             slot,
         })
+    }
+
+    /// Spill ALL currently-allocated caller-saved registers to the stack.
+    /// Called before a function `Call` instruction: the callee is allowed to
+    /// clobber every caller-saved register (X0–X18), so any live value in
+    /// `used_regs` (the caller-saved pool) must be spilled to survive the
+    /// call. Values in `callee_saved_used` (X19–X28) are preserved by the
+    /// callee's prologue/epilogue and need NOT be spilled.
+    ///
+    /// Returns `Vec<(vreg, physical_reg, spill_slot)>` for each spilled vreg,
+    /// so the emitter can emit the actual STR instructions before the BL.
+    /// After the call, the spilled values are reloaded on demand by
+    /// `allocate()` → `reload_slot` when they're next accessed via
+    /// `resolve_reg`.
+    ///
+    /// This fixes the "greedy allocator doesn't save caller-saved registers
+    /// across calls" defect that caused wrong values when a live-across-call
+    /// vreg was allocated to a caller-saved register and clobbered by the
+    /// callee (e.g. fn_multiple_callers: caller1's return in X15 was
+    /// overwritten by caller2's body, giving 5+5=10 instead of 4+5=9).
+    pub fn spill_caller_saved(&mut self) -> Vec<(IRValueId, Register, u32)> {
+        let to_spill: Vec<(IRValueId, Register)> = self
+            .used_regs
+            .iter()
+            .map(|(id, reg)| (*id, *reg))
+            .collect();
+        let mut spilled = Vec::new();
+        for (vreg, reg) in to_spill {
+            let slot = self.next_spill_slot;
+            self.next_spill_slot += 1;
+            self.spill_map.insert(vreg, slot);
+            self.used_regs.remove(&vreg);
+            self.free_regs.push(reg);
+            spilled.push((vreg, reg, slot));
+        }
+        spilled
     }
 
     /// Look up the physical register for a virtual register, allocating one

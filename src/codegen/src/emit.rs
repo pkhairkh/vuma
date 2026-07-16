@@ -1183,6 +1183,29 @@ impl Emitter {
                 args,
                 is_extern,
             } => {
+                // ── Spill all caller-saved registers before the call ──
+                // The callee may clobber X0–X18 (all caller-saved). Any live
+                // value in the caller-saved pool (used_regs) must be saved to
+                // the stack to survive the call. Callee-saved regs (X19–X28)
+                // are preserved by the callee and need not be spilled.
+                // After the call, spilled values are reloaded on demand by
+                // resolve_reg → allocate → reload_slot.
+                let caller_spilled = self.reg_alloc.spill_caller_saved();
+                for (_vreg, reg, slot) in &caller_spilled {
+                    let sp_offset = 8 + (*slot as i32) * 8;
+                    // Compute spill address: X29 - sp_offset (using X16 as scratch)
+                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+                    self.emit_instruction(Instruction::ADD {
+                        rd: Register::X16,
+                        rn: Register::X29,
+                        rm: Operand::Reg { reg: Register::X16, shift: None },
+                    })?;
+                    self.emit_instruction(Instruction::STR {
+                        rt: *reg,
+                        rn: Register::X16,
+                        offset: 0,
+                    })?;
+                }
                 // Resolve all argument source registers FIRST, before moving
                 // any of them. This prevents a later move from overwriting a
                 // register that an earlier argument is in.
@@ -4700,6 +4723,21 @@ fn compute_frame_size(func: &IRFunction) -> u32 {
     let spill_bytes = potential_spills * 8; // 8 bytes per spill slot
 
     total += spill_bytes;
+
+    // Reserve space for caller-saved register spills at call sites.
+    // Each Call instruction may need to spill up to 13 caller-saved registers
+    // (X0–X7, X11–X15) to preserve live values across the call (see
+    // `spill_caller_saved` in the Call handler). The spill slot counter
+    // (`next_spill_slot`) never decrements — each call allocates new slots
+    // even if previous call's slots were reloaded — so the frame must hold
+    // up to `13 * num_calls` slots in the worst case.
+    let num_calls: u32 = func.blocks.iter()
+        .flat_map(|b| b.instructions.iter())
+        .filter(|i| matches!(i, IRInstr::Call { .. }))
+        .count() as u32;
+    if num_calls > 0 {
+        total += 13 * num_calls * 8; // 104 bytes per call site
+    }
 
     // Round up to 16-byte alignment (should already be, but be safe).
     total = (total + 15) & !15;
