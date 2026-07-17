@@ -1,0 +1,430 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/mm/vmm.vuma
+// VWK Virtual Memory Manager — page-table walk as PMT transforms (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Implements the address-space operations (map / unmap / translate) on top
+// of a multi-level page table. The table format itself is arch-specific:
+//
+//   x86_64  4-level (PML4→PDPT→PD→PT):   bits 47-39 / 38-30 / 29-21 / 20-12
+//   aarch64 4-level (PGD→PUD→PMD→PTE):   same bit layout (4 KB granule)
+//   riscv64 3-level Sv39 (PGD→PMD→PTE):  bits 38-30 / 29-21 / 20-12
+//
+// The walk is generic over `levels` (read from the PageTable state): walk
+// from level (levels-1) down to 0, extracting a 9-bit index at each level
+// from the virtual address. At level 0, the PTE is the leaf.
+//
+// Build & run self-test (hosted x86_64):
+//     ./target/release-fast/compile_dump womb/kernel/mm/vmm.vuma \
+//         /tmp/vmm.bin x86_64 --verify
+//     /tmp/vmm.bin ; echo "exit=$?"
+// Expected exit: 0
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
+// lives in ___pmt_buffer-backed State<T> buffers:
+//   - State<PageTable>  — the address-space root (root_phys + levels)
+//   - State<VaddrParts> — a scratch struct holding the decomposed vaddr
+// Both are allocated via `state_new(...)` by the CALLER (init-style API —
+// see "Why init-style?" below) and passed by reference.
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K2b contract specifies:
+//     fn vaddr_parts(vaddr: u64) -> State<VaddrParts>
+//     transform vmm_map(pt: State<PageTable>, vaddr: u64, ...) -> State<PageTable>
+// i.e. each function returns a fresh State<T> to its caller. The current
+// VUMA codegen (verified via /tmp/probe_vaddrparts.vuma during K2b) does
+// NOT propagate State-typedness through function return values: a
+// `let parts = vaddr_parts(vaddr); ... parts.level3 ...` binding in the
+// caller is NOT registered as state-typed, so the `parts.level3` access
+// in the caller lowers to the "unsupported FieldAccess (not state-typed)"
+// path in src/pipeline.rs::flatten_expr, emits a warning, and silently
+// returns 0. This is the same caveat documented in womb/alloc/arena.vuma
+// and womb/kernel/mm/pmm.vuma (K2a):
+//   "the current PMT codegen does not propagate State-typedness through
+//    function return values ... The init-style API (state allocated at
+//    the call site, passed by reference to an init function) is the
+//    canonical PMT pattern and works correctly end-to-end."
+//
+// Two further issues force the deviation:
+//   1. `transform` is parser-restricted to a SINGLE State<T> parameter
+//      (src/parser/src/parser.rs::parse_transform_def). vmm_map / vmm_unmap
+//      need extra (vaddr, paddr, flags) parameters, so they cannot be
+//      declared `transform` at all.
+//   2. Even vaddr_parts, which has only one non-state param, returns a
+//      State<T> that the caller immediately reads fields from — the
+//      return-value path is broken as described above.
+//
+// Workaround: every function takes its State<T> by reference (init-style,
+// same as K2a's pmm_init). The function bodies are pure PMT — they read
+// and write State<T> fields, no pointer arithmetic, no allocations.
+// The deviation from the contract's return-type signature is documented
+// here and in the worklog; when the codegen gains State-typedness
+// propagation through returns, this file can collapse back to the
+// contract's signatures verbatim.
+//
+// ── Why extern "C" trampolines for pte_read / pte_write? ────────────────────
+// Page-table entries live in PHYSICAL memory at addresses determined by
+// the page-table hierarchy itself. In bare-metal mode (K11), reading or
+// writing a PTE is a per-arch MMIO sequence:
+//   - x86_64:   PTE physical addr → direct dereference (identity-mapped
+//               physmem window OR with CR3.PCIDE-aware translation)
+//   - aarch64:  PTE phys → TTBR0/1-relative dereference
+//   - riscv64:  PTE phys → satp-relative dereference
+// In hosted mode (x86_64 Linux/MacOS), there is no "physical memory" —
+// the host kernel owns the real page tables. The compile_dump binary
+// links all unresolved externs to __ffi_fallback_stub (returns 0), so
+// pte_read returns 0 (PTE not present) and pte_write is a no-op.
+//
+// This means: in hosted mode, vmm_map returns early (can't allocate
+// intermediate tables — the contract says "return pt unchanged if the
+// walk fails, since we can't allocate physical pages in hosted mode"),
+// and vmm_translate always returns 0 (every PTE reads as not-present).
+// The self-test therefore only exercises vaddr_parts for correctness;
+// map/unmap/translate are called to confirm they don't CRASH (no
+// infinite loops, no out-of-bounds State writes).
+//
+// When K11 lands, the bare-metal build replaces __ffi_fallback_stub with
+// per-arch PTE access + TLB flush primitives, and the same vmm.vuma
+// file works end-to-end with no source changes (the extern block is
+// the ONLY swap point — same pattern as womb/kernel/console.vuma).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. If a future kmain.vuma wants to call
+// vmm_map / vmm_unmap / vmm_translate, it must re-declare the PageTable
+// / VaddrParts layouts and the extern block byte-identically (same
+// pattern as console.vuma re-declaring its extern `write`).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (declared verbatim per the K2b contract).
+// ────────────────────────────────────────────────────────────────────────────
+
+// A page table. `root_phys` is the physical address of the top-level
+// table (PML4 for x86_64, PGD for aarch64, the SATP-pointed table for
+// riscv64). `levels` is the number of paging levels (4 for x86_64/aarch64,
+// 3 for riscv64 Sv39). The walk uses levels to know how deep to descend.
+layout PageTable = {
+    root_phys: u64,
+    levels: u8,
+}
+
+// A virtual address broken into page-table indices. For x86_64 4-level:
+//   bits 47-39 = level 3 index, 38-30 = level 2, 29-21 = level 1,
+//   20-12 = level 0. For aarch64 4-level (4 KB granule): same bit
+//   layout. For riscv64 Sv39 3-level: bits 38-30 = level 2,
+//   29-21 = level 1, 20-12 = level 0 (the `level3` field then holds
+//   bits 38-30, `level2` holds bits 29-21, `level1` holds bits 20-12,
+//   and `level0` is unused). `offset` is always bits 11-0 (page offset).
+layout VaddrParts = {
+    level3: u32,   // bits 47-39 (or 38-30 for Sv39)
+    level2: u32,   // bits 38-30 (or 29-21)
+    level1: u32,   // bits 29-21 (or 20-12)
+    level0: u32,   // bits 20-12
+    offset: u32,   // bits 11-0 (page offset)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — per-arch PTE access + TLB flush.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode, these resolve to __ffi_fallback_stub (returns 0) — fine
+// for compile verification. K11 adds the real per-arch implementations:
+//   - pte_read / pte_write: MMIO at the PTE's physical address.
+//   - tlb_flush: invlpg (x86_64), tlbi_vmalle1 (aarch64), sfence_vma (riscv64).
+//   - invlpg: per-vaddr TLB invalidation (invlpg / tlbi_vaae1is / sfence_vma vaddr).
+//
+// `#[borrow]` on pte_read / pte_write marks the State<PageTable> arg as
+// borrowed (not consumed) — the page table survives the call. This is the
+// same attribute pattern as tests/gold_standard/ffi_wave2/*.vuma.
+extern "C" {
+    // Read the 8-byte page-table entry at (level, idx) in the table rooted
+    // at pt.root_phys. The codegen resolves the actual PTE physical
+    // address (walking the levels above `level`) — this is a per-arch
+    // concern handled in K11.
+    #[borrow]
+    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    // Write the 8-byte PTE at (level, idx). Same address-resolution story.
+    #[borrow]
+    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    // Full TLB flush — invalidate all TLB entries for the current ASID.
+    fn tlb_flush();
+    // Per-vaddr TLB invalidation — invalidate the TLB entry for `vaddr`
+    // (if any) in the current address space.
+    fn invlpg(vaddr: u64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// vaddr_parts — decompose a virtual address into page-table indices.
+// ────────────────────────────────────────────────────────────────────────────
+// Init-style: caller allocates `out` via state_new(VaddrParts), passes by
+// reference. Populates out.level3/level2/level1/level0/offset from vaddr.
+// The bit extraction is the same for all arches that use 9-bit indices
+// (x86_64 4-level, aarch64 4-level, riscv64 Sv39 3-level — all use 9-bit
+// indices into 4 KB-page tables holding 512 8-byte PTEs each). For Sv39
+// (3-level), the level3 field holds bits 38-30 (which Sv39 calls "level
+// 2"); the walk_idx helper below re-derives the index from the level
+// number directly, so the field-name-vs-level-number mismatch does not
+// affect vmm_map / vmm_unmap / vmm_translate.
+
+fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
+    out.level3 = ((vaddr >> 39) as u32) & 511;
+    out.level2 = ((vaddr >> 30) as u32) & 511;
+    out.level1 = ((vaddr >> 21) as u32) & 511;
+    out.level0 = ((vaddr >> 12) as u32) & 511;
+    out.offset = (vaddr & 4095) as u32;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// vmm_walk_idx — extract the 9-bit page-table index for a given level.
+// ────────────────────────────────────────────────────────────────────────────
+// For walk level L (0..levels-1), the index occupies 9 bits starting at
+// bit (12 + 9*L) of the virtual address:
+//   L=0 → bits 20-12   (offset is bits 11-0, so the L=0 index is just above)
+//   L=1 → bits 29-21
+//   L=2 → bits 38-30
+//   L=3 → bits 47-39
+// This works for both 4-level (x86_64/aarch64, L=3..0) and 3-level Sv39
+// (riscv64, L=2..0) — the only difference is the starting level, which
+// the caller picks from pt.levels.
+
+fn vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
+    let sh = (level as u32) * 9 + 12;
+    let shifted = vaddr >> sh;
+    return (shifted as u32) & 511;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// vmm_map — map a virtual page to a physical page with given flags.
+// ────────────────────────────────────────────────────────────────────────────
+// Walks the page tables from root (level = levels-1) down to level 1. At
+// each level, reads the PTE at the level's index. If the PTE's present
+// bit (bit 0) is 0, the intermediate table is missing — in hosted mode
+// (where pte_read is a stub returning 0), this happens immediately, so
+// the function returns pt unchanged (no allocation possible). At the
+// leaf (level 0), writes the PTE:
+//   pte = (paddr & 0x000FFFFFFFFFF000)   // physical page-frame number
+//       | (flags & 0xFFF)                // arch-specific flag bits
+//       | 1                              // present bit
+// Then flushes the TLB so the new mapping takes effect immediately.
+//
+// Init-style: caller allocates `pt` via state_new(PageTable), passes by
+// reference. The function reads pt.levels and pt.root_phys (the latter
+// is read by the pte_read/pte_write trampoline, not directly here) and
+// may write PTEs via the pte_write trampoline.
+
+fn vmm_map(pt: State<PageTable>, vaddr: u64, paddr: u64, flags: u64) {
+    // No levels → nothing to do (degenerate PageTable).
+    if pt.levels == 0 {
+        return;
+    }
+
+    // Walk from the top level down to level 1 (the level just above the
+    // leaf). At each level, the PTE we read points to the next-level
+    // table; if it's not present, we can't descend further (hosted mode
+    // has no PMM available to allocate a missing intermediate table).
+    let lvl = pt.levels - 1;
+    while lvl > 0 {
+        let idx = vmm_walk_idx(vaddr, lvl);
+        let pte = pte_read(pt, lvl, idx);
+        if (pte & 1) == 0 {
+            // Intermediate table missing — bail (contract: "return pt
+            // unchanged if the walk fails"). In bare-metal mode (K11),
+            // this is where we'd call pmm_alloc to get a new page for
+            // the missing table, zero it, and write its physical
+            // address into the parent PTE before continuing the walk.
+            return;
+        }
+        lvl = lvl - 1;
+    }
+
+    // Leaf level (level 0): write the final PTE.
+    let leaf_idx = vmm_walk_idx(vaddr, 0);
+    let pte = (paddr & 0x000FFFFFFFFFF000) | (flags & 0xFFF) | 1;
+    pte_write(pt, 0, leaf_idx, pte);
+
+    // Flush TLB so any stale entry for `vaddr` is evicted before the
+    // new mapping is used. (tlb_flush is the heavy hammer; a future
+    // optimization could call invlpg(vaddr) for a single-entry flush.)
+    tlb_flush();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// vmm_unmap — unmap a virtual page (set its leaf PTE to not-present).
+// ────────────────────────────────────────────────────────────────────────────
+// Walks to the leaf PTE (same walk as vmm_map). If any intermediate
+// table is missing, the page was never mapped — bail (no-op). At the
+// leaf, writes 0 (not present) and flushes TLB. Does NOT free the
+// physical page (that's the caller's responsibility — call pmm_free
+// with the physical address returned by vmm_translate BEFORE unmapping).
+//
+// Init-style: same pattern as vmm_map.
+
+fn vmm_unmap(pt: State<PageTable>, vaddr: u64) {
+    if pt.levels == 0 {
+        return;
+    }
+
+    let lvl = pt.levels - 1;
+    while lvl > 0 {
+        let idx = vmm_walk_idx(vaddr, lvl);
+        let pte = pte_read(pt, lvl, idx);
+        if (pte & 1) == 0 {
+            // Intermediate table missing → page was never mapped.
+            return;
+        }
+        lvl = lvl - 1;
+    }
+
+    // Leaf: clear the PTE.
+    let leaf_idx = vmm_walk_idx(vaddr, 0);
+    pte_write(pt, 0, leaf_idx, 0);
+
+    // Per-vaddr TLB invalidation + full flush. The invlpg(vaddr) is
+    // the precise flush; tlb_flush() is the conservative hammer for
+    // arches that don't have a precise single-entry invalidation (or
+    // where the caller wants belt-and-suspenders).
+    invlpg(vaddr);
+    tlb_flush();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// vmm_translate — walk page tables to translate a virtual address.
+// ────────────────────────────────────────────────────────────────────────────
+// Walks from the top level down to the leaf. If any PTE along the way is
+// not present, returns 0 (not mapped). At the leaf, returns:
+//   (leaf_pte & 0x000FFFFFFFFFF000) | (vaddr & 4095)
+// i.e. the physical page-frame address OR'd with the original page
+// offset. This is the canonical "translate vaddr → paddr" operation.
+//
+// Returns u64 (not State<T>) — no state-typedness propagation issue.
+
+fn vmm_translate(pt: State<PageTable>, vaddr: u64) -> u64 {
+    if pt.levels == 0 {
+        return 0;
+    }
+
+    // Walk from the top level down to level 1.
+    let lvl = pt.levels - 1;
+    while lvl > 0 {
+        let idx = vmm_walk_idx(vaddr, lvl);
+        let pte = pte_read(pt, lvl, idx);
+        if (pte & 1) == 0 {
+            // Not present at this level → translation fails.
+            return 0;
+        }
+        lvl = lvl - 1;
+    }
+
+    // Leaf level (level 0): read the final PTE.
+    let idx = vmm_walk_idx(vaddr, 0);
+    let pte = pte_read(pt, 0, idx);
+    if (pte & 1) == 0 {
+        return 0;
+    }
+
+    // Mask out the flag bits, OR in the original page offset.
+    let pa = pte & 0x000FFFFFFFFFF000;
+    let off = vaddr & 4095;
+    return pa | off;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K2b DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode, pte_read/pte_write are stubs (return 0), so we cannot
+// test real mapping. But we CAN test vaddr_parts, and we can exercise
+// vmm_map / vmm_unmap / vmm_translate to confirm they don't crash (no
+// infinite loops, no out-of-bounds State writes, no PMT violations).
+//
+// vaddr_parts(0x123456789ABC) should yield:
+//   level3 = (0x123456789ABC >> 39) & 511 = 36
+//   level2 = (0x123456789ABC >> 30) & 511 = 209
+//   level1 = (0x123456789ABC >> 21) & 511 = 179
+//   level0 = (0x123456789ABC >> 12) & 511 = 393
+//   offset = 0x123456789ABC & 4095        = 2748
+// (computed via Python: int('0x123456789abc', 16) decomposed as above.)
+//
+// Returns 0 on pass.
+
+fn main() -> i32 {
+    // Build a PageTable (4-level, root at phys 0).
+    let pt = state_new(PageTable);
+    pt.root_phys = 0;
+    pt.levels = 4;
+
+    // Decompose a test virtual address.
+    let parts = state_new(VaddrParts);
+    vaddr_parts(parts, 0x123456789ABC);
+
+    // Verify each index. (The contract's DoD requires level3 == 36; we
+    // also check level2/level1/level0/offset for tighter coverage.)
+    if parts.level3 != 36 {
+        return 1;
+    }
+    if parts.level2 != 209 {
+        return 2;
+    }
+    if parts.level1 != 179 {
+        return 3;
+    }
+    if parts.level0 != 393 {
+        return 4;
+    }
+    if parts.offset != 2748 {
+        return 5;
+    }
+
+    // Exercise vmm_walk_idx directly for each level of a 4-level table.
+    // For vaddr 0x123456789ABC, the indices are:
+    //   level 3 (>> 39): 36    level 2 (>> 30): 209
+    //   level 1 (>> 21): 179   level 0 (>> 12): 393
+    if vmm_walk_idx(0x123456789ABC, 3) != 36 {
+        return 6;
+    }
+    if vmm_walk_idx(0x123456789ABC, 2) != 209 {
+        return 7;
+    }
+    if vmm_walk_idx(0x123456789ABC, 1) != 179 {
+        return 8;
+    }
+    if vmm_walk_idx(0x123456789ABC, 0) != 393 {
+        return 9;
+    }
+
+    // Exercise vmm_map / vmm_translate / vmm_unmap. With stubbed
+    // pte_read (returns 0 = not present):
+    //   - vmm_map walks to level 3, reads PTE = 0, returns early.
+    //   - vmm_translate walks to level 3, reads PTE = 0, returns 0.
+    //   - vmm_unmap walks to level 3, reads PTE = 0, returns early.
+    // None of these should crash, hang, or write out-of-bounds.
+    vmm_map(pt, 0x1000, 0x80000, 0);
+
+    let pa = vmm_translate(pt, 0x1000);
+    if pa != 0 {
+        // In hosted mode, translate must return 0 (nothing mapped).
+        return 10;
+    }
+
+    vmm_unmap(pt, 0x1000);
+
+    // Sanity: levels=0 is a degenerate table; all ops are no-ops.
+    let pt2 = state_new(PageTable);
+    pt2.root_phys = 0;
+    pt2.levels = 0;
+    vmm_map(pt2, 0x2000, 0x90000, 0);
+    vmm_unmap(pt2, 0x2000);
+    if vmm_translate(pt2, 0x2000) != 0 {
+        return 11;
+    }
+
+    // Sanity: 3-level (Sv39-like) table also walks without crashing.
+    let pt3 = state_new(PageTable);
+    pt3.root_phys = 0;
+    pt3.levels = 3;
+    vmm_map(pt3, 0x4000, 0xA0000, 2);
+    if vmm_translate(pt3, 0x4000) != 0 {
+        return 12;
+    }
+    vmm_unmap(pt3, 0x4000);
+
+    return 0;
+}
