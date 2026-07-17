@@ -1,0 +1,12 @@
+// arena_wave0/arena_new_parse — arena_new + arena_free parse test
+// Expected exit code: 0
+//
+// Wave 1 test: arena_new and arena_free parse correctly.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+
+fn main() -> i32 {
+    let arena = arena_new(4096);
+    arena_free(arena);
+    return 0;
+}

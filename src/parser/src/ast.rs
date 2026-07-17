@@ -1288,6 +1288,45 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+
+    // ---- Arena State Model — Wave 1 ---------------------------------------
+    /// Arena creation: `arena_new(capacity)` — constructs a fresh
+    /// `State<Arena>` backed by an mmap'd region of `capacity` bytes.
+    ArenaNew {
+        /// The initial capacity in bytes.
+        capacity: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Arena allocation: `arena_alloc(arena, LayoutName)` — bump-allocates
+    /// a `State<LayoutName>` inside the arena. Consumes the arena and
+    /// returns `(State<Arena>, State<LayoutName>)`.
+    ArenaAlloc {
+        /// The arena state being consumed.
+        arena: Box<Expr>,
+        /// The layout to allocate.
+        layout_name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Arena growth: `arena_grow(arena, min_capacity)` — grows the arena's
+    /// mmap'd region via mremap. Consumes and returns `State<Arena>`.
+    ArenaGrow {
+        /// The arena state being consumed.
+        arena: Box<Expr>,
+        /// The minimum new capacity.
+        min_capacity: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Arena destruction: `arena_free(arena)` — unmaps the arena's region
+    /// via munmap. Consumes the arena.
+    ArenaFree {
+        /// The arena state being consumed.
+        arena: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

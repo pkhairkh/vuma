@@ -2483,6 +2483,48 @@ impl<'src> Parser<'src> {
                             }
                         }
                     }
+
+                    // Arena State Model (Wave 1): intercept arena builtins.
+                    // arena_new(capacity) → Expr::ArenaNew
+                    // arena_alloc(arena, LayoutName) → Expr::ArenaAlloc
+                    // arena_grow(arena, min_capacity) → Expr::ArenaGrow
+                    // arena_free(arena) → Expr::ArenaFree
+                    if let Expr::Call { callee, args, span } = &expr {
+                        if let Expr::Var { name, .. } = callee.as_ref() {
+                            match name.as_str() {
+                                "arena_new" if args.len() == 1 => {
+                                    expr = Expr::ArenaNew {
+                                        capacity: Box::new(args[0].clone()),
+                                        span: *span,
+                                    };
+                                }
+                                "arena_alloc" if args.len() == 2 => {
+                                    // Second arg must be a layout name (Expr::Var)
+                                    if let Expr::Var { name: layout_name, .. } = &args[1] {
+                                        expr = Expr::ArenaAlloc {
+                                            arena: Box::new(args[0].clone()),
+                                            layout_name: layout_name.clone(),
+                                            span: *span,
+                                        };
+                                    }
+                                }
+                                "arena_grow" if args.len() == 2 => {
+                                    expr = Expr::ArenaGrow {
+                                        arena: Box::new(args[0].clone()),
+                                        min_capacity: Box::new(args[1].clone()),
+                                        span: *span,
+                                    };
+                                }
+                                "arena_free" if args.len() == 1 => {
+                                    expr = Expr::ArenaFree {
+                                        arena: Box::new(args[0].clone()),
+                                        span: *span,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 TokenKind::Dot => {
                     // Field access or .await
@@ -4083,6 +4125,11 @@ impl Expr {
             Expr::StateInit { span, .. } => *span,
             Expr::StateRead { span, .. } => *span,
             Expr::StateWrite { span, .. } => *span,
+            // Arena State Model (Wave 1)
+            Expr::ArenaNew { span, .. } => *span,
+            Expr::ArenaAlloc { span, .. } => *span,
+            Expr::ArenaGrow { span, .. } => *span,
+            Expr::ArenaFree { span, .. } => *span,
         }
     }
 }
