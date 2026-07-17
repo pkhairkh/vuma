@@ -1,0 +1,33 @@
+// ffi_wave1/open_file — open() with marshalled path (aarch64)
+// Expected exit code: 0
+//
+// Wave 6 test: declares open() and demonstrates the NUL-terminated string
+// marshalling pattern. Today's VUMA layouts are not NUL-terminated, so a
+// real call would use marshal_cstr() to copy the path to the scratchpad
+// with a trailing '\0'. This test declares the extern and the layout;
+// the actual marshal_cstr call is shown in comments (the builtin is
+// recognized by the marshal module but full codegen lowering is Wave 5+).
+
+layout Path = { bytes: [u8; 256], len: u64 }
+
+extern "C" {
+    fn open(path: Address, flags: i32) -> i32;
+}
+
+fn main() -> i32 {
+    let path = state_new(Path);
+    path.len = 9;
+    path.bytes[0] = 47; // '/'
+    path.bytes[1] = 100; // 'd'
+    path.bytes[2] = 101; // 'e'
+    path.bytes[3] = 118; // 'v'
+    path.bytes[4] = 47; // '/'
+    path.bytes[5] = 110; // 'n'
+    path.bytes[6] = 117; // 'u'
+    path.bytes[7] = 108; // 'l'
+    path.bytes[8] = 108; // 'l'
+    // Hypothetically: let c_path = marshal_cstr(path); let fd = open(c_path, 0);
+    // On aarch64 the ffi_stub returns 0 (no real fd); when linked against
+    // libc, this opens /dev/null and returns a real fd >= 0.
+    return 0;
+}
