@@ -1,0 +1,228 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/handlers/mm.vuma
+// VWK Syscall Handlers — Memory Management (brk, mmap, munmap) (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the memory-management syscall-handler layer. It implements
+// sys_brk (asm-generic __NR_brk = 214), sys_mmap (asm-generic __NR_mmap =
+// 222), and sys_munmap (asm-generic __NR_munmap = 215). Sibling io.vuma
+// implements sys_write / sys_read; sibling proc.vuma implements sys_getpid
+// / sys_exit.
+//
+// ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
+// Same rationale as io.vuma's header: K3e's dispatch.vuma uses a stub
+// return because VUMA has no fn-pointer call today. K11 will register
+// sys_brk / sys_mmap / sys_munmap via syscall_register and wire up real
+// dispatch. For now, this file is self-testable: main() calls sys_mmap
+// + sys_munmap directly to verify the path works end-to-end.
+//
+// ── Hosted vs bare-metal swap ───────────────────────────────────────────────
+// In hosted mode (compile_dump on x86_64), the `mmap` and `munmap` externs
+// resolve to the pre-registered runtime stubs in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
+//   - mmap   = sys_mmap (syscall #9 on x86_64). 6 args (addr, len, prot,
+//              flags, fd, offset) — the stub moves arg4 (flags) from RCX
+//              to R10 (SysV → syscall-ABI fixup) then does the syscall.
+//   - munmap = sys_munmap (syscall #11 on x86_64). 2 args — simple_stub
+//              form ("mov eax,#11; syscall; ret").
+// In bare-metal mode (K11), mmap/munmap will route through the VMM (K2b's
+// vmm_map / vmm_unmap) and the PMM (K2a's pmm_alloc / pmm_free). The
+// existing womb/kernel/mm/mmap.vuma file (K2f) implements the kernel-side
+// region-table bookkeeping + PMM/VMM glue for the bare-metal path. This
+// file is the simpler hosted-mode handler that delegates to the host
+// kernel's mmap/munmap directly. K11 will choose between them based on
+// the build target (hosted vs bare-metal).
+//
+// ── brk in hosted mode is a no-op identity ──────────────────────────────────
+// The Linux brk(addr) syscall has subtle semantics: if addr == 0, it
+// returns the CURRENT brk value (a query); if addr != 0, it tries to
+// SET the brk to addr and returns the NEW brk (which may be != addr if
+// the request couldn't be satisfied). The hosted-mode host kernel manages
+// its own brk for the host process — the VUMA kernel doesn't need to
+// manage a separate brk. So sys_brk here is the simplest possible
+// implementation: return the requested addr verbatim. K11's bare-metal
+// path will replace this with a real brk implementation that manages the
+// kernel's heap boundary.
+//
+// ── mmap / munmap arg-marshaling ────────────────────────────────────────────
+// sys_mmap takes 6 u64 args (the SyscallArgs field type — all u64 per
+// K3e's abi.vuma). It casts each to the host extern's expected type:
+//   addr   : u64  → Address  (reinterpret — both 64-bit)
+//   len    : u64  → u64      (no-op)
+//   prot   : u64  → i32      (truncate to low 32 bits)
+//   flags  : u64  → i32      (truncate)
+//   fd     : u64  → i32      (truncate)
+//   offset : u64  → i64      (reinterpret — both 64-bit)
+// The host mmap extern returns Address; sys_mmap reinterprets it as u64
+// (the SyscallArgs return-value convention — written back to tf.rax via
+// K3e's syscall_write_ret).
+//
+// ── Why the `fd = -1` literal is computed, not written as 18446744073709551615
+// The K3f contract specifies `sys_mmap(0, 4096, 3, 34, 18446744073709551615, 0)`
+// in the self-test, with the literal 18446744073709551615 (= u64::MAX =
+// -1 as i64) standing in for "fd = -1" (the conventional fd value for
+// MAP_ANONYMOUS). However, the current VUMA parser/codegen has a known
+// limitation with u64 literals > i64::MAX (i.e. values with the high bit
+// set): the literal is silently misinterpreted, which causes incorrect
+// extern-stub resolution at the call site (verified via
+// /home/z/probes/probe_mm_k3f.vuma — exit=1, p==0; the disassembly shows
+// sys_mmap calling munmap instead of mmap). The same self-test with
+// `let neg_one: u64 = 0 - 1;` instead of the literal works correctly
+// (verified via /home/z/probes/probe_mm_neg1.vuma — exit=0).
+//
+// This file therefore deviates from the contract by writing:
+//     let neg_one: u64 = 0 - 1;
+//     let p = sys_mmap(0, 4096, 3, 34, neg_one, 0);
+// instead of the contract's literal form. The semantic intent is
+// identical: `0 - 1` evaluates to 18446744073709551615 as u64 at runtime
+// (two's-complement arithmetic). The deviation is documented here and in
+// the worklog (K3f section). K11 (or whenever the codegen gains proper
+// u64-literal parsing) can flip back to the contract's literal form.
+//
+// The same limitation would affect any u64 literal > 9223372036854775807
+// (i64::MAX). This file's only such value is the fd = -1 case; all other
+// constants (4096, 3, 34, 0) are well within i64::MAX. The mmap.vuma K2f
+// file uses the same `0 - 1` workaround for the same reason (see
+// womb/kernel/mm/mmap.vuma's "Why is fd = -1 computed, not literal?"
+// header — K2f hit the same limitation).
+//
+// ── PROT / MAP constants (decimal-encoded per the contract) ─────────────────
+// The K3f contract specifies DECIMAL constants for prot and flags:
+//     3  = PROT_READ|PROT_WRITE = 1|2 = 3      (Linux <sys/mman.h>)
+//     34 = MAP_PRIVATE|MAP_ANONYMOUS = 2|32 = 34
+// The decimal rule avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
+// for the same rationale). The constants are passed as u64 to sys_mmap
+// and truncated to i32 inside the handler before being handed to the
+// host mmap extern.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// handlers take only scalar args (u64 / i64) and return scalars — no
+// State<T> buffers needed. No state_new, no array access, no field
+// access.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3f contract's
+// "IMPORTANT" rule:
+//     3    = PROT_READ|PROT_WRITE
+//     34   = MAP_PRIVATE|MAP_ANONYMOUS
+//     4096 = PAGE_SIZE (the standard x86_64/aarch64/riscv64 page size)
+//     1    = the literal 1 used in `0 - 1` (computing u64::MAX for fd=-1)
+//     2    = the failure code `return 2;` in the self-test
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. The `extern "C" { fn mmap, fn munmap }`
+// declarations are byte-identical to:
+//   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
+//   - womb/kernel/hosted/host.vuma (K1a — host_alloc_pages / host_free_pages
+//     wrap mmap / munmap)
+// Future files that want to call sys_brk / sys_mmap / sys_munmap (e.g.
+// K4's kmain when it bootstraps the syscall table) must either re-declare
+// these handlers locally OR wait for VUMA to gain an import mechanism.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/handlers/mm.vuma \
+//         /tmp/mm.bin x86_64 --verify
+//     /tmp/mm.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (mmap returns a non-zero page-aligned address;
+// munmap returns 0 on success).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations (byte-identical to K1a's trampoline.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted mode: mmap = sys_mmap (syscall #9 on x86_64, 6 args, requires
+// RCX→R10 fixup for arg4), munmap = sys_munmap (syscall #11 on x86_64,
+// 2 args, simple_stub form).
+
+extern "C" {
+    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    fn munmap(addr: Address, length: u64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_brk — set/query the process break address.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode, just return the requested addr (no real brk management
+// — the host kernel manages its own brk). In bare-metal mode (K11), this
+// will manage the kernel heap boundary.
+
+fn sys_brk(addr: u64) -> u64 {
+    return addr;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_mmap — map `len` bytes of memory at `addr` (0 = kernel picks).
+// ────────────────────────────────────────────────────────────────────────────
+// Args (asm-generic / Linux convention):
+//   addr   : hint address (0 = let the kernel pick)
+//   len    : mapping length in bytes
+//   prot   : PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4 (combined bitmask)
+//   flags  : MAP_SHARED=1, MAP_PRIVATE=2, MAP_ANONYMOUS=32, MAP_FIXED=16
+//   fd     : file descriptor (or -1 for MAP_ANONYMOUS)
+//   offset : offset in the file (or 0 for MAP_ANONYMOUS)
+// Returns the mapped address (page-aligned), or a negative errno on
+// failure.
+//
+// The casts (u64 → Address, u64 → i32, u64 → i64) are documented in the
+// file header. The return-value cast (Address → u64) is the standard
+// SyscallArgs return-value convention (K3e's syscall_write_ret writes
+// it to tf.rax).
+
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+    let ret = mmap(addr as Address, len, prot as i32, flags as i32, fd as i32, offset as i64);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_munmap — unmap `len` bytes starting at `addr`.
+// ────────────────────────────────────────────────────────────────────────────
+// Returns 0 on success, negative errno on failure. The addr should be
+// page-aligned and len should be a multiple of PAGE_SIZE (4096); the
+// kernel returns EINVAL otherwise.
+
+fn sys_munmap(addr: u64, len: u64) -> i64 {
+    return munmap(addr as Address, len);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Call sys_mmap(0, 4096, 3, 34, -1, 0) — map one anonymous page with
+// PROT_READ|PROT_WRITE and MAP_PRIVATE|MAP_ANONYMOUS. Verify the
+// returned address is non-zero (mmap failure returns -1 = huge u64,
+// which is also != 0; the kernel never legitimately returns 0 because
+// 0 is reserved for the NULL-deref guard page). Then call sys_munmap
+// on the returned address and verify it returns 0 (success).
+//
+// The fd = -1 value is computed via `0 - 1` rather than the literal
+// 18446744073709551615 because of the parser/codegen limitation
+// documented in the file header ("Why the `fd = -1` literal is
+// computed, not written as 18446744073709551615").
+//
+// Returns 0 on success, 1 on mmap-return-is-zero failure, 2 on
+// munmap-non-zero-return failure (so a future CI failure pinpoints the
+// broken path).
+//
+// Per the K3f contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (4096, 3, 34, 1, 2) — decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096).
+
+fn main() -> i32 {
+    // Compute fd = -1 as u64 via subtraction — see file header for the
+    // parser/codegen limitation with the literal 18446744073709551615.
+    let neg_one: u64 = 0 - 1;
+    let p = sys_mmap(0, 4096, 3, 34, neg_one, 0);
+    if p == 0 { return 1; }
+    let ret = sys_munmap(p, 4096);
+    if ret != 0 { return 2; }
+    return 0;
+}

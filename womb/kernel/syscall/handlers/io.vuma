@@ -1,0 +1,222 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/handlers/io.vuma
+// VWK Syscall Handlers — I/O (write, read) (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the I/O syscall-handler layer. K3e's dispatch.vuma looks up
+// the handler for syscall nr (e.g. 64 = __NR_write, 63 = __NR_read) in
+// SyscallTable and invokes it. The handler takes the raw u64 args from
+// SyscallArgs (a0, a1, a2) and routes them to the appropriate host syscall
+// stub. This file implements sys_write and sys_read; sibling proc.vuma
+// implements sys_getpid / sys_exit; sibling mm.vuma implements sys_brk /
+// sys_mmap / sys_munmap.
+//
+// ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
+// K3e's dispatch.vuma uses a SyscallTable of u64 handler addresses plus a
+// stub-return path (VUMA has no fn-pointer call today — see dispatch.vuma's
+// "Why is the handler-call a stub?" header). K3e's stub returns 0; it does
+// NOT actually invoke the handler. The handler dispatch is a K11 task (real
+// fn-pointer dispatch via a new call_indirect intrinsic or a trap.S switch
+// statement).
+//
+// This file's sys_write / sys_read are the actual handler bodies. K11 will
+// register them via syscall_register(tbl, 64, &sys_write) and
+// syscall_register(tbl, 63, &sys_read) during kmain init; the dispatch layer
+// will then call them. For now (hosted mode), this file is self-testable:
+// main() calls sys_write directly to verify the path works end-to-end.
+//
+// ── Hosted vs bare-metal swap ───────────────────────────────────────────────
+// In hosted mode (compile_dump on x86_64), the `write` and `read` externs
+// resolve to the pre-registered runtime stubs in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (write =
+// syscall #1, read = syscall #0 on x86_64). In bare-metal mode (K11), the
+// externs will be re-resolved to MMIO-based UART trampolines (x86_64:
+// COM1 serial port at I/O port 0x3F8; aarch64: PL011 UART; riscv64: NS16550
+// UART). The handler signatures (sys_write, sys_read) stay byte-identical
+// across modes — only the extern block is the swap point. Same pattern as
+// womb/kernel/console.vuma re-declaring its `write` extern.
+//
+// ── ByteBuf layout ─────────────────────────────────────────────────────────
+// A flat 16-byte buffer used by the self-test. The `data` field is at
+// offset 0 so that `buf_state as Address` (cast of the State<ByteBuf> base
+// pointer) yields the address of the first buffered byte — the natural
+// argument for `write(1, base, count)`. Same pattern as K1d's Console
+// layout (buf at offset 0, len following).
+//
+// ── Why the `buf as Address` cast on a u64 arg works ───────────────────────
+// sys_write's signature is `fn sys_write(fd: u64, buf: u64, count: u64) ->
+// i64`. The `buf` arg is u64 (the SyscallArgs field type — see K3e's
+// abi.vuma SyscallArgs layout, all 7 fields are u64). Inside sys_write, the
+// `buf as Address` cast reinterprets the u64 as an Address (raw pointer).
+// This is the documented PMT pattern — see probe_addr_cast.vuma and
+// probe_io_k3f.vuma (both verified IVE Pass, exit=0). The codegen lowers
+// `u64 as Address` to a no-op (the value is already a 64-bit pointer on
+// x86_64).
+//
+// The CALLER (K3e's trap_syscall, once K11 wires it up) passes the user-
+// space buffer address as args.a1 (a u64). sys_write reinterprets it as
+// an Address and hands it to write(). No bounds-checking is performed —
+// K12 (panic/log) will add an user-space-address-validation step.
+//
+// ── Routing: fd 1 = stdout, fd 2 = stderr, fd 0 = stdin, else VFS ───────────
+// sys_write routes by fd:
+//   fd == 1 → write(1, buf, count)  (host stdout)
+//   fd == 2 → write(2, buf, count)  (host stderr)
+//   else    → VFS write (K5 — stub returns 0 for now)
+// sys_read routes by fd:
+//   fd == 0 → read(0, buf, count)   (host stdin)
+//   else    → VFS read (K5 — stub returns 0 for now)
+// The VFS path (K5) will replace the `return 0` stub with a real VFS call.
+// Until then, only fd 0/1/2 work end-to-end (host console).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The ByteBuf
+// state is allocated via `state_new(ByteBuf)` (which lowers to an Alloc into
+// `___pmt_buffer`) in main(). The `buf_state as Address` cast hands the
+// state's base pointer to write() — the state remains live in
+// `___pmt_buffer` for the duration of the call.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3f contract's
+// "IMPORTANT" rule:
+//     1    = fd for stdout (POSIX STDIN_FILENO = 0, STDOUT_FILENO = 1,
+//            STDERR_FILENO = 2)
+//     2    = fd for stderr
+//     0    = fd for stdin (in sys_read)
+//     3    = byte count for the self-test write ('h', 'i', '\n')
+//     104  = ASCII 'h'
+//     105  = ASCII 'i'
+//     10   = ASCII '\n' (newline)
+//     16   = ByteBuf.data array size
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. The `extern "C" { fn write, fn read }`
+// declarations are byte-identical to:
+//   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
+//   - womb/kernel/console.vuma (K1d)
+//   - womb/kernel/hosted/host.vuma (K1a)
+// Future files that want to call sys_write / sys_read (e.g. K4's kmain
+// when it bootstraps the syscall table) must re-declare ByteBuf byte-
+// identically and either re-declare sys_write/sys_read locally OR wait
+// for VUMA to gain an import mechanism.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/handlers/io.vuma \
+//         /tmp/io.bin x86_64 --verify
+//     /tmp/io.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, prints "hi\n" to stdout (3 bytes written).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations (byte-identical to K1a's trampoline.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted mode: write = sys_write (syscall #1 on x86_64), read = sys_read
+// (syscall #0 on x86_64). Both take (fd, buf, count) in RDI/RSI/RDX and
+// return the byte count in RAX. The runtime stub is the canonical
+// "mov eax,#num; syscall; ret" sequence — no register shuffling needed
+// because all 3 args already match the syscall ABI.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+// ByteBuf is a flat 16-byte buffer used by the self-test. The `data` field
+// is at offset 0 so `buf_state as Address` yields &data[0] — the natural
+// argument for write(1, base, count).
+
+layout ByteBuf = {
+    data: [u8; 16],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_write — write `count` bytes from `buf` to fd `fd`.
+// ────────────────────────────────────────────────────────────────────────────
+// Routes by fd:
+//   fd == 1 → host stdout  (write(1, buf, count))
+//   fd == 2 → host stderr  (write(2, buf, count))
+//   else    → VFS write (K5 — stub returns 0 for now)
+// Returns the byte count written (or a negative errno on failure).
+//
+// The `buf as Address` cast reinterprets the u64 buffer address as a raw
+// pointer (no-op on x86_64 — both are 64-bit). The CALLER (K3e's
+// trap_syscall, once K11 wires it up) populates args.a1 with the user-space
+// buffer address; sys_write reinterprets it as an Address and hands it to
+// the host `write` extern. No bounds-checking — K12 (panic/log) will add
+// user-space-address validation.
+
+fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+    if fd == 1 {
+        return write(1, buf as Address, count as i64);
+    }
+    if fd == 2 {
+        return write(2, buf as Address, count as i64);
+    }
+    // Other fds: VFS write (K5). Stub for now.
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_read — read `count` bytes into `buf` from fd `fd`.
+// ────────────────────────────────────────────────────────────────────────────
+// Routes by fd:
+//   fd == 0 → host stdin  (read(0, buf, count))
+//   else    → VFS read (K5 — stub returns 0 for now)
+// Returns the byte count read (0 on EOF, negative on error).
+
+fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+    if fd == 0 {
+        return read(0, buf as Address, count as i64);
+    }
+    // Other fds: VFS read (K5). Stub for now.
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ByteBuf via state_new, populate the first 3 bytes with
+// "hi\n" (ASCII 104, 105, 10), call sys_write(1, &buf, 3) and verify the
+// return value is 3 (3 bytes written). Then call sys_read on an invalid
+// fd (99) and verify it returns 0 (the VFS-stub path). Returns 0 on
+// success, 1 on the write-byte-count mismatch, 2 on the VFS-stub return
+// mismatch (so a future CI failure pinpoints the broken path).
+//
+// The test exercises:
+//   - state_new(ByteBuf) — PMT allocation
+//   - state.field[idx] = u8 — typed array-store
+//   - state as Address — PMT-to-pointer cast (the canonical pattern from
+//     K1d's console_flush)
+//   - sys_write(1, addr, 3) → write(1, addr, 3) → 3 bytes to stdout
+//   - sys_read(99, addr, 3) → returns 0 (VFS stub — fd 99 != 0)
+//
+// Per the K3f contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (104, 105, 10, 3, 1, 99) — decimal avoids the
+// parser's hex-literal path (parse_int_radix width-extension subtleties
+// — see womb/kernel/arch/x86_64/pt.vuma header for the same rationale,
+// and K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096).
+
+fn main() -> i32 {
+    let buf_state = state_new(ByteBuf);
+    buf_state.data[0] = 104;  // 'h'
+    buf_state.data[1] = 105;  // 'i'
+    buf_state.data[2] = 10;   // '\n'
+    let buf_addr = buf_state as Address;
+
+    // Test 1: sys_write(1, &buf, 3) → 3 bytes to stdout.
+    let ret = sys_write(1, buf_addr, 3);
+    if ret != 3 { return 1; }
+
+    // Test 2: sys_read(99, &buf, 3) → VFS stub returns 0 (fd 99 != 0).
+    let ret2 = sys_read(99, buf_addr, 3);
+    if ret2 != 0 { return 2; }
+
+    return 0;
+}
