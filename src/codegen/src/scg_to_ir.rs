@@ -972,6 +972,27 @@ impl IRBuilder {
         // Translate the body statements.
         self.lower_statements(&func.body, &mut ir_func, &mut name_to_vreg)?;
 
+        // ── FFI scratchpad frame hooks (Wave 3b) ──────────────────────────
+        //
+        // Emit a call to `ffi_scratch_push_frame` at function entry and
+        // `ffi_scratch_pop_frame` before every Return — BUT ONLY IF this
+        // function contains an extern call or a marshal builtin. This avoids
+        // adding unresolved symbols to programs that don't use FFI (which
+        // would crash standalone ET_EXEC binaries).
+        //
+        // When hooks ARE emitted, they are extern calls (is_extern: true)
+        // producing SHN_UNDEF relocations. Programs using FFI must link
+        // against the VUMA runtime (which provides ffi_scratch_push_frame/
+        // ffi_scratch_pop_frame) or libc — this is the expected workflow
+        // per the proposal (`ld -o out.o -lc`).
+        //
+        // SACRED INVARIANT: the scratchpad is foreign memory, never aliased
+        // by ___pmt_buffer. The StateRead/StateWrite/StateTransform verifiers
+        // never see it.
+        if self.function_uses_ffi(&func.body) {
+            self.emit_scratchpad_hooks(&mut ir_func);
+        }
+
         // Resolve phi nodes into explicit copy instructions.
         self.resolve_phis(&mut ir_func)?;
 
@@ -979,6 +1000,81 @@ impl IRBuilder {
         ir_func.rebuild_cfg();
 
         Ok(ir_func)
+    }
+
+    // =======================================================================
+    // Wave 3b: FFI scratchpad frame hooks
+    // =======================================================================
+
+    /// Emit `ffi_scratch_push_frame` at function entry and
+    /// `ffi_scratch_pop_frame` before every Return instruction.
+    ///
+    /// This wires the thread-local scratchpad (runtime::ffi_scratch) into
+    /// every function's lifecycle. The push call is inserted at the start
+    /// of the entry block; the pop call is inserted immediately before
+    /// each `IRInstr::Ret`.
+    ///
+    /// Both are emitted as extern calls (`is_extern: true`) so backends
+    /// produce `SHN_UNDEF` relocations. The symbols `ffi_scratch_push_frame`
+    /// and `ffi_scratch_pop_frame` must be resolvable at link time — either
+    /// by linking the VUMA runtime library, or by providing stubs.
+    fn emit_scratchpad_hooks(&self, ir_func: &mut IRFunction) {
+        // ── Push frame at entry ──────────────────────────────────────────
+        // Insert at the beginning of the entry block (block 0).
+        if let Some(entry_block) = ir_func.blocks.first_mut() {
+            entry_block.instructions.insert(0, IRInstr::Call {
+                dst: None,
+                func: "ffi_scratch_push_frame".to_string(),
+                args: vec![],
+                is_extern: true,
+            });
+        }
+
+        // ── Pop frame before every Return ───────────────────────────────
+        // Walk all blocks; for each block whose terminator is Return, insert
+        // a pop call immediately before the Ret instruction (at the end of
+        // the block's instructions, since Ret is the terminator, not an
+        // instruction — but some blocks also push an IRInstr::Ret into the
+        // instruction list; handle both).
+        for block in &mut ir_func.blocks {
+            let needs_pop = matches!(block.terminator, IRTerminator::Return(_))
+                || block.instructions.iter().any(|i| matches!(i, IRInstr::Ret { .. }));
+            if needs_pop {
+                // Find the index of the Ret instruction (if it's in the
+                // instruction list) and insert before it; otherwise append
+                // to the end of the instruction list (the Ret is the
+                // terminator).
+                let insert_at = block
+                    .instructions
+                    .iter()
+                    .position(|i| matches!(i, IRInstr::Ret { .. }))
+                    .unwrap_or(block.instructions.len());
+                block.instructions.insert(insert_at, IRInstr::Call {
+                    dst: None,
+                    func: "ffi_scratch_pop_frame".to_string(),
+                    args: vec![],
+                    is_extern: true,
+                });
+            }
+        }
+    }
+
+    /// Returns true if this function body contains an extern call (a call to
+    /// a function declared in an `extern "C"` block) or a marshal builtin
+    /// (`marshal_cstr` / `unmarshal`). Used to decide whether to emit the
+    /// scratchpad frame hooks.
+    fn function_uses_ffi(&self, body: &[ScgStatement]) -> bool {
+        let mut uses_ffi = false;
+        Self::walk_body(body, |s| {
+            if let ScgStatement::Call(call) = s {
+                if call.is_extern
+                    || crate::marshal::is_marshal_builtin(&call.func)
+                {
+                    uses_ffi = true;
+                }
+            }
+        });
+        uses_ffi
     }
 
     // =======================================================================
