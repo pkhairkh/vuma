@@ -528,67 +528,91 @@ the 4 backends in the gold-standard matrix.
 
 ---
 
-## 9. FFI Marshal Pass
+## 9. FFI — The 4-Mode Matrix
 
-VUMA 2.0 supports C FFI via `extern "C"` blocks. Foreign functions do
-not understand `State<T>` types, so the marshal pass
-(`vuma-codegen/src/marshal.rs`) flattens state arguments to raw pointers
-at the call site:
+VUMA 2.0's FFI is built on a 4-mode matrix (replacing the legacy binary
+`#[pure]`/invalidate model). Every foreign call is classified into an
+argument mode per argument, a return mode, and optionally a callback mode.
 
-```rust
-pub fn marshal_state_for_ffi(
-    state_var: &str, layout_size: u64, is_pure: bool,
-) -> MarshalResult {
-    MarshalResult {
-        ptr_expr: state_var.to_string(),
-        preserved: is_pure,
-    }
-}
-```
+### 9.1 The marshal module (`vuma-codegen/src/marshal.rs`)
 
-The state's backing buffer pointer becomes the raw pointer passed to the
-foreign function. After the call:
+The marshal module provides the classification helpers and marshal-result
+types that the codegen bridge consumes:
 
-- If the foreign function is declared `#[pure]`, the state is
-  **preserved** — subsequent reads and writes are still valid.
-- Otherwise the state is **invalidated** — the foreign function may have
-  modified the buffer in ways the VUMA type system cannot track, so the
-  state must be re-initialised before any subsequent read or write.
+- `ArgMode` enum: `Borrow` / `Invalidate` / `Marshal` / `MayRetain` / `ForeignPass`
+- `ReturnMode` enum: `Scalar` / `Unmarshal(Layout)` / `ForeignWrap(field)`
+- `classify_arg_mode(params_attrs, layout_is_foreign)` — precedence:
+  `#[may_retain]` > `#[marshal]` > `#[borrow]` > `#[foreign]` > default
+- `marshal_arg(state_var, mode, offset, size)` — produces the ptr_expr
+  per mode (`___pmt_buffer_base + offset` for Borrow/Invalidate,
+  `___ffi_scratch_alloc` for Marshal/MayRetain, `.raw` for ForeignPass)
+- `foreign_consume_field()`, `foreign_layout_field()`, `is_callback_fn()`
+- `MARSHAL_CSTR_FN` / `UNMARSHAL_FN` constants + `is_marshal_builtin()`
 
-### 9.1 The FFI safety verifier
+### 9.2 The FFI safety verifier (`vuma-ive/src/ffi.rs`)
 
-The IVE `ffi` module (`src/ive/src/ffi.rs`) proves no invalidated state is
-accessed: `verify_ffi_safety(invalidated_vars, accesses)` flags any
-`(var, field)` access where `var ∈ invalidated_vars`. The
-`pmt_wave10/ffi_pure.vuma` (preserved), `ffi_write.vuma` (invalidated),
-and `ffi_reinit.vuma` (re-init) tests exercise both paths.
+Proves no invalidated state is accessed: `verify_ffi_safety(invalidated_vars,
+accesses)` flags any `(var, field)` access where `var ∈ invalidated_vars`.
 
-### 9.2 Auto-lowering of state-to-pointer
+### 9.3 The borrow-region verifier (`vuma-ive/src/borrow_region.rs`)
 
-In practice, `State<T>` auto-lowers to `Address` whenever it is passed to
-a syscall or to an `Address`-typed function parameter — the codegen
-bridge emits the buffer pointer directly. This makes the marshal pass
-largely redundant for the common case; it remains in the tree to track
-the `preserved`/`invalidated` flag for the FFI safety verifier, which is
-not redundant.
+Tracks `#[borrow]` regions per extern call site. A borrow-region is "in
+flight" from the call node until the call's return (the next call in
+`call_order`). `verify_borrow_regions(regions, writes, call_order)` flags
+any StateWrite to a borrowed region during the borrow window — C might be
+mid-read. On call return, the borrow is auto-released and the region is
+marked "preserved" (not invalidated).
 
-```vuma
-// tests/gold_standard/pmt_wave10/ffi_pure.vuma (excerpt)
-layout Buffer = { len: u32, data: u64 }
+### 9.4 The ForeignConsume SCG node (`vuma-scg/src/node.rs`)
 
-extern "C" {
-    // #[pure] — does not modify its state argument.
-    fn state_size(buf: Address) -> i64;
-}
+`NodeType::ForeignConsume` marks a State as consumed by a foreign
+close-call (e.g. `sqlite3_close`). The existing `state_write` verifier
+treats this the same as a `StateTransform` consume — any subsequent
+read/write to the consumed vreg is a linearity error. This reuses the
+existing verifier machinery (no new verifier needed).
 
-fn main() -> i32 {
-    let buf = state_new(Buffer);
-    buf.len = 12;
-    // After a real `state_size(buf)` call, `buf.len` is still 12.
-    if buf.len != 12 { return 1; }
-    return 0;
-}
-```
+The codegen bridge (`pipeline.rs:emit_foreign_consume_markers`) emits
+`ScgStatement::ForeignConsume` at `#[foreign_consume]` call sites for each
+State arg whose layout is `#[foreign(raw)]`.
+
+### 9.5 The marshal scratchpad (`vuma-codegen/src/runtime/ffi_scratch.rs`)
+
+A thread-local, `malloc`-backed stack scratchpad, separate from
+`___pmt_buffer`. Used for NUL-terminated strings, C-owned memory
+round-trips, and in-place mutation buffers. Stack-shaped: `push_frame`
+on transform entry, `pop_frame` on transform exit.
+
+**Sacred invariant:** scratchpad memory is NEVER aliased by `___pmt_buffer`.
+The `StateRead`/`StateWrite`/`StateTransform` verifiers never see it.
+
+The codegen bridge (`scg_to_ir.rs:emit_scratchpad_hooks`) emits
+`ffi_scratch_push_frame` at function entry and `ffi_scratch_pop_frame`
+before every Return — but ONLY for functions that contain extern calls
+or marshal builtins (avoids unresolved symbols in non-FFI programs).
+
+### 9.6 The vuma_context_t C-API (`vuma_vm.h` + `runtime/vuma_context.rs`)
+
+Generalizes the wasm32 host shim (`scripts/wasm32_runner.py:make_host_functions`)
+into a C header shipped for all backends. 8 accessors:
+`vuma_read/write_u32/u64`, `vuma_state_new`, `vuma_push_i32/i64`.
+
+### 9.7 The callback runtime (`vuma-codegen/src/runtime/callback.rs`)
+
+Implements the re-entrancy rule: callbacks run on an isolated callback
+stack with their own scratchpad frame, forbidden from touching caller-live
+State. `LiveSet` tracks caller-live byte ranges; `check_access` returns
+false (trap) for any access to a caller-live region. Nested callbacks
+supported via `CALLBACK_DEPTH` tracking.
+
+### 9.8 Test coverage
+
+| Wave | Directory | Tests |
+|---|---|---|
+| 1 (parser attrs) | `ffi_wave0/` | 8 positive + 1 negative |
+| 2 (borrow modes) | `ffi_wave2/` | 3 (borrow_preserved, invalidate, may_retain) |
+| 3 (marshal) | `ffi_wave1/` | 3 (write_real, open_file, strdup) |
+| 4 (foreign state) | `ffi_wave3/` | 4 (arg_pass, return_wrap, consume_emitted, use_after_close_reject) |
+| 5 (callbacks) | `ffi_wave4/` | 2 (sqlite_exec_callback, callback_traps) |
 
 ---
 
