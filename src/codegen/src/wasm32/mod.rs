@@ -1458,6 +1458,7 @@ const VUMA_MMAP_IDX: u32 = 41;         // (addr, len, prot, flags, fd, offset) -
 const VUMA_MUNMAP_IDX: u32 = 42;       // (addr, len) -> errno
 const VUMA_MPROTECT_IDX: u32 = 43;     // (addr, len, prot) -> errno
 const VUMA_NANOSLEEP_IDX: u32 = 44;    // (req_ptr, rem_ptr) -> errno
+const VUMA_MREMAP_IDX: u32 = 45;       // (old_addr, old_size, new_size, flags) -> ptr
 
 // ── Reserved for future waves (indices 45+) ──
 // POSIX operations still to be wired in later waves.  Their constants are
@@ -3951,6 +3952,21 @@ impl Backend for Wasm32Backend {
             module: "vuma".to_string(), name: "nanosleep".to_string(),
             kind: WasmImportKind::Function { type_idx: vuma_type_2_i32 },
         });  // idx 44 = VUMA_NANOSLEEP_IDX
+        // mremap(old_addr, old_size, new_size, flags) → ptr
+        // On wasm32, mremap is implemented by the host as a bump-allocator
+        // extension: allocate new_size bytes and return the new pointer.
+        // The old data is NOT copied (wasm linear memory is contiguous, so
+        // the old region remains accessible until overwritten). This matches
+        // the arena_grow semantics (the arena stores the new capacity and
+        // uses the new base pointer).
+        let vuma_type_4_i32 = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32; 4],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport {
+            module: "vuma".to_string(), name: "mremap".to_string(),
+            kind: WasmImportKind::Function { type_idx: vuma_type_4_i32 },
+        });  // idx 45 = VUMA_MREMAP_IDX
 
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
@@ -4087,6 +4103,7 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("mmap".to_string(),      VUMA_MMAP_IDX);
         func_name_to_idx.insert("munmap".to_string(),    VUMA_MUNMAP_IDX);
         func_name_to_idx.insert("mprotect".to_string(),  VUMA_MPROTECT_IDX);
+        func_name_to_idx.insert("mremap".to_string(),    VUMA_MREMAP_IDX);
         // Sleep (Wave 5).  clock_gettime is already aliased to WASI
         // clock_time_get above; nanosleep is a new vuma.* host function.
         func_name_to_idx.insert("nanosleep".to_string(), VUMA_NANOSLEEP_IDX);
@@ -4155,7 +4172,7 @@ impl Backend for Wasm32Backend {
             "getrusage", "getsid", "gettimeofday", "getuid",
             "inotify_add_watch", "inotify_init1", "inotify_rm_watch",
             "ioctl", "kill", "linkat", "madvise", "mincore", "mlock",
-            "mlockall", "mremap", "msync", "munlock", "munlockall",
+            "mlockall", "msync", "munlock", "munlockall",
             "newfstatat", "openat", "pread", "preadv", "prlimit64",
             "ptrace", "pwrite", "pwritev", "readlinkat", "readv",
             "renameat", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",

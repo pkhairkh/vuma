@@ -961,6 +961,34 @@ def main():
         write_mem(0, struct.pack('<i', ret))
         return ret
 
+    # vuma_mremap(old_addr, old_size, new_size, flags) → new_ptr, or -1 (MAP_FAILED)
+    # On wasm32, mremap is implemented as a bump-allocator extension:
+    # allocate new_size bytes at the current bump pointer and return the
+    # new pointer. The old region's data is NOT copied — the arena_grow
+    # lowering stores the new capacity at [new_base+16] and returns new_base
+    # as the updated arena pointer. The old arena data (base/offset/capacity
+    # struct at the old base) is re-initialized by arena_grow's Store
+    # operations at the new base.
+    #
+    # This matches the MREMAP_MAYMOVE semantics: the kernel may return a
+    # DIFFERENT address when growing. The arena handles this by using the
+    # returned new_base as the updated arena pointer.
+    def vuma_mremap(old_addr, old_size, new_size, flags):
+        if new_size <= 0:
+            ret = -1  # MAP_FAILED
+        else:
+            page = 65536
+            aligned_len = (new_size + page - 1) & ~(page - 1)
+            ptr = _mmap_bump[0]
+            end = ptr + aligned_len
+            if not _ensure_mem_size(end):
+                ret = -1  # MAP_FAILED (ENOMEM)
+            else:
+                _mmap_bump[0] = end
+                ret = ptr
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
     # vuma_mprotect(addr, len, prot) → 0 (no-op; wasm has no page protection)
     def vuma_mprotect(addr, length, prot):
         ret = 0
@@ -1042,6 +1070,7 @@ def main():
     # memory; file-backed = MAP_FAILED (-1); munmap/mprotect = no-op 0.
     linker.define_func("vuma", "mmap", FuncType([i32, i32, i32, i32, i32, i32], [i32]), vuma_mmap)
     linker.define_func("vuma", "munmap", FuncType([i32, i32], [i32]), vuma_munmap)
+    linker.define_func("vuma", "mremap", FuncType([i32, i32, i32, i32], [i32]), vuma_mremap)
     linker.define_func("vuma", "mprotect", FuncType([i32, i32, i32], [i32]), vuma_mprotect)
     # Sleep (Wave 5).  clock_gettime is already aliased to WASI
     # clock_time_get; nanosleep is a new host function (real time.sleep).
