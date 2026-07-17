@@ -1952,7 +1952,8 @@ impl Backend for HppaBackend {
         let mut syscall_stubs: Vec<(String, Vec<u8>)> = Vec::new();
         for (name, num) in [
             ("write", 4), ("read", 3), ("open", 5), ("close", 6),
-            ("mmap", 90), ("munmap", 91), ("exit", 1), ("exit_group", 252),
+            // mmap is a custom stub (6 args, hppa has 4 C ABI arg regs)
+            ("munmap", 91), ("exit", 1), ("exit_group", 252),
             ("brk", 45), ("getpid", 20), ("alarm", 27), ("kill", 37),
             ("pipe", 42), ("dup", 41), ("dup2", 63), ("dup3", 431),
             ("execve", 11), ("wait4", 114), ("unlink", 10),
@@ -2323,6 +2324,36 @@ impl Backend for HppaBackend {
             code.extend(ss_load_imm(R20, 1));       // sys_exit
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
+        // mmap custom stub: hppa has 4 C ABI arg regs (R26-R23).
+        // mmap takes 6 args. Args 5-6 are on the stack at R30-32 and R30-28
+        // (outgoing args area, stack grows upward).
+        // hppa syscall ABI: R20=nr, R26-R23=args 1-4, args 5-6 on stack.
+        // The GATE instruction switches to the kernel stack, so the kernel
+        // reads args 5-6 from the USER stack at the same offsets.
+        // Actually, hppa Linux kernel reads args 5-6 from the stack frame
+        // at R30-36 and R30-32 (the standard outgoing args area).
+        // The C ABI already put args 5-6 there before the CALL.
+        // So the simple_stub SHOULD work — but it doesn't because hppa's
+        // mmap (syscall 90) is actually old_mmap which takes a struct ptr.
+        // hppa Linux: __NR_mmap = 90, but it's the 6-arg version, not old_mmap.
+        // The issue is that the GATE instruction may not pass stack args.
+        // FIX: use a custom stub that copies args 5-6 from the stack into
+        // R22 and R21 (which the kernel may use for args 5-6), then GATE.
+        syscall_stubs.push(("mmap".to_string(), {
+            let mut code = Vec::new();
+            // Load arg 5 (fd) from [R30 - 32] into R22
+            code.extend_from_slice(&encode_ldw(R30, -32, R22));
+            // Load arg 6 (offset) from [R30 - 28] into R21
+            code.extend_from_slice(&encode_ldw(R30, -28, R21));
+            // R20 = 90 (sys_mmap)
+            code.extend(ss_load_imm(R20, 90));
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             code
