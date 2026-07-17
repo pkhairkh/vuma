@@ -1,4 +1,8 @@
-VUMA Test Failures — 2026-07-16 23:51:08 UTC
-Total: 0 failures across 0 tests
+VUMA Test Failures — 2026-07-17 06:24:41 UTC
+Total: 22 failures across 4 tests
 Skipped: 0 (architecturally unavailable on target)
 
+  pmt_wave8            buffer_reuse.vuma                             exp=  30 [('wasm32', 1, 'MM')]
+  pmt_wave9            bounded_loop.vuma                             exp=  45 [('wasm32', 1, 'MM')]
+  pmt_wave9            grow_array.vuma                               exp=   6 [('aarch64_be', 0, 'MM'), ('armeb', 0, 'MM'), ('mips64', -7, 'CR'), ('ppc64', 0, 'MM'), ('mips64be', -7, 'CR'), ('s390x', 0, 'MM'), ('hppa', 0, 'MM'), ('sparc64', -7, 'CR'), ('m68k', 0, 'MM'), ('wasm32', 1, 'MM')]
+  pmt_wave9            stack.vuma                                    exp=  60 [('aarch64_be', 0, 'MM'), ('armeb', 0, 'MM'), ('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('ppc64', 0, 'MM'), ('s390x', 0, 'MM'), ('m68k', 0, 'MM'), ('sparc64', -7, 'CR'), ('hppa', 0, 'MM'), ('wasm32', 1, 'MM')]
