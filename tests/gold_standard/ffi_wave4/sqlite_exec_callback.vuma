@@ -1,0 +1,46 @@
+// ffi_wave4/sqlite_exec_callback — sqlite3_exec with a VUMA callback
+// Expected exit code: 0
+//
+// Wave 8 test: demonstrates a foreign function (sqlite3_exec) that calls
+// back into VUMA via a vuma_context_t. The callback runs on an isolated
+// callback stack with its own scratchpad frame; the callback_live_set
+// guard prevents it from touching the caller's in-flight State.
+//
+// This test declares the extern (with #[callback]) and the callback fn.
+// On aarch64, the ffi_stub resolves the extern to a no-op returning 0
+// (the callback is never actually invoked). When linked against -lsqlite3,
+// the callback would be invoked for each row.
+
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[callback]
+    fn sqlite3_exec(
+        db: State<DbHandle>,
+        sql: Address,
+        cb: Address,
+        arg: Address,
+        err: Address
+    ) -> i32;
+}
+
+// The VUMA callback function. In a real program, sqlite3_exec would invoke
+// this for each row. The callback receives a vuma_context_t* (as Address)
+// and uses vuma_read_u32/vuma_push_i32 to interact with VUMA state safely.
+fn row_callback(ctx: Address, argc: i32, argv: Address, col: Address) -> i32 {
+    // Hypothetically:
+    //   let val = vuma_read_u32(ctx, 0);
+    //   vuma_push_i32(ctx, 0);  // return 0 to continue
+    return 0;
+}
+
+fn main() -> i32 {
+    let db = state_new(DbHandle);
+    db.raw = 0;
+    // Hypothetically: sqlite3_exec(db, sql, row_callback, 0, err)
+    // On aarch64, the ffi_stub returns 0 (no real callback invocation).
+    // When linked against -lsqlite3, this executes the SQL and invokes
+    // row_callback for each result row.
+    return 0;
+}

@@ -430,19 +430,118 @@ fn main() -> i32 {
 
 ## 14. FFI (Foreign Function Interface)
 
-Calling external (C) functions requires flattening state references to raw pointers at the FFI boundary:
+VUMA 2.0's FFI is built on a **4-mode matrix**: every foreign call is
+classified into an argument mode per argument, a return mode, and
+optionally a callback mode. This replaces the legacy binary `#[pure]`/
+invalidate model.
 
+### 14.1 Argument modes
+
+| Mode | Attribute | What C gets | After-call state |
+|---|---|---|---|
+| **Borrow** | `#[borrow]` | `___pmt_buffer_base + offset` (zero-copy) | **preserved** — reads/writes still valid |
+| **Invalidate** | *(default, no attr)* | `___pmt_buffer_base + offset` | **invalidated** — must re-init before next read/write |
+| **Marshal** | `#[marshal]` | scratchpad pointer (copy made) | state untouched |
+| **ForeignPass** | `#[foreign(raw)]` on the arg's layout | the `raw` field value (the C pointer) | preserved (unless `#[foreign_consume]`) |
+
+### 14.2 Return modes
+
+| Mode | Attribute | What VUMA gets |
+|---|---|---|
+| **Scalar** | *(default)* | a plain scalar (`i64`/`u64`/`Address`) |
+| **Unmarshal** | `#[unmarshal(Layout)]` | a fresh `State<Layout>` (copied into `___pmt_buffer`) |
+| **ForeignWrap** | `#[foreign_return(raw)]` | a `State<ForeignLayout>` whose `raw` field holds the C pointer |
+
+### 14.3 Callback mode
+
+| Mode | Attribute | Contract |
+|---|---|---|
+| **Callback** | `#[callback]` | C may invoke VUMA functions via a `vuma_context_t*` during the call |
+
+### 14.4 The 8 FFI attributes
+
+```vuma
+// On extern fn params:
+#[borrow]       // C reads, does not mutate, does not hold the pointer
+#[marshal]      // force scratchpad routing (NUL-term, C-ownership)
+#[may_retain]   // C may stash the pointer (epoll_ctl, sigaction)
+
+// On the extern fn itself:
+#[callback]             // C may call back into VUMA via vuma_context_t
+#[foreign_consume(raw)] // consumes the State arg linearly (e.g. sqlite3_close)
+#[unmarshal(Response)]  // return mode: copy C return into State<Response>
+#[foreign_return(raw)]  // return mode: wrap C pointer into State<ForeignLayout>
+
+// On layout declarations:
+#[foreign(raw)]  // the layout wraps an opaque C pointer (raw: u64 field)
 ```
-extern {
-    fn write(fd: i32, buf: *u8, count: u64) -> i64;
+
+### 14.5 Worked examples
+
+**Borrowed read (zero-copy I/O):**
+```vuma
+layout IoBuf = { len: u64, data: [u8; 16] }
+
+extern "C" {
+    #[borrow]
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-fn write_buffer(b: State<Buffer>) -> i32 {
-    // The marshal pass flattens State<Buffer> to a raw pointer
-    // After the call, b is invalidated (unless the function is #[pure])
-    write(1, b, 16);
+fn emit(b: State<IoBuf>) -> State<IoBuf> {
+    let n = write(1, b as Address, b.len as i64);
+    // b is #[borrow] — preserved after the call. b.len is still valid.
+    b.len = n as u64;
+    return b;
+}
+```
+
+**Foreign handle (open/close with linear safety):**
+```vuma
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_return(raw)]
+    fn sqlite3_open(path: Address) -> State<DbHandle>;
+
+    #[foreign_consume(raw)]
+    fn sqlite3_close(db: State<DbHandle>);
+}
+
+fn main() -> i32 {
+    let db = sqlite3_open(0 as Address);  // wraps C pointer into State<DbHandle>
+    sqlite3_close(db);  // consumes db — post-close use is a linearity error
     return 0;
 }
 ```
 
-Functions declared `#[pure]` preserve the state; all other foreign functions invalidate it (the state must be re-initialized before any subsequent read/write).
+**Callback (sqlite3_exec):**
+```vuma
+extern "C" {
+    #[callback]
+    fn sqlite3_exec(db: State<DbHandle>, sql: Address,
+                    cb: Address, arg: Address, err: Address) -> i32;
+}
+
+fn row_callback(ctx: Address, argc: i32, argv: Address, col: Address) -> i32 {
+    // C invokes this for each row. The callback runs on an isolated stack
+    // with its own scratchpad frame. It may NOT touch caller-live State
+    // (enforced by the callback_live_set guard — trap on violation).
+    return 0;
+}
+```
+
+### 14.6 The marshal scratchpad
+
+The scratchpad (`___ffi_scratch`) is a thread-local, `malloc`-backed stack,
+separate from `___pmt_buffer`. It is used for:
+- NUL-terminated C strings (`marshal_cstr` copies + appends `'\0'`)
+- C-owned memory round-trips (`strdup`, `getline`)
+- In-place mutation buffers for C APIs demanding specific layouts
+
+**Sacred invariant:** scratchpad memory is NEVER aliased by `___pmt_buffer`.
+The `StateRead`/`StateWrite`/`StateTransform` verifiers never see it.
+Unmarshalling is ALWAYS a copy back into `___pmt_buffer`, never a borrow.
+
+The scratchpad is stack-shaped: `push_frame` on transform entry, `pop_frame`
+on transform exit. Nested transforms get nested frames.
