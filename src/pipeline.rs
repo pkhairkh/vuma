@@ -7734,6 +7734,57 @@ pub fn extract_extern_functions_from_ast(program: &AstProgram) -> HashSet<String
     extern_fns
 }
 
+/// Extract extern function declarations (name + attrs + params) from the AST.
+/// Used by Wave 5 (ForeignState lowering) to inspect #[foreign_consume],
+/// #[foreign_return], #[callback], etc. at call sites.
+pub fn extract_extern_fn_decls_from_ast(
+    program: &AstProgram,
+) -> HashMap<String, vuma_parser::ast::ExternFnDecl> {
+    let mut map = HashMap::new();
+    for item in &program.items {
+        if let Item::ExternBlock(eb) = item {
+            for fn_decl in &eb.functions {
+                map.insert(fn_decl.name.clone(), fn_decl.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Extract layout declarations (name → LayoutDef incl. attrs) from the AST.
+/// Used by Wave 5 to check if a layout has #[foreign(raw)].
+pub fn extract_layout_decls_from_ast(
+    program: &AstProgram,
+) -> HashMap<String, vuma_parser::ast::LayoutDef> {
+    let mut map = HashMap::new();
+    for item in &program.items {
+        if let Item::LayoutDef(ld) = item {
+            map.insert(ld.name.clone(), ld.clone());
+        }
+    }
+    map
+}
+
+/// Convert a parser `Attribute` to a codegen `AttrInfo` (the lightweight
+/// attribute view used by the marshal module).
+pub fn attr_to_attr_info(attr: &vuma_parser::ast::Attribute) -> vuma_codegen::marshal::AttrInfo {
+    vuma_codegen::marshal::AttrInfo {
+        name: attr.name.clone(),
+        value: attr.value.as_ref().map(|v| match v {
+            vuma_parser::ast::AttrValue::Single(s) => s.clone(),
+            vuma_parser::ast::AttrValue::List(items) => {
+                items.first().cloned().unwrap_or_default()
+            }
+            vuma_parser::ast::AttrValue::KeyValue { value, .. } => value.clone(),
+        }),
+    }
+}
+
+/// Convert a slice of parser `Attribute`s to codegen `AttrInfo`s.
+pub fn attrs_to_attr_infos(attrs: &[vuma_parser::ast::Attribute]) -> Vec<vuma_codegen::marshal::AttrInfo> {
+    attrs.iter().map(attr_to_attr_info).collect()
+}
+
 /// Bridge a parsed VUMA AST into the codegen crate's SCG representation.
 ///
 /// This is the direct path: AST → codegen SCG. It bypasses the semantic
@@ -7749,6 +7800,12 @@ pub fn extract_extern_functions_from_ast(program: &AstProgram) -> HashSet<String
 pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // Collect extern function names so we can mark calls as is_extern.
     let extern_fns = extract_extern_functions_from_ast(program);
+
+    // Wave 5: collect extern fn declarations (with attrs) and layout
+    // declarations (with attrs) so call sites can detect #[foreign_consume],
+    // #[foreign_return], #[foreign(raw)], etc.
+    let extern_fn_decls = extract_extern_fn_decls_from_ast(program);
+    let layout_decls = extract_layout_decls_from_ast(program);
 
     // Collect global constant definitions so they can be inlined
     // as literal values when referenced in function bodies.
@@ -7788,6 +7845,8 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         tl_ctx.extern_fns = extern_fns.clone();
         tl_ctx.global_constants = global_constants.clone();
         tl_ctx.layouts = layouts.clone();
+        tl_ctx.extern_fn_decls = extern_fn_decls.clone();
+        tl_ctx.layout_decls = layout_decls.clone();
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
                 top_level_stmts.extend(bridge_stmt_to_scg(stmt, &mut tl_ctx));
@@ -7819,6 +7878,8 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.global_constants = global_constants.clone();
             ctx.void_functions = void_functions.clone();
             ctx.layouts = layouts.clone();
+            ctx.extern_fn_decls = extern_fn_decls.clone();
+            ctx.layout_decls = layout_decls.clone();
             // PMT (Wave 2): register state-typed params (those with
             // `State<L>` type annotation) so `param.field` accesses inside
             // the body lower to Loads with the layout's field offsets.
@@ -7937,6 +7998,14 @@ pub struct BridgeCtx {
     /// lowered, and `let p = state_new(L)` / `let p: State<L> = ...` add
     /// entries as they're processed.
     pub state_var_layouts: HashMap<String, String>,
+    /// Wave 5 (ForeignState): extern fn name → its declaration (incl. attrs).
+    /// Used at call sites to detect #[foreign_consume], #[foreign_return],
+    /// #[callback], etc. Populated by `bridge_ast_to_codegen_scg`.
+    pub extern_fn_decls: HashMap<String, vuma_parser::ast::ExternFnDecl>,
+    /// Wave 5 (ForeignState): layout name → its declaration (incl. attrs).
+    /// Used to check if a layout has #[foreign(raw)]. Populated by
+    /// `bridge_ast_to_codegen_scg`.
+    pub layout_decls: HashMap<String, vuma_parser::ast::LayoutDef>,
 }
 
 impl Default for BridgeCtx {
@@ -7957,6 +8026,8 @@ impl BridgeCtx {
             void_functions: HashSet::new(),
             layouts: HashMap::new(),
             state_var_layouts: HashMap::new(),
+            extern_fn_decls: HashMap::new(),
+            layout_decls: HashMap::new(),
         }
     }
 
@@ -8289,6 +8360,48 @@ pub fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut Brid
 /// holds the result, and appends any intermediate computation statements
 /// to `stmts`.
 ///
+/// Wave 5: emit ForeignConsume marker statements for a `#[foreign_consume]`
+/// extern call. For each argument that is a State variable whose layout has
+/// `#[foreign(raw)]`, push a `ScgStatement::ForeignConsume` so the IVE treats
+/// the State's vreg as consumed (linearity error on subsequent read/write).
+fn emit_foreign_consume_markers(
+    func_name: &str,
+    args: &[vuma_parser::ast::Expr],
+    stmts: &mut Vec<ScgStatement>,
+    ctx: &BridgeCtx,
+) {
+    // Look up the extern fn's declaration to check for #[foreign_consume].
+    let fn_decl = match ctx.extern_fn_decls.get(func_name) {
+        Some(d) => d,
+        None => return, // not an extern fn — nothing to do
+    };
+    let fn_attrs = attrs_to_attr_infos(&fn_decl.attrs);
+    if vuma_codegen::marshal::foreign_consume_field(&fn_attrs).is_none() {
+        return; // not a #[foreign_consume] fn
+    }
+    // For each arg that is a State variable (Expr::Var) whose layout is
+    // #[foreign(raw)], emit a ForeignConsume marker.
+    for arg in args {
+        if let vuma_parser::ast::Expr::Var { name, .. } = arg {
+            // Check if this variable is a state-typed variable.
+            if let Some(layout_name) = ctx.state_var_layouts.get(name) {
+                // Check if the layout has #[foreign(raw)].
+                if let Some(layout_decl) = ctx.layout_decls.get(layout_name) {
+                    let layout_attrs = attrs_to_attr_infos(&layout_decl.attrs);
+                    if vuma_codegen::marshal::foreign_layout_field(&layout_attrs).is_some() {
+                        stmts.push(ScgStatement::ForeignConsume(
+                            vuma_codegen::scg_to_ir::ForeignConsumeStmt {
+                                state_var: name.clone(),
+                                layout_name: layout_name.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// This is the core of the bridge: it recursively decomposes nested
 /// expressions into a sequence of simple computation nodes, each operating
 /// on at most two operands and producing one result. This preserves the
@@ -8449,22 +8562,28 @@ pub fn flatten_expr(
             if is_void {
                 stmts.push(ScgStatement::Call(CallNode {
                     dst: None,
-                    func: func_name,
-                    args: flat_args,
+                    func: func_name.clone(),
+                    args: flat_args.clone(),
                     is_extern,
                     reassigns: None,
                 }));
+                // Wave 5: if this is a #[foreign_consume] extern call, emit
+                // a ForeignConsume marker for each State arg whose layout is
+                // #[foreign(raw)]. The IVE treats the State's vreg as consumed.
+                emit_foreign_consume_markers(&func_name, args, stmts, ctx);
                 // Return a dummy value (0) for void calls used as expressions
                 ScgExpr::Int(0)
             } else {
                 let dst = ctx.alloc_temp();
                 stmts.push(ScgStatement::Call(CallNode {
                     dst: Some(dst.clone()),
-                    func: func_name,
-                    args: flat_args,
+                    func: func_name.clone(),
+                    args: flat_args.clone(),
                     is_extern,
                     reassigns: None,
                 }));
+                // Wave 5: emit ForeignConsume markers for #[foreign_consume] calls.
+                emit_foreign_consume_markers(&func_name, args, stmts, ctx);
                 ScgExpr::Var(dst)
             }
         }
