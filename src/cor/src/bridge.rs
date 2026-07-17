@@ -92,7 +92,8 @@ fn map_node_type(
         vuma_scg::NodeType::StateInit
         | vuma_scg::NodeType::StateRead
         | vuma_scg::NodeType::StateWrite
-        | vuma_scg::NodeType::StateTransform => NodeKind::Memory,
+        | vuma_scg::NodeType::StateTransform
+        | vuma_scg::NodeType::ForeignConsume => NodeKind::Memory,
     }
 }
 

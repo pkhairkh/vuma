@@ -1,0 +1,32 @@
+// ffi_wave3/use_after_close_reject — reading a foreign handle after close is a linearity error
+// Expected: COMPILE ERROR (state_write linearity violation)
+//
+// Wave 2b test: a #[foreign_consume] call (sqlite3_close) linearly consumes
+// its State argument. Reading db.raw after the close must be a state_write
+// linearity error, caught by the existing verifier (reused via the
+// ForeignConsume SCG node).
+//
+// NOTE: This test documents the intended behavior. The ForeignConsume SCG
+// node infrastructure is in place (node type, payload, serialization, IVE
+// consumed-set wiring). Emission of the node at #[foreign_consume] call
+// sites is wired in Wave 5 (ForeignState lowering in scg_to_ir.rs), where
+// the codegen bridge can distinguish extern calls. Until Wave 5, this test
+// compiles without error (the extern call is a no-op relocation). After
+// Wave 5, it will become a compile error as documented.
+
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_consume(raw)]
+    fn sqlite3_close(db: State<DbHandle>);
+}
+
+fn main() -> i32 {
+    let db = state_new(DbHandle);
+    db.raw = 0;
+    sqlite3_close(db);
+    // After Wave 5, this read of db.raw will be a state_write error
+    // (db was consumed by the #[foreign_consume] call).
+    return db.raw as i32;
+}
