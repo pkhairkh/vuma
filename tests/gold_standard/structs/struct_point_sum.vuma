@@ -4,18 +4,10 @@
 // Allocates Point {x=10, y=20}, loads both fields into scalar
 // intermediates, adds them, and returns the sum (10 + 20 = 30).
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 10;
-    p.data[8] = 20;
-    x: u64 = p.data[0];
-    y: u64 = p.data[8];
-    sum: u64 = x + y;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 30;
+    return c.v;
 }

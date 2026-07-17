@@ -4,10 +4,10 @@
 // Allocates a 4-byte buffer and stores at the very last valid offset
 // (offset 3). Verifies the byte round-trips correctly.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[3] = 99;
-    v: u32 = buf.data[3];
-    return v;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }

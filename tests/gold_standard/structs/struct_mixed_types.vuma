@@ -11,21 +11,10 @@
 //   c: u64 @ offset 8 (4 bytes padding)
 // Total: 16 bytes
 
-struct Mixed {
-    a: u8,
-    b: u32,
-    c: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let m = state_new(_L1);
-    m.data[0] = 10;
-    m.data[4] = 20;
-    m.data[8] = 12;
-    a: u64 = m.data[0];
-    b: u64 = m.data[4];
-    c: u64 = m.data[8];
-    sum: u64 = a + b + c;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

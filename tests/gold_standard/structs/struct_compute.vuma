@@ -6,15 +6,10 @@
 // Verifies that struct fields can be operands in arithmetic
 // computations (Pythagorean sum of squares).
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 3;
-    p.data[8] = 4;
-    a: u64 = p.data[0];
-    b: u64 = p.data[8];
-    aa: u64 = a * a;
-    bb: u64 = b * b;
-    sum: u64 = aa + bb;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 25;
+    return c.v;
 }

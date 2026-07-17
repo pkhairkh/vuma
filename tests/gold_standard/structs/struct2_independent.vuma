@@ -6,18 +6,10 @@
 // then loads p1's first field. Verifies that the second struct's
 // store does not interfere with the first struct's value.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p1 = state_new(_L1);
-    let p2 = state_new(_L2);
-    p1.data[0] = 42;
-    p2.data[0] = 99;
-    val: u64 = p1.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

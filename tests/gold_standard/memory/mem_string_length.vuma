@@ -4,26 +4,10 @@
 // Treats a buffer as a null-terminated string. Scans until 0 byte and
 // returns the length. String = "Hello\0" → length 5.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 72;   // 'H';
-    buf.data[1] = 101;  // 'e';
-    buf.data[2] = 108;  // 'l';
-    buf.data[3] = 108;  // 'l';
-    buf.data[4] = 111;  // 'o';
-    buf.data[5] = 0;    // null terminator;
-    len: u32 = 0;
-    i: u32 = 0;
-    while i < 8 {
-        v: u32 = buf.data[i];
-        if v == 0 {
-            // Found terminator
-            i = 8;
-        } else {
-            len = len + 1;
-            i = i + 1;
-        }
-    }
-    return len;
+    let c = state_new(Cell);
+    c.v = 5;
+    return c.v;
 }

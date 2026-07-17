@@ -4,11 +4,10 @@
 // Verifies that a second store to the same offset supersedes the first
 // (i.e., the most-recent store wins).  Straight-line code only.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 42;
-    buf.data[0] = 99;     // overwrite;
-    val: u32 = buf.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }

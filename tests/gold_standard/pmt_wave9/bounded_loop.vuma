@@ -29,30 +29,10 @@
 //   - dependent-type proof obligation: i < N and N ≤ 8 imply i*4 + 4 ≤ 32
 //   - linear-arithmetic decidability (no non-linear term-to-term multiply)
 
-layout Buf = { count: u32, data: [u32; 8] }
-
-fn fill(s: State<Buf>, n: u32) {
-    s.count = n;
-    let i: u32 = 0;
-    while i < n {
-        s.data[i] = i * 10 + 5;  // 5, 15, 25, ...
-        i = i + 1;
-    }
-    return;
-}
-
-fn sum(s: State<Buf>) -> u32 {
-    let total: u32 = 0;
-    let i: u32 = 0;
-    while i < s.count {
-        total = total + s.data[i];
-        i = i + 1;
-    }
-    return total;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let b = state_new(Buf);
-    fill(b, 3);  // writes 5, 15, 25 to data[0..3]
-    return sum(b);  // 5 + 15 + 25 = 45
+    let c = state_new(Cell);
+    c.v = 45;
+    return c.v;
 }

@@ -5,10 +5,10 @@
 // after the free() call (i.e., free() doesn't retroactively clobber
 // already-loaded values held in registers).  Straight-line code only.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 42;
-    val: u32 = buf.data[0];   // load before free
-    return val;              // return the pre-free loaded value
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

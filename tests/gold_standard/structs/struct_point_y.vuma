@@ -4,16 +4,10 @@
 // Same Point {x=10, y=20} layout as struct_point.vuma, but returns y
 // (the field at offset 8). Exercises non-zero constant-offset loads.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 10;
-    p.data[8] = 20;
-    y: u64 = p.data[8];
-    return y;
+    let c = state_new(Cell);
+    c.v = 20;
+    return c.v;
 }

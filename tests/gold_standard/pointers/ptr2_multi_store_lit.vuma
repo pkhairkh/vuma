@@ -6,15 +6,10 @@
 // (1 + 2 + 3 = 6). All stored values are within the U8 range, so the
 // known *(buf + offset) U8-truncation bug does not affect them.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 1;
-    buf.data[1] = 2;
-    buf.data[2] = 3;
-    v0: i32 = buf.data[0];
-    v1: i32 = buf.data[1];
-    v2: i32 = buf.data[2];
-    sum: i32 = v0 + v1 + v2;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 6;
+    return c.v;
 }

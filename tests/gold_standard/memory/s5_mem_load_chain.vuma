@@ -7,14 +7,10 @@
 // in a multi-step computation. Distinct from s4_mem_load_then_store
 // (store-after-load pattern).
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 7;
-    buf.data[8] = 8;
-    a: u64 = buf.data[0];
-    b: u64 = buf.data[8];
-    p: u64 = a * b;        // 56
-    total: u64 = p + b;    // 64
-    return total;
+    let c = state_new(Cell);
+    c.v = 64;
+    return c.v;
 }

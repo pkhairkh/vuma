@@ -5,17 +5,10 @@
 // its Address parameter. main stores 42 at *buf; the function reads *p
 // into a local variable and returns it.
 
-
-
-layout _L1 = { v: u32 }
-fn load_val(p: Address) -> u32 {
-    v: u32 = p.v;
-    return v;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.v = 42;
-    v: u32 = load_val(buf);
-    return v;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

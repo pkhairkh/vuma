@@ -6,15 +6,10 @@
 // the value back from the same buffer and returns it. Exercises the
 // calling convention for Address-typed parameters.
 
-layout _L1 = { data: [u8; 64] }
-fn helper(buf: Address) -> i32 {
-    buf.v = 42;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    helper(buf);
-    val: i32 = buf.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

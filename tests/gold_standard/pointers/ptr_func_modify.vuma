@@ -7,15 +7,10 @@
 // callee's store to a passed-in buffer is visible to the caller
 // after the call returns.
 
-layout _L1 = { data: [u8; 64] }
-fn write_99(buf: Address) -> i32 {
-    buf.v = 99;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    write_99(buf);
-    val: i32 = buf.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }

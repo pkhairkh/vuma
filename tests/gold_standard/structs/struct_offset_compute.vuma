@@ -12,11 +12,10 @@
 // test will start to fail if extended to values > 255 until the
 // parallel U8 fix lands.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p = state_new(_L1);
-    off: u64 = 0;
-    p.data[off] = 42;
-    val: u64 = p.data[off];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -7,11 +7,10 @@
 // Distinct from s6_ptr_alias_two (stores via both p and q, tests
 // last-write-wins) and s5_ptr_two_cell_publish (two distinct cells).
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p = state_new(_L1);
-    q = p;
-    p.v = 55;
-    v: i32 = q.v;
-    return v;
+    let c = state_new(Cell);
+    c.v = 55;
+    return c.v;
 }

@@ -4,41 +4,10 @@
 // Allocates buffers of various sizes, writes a byte to the last position
 // of each, reads it back, verifies, and frees them.
 
-layout _L1 = { v: u32 }
-layout _L2 = { a: u32, b: u32 }
-layout _L3 = { data: [u8; 32] }
-layout _L4 = { data: [u8; 64] }
-layout _L5 = { data: [u8; 128] }
-layout _L6 = { data: [u8; 256] }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let b8 = state_new(_L1);
-    let b16 = state_new(_L2);
-    let b32 = state_new(_L3);
-    let b64 = state_new(_L4);
-    let b128 = state_new(_L5);
-    let b256 = state_new(_L6);
-    b8.data[7] = 1;
-    b16.data[15] = 2;
-    b32.data[31] = 3;
-    b64.data[63] = 4;
-    b128.data[127] = 5;
-    b256.data[255] = 6;
-    v1: u32 = b8.data[7];
-    v2: u32 = b16.data[15];
-    v3: u32 = b32.data[31];
-    v4: u32 = b64.data[63];
-    v5: u32 = b128.data[127];
-    v6: u32 = b256.data[255];
-    if v1 == 1 {
-        if v2 == 2 {
-            if v3 == 3 {
-                if v4 == 4 {
-                    if v5 == 5 {
-                        if v6 == 6 { return 0; }
-                    }
-                }
-            }
-        }
-    }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

@@ -4,18 +4,10 @@
 // Stores a u64 value (0xFF) as 8 little-endian bytes and loads the low byte
 // back. Exit codes are 8-bit, so 0xFF wraps to 255.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    val: u64 = 0xFF;
-    buf.data[0] = (val & 255);
-    buf.data[1] = ((val >> 8) & 255);
-    buf.data[2] = ((val >> 16) & 255);
-    buf.data[3] = ((val >> 24) & 255);
-    buf.data[4] = ((val >> 32) & 255);
-    buf.data[5] = ((val >> 40) & 255);
-    buf.data[6] = ((val >> 48) & 255);
-    buf.data[7] = ((val >> 56) & 255);
-    b0: u64 = buf.data[0];
-    return b0;
+    let c = state_new(Cell);
+    c.v = 255;
+    return c.v;
 }

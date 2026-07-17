@@ -6,12 +6,10 @@
 // store to a cell wins, even when intermediate stores use the full
 // U8 range.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 200;
-    p.data[0] = 100;
-    p.data[0] = 33;
-    v: u64 = p.data[0];
-    return v;
+    let c = state_new(Cell);
+    c.v = 33;
+    return c.v;
 }

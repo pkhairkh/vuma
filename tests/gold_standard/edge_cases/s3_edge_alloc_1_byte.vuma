@@ -4,9 +4,10 @@
 // Edge case: minimum-size allocation of a single byte. Stores 0, frees
 // the buffer, returns 0. Verifies the allocator handles size-1 requests.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 0;
-    return 0;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

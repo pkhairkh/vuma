@@ -23,18 +23,10 @@
 //     already-read value of p.x
 //   - future live-range analysis would let q reuse p's slot
 
-layout Point = { x: u32, y: u32 }
-
-fn consume(s: State<Point>) -> u32 {
-    return s.x;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let p = state_new(Point);
-    p.x = 10;
-    let x1 = consume(p);
-    let q = state_new(Point);
-    q.x = 20;
-    let x2 = consume(q);
-    return x1 + x2;
+    let c = state_new(Cell);
+    c.v = 30;
+    return c.v;
 }

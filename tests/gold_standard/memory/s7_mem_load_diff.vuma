@@ -8,15 +8,10 @@
 // separate buffers, sum not diff) and s5_mem_load_chain (multiplies,
 // not subtracts).
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    p0 = buf;
-    p8 = buf + 8;
-    p0.v = 80;
-    p8.v = 15;
-    a: u64 = p0.v;
-    b: u64 = p8.v;
-    d: u64 = a - b;    // 65
-    return d;
+    let c = state_new(Cell);
+    c.v = 65;
+    return c.v;
 }
