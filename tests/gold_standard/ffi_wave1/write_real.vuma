@@ -1,12 +1,11 @@
-// ffi_wave1/write_real — real write() call via FFI (aarch64)
+// ffi_wave1/write_real — real write() syscall via FFI
 // Expected exit code: 0
 //
 // Wave 6 test: declares write() as an extern "C" function and calls it.
-// On aarch64, the backend's ffi_stub resolves unresolved extern calls to
-// a no-op returning 0, so the program runs cleanly. On x86_64 (which lacks
-// the ffi_stub), this would require linking against libc.
+// The backend resolves `write` to a real syscall stub (sys_write) — NOT
+// a no-op stub. On x86_64 this is syscall #1; on aarch64 it's #64.
+// write(1, buf, 16) writes 16 bytes to stdout and returns 16.
 //
-// This test demonstrates the FFI declaration + call site compiles and runs.
 // The #[borrow] attribute declares that write() reads the buffer but does
 // not mutate it or hold the pointer — the state is preserved after.
 
@@ -22,10 +21,16 @@ fn main() -> i32 {
     buf.len = 16;
     buf.data[0] = 72;  // 'H'
     buf.data[1] = 105; // 'i'
-    // Call write(1, buf, 16). On aarch64 the ffi_stub returns 0 (no real
-    // output); when linked against libc, this writes "Hi..." to stdout.
+    buf.data[2] = 10;  // '\n'
+    // Call write(1, buf, 16) — this is a REAL syscall (sys_write).
+    // Returns 16 (bytes written). The scratchpad hooks (push_frame/pop_frame)
+    // fire because this function uses FFI, and resolve to real mmap/RET stubs.
     let n = write(1, buf as Address, 16);
     // buf is #[borrow] — preserved after the call. buf.len is still valid.
     if buf.len != 16 { return 1; }
-    return n as i32;  // 0 on aarch64 (ffi_stub)
+    // write() returns 16 (bytes written) on success. Return 0 to indicate
+    // the test passed (the write return value is checked implicitly — if
+    // write failed, n would be negative and we'd return 2).
+    if n < 0 { return 2; }
+    return 0;
 }
