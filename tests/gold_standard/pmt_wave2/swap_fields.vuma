@@ -1,0 +1,23 @@
+// swap_fields — PMT Wave 2: swap two state fields via a temp
+// Expected exit code: 20
+//
+// Initializes a Point with x=10 y=20, swaps them via a temp variable,
+// then returns x (which is now 20). Verifies multiple state-field reads
+// and writes interact correctly through a temp.
+//
+// VUMA Key Concepts:
+//   - state.field read (Load) + state.field write (Store) in one function
+//   - temp variable mediates the swap
+//   - field offsets are distinct (x@0, y@4)
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 10;
+    p.y = 20;
+    let tmp = p.x;
+    p.x = p.y;
+    p.y = tmp;
+    return p.x;
+}

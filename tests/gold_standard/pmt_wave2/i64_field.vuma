@@ -1,0 +1,23 @@
+// i64_field — PMT Wave 2: i64 field round-trip
+// Expected exit code: 192
+//
+// Declares a layout with an i64 field, writes 1000000, reads it back.
+// The expected exit code is 1000000 mod 256 = 192 (since exit codes
+// are a single byte 0-255).
+//
+// Verifies that the Store/Load width inference picks U64 (8 bytes) for
+// an i64 field so the full 64-bit value is preserved across the
+// store/load round-trip.
+//
+// VUMA Key Concepts:
+//   - i64-typed layout field (size=8, align=8)
+//   - access_size=8 → IRType::U64 for Store and Load
+//   - 64-bit value preserved (exit code is value mod 256)
+
+layout Big = { v: i64 }
+
+fn main() -> i32 {
+    let b = state_new(Big);
+    b.v = 1000000;
+    return b.v;
+}

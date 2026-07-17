@@ -2378,10 +2378,18 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Access(access) => match access.mode {
             AccessMode::Read => {
-                // Don't use access_size — it reflects the pointer size, not the
-                // value size. Let the IR builder infer from result types.
+                // PMT (Wave 2): when both `offset` and `access_size` are set
+                // (state-field reads), use `access_size` to pick the Load's IR
+                // type. For legacy Access nodes (raw deref), `access_size`
+                // reflects the pointer size (8) not the value size, so we
+                // still fall through to None and let the IR builder infer.
+                let ty = if access.offset.is_some() {
+                    access.access_size.and_then(access_size_to_ir_type)
+                } else {
+                    None
+                };
                 single(Some(ScgStatement::Access(AccessNode::Load {
-                    ty: None,
+                    ty,
                     dst: node_var(node_id, "val"),
                     ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
@@ -2389,14 +2397,18 @@ fn convert_node_to_statement_with_externs(
             }
             AccessMode::Write | AccessMode::ReadWrite => {
                 {
-                    // Don't use access_size for stores — it reflects the pointer
-                    // size, not the value size. Let the IR builder infer from
-                    // param types.
+                    // PMT (Wave 2): same as Read — use `access_size` for the
+                    // Store's IR type when both offset and access_size are set.
+                    let ty = if access.offset.is_some() {
+                        access.access_size.and_then(access_size_to_ir_type)
+                    } else {
+                        None
+                    };
                     single(Some(ScgStatement::Access(AccessNode::Store {
                         ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                         offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
                         value: resolve_df_input(node_id, 1, edge_idx, scg),
-                        ty: None,
+                        ty,
                     })))
                 }
             }
@@ -3987,6 +3999,22 @@ fn parse_scg_type(type_str: &str) -> Option<ScgType> {
         "u64" | "U64" => Some(ScgType::U64),
         "ptr" | "*void" | "*u8" | "*i8" => Some(ScgType::Ptr),
         "void" => Some(ScgType::Void),
+        _ => None,
+    }
+}
+
+/// PMT (Wave 2): map an access_size (in bytes) to the corresponding unsigned
+/// IR type. Used by `convert_node_to_statement_with_externs` when lowering
+/// state-field Access nodes (which carry both an explicit `offset` and a
+/// `access_size` matching the field's width). Returns `None` for sizes that
+/// don't map to a standard integer type — the IR builder's heuristics then
+/// pick a sensible default (typically U8).
+fn access_size_to_ir_type(size: u64) -> Option<vuma_codegen::ir::IRType> {
+    match size {
+        1 => Some(vuma_codegen::ir::IRType::U8),
+        2 => Some(vuma_codegen::ir::IRType::U16),
+        4 => Some(vuma_codegen::ir::IRType::U32),
+        8 => Some(vuma_codegen::ir::IRType::U64),
         _ => None,
     }
 }
@@ -7735,6 +7763,11 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         })
         .collect();
 
+    // PMT (Wave 2): build the layout registry from all `Item::LayoutDef`
+    // items. Cloned into each function's BridgeCtx so state.field accesses
+    // can resolve field offsets/types at bridge time.
+    let layouts = build_layout_registry(program);
+
     // ── Collect top-level statements ─────────────────────────────────
     //
     // Top-level `Item::Stmt` items (e.g. `region buf = allocate(1024);`,
@@ -7749,6 +7782,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         let mut tl_ctx = BridgeCtx::new();
         tl_ctx.extern_fns = extern_fns.clone();
         tl_ctx.global_constants = global_constants.clone();
+        tl_ctx.layouts = layouts.clone();
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
                 top_level_stmts.extend(bridge_stmt_to_scg(stmt, &mut tl_ctx));
@@ -7779,6 +7813,17 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.extern_fns = extern_fns.clone();
             ctx.global_constants = global_constants.clone();
             ctx.void_functions = void_functions.clone();
+            ctx.layouts = layouts.clone();
+            // PMT (Wave 2): register state-typed params (those with
+            // `State<L>` type annotation) so `param.field` accesses inside
+            // the body lower to Loads with the layout's field offsets.
+            for p in &fn_def.params {
+                if let Some(ref ty) = p.ty {
+                    if let Some(layout_name) = extract_state_layout_name_from_ast(ty) {
+                        ctx.state_var_layouts.insert(p.name.clone(), layout_name);
+                    }
+                }
+            }
             let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
 
             // Ensure every function ends with a Return statement.
@@ -7874,6 +7919,19 @@ pub struct BridgeCtx {
     /// bodies. Used by `flatten_expr` to emit `dst: None` for void function
     /// calls — critical for wasm32 which loads from mem[0] for non-void calls.
     pub void_functions: HashSet<String>,
+    /// PMT (Wave 2): layout definitions — maps layout name → (total_size,
+    /// fields). Each field is `(name, ir_type, byte_offset, byte_size,
+    /// type_name)` where `type_name` is the field's declared type as a
+    /// string (e.g. "u32", "Point") — used to descend into nested
+    /// layout-typed fields.
+    /// Built once from `Item::LayoutDef` items at the start of
+    /// `bridge_ast_to_codegen_scg` and cloned into each function's ctx.
+    pub layouts: HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
+    /// PMT (Wave 2): state-typed variable → layout name. Populated per
+    /// function: state-typed params are registered before the body is
+    /// lowered, and `let p = state_new(L)` / `let p: State<L> = ...` add
+    /// entries as they're processed.
+    pub state_var_layouts: HashMap<String, String>,
 }
 
 impl Default for BridgeCtx {
@@ -7892,6 +7950,8 @@ impl BridgeCtx {
             global_constants: HashMap::new(),
             var_types: HashMap::new(),
             void_functions: HashSet::new(),
+            layouts: HashMap::new(),
+            state_var_layouts: HashMap::new(),
         }
     }
 
@@ -8006,6 +8066,149 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
         Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
         _ => ScgType::Void,
     }
+}
+
+/// PMT (Wave 2): convert a parser `Type` to a codegen `IRType` for layout
+/// field computation. Returns `U64` for unknown/aggregate types (safe
+/// default — the field's bytes are still read/written correctly).
+fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRType {
+    use vuma_parser::ast::Type;
+    match ty {
+        Type::BDBase(name) => match name.as_str() {
+            "i8" => vuma_codegen::ir::IRType::I8,
+            "i16" => vuma_codegen::ir::IRType::I16,
+            "i32" => vuma_codegen::ir::IRType::I32,
+            "i64" => vuma_codegen::ir::IRType::I64,
+            "u8" => vuma_codegen::ir::IRType::U8,
+            "u16" => vuma_codegen::ir::IRType::U16,
+            "u32" => vuma_codegen::ir::IRType::U32,
+            "u64" => vuma_codegen::ir::IRType::U64,
+            _ => vuma_codegen::ir::IRType::U64,
+        },
+        Type::Ptr(_) | Type::RegionPtr { .. } => vuma_codegen::ir::IRType::U64,
+        _ => vuma_codegen::ir::IRType::U64,
+    }
+}
+
+/// PMT (Wave 2): compute the byte size of a parser `Type` for layout field
+/// offset computation.
+fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
+    use vuma_parser::ast::Type;
+    match ty {
+        Type::BDBase(name) => match name.as_str() {
+            "i8" | "u8" | "bool" => 1,
+            "i16" | "u16" => 2,
+            "i32" | "u32" | "f32" => 4,
+            "i64" | "u64" | "f64" => 8,
+            _ => 8,
+        },
+        Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        Type::Array { element, size } => bridge_type_size(element) * (*size as u64),
+        _ => 8,
+    }
+}
+
+/// PMT (Wave 2): compute the byte alignment of a parser `Type` for layout
+/// field offset computation.
+fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
+    use vuma_parser::ast::Type;
+    match ty {
+        Type::BDBase(name) => match name.as_str() {
+            "i8" | "u8" | "bool" => 1,
+            "i16" | "u16" => 2,
+            "i32" | "u32" | "f32" => 4,
+            "i64" | "u64" | "f64" => 8,
+            _ => 8,
+        },
+        Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        Type::Array { element, .. } => bridge_type_align(element),
+        _ => 8,
+    }
+}
+
+/// PMT (Wave 2): if `ty` is `State<LayoutName>`, return `Some(layout_name)`.
+fn extract_state_layout_name_from_ast(ty: &vuma_parser::ast::Type) -> Option<String> {
+    if let vuma_parser::ast::Type::State(inner) = ty {
+        if let vuma_parser::ast::Type::BDBase(name) = inner.as_ref() {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+/// PMT (Wave 2): build the layout registry from all `Item::LayoutDef` items
+/// in the program. Returns a map: layout_name → (total_size, fields) where
+/// each field is (name, ir_type, byte_offset, byte_size, type_name). Field
+/// offsets are computed sequentially with alignment padding (mirroring
+/// vuma-bd's `LayoutRegistry::register`).
+fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)> {
+    let mut layouts = HashMap::new();
+    for item in &program.items {
+        if let Item::LayoutDef(ld) = item {
+            let mut offset: u64 = 0;
+            let mut max_align: u64 = 1;
+            let mut fields: Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)> = Vec::new();
+            for (fname, ftype) in &ld.fields {
+                let falign = bridge_type_align(ftype).max(1);
+                let fsize = bridge_type_size(ftype);
+                if falign > 1 && offset % falign != 0 {
+                    offset = (offset + falign - 1) & !(falign - 1);
+                }
+                max_align = max_align.max(falign);
+                let ir_ty = bridge_type_to_ir_type(ftype);
+                // Store the field's declared type as a string for nested
+                // layout descent. For `Type::BDBase(name)` this is `name`;
+                // for other types it's the Display form (not a layout name,
+                // so descent stops here).
+                let type_name = match ftype {
+                    vuma_parser::ast::Type::BDBase(n) => n.clone(),
+                    other => other.to_string(),
+                };
+                fields.push((fname.clone(), ir_ty, offset, fsize, type_name));
+                offset += fsize;
+            }
+            let alignment = max_align.max(1);
+            if offset > 0 && offset % alignment != 0 {
+                offset = (offset + alignment - 1) & !(alignment - 1);
+            }
+            layouts.insert(ld.name.clone(), (offset, fields));
+        }
+    }
+    layouts
+}
+
+/// PMT (Wave 2): resolve a state-field chain `(layout_name, [field1, field2, ...])`
+/// against the layout registry. Returns `(cumulative_offset, size, ir_type)`
+/// of the leaf field, descending into nested layout-typed fields. Returns
+/// `None` if any field in the chain isn't found.
+fn resolve_state_field_chain(
+    layouts: &HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
+    start_layout: &str,
+    chain: &[String],
+) -> Option<(u64, u64, vuma_codegen::ir::IRType)> {
+    if chain.is_empty() {
+        return None;
+    }
+    let mut layout = start_layout.to_string();
+    let mut cum_offset: u64 = 0;
+    let mut last_size: u64 = 0;
+    let mut last_ty: Option<vuma_codegen::ir::IRType> = None;
+    for field in chain {
+        let (_, fields) = layouts.get(&layout)?;
+        let (_fname, ftype, foffset, fsize, ftype_name) = fields
+            .iter()
+            .find(|(n, _, _, _, _)| n == field)?;
+        cum_offset += foffset;
+        last_size = *fsize;
+        last_ty = Some(ftype.clone());
+        // Descend into nested layout-typed fields: if the field's declared
+        // type name matches a known layout, switch to that layout for the
+        // next field in the chain.
+        if layouts.contains_key(ftype_name) {
+            layout = ftype_name.clone();
+        }
+    }
+    last_ty.map(|ty| (cum_offset, last_size, ty))
 }
 
 /// Convert a parser block into codegen SCG statements, flattening expressions
@@ -8424,6 +8627,56 @@ pub fn flatten_expr(
             }
         }
 
+        // ── PMT (Wave 2): state.field read (and nested state.a.b read) ──
+        //
+        // `Expr::FieldAccess` chains rooted at a state-typed var (e.g.
+        // `p.x`, `l.a.x`) lower to a single Load at the field's cumulative
+        // byte offset within the state's buffer. Non-state FieldAccess
+        // (e.g. on a struct value) is not supported here — it falls through
+        // to the unsupported-expression warning.
+        Expr::FieldAccess { .. } => {
+            // Walk the chain to find (base_var, [field1, ..., fieldN]).
+            let mut chain: Vec<String> = Vec::new();
+            let mut cur = expr;
+            while let Expr::FieldAccess { expr: inner, field, .. } = cur {
+                chain.push(field.clone());
+                cur = inner.as_ref();
+            }
+            let base_var = if let Expr::Var { name, .. } = cur {
+                Some(name.clone())
+            } else {
+                None
+            };
+            if let Some(bv) = base_var {
+                if let Some(layout_name) = ctx.state_var_layouts.get(&bv).cloned() {
+                    chain.reverse(); // outermost-to-innermost order
+                    if let Some((offset, _size, field_ty)) =
+                        resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
+                    {
+                        let dst = ctx.alloc_temp();
+                        stmts.push(ScgStatement::Access(AccessNode::Load {
+                            dst: dst.clone(),
+                            ptr: ScgExpr::Var(bv),
+                            offset: Some(ScgExpr::Int(offset as i64)),
+                            ty: Some(field_ty),
+                        }));
+                        return ScgExpr::Var(dst);
+                    }
+                }
+            }
+            // Not a state-typed FieldAccess — emit warning and return 0.
+            eprintln!("[vuma] WARNING: unsupported FieldAccess (not state-typed) in flatten_expr; using 0");
+            ScgExpr::Int(0)
+        }
+
+        // ── PMT (Wave 2): StateInit as an expression (rare — usually
+        // handled directly in PStmt::Let). If encountered here, return 0
+        // since we can't allocate without a binding name. ──
+        Expr::StateInit { .. } => {
+            eprintln!("[vuma] WARNING: state_new() outside let-binding in flatten_expr; using 0");
+            ScgExpr::Int(0)
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
@@ -8548,6 +8801,29 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 let scg_ty = bridge_type_to_codegen_scg(&Some(ty.clone()));
                 if scg_ty != ScgType::Void {
                     ctx.var_types.insert(let_stmt.name.clone(), scg_ty);
+                }
+                // PMT (Wave 2): register state-typed vars (`let p: State<L> = ...`)
+                // so subsequent `p.field` accesses lower to Loads with the
+                // layout's field offsets.
+                if let Some(layout_name) = extract_state_layout_name_from_ast(ty) {
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name);
+                }
+            }
+
+            // PMT (Wave 2): `let p = state_new(Layout)` → AllocationNode::Stack
+            // sized to the layout's total_size. The resulting stack slot
+            // holds the state's buffer pointer; subsequent `p.field` reads/
+            // writes use it as the Load/Store address.
+            if let vuma_parser::ast::Expr::StateInit { layout_name, .. } = &let_stmt.value {
+                if let Some((total_size, _)) = ctx.layouts.get(layout_name) {
+                    // Register the var as state-typed BEFORE returning so
+                    // subsequent `p.field` accesses can find the layout.
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name.clone());
+                    return vec![ScgStatement::Allocation(AllocationNode::Stack {
+                        name: let_stmt.name.clone(),
+                        size: *total_size as u32,
+                        ty: ScgType::Ptr,
+                    })];
                 }
             }
 
@@ -8722,6 +8998,54 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     ty: None,
                 }));
                 return stmts;
+            }
+
+            // PMT (Wave 2): state-field write — `p.field = val` (and nested
+            // `l.a.x = val`). The parser represents these as
+            // `AssignTarget::DerefField { expr, field }`. We walk the
+            // FieldAccess chain to find the base state-typed var, resolve
+            // the cumulative field offset against the layout registry, and
+            // emit a single Store at that offset.
+            if let vuma_parser::ast::AssignTarget::DerefField { expr, field, .. } = &assign_stmt.target {
+                // Walk the chain to find (base_var, [field1, field2, ..., field]).
+                let mut chain = vec![field.clone()];
+                let mut cur = expr.as_ref();
+                let mut base_var: Option<String> = None;
+                while let vuma_parser::ast::Expr::FieldAccess { expr: inner, field: f, .. } = cur {
+                    chain.push(f.clone());
+                    cur = inner.as_ref();
+                }
+                if let vuma_parser::ast::Expr::Var { name, .. } = cur {
+                    base_var = Some(name.clone());
+                }
+                if let Some(bv) = &base_var {
+                    if let Some(layout_name) = ctx.state_var_layouts.get(bv).cloned() {
+                        chain.reverse(); // outermost-to-innermost order
+                        if let Some((offset, _size, field_ty)) =
+                            resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
+                        {
+                            let ptr = flatten_expr(&vuma_parser::ast::Expr::Var {
+                                name: bv.clone(),
+                                span: vuma_parser::Span::synthetic(),
+                            }, &mut stmts, ctx);
+                            let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+                            eprintln!("[W2-DBG] state-write: bv={} layout={} chain={:?} offset={} ty={:?} ptr={:?} value={:?}", bv, layout_name, chain, offset, field_ty, ptr, value);
+                            stmts.push(ScgStatement::Access(AccessNode::Store {
+                                ptr,
+                                offset: Some(ScgExpr::Int(offset as i64)),
+                                value,
+                                ty: Some(field_ty),
+                            }));
+                            return stmts;
+                        } else {
+                            eprintln!("[W2-DBG] state-write: resolve FAILED bv={} layout={} chain={:?}", bv, layout_name, chain);
+                        }
+                    } else {
+                        eprintln!("[W2-DBG] state-write: bv={} not in state_var_layouts", bv);
+                    }
+                }
+                // Not a state-typed field write — fall through to the
+                // generic handling below (treats `field` as a var name).
             }
 
             let dst = match &assign_stmt.target {

@@ -1,0 +1,21 @@
+// two_states — PMT Wave 2: two independent states
+// Expected exit code: 30
+//
+// Allocates two Points, sets x=10 on the first and x=20 on the second,
+// returns their sum (30). Verifies that each state has its own buffer
+// and field writes don't cross-contaminate.
+//
+// VUMA Key Concepts:
+//   - multiple state_new allocations in one function
+//   - each state's buffer pointer is distinct
+//   - field writes target the correct buffer
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    let q = state_new(Point);
+    p.x = 10;
+    q.x = 20;
+    return p.x + q.x;
+}
