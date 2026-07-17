@@ -338,6 +338,52 @@ impl AstToScg {
                 default_region.add_node(id);
                 Ok(id)
             }
+            // PMT (Wave 1a): LayoutDef and TransformDef are parsed but not
+            // yet lowered to SCG. Wave 1c will wire them. For now, emit a
+            // Computation node with a descriptive label so the SCG retains
+            // a trace of the construct (parallel with how StructDef/EnumDef
+            // are handled above) WITHOUT crashing or failing the build —
+            // this lets the parse-only test files in
+            // tests/gold_standard/pmt_wave1/ compile end-to-end and run
+            // `fn main() { return 0; }` to exit 0.
+            Item::LayoutDef(ld) => {
+                let fields_str: Vec<String> = ld
+                    .fields
+                    .iter()
+                    .map(|(n, t)| format!("{}: {}", n, t))
+                    .collect();
+                let id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(format!(
+                            "layout {} {{ {} }}  // PMT Wave 1c TODO",
+                            ld.name,
+                            fields_str.join(", ")
+                        )),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    self.span_to_pp(&ld.span),
+                );
+                default_region.add_node(id);
+                Ok(id)
+            }
+            Item::TransformDef(td) => {
+                let id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(format!(
+                            "transform {}({}: State<{}>) -> State<{}> {{ ... }}  // PMT Wave 1c TODO",
+                            td.name, td.param_name, td.param_layout, td.return_layout
+                        )),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    self.span_to_pp(&td.span),
+                );
+                default_region.add_node(id);
+                Ok(id)
+            }
         }
     }
 
@@ -1776,6 +1822,26 @@ impl AstToScg {
                 }
                 Ok(id)
             }
+            // PMT (Wave 1a): TransformCall is parsed-but-not-emitted in
+            // Wave 1a (the parser produces Stmt::Let with a function-call
+            // RHS for transform invocations). Stub arm produces no SCG
+            // node so the build does not crash; Wave 1c will lower this.
+            Stmt::TransformCall(tc) => {
+                let id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(format!(
+                            "transform_call {} = {}(...)  // PMT Wave 1c TODO",
+                            tc.dst, tc.transform_name
+                        )),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    self.span_to_pp(&tc.span),
+                );
+                region.add_node(id);
+                Ok(id)
+            }
         }
     }
 
@@ -2828,6 +2894,18 @@ impl AstToScg {
                     self.collect_uses(a, uses);
                 }
             }
+            // PMT (Wave 1a): the parser does not yet emit these variants
+            // (StateInit intercepts `state_new(Name)` in parse_postfix;
+            // StateRead reuses FieldAccess; StateWrite is reserved). The
+            // arms are present so the match stays exhaustive.
+            Expr::StateInit { .. } => {}
+            Expr::StateRead { state, .. } => {
+                self.collect_uses(state, uses);
+            }
+            Expr::StateWrite { state, value, .. } => {
+                self.collect_uses(state, uses);
+                self.collect_uses(value, uses);
+            }
         }
     }
 
@@ -2917,6 +2995,11 @@ impl AstToScg {
             Some(Type::Func { .. }) => 8,
             Some(Type::Generic { .. }) => 8,
             Some(Type::BdAnnot { .. }) => 8,
+            // PMT (Wave 1a): State<T> is a typed view over a memory
+            // buffer — pointer-sized handle. Ref<State, F> is an offset
+            // into one. Wave 1c will compute proper layout-based sizes.
+            Some(Type::State(_)) => 8,
+            Some(Type::Ref { .. }) => 8,
             None => 8,
         }
     }
@@ -2931,6 +3014,10 @@ impl AstToScg {
             Type::Func { .. } => 8,
             Type::Generic { .. } => 8,
             Type::BdAnnot { .. } => 0,
+            // PMT (Wave 1a): pointer-sized handles for now. Wave 1c will
+            // look up the layout's actual size once layouts are tracked.
+            Type::State(_) => 8,
+            Type::Ref { .. } => 8,
         }
     }
 
@@ -2991,6 +3078,11 @@ impl AstToScg {
             Expr::MatchExpr { .. } => "unknown".to_string(),
             // Linux syscalls return `isize`, which is `i64` on the 64-bit ABI.
             Expr::Syscall { .. } => "i64".to_string(),
+            // PMT (Wave 1a) — best-effort type names. Wave 1c will track
+            // State<T> types properly through the SCG.
+            Expr::StateInit { layout_name, .. } => format!("State<{}>", layout_name),
+            Expr::StateRead { .. } => "unknown".to_string(),
+            Expr::StateWrite { .. } => "unknown".to_string(),
         }
     }
 
@@ -3185,6 +3277,21 @@ impl AstToScg {
             Expr::Syscall { nr, args, .. } => {
                 let a: Vec<String> = args.iter().map(|e| self.expr_to_string(e)).collect();
                 format!("syscall({}, {})", nr, a.join(", "))
+            }
+            // PMT (Wave 1a) — best-effort string forms.
+            Expr::StateInit { layout_name, .. } => {
+                format!("state_new({})", layout_name)
+            }
+            Expr::StateRead { state, field, .. } => {
+                format!("{}.{}", self.expr_to_string(state), field)
+            }
+            Expr::StateWrite { state, field, value, .. } => {
+                format!(
+                    "{}.{} = {}",
+                    self.expr_to_string(state),
+                    field,
+                    self.expr_to_string(value)
+                )
             }
         }
     }

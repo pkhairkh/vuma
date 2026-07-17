@@ -263,6 +263,14 @@ impl<'src> Parser<'src> {
                 let lexeme = self.current.lexeme.as_str();
                 match lexeme {
                     "static" => self.parse_static_item(visibility, attrs).map(Item::Static),
+                    // PMT (Wave 1a): `layout Name = { ... }` and
+                    // `transform name(s: State<L>) -> State<L> { ... }`.
+                    // These are intentionally NOT promoted to keyword tokens
+                    // — they are dispatched by lexeme so the lexer is
+                    // untouched (the existing `Ref` keyword, lowercase `ref`,
+                    // is unrelated to the capital-`R` `Ref<T,F>` PMT type).
+                    "layout" => self.parse_layout_def().map(Item::LayoutDef),
+                    "transform" => self.parse_transform_def().map(Item::TransformDef),
                     _ => self.parse_stmt().map(Item::Stmt),
                 }
             }
@@ -410,6 +418,123 @@ impl<'src> Parser<'src> {
             where_clause,
             span: Span::new(start, self.current.span.end),
         })
+    }
+
+    /// `layout` <ident> `=` `{` <field>: <type> `,` ... `}` [`;`]
+    ///
+    /// PMT (Wave 1a) — a layout is a typed view of a memory buffer region.
+    /// Mirrors `parse_struct_def` but uses `=` between the name and the
+    /// field list (mirroring the `region name = allocate(N)` form) and
+    /// accepts an optional trailing semicolon.
+    fn parse_layout_def(&mut self) -> Result<LayoutDef, ParseError> {
+        let start = self.current.span.start;
+        // Consume 'layout' (currently lexed as Ident — see parse_item dispatch).
+        self.advance();
+
+        let name = self.expect_name()?;
+
+        self.expect(TokenKind::Assign)?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let fname = self.expect_name()?;
+            self.expect(TokenKind::Colon)?;
+            let ftype = self.parse_type()?;
+            fields.push((fname, ftype));
+            if self.at(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.expect(TokenKind::RBrace)?;
+
+        // Optional trailing semicolon (parallel with `region name = ...;`).
+        if self.at(TokenKind::Semicolon) {
+            self.advance();
+        }
+
+        Ok(LayoutDef {
+            name,
+            fields,
+            span: Span::new(start, self.current.span.end),
+        })
+    }
+
+    /// `transform` <ident> `(` <ident> `:` `State` `<` <ident> `>` `)`
+    ///       `->` `State` `<` <ident> `>` `{` <block> `}`
+    ///
+    /// PMT (Wave 1a) — a pure function from one state layout to another.
+    /// Mirrors `parse_fn_def` but with a single `State<LayoutName>` parameter
+    /// and a `State<LayoutName>` return type. The layout names are extracted
+    /// from the `State<T>` type produced by `parse_type` (which special-cases
+    /// the `State` and `Ref` identifiers).
+    fn parse_transform_def(&mut self) -> Result<TransformDef, ParseError> {
+        let start = self.current.span.start;
+        // Consume 'transform' (lexed as Ident — see parse_item dispatch).
+        self.advance();
+
+        let name = self.expect_name()?;
+
+        self.expect(TokenKind::LParen)?;
+        let param_name = self.expect_name()?;
+        self.expect(TokenKind::Colon)?;
+        let param_ty = self.parse_type()?;
+        let param_layout = Self::extract_state_layout_name(param_ty, "parameter")?;
+        self.expect(TokenKind::RParen)?;
+
+        self.expect(TokenKind::Arrow)?;
+        let return_ty = self.parse_type()?;
+        let return_layout = Self::extract_state_layout_name(return_ty, "return")?;
+
+        let body_block = self.parse_block()?;
+
+        Ok(TransformDef {
+            name,
+            param_name,
+            param_layout,
+            return_layout,
+            body: body_block.statements,
+            span: Span::new(start, self.current.span.end),
+        })
+    }
+
+    /// Given a `Type` produced by `parse_type`, require it to be
+    /// `State<BDBase(layout_name)>` and return the layout name. Used by
+    /// `parse_transform_def` to enforce the `State<LayoutName>` signature.
+    ///
+    /// `position` is "parameter" or "return" — used in the error message.
+    ///
+    /// This is a free function (not a `&self` method) so it can be called
+    /// inline with `parse_type()` without running afoul of the borrow
+    /// checker (`parse_type` takes `&mut self`).
+    fn extract_state_layout_name(
+        ty: Type,
+        position: &str,
+    ) -> Result<String, ParseError> {
+        match ty {
+            Type::State(inner) => match *inner {
+                Type::BDBase(name) => Ok(name),
+                other => Err(ParseError::new(
+                    format!(
+                        "transform {} layout must be a plain layout name, got {}",
+                        position, other
+                    ),
+                    Span::synthetic(),
+                    ParseErrorKind::UnexpectedToken,
+                )),
+            },
+            other => Err(ParseError::new(
+                format!(
+                    "transform {} type must be State<LayoutName>, got {}",
+                    position, other
+                ),
+                Span::synthetic(),
+                ParseErrorKind::UnexpectedToken,
+            )),
+        }
     }
 
     /// `enum` <ident> [`<` type_params `>`] `{` <variants> `}`
@@ -2128,11 +2253,28 @@ impl<'src> Parser<'src> {
                     }
                     self.expect(TokenKind::RParen)?;
                     let end = self.current.span.end;
+                    let call_span = Span::new(start, end);
                     expr = Expr::Call {
                         callee: Box::new(expr),
                         args,
-                        span: Span::new(start, end),
+                        span: call_span,
                     };
+                    // PMT (Wave 1a): intercept `state_new(LayoutName)` and
+                    // emit `Expr::StateInit` directly. The function-call
+                    // syntax was chosen (per task spec) as the simplest
+                    // parse form — no new keyword tokens required.
+                    if let Expr::Call { callee, args, span } = &expr {
+                        if let Expr::Var { name, .. } = callee.as_ref() {
+                            if name == "state_new" && args.len() == 1 {
+                                if let Expr::Var { name: layout_name, .. } = &args[0] {
+                                    expr = Expr::StateInit {
+                                        layout_name: layout_name.clone(),
+                                        span: *span,
+                                    };
+                                }
+                            }
+                        }
+                    }
                 }
                 TokenKind::Dot => {
                     // Field access or .await
@@ -3063,6 +3205,29 @@ impl<'src> Parser<'src> {
         // Named type (BDBase) or Generic type: `Name<T, ...>`
         let name = self.expect_name()?;
 
+        // PMT (Wave 1a): `State<T>` and `Ref<T, field>` are recognised by
+        // name (the lexer leaves `State`/`Ref` as Ident tokens because
+        // there is already a lowercase `ref` keyword). We intercept them
+        // here, *before* the LLM-type suggestion check, so that
+        // `State<u32>` is not mis-reported as an unknown type.
+        if name == "State" && self.at(TokenKind::Lt) {
+            self.advance(); // consume '<'
+            let inner = self.parse_type()?;
+            self.expect_gt_closing_generic()?;
+            return Ok(Type::State(Box::new(inner)));
+        }
+        if name == "Ref" && self.at(TokenKind::Lt) {
+            self.advance(); // consume '<'
+            let state = self.parse_type()?;
+            self.expect(TokenKind::Comma)?;
+            let field = self.expect_name()?;
+            self.expect_gt_closing_generic()?;
+            return Ok(Type::Ref {
+                state: Box::new(state),
+                field,
+            });
+        }
+
         // Check for known LLM type aliases (int, float, String, etc.)
         if suggest_vuma_type(&name).is_some() {
             // Only report if the name is NOT a valid VUMA type already
@@ -3695,6 +3860,10 @@ impl Expr {
             Expr::Block { span, .. } => *span,
             Expr::MatchExpr { span, .. } => *span,
             Expr::Syscall { span, .. } => *span,
+            // PMT (Wave 1a)
+            Expr::StateInit { span, .. } => *span,
+            Expr::StateRead { span, .. } => *span,
+            Expr::StateWrite { span, .. } => *span,
         }
     }
 }
@@ -3726,6 +3895,8 @@ impl Stmt {
             Stmt::Break(s) => s.span,
             Stmt::Continue(s) => s.span,
             Stmt::BdDirective(s) => s.span,
+            // PMT (Wave 1a)
+            Stmt::TransformCall(s) => s.span,
             Stmt::Expr(s) => s.span,
         }
     }

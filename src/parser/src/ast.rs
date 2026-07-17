@@ -123,6 +123,16 @@ pub enum Item {
     ImplBlock(ImplBlock),
     /// Extern block: `extern "C" { fn ...; fn ...; }`
     ExternBlock(ExternBlockDef),
+    /// Layout definition: `layout Name = { field: Type, ... }`
+    ///
+    /// PMT (Programs as Memory Transformations) construct — a typed view of
+    /// a memory buffer region. Wave 1a: parsed only; not yet lowered to SCG.
+    LayoutDef(LayoutDef),
+    /// State transformation: `transform name(s: State<T>) -> State<U> { ... }`
+    ///
+    /// PMT construct — a pure function from one memory-state layout to
+    /// another. Wave 1a: parsed only; not yet lowered to SCG.
+    TransformDef(TransformDef),
     /// Top-level statement (assignment, expression, free, etc.) that
     /// appears outside of any function body.
     Stmt(Stmt),
@@ -394,6 +404,78 @@ pub struct ExternFnDecl {
 }
 
 // ---------------------------------------------------------------------------
+// PMT (Programs as Memory Transformations) — Wave 1a
+// ---------------------------------------------------------------------------
+//
+// These constructs introduce a "state-transformation" model alongside the
+// existing pointer-idiomatic syntax (nothing is removed). The Wave 1a scope
+// is parse-only: the parser produces the new AST nodes, the `to_scg` bridge
+// returns a clear "unimplemented" error if it ever sees them, and Wave 1c
+// wires the actual lowering to the existing SCG + codegen IR.
+//
+// See <worklog §11–13> for the full design rationale.
+
+/// A layout definition: a typed view of a memory buffer region.
+///
+/// Source syntax: `layout Name = { field: Type, field: Type, ... }`
+///
+/// Example:
+/// ```text
+/// layout Point = { x: u32, y: u32 }
+/// ```
+///
+/// Unlike [`StructDef`], a layout does not allocate storage — it is a
+/// *typed view* over an existing memory buffer (a `State<Name>`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutDef {
+    /// Layout name (e.g. `Point`).
+    pub name: String,
+    /// Ordered `(field_name, field_type)` pairs.
+    pub fields: Vec<(String, Type)>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// A state transformation: `transform name(s: State<T>) -> State<U> { ... }`
+///
+/// A transform is a pure function from one memory-state layout to another.
+/// The body is a sequence of statements; the final statement is expected to
+/// produce the return state (Wave 1c will enforce this).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformDef {
+    /// Transform name.
+    pub name: String,
+    /// Parameter name (e.g. `s`).
+    pub param_name: String,
+    /// Parameter layout name (e.g. `Request`).
+    pub param_layout: String,
+    /// Return layout name (e.g. `Response`).
+    pub return_layout: String,
+    /// Transform body — a sequence of statements.
+    pub body: Vec<Stmt>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Transform call statement: `let s2 = transform_name(s1);`
+///
+/// Wave 1a: the parser produces a regular `Stmt::Let` with a function-call
+/// RHS for transform invocations — this `TransformCall` variant exists in
+/// the AST for future use (e.g. when an explicit `transform` keyword
+/// statement is desired), but is not yet emitted by the parser.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformStmt {
+    /// Destination variable name.
+    pub dst: String,
+    /// Transform being invoked.
+    pub transform_name: String,
+    /// Argument expression (typically a `State<…>` value).
+    pub arg: Expr,
+    /// Source span.
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
 // Type parameters & Where clauses
 // ---------------------------------------------------------------------------
 
@@ -483,6 +565,9 @@ pub enum Stmt {
     Continue(ContinueStmt),
     /// BD directive: `bd(name, expr)`, `repd(name, expr)`, `capd(name, expr)`, `reld(name, expr)`
     BdDirective(BdDirectiveStmt),
+    /// PMT transform call: `let s2 = name(s1);` (Wave 1a: not yet emitted
+    /// by the parser; reserved for an explicit `transform` keyword form).
+    TransformCall(TransformStmt),
     /// Expression statement: `expr;`
     Expr(ExprStmt),
 }
@@ -1152,6 +1237,51 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+
+    // ---- PMT (Programs as Memory Transformations) — Wave 1a -------------
+    /// State initialization: `state_new(LayoutName)` — constructs a fresh
+    /// `State<LayoutName>` value backed by a zero-initialized memory buffer.
+    ///
+    /// Parsed as the function-call form `state_new(LayoutName)`; the parser
+    /// intercepts this specific call pattern and emits `StateInit` directly
+    /// (rather than `Expr::Call`) so downstream passes can recognise it
+    /// without name-resolution.
+    StateInit {
+        /// The layout name being initialized (e.g. `Point`).
+        layout_name: String,
+        /// Source span.
+        span: Span,
+    },
+    /// State field read: `state.field`
+    ///
+    /// Wave 1a: the parser produces a regular `Expr::FieldAccess` for state
+    /// field reads — this variant exists in the AST for future type-driven
+    /// lowering (Wave 1c will rewrite `FieldAccess` on state-typed exprs to
+    /// `StateRead`).
+    StateRead {
+        /// The state expression being projected.
+        state: Box<Expr>,
+        /// The field being read.
+        field: String,
+        /// Source span.
+        span: Span,
+    },
+    /// State field write: `state.field = value` (as expression, returns the
+    /// updated state).
+    ///
+    /// Wave 1a: not yet emitted by the parser — assignment-statement
+    /// detection of state-typed targets requires type information that is
+    /// not available until Wave 1c.
+    StateWrite {
+        /// The state expression being updated.
+        state: Box<Expr>,
+        /// The field being written.
+        field: String,
+        /// The value to write.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1455,18 @@ pub enum Type {
         /// BD annotation name.
         name: String,
     },
+    /// PMT state type: `State<T>` — a typed view of the program's memory
+    /// buffer whose layout is described by `T` (typically a layout name
+    /// like `Point`).
+    State(Box<Type>),
+    /// PMT reference type: `Ref<State, Field>` — a typed offset into a
+    /// state, projecting a single field.
+    Ref {
+        /// The state type being projected.
+        state: Box<Type>,
+        /// The field name being referenced.
+        field: String,
+    },
 }
 
 impl std::fmt::Display for Type {
@@ -1351,6 +1493,8 @@ impl std::fmt::Display for Type {
                 Ok(())
             }
             Type::BdAnnot { name } => write!(f, "#bd({})", name),
+            Type::State(inner) => write!(f, "State<{}>", inner),
+            Type::Ref { state, field } => write!(f, "Ref<{}, {}>", state, field),
         }
     }
 }

@@ -885,6 +885,15 @@ impl BinaryWrite for RepD {
                 write_string(w, name)?;
                 write_vec(w, constraints)?;
             }
+            RepD::State { layout } => {
+                write_u8(w, 11)?;
+                write_u32(w, layout.0)?;
+            }
+            RepD::Ref { layout, field } => {
+                write_u8(w, 12)?;
+                write_u32(w, layout.0)?;
+                write_u32(w, field.0)?;
+            }
         }
         Ok(())
     }
@@ -911,6 +920,15 @@ impl BinaryRead for RepD {
                 let name = read_string(r)?;
                 let constraints = read_vec::<BDConstraint, _>(r)?;
                 Ok(RepD::Generic { name, constraints })
+            }
+            11 => {
+                let layout = crate::repd::LayoutId(read_u32(r)?);
+                Ok(RepD::State { layout })
+            }
+            12 => {
+                let layout = crate::repd::LayoutId(read_u32(r)?);
+                let field = crate::repd::FieldId(read_u32(r)?);
+                Ok(RepD::Ref { layout, field })
             }
             other => Err(BinaryError::InvalidData(format!(
                 "invalid RepD discriminant: {other}"

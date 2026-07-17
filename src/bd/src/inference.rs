@@ -401,6 +401,13 @@ impl BDInferenceEngine {
                 // they inherit BD from their arguments (like Effect nodes).
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
+            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // nodes need proper BD inference — for now, treat them like
+            // phantom nodes (inherit BD from inputs) so the build passes.
+            NodeType::StateInit
+            | NodeType::StateRead
+            | NodeType::StateWrite
+            | NodeType::StateTransform => self.compute_phantom_bd(scg, node_id, bd_map),
         }
     }
 
@@ -868,6 +875,13 @@ impl BDInferenceEngine {
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
             NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime | NodeType::Syscall => None,
+            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // nodes need proper usage-context inference — for now, return
+            // None (no self-usage) so the build passes.
+            NodeType::StateInit
+            | NodeType::StateRead
+            | NodeType::StateWrite
+            | NodeType::StateTransform => None,
         }
     }
 
@@ -1135,6 +1149,10 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
         RepD::ManifoldSpatial(m) => RepD::ManifoldSpatial(m.clone()),
         RepD::GestaltSuperposition(g) => RepD::GestaltSuperposition(g.clone()),
         RepD::ConceptRelational(c) => RepD::ConceptRelational(c.clone()),
+        // PMT (Programs as Memory Transformations) — pass through unchanged;
+        // LayoutId/FieldId are opaque handles that don't carry generics.
+        RepD::State { layout } => RepD::State { layout: *layout },
+        RepD::Ref { layout, field } => RepD::Ref { layout: *layout, field: *field },
     }
 }
 
