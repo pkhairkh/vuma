@@ -3923,6 +3923,7 @@ impl Backend for Sparc64Backend {
                 ("listen", 354),
                 ("accept", 99),
                 ("setsockopt", 355),
+                ("getsockopt", 118),
                 ("shutdown", 134),
                 ("dup3", 320),
                 ("recvfrom", 125),

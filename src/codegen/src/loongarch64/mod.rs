@@ -2641,6 +2641,7 @@ impl Backend for LoongArch64Backend {
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
                 ("setsockopt", 208),
+                ("getsockopt", 209),
                 // ── Phase 8: additional POSIX syscalls for full coverage ──
                 ("dup3", 24),
                 ("recvfrom", 207),    // same as recv on generic ABI
@@ -2692,6 +2693,7 @@ impl Backend for LoongArch64Backend {
                 // asm-generic → callers use getpgid(0))
                 ("getppid", 173), ("getsid", 156), ("setsid", 157),
                 ("setpgid", 154), ("getpgid", 155),
+                ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
                 // callers use clone(CLONE_VFORK))
                 ("clone3", 435), ("waitid", 95),

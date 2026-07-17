@@ -1963,6 +1963,7 @@ impl Backend for HppaBackend {
             ("rt_sigaction", 174),
             ("socket", 340), ("connect", 343), ("bind", 341),
             ("listen", 342), ("accept", 344), ("setsockopt", 346),
+                ("getsockopt", 182),
             ("shutdown", 348), ("sendto", 349), ("recvfrom", 350),
             ("clone", 120), ("fork", 2),
             // [wave 9 fix] epoll numbers corrected from kernel parisc syscall.tbl:
@@ -2407,6 +2408,18 @@ impl Backend for HppaBackend {
                 all_code.extend_from_slice(&encode_nop());
             }
             stub_offset = all_code.len();
+        }
+
+        // Add __vuma_print_int / __vuma_print_hex / __vuma_print_newline
+        // canonical aliases pointing at the same offsets as the bare-name helpers.
+        for (short, canonical) in [
+            ("print_int", "__vuma_print_int"),
+            ("print_hex", "__vuma_print_hex"),
+            ("print_newline", "__vuma_print_newline"),
+        ] {
+            if let Some(&off) = func_offsets.get(short) {
+                func_offsets.insert(canonical.to_string(), off);
+            }
         }
 
         // Collect trampolines for backward/non-aligned calls.

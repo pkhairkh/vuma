@@ -3214,6 +3214,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("setsockopt".to_string(), code));
+
+    // getsockopt(sockfd, level, optname, optval, optlen) -> int  [syscall 55]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 55));  // sys_getsockopt
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("getsockopt".to_string(), code));
+    }
     }
 
     // clone(flags, stack, ptid, ctid, tls) -> pid_t  [syscall 56]

@@ -2642,7 +2642,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     for (name, num) in [
         ("brk", 45), ("clock_gettime", 265), ("gettimeofday", 78),
         ("rt_sigprocmask", 175), ("rt_sigreturn", 173),
-        ("setsockopt", 372), ("bind", 361), ("listen", 363),
+        ("setsockopt", 372),
+                ("getsockopt", 365), ("bind", 361), ("listen", 363),
         ("accept", 364), ("lstat", 107),
         ("recvfrom", 368), ("sendto", 367),
     ] {
