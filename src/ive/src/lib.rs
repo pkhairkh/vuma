@@ -76,6 +76,8 @@ pub mod modular;
 pub mod query;
 pub mod result;
 pub mod state_read;
+pub mod state_transform;
+pub mod state_write;
 pub mod verification;
 
 // Re-export the primary public API.
