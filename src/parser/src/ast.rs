@@ -1327,6 +1327,24 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Conditional expression: `if cond { then_expr } else { else_expr }`
+    ///
+    /// Unlike [`Stmt::If`] (which is a statement and produces no value),
+    /// `Expr::If` produces a value — the value of the taken branch's
+    /// trailing expression. Used in `let x = if cond { a } else { b };`.
+    /// The then-block and else-block MUST each have a trailing expression
+    /// (the last statement is treated as the value if it is a bare
+    /// expression statement).
+    IfExpr {
+        /// The condition expression.
+        condition: Box<Expr>,
+        /// Block executed when condition is true (must produce a value).
+        then_block: Block,
+        /// Block executed when condition is false (must produce a value).
+        else_block: Block,
+        /// Source span.
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

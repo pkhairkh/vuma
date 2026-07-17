@@ -3330,6 +3330,15 @@ impl AstToScg {
             Expr::ArenaFree { arena, .. } => {
                 self.collect_uses(arena, uses);
             }
+            Expr::IfExpr { condition, then_block, else_block, .. } => {
+                self.collect_uses(condition, uses);
+                for stmt in &then_block.statements {
+                    self.collect_stmt_uses(stmt, uses);
+                }
+                for stmt in &else_block.statements {
+                    self.collect_stmt_uses(stmt, uses);
+                }
+            }
         }
     }
 
@@ -3512,6 +3521,19 @@ impl AstToScg {
             Expr::ArenaAlloc { layout_name, .. } => format!("State<{}>", layout_name),
             Expr::ArenaGrow { .. } => "State<Arena>".to_string(),
             Expr::ArenaFree { .. } => "void".to_string(),
+            // If-expression: type is the type of the then-branch's value
+            // (best-effort — use the then-block's last statement's type).
+            Expr::IfExpr { then_block, .. } => {
+                if let Some(last) = then_block.statements.last() {
+                    match last {
+                        Stmt::Expr(e) => self.infer_expr_type(&e.expr),
+                        Stmt::Let(l) => self.infer_expr_type(&l.value),
+                        _ => "i64".to_string(),
+                    }
+                } else {
+                    "i64".to_string()
+                }
+            }
         }
     }
 
@@ -3734,6 +3756,9 @@ impl AstToScg {
             }
             Expr::ArenaFree { arena, .. } => {
                 format!("arena_free({})", self.expr_to_string(arena))
+            }
+            Expr::IfExpr { condition, .. } => {
+                format!("if {} {{ ... }} else {{ ... }}", self.expr_to_string(condition))
             }
         }
     }
