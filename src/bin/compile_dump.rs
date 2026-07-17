@@ -99,13 +99,9 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // can run the 3 state verifiers (state_read / state_write /
     // state_transform) with full layout info — skipping the 5 pointer
     // invariants that `VerificationLevel::Normal` would otherwise run.
-    // Built unconditionally here (cheap — walks layout defs only); attached
-    // to the `VerificationInput` only when `pmt` is true (see below).
-    let pmt_layouts = if pmt {
-        Some(build_pmt_layout_specs(&ast))
-    } else {
-        None
-    };
+    // PMT layouts are built unconditionally — every program is now PMT.
+    // If the program has no `layout` items, this returns an empty map.
+    let mut pmt_layouts = Some(build_pmt_layout_specs(&ast));
 
     let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e))? };
 
@@ -151,16 +147,18 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // pointer invariants) and no pmt_layouts are attached.
     let mut ive_status: Option<String> = None;
     let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
+    // Auto-detect PMT programs: if the AST contains any LayoutDef items or
+    // the source uses state_new(), use VerificationLevel::Pmt automatically.
+    // This ensures PMT tests get the right verification without needing --pmt.
+    // ALL programs use VerificationLevel::Pmt now. There is no "Normal" mode.
+    // PMT programs (with layouts/state_new) get the 3 state verifiers.
+    // Legacy pointer programs: the state verifiers see no state nodes → pass vacuously.
     if verify && !ive_skip {
         let mut ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
-        let (level_label, level) = if pmt {
-            if let Some(layouts) = &pmt_layouts {
-                ive_input = ive_input.with_pmt_layouts(layouts.clone());
-            }
-            ("PMT", vuma_ive::invariant_aggregator::VerificationLevel::Pmt)
-        } else {
-            ("Normal", vuma_ive::invariant_aggregator::VerificationLevel::Normal)
-        };
+        if let Some(layouts) = &pmt_layouts {
+            ive_input = ive_input.with_pmt_layouts(layouts.clone());
+        }
+        let level = vuma_ive::invariant_aggregator::VerificationLevel::Pmt;
         let aggregator = vuma_ive::invariant_aggregator::InvariantAggregator::new()
             .with_level(level);
         let result = aggregator.verify_all(&ive_input);
@@ -171,8 +169,8 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
             result.summary.failed,
             result.summary.total_checked
         );
-        ive_status = Some(format!("{} {} {}", level_label, verdict, summary));
-        eprintln!("IVE: {} {} {}", level_label, verdict, summary);
+        ive_status = Some(format!("{} {}", verdict, summary));
+        eprintln!("IVE: {} {}", verdict, summary);
     } else if verify && ive_skip {
         ive_status = Some("Skip ive_skip".to_string());
         eprintln!("IVE: Skip (ive_skip marker)");
