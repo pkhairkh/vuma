@@ -1,0 +1,237 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/aarch64/mm_trampoline.vuma
+// aarch64 MM trampolines — extern declarations for page-table + TLB ops.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the aarch64-specific swap point for the MM externs
+// declared in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
+//     extern "C" {
+//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         fn tlb_flush();
+//         fn invlpg(vaddr: u64);
+//     }
+// In hosted mode (this file compiles on x86_64 — the declarations are
+// pure type + extern, no arch-specific code), those four names resolve
+// to `__ffi_fallback_stub` (xor eax, eax; ret — returns 0, no-op for
+// void functions) at link time. In bare-metal mode (Wave K11), the
+// same four names link against REAL asm stubs registered by the
+// aarch64 backend (src/codegen/src/arm64.rs):
+//     pte_read / pte_write — direct 8-byte load/store at the PTE's
+//         physical address (aarch64 stage-1 page tables live in regular
+//         memory, not behind an MMIO indirection — the table is reached
+//         via the kernel's identity-mapped physmem window OR with
+//         TTBR0_EL1-aware translation; the precise mechanism is K11's
+//         concern).
+//     tlb_flush    — `tlbi vmalle1is` (flush all TLB entries for EL1,
+//                    Inner-Shareable — broadcasts to all PEs in the
+//                    same Inner-Shareable domain). Followed by `dsb
+//                    nsh; isb` to guarantee completion + instruction
+//                    re-fetch.
+//     invlpg(vaddr)— aarch64 has no single-page invlpg instruction;
+//                    K2d's contract specifies that invlpg falls back
+//                    to tlb_flush semantics here (full flush). K11
+//                    will refine this to `tlbi vaae1is, <vaddr>>`
+//                    (VA-asynchronous, ASID-agnostic, single-page
+//                    invalidation, Inner-Shareable) — same ABI, finer
+//                    granularity. Until then, this stub does the safe
+//                    thing: flush everything.
+//
+// This file ADDS four aarch64-specific externs that vmm.vuma does NOT
+// declare:
+//     ttbr0_el1_read() — `mrs x0, ttbr0_el1` (returns the current
+//                        TTBR0_EL1 — the physical address of the
+//                        EL0/EL1 user VA root page table, plus ASID
+//                        and CnP bits). Used by the future scheduler
+//                        (K4+) to save the current address space
+//                        before a context switch.
+//     ttbr0_el1_write(v)— `msr ttbr0_el1, x0; isb` (switches user VA
+//                         spaces — x0 = new TTBR0 under the AAPCS64
+//                         ABI; the isb forces the new translation to
+//                         take effect on the next instruction fetch).
+//     dsb()           — `dsb nsh` (Data Synchronization Barrier,
+//                        Non-shareable — waits for all memory accesses
+//                        issued before the barrier to complete before
+//                        any subsequent instruction executes). Used
+//                        after pte_write + before tlb_flush to
+//                        guarantee the new PTE is visible to all PEs
+//                        before the TLB flush broadcasts.
+//     isb()           — `isb` (Instruction Synchronization Barrier —
+//                        flushes the PE instruction pipeline so that
+//                        any subsequent instruction fetch comes from
+//                        the new translation). Used after tlb_flush /
+//                        ttbr0_el1_write so the very next instruction
+//                        executes in the new address space.
+// These are needed by a future scheduler (K4+) for context switching
+// between address spaces; they live here rather than in vmm.vuma
+// because they're aarch64-specific (x86_64 uses CR3, riscv64 uses
+// satp — see womb/kernel/arch/x86_64/mm_trampoline.vuma's cr3_read /
+// cr3_write pair, and the future womb/kernel/arch/riscv64/mm_trampoline
+// .vuma's satp_read / satp_write pair).
+//
+// ── Why re-declare PageTable here? ──────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so every kernel module re-declares
+// the layouts it uses byte-identically (same pattern as
+// womb/kernel/arch/x86_64/mm_trampoline.vuma re-declaring PageTable and
+// womb/kernel/arch/x86_64/bootinfo.vuma re-declaring __vuma_argc). The
+// PageTable layout here MUST match the one in womb/kernel/mm/vmm.vuma:
+//     layout PageTable = { root_phys: u64, levels: u8 }
+//
+// ── Why #[borrow] on pte_read / pte_write? ──────────────────────────────────
+// `#[borrow]` is load-bearing (K2b note in worklog.md): it tells the
+// marshal module (src/codegen/src/marshal.rs::classify_arg_mode) to pass
+// the State<PageTable> buffer's BASE ADDRESS and NOT invalidate the state
+// after the call. Without #[borrow], the default mode is `Invalidate`,
+// which marks `pt` as consumed after the first pte_read — the very next
+// pte_read in vmm.vuma's walk would then trip the use-after-invalidate
+// verifier. Keeping #[borrow] on the re-declaration here is therefore
+// essential, not stylistic.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// extern block is pure declaration — no storage, no pointer arithmetic.
+// The State<PageTable> parameter is a borrow-by-reference handle (the
+// marshal module lowers it to the buffer's base Address under the hood);
+// we never write `&pt` or `*pt` in VUMA source.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/aarch64/mm_trampoline.vuma \
+//         /tmp/mm_trampoline.bin x86_64 --verify
+//     /tmp/mm_trampoline.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (no top-level code; main() returns 0).
+//
+// In hosted mode the externs are never called from THIS file's main, so
+// __ffi_fallback_stub's "returns 0" behavior is not exercised — the
+// trampoline exists for OTHER modules (vmm.vuma, future kmain.vuma) to
+// link against. K2b's vmm.vuma calls pte_read / pte_write / tlb_flush /
+// invlpg and exercises the stubs at runtime; this file only declares
+// them so the symbol table is complete when both files are linked into
+// the same kernel image.
+//
+// ── K11 parity note ───────────────────────────────────────────────────────
+// The four shared externs need real asm stubs registered in
+// src/codegen/src/arm64.rs's build_runtime_syscall_stubs (or the
+// aarch64 equivalent — the function name may differ from x86_64's).
+// The stub bodies are documented in this file's header (tlb_flush =
+// `tlbi vmalle1is; dsb nsh; isb`; invlpg = same as tlb_flush until K11
+// refines to `tlbi vaae1is, <vaddr>>`; pte_read/pte_write = direct
+// 8-byte load/store at the PTE's physical address; ttbr0_el1_read =
+// `mrs x0, ttbr0_el1`; ttbr0_el1_write = `msr ttbr0_el1, x0; isb`;
+// dsb = `dsb nsh`; isb = `isb`). K11 should also wire up the
+// identity-mapped physmem window that pte_read/pte_write rely on to
+// dereference physical addresses from kernel virtual space (aarch64
+// equivalent of x86_64's CR3-aware identity mapping — typically
+// TTBR1_EL1 pointing at a 1:1 kernel mapping covering all of physical
+// RAM, with the user VA space managed via TTBR0_EL1).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared byte-identically to womb/kernel/mm/vmm.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+
+// A page table. `root_phys` is the physical address of the top-level
+// table (L3 PGD for aarch64 4-level paging). `levels` is the number of
+// paging levels (4 for ARMv8 4-level / 4KB granule; 3 for 64KB granule;
+// 5 for FEAT_LPA — K2d scope is 4-level / 4KB only). The walk uses
+// `levels` to know how deep to descend; see womb/kernel/mm/vmm.vuma::
+// vmm_walk_idx for the bit-extraction formula (9-bit indices, 4 KB
+// pages, 512 entries/table — same geometry as x86_64 4-level, just
+// different root-pointer register and different PTE bit layout).
+layout PageTable = {
+    root_phys: u64,
+    levels: u8,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — page-table access + TLB/TTBR0 ops.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
+// these for per-arch asm stubs registered in src/codegen/src/arm64.rs.
+extern "C" {
+    // Read a page-table entry. On aarch64, stage-1 page tables are in
+    // regular memory, so this is a direct 8-byte load from the table's
+    // physical address (mapped to kernel virtual space via the
+    // identity-mapped physmem window OR with TTBR0_EL1/TTBR1_EL1-aware
+    // translation — K11's job). `#[borrow]` keeps the PageTable state
+    // alive across the call (see header note); without it, vmm.vuma's
+    // walk would trip the use-after-invalidate verifier after the
+    // first pte_read.
+    #[borrow]
+    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    // Write a page-table entry. Same address-resolution story as
+    // pte_read; the write goes to the same 8-byte cell. Callers are
+    // responsible for the appropriate dsb() + tlb_flush() / invlpg()
+    // after a write that changes an entry the hardware walker may
+    // have cached — aarch64's weakly-ordered memory model means the
+    // PTE write may be visible to OTHER PEs before the writer's TLB
+    // flush, so the dsb() before tlb_flush() is mandatory.
+    #[borrow]
+    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    // Full TLB flush — `tlbi vmalle1is; dsb nsh; isb` (flush all TLB
+    // entries for EL1, Inner-Shareable, then barrier completion, then
+    // instruction re-fetch). K11 stub: same sequence. The dsb+isb
+    // tail is what makes the flush "complete" from the CPU's POV —
+    // without it, the next instruction could speculatively execute
+    // against a stale TLB entry.
+    fn tlb_flush();
+    // Per-vaddr TLB invalidation — aarch64 has no single-page
+    // invlpg instruction; this stub currently calls tlb_flush under
+    // the hood (full flush — safe but coarse). K11 will refine this
+    // to `tlbi vaae1is, <vaddr>; dsb nsh; isb` (VA-asynchronous,
+    // ASID-agnostic, single-page invalidation, Inner-Shareable) —
+    // same ABI signature, finer granularity. Until then, the stub
+    // does the safe thing: flush everything. (The vaddr argument is
+    // ignored in the current hosted-mode __ffi_fallback_stub body and
+    // in the K11 fallback body; K11's refined body uses it as the
+    // `tlbi vaae1is` operand.)
+    fn invlpg(vaddr: u64);
+    // TTBR0_EL1 read — returns the current TTBR0_EL1 (physical address
+    // of the EL0/EL1 user VA root page table, plus ASID and CnP bits).
+    // K11 stub: `mrs x0, ttbr0_el1; ret`. Used by the future scheduler
+    // (K4+) to save the current user address space before a context
+    // switch. (TTBR1_EL1 — the kernel VA root — is typically constant
+    // after boot, so we don't expose a ttbr1 pair here; K4+ may add
+    // one if a kernel-VA-space switch ever becomes necessary.)
+    fn ttbr0_el1_read() -> u64;
+    // TTBR0_EL1 write — switches user VA spaces. K11 stub:
+    // `msr ttbr0_el1, x0; isb; ret` (x0 = new TTBR0 under AAPCS64).
+    // Side-effect: the isb forces the next instruction fetch to use
+    // the new translation. Callers do NOT need to call tlb_flush
+    // separately if they're switching to a previously-unused ASID
+    // (ARMv8 hardware automatically tags TLB entries by ASID); for
+    // an ASID-reuse switch, callers should follow ttbr0_el1_write
+    // with a tlb_flush to clear stale entries from the old ASID.
+    fn ttbr0_el1_write(val: u64);
+    // Data Synchronization Barrier (Non-shareable) — `dsb nsh`. Waits
+    // for all memory accesses issued before the barrier to complete
+    // (within the current PE's local domain) before any subsequent
+    // instruction executes. Used after pte_write + before tlb_flush
+    // to guarantee the new PTE is visible before the TLB flush
+    // broadcasts. (Note: for multiprocessor TLB coherency, the
+    // `tlbi vmalle1IS` form already broadcasts to all PEs in the
+    // Inner-Shareable domain; the dsb here is for the WRITER's local
+    // store-to-broadcast ordering, not for cross-PE visibility.)
+    fn dsb();
+    // Instruction Synchronization Barrier — `isb`. Flushes the PE
+    // instruction pipeline so that any subsequent instruction fetch
+    // comes from the new translation. Used after tlb_flush /
+    // ttbr0_el1_write / any system-register write that affects
+    // translation (TCR_EL1, SCTLR_EL1, MAIR_EL1, etc.) so the very
+    // next instruction executes in the new context.
+    fn isb();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// main entry stub.
+// ────────────────────────────────────────────────────────────────────────────
+// This file is a pure declaration module (extern block + layout only, no
+// top-level execution). The compiler requires a `fn main()` entry to
+// compile as a standalone program; the real kmain (K1d) lives in
+// womb/kernel/kernel.vuma and will call the externs declared here via
+// womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
+// and directly (ttbr0_el1_read / ttbr0_el1_write / dsb / isb) during
+// context switches.
+
+fn main() -> i32 {
+    return 0;
+}
