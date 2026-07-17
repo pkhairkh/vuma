@@ -2765,7 +2765,8 @@ mod tests {
         assert_ne!(eg.find(write), eg.find(read));
         assert_ne!(eg.find(read), eg.find(transform));
         // Adding the same ENode twice returns the same e-class (hashcons).
-        assert_eq!(eg.find(init), eg.find(eg.add(ENode::StateInit { layout_id: 42 })));
+        let added = eg.add(ENode::StateInit { layout_id: 42 });
+        assert_eq!(eg.find(init), eg.find(added));
     }
 
     /// Wave 5 [dead-state elimination]: `StateInit(L)` whose e-class is
