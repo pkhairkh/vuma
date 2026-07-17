@@ -28,8 +28,8 @@ fn main() -> i32 {
     equal: u32 = 1;
     i: u32 = 0;
     while i < 8 {
-        va: u32 = *(a + i);
-        vb: u32 = *(b + i);
+        va: u32 = a.data[i];
+        vb: u32 = b.data[i];
         if va != vb { equal = 0; }
         i = i + 1;
     }

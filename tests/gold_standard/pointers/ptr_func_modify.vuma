@@ -9,7 +9,7 @@
 
 layout _L1 = { data: [u8; 64] }
 fn write_99(buf: Address) -> i32 {
-    *buf = 99;
+    buf.v = 99;
     return 0;
 }
 

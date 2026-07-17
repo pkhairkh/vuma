@@ -19,7 +19,7 @@ fn main() -> i32 {
     let buf1 = state_new(_L1);
     let buf2 = state_new(_L2);
     buf1.v = buf2;
-    *buf1.v = 42;
-    val: i32 = *buf1.v;
+    buf1.v.v = 42;
+    val: i32 = buf1.v.v;
     return val;
 }

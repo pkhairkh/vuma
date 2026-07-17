@@ -13,10 +13,10 @@ fn main() -> i32 {
     let buf = state_new(_L1);
     p0 = buf;
     p8 = buf + 8;
-    *p0 = 80;
-    *p8 = 15;
-    a: u64 = *p0;
-    b: u64 = *p8;
+    p0.v = 80;
+    p8.v = 15;
+    a: u64 = p0.v;
+    b: u64 = p8.v;
     d: u64 = a - b;    // 65
     return d;
 }

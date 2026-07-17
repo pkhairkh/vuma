@@ -4,30 +4,30 @@
 // Fills src with a known pattern, copies to dst, then verifies dst matches.
 // Returns 0 on success, 1 on mismatch.
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
+layout Buffer16 = { data: [u8; 16] }
+
 fn main() -> i32 {
-    let src = state_new(_L1);
-    let dst = state_new(_L2);
+    let src = state_new(Buffer16);
+    let dst = state_new(Buffer16);
     // Fill src with pattern
     i: u32 = 0;
     while i < 16 {
-        *(src + i) = (i + 1) & 255;
+        src.data[i] = (i + 1) & 255;
         i = i + 1;
     }
     // Copy src to dst
     j: u32 = 0;
     while j < 16 {
-        v: u32 = *(src + j);
-        *(dst + j) = v;
+        v: u32 = src.data[j];
+        dst.data[j] = v;
         j = j + 1;
     }
     // Verify
     ok: u32 = 1;
     k: u32 = 0;
     while k < 16 {
-        sv: u32 = *(src + k);
-        dv: u32 = *(dst + k);
+        sv: u32 = src.data[k];
+        dv: u32 = dst.data[k];
         if sv != dv { ok = 0; }
         k = k + 1;
     }

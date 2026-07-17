@@ -15,9 +15,9 @@ fn main() -> i32 {
     let b3 = state_new(Buf_b3);
     b1.data[0] = 55;
     t1: u32 = b1.data[0];
-    b2.data[0] = t1 | 0;       // copy b1 -> b2 (workaround for *ptr = variable)
+    b2.data[0] = t1 | 0;       // copy b1 -> b2 (workaround for pt.vr = variable)
     t2: u32 = b2.data[0];
-    b3.data[0] = t2 | 0;       // copy b2 -> b3 (workaround for *ptr = variable)
+    b3.data[0] = t2 | 0;       // copy b2 -> b3 (workaround for pt.vr = variable)
     out: u32 = b3.data[0];
     return out;
 }

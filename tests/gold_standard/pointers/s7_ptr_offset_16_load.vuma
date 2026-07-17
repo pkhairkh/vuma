@@ -11,7 +11,7 @@ layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
     let p = state_new(_L1);
     q = p + 16;
-    *q = 77;
-    v: i32 = *q;
+    q.v = 77;
+    v: i32 = q.v;
     return v;
 }

@@ -12,6 +12,8 @@
 // crash today; the test will turn green once the codegen for
 // AddressOf / wider stores / multi-level deref is implemented.
 
+
+
 layout _L1 = { v: u32 }
 layout _L2 = { v: u32 }
 layout _L3 = { v: u32 }
@@ -22,6 +24,6 @@ fn main() -> i32 {
     buf1.v = buf2;
     buf2.v = buf3;
     buf3.v = 3;
-    val: i32 = **buf1.v;
+    val: i32 = *buf1.v.v;
     return val;
 }

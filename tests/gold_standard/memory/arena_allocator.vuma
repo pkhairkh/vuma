@@ -11,6 +11,9 @@
 //   - Manual alignment computation
 //   - Bulk invalidation: free(base) invalidates all derived pointers
 
+layout _L1 = { data: [u8; 4096] }
+
+
 fn main() -> i32 {
     // Allocate one contiguous block for the entire arena
     base: Address = allocate(4096);
@@ -38,12 +41,12 @@ fn main() -> i32 {
     }
 
     // Write values
-    *a = 1;
-    *b = 2;
+    a.v = 1;
+    b.v = 2;
 
     // Read back and verify
-    val_a: u64 = *a;
-    val_b: u64 = *b;
+    val_a: u64 = a.v;
+    val_b: u64 = b.v;
 
     // Free entire arena in one call
 

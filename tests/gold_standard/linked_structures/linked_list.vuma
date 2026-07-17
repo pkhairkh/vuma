@@ -50,7 +50,7 @@ fn list_length(head: Address) -> u64 {
     current = head;
     while current != 0 {
         count = count + 1;
-        current = (*current).next;
+        current = (curren.vt).next;
     }
     return count;
 }
@@ -64,8 +64,8 @@ fn list_sum(head: Address) -> u64 {
     sum: u64 = 0;
     current = head;
     while current != 0 {
-        sum = sum + (*current).data;
-        current = (*current).next;
+        sum = sum + (curren.vt).data;
+        current = (curren.vt).next;
     }
     return sum;
 }
@@ -79,7 +79,7 @@ fn list_sum(head: Address) -> u64 {
 fn list_free(head: Address) {
     current = head;
     while current != 0 {
-        next = (*current).next;
+        next = (curren.vt).next;
         current = next;
     }
 }

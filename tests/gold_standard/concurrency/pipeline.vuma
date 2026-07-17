@@ -17,7 +17,7 @@ fn stage1_generate(buf: Address, len: u64) {
     // Fill buffer with known values: 1, 2, 3, ... len
     i: u64 = 0;
     while i < len {
-        *(buf + i) = (i + 1) & 255;
+    buf.data[i] = (i + 1) & 255;
         i = i + 1;
     }
 }
@@ -26,8 +26,8 @@ fn stage2_xor_transform(buf: Address, len: u64, key: u32) {
     // XOR each byte with the key
     i: u64 = 0;
     while i < len {
-        val: u32 = *(buf + i);
-        *(buf + i) = (val ^ key) & 255;
+        val: u32 = buf.data[i];
+    buf.data[i] = (val ^ key) & 255;
         i = i + 1;
     }
 }
@@ -36,7 +36,7 @@ fn stage3_sum(buf: Address, len: u64) -> u64 {
     sum: u64 = 0;
     i: u64 = 0;
     while i < len {
-        val: u64 = *(buf + i);
+        val: u64 = buf.data[i];
         sum = sum + val;
         i = i + 1;
     }

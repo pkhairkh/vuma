@@ -6,29 +6,33 @@
 // bitmap-like free list. Allocates 2 slots, writes to them, frees them,
 // re-allocates one, verifies.
 
+layout _L1 = { a: u64, b: u64 }
+layout _L2 = { v: u64 }
+
+
 fn main() -> i32 {
     pool = allocate(16);   // 4 slots × 4 bytes
     free_list = allocate(4);  // 4 bytes, 1 per slot (1 = free, 0 = used)
     // Initialize all slots as free
-    *(free_list + 0) = 1;
-    *(free_list + 1) = 1;
-    *(free_list + 2) = 1;
-    *(free_list + 3) = 1;
+    free_list.data[0] = 1;
+    free_list.data[1] = 1;
+    free_list.data[2] = 1;
+    free_list.data[3] = 1;
     // Allocate slot 0 (mark as used)
-    *(free_list + 0) = 0;
-    *(pool + 0) = 100;
+    free_list.data[0] = 0;
+    pool.data[0] = 100;
     // Allocate slot 1
-    *(free_list + 1) = 0;
-    *(pool + 4) = 200;
+    free_list.data[1] = 0;
+    pool.data[4] = 200;
     // Verify values
-    v0: u32 = *(pool + 0);
-    v1: u32 = *(pool + 4);
+    v0: u32 = pool.data[0];
+    v1: u32 = pool.data[4];
     // Free slot 0
-    *(free_list + 0) = 1;
+    free_list.data[0] = 1;
     // Re-allocate slot 0
-    *(free_list + 0) = 0;
-    *(pool + 0) = 150;
-    v0_new: u32 = *(pool + 0);
+    free_list.data[0] = 0;
+    pool.data[0] = 150;
+    v0_new: u32 = pool.data[0];
     if v0 == 100 {
         if v1 == 200 {
             if v0_new == 150 { return 0; }

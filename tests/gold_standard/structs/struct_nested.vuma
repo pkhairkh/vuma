@@ -40,7 +40,7 @@ fn main() -> i32 {
     // Step 1: read Outer's inner_offset marker
     off: u64 = block.data[8];
     // Step 2: dereference Inner's val at (block + off)
-    val: u64 = *(block + off);
+    val: u64 = block.data[off];
 
     return val;
 }

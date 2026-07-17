@@ -65,7 +65,7 @@ fn small_sigma1(x: u32) -> u32 {
 // ===========================================================================
 
 fn read_u32_be(buf: Address, offset: u64) -> u32 {
-    b0: u32 = *(buf + offset);
+    b0: u32 = buf.data[offset];
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
     b3: u32 = *(buf + offset + 3);
@@ -73,7 +73,7 @@ fn read_u32_be(buf: Address, offset: u64) -> u32 {
 }
 
 fn write_u32_be(buf: Address, offset: u64, val: u32) {
-    *(buf + offset) = (val >> 24) & 255;
+    buf.data[offset] = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
     *(buf + offset + 3) = val & 255;
@@ -229,27 +229,27 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     i: u64 = 0;
     for i in 0..msg_len {
-        *(block + i) = *(msg + i);
+    block.data[i] = *(msg + i);
     }
-    *(block + msg_len) = 128;
+    block.data[msg_len] = 128;
     for i in msg_len + 1..56 {
-        *(block + i) = 0;
+    block.data[i] = 0;
     }
     bit_len: u64 = msg_len * 8;
-    *(block + 56) = (bit_len >> 56) & 255;
-    *(block + 57) = (bit_len >> 48) & 255;
-    *(block + 58) = (bit_len >> 40) & 255;
-    *(block + 59) = (bit_len >> 32) & 255;
-    *(block + 60) = (bit_len >> 24) & 255;
-    *(block + 61) = (bit_len >> 16) & 255;
-    *(block + 62) = (bit_len >> 8) & 255;
-    *(block + 63) = bit_len & 255;
+    block.data[56] = (bit_len >> 56) & 255;
+    block.data[57] = (bit_len >> 48) & 255;
+    block.data[58] = (bit_len >> 40) & 255;
+    block.data[59] = (bit_len >> 32) & 255;
+    block.data[60] = (bit_len >> 24) & 255;
+    block.data[61] = (bit_len >> 16) & 255;
+    block.data[62] = (bit_len >> 8) & 255;
+    block.data[63] = bit_len & 255;
 }
 
 fn copy32(dst: Address, src: Address) {
     i: u64 = 0;
     for i in 0..32 {
-        *(dst + i) = *(src + i);
+    dst.data[i] = *(src + i);
     }
 }
 
@@ -293,7 +293,7 @@ fn hash_handler(msg: Address, msg_len: u64, result_addr: Address, flag_addr: Add
     // Copy the 32-byte hash into the shared result buffer
     i: u64 = 0;
     for i in 0..32 {
-        *(result_addr + i) = *(scratch + i);
+    result_addr.data[i] = *(scratch + i);
     }
 
 
@@ -344,8 +344,8 @@ fn main() -> i32 {
     hashes_match: i32 = 1;
     i: u64 = 0;
     for i in 0..32 {
-        h_byte: u32 = *(handler_result + i);
-        r_byte: u32 = *(ref_hash + i);
+        h_byte: u32 = handler_result.data[i];
+        r_byte: u32 = ref_hash.data[i];
         if h_byte != r_byte {
             hashes_match = 0;
         }

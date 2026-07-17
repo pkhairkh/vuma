@@ -7,6 +7,8 @@
 // inside the function because VUMA drops stores through offset
 // addressing inside functions.
 
+
+
 struct Point {
     x: u64,
     y: u64,

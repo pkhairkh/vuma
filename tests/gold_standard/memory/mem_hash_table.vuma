@@ -30,7 +30,7 @@ fn main() -> i32 {
     i: u32 = 0;
     while i < 4 {
         s: u32 = (slot + i) & 3;
-        v: u32 = *(table + s);
+        v: u32 = table.data[s];
         if v == key {
             found = 1;
         }

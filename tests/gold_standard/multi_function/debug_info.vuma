@@ -29,13 +29,9 @@
 // are still proved at compile time. Debug info is purely informational
 // and does not affect the generated code's behavior.
 
-// ===========================================================================
-// A helper function — the DWARF info will contain an FDE for this
-// ===========================================================================
-// With --debug, the compiler emits:
-//   - A DW_TAG_SUBPROGRAM DIE for 'double_value'
-//   - An FDE covering this function's address range
-//   - Line-number entries mapping instructions to source lines below
+layout _L1 = { v: u64 }
+
+
 
 fn double_value(x: i32) -> i32 {
     // IVE verifies: x is a valid function parameter (Liveness)
@@ -77,8 +73,8 @@ struct Pair {
 
 fn pair_sum(p: Address) -> i32 {
     // IVE verifies: p is live and correctly typed as Pair
-    va: i32 = *(p + 0);
-    vb: i32 = *(p + 4);
+    va: i32 = p.data[0];
+    vb: i32 = p.data[4];
     // With --debug, 'va' and 'vb' appear as DW_TAG_VARIABLE DIEs
     return va + vb;
 }
@@ -100,8 +96,8 @@ fn main() -> i32 {
 
     // Test struct and pair_sum
     p = allocate(8);              // Pair: 2 × i32 = 8 bytes
-    *(p + 0) = y;                 // p.a = 42
-    *(p + 4) = z;                 // p.b = 7
+    p.data[0] = y;                 // p.a = 42;
+    p.data[4] = z;                 // p.b = 7;
     s: i32 = pair_sum(p);         // s = 49
 
     // IVE verifies: all allocations freed (Cleanup)

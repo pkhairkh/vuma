@@ -5,9 +5,11 @@
 // its Address parameter. main stores 42 at *buf; the function reads *p
 // into a local variable and returns it.
 
+
+
 layout _L1 = { v: u32 }
 fn load_val(p: Address) -> u32 {
-    v: u32 = *p;
+    v: u32 = p.v;
     return v;
 }
 

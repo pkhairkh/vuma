@@ -6,10 +6,12 @@
 // a local variable, and returns that value. Uses `*p` (not `*(p + 0)`)
 // because VUMA drops stores through offset addressing inside functions.
 
+
+
 layout _L1 = { v: u32 }
 fn store_and_load(p: Address) -> u32 {
-    *p = 42;
-    v: u32 = *p;
+    p.v = 42;
+    v: u32 = p.v;
     return v;
 }
 

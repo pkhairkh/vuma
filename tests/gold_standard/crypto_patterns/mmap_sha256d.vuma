@@ -59,7 +59,7 @@ fn small_sigma1(x: u32) -> u32 {
 // ===========================================================================
 
 fn read_u32_be(buf: Address, offset: u32) -> u32 {
-    b0: u32 = *(buf + offset);
+    b0: u32 = buf.data[offset];
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
     b3: u32 = *(buf + offset + 3);
@@ -67,7 +67,7 @@ fn read_u32_be(buf: Address, offset: u32) -> u32 {
 }
 
 fn write_u32_be(buf: Address, offset: u32, val: u32) {
-    *(buf + offset) = (val >> 24) & 255;
+    buf.data[offset] = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
     *(buf + offset + 3) = val & 255;
@@ -223,30 +223,30 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 fn sha256_pad_block(block: Address, msg: Address, msg_len: u32) {
     i: u32 = 0;
     for i in 0..msg_len {
-        *(block + i) = *(msg + i);
+    block.data[i] = *(msg + i);
     }
-    *(block + msg_len) = 128;
+    block.data[msg_len] = 128;
     for i in msg_len + 1..56 {
-        *(block + i) = 0;
+    block.data[i] = 0;
     }
     // 64-bit big-endian message length in bits.
     // msg_len is at most 55, so bit_len = msg_len * 8 fits in 32 bits.
     // The high 32 bits are always 0.
     bit_len: u32 = msg_len * 8;
-    *(block + 56) = 0;
-    *(block + 57) = 0;
-    *(block + 58) = 0;
-    *(block + 59) = 0;
-    *(block + 60) = (bit_len >> 24) & 255;
-    *(block + 61) = (bit_len >> 16) & 255;
-    *(block + 62) = (bit_len >> 8) & 255;
-    *(block + 63) = bit_len & 255;
+    block.data[56] = 0;
+    block.data[57] = 0;
+    block.data[58] = 0;
+    block.data[59] = 0;
+    block.data[60] = (bit_len >> 24) & 255;
+    block.data[61] = (bit_len >> 16) & 255;
+    block.data[62] = (bit_len >> 8) & 255;
+    block.data[63] = bit_len & 255;
 }
 
 fn copy32(dst: Address, src: Address) {
     i: u32 = 0;
     for i in 0..32 {
-        *(dst + i) = *(src + i);
+    dst.data[i] = *(src + i);
     }
 }
 
