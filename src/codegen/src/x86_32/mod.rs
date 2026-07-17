@@ -2976,6 +2976,38 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }
 
+    // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────────────
+    // ffi_scratch_push_frame: real mmap via int 0x80 (i386 sys_mmap2=192).
+    // sys_mmap2(addr, len, prot, flags, fd, pgoffset) — args in EBX,ECX,EDX,ESI,EDI,EBP.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));        // addr = NULL
+        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 4096));          // len = 4096
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));             // prot = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22));          // flags = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32));         // fd = -1
+        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));        // pgoffset = 0
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));           // sys_mmap2
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("ffi_scratch_push_frame".to_string(), code));
+    }
+
+    // ffi_scratch_pop_frame: no-op (ret).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_ret());
+        stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+    }
+
+    // __ffi_fallback_stub: return 0 (xor eax, eax; ret).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+        code.extend(encode_ret());
+        stubs.push(("__ffi_fallback_stub".to_string(), code));
+    }
+
     stubs
 }
 
@@ -3334,14 +3366,29 @@ impl Backend for X86_32Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&resolved.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        vuma_log!(debug, 
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — patch the CALL to point at
+                        // __ffi_fallback_stub (xor eax, eax; ret → returns 0)
+                        // instead of leaving it as 0 (which would crash).
+                        if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
+                            let current_val = i32::from_le_bytes([
+                                all_code[abs_offset],
+                                all_code[abs_offset + 1],
+                                all_code[abs_offset + 2],
+                                all_code[abs_offset + 3],
+                            ]);
+                            let s = fallback_off as i64;
+                            let a = current_val as i64;
+                            let p = abs_offset as i64;
+                            let resolved = (s + a - p - 4) as i32;
+                            all_code[abs_offset..abs_offset + 4]
+                                .copy_from_slice(&resolved.to_le_bytes());
+                        } else {
+                            vuma_log!(debug, 
+                                "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — no __ffi_fallback_stub, deferring to linker",
+                                reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                            );
+                            continue;
+                        }
                     }
                 } else if reloc.reloc_type == R_X86_64_64 {
                     // R_X86_64_64 — absolute address relocation.

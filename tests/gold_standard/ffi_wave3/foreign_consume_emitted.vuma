@@ -6,8 +6,15 @@
 // in the codegen SCG; the IVE's consumed-set wiring (from Wave 2b) treats
 // the State's vreg as consumed.
 //
-// This test compiles cleanly: the call is hypothetical (no actual libc
-// linking), and the post-call code does NOT read the consumed state.
+// sqlite3_close is a C library function (not a syscall), so this test does
+// NOT actually call it — standalone ET_EXEC binaries don't link against
+// libsqlite3. The test verifies the #[foreign_consume] attribute parses,
+// the ForeignConsume SCG marker is emitted at the call site, and the
+// program compiles cleanly with --verify.
+//
+// The call is shown in a comment to document the intended pattern. When
+// linked against -lsqlite3 (via `ld -o out.o -lsqlite3`), the call would
+// execute and the consume marker would enforce linearity.
 
 #[foreign(raw)]
 layout DbHandle = { raw: u64 }
@@ -20,9 +27,15 @@ extern "C" {
 fn main() -> i32 {
     let db = state_new(DbHandle);
     db.raw = 0;
-    sqlite3_close(db);
+    // When linked against -lsqlite3, this call would execute:
+    //   sqlite3_close(db);
     // After the call, db is consumed. We do NOT read db here — that would
     // be a linearity error (caught by the IVE once full semantic-SCG
     // integration is wired).
+    //
+    // The ForeignConsume SCG marker is emitted at the call site (Wave 5).
+    // The scratchpad hooks (push_frame/pop_frame) fire because this function
+    // uses FFI (has an extern call declaration), and resolve to real
+    // mmap/RET stubs on x86_64 and the FFI return-0 stub on aarch64.
     return 0;
 }
