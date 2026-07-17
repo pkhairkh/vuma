@@ -1157,6 +1157,24 @@ impl IRBuilder {
         let mut add_defs: HashMap<String, (ScgExpr, ScgExpr)> = HashMap::new();
         let mut state_vars: HashSet<String> = HashSet::new();
 
+        // Arena State Model (Wave 3a): collect all variables that are
+        // arena-allocated (from arena_alloc). These are NOT PMT state vars
+        // — they're pointers into mmap'd arena memory. They must NOT be
+        // routed to ___pmt_buffer.
+        //
+        // Detection: arena_alloc returns a temp via Add(base, offset).
+        // The PStmt::Let general case creates Add(temp, 0) → user_var.
+        // We can't easily distinguish this from state_new's Add pattern,
+        // so instead we track which vars have AllocationNode::Stack entries
+        // (state_new produces these; arena_alloc does NOT). Only vars with
+        // an AllocationNode::Stack are eligible for PMT buffer routing.
+        let mut allocated_vars: HashSet<String> = HashSet::new();
+        Self::walk_body(body, |stmt| {
+            if let ScgStatement::Allocation(AllocationNode::Stack { name, .. }) = stmt {
+                allocated_vars.insert(name.clone());
+            }
+        });
+
         // First pass: collect all Add computation defs so we can look them
         // up by destination temp name. We do this in a separate pass
         // because the Add may appear after a (rare) forward reference in
@@ -1184,13 +1202,22 @@ impl IRBuilder {
                     }
                     // Case 1: ptr is the state var directly (field at offset 0).
                     if let ScgExpr::Var(name) = ptr {
-                        state_vars.insert(name.clone());
+                        // Arena State Model (Wave 3a): only add to state_vars
+                        // if the var has an AllocationNode::Stack (i.e. it's
+                        // from state_new, not arena_alloc).
+                        if allocated_vars.contains(name) {
+                            state_vars.insert(name.clone());
+                        }
                     }
                     // Case 2: ptr is an addr_tmp produced by Add(state_var, Int(_)).
                     if let ScgExpr::Var(tmp) = ptr {
                         if let Some((lhs, rhs)) = add_defs.get(tmp) {
                             if let (ScgExpr::Var(name), ScgExpr::Int(_)) = (lhs, rhs) {
-                                state_vars.insert(name.clone());
+                                // Arena State Model: only add if the base var
+                                // has an AllocationNode::Stack.
+                                if allocated_vars.contains(name) {
+                                    state_vars.insert(name.clone());
+                                }
                             }
                         }
                     }
@@ -1201,7 +1228,10 @@ impl IRBuilder {
                         StructAccessNode::Store { ptr, .. } => ptr,
                     };
                     if let ScgExpr::Var(name) = ptr {
-                        state_vars.insert(name.clone());
+                        // Arena State Model: only add if allocated.
+                        if allocated_vars.contains(name) {
+                            state_vars.insert(name.clone());
+                        }
                     }
                 }
                 _ => {}
@@ -1222,6 +1252,12 @@ impl IRBuilder {
         let mut total: u32 = 0;
         Self::walk_body(body, |stmt| {
             if let ScgStatement::Allocation(AllocationNode::Stack { name, size, .. }) = stmt {
+                // Arena State Model (Wave 3a): skip arena struct allocations
+                // (24 bytes) — they're NOT PMT state vars, they're stack
+                // buffers holding the Arena metadata (base, offset, capacity).
+                if *size == 24 {
+                    return;
+                }
                 if state_vars.contains(name) {
                     let aligned = (*size + 15) & !15u32;
                     total = total.saturating_add(aligned);
@@ -3006,6 +3042,18 @@ impl IRBuilder {
                 // `lower_function`); for non-`main` functions,
                 // `pmt_buffer_vreg` is `None` and state-typed allocations
                 // fall back to per-state `Alloc`.
+                // Arena State Model (Wave 3a): Arena struct allocations
+                // (24 bytes, from arena_new) are NOT PMT state vars —
+                // they're heap-allocated buffers. Since they're NOT in
+                // state_vars, they fall through to the regular Alloc path
+                // below, which emits IRInstr::Alloc (mmap). This is correct:
+                // the arena struct needs real memory to hold (base, offset,
+                // capacity). The Stores from arena_new fill it.
+                //
+                // No special handling needed here — the regular Alloc path
+                // handles it correctly.
+
+                // PMT state vars: route to ___pmt_buffer.
                 if self.state_vars.contains(name)
                     && self.pmt_buffer_vreg.is_some()
                 {
@@ -3043,6 +3091,18 @@ impl IRBuilder {
                 names.insert(name.clone(), vreg);
                 // Mark this vreg as a pointer for Store/Load width
                 self.pointer_vregs.insert(vreg);
+                // Arena State Model (Wave 3a): Arena struct allocations
+                // (24 bytes) from arena_new are NOT state vars in the PMT
+                // sense — they're just stack buffers holding (base, offset,
+                // capacity). Don't emit Alloc; just leave the stack slot
+                // (the AllocationNode::Stack already reserved it). The
+                // arena_new flatten_expr code fills it via Store instructions.
+                if *size == 24 && name.starts_with("__t") {
+                    // Arena struct — the Stores from arena_new fill it.
+                    // No Alloc needed; the Stack allocation reserves the space.
+                    let _ = ty;
+                    return Ok(());
+                }
                 // Wave 4a: `*size` is the RepD-canonical state_size() value
                 // for state-typed allocations (see the doc comment on
                 // `lower_allocation`). It is forwarded verbatim to the IR
@@ -3800,11 +3860,23 @@ impl IRBuilder {
         };
 
         ir_func.current_block().push(IRInstruction::Call {
-            dst,
+            dst: dst.clone(),
             func: call.func.clone(),
             args,
             is_extern: call.is_extern,
         });
+
+        // Arena State Model (Wave 3a): mark mmap/mremap return vregs as
+        // pointers so Load/Store uses the correct width (64-bit). Without
+        // this, the codegen may truncate the mmap'd address to 32 bits,
+        // causing SIGSEGV when writing to the arena memory.
+        if let Some(IRValue::Register(vreg)) = dst {
+            if call.func == "mmap" || call.func == "mremap" {
+                self.pointer_vregs.insert(vreg);
+                self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
+            }
+        }
+
         Ok(())
     }
 

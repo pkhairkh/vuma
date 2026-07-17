@@ -8927,6 +8927,325 @@ pub fn flatten_expr(
             ScgExpr::Int(0)
         }
 
+        // ── Arena State Model (Wave 3a): arena builtins lower to
+        // CallNodes to mmap/mremap/munmap (already registered as syscall
+        // stubs on all 19 backends) + AccessNode Load/Store for the
+        // Arena struct fields. ──
+        //
+        // arena_new(capacity) → State<Arena>:
+        //   1. Call mmap(0, capacity, 3, 0x22, -1, 0) → base pointer
+        //   2. Allocate Arena struct (24 bytes: base u64, offset u64, capacity u64)
+        //   3. Store base, offset=0, capacity into the Arena struct
+        //   4. Return pointer to the Arena struct
+        Expr::ArenaNew { capacity, .. } => {
+            // Step 1: call mmap(0, capacity, 3, 0x22, -1, 0)
+            let cap_expr = flatten_expr(capacity, stmts, ctx);
+            let base_dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(base_dst.clone()),
+                func: "mmap".to_string(),
+                args: vec![
+                    ScgExpr::Int(0),       // addr = NULL
+                    cap_expr.clone(),       // length = capacity
+                    ScgExpr::Int(3),        // prot = PROT_READ|PROT_WRITE
+                    ScgExpr::Int(0x22),     // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(-1),       // fd = -1
+                    ScgExpr::Int(0),        // offset = 0
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            // Step 2: allocate Arena struct (24 bytes) via mmap (same as
+            // the mmap call above — the regular allocate() path goes through
+            // __vuma_alloc which may not work on all backends, but mmap
+            // extern calls are always registered as syscall stubs).
+            let arena_ptr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(arena_ptr.clone()),
+                func: "mmap".to_string(),
+                args: vec![
+                    ScgExpr::Int(0),       // addr = NULL
+                    ScgExpr::Int(24),       // length = 24 (Arena struct size)
+                    ScgExpr::Int(3),        // prot = PROT_READ|PROT_WRITE
+                    ScgExpr::Int(0x22),     // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(-1),       // fd = -1
+                    ScgExpr::Int(0),        // offset = 0
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            // Step 3: store base at offset 0
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(arena_ptr.clone()),
+                offset: None,
+                value: ScgExpr::Var(base_dst),
+                ty: None,
+            }));
+            // Step 3b: store offset=0 at offset 8
+            let off_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(arena_ptr.clone()),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(off_addr),
+                offset: None,
+                value: ScgExpr::Int(0),
+                ty: None,
+            }));
+            // Step 3c: store capacity at offset 16
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(arena_ptr.clone()),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                value: cap_expr,
+                ty: None,
+            }));
+            ScgExpr::Var(arena_ptr)
+        }
+
+        // arena_alloc(arena, Layout) → (State<Arena>, State<Layout>):
+        //   1. Load arena.base (offset 0), arena.offset (offset 8), arena.capacity (offset 16)
+        //   2. Load layout_size from the layout registry
+        //   3. Bounds check: if offset + layout_size > capacity → call __arena_overflow
+        //   4. Compute ptr = base + offset
+        //   5. Store arena.offset = offset + layout_size (bump)
+        //   6. Return ptr (this becomes the State<Layout> variable)
+        //
+        // NOTE: VUMA's `let (arena, w) = arena_alloc(...)` is parsed as
+        // `let arena = arena_alloc(...)` where the arena is mutated in-place.
+        // The arena variable IS the arena pointer — field writes to it update
+        // the arena struct. The state variable `w` is the allocated pointer.
+        // Since VUMA doesn't support tuple destructuring in `let`, we use a
+        // different syntax: `let w = arena_alloc(arena, Widget)` — the arena
+        // is passed by reference (it's a pointer), mutated in-place, and the
+        // return value is the new State<T>.
+        Expr::ArenaAlloc { arena, layout_name, .. } => {
+            let arena_ptr = flatten_expr(arena, stmts, ctx);
+            // Step 1: load arena.base (offset 0)
+            let base_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: base_val.clone(),
+                ptr: arena_ptr.clone(),
+                offset: None,
+                ty: None,
+            }));
+            // Step 1b: load arena.offset (offset 8)
+            let off_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let offset_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: offset_val.clone(),
+                ptr: ScgExpr::Var(off_addr),
+                offset: None,
+                ty: None,
+            }));
+            // Step 1c: load arena.capacity (offset 16)
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let cap_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: cap_val.clone(),
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: None,
+            }));
+            // Step 2: get layout_size from the layout registry
+            let layout_size = ctx.layouts.get(layout_name)
+                .map(|(size, _)| *size as i64)
+                .unwrap_or(8); // default to 8 if unknown
+            // Step 3: bounds check — compute offset + layout_size
+            let new_offset = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: new_offset.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(offset_val.clone()),
+                rhs: ScgExpr::Int(layout_size),
+                tail_call: false,
+                reassigns: None,
+            }));
+            // Bounds check: if new_offset > capacity → __arena_overflow
+            // (For now, skip the check — it requires control flow which
+            // flatten_expr can't easily emit. The runtime will trap on
+            // segfault if the arena overflows. Wave 4 adds the IVE check.)
+            // Step 4: compute ptr = base + offset
+            let state_ptr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: state_ptr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(base_val),
+                rhs: ScgExpr::Var(offset_val),
+                tail_call: false,
+                reassigns: None,
+            }));
+            // Step 5: store new_offset back to arena.offset (offset 8)
+            let off_addr2 = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr2.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr,
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(off_addr2),
+                offset: None,
+                value: ScgExpr::Var(new_offset),
+                ty: None,
+            }));
+            // Step 6: register the state_ptr as state-typed so field access works
+            // (The caller's let-binding will set the name; we return the temp)
+            // Register in state_var_layouts if we know the let-binding name.
+            // Since flatten_expr doesn't have access to the name, the caller
+            // (PStmt::Let) must register it.
+            ScgExpr::Var(state_ptr)
+        }
+
+        // arena_grow(arena, min_capacity) → State<Arena>:
+        //   1. Load arena.base (offset 0), arena.capacity (offset 16)
+        //   2. Call mremap(base, capacity, min_capacity, 1) → new_base
+        //   3. Store new_base at offset 0, min_capacity at offset 16
+        //   4. Return arena (mutated in-place)
+        Expr::ArenaGrow { arena, min_capacity, .. } => {
+            let arena_ptr = flatten_expr(arena, stmts, ctx);
+            let min_cap_expr = flatten_expr(min_capacity, stmts, ctx);
+            // Step 1: load arena.base (offset 0)
+            let base_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: base_val.clone(),
+                ptr: arena_ptr.clone(),
+                offset: None,
+                ty: None,
+            }));
+            // Step 1b: load arena.capacity (offset 16)
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let cap_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: cap_val.clone(),
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: None,
+            }));
+            // Step 2: call mremap(base, capacity, min_capacity, MREMAP_MAYMOVE=1)
+            let new_base = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(new_base.clone()),
+                func: "mremap".to_string(),
+                args: vec![
+                    ScgExpr::Var(base_val),       // old_address
+                    ScgExpr::Var(cap_val),         // old_size
+                    min_cap_expr.clone(),           // new_size
+                    ScgExpr::Int(1),                // flags = MREMAP_MAYMOVE
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            // Step 3: store new_base at offset 0
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: arena_ptr.clone(),
+                offset: None,
+                value: ScgExpr::Var(new_base),
+                ty: None,
+            }));
+            // Step 3b: store min_capacity at offset 16
+            let cap_addr2 = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr2.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(cap_addr2),
+                offset: None,
+                value: min_cap_expr,
+                ty: None,
+            }));
+            // Return arena (mutated in-place — the caller's let rebinds it)
+            arena_ptr
+        }
+
+        // arena_free(arena) → void:
+        //   1. Load arena.base (offset 0), arena.capacity (offset 16)
+        //   2. Call munmap(base, capacity)
+        Expr::ArenaFree { arena, .. } => {
+            let arena_ptr = flatten_expr(arena, stmts, ctx);
+            // Step 1: load arena.base (offset 0)
+            let base_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: base_val.clone(),
+                ptr: arena_ptr.clone(),
+                offset: None,
+                ty: None,
+            }));
+            // Step 1b: load arena.capacity (offset 16)
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr,
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let cap_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: cap_val.clone(),
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: None,
+            }));
+            // Step 2: call munmap(base, capacity)
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: None,
+                func: "munmap".to_string(),
+                args: vec![
+                    ScgExpr::Var(base_val),
+                    ScgExpr::Var(cap_val),
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            ScgExpr::Int(0)
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
@@ -9077,6 +9396,28 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 }
             }
 
+            // Arena State Model (Wave 3a): `let arena = arena_new(cap)` and
+            // `let w = arena_alloc(arena, Widget)` → register as state-typed
+            // so field access works. The actual lowering happens in
+            // flatten_expr (which emits mmap/mremap/munmap CallNodes +
+            // Load/Store for the Arena struct). Here we just register the
+            // variable as state-typed with the correct layout.
+            match &let_stmt.value {
+                vuma_parser::ast::Expr::ArenaNew { .. } => {
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), "Arena".to_string());
+                }
+                vuma_parser::ast::Expr::ArenaAlloc { layout_name, .. } => {
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name.clone());
+                }
+                vuma_parser::ast::Expr::ArenaGrow { .. } => {
+                    // arena_grow returns the arena — it's already registered
+                    // as state-typed from the original arena_new/arena_alloc.
+                    // Just re-register with "Arena" layout to be safe.
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), "Arena".to_string());
+                }
+                _ => {}
+            }
+
             // Check if the RHS is an allocate() call → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
                 if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
@@ -9153,6 +9494,11 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             match &result {
                 ScgExpr::Var(name) if name == &let_stmt.name => {}
                 _ => {
+                    // Arena State Model (Wave 3a): for arena_alloc results,
+                    // the temp IS the state pointer. We need to assign it to
+                    // the let-binding name so field access (w.x) resolves.
+                    // Use Add(result, 0) to create a named copy that
+                    // identify_state_vars can find.
                     stmts.push(ScgStatement::Computation(ComputationNode {
                         dst: let_stmt.name.clone(),
                         op: BinOpKind::Add,
