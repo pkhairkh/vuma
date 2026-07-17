@@ -1073,7 +1073,12 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
         | PStmt::Sync(_)
         | PStmt::UnsafeBlock { .. }
         | PStmt::Match(_)
-        | PStmt::Access(_) => vec![],
+        | PStmt::Access(_)
+        // PMT (Wave 1a): TransformCall is parsed-but-not-emitted by the
+        // parser in Wave 1a (the parser produces Stmt::Let with a
+        // function-call RHS for transform invocations). Stub: emit no
+        // statements so this match stays exhaustive.
+        | PStmt::TransformCall(_) => vec![],
     }
 }
 

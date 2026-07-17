@@ -1,0 +1,18 @@
+// layout_basic — PMT Wave 1a: simplest layout declaration
+// Expected exit code: 0
+//
+// Wave 1a parse-only smoke test: declares a `layout Point = { x: u32, y: u32 }`
+// and a `fn main` that returns 0. The layout is parsed into `Item::LayoutDef`
+// but not yet lowered to SCG (Wave 1c does that). The key assertion is that
+// the parser accepts the new `layout` keyword form without error.
+//
+// VUMA Key Concepts:
+//   - PMT (Programs as Memory Transformations) — typed memory-state views
+//   - `layout Name = { field: Type, ... }` syntax
+//   - Coexistence with the existing pointer-idiomatic syntax (no removal)
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    return 0;
+}

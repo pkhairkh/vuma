@@ -1,0 +1,25 @@
+// transform_decl — PMT Wave 1a: transform declaration
+// Expected exit code: 0
+//
+// Wave 1a parse-only smoke test: declares a `transform` that takes a
+// `State<Request>` and returns a `State<Response>`. The body is a single
+// `return;` — Wave 1c will require the body to produce a return state. The
+// key assertion is that the parser accepts the new `transform` keyword form
+// with a `State<T>` parameter and return type without error.
+//
+// VUMA Key Concepts:
+//   - PMT transform: a pure function from one state layout to another
+//   - `transform name(param: State<L>) -> State<L> { body }` syntax
+//   - `State<T>` type parsing (capital-s State, NOT the lowercase `state`)
+
+layout Request = { opcode: u32, arg: u32 }
+
+layout Response = { status: u32, result: u32 }
+
+transform handle(req: State<Request>) -> State<Response> {
+    return;
+}
+
+fn main() -> i32 {
+    return 0;
+}

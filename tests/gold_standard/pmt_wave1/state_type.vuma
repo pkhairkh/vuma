@@ -1,0 +1,22 @@
+// state_type — PMT Wave 1a: State<T> as a function parameter type
+// Expected exit code: 0
+//
+// Wave 1a parse-only smoke test: a regular `fn` (not a `transform`) that
+// accepts a `State<Point>` parameter. Verifies the parser handles the
+// `State<T>` type annotation in any position where a `Type` is expected,
+// not only inside `transform` signatures.
+//
+// VUMA Key Concepts:
+//   - `State<T>` as a first-class type (usable in any fn signature)
+//   - Coexistence with the existing `*T` pointer syntax
+//   - Wave 1c will type-check that `s` is a state-typed value
+
+layout Point = { x: u32, y: u32 }
+
+fn read_x(s: State<Point>) -> u32 {
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

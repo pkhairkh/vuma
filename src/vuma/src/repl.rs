@@ -166,6 +166,13 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
+        // PMT (Wave 1b): minimal stubs so this match stays exhaustive.
+        NodePayload::StateInit(s) => format!("state_init({})", s.layout_name),
+        NodePayload::StateRead(s) => format!("state_read({}.{})", s.layout_name, s.field_name),
+        NodePayload::StateWrite(s) => format!("state_write({}.{})", s.layout_name, s.field_name),
+        NodePayload::StateTransform(s) => {
+            format!("state_transform({} -> {})", s.input_layout, s.output_layout)
+        }
     }
 }
 

@@ -1,0 +1,17 @@
+// layout_array — PMT Wave 1a: layout with a fixed-size array field
+// Expected exit code: 0
+//
+// Wave 1a parse-only smoke test: a layout whose field is a fixed-size array
+// (`[u8; 16]`). Verifies the parser handles array-typed layout fields,
+// exercising the existing `[T; N]` type parser inside the new `layout` form.
+//
+// VUMA Key Concepts:
+//   - PMT layout with array-typed field
+//   - `[T; N]` type syntax (existing) inside the new `layout` form
+//   - Wave 1c will compute the array's byte offset within the layout
+
+layout Buf = { len: u32, data: [u8; 16] }
+
+fn main() -> i32 {
+    return 0;
+}

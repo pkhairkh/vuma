@@ -68,6 +68,18 @@ pub enum NodeType {
     ConstantTime,
     /// A direct syscall node (first-class syscall invocation).
     Syscall,
+    /// A state initialization node (PMT — allocates/zero-inits a typed buffer
+    /// view conforming to a named layout).
+    StateInit,
+    /// A state field read node (PMT — loads a field from a typed state at a
+    /// compile-time-verified offset).
+    StateRead,
+    /// A state field write node (PMT — stores a value to a field of a typed
+    /// state at a compile-time-verified offset).
+    StateWrite,
+    /// A state transformation node (PMT — reinterprets a buffer from one
+    /// layout to another, e.g. parsing raw bytes into a struct).
+    StateTransform,
 }
 
 impl std::fmt::Display for NodeType {
@@ -88,6 +100,10 @@ impl std::fmt::Display for NodeType {
             NodeType::Match => write!(f, "Match"),
             NodeType::ConstantTime => write!(f, "ConstantTime"),
             NodeType::Syscall => write!(f, "Syscall"),
+            NodeType::StateInit => write!(f, "StateInit"),
+            NodeType::StateRead => write!(f, "StateRead"),
+            NodeType::StateWrite => write!(f, "StateWrite"),
+            NodeType::StateTransform => write!(f, "StateTransform"),
         }
     }
 }
@@ -174,6 +190,14 @@ pub enum NodePayload {
     ConstantTime(ConstantTimeNode),
     /// Payload for `NodeType::Syscall`.
     Syscall(SyscallNode),
+    /// Payload for `NodeType::StateInit`.
+    StateInit(StateInitNode),
+    /// Payload for `NodeType::StateRead`.
+    StateRead(StateReadNode),
+    /// Payload for `NodeType::StateWrite`.
+    StateWrite(StateWriteNode),
+    /// Payload for `NodeType::StateTransform`.
+    StateTransform(StateTransformNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -656,6 +680,78 @@ pub struct SyscallNode {
     pub dst: Option<String>,
     /// Argument variable names.
     pub args: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// PMT (Programs as Memory Transformations) state nodes
+// ---------------------------------------------------------------------------
+
+/// Data specific to a state initialization node (`NodeType::StateInit`).
+///
+/// Allocates (or zero-initializes) a typed buffer view conforming to the
+/// named layout. The result is a virtual register holding a pointer to the
+/// buffer. The actual byte offset/size of each field is resolved later by
+/// the codegen against the BD `LayoutRegistry`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateInitNode {
+    /// Name of the layout this state conforms to (resolved against the
+    /// BD `LayoutRegistry` at codegen time).
+    pub layout_name: String,
+    /// Virtual register receiving the resulting state pointer.
+    pub result_vreg: u32,
+}
+
+/// Data specific to a state field read node (`NodeType::StateRead`).
+///
+/// Loads the value of a field from a typed state at the field's
+/// compile-time-verified offset. The field's offset and size are resolved
+/// against the BD `LayoutRegistry` at codegen time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateReadNode {
+    /// Virtual register holding the state being read.
+    pub state_vreg: u32,
+    /// Name of the state's layout (must match the state's actual layout).
+    pub layout_name: String,
+    /// Name of the field being read.
+    pub field_name: String,
+    /// Virtual register receiving the loaded value.
+    pub result_vreg: u32,
+}
+
+/// Data specific to a state field write node (`NodeType::StateWrite`).
+///
+/// Stores a value to a field of a typed state at the field's
+/// compile-time-verified offset. The field's offset and size are resolved
+/// against the BD `LayoutRegistry` at codegen time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateWriteNode {
+    /// Virtual register holding the state being written.
+    pub state_vreg: u32,
+    /// Name of the state's layout (must match the state's actual layout).
+    pub layout_name: String,
+    /// Name of the field being written.
+    pub field_name: String,
+    /// Virtual register holding the value to store.
+    pub value_vreg: u32,
+}
+
+/// Data specific to a state transformation node (`NodeType::StateTransform`).
+///
+/// Reinterprets a buffer from one layout to another. This is the PMT
+/// primitive for parsing (raw bytes → struct) and serialization (struct →
+/// raw bytes). Both layouts must agree on total size; the codegen emits a
+/// no-op reinterpretation (or a checked copy if aliasing is a concern).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateTransformNode {
+    /// Virtual register holding the input state.
+    pub input_vreg: u32,
+    /// Name of the input state's layout.
+    pub input_layout: String,
+    /// Name of the output state's layout (must have the same total size as
+    /// `input_layout`).
+    pub output_layout: String,
+    /// Virtual register receiving the transformed state.
+    pub result_vreg: u32,
 }
 
 #[cfg(test)]

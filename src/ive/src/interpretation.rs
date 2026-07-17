@@ -1268,6 +1268,8 @@ fn repd_kind_name(repd: &RepD) -> String {
         RepD::ManifoldSpatial(_) => "ManifoldSpatial".to_string(),
         RepD::GestaltSuperposition(_) => "GestaltSuperposition".to_string(),
         RepD::ConceptRelational(_) => "ConceptRelational".to_string(),
+        RepD::State { .. } => "State".to_string(),
+        RepD::Ref { .. } => "Ref".to_string(),
     }
 }
 
