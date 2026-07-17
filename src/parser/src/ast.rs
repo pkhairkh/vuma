@@ -170,6 +170,8 @@ pub struct Param {
     pub name: String,
     /// Optional type annotation.
     pub ty: Option<Type>,
+    /// Outer attributes on this parameter (e.g. `#[borrow]` on an extern fn param).
+    pub attrs: Vec<Attribute>,
     /// Source span.
     pub span: Span,
 }
@@ -399,6 +401,8 @@ pub struct ExternFnDecl {
     pub params: Vec<Param>,
     /// Optional return type.
     pub return_type: Option<Type>,
+    /// Outer attributes on this extern fn (e.g. `#[callback]`, `#[foreign_consume(raw)]`).
+    pub attrs: Vec<Attribute>,
     /// Source span.
     pub span: Span,
 }
@@ -432,6 +436,8 @@ pub struct LayoutDef {
     pub name: String,
     /// Ordered `(field_name, field_type)` pairs.
     pub fields: Vec<(String, Type)>,
+    /// Outer attributes on this layout (e.g. `#[foreign(raw)]`).
+    pub attrs: Vec<Attribute>,
     /// Source span.
     pub span: Span,
 }

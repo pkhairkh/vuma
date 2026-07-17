@@ -1,0 +1,15 @@
+// ffi_wave0/misplaced_attr — #[foreign(raw)] on an extern fn is a parse error
+// Expected: PARSE ERROR (not exit code 0)
+//
+// Wave 1 negative test: #[foreign(raw)] is layout-only. Placing it on an
+// extern fn must produce a parse error with a diagnostic mentioning that
+// it belongs on a layout declaration.
+
+extern "C" {
+    #[foreign(raw)]
+    fn bad_fn(x: i64) -> i64;
+}
+
+fn main() -> i32 {
+    return 0;
+}

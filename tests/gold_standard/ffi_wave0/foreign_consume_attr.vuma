@@ -1,0 +1,17 @@
+// ffi_wave0/foreign_consume_attr — #[foreign_consume(raw)] on an extern fn (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[foreign_consume(raw)] marks an extern fn (e.g. a close
+// function) as consuming its State<ForeignLayout> argument linearly. After
+// the call, the state is consumed — post-close use is a linearity error.
+
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_consume(raw)]
+    fn sqlite3_close(db: State<DbHandle>);
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,14 @@
+// ffi_wave0/callback_attr — #[callback] on an extern fn (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[callback] marks an extern fn as one that may invoke VUMA
+// functions via a vuma_context_t during the call.
+
+extern "C" {
+    #[callback]
+    fn sqlite3_exec(db: Address, sql: Address, cb: Address, arg: Address, err: Address) -> i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

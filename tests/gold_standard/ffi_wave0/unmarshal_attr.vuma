@@ -1,0 +1,16 @@
+// ffi_wave0/unmarshal_attr — #[unmarshal(Layout)] on an extern fn (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[unmarshal(Layout)] on an extern fn declares the return
+// mode: the C return value is copied into ___pmt_buffer as a State<Layout>.
+
+layout Response = { status: u32, data: u64 }
+
+extern "C" {
+    #[unmarshal(Response)]
+    fn do_request(url: Address) -> i64;
+}
+
+fn main() -> i32 {
+    return 0;
+}
