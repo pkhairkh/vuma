@@ -1,3 +1,7 @@
+   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
+   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
+   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
 warning: unused import: `Condition`
     --> src/codegen/src/backend.rs:2553:60
      |
@@ -6,5 +10,10 @@ warning: unused import: `Condition`
      |
      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
+   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
+   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
+   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: `vuma-codegen` (lib) generated 1 warning (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 0.01s
+    Finished `release-fast` profile [optimized] target(s) in 1m 25s
