@@ -1,0 +1,15 @@
+// Migrated from concurrency/s32_conc_overwrite_last.vuma
+// Expected exit code: 250
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 120;
+    __s.v = 250;
+    let v = __s.v;
+    return v;
+}

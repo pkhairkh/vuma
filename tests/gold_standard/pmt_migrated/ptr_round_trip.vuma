@@ -1,0 +1,16 @@
+// Migrated from pointers/ptr_round_trip.vuma
+// Expected exit code: 123
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 123;
+    let v1 = __s.a;
+    __s.b = v1;
+    let v2 = __s.b;
+    return v2;
+}

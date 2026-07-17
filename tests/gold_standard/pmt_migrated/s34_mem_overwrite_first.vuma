@@ -1,0 +1,15 @@
+// Migrated from memory/s34_mem_overwrite_first.vuma
+// Expected exit code: 210
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 30;
+    __s.v = 210;
+    let v = __s.v;
+    return v;
+}

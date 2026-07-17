@@ -1,0 +1,17 @@
+// Migrated from memory/s89_mem_two_cell_sum.vuma
+// Expected exit code: 19
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 10;
+    __s.b = 9;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
+    return s;
+}
