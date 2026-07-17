@@ -1,0 +1,22 @@
+// ffi_wave3/foreign_return_wrap — #[foreign_return(raw)] wraps C pointer into State
+// Expected exit code: 0
+//
+// Wave 5 test: an extern fn with #[foreign_return(raw)] wraps its C return
+// value (a raw pointer) into a State<ForeignLayout> whose `raw` field holds
+// the pointer. The pointer lives in ___pmt_buffer (as a u64 payload) —
+// single-buffer invariant preserved.
+
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_return(raw)]
+    fn open_db(path: Address) -> State<DbHandle>;
+}
+
+fn main() -> i32 {
+    // Hypothetically: let db = open_db(path) — the C return (a sqlite3*) is
+    // wrapped into a State<DbHandle> at a fresh offset in ___pmt_buffer.
+    // db.raw holds the C pointer.
+    return 0;
+}
