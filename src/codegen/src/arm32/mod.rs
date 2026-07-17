@@ -7532,6 +7532,14 @@ impl Backend for Arm32Backend {
                 let mut code = Vec::new();
                 code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+                stubs.push(("__arena_overflow".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend(load_immediate_arm32(Gpr::R0, 1));
+                    code.extend(load_immediate_arm32(Gpr::R7, 1));
+                    code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                    code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+                    code
+                }));
             }
 
             stubs

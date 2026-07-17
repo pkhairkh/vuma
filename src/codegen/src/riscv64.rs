@@ -6446,6 +6446,16 @@ impl Backend for RiscV64Backend {
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
+            // __arena_overflow: real exit(1) syscall
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 93 }.encode());
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("__arena_overflow".to_string(), code));
+            }
+
             stubs
         };
 

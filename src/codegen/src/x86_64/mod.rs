@@ -3578,6 +3578,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__ffi_fallback_stub".to_string(), code));
     }
 
+    // __arena_overflow() → void  [syscall 60 = sys_exit, code=1]
+    // Real exit(1) — arena bounds check overflow trap.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1));   // exit code = 1
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60));   // sys_exit
+        code.extend(encode_syscall());
+        code.extend(encode_int3());                          // safety guard
+        stubs.push(("__arena_overflow".to_string(), code));
+    }
+
     stubs
 }
 

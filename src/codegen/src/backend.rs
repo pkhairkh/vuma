@@ -3217,6 +3217,16 @@ impl Backend for AArch64Backend {
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
+            // __arena_overflow: real exit(1) syscall (aarch64 sys_exit=93)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(0, 1));       // X0 = 1 (exit code)
+                code.extend_from_slice(&movz_x8(93));           // sys_exit
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);                   // safety (shouldn't reach)
+                stubs.push(("__arena_overflow".to_string(), code));
+            }
+
             stubs
         };
 

@@ -1796,6 +1796,16 @@ impl Backend for AlphaBackend {
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
+            // __arena_overflow: real exit(1) syscall
+            {
+                let mut code = Vec::new();
+                code.extend(ss_load_imm(Gpr::R16, 1));      // exit code = 1
+                code.extend(ss_load_imm(Gpr::R0, 1));       // sys_exit
+                code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+                code.extend(Instruction::Ret.encode());
+                stubs.push(("__arena_overflow".to_string(), code));
+            }
+
             stubs
         };
 

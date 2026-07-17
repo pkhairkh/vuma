@@ -4442,6 +4442,14 @@ impl Backend for PPC64Backend {
                 let mut code = Vec::new();
                 code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+                stubs.push(("__arena_overflow".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
+                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 1 }.encode());
+                    code.extend_from_slice(&Instruction::Sc.encode());
+                    code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                    code
+                }));
             }
 
             // __ffi_fallback_stub: return 0 (LI R3, 0; BLR). Fallback for

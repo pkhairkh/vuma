@@ -2316,6 +2316,18 @@ impl Backend for HppaBackend {
             code
         }));
 
+        // __arena_overflow: real exit(1) syscall
+        syscall_stubs.push(("__arena_overflow".to_string(), {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(R26, 1));       // exit code = 1
+            code.extend(ss_load_imm(R20, 1));       // sys_exit
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
         // ── Build __vuma_alloc stub ──
         // __vuma_alloc(size in R26) → R28 = allocated pointer.
         // Uses brk() syscall to extend the heap:
