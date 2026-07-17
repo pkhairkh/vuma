@@ -2481,7 +2481,11 @@ fn convert_node_to_statement_with_externs(
         | NodePayload::StateRead(_)
         | NodePayload::StateWrite(_)
         | NodePayload::StateTransform(_)
-        | NodePayload::ForeignConsume(_) => Vec::new(),
+        | NodePayload::ForeignConsume(_)
+        | NodePayload::ArenaNew(_)
+        | NodePayload::ArenaAlloc(_)
+        | NodePayload::ArenaGrow(_)
+        | NodePayload::ArenaFree(_) => Vec::new(),
     }
 }
 

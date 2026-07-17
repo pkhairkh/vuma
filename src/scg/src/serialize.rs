@@ -33,6 +33,7 @@ use crate::node::{
     MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
     ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
     ForeignConsumeNode,
+    ArenaNewNode, ArenaAllocNode, ArenaGrowNode, ArenaFreeNode,
     StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
@@ -70,6 +71,10 @@ const NODE_TYPE_STATE_READ: u32 = 16;
 const NODE_TYPE_STATE_WRITE: u32 = 17;
 const NODE_TYPE_STATE_TRANSFORM: u32 = 18;
 const NODE_TYPE_FOREIGN_CONSUME: u32 = 19;
+const NODE_TYPE_ARENA_NEW: u32 = 20;
+const NODE_TYPE_ARENA_ALLOC: u32 = 21;
+const NODE_TYPE_ARENA_GROW: u32 = 22;
+const NODE_TYPE_ARENA_FREE: u32 = 23;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -374,6 +379,10 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::StateWrite => NODE_TYPE_STATE_WRITE,
         NodeType::StateTransform => NODE_TYPE_STATE_TRANSFORM,
         NodeType::ForeignConsume => NODE_TYPE_FOREIGN_CONSUME,
+        NodeType::ArenaNew => NODE_TYPE_ARENA_NEW,
+        NodeType::ArenaAlloc => NODE_TYPE_ARENA_ALLOC,
+        NodeType::ArenaGrow => NODE_TYPE_ARENA_GROW,
+        NodeType::ArenaFree => NODE_TYPE_ARENA_FREE,
     }
 }
 
@@ -399,6 +408,10 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_STATE_WRITE => Ok(NodeType::StateWrite),
         NODE_TYPE_STATE_TRANSFORM => Ok(NodeType::StateTransform),
         NODE_TYPE_FOREIGN_CONSUME => Ok(NodeType::ForeignConsume),
+        NODE_TYPE_ARENA_NEW => Ok(NodeType::ArenaNew),
+        NODE_TYPE_ARENA_ALLOC => Ok(NodeType::ArenaAlloc),
+        NODE_TYPE_ARENA_GROW => Ok(NodeType::ArenaGrow),
+        NODE_TYPE_ARENA_FREE => Ok(NodeType::ArenaFree),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -1010,6 +1023,28 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
             w.write_u32_le(s.input_vreg);
             w.write_string(&s.layout_name);
         }
+        NodePayload::ArenaNew(s) => {
+            w.write_u32_le(NODE_TYPE_ARENA_NEW);
+            w.write_u32_le(s.capacity_vreg);
+            w.write_u32_le(s.result_vreg);
+        }
+        NodePayload::ArenaAlloc(s) => {
+            w.write_u32_le(NODE_TYPE_ARENA_ALLOC);
+            w.write_u32_le(s.arena_vreg);
+            w.write_string(&s.layout_name);
+            w.write_u32_le(s.result_arena_vreg);
+            w.write_u32_le(s.result_state_vreg);
+        }
+        NodePayload::ArenaGrow(s) => {
+            w.write_u32_le(NODE_TYPE_ARENA_GROW);
+            w.write_u32_le(s.arena_vreg);
+            w.write_u32_le(s.min_capacity_vreg);
+            w.write_u32_le(s.result_vreg);
+        }
+        NodePayload::ArenaFree(s) => {
+            w.write_u32_le(NODE_TYPE_ARENA_FREE);
+            w.write_u32_le(s.arena_vreg);
+        }
     }
 }
 
@@ -1344,6 +1379,42 @@ fn read_payload(
                 layout_name,
             }))
         }
+        NodeType::ArenaNew => {
+            let capacity_vreg = reader.read_u32_le(&format!("{}.capacity_vreg", context))?;
+            let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
+            Ok(NodePayload::ArenaNew(ArenaNewNode {
+                capacity_vreg,
+                result_vreg,
+            }))
+        }
+        NodeType::ArenaAlloc => {
+            let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
+            let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
+            let result_arena_vreg = reader.read_u32_le(&format!("{}.result_arena_vreg", context))?;
+            let result_state_vreg = reader.read_u32_le(&format!("{}.result_state_vreg", context))?;
+            Ok(NodePayload::ArenaAlloc(ArenaAllocNode {
+                arena_vreg,
+                layout_name,
+                result_arena_vreg,
+                result_state_vreg,
+            }))
+        }
+        NodeType::ArenaGrow => {
+            let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
+            let min_capacity_vreg = reader.read_u32_le(&format!("{}.min_capacity_vreg", context))?;
+            let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
+            Ok(NodePayload::ArenaGrow(ArenaGrowNode {
+                arena_vreg,
+                min_capacity_vreg,
+                result_vreg,
+            }))
+        }
+        NodeType::ArenaFree => {
+            let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
+            Ok(NodePayload::ArenaFree(ArenaFreeNode {
+                arena_vreg,
+            }))
+        }
         // Womb data model variants were removed; tags 14..=25 now fall
         // through to the `tag_to_node_type` error path above before
         // reaching this match.
@@ -1676,6 +1747,18 @@ fn format_node_label(node: &NodeData) -> String {
         }
         NodePayload::ForeignConsume(s) => {
             format!("foreign_consume({})", s.layout_name)
+        }
+        NodePayload::ArenaNew(_) => {
+            "arena_new".to_string()
+        }
+        NodePayload::ArenaAlloc(s) => {
+            format!("arena_alloc({})", s.layout_name)
+        }
+        NodePayload::ArenaGrow(_) => {
+            "arena_grow".to_string()
+        }
+        NodePayload::ArenaFree(_) => {
+            "arena_free".to_string()
         }
     };
 
