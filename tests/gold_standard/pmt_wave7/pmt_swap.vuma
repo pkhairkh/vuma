@@ -1,0 +1,33 @@
+// pmt_swap.vuma — PMT Wave 7: swap two fields in a state
+// Expected exit code: 1
+//
+// PMT migration of concurrency/conc_swap.vuma: instead of two
+// `allocate(8)` cells + `*cell = expr` stores + `free`, we declare a
+// `Swap = { a: u32, b: u32 }` layout and swap the two fields via a temp
+// variable. Same logical operation (tmp = a; a = b; b = tmp), but the
+// buffer is a typed `State<Swap>` rather than two raw byte buffers.
+//
+// Memory safety is now a type-checking property: there are no
+// `allocate`/`free`/`*ptr` sites, so `--pmt --verify` runs ONLY the 3
+// state verifiers (state_read / state_write / state_transform) via
+// VerificationLevel::Pmt — skipping the 5 pointer invariants that
+// `Normal` would otherwise run.
+//
+// Initial values: a=2, b=1. After swap: a=1, b=2. Returns the new a (1).
+//
+// Passes when compiled normally (the lowering is identical — the `--pmt`
+// flag only affects which IVE invariants run, not the codegen) AND when
+// compiled with `--pmt --verify` (the IVE shows "PMT" verification
+// instead of "Normal").
+
+layout Swap = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let s = state_new(Swap);
+    s.a = 2;
+    s.b = 1;
+    let tmp = s.a;
+    s.a = s.b;
+    s.b = tmp;
+    return s.a;
+}

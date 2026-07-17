@@ -1,0 +1,44 @@
+// pmt_copy.vuma — PMT Wave 7: copy state fields
+// Expected exit code: 0
+//
+// PMT migration of memory/mem_copy_buffer.vuma: instead of two
+// `allocate(16)` byte buffers + `*(src+i)` indexing + `free`, we declare
+// a `Buf = { a: u32, b: u32, c: u32, d: u32 }` layout and copy each
+// field from `src` to `dst` by name. Same logical operation (fill src
+// with a known pattern, copy to dst, verify they match), but the
+// buffers are typed `State<Buf>` — memory safety is a type-checking
+// property (no allocate/free/*ptr sites).
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via
+// VerificationLevel::Pmt — skipping the 5 pointer invariants that
+// `Normal` would otherwise run. Multiple state.field reads (from src)
+// and writes (to dst) across two distinct states of the same layout
+// exercise the state_read and state_write verifiers.
+//
+// Returns 0 on success (all 4 fields match between src and dst), 1 on
+// any mismatch. The copy preserves all 4 field values.
+//
+// Passes when compiled normally AND when compiled with `--pmt --verify`.
+
+layout Buf = { a: u32, b: u32, c: u32, d: u32 }
+
+fn main() -> i32 {
+    let src = state_new(Buf);
+    let dst = state_new(Buf);
+    // Fill src with a known pattern
+    src.a = 10;
+    src.b = 20;
+    src.c = 30;
+    src.d = 40;
+    // Copy src to dst, field by field
+    dst.a = src.a;
+    dst.b = src.b;
+    dst.c = src.c;
+    dst.d = src.d;
+    // Verify all fields match
+    if dst.a != src.a { return 1; }
+    if dst.b != src.b { return 1; }
+    if dst.c != src.c { return 1; }
+    if dst.d != src.d { return 1; }
+    return 0;
+}
