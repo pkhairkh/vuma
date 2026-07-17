@@ -1153,6 +1153,13 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
         // LayoutId/FieldId are opaque handles that don't carry generics.
         RepD::State { layout } => RepD::State { layout: *layout },
         RepD::Ref { layout, field } => RepD::Ref { layout: *layout, field: *field },
+        // Wave 9 — Dependent state types: pass through unchanged. The
+        // element may contain generics, so recurse; the count_var is a
+        // runtime-variable name (not a type), kept as-is.
+        RepD::DependentArray { elem, count_var } => RepD::DependentArray {
+            elem: Box::new(instantiate_repd(elem, type_args)),
+            count_var: count_var.clone(),
+        },
     }
 }
 

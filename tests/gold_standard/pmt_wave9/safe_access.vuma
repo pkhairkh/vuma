@@ -1,0 +1,42 @@
+// safe_access — PMT Wave 9: access elements 0..N with N known at compile time
+// Expected exit code: 100
+//
+// A `FixedBuf` layout with a fixed-size `data: [u32; 8]` array. All
+// accesses use compile-time-known indices (0, 1, 2, 3). The State Transform
+// verifier proves each access is within the data field's bounds — the proof
+// obligation `offset + (count * elem_size) ≤ buffer_size` trivially holds
+// when `count` is a compile-time constant ≤ 8 (i.e. `0 + 4*4 ≤ 32`).
+//
+// Under the Wave 9 dependent-state-types model, this is the degenerate case
+// where the runtime count happens to be statically known. The proof is
+// still by linear arithmetic — `verify_dependent_transform(elem_size=4,
+// count=4, offset=0, buffer_size=32)` returns `true`. The same machinery
+// that proves dynamic counts safe also handles the static-count case
+// (no special-casing).
+//
+// This test verifies the verifier's "happy path": with N = 4 (compile-time
+// constant), the array accesses are obviously safe, and the verifier
+// confirms it. Compare with `dynamic_array.vuma` / `grow_array.vuma` /
+// `bounded_loop.vuma` where N is a runtime value.
+//
+// Four elements written (10, 20, 30, 40) and summed: 10+20+30+40 = 100.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via VerificationLevel::Pmt.
+//
+// VUMA Key Concepts:
+//   - all array indices are compile-time constants (0, 1, 2, 3)
+//   - dependent-type proof obligation: 4*4 ≤ 32 (trivially holds)
+//   - degenerate case of the dynamic-array proof (static count)
+//   - verifier's "happy path" — no runtime reasoning required
+
+layout FixedBuf = { data: [u32; 8] }
+
+fn main() -> i32 {
+    let fb = state_new(FixedBuf);
+    fb.data[0] = 10;
+    fb.data[1] = 20;
+    fb.data[2] = 30;
+    fb.data[3] = 40;
+    // All 4 indices are compile-time constants ≤ 7 → safe.
+    return fb.data[0] + fb.data[1] + fb.data[2] + fb.data[3];  // 100
+}

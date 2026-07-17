@@ -1270,6 +1270,8 @@ fn repd_kind_name(repd: &RepD) -> String {
         RepD::ConceptRelational(_) => "ConceptRelational".to_string(),
         RepD::State { .. } => "State".to_string(),
         RepD::Ref { .. } => "Ref".to_string(),
+        // Wave 9 — dependent state types.
+        RepD::DependentArray { .. } => "DependentArray".to_string(),
     }
 }
 
