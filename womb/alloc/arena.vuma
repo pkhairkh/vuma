@@ -1,51 +1,103 @@
-// womb/alloc/arena.vuma — Bump allocator using heap memory
+// womb/alloc/arena.vuma — Bump allocator using PMT State (typed memory)
+//
+// PMT migration of the original pointer-based bump allocator.
+//
+// Original (pointer-idiomatic) design:
+//   - `arena_new(size)` did `allocate(16)` for a header + `allocate(size)`
+//     for a data block, then byte-stitched the (base, offset, capacity)
+//     fields into the header via `*(ptr + offset)` stores.
+//   - `arena_alloc(arena, size)` returned a raw `Address` (base + aligned
+//     offset) into the data block — callers used `*(addr + i)` to access
+//     bytes.
+//   - `arena_free(arena)` called `free(base); free(arena);`.
+//
+// PMT (State/transform) design:
+//   - A single `layout Arena = { offset: u32, capacity: u32, data: [u8; 256] }`
+//     captures the header fields and the data block as one typed buffer.
+//   - The byte-stitched store_u64/load_u64/store_u32/load_u32 helpers are
+//     eliminated — PMT field access (`arena.offset`, `arena.capacity`) is
+//     typed and endian-safe by construction (the codegen emits correctly-
+//     sized Loads/Stores at layout-computed offsets).
+//   - `arena_alloc` returns a `u32` logical byte offset within `arena.data`
+//     (a handle, not a raw pointer). Callers access bytes via
+//     `arena.data[offset]` (typed array indexing), never via pointer
+//     arithmetic.
+//   - `arena_free` is a no-op — PMT states are automatically managed (no
+//     `free` call site). Kept in the API for source compatibility.
+//
+// API changes from the pointer-based original:
+//   - `arena_new(size) -> Address` is replaced by `arena_init(arena, size)`
+//     (caller does `let a = state_new(Arena); arena_init(a, size);`).
+//     Rationale: the current PMT codegen does not propagate State-typedness
+//     through function return values, so a `fn arena_new(...) -> State<Arena>`
+//     that returns a freshly-allocated state produces broken field-access
+//     code in downstream functions. The init-style API (state allocated at
+//     the call site, passed by reference to an init function) is the
+//     canonical PMT pattern and works correctly end-to-end.
+//   - `arena_alloc` return type changed from `u64` (raw address) to `u32`
+//     (logical offset into `arena.data`). Callers use `arena.data[off]`
+//     instead of `*(addr + i)`.
+//   - The data block is fixed-size (256 bytes) — PMT layout sizes are
+//     compile-time constants. `arena_init` clamps the requested capacity
+//     to 256.
+//
+// This is a library module (no `main`, no expected exit code). The PMT
+// migration preserves the logical semantics (bump allocation, reset,
+// used/capacity queries) while eliminating all `allocate`/`free`/`*ptr`
+// sites.
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
-}
-fn load_u64(ptr: Address, offset: u32) -> u64 {
-    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
-    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
-    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
-    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
-fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-}
-fn load_u32(ptr: Address, offset: u32) -> u32 {
-    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
-    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+layout Arena = { offset: u32, capacity: u32, data: [u8; 256] }
+
+// arena_init: initialize a freshly-allocated Arena state.
+// Replaces the original `arena_new(size) -> Address`. The caller allocates
+// the state with `let a = state_new(Arena);` and passes it here to set
+// the initial offset (0) and capacity (clamped to the data array size).
+fn arena_init(arena: State<Arena>, size: u32) {
+    arena.offset = 0;
+    if size > 256 {
+        arena.capacity = 256;
+    } else {
+        arena.capacity = size;
+    }
+    return;
 }
 
-fn arena_new(size: u32) -> Address {
-    arena = allocate(16);
-    base = allocate(size);
-    store_u64(arena, 0, base); store_u32(arena, 8, 0); store_u32(arena, 12, size);
-    return arena;
-}
-
-fn arena_alloc(arena: Address, size: u32) -> u64 {
-    offset: u32 = load_u32(arena, 8);
-    total: u32 = load_u32(arena, 12);
-    aligned: u32 = (offset + 7) & 0xFFFFFFF8;
+// arena_alloc: bump-allocate `size` bytes from the arena.
+// Returns the byte offset of the allocation within `arena.data` (a logical
+// handle, not a raw pointer). Returns 0 on overflow (NOTE: 0 is also a
+// valid offset for the first allocation — callers should check
+// `arena_used` before/after to detect failure, or ensure `size` fits).
+// The original returned `base + aligned` as a raw Address; PMT callers
+// access the bytes via `arena.data[offset]`.
+fn arena_alloc(arena: State<Arena>, size: u32) -> u32 {
+    let offset: u32 = arena.offset;
+    let total: u32 = arena.capacity;
+    let aligned: u32 = (offset + 7) & 0xFFFFFFF8;
     if aligned + size > total { return 0; }
-    base: u64 = load_u64(arena, 0);
-    store_u32(arena, 8, aligned + size);
-    return base + aligned;
+    arena.offset = aligned + size;
+    return aligned;
 }
 
-fn arena_reset(arena: Address) { store_u32(arena, 8, 0); }
-
-fn arena_free(arena: Address) {
-    base: u64 = load_u64(arena, 0); size: u32 = load_u32(arena, 12);
-    free(base); free(arena);
+// arena_reset: reset the bump offset to 0, allowing reuse of the data
+// block without reallocating.
+fn arena_reset(arena: State<Arena>) {
+    arena.offset = 0;
+    return;
 }
 
-fn arena_used(arena: Address) -> u32 { return load_u32(arena, 8); }
-fn arena_capacity(arena: Address) -> u32 { return load_u32(arena, 12); }
+// arena_free: no-op in PMT. State buffers are automatically managed
+// (no `free` call site). Kept for source compatibility with the
+// pointer-based original.
+fn arena_free(arena: State<Arena>) {
+    return;
+}
+
+// arena_used: return the current bump offset (bytes allocated so far).
+fn arena_used(arena: State<Arena>) -> u32 {
+    return arena.offset;
+}
+
+// arena_capacity: return the arena's total data capacity (bytes).
+fn arena_capacity(arena: State<Arena>) -> u32 {
+    return arena.capacity;
+}
