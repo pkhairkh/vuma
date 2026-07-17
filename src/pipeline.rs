@@ -8185,7 +8185,7 @@ fn resolve_state_field_chain(
     layouts: &HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
     start_layout: &str,
     chain: &[String],
-) -> Option<(u64, u64, vuma_codegen::ir::IRType)> {
+) -> Option<(u64, u64, vuma_codegen::ir::IRType, String)> {
     if chain.is_empty() {
         return None;
     }
@@ -8193,6 +8193,7 @@ fn resolve_state_field_chain(
     let mut cum_offset: u64 = 0;
     let mut last_size: u64 = 0;
     let mut last_ty: Option<vuma_codegen::ir::IRType> = None;
+    let mut last_type_name: String = String::new();
     for field in chain {
         let (_, fields) = layouts.get(&layout)?;
         let (_fname, ftype, foffset, fsize, ftype_name) = fields
@@ -8201,6 +8202,7 @@ fn resolve_state_field_chain(
         cum_offset += foffset;
         last_size = *fsize;
         last_ty = Some(ftype.clone());
+        last_type_name = ftype_name.clone();
         // Descend into nested layout-typed fields: if the field's declared
         // type name matches a known layout, switch to that layout for the
         // next field in the chain.
@@ -8208,7 +8210,7 @@ fn resolve_state_field_chain(
             layout = ftype_name.clone();
         }
     }
-    last_ty.map(|ty| (cum_offset, last_size, ty))
+    last_ty.map(|ty| (cum_offset, last_size, ty, last_type_name))
 }
 
 /// Convert a parser block into codegen SCG statements, flattening expressions
@@ -8650,14 +8652,77 @@ pub fn flatten_expr(
             if let Some(bv) = base_var {
                 if let Some(layout_name) = ctx.state_var_layouts.get(&bv).cloned() {
                     chain.reverse(); // outermost-to-innermost order
-                    if let Some((offset, _size, field_ty)) =
+                    if let Some((offset, _size, field_ty, type_name)) =
                         resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
                     {
+                        // Wave 2 fix (array-typed fields): when the field's
+                        // declared type is an inline array (e.g. `data: [u8; 4]`),
+                        // `state.field` should produce the ADDRESS of the
+                        // inline array — NOT a Load of its (non-existent)
+                        // pointer. The downstream `Index` access then adds
+                        // the element index to this address and Loads from
+                        // the result. Without this, the FieldAccess would
+                        // emit a U64 Load reading 8 bytes from a 4-byte
+                        // allocation (buffer overread), and the Index would
+                        // dereference the resulting garbage as a pointer
+                        // (SIGSEGV on x86_64). Array types are detected via
+                        // the field's stored `type_name` (Display form, e.g.
+                        // `[u8; 4]`).
+                        if type_name.starts_with('[') {
+                            let addr = if offset == 0 {
+                                ScgExpr::Var(bv.clone())
+                            } else {
+                                let addr_tmp = ctx.alloc_temp();
+                                stmts.push(ScgStatement::Computation(ComputationNode {
+                                    dst: addr_tmp.clone(),
+                                    op: BinOpKind::Add,
+                                    lhs: ScgExpr::Var(bv.clone()),
+                                    rhs: ScgExpr::Int(offset as i64),
+                                    tail_call: false,
+                                    reassigns: None,
+                                }));
+                                ScgExpr::Var(addr_tmp)
+                            };
+                            return addr;
+                        }
+                        // Wave 2 fix (scalar fields): compute the field
+                        // address explicitly via a separate
+                        // `Add(base, offset)` Computation node so each field
+                        // access lowers to a Load with a UNIQUE address vreg
+                        // (and `offset: None`). The `dead_store_eliminate`
+                        // pass in the IR optimizer treats two Stores with
+                        // the SAME `addr` IRValue as aliasing (ignoring the
+                        // `offset` field), so a naive
+                        // `Load { ptr: Var(bv), offset: Some(Int(N)) }` would
+                        // lower to `Load { addr: R_base, offset: N }` and
+                        // two Stores to different fields of the same state
+                        // buffer would alias by `addr`, causing the first
+                        // Store to be eliminated (returning the LAST field
+                        // written instead of the sum). Emitting an explicit
+                        // `Add` produces a distinct address vreg per access;
+                        // the TBAA `Unique(N)` alias class is inherited via
+                        // the BinOp arm of `AliasAnalysis`, so the DSE then
+                        // correctly falls through to `may_alias_combined`
+                        // and stops (may-alias, conservatively keep both).
+                        let ptr_expr = if offset == 0 {
+                            ScgExpr::Var(bv.clone())
+                        } else {
+                            let addr_tmp = ctx.alloc_temp();
+                            stmts.push(ScgStatement::Computation(ComputationNode {
+                                dst: addr_tmp.clone(),
+                                op: BinOpKind::Add,
+                                lhs: ScgExpr::Var(bv.clone()),
+                                rhs: ScgExpr::Int(offset as i64),
+                                tail_call: false,
+                                reassigns: None,
+                            }));
+                            ScgExpr::Var(addr_tmp)
+                        };
                         let dst = ctx.alloc_temp();
                         stmts.push(ScgStatement::Access(AccessNode::Load {
                             dst: dst.clone(),
-                            ptr: ScgExpr::Var(bv),
-                            offset: Some(ScgExpr::Int(offset as i64)),
+                            ptr: ptr_expr,
+                            offset: None,
                             ty: Some(field_ty),
                         }));
                         return ScgExpr::Var(dst);
@@ -9021,17 +9086,48 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 if let Some(bv) = &base_var {
                     if let Some(layout_name) = ctx.state_var_layouts.get(bv).cloned() {
                         chain.reverse(); // outermost-to-innermost order
-                        if let Some((offset, _size, field_ty)) =
+                        if let Some((offset, _size, field_ty, _type_name)) =
                             resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
                         {
-                            let ptr = flatten_expr(&vuma_parser::ast::Expr::Var {
-                                name: bv.clone(),
-                                span: vuma_parser::Span::synthetic(),
-                            }, &mut stmts, ctx);
+                            // Wave 2 fix: emit an explicit `Add(base, offset)`
+                            // Computation node so each Store gets a UNIQUE
+                            // address vreg (mirrors the Load-side fix in
+                            // `flatten_expr`'s FieldAccess arm). Without
+                            // this, two Stores to different fields of the
+                            // same state buffer would share the same `addr`
+                            // IRValue, and `dead_store_eliminate` would
+                            // incorrectly eliminate the first Store
+                            // (returning the LAST field written instead of
+                            // the sum of all fields). The `Add` result
+                            // inherits the base's `Unique(N)` alias class
+                            // via `AliasAnalysis`'s BinOp arm, so DSE then
+                            // conservatively treats the two Stores as
+                            // may-alias (keeping both).
+                            let ptr = if offset == 0 {
+                                flatten_expr(&vuma_parser::ast::Expr::Var {
+                                    name: bv.clone(),
+                                    span: vuma_parser::Span::synthetic(),
+                                }, &mut stmts, ctx)
+                            } else {
+                                let base = flatten_expr(&vuma_parser::ast::Expr::Var {
+                                    name: bv.clone(),
+                                    span: vuma_parser::Span::synthetic(),
+                                }, &mut stmts, ctx);
+                                let addr_tmp = ctx.alloc_temp();
+                                stmts.push(ScgStatement::Computation(ComputationNode {
+                                    dst: addr_tmp.clone(),
+                                    op: BinOpKind::Add,
+                                    lhs: base,
+                                    rhs: ScgExpr::Int(offset as i64),
+                                    tail_call: false,
+                                    reassigns: None,
+                                }));
+                                ScgExpr::Var(addr_tmp)
+                            };
                             let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
                             stmts.push(ScgStatement::Access(AccessNode::Store {
                                 ptr,
-                                offset: Some(ScgExpr::Int(offset as i64)),
+                                offset: None,
                                 value,
                                 ty: Some(field_ty),
                             }));

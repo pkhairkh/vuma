@@ -1,0 +1,21 @@
+// diag_two_reads — PMT Wave 2 diagnostic: two separate-let reads (not BinOp)
+// Expected exit code: 30
+//
+// Separates the two reads into two `let` bindings and then sums those
+// bindings. If this passes (30) the issue is in BinOp flatten. If it fails
+// (20) the issue is in the Load itself.
+//
+// VUMA Key Concepts:
+//   - two state.field reads, each in its own `let` (NOT inside a BinOp)
+//   - sum is computed by a third `let` (BinOp over the two loaded values)
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Pair);
+    p.a = 10;
+    p.b = 20;
+    let x = p.a;
+    let y = p.b;
+    return x + y;
+}
