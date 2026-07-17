@@ -4197,6 +4197,7 @@ impl Backend for Wasm32Backend {
         });
         func_name_to_idx.insert("ffi_scratch_push_frame".to_string(), noop_push_idx);
         func_name_to_idx.insert("ffi_scratch_pop_frame".to_string(), noop_pop_idx);
+        func_name_to_idx.insert("__arena_overflow".to_string(), WASI_PROC_EXIT_IDX);
 
         // ── Program functions ──────────────────────────────────────
         // Track the main function so the _start wrapper can call it.

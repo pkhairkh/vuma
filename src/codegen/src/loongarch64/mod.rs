@@ -3149,6 +3149,16 @@ impl Backend for LoongArch64Backend {
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
+            // __arena_overflow: real exit(1) syscall
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 93 }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("__arena_overflow".to_string(), code));
+            }
+
             stubs
         };
 
