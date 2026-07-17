@@ -1,0 +1,47 @@
+// grow_array — PMT Wave 9: extend an array by writing to the next position
+// Expected exit code: 6
+//
+// A `GrowArr` layout with `count` + `data: [u32; 8]`. grow(s, v) writes
+// `s.data[s.count] = v` and increments `s.count`, simulating dynamic-array
+// growth (the canonical "push back" / `Vec::push` pattern). The State
+// Transform verifier proves each grow() keeps `count ≤ 8` (the data field's
+// element capacity).
+//
+// Under the Wave 9 dependent-state-types model, this would be typed
+// `State<Vec<N>>` where N is the runtime element count. The proof
+// obligation `count * 4 ≤ 32` (data field's byte size) is checked by
+// `verify_dependent_transform(elem_size=4, count, offset=0, buffer_size=32)`.
+// Each `grow` call's write to `data[count]` is safe iff `count < 8` —
+// provable by linear arithmetic (Presburger).
+//
+// Because full dependent types need parser support that's not yet added,
+// this test uses a fixed-size `[u32; 8]` array and tracks the count in a
+// sibling field. The State Transform verifier still proves each access is
+// within the data field's bounds.
+//
+// Three grow() calls push 1, 2, 3; sum of pushed values = 1+2+3 = 6.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via VerificationLevel::Pmt.
+//
+// VUMA Key Concepts:
+//   - dynamic-array growth pattern (push-back via data[count]++)
+//   - runtime count incremented alongside each write
+//   - dependent-type proof obligation: count < 8 before each write
+//   - linear-arithmetic decidability (count is a runtime var, 8 is constant)
+
+layout GrowArr = { count: u32, data: [u32; 8] }
+
+fn grow(s: State<GrowArr>, v: u32) {
+    s.data[s.count] = v;
+    s.count = s.count + 1;
+}
+
+fn main() -> i32 {
+    let g = state_new(GrowArr);
+    g.count = 0;
+    grow(g, 1);
+    grow(g, 2);
+    grow(g, 3);
+    // Sum of pushed values: 1 + 2 + 3 = 6
+    return g.data[0] + g.data[1] + g.data[2];
+}

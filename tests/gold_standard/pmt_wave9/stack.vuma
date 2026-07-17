@@ -1,0 +1,51 @@
+// stack — PMT Wave 9: stack using State with push/pop helpers
+// Expected exit code: 60
+//
+// A `Stack` layout: a `count` field (the stack pointer, runtime count of
+// elements currently on the stack) + a fixed-size `data: [u32; 8]` array.
+// push(s, v) writes `s.data[s.count] = v` and increments `s.count`; pop(s)
+// decrements `s.count` and returns `s.data[s.count]`.
+//
+// Under the Wave 9 dependent-state-types model, this would be typed
+// `State<Stack<N>>` where N is the runtime count of pushed elements. The
+// State Transform verifier proves `offset + (count * elem_size) ≤
+// buffer_size` (i.e. `0 + count * 4 ≤ 32`) using linear arithmetic.
+//
+// Because full dependent types need parser support that's not yet added,
+// this test uses a fixed-size `[u32; 8]` array and tracks the count
+// separately. The State Transform verifier still proves each data[count]
+// access is within the data field's bounds.
+//
+// Push 10, 20, 30; pop 3 times → 30, 20, 10 → sum = 60.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via VerificationLevel::Pmt.
+//
+// VUMA Key Concepts:
+//   - State<T> parameter (passed by reference, mutated through field writes)
+//   - runtime count field as stack pointer (data[count] write-then-increment)
+//   - dependent-type proof obligation: count ≤ 8 (data field's element count)
+//   - LIFO discipline verified by the state_read / state_write verifiers
+
+layout Stack = { count: u32, data: [u32; 8] }
+
+fn push(s: State<Stack>, v: u32) {
+    s.data[s.count] = v;
+    s.count = s.count + 1;
+}
+
+fn pop(s: State<Stack>) -> u32 {
+    s.count = s.count - 1;
+    return s.data[s.count];
+}
+
+fn main() -> i32 {
+    let st = state_new(Stack);
+    st.count = 0;
+    push(st, 10);
+    push(st, 20);
+    push(st, 30);
+    let a = pop(st);  // 30
+    let b = pop(st);  // 20
+    let c = pop(st);  // 10
+    return a + b + c;  // 60
+}

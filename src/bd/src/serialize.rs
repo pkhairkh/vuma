@@ -906,6 +906,12 @@ impl BinaryWrite for RepD {
                 write_u32(w, layout.0)?;
                 write_u32(w, field.0)?;
             }
+            RepD::DependentArray { elem, count_var } => {
+                // Wave 9 — Dependent state types.
+                write_u8(w, 13)?;
+                write_box(w, &**elem)?;
+                write_string(w, count_var)?;
+            }
         }
         Ok(())
     }
@@ -941,6 +947,12 @@ impl BinaryRead for RepD {
                 let layout = crate::repd::LayoutId(read_u32(r)?);
                 let field = crate::repd::FieldId(read_u32(r)?);
                 Ok(RepD::Ref { layout, field })
+            }
+            13 => {
+                // Wave 9 — Dependent state types.
+                let elem = read_box::<RepD, _>(r)?;
+                let count_var = read_string(r)?;
+                Ok(RepD::DependentArray { elem, count_var })
             }
             other => Err(BinaryError::InvalidData(format!(
                 "invalid RepD discriminant: {other}"

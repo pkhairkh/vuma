@@ -4044,6 +4044,10 @@ fn repd_to_scg_type(repd: &RepD) -> ScgType {
         // pointer-sized offset.
         RepD::State { .. } => ScgType::Ptr,
         RepD::Ref { .. } => ScgType::U64,
+        // Wave 9 — Dependent state types: a DependentArray is a dynamic
+        // data structure passed by reference (like Struct/Array); the
+        // runtime count is tracked in a separate u64 vreg.
+        RepD::DependentArray { .. } => ScgType::Ptr,
     }
 }
 

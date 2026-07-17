@@ -258,6 +258,34 @@ pub enum RepD {
         /// The field within that layout.
         field: FieldId,
     },
+    /// Dependent array: element count is a runtime value (not compile-time
+    /// constant).
+    /// Used for dynamic data structures: `State<List<N>>` where N is a runtime
+    /// count.
+    /// Size = elem_size * count (requires runtime value to compute).
+    /// The type system proves offset + (count * elem_size) ≤ buffer_size using
+    /// linear arithmetic (which is decidable — Presburger arithmetic).
+    ///
+    /// # Wave 9 — Dependent state types
+    ///
+    /// This variant captures the type-level shape of a dynamic data structure
+    /// (linked list, dynamic array, stack). The actual element count is held
+    /// in a runtime variable named by `count_var`; the type system cannot
+    /// compute a static size for it (callers must use
+    /// [`RepD::dependent_array_size`] with the runtime count value).
+    ///
+    /// Safety is proved by the IVE State Transform verifier via linear
+    /// arithmetic — see [`crate::state_transform`] /
+    /// `verify_dependent_transform`. The proof obligation is
+    /// `offset + (count * elem_size) ≤ buffer_size`, which is decidable
+    /// because the only operations are `+` and `*` by a constant (no
+    /// non-linear term-to-term multiplication).
+    DependentArray {
+        /// Representation of each element.
+        elem: Box<RepD>,
+        /// Name of the runtime variable holding the count.
+        count_var: String,
+    },
 }
 
 impl std::hash::Hash for RepD {
@@ -342,6 +370,10 @@ impl std::hash::Hash for RepD {
                 layout.hash(state);
                 field.hash(state);
             }
+            RepD::DependentArray { elem, count_var } => {
+                elem.hash(state);
+                count_var.hash(state);
+            }
         }
     }
 }
@@ -401,6 +433,10 @@ impl RepD {
             // A `Ref` is a compile-time-verified buffer offset — at runtime
             // it is stored as a pointer-sized offset.
             RepD::Ref { .. } => POINTER_SIZE,
+            // Dependent array's size depends on a runtime count value —
+            // callers must use `dependent_array_size(elem_size, count_value)`
+            // to compute it. Returns 0 here (analogous to `State`/`Generic`).
+            RepD::DependentArray { .. } => 0,
         }
     }
 
@@ -455,6 +491,11 @@ impl RepD {
             // A `Ref` is a pointer-sized offset, so it inherits pointer
             // alignment.
             RepD::Ref { .. } => POINTER_SIZE,
+            // A `DependentArray`'s alignment is the element's alignment —
+            // like `Array`, the stride aligns to the element type. The
+            // element's alignment is statically known even though the count
+            // is runtime.
+            RepD::DependentArray { elem, .. } => elem.alignment(),
         }
     }
 
@@ -636,6 +677,34 @@ impl RepD {
             }),
         }
     }
+
+    /// **Wave 9 — Dependent state types:** Compute the size of a dependent
+    /// array given the runtime count value.
+    ///
+    /// The element size is the static, compile-time-known size of the array's
+    /// element `RepD`. The count is the runtime value of the variable named
+    /// by `DependentArray::count_var`. The total size is the element size
+    /// multiplied by the count (linear arithmetic — no non-linear
+    /// dependencies).
+    ///
+    /// This is the runtime-size query for `RepD::DependentArray`. The
+    /// IVE State Transform verifier (`verify_dependent_transform`) uses this
+    /// to prove `offset + size ≤ buffer_size` for every dependent-array
+    /// access.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vuma_bd::repd::RepD;
+    ///
+    /// // elem_size = 4 bytes, count = 10 (runtime value) → 40 bytes
+    /// assert_eq!(RepD::dependent_array_size(4, 10), 40);
+    /// // zero-count dependent array is zero-size
+    /// assert_eq!(RepD::dependent_array_size(4, 0), 0);
+    /// ```
+    pub fn dependent_array_size(elem_size: u64, count: u64) -> u64 {
+        elem_size * count
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +776,9 @@ impl fmt::Display for RepD {
             RepD::State { layout } => write!(f, "state(layout={})", layout.0),
             RepD::Ref { layout, field } => {
                 write!(f, "ref(layout={}, field={})", layout.0, field.0)
+            }
+            RepD::DependentArray { elem, count_var } => {
+                write!(f, "dep_array(elem={elem}, count={count_var})")
             }
         }
     }
@@ -1863,5 +1935,138 @@ mod tests {
         assert_eq!(reg.field_offset(id, "any"), None);
         assert_eq!(reg.field_size(id, "any"), None);
         assert!(reg.field_repd(id, "any").is_none());
+    }
+
+    // =======================================================================
+    // Wave 9 — Dependent state types (RepD::DependentArray)
+    // =======================================================================
+
+    #[test]
+    fn wave9_dependent_array_size_of_returns_zero() {
+        // DependentArray's size_of returns 0 — callers must use
+        // dependent_array_size(elem_size, count) with the runtime count.
+        let dep = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        assert_eq!(dep.size(), 0);
+        assert_eq!(dep.size_of(), 0);
+    }
+
+    #[test]
+    fn wave9_dependent_array_alignment_is_element_alignment() {
+        // DependentArray's alignment is its element's alignment (like Array).
+        let dep = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        assert_eq!(dep.alignment(), 4);
+
+        let dep8 = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 8, align: 8 })),
+            count_var: "n".to_string(),
+        };
+        assert_eq!(dep8.alignment(), 8);
+    }
+
+    #[test]
+    fn wave9_dependent_array_size_method() {
+        // dependent_array_size(elem_size, count) = elem_size * count.
+        assert_eq!(RepD::dependent_array_size(4, 0), 0);
+        assert_eq!(RepD::dependent_array_size(4, 1), 4);
+        assert_eq!(RepD::dependent_array_size(4, 10), 40);
+        assert_eq!(RepD::dependent_array_size(8, 16), 128);
+        assert_eq!(RepD::dependent_array_size(1, 1024), 1024);
+        // Zero-size element → zero total size regardless of count.
+        assert_eq!(RepD::dependent_array_size(0, 100), 0);
+    }
+
+    #[test]
+    fn wave9_dependent_array_display() {
+        let dep = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        let s = format!("{dep}");
+        assert!(s.starts_with("dep_array("), "display: {s}");
+        assert!(s.contains("count=n"), "display: {s}");
+        assert!(s.contains("byte(size=4"), "display: {s}");
+    }
+
+    #[test]
+    fn wave9_dependent_array_hash_round_trips() {
+        // Two identical DependentArray reps hash to the same value (manual
+        // Hash impl). We can't compare hash values directly without a Hasher,
+        // but we can at least ensure the manual Hash impl doesn't panic.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let dep = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        let mut h1 = DefaultHasher::new();
+        dep.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        dep.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn wave9_dependent_array_byte_round_trip() {
+        // RepD::DependentArray serialises and deserialises through the
+        // binary protocol (Wave 43 serde replacement).
+        let dep = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        let mut buf = Vec::new();
+        dep.write_binary(&mut buf).unwrap();
+        let mut cursor = std::io::Cursor::new(&buf);
+        let back: RepD = RepD::read_binary(&mut cursor).unwrap();
+        assert_eq!(dep, back);
+    }
+
+    #[test]
+    fn wave9_dependent_array_with_struct_elem() {
+        // Dependent array of structs — element size = struct's total_size.
+        let elem = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+            total_size: 8,
+            align: 4,
+        });
+        let dep = RepD::DependentArray {
+            elem: Box::new(elem),
+            count_var: "count".to_string(),
+        };
+        // size_of is 0 (runtime-dependent) — alignment is 4 (struct's align).
+        assert_eq!(dep.size_of(), 0);
+        assert_eq!(dep.alignment(), 4);
+        // Runtime size: 8 bytes/elem * 5 elems = 40 bytes.
+        assert_eq!(RepD::dependent_array_size(8, 5), 40);
+    }
+
+    #[test]
+    fn wave9_dependent_array_nested_in_struct() {
+        // A struct holding a dependent array — the dep array's slot is
+        // 0-sized at compile time but the field offset after it advances by
+        // the dep array's element alignment (matching Array's behaviour for
+        // stride alignment).
+        let inner = RepD::DependentArray {
+            elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+            count_var: "n".to_string(),
+        };
+        let outer = RepD::Struct(StructRep {
+            fields: vec![
+                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (4, inner),
+            ],
+            total_size: 4, // dep array contributes 0 to compile-time size
+            align: 4,
+        });
+        assert_eq!(outer.size_of(), 4);
+        assert_eq!(outer.alignment(), 4);
     }
 }
