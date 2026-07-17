@@ -1,0 +1,283 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/riscv64/mm_trampoline.vuma
+// riscv64 MM trampolines — extern declarations for page-table + TLB ops.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the riscv64-specific swap point for the MM externs
+// declared in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
+//     extern "C" {
+//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         fn tlb_flush();
+//         fn invlpg(vaddr: u64);
+//     }
+// In hosted mode (this file compiles on x86_64 — the declarations are
+// pure type + extern, no arch-specific code), those four names resolve
+// to `__ffi_fallback_stub` (xor eax, eax; ret — returns 0, no-op for
+// void functions) at link time. In bare-metal mode (Wave K11), the
+// same four names link against REAL asm stubs registered by the
+// riscv64 backend (src/codegen/src/riscv64.rs — or wherever the
+// riscv64 backend's build_runtime_syscall_stubs equivalent lives):
+//     pte_read / pte_write — direct 8-byte load/store at the PTE's
+//         physical address (RISC-V page tables live in regular memory,
+//         not behind an MMIO indirection — the table is reached via
+//         the kernel's identity-mapped physmem window OR with satp-
+//         aware translation; the precise mechanism is K11's concern).
+//     tlb_flush    — `sfence.vma zero, zero` (flush ALL TLB entries
+//                    across ALL ASIDs — the rs1=zero, rs2=zero form
+//                    is the global-flush all-ASID variant, see RISC-V
+//                    Privileged ISA Vol. II §4.2.1). No trailing fence
+//                    is needed: sfence.vma is itself a full barrier
+//                    for the local hart — it guarantees that all
+//                    subsequent explicit memory accesses see the
+//                    effect of any prior stores whose translation
+//                    was modified, AND that any prior speculative
+//                    TLB fills are discarded before the next
+//                    instruction fetch.
+//     invlpg(vaddr)— `sfence.vma vaddr, zero` (single-page invalidation
+//                    for vaddr, all-ASID — the rs1=vaddr, rs2=zero
+//                    form). RISC-V does NOT have a per-ASID single-
+//                    page variant that's cheaper than the all-ASID
+//                    form (the rs2=asid form on most implementations
+//                    is the same cost as rs2=zero), so this stub
+//                    always uses the all-ASID single-page form. K11
+//                    may refine to `sfence.vma vaddr, asid` if the
+//                    implementation advertises cheaper per-ASID
+//                    invalidation in a future ISA extension.
+//
+// This file ADDS three riscv64-specific externs that vmm.vuma does NOT
+// declare:
+//     satp_read()   — `csrr a0, satp` (returns the current satp CSR
+//                     value — mode bits [63:60], ASID bits [59:44],
+//                     PPN bits [43:0] of the root page table). Used
+//                     by the future scheduler (K4+) to save the
+//                     current address space before a context switch.
+//     satp_write(v) — `csrw satp, a0` (switches address spaces — a0
+//                     = new satp under the RISC-V calling convention;
+//                     the RISC-V Privileged ISA §4.2.1 requires an
+//                     `sfence.vma` after a satp write whose MODE or
+//                     PPN field changes, because stale TLB entries
+//                     from the OLD translation may otherwise be used
+//                     for subsequent accesses — K11's stub includes
+//                     the trailing sfence.vma automatically; callers
+//                     do NOT need to call tlb_flush separately after
+//                     satp_write).
+//     fence_io()    — `fence iorw, iorw` (full memory barrier —
+//                     predecessor set iorw = input+output, read+
+//                     write; successor set iorw = same. This orders
+//                     ALL prior memory accesses before ALL subsequent
+//                     memory accesses, the strongest form of the
+//                     RISC-V `fence` instruction per §2.7 of the
+//                     Unprivileged ISA). Used after pte_write +
+//                     before tlb_flush to guarantee the new PTE is
+//                     visible to all harts before the TLB flush
+//                     broadcasts (riscv64's memory model is weaker
+//                     than aarch64's — even though sfence.vma is a
+//                     local barrier on the issuing hart, OTHER harts
+//                     may observe the PTE write and the sfence.vma
+//                     broadcast in different orders, so an explicit
+//                     fence.io before sfence.vma is the safe
+//                     sequence). This is the riscv64 analogue of
+//                     aarch64's `dsb nsh` + `isb` pair.
+// These are needed by a future scheduler (K4+) for context switching
+// between address spaces; they live here rather than in vmm.vuma
+// because they're riscv64-specific (x86_64 uses CR3, aarch64 uses
+// TTBR0_EL1 — see womb/kernel/arch/x86_64/mm_trampoline.vuma's cr3_read
+// / cr3_write pair, and womb/kernel/arch/aarch64/mm_trampoline.vuma's
+// ttbr0_el1_read / ttbr0_el1_write pair).
+//
+// ── Why re-declare PageTable here? ──────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so every kernel module re-declares
+// the layouts it uses byte-identically (same pattern as
+// womb/kernel/arch/x86_64/mm_trampoline.vuma re-declaring PageTable and
+// womb/kernel/arch/x86_64/bootinfo.vuma re-declaring __vuma_argc). The
+// PageTable layout here MUST match the one in womb/kernel/mm/vmm.vuma:
+//     layout PageTable = { root_phys: u64, levels: u8 }
+//
+// ── Why #[borrow] on pte_read / pte_write? ──────────────────────────────────
+// `#[borrow]` is load-bearing (K2b note in worklog.md): it tells the
+// marshal module (src/codegen/src/marshal.rs::classify_arg_mode) to pass
+// the State<PageTable> buffer's BASE ADDRESS and NOT invalidate the state
+// after the call. Without #[borrow], the default mode is `Invalidate`,
+// which marks `pt` as consumed after the first pte_read — the very next
+// pte_read in vmm.vuma's walk would then trip the use-after-invalidate
+// verifier. Keeping #[borrow] on the re-declaration here is therefore
+// essential, not stylistic.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// extern block is pure declaration — no storage, no pointer arithmetic.
+// The State<PageTable> parameter is a borrow-by-reference handle (the
+// marshal module lowers it to the buffer's base Address under the hood);
+// we never write `&pt` or `*pt` in VUMA source.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/riscv64/mm_trampoline.vuma \
+//         /tmp/mm_trampoline.bin x86_64 --verify
+//     /tmp/mm_trampoline.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (no top-level code; main() returns 0).
+//
+// In hosted mode the externs are never called from THIS file's main, so
+// __ffi_fallback_stub's "returns 0" behavior is not exercised — the
+// trampoline exists for OTHER modules (vmm.vuma, future kmain.vuma) to
+// link against. K2b's vmm.vuma calls pte_read / pte_write / tlb_flush /
+// invlpg and exercises the stubs at runtime; this file only declares
+// them so the symbol table is complete when both files are linked into
+// the same kernel image.
+//
+// ── K11 parity note ───────────────────────────────────────────────────────
+// The four shared externs need real asm stubs registered in
+// src/codegen/src/riscv64.rs's build_runtime_syscall_stubs (or the
+// riscv64 equivalent of x86_64's). The stub bodies are documented in
+// this file's header (tlb_flush = `sfence.vma zero, zero`;
+// invlpg = `sfence.vma vaddr, zero`; pte_read/pte_write = direct
+// 8-byte load/store at the PTE's physical address; satp_read =
+// `csrr a0, satp`; satp_write = `csrw satp, a0; sfence.vma zero,
+// zero`; fence_io = `fence iorw, iorw`). K11 should also wire up the
+// identity-mapped physmem window that pte_read/pte_write rely on to
+// dereference physical addresses from kernel virtual space (riscv64
+// equivalent of x86_64's CR3-aware identity mapping — typically the
+// kernel bootstraps a 1:1 Sv39 mapping covering all of physical RAM
+// in satp at boot, then switches to a split VA layout with the kernel
+// half identity-mapped and the user half managed via per-process
+// satp values during context switches).
+//
+// ── Cross-arch parity note ─────────────────────────────────────────────────
+// Compared to K2c's x86_64 mm_trampoline (6 externs: 4 shared + 2
+// x86_64-specific cr3_read/cr3_write) and K2d's aarch64 variant (8
+// externs: 4 shared + 4 aarch64-specific ttbr0_el1_read/write +
+// dsb + isb), this riscv64 variant has 7 externs (4 shared + 3
+// riscv64-specific satp_read/write + fence_io). The reason riscv64
+// needs fewer arch-specific externs than aarch64: sfence.vma is both
+// a TLB flush AND a barrier (it subsumes aarch64's `dsb nsh` + `tlbi`
+// + `isb` sequence in one instruction), so we don't need separate
+// `dsb` / `isb` externs. The single `fence_io` extern (the generic
+// RISC-V `fence` instruction) covers the rare case where a barrier
+// is needed WITHOUT a TLB flush (e.g. before a device MMIO write
+// that doesn't touch page tables).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared byte-identically to womb/kernel/mm/vmm.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+
+// A page table. `root_phys` is the physical address of the top-level
+// table (the root Sv39 L2 table — its PPN goes into satp.PPN at
+// context-switch time). `levels` is the number of paging levels (3
+// for RISC-V Sv39, 4 for Sv48, 5 for Sv57 — K2e scope is Sv39 only).
+// The walk uses `levels` to know how deep to descend; see
+// womb/kernel/mm/vmm.vuma::vmm_walk_idx for the bit-extraction
+// formula (9-bit indices, 4 KB pages, 512 entries/table — same
+// geometry as x86_64 4-level and aarch64 4-level, just different
+// root-pointer register and different PTE bit layout).
+layout PageTable = {
+    root_phys: u64,
+    levels: u8,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — page-table access + TLB/satp ops.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
+// these for per-arch asm stubs registered in src/codegen/src/riscv64.rs.
+extern "C" {
+    // Read a page-table entry. On riscv64, page tables are in regular
+    // memory, so this is a direct 8-byte load from the table's
+    // physical address (mapped to kernel virtual space via the
+    // identity-mapped physmem window OR with satp-aware translation
+    // — K11's job). `#[borrow]` keeps the PageTable state alive
+    // across the call (see header note); without it, vmm.vuma's walk
+    // would trip the use-after-invalidate verifier after the first
+    // pte_read.
+    #[borrow]
+    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    // Write a page-table entry. Same address-resolution story as
+    // pte_read; the write goes to the same 8-byte cell. Callers are
+    // responsible for the appropriate fence_io() + tlb_flush() /
+    // invlpg() after a write that changes an entry the hardware
+    // walker may have cached — riscv64's weakly-ordered memory model
+    // means the PTE write may be visible to OTHER harts before the
+    // writer's TLB flush, so the fence_io() before tlb_flush() is
+    // mandatory (and sfence.vma's broadcast handles cross-hart TLB
+    // coherency).
+    #[borrow]
+    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    // Full TLB flush — `sfence.vma zero, zero` (flush ALL TLB entries
+    // across ALL ASIDs — the rs1=zero, rs2=zero form per RISC-V
+    // Privileged ISA Vol. II §4.2.1). K11 stub: same instruction.
+    // sfence.vma is itself a full local-hart barrier: it guarantees
+    // that all subsequent explicit memory accesses see the effect of
+    // any prior stores whose translation was modified, AND that any
+    // prior speculative TLB fills are discarded before the next
+    // instruction fetch — so NO trailing fence / fence.i is needed
+    // (this is the riscv64 advantage over aarch64, which needs
+    // separate `dsb nsh; isb` after `tlbi vmalle1is`).
+    fn tlb_flush();
+    // Per-vaddr TLB invalidation — `sfence.vma vaddr, zero` (single-
+    // page invalidation for vaddr, all-ASID — the rs1=vaddr, rs2=zero
+    // form). RISC-V does NOT have a cheaper per-ASID single-page
+    // variant on most implementations (rs2=asid is the same cost as
+    // rs2=zero), so this stub always uses the all-ASID single-page
+    // form. K11 may refine to `sfence.vma vaddr, asid` if a future
+    // ISA extension advertises cheaper per-ASID invalidation. (The
+    // vaddr argument is the rs1 operand; under the RISC-V calling
+    // convention it arrives in a0, and the stub moves it to the
+    // rs1 field of the sfence.vma encoding.)
+    fn invlpg(vaddr: u64);
+    // SATP read — returns the current satp CSR value. K11 stub:
+    // `csrr a0, satp; ret`. The returned value encodes:
+    //     bits [63:60]  Mode  (0 = bare/no-paging, 8 = Sv39,
+    //                          9 = Sv48, 10 = Sv57)
+    //     bits [59:44]  ASID  (16-bit address-space identifier; 0
+    //                          if ASIDs are not used)
+    //     bits [43:0]   PPN   (physical page number of the root
+    //                          page table — address = PPN << 12)
+    // Used by the future scheduler (K4+) to save the current address
+    // space before a context switch.
+    fn satp_read() -> u64;
+    // SATP write — switches address spaces. K11 stub:
+    // `csrw satp, a0; sfence.vma zero, zero; ret` (a0 = new satp
+    // under the RISC-V calling convention). The RISC-V Privileged
+    // ISA §4.2.1 REQUIRES a `sfence.vma` after a satp write whose
+    // MODE or PPN field changes (stale TLB entries from the OLD
+    // translation may otherwise be used for subsequent accesses), so
+    // the K11 stub includes the trailing sfence.vma automatically —
+    // callers do NOT need to call tlb_flush separately after
+    // satp_write. (If the caller is switching to a previously-unused
+    // ASID, the sfence.vma is overkill — ARMv8's hardware auto-tags
+    // TLB entries by ASID, but RISC-V's sfence.vma semantics are
+    // global across ASIDs by default unless rs2=asid is used. K4+
+    // may add a satp_write_asid variant that uses `sfence.vma zero,
+    // asid` for finer-grained flush when ASID-reuse semantics apply.)
+    fn satp_write(val: u64);
+    // Memory barrier — `fence iorw, iorw` (full memory barrier; the
+    // strongest form of the RISC-V `fence` instruction per §2.7 of
+    // the Unprivileged ISA). Orders ALL prior memory accesses before
+    // ALL subsequent memory accesses. Used after pte_write + before
+    // tlb_flush to guarantee the new PTE is visible to all harts
+    // before the TLB flush broadcasts — riscv64's memory model is
+    // weaker than aarch64's, so even though sfence.vma is a local
+    // barrier on the issuing hart, OTHER harts may observe the PTE
+    // write and the sfence.vma broadcast in different orders, so an
+    // explicit fence_io before sfence.vma is the safe sequence.
+    // (Note: `fence iorw, iorw` does NOT flush the instruction cache
+    // — if a code page's mapping changes, the caller also needs
+    // `fence.i` to flush the I-cache. K4+ may add a separate
+    // `fence_i` extern if code-page re-mapping becomes a use case.)
+    fn fence_io();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// main entry stub.
+// ────────────────────────────────────────────────────────────────────────────
+// This file is a pure declaration module (extern block + layout only, no
+// top-level execution). The compiler requires a `fn main()` entry to
+// compile as a standalone program; the real kmain (K1d) lives in
+// womb/kernel/kernel.vuma and will call the externs declared here via
+// womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
+// and directly (satp_read / satp_write / fence_io) during context
+// switches.
+
+fn main() -> i32 {
+    return 0;
+}
