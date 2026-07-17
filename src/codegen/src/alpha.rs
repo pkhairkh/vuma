@@ -1694,7 +1694,8 @@ impl Backend for AlphaBackend {
                 ("nanosleep", 162), ("mprotect", 50), ("clock_gettime", 410),
                 ("gettimeofday", 78), ("rt_sigprocmask", 353), ("rt_sigaction", 352),
                 ("socket", 97), ("connect", 98), ("bind", 104), ("listen", 106),
-                ("accept", 99), ("setsockopt", 105), ("shutdown", 103),
+                ("accept", 99), ("setsockopt", 105),
+                ("getsockopt", 118), ("shutdown", 103),
                 ("sendto", 82), ("recvfrom", 102), ("clone", 220), ("fork", 2),
                 // [wave 9 fix] epoll numbers corrected from kernel alpha syscall.tbl:
                 //   old (wrong): 449/424/425 (those are migrate_pages/tgkill/stat64)
@@ -2150,6 +2151,18 @@ impl Backend for AlphaBackend {
         for (name, code) in &syscall_stubs {
             func_offsets.insert(name.clone(), stub_offset);
             stub_offset += code.len();
+        }
+
+        // Add __vuma_print_int / __vuma_print_hex / __vuma_print_newline
+        // canonical aliases pointing at the same offsets as the bare-name helpers.
+        for (short, canonical) in [
+            ("print_int", "__vuma_print_int"),
+            ("print_hex", "__vuma_print_hex"),
+            ("print_newline", "__vuma_print_newline"),
+        ] {
+            if let Some(&off) = func_offsets.get(short) {
+                func_offsets.insert(canonical.to_string(), off);
+            }
         }
 
         // ── Build _start stub bytes ──

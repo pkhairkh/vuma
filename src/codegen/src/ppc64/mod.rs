@@ -4253,6 +4253,7 @@ impl Backend for PPC64Backend {
                 ("shutdown", 373),
                 ("bind", 361), ("listen", 363), ("accept", 364),
                 ("setsockopt", 366),
+                ("getsockopt", 340),
                 ("brk", 45), ("clock_gettime", 246), ("gettimeofday", 78),
                 ("rt_sigprocmask", 126), ("rt_sigreturn", 173),
                 ("dup3", 316), ("lstat", 107),

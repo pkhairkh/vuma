@@ -3413,7 +3413,8 @@ impl Backend for Mips64Backend {
                 // Sockets (N64 generic numbers — bind/listen/accept/connect/
                 // setsockopt/shutdown).
                 ("connect", 5203), ("bind", 5200), ("listen", 5201),
-                ("accept", 5202), ("setsockopt", 5195), ("shutdown", 5210),
+                ("accept", 5202), ("setsockopt", 5195),
+                ("getsockopt", 5054), ("shutdown", 5210),
                 // ── Phase 8: additional syscalls for full parity ──
                 ("dup3", 5286), ("lstat", 5107),
                 ("recvfrom", 5207), ("sendto", 5206),
