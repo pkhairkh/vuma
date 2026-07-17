@@ -1764,7 +1764,10 @@ impl Backend for AlphaBackend {
                 ("getdents64", 377), ("getdents", 305),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 348), ("uname", 339), ("sysinfo", 318),
-            ] {
+                            ("eventfd2", 485),
+                ("newfstatat", 455),
+                ("signalfd4", 484),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 

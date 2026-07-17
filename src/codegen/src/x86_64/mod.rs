@@ -3222,6 +3222,33 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("getsockopt".to_string(), code));
+
+    // signalfd4(args...) -> int  [syscall 289]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 289));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("signalfd4".to_string(), code));
+    }
+
+    // newfstatat(args...) -> int  [syscall 262]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 262));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("newfstatat".to_string(), code));
+    }
+
+    // eventfd2(args...) -> int  [syscall 290]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 290));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("eventfd2".to_string(), code));
+    }
     }
     }
 

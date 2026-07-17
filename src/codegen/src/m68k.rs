@@ -2056,7 +2056,10 @@ impl Backend for M68kBackend {
                 ("getdents64", 220), ("getdents", 141), ("readdir", 89),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 172), ("uname", 122), ("sysinfo", 116),
-            ] {
+                            ("eventfd2", 324),
+                ("newfstatat", 293),
+                ("signalfd4", 326),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 

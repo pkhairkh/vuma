@@ -2029,7 +2029,10 @@ impl Backend for HppaBackend {
                 ("getdents64", 201), ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only; uname=59 divergent)
                 ("prctl", 172), ("uname", 59), ("sysinfo", 116),
-        ] {
+                        ("eventfd2", 310),
+                ("newfstatat", 280),
+                ("signalfd4", 302),
+] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }
 

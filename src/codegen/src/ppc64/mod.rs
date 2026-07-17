@@ -4311,7 +4311,10 @@ impl Backend for PPC64Backend {
                 ("getdents64", 202), ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 171), ("uname", 122), ("sysinfo", 116),
-            ] {
+                            ("eventfd2", 314),
+                ("newfstatat", 291),
+                ("signalfd4", 313),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
