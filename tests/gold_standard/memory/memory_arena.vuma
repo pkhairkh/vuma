@@ -38,6 +38,7 @@
 //       local u64 variables in main instead of in struct allocations.
 
 // Read 8 little-endian bytes from `buf + offset` and reconstruct a u64.
+layout _L1 = { data: [u8; 4096] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
     b0: u64 = *(buf + offset);
     b1: u64 = *(buf + offset + 1);
@@ -91,7 +92,7 @@ fn main() -> i32 {
     arena_total:    u64 = arena_capacity * type_size;   // 4096
 
     // Allocate the arena's backing storage (literal size → stack allocation).
-    arena_base = allocate(4096);
+    let arena_base = state_new(_L1);
     // Local mutable state (no struct allocation needed):
     arena_offset:         u64 = 0;
     arena_alloc_count:    u64 = 0;
@@ -168,7 +169,6 @@ fn main() -> i32 {
     p4_y: u64 = read_u64(p4, 8);
 
     // ─── Clean up — one free for the entire arena ──────────────────────
-    free(arena_base);
 
     // Expected: p4_x == 100, p4_y == 200 → return 0
     if p4_x == 100 {

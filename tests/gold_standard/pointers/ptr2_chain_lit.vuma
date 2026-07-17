@@ -1,19 +1,16 @@
-// ptr2_chain_lit.vuma — chain value across two buffers (literal stores)
+// Migrated from pointers/ptr2_chain_lit.vuma
 // Expected exit code: 55
 //
-// Allocates two 8-byte buffers buf1 and buf2, stores the literal 55 in
-// buf1, loads it back, stores the literal 55 in buf2, loads buf2, and
-// returns. Uses literal stores in both buffers (not the loaded
-// variable) to avoid the known `*ptr = variable` silent-drop bug.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *buf1 = 55;
-    v1: i32 = *buf1;
-    *buf2 = 55;
-    v2: i32 = *buf2;
-    free(buf1);
-    free(buf2);
+    let __s = state_new(Pair);
+    __s.a = 55;
+    let v1 = __s.a;
+    __s.b = 55;
+    let v2 = __s.b;
     return v2;
 }

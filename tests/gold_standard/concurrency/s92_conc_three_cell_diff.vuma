@@ -1,23 +1,19 @@
-// s92_conc_three_cell_diff.vuma — three cells, diff = 57 (250 - 105 - 88)
+// Migrated from concurrency/s92_conc_three_cell_diff.vuma
 // Expected exit code: 57
 //
-// Three independent 8-byte cells. Store 250/105/88 via `*ptr =
-// literal`, load all three, a - b - c -> 57. Uses `*ptr = literal`
-// form. Distinct from s90_conc_three_cell_diff (10),
-// s86_conc_three_cell_diff (150) and s82_conc_three_cell_diff (135).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 250;
-    *c2 = 105;
-    *c3 = 88;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    v3: i32 = *c3;
-    r: i32 = v1 - v2 - v3; // 57
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 250;
+    __s.b = 105;
+    __s.c = 88;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let v3 = __s.c;
+    let r = v1 - v2 - v3;
     return r;
 }

@@ -4,9 +4,11 @@
 // Fills src with a known pattern, copies to dst, then verifies dst matches.
 // Returns 0 on success, 1 on mismatch.
 
+layout _L1 = { a: u32, b: u32 }
+layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    src = allocate(16);
-    dst = allocate(16);
+    let src = state_new(_L1);
+    let dst = state_new(_L2);
     // Fill src with pattern
     i: u32 = 0;
     while i < 16 {
@@ -29,8 +31,6 @@ fn main() -> i32 {
         if sv != dv { ok = 0; }
         k = k + 1;
     }
-    free(src);
-    free(dst);
     if ok == 1 { return 0; }
     return 1;
 }

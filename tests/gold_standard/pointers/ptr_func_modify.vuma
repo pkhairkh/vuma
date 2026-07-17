@@ -7,15 +7,15 @@
 // callee's store to a passed-in buffer is visible to the caller
 // after the call returns.
 
+layout _L1 = { data: [u8; 64] }
 fn write_99(buf: Address) -> i32 {
     *buf = 99;
     return 0;
 }
 
 fn main() -> i32 {
-    buf = allocate(64);
+    let buf = state_new(_L1);
     write_99(buf);
-    val: i32 = *buf;
-    free(buf);
+    val: i32 = buf.v;
     return val;
 }

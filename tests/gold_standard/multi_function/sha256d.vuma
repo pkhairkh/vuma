@@ -29,6 +29,13 @@
 // VUMA does not have a built-in rotate, so we compose from shifts.
 // rotate_right(x, n) = (x >> n) | (x << (32 - n))
 
+layout _L1 = { data: [u8; 32] }
+layout _L2 = { data: [u8; 256] }
+layout _L3 = { data: [u8; 256] }
+layout _L4 = { data: [u8; 64] }
+layout _L5 = { data: [u8; 32] }
+layout _L6 = { v: u32 }
+layout _L7 = { data: [u8; 32] }
 fn rotr32(x: u32, n: u32) -> u32 {
     // Mask to 32 bits: VUMA uses 64-bit registers, so left shifts
     // produce bits above bit 31 that must be cleared.
@@ -322,11 +329,11 @@ fn copy32(dst: Address, src: Address) {
 
 fn sha256d(msg: Address, msg_len: u64, out: Address) {
     // Allocate working memory
-    state = allocate(32);
-    k = allocate(256);
-    w = allocate(256);
-    block = allocate(64);
-    inner = allocate(32);
+    let state = state_new(_L1);
+    let k = state_new(_L2);
+    let w = state_new(_L3);
+    let block = state_new(_L4);
+    let inner = state_new(_L5);
 
     // Initialize constants (same for both passes)
     sha256_init_k(k);
@@ -344,11 +351,6 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
     copy32(out, state);
 
     // Clean up all allocations
-    free(state);
-    free(k);
-    free(w);
-    free(block);
-    free(inner);
 }
 
 // ===========================================================================
@@ -360,18 +362,16 @@ fn main() -> i32 {
     // "abc" — NIST FIPS 180-4 test vector
     // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
     // SHA256d("abc") = 4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358
-    msg = allocate(3);
-    *(msg + 0) = 97;   // 'a'
-    *(msg + 1) = 98;   // 'b'
-    *(msg + 2) = 99;   // 'c'
+    let msg = state_new(_L6);
+    msg.data[0] = 97;   // 'a';
+    msg.data[1] = 98;   // 'b';
+    msg.data[2] = 99;   // 'c';
 
-    digest = allocate(32);
+    let digest = state_new(_L7);
     sha256d(msg, 3, digest);
 
     // Return the first byte of the hash as exit code.
     // Expected: 0x4f = 79
-    result: i32 = *(digest + 0);
-    free(msg);
-    free(digest);
+    result: i32 = digest.data[0];
     return result;
 }

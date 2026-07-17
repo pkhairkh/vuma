@@ -1,23 +1,19 @@
-// s84_mem_three_cell_diff.vuma — three cells, diff = 39 (50 - 8 - 3)
+// Migrated from memory/s84_mem_three_cell_diff.vuma
 // Expected exit code: 39
 //
-// Three 8-byte cells. Store 50/8/3 via `*ptr = literal`,
-// load all three, a - b - c -> 39. Uses `*ptr = literal` form
-// (no offsets). Distinct from s82_mem_three_cell_diff (230),
-// s78_mem_three_cell_diff (148) and s74_mem_three_cell_diff (78).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 50;
-    *c2 = 8;
-    *c3 = 3;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
-    r: u64 = a - b - c;    // 39
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 50;
+    __s.b = 8;
+    __s.c = 3;
+    let a = __s.a;
+    let b = __s.b;
+    let c = __s.c;
+    let r = a - b - c;
     return r;
 }

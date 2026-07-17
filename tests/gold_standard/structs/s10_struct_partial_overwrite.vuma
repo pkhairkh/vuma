@@ -16,20 +16,20 @@ struct Quad {
     d: u64,
 }
 
+layout _L1 = { data: [u8; 32] }
 fn main() -> i32 {
-    p = allocate(32);
-    *(p + 0) = 10;
-    *(p + 8) = 20;
-    *(p + 16) = 30;
-    *(p + 24) = 40;
-    *(p + 8) = 99;
-    a: u64 = *(p + 0);
-    b: u64 = *(p + 8);
-    c: u64 = *(p + 16);
-    d: u64 = *(p + 24);
+    let p = state_new(_L1);
+    p.data[0] = 10;
+    p.data[8] = 20;
+    p.data[16] = 30;
+    p.data[24] = 40;
+    p.data[8] = 99;
+    a: u64 = p.data[0];
+    b: u64 = p.data[8];
+    c: u64 = p.data[16];
+    d: u64 = p.data[24];
     t1: u64 = a + b;
     t2: u64 = t1 + c;
     s: u64 = t2 + d;
-    free(p);
     return s;
 }

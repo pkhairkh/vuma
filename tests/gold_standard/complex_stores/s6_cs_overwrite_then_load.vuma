@@ -5,11 +5,12 @@
 // 33. Load offset 0 -> 33. Distinct from s5_cs_overwrite_then_sum
 // (overwrites and then sums across offsets).
 
+layout Buf_buf = { data: [u8; 16] }
+
 fn main() -> i32 {
-    buf = allocate(16);
-    *(buf + 0) = 11;
-    *(buf + 0) = 33;
-    v: u64 = *(buf + 0);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 11;
+    buf.data[0] = 33;
+    v: u64 = buf.data[0];
     return v;
 }

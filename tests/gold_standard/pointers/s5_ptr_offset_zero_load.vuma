@@ -5,11 +5,11 @@
 // reads only offset 0 back. Verifies that a later store at a
 // different offset doesn't clobber offset 0.
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 99;
-    *(p + 8) = 7;
-    v: i32 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 99;
+    p.data[8] = 7;
+    v: i32 = p.data[0];
     return v;
 }

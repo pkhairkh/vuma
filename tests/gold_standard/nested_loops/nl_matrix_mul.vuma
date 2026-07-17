@@ -14,6 +14,9 @@
 // continues to pass and serves as a regression test for matrix-multiply
 // codegen.
 
+layout _L1 = { a: u32, b: u32 }
+layout _L2 = { a: u32, b: u32 }
+layout _L3 = { a: u32, b: u32 }
 fn mat_read(mat: Address, row: u64, col: u64) -> u32 {
     offset: u64 = (row * 2 + col) * 4;
     val: u32 = *(mat + offset);
@@ -26,9 +29,9 @@ fn mat_write(mat: Address, row: u64, col: u64, val: u32) {
 }
 
 fn main() -> i32 {
-    a = allocate(16);
-    b = allocate(16);
-    c = allocate(16);
+    let a = state_new(_L1);
+    let b = state_new(_L2);
+    let c = state_new(_L3);
 
     // A = [[1,1],[1,1]]
     mat_write(a, 0, 0, 1); mat_write(a, 0, 1, 1);
@@ -59,8 +62,5 @@ fn main() -> i32 {
         }
     }
 
-    free(a);
-    free(b);
-    free(c);
     return check;
 }

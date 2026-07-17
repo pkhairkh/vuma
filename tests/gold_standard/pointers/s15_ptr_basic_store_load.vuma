@@ -1,15 +1,14 @@
-// s15_ptr_basic_store_load.vuma — store 73, load 73
+// Migrated from pointers/s15_ptr_basic_store_load.vuma
 // Expected exit code: 73
 //
-// Single 8-byte cell. Store literal 73, load back, return. Most basic
-// store-load round trip via pointer. Uses `*p = literal` form. Distinct
-// from s14_ptr_single_store_load (value 88) and s13_ptr_store_load_basic
-// (value 55).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 73;
-    v: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 73;
+    let v = __s.v;
     return v;
 }

@@ -1,14 +1,14 @@
-// s40_mem_store_load_lit.vuma — store 205, load = 205
+// Migrated from memory/s40_mem_store_load_lit.vuma
 // Expected exit code: 205
 //
-// Single 8-byte cell. Store 205 via `*ptr = literal`, load and
-// return 205. Uses `*ptr = literal` form (no offsets). Distinct from
-// s38_mem_store_load_lit (175) and s34_mem_store_load_lit (187).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 205;
-    v: u64 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 205;
+    let v = __s.v;
     return v;
 }

@@ -7,15 +7,16 @@
 // before the XOR. Distinct from s22_ls_two_node_sum (37+53=90) and
 // s18_ls_two_node_sum (19+61=80).
 
+layout Buf_n1 = { data: [u8; 8] }
+layout Buf_n2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    n2 = allocate(8);
-    *n1 = 240;           // 0xF0
-    *n2 = 15;            // 0x0F
-    a: u64 = *n1;
-    b: u64 = *n2;
+    let n1 = state_new(Buf_n1);
+    let n2 = state_new(Buf_n2);
+    n1.data[0] = 240;           // 0xF0
+    n2.data[0] = 15;            // 0x0F
+    a: u64 = n1.data[0];
+    b: u64 = n2.data[0];
     s: u64 = a ^ b;       // 0xFF = 255
-    free(n1);
-    free(n2);
     return s;
 }

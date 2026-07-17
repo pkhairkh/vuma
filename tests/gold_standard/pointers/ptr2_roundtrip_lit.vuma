@@ -1,20 +1,16 @@
-// ptr2_roundtrip_lit.vuma — double round-trip with literal stores
+// Migrated from pointers/ptr2_roundtrip_lit.vuma
 // Expected exit code: 123
 //
-// Allocates two 8-byte buffers buf1 and buf2, stores the literal 123 in
-// buf1, loads it back, stores the literal 123 (not the loaded
-// variable) in buf2, loads buf2, and returns. Uses literal stores in
-// both buffers to avoid the known `*ptr = variable` silent-drop bug
-// (which breaks the equivalent variable-store roundtrip).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *buf1 = 123;
-    v1: i32 = *buf1;
-    *buf2 = 123;
-    v2: i32 = *buf2;
-    free(buf1);
-    free(buf2);
+    let __s = state_new(Pair);
+    __s.a = 123;
+    let v1 = __s.a;
+    __s.b = 123;
+    let v2 = __s.b;
     return v2;
 }

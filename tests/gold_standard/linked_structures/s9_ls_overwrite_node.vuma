@@ -7,11 +7,12 @@
 // Distinct from s6_ls_overwrite_first (uses *(block+N) form,
 // overwrites first node of a 3-node chain).
 
+layout Buf_node = { data: [u8; 8] }
+
 fn main() -> i32 {
-    node = allocate(8);
-    *node = 5;
-    *node = 50;
-    v: u64 = *node;
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 5;
+    node.data[0] = 50;
+    v: u64 = node.data[0];
     return v;
 }

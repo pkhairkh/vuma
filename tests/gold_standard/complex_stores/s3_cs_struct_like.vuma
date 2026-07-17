@@ -5,18 +5,19 @@
 // field_a = 10, field_b = 30, field_c = 60. main loads all three and
 // sums them.
 
-fn main() -> i32 {
-    s = allocate(24);
-    *(s + 0) = 10;
-    *(s + 8) = 30;
-    *(s + 16) = 60;
+layout Buf_s = { data: [u8; 24] }
 
-    a: u64 = *(s + 0);
-    b: u64 = *(s + 8);
-    c: u64 = *(s + 16);
+fn main() -> i32 {
+    let s = state_new(Buf_s);
+    s.data[0] = 10;
+    s.data[8] = 30;
+    s.data[16] = 60;
+
+    a: u64 = s.data[0];
+    b: u64 = s.data[8];
+    c: u64 = s.data[16];
     s1: u64 = a + b;
     s2: u64 = s1 + c;
 
-    free(s);
     return s2;
 }

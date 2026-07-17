@@ -9,15 +9,15 @@ struct Cell {
     v: u64,
 }
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    q = allocate(8);
-    *(p + 0) = 25;
-    *(q + 0) = 50;
-    a: u64 = *(p + 0);
-    b: u64 = *(q + 0);
+    let p = state_new(_L1);
+    let q = state_new(_L2);
+    p.data[0] = 25;
+    q.data[0] = 50;
+    a: u64 = p.data[0];
+    b: u64 = q.data[0];
     s: u64 = a + b;
-    free(p);
-    free(q);
     return s;
 }

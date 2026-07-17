@@ -13,13 +13,13 @@
 // return a non-42 value today; the test will turn green once the
 // codegen for AddressOf / wider stores / double-deref is implemented.
 
+layout _L1 = { data: [u8; 64] }
+layout _L2 = { data: [u8; 64] }
 fn main() -> i32 {
-    buf1 = allocate(64);
-    buf2 = allocate(64);
-    *buf2 = 42;
-    *buf1 = buf2;
-    val: i32 = **buf1;
-    free(buf1);
-    free(buf2);
+    let buf1 = state_new(_L1);
+    let buf2 = state_new(_L2);
+    buf2.v = 42;
+    buf1.v = buf2;
+    val: i32 = *buf1.v;
     return val;
 }

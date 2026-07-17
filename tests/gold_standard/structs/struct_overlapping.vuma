@@ -7,15 +7,15 @@
 // Demonstrates that struct field offsets can address individual bytes
 // within a wider allocation.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
+    let p = state_new(_L1);
     // Store u64 value 0xFF as 8 individual bytes (little-endian)
-    *(p + 0) = 255;
-    *(p + 1) = 0;
-    *(p + 2) = 0;
-    *(p + 3) = 0;
+    p.data[0] = 255;
+    p.data[1] = 0;
+    p.data[2] = 0;
+    p.data[3] = 0;
     // Load byte 0
-    b0: u64 = *(p + 0);
-    free(p);
+    b0: u64 = p.data[0];
     return b0;
 }

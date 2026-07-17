@@ -5,10 +5,10 @@
 // freshly-allocated buffer (the cell is writable immediately after
 // allocation returns).  Straight-line code only.
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    buf = allocate(16);
-    *(buf + 0) = 42;
-    val: u32 = *(buf + 0);
-    free(buf);
+    let buf = state_new(_L1);
+    buf.data[0] = 42;
+    val: u32 = buf.data[0];
     return val;
 }

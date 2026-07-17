@@ -9,10 +9,10 @@ struct Small {
     val: u64,
 }
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *(p + 0) = 7;
-    val: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 7;
+    val: u64 = p.data[0];
     return val;
 }

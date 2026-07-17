@@ -4,13 +4,14 @@
 // Compute the sum of two constants in a variable, store that variable
 // (via `+ 0` workaround) to memory, load it back, return it.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
     a: u32 = 20;
     b: u32 = 30;
     s: u32 = a + b;
-    buf = allocate(8);
-    *(buf + 0) = s + 0;
-    out: u64 = *(buf + 0);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = s + 0;
+    out: u64 = buf.data[0];
     return out;
 }

@@ -35,6 +35,7 @@
 //   offset 16: data (u64,     8 bytes)
 
 // ─── Read 8 little-endian bytes from `ptr + offset` and reconstruct u64 ─
+layout _L1 = { data: [u8; 96] }
 fn read_u64(ptr: Address, offset: u64) -> u64 {
     b0: u64 = *(ptr + offset);
     b1: u64 = *(ptr + offset + 1);
@@ -63,7 +64,7 @@ fn write_u64(ptr: Address, offset: u64, val: u64) {
 fn main() -> i32 {
     // ─── Allocate all nodes up-front in main ──────────────────────────
     // 1 sentinel + 3 data nodes = 4 × 24 = 96 bytes.
-    pool = allocate(96);
+    let pool = state_new(_L1);
     sentinel: Address = pool;
     node1:    Address = pool + 24;
     node2:    Address = pool + 48;
@@ -124,7 +125,6 @@ fn main() -> i32 {
 
     // ─── Free every node (Cleanup invariant) ─────────────────────────
     // All nodes are in the single `pool` allocation, so one free suffices.
-    free(pool);
 
     if sum == 60 {
         return 0;

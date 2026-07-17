@@ -7,11 +7,12 @@
 // s26_ls_overwrite_first (overwrite-first, three-node sum, 150) and
 // s22_ls_overwrite_last (overwrite-last, different shape).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 5;
-    *n1 = 95;
-    a: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 5;
+    n1.data[0] = 95;
+    a: u64 = n1.data[0];
     return a;
 }

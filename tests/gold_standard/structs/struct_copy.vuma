@@ -11,17 +11,17 @@ struct Point {
     y: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
+layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    src = allocate(16);
-    dst = allocate(16);
-    *(src + 0) = 42;
-    *(src + 8) = 99;
-    sx: u64 = *(src + 0);
-    sy: u64 = *(src + 8);
-    *(dst + 0) = sx;
-    *(dst + 8) = sy;
-    val: u64 = *(dst + 0);
-    free(src);
-    free(dst);
+    let src = state_new(_L1);
+    let dst = state_new(_L2);
+    src.data[0] = 42;
+    src.data[8] = 99;
+    sx: u64 = src.data[0];
+    sy: u64 = src.data[8];
+    dst.data[0] = sx;
+    dst.data[8] = sy;
+    val: u64 = dst.data[0];
     return val;
 }

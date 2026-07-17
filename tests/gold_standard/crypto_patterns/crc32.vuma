@@ -19,6 +19,8 @@
 // Right-rotate a u32 by n bits
 // ===========================================================================
 
+layout _L1 = { data: [u8; 1024] }
+layout _L2 = { a: u32, b: u32 }
 fn rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
@@ -95,26 +97,24 @@ fn crc32_compute(table: Address, msg: Address, len: u64) -> u32 {
 
 fn main() -> i32 {
     // Allocate and build CRC table (256 × 4 = 1024 bytes)
-    table = allocate(1024);
+    let table = state_new(_L1);
     build_crc_table(table);
 
     // Allocate message buffer: "123456789" (9 bytes)
-    msg = allocate(9);
-    *(msg + 0) = 49;    // '1'
-    *(msg + 1) = 50;    // '2'
-    *(msg + 2) = 51;    // '3'
-    *(msg + 3) = 52;    // '4'
-    *(msg + 4) = 53;    // '5'
-    *(msg + 5) = 54;    // '6'
-    *(msg + 6) = 55;    // '7'
-    *(msg + 7) = 56;    // '8'
-    *(msg + 8) = 57;    // '9'
+    let msg = state_new(_L2);
+    msg.data[0] = 49;    // '1';
+    msg.data[1] = 50;    // '2';
+    msg.data[2] = 51;    // '3';
+    msg.data[3] = 52;    // '4';
+    msg.data[4] = 53;    // '5';
+    msg.data[5] = 54;    // '6';
+    msg.data[6] = 55;    // '7';
+    msg.data[7] = 56;    // '8';
+    msg.data[8] = 57;    // '9';
 
     // Compute CRC32
     result: u32 = crc32_compute(table, msg, 9);
 
-    free(table);
-    free(msg);
 
     // Return the low byte of the CRC as exit code
     // Expected: 0x26 = 38

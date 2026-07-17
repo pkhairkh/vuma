@@ -6,11 +6,12 @@
 // `*ptr = literal` form (no offsets). Distinct from
 // s78_cs_overwrite_first (3), s77_cs_overwrite_first (2) and
 // s76_cs_overwrite_first (3).
+layout Buf_c1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    *c1 = 1;
-    *c1 = 36;
-    r: u64 = *c1;          // 36
-    free(c1);
+    let c1 = state_new(Buf_c1);
+    c1.data[0] = 1;
+    c1.data[0] = 36;
+    r: u64 = c1.data[0];          // 36
     return r;
 }

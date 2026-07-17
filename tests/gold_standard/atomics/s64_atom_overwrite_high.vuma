@@ -7,11 +7,11 @@
 // through. Distinct from s62_atom_overwrite_low (240), s62_atom_three_
 // cell_sum (205) and s62_atom_two_cell_diff (170).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 40);
-    atomic_store(c1, 250);
-    v = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 40;
+    c1.v = 250;
+    v = c1.v;
     return v;
 }

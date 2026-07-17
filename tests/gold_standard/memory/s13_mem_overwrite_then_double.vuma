@@ -7,13 +7,13 @@
 // Distinct from s9_mem_load_then_double (no overwrite) and
 // s10_mem_overwrite_middle (3-cell overwrite, no multiply).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *buf = 7;
-    *buf = 14;
-    v: u64 = *buf;
+    let buf = state_new(_L1);
+    buf.v = 7;
+    buf.v = 14;
+    v: u64 = buf.v;
     two: u64 = 2;
     r: u64 = v * two;
-    free(buf);
     return r;
 }

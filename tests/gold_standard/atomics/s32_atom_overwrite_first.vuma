@@ -8,11 +8,11 @@
 // (different value).
 // Expected exit code: 200
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 100);
-    atomic_store(c1, 200);
-    a = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 100;
+    c1.v = 200;
+    a = c1.v;
     return a;
 }

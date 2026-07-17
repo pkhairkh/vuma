@@ -5,10 +5,10 @@
 // loads it back. Verifies that larger buffers do not corrupt offset-0
 // stores.
 
+layout _L1 = { data: [u8; 256] }
 fn main() -> i32 {
-    buf = allocate(256);
-    *buf = 42;
-    val: i32 = *buf;
-    free(buf);
+    let buf = state_new(_L1);
+    buf.v = 42;
+    val: i32 = buf.v;
     return val;
 }

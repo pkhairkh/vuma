@@ -7,11 +7,11 @@
 // from s22_atom_overwrite_load (overwrite pattern, 0xFF) and
 // s16_atom_overwrite_then_load (different values).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 10);
-    atomic_store(c1, 250);
-    a = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 10;
+    c1.v = 250;
+    a = c1.v;
     return a;
 }

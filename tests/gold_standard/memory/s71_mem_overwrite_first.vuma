@@ -1,18 +1,16 @@
-// s71_mem_overwrite_first.vuma — overwrite c1 to 198, load = 198
+// Migrated from memory/s71_mem_overwrite_first.vuma
 // Expected exit code: 198
 //
-// Two 8-byte cells. Store 50 at c1, store 100 at c2 then overwrite
-// c1 to 198. Load c1 -> 198 (the overwritten value). Uses `*ptr
-// = literal` form. Distinct from s69_mem_overwrite_first (110),
-// s70_mem_overwrite_first (105) and s66_mem_overwrite_first (200).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 50;
-    *c2 = 100;
-    *c1 = 198;
-    v: u64 = *c1;          // 198
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 50;
+    __s.b = 100;
+    __s.a = 198;
+    let v = __s.a;
     return v;
 }

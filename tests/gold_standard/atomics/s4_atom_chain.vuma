@@ -6,19 +6,19 @@
 // 11 + 22 + 33 = 66. On the current backend all loads return 0 →
 // exit 0. Will exit 66 once atomic ops are wired through the bridge.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    atomic_store(c1, 11);
-    atomic_store(c2, 22);
-    atomic_store(c3, 33);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
-    c = atomic_load(c3);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 11;
+    c2.v = 22;
+    c3.v = 33;
+    a = c1.v;
+    b = c2.v;
+    c = c3.v;
     s = a + b + c;
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

@@ -7,15 +7,15 @@
 // from s34_atom_two_cell_sum (sum, 165) and s30_atom_two_cell_xor
 // (xor, 255, different operands).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
     atomic_store(c1, 240);           // 0xF0
     atomic_store(c2, 15);            // 0x0F
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    a = c1.v;
+    b = c2.v;
     r: i32 = a ^ b;                  // 0xFF = 255
-    free(c1);
-    free(c2);
     return r;
 }

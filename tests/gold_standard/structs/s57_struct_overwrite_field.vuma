@@ -11,11 +11,11 @@ struct Single {
     a: u64,
 }
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p1 = allocate(8);
-    *p1 = 175;
-    *p1 = 80;              // overwrite
-    a: u64 = *p1;          // 80
-    free(p1);
+    let p1 = state_new(_L1);
+    p1.v = 175;
+    p1.v = 80;              // overwrite;
+    a: u64 = p1.v;          // 80
     return a;
 }

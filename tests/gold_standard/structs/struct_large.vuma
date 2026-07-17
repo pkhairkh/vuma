@@ -16,10 +16,10 @@ struct Large {
     f7: u64,
 }
 
+layout _L1 = { data: [u8; 64] }
 fn main() -> i32 {
-    p = allocate(64);
-    *(p + 56) = 42;
-    val: u64 = *(p + 56);
-    free(p);
+    let p = state_new(_L1);
+    p.data[56] = 42;
+    val: u64 = p.data[56];
     return val;
 }

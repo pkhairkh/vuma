@@ -8,10 +8,10 @@
 // included for set-13 coverage) and s9_edge_max_then_zero
 // (255 then 0).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 0;
-    v: u64 = *p;
-    free(p);
+    let p = state_new(_L1);
+    p.v = 0;
+    v: u64 = p.v;
     return v;
 }

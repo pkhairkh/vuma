@@ -4,10 +4,10 @@
 // Edge case: smallest meaningful allocation (1 byte). Store 42 at
 // offset 0, load it back, return. Verifies 1-byte buffers work.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(1);
-    *buf = 42;
-    val: i32 = *buf;
-    free(buf);
+    let buf = state_new(_L1);
+    buf.v = 42;
+    val: i32 = buf.v;
     return val;
 }

@@ -6,20 +6,21 @@
 // (no offsets). Distinct from s34_cs_three_cell_sum (sum, 180) and
 // s30_cs_three_cell_xor (xor).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 200;
-    *c2 = 50;
-    *c3 = 30;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 200;
+    c2.data[0] = 50;
+    c3.data[0] = 30;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    c: u64 = c3.data[0];
     t: u64 = a - b;
     d: u64 = t - c;        // 120
-    free(c1);
-    free(c2);
-    free(c3);
     return d;
 }

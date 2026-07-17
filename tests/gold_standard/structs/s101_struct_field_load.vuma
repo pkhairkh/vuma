@@ -9,10 +9,10 @@ struct Single {
     a: u64,
 }
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 71;
-    v: u64 = *p;           // 71
-    free(p);
+    let p = state_new(_L1);
+    p.v = 71;
+    v: u64 = p.v;           // 71
     return v;
 }

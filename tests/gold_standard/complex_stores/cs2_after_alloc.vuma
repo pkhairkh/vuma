@@ -6,10 +6,11 @@
 // the back. Verifies allocate does not leave the buffer in a state that
 // breaks subsequent offset-0 stores.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 42;
-    val: u32 = *(buf + 0);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 42;
+    val: u32 = buf.data[0];
     return val;
 }

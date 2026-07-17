@@ -5,10 +5,10 @@
 // confirm that arbitrary decimal literals survive the store→load path
 // and the value isn't truncated or replaced.  Straight-line code only.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 10;
-    val: u32 = *(buf + 0);
-    free(buf);
+    let buf = state_new(_L1);
+    buf.data[0] = 10;
+    val: u32 = buf.data[0];
     return val;
 }

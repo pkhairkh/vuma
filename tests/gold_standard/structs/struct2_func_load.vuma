@@ -12,15 +12,15 @@ struct Point {
     y: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
 fn load_val(p: Address) -> u64 {
     v: u64 = *p;
     return v;
 }
 
 fn main() -> i32 {
-    p = allocate(16);
-    *p = 42;
+    let p = state_new(_L1);
+    p.v = 42;
     val: u64 = load_val(p);
-    free(p);
     return val;
 }

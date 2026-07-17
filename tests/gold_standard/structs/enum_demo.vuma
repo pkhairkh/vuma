@@ -43,6 +43,7 @@ enum Result {
 // Create an Option::Some value in memory
 // ===========================================================================
 
+layout _L1 = { v: u32 }
 fn make_some(val: u32, out: Address) {
     // Write tag = 1 (Some variant)
     *(out + 0) = 1;
@@ -92,7 +93,7 @@ fn option_unwrap_or(opt: Address, default: u32) -> u32 {
 
 fn main() -> i32 {
     // Allocate space for an Option enum (8 bytes: tag + payload)
-    opt = allocate(8);
+    let opt = state_new(_L1);
 
     // Create Some(42)
     make_some(42, opt);
@@ -107,7 +108,6 @@ fn main() -> i32 {
     val2: u32 = option_unwrap_or(opt, 99);
 
     // Clean up
-    free(opt);
 
     // Return val1 + val2 as exit code
     // Expected: 42 + 99 = 141

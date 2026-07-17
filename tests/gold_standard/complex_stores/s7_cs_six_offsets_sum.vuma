@@ -8,8 +8,10 @@
 // dereference itself). Distinct from s5_cs_long_scatter (4 offsets)
 // and s6_cs_four_offsets (4 offsets, different values).
 
+layout Buf_buf = { data: [u8; 48] }
+
 fn main() -> i32 {
-    buf = allocate(48);
+    let buf = state_new(Buf_buf);
     p0 = buf;
     p8 = buf + 8;
     p16 = buf + 16;
@@ -33,6 +35,5 @@ fn main() -> i32 {
     t3: u64 = t2 + d;
     t4: u64 = t3 + e;
     s: u64 = t4 + f;
-    free(buf);
     return s;
 }

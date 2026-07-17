@@ -6,18 +6,18 @@
 // After the swap, a=2 and b=1. Returns b (the new value at offset 8,
 // which is the original a = 1).
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 1;
-    *(p + 8) = 2;
+    let p = state_new(_L1);
+    p.data[0] = 1;
+    p.data[8] = 2;
     // Swap using temp
-    a: u64 = *(p + 0);
-    b: u64 = *(p + 8);
+    a: u64 = p.data[0];
+    b: u64 = p.data[8];
     tmp: u64 = a;
-    *(p + 0) = b;
-    *(p + 8) = tmp;
+    p.data[0] = b;
+    p.data[8] = tmp;
     // Return new b (which is original a = 1)
-    val: u64 = *(p + 8);
-    free(p);
+    val: u64 = p.data[8];
     return val;
 }

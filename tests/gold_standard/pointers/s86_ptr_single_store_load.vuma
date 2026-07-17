@@ -1,14 +1,14 @@
-// s86_ptr_single_store_load.vuma — store 180, load = 180
+// Migrated from pointers/s86_ptr_single_store_load.vuma
 // Expected exit code: 180
 //
-// Single 8-byte cell. Store 180 via `*p = literal`, load and
-// return 180. Uses `*p = literal` form (no offsets). Distinct
-// from s82_ptr_single_store_load (35), s78_ptr_single_store_load
-// (1) and s74_ptr_single_store_load (161).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 180;
-    v: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 180;
+    let v = __s.v;
     return v;
 }

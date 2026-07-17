@@ -6,10 +6,11 @@
 // (no offsets). Distinct from s30_ls_two_node_sum (sum, 110) and
 // s28_ls_single_load (different value).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 175;
-    a: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 175;
+    a: u64 = n1.data[0];
     return a;
 }

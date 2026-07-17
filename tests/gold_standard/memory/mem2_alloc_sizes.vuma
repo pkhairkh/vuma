@@ -6,16 +6,16 @@
 // the largest allocated last) does not corrupt the ability to store to
 // and load from the largest buffer.  Straight-line code only.
 
+layout _L1 = { v: u32 }
+layout _L2 = { a: u32, b: u32 }
+layout _L3 = { data: [u8; 32] }
+layout _L4 = { data: [u8; 64] }
 fn main() -> i32 {
-    b8  = allocate(8);
-    b16 = allocate(16);
-    b32 = allocate(32);
-    b64 = allocate(64);
-    *(b64 + 0) = 42;
-    val: u32 = *(b64 + 0);
-    free(b8);
-    free(b16);
-    free(b32);
-    free(b64);
+    let b8 = state_new(_L1);
+    let b16 = state_new(_L2);
+    let b32 = state_new(_L3);
+    let b64 = state_new(_L4);
+    b64.data[0] = 42;
+    val: u32 = b64.data[0];
     return val;
 }

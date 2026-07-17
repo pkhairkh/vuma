@@ -6,15 +6,15 @@
 // exit 0. Will exit 19 once atomics are wired through. Distinct from
 // s94_atom_two_cell_diff (33), s90_atom_two_cell_diff (1) and
 // s86_atom_two_cell_sum (200).
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    atomic_store(c1, 100);
-    atomic_store(c2, 81);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    c1.v = 100;
+    c2.v = 81;
+    a = c1.v;
+    b = c2.v;
     d: i32 = a - b;                   // 19
-    free(c1);
-    free(c2);
     return d;
 }

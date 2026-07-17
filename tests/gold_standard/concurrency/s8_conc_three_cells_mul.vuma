@@ -5,20 +5,20 @@
 // All three loaded back and multiplied. 5 * 6 * 7 = 210. Distinct from
 // s6_conc_sum_three_diff (sum, not product).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 5;
-    *c2 = 6;
-    *c3 = 7;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    v3: i32 = *c3;
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 5;
+    c2.v = 6;
+    c3.v = 7;
+    v1: i32 = c1.v;
+    v2: i32 = c2.v;
+    v3: i32 = c3.v;
     p1: i32 = v1 * v2;
     s: i32 = p1 * v3;
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

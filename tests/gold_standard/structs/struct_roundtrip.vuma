@@ -6,14 +6,14 @@
 // p2. The returned value (123) confirms a full store→load→store→load
 // roundtrip preserves the value across two struct instances.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *(p1 + 0) = 123;
-    v1: u64 = *(p1 + 0);
-    *(p2 + 0) = v1;
-    v2: u64 = *(p2 + 0);
-    free(p1);
-    free(p2);
+    let p1 = state_new(_L1);
+    let p2 = state_new(_L2);
+    p1.data[0] = 123;
+    v1: u64 = p1.data[0];
+    p2.data[0] = v1;
+    v2: u64 = p2.data[0];
     return v2;
 }

@@ -5,19 +5,20 @@
 // all three, a - b - c -> 13. Uses `*ptr = literal` form (no
 // offsets). Distinct from s78_cs_three_cell_diff (148),
 // s74_cs_three_cell_diff (50) and s73_cs_three_cell_diff (70).
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 15;
-    *c2 = 1;
-    *c3 = 1;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 15;
+    c2.data[0] = 1;
+    c3.data[0] = 1;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    c: u64 = c3.data[0];
     r: u64 = a - b - c;    // 13
-    free(c1);
-    free(c2);
-    free(c3);
     return r;
 }

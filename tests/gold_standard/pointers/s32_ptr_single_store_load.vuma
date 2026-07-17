@@ -1,16 +1,14 @@
-// s32_ptr_single_store_load.vuma - store 165, load = 165
+// Migrated from pointers/s32_ptr_single_store_load.vuma
 // Expected exit code: 165
 //
-// store 165, load = 165. All operands loaded into typed variables before any
-// bitwise op (immediate-RHS drop workaround where applicable); stores use
-// the `*ptr = literal` (or `*ptr = variable + 0`) form with no `*(ptr +
-// offset)` indexing. Distinct from s30_ptr_single_store_load (different
-// value) and s26_ptr_single_store_load (different value).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 165;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 165;
+    let r = __s.v;
     return r;
 }

@@ -14,8 +14,9 @@ struct Quad {
     d: u64,
 }
 
+layout _L1 = { data: [u8; 32] }
 fn main() -> i32 {
-    p = allocate(32);
+    let p = state_new(_L1);
     f0 = p;
     f1 = p + 8;
     f2 = p + 16;
@@ -31,6 +32,5 @@ fn main() -> i32 {
     t1: u64 = a + b;
     t2: u64 = c + d;
     s: u64 = t1 + t2;
-    free(p);
     return s;
 }

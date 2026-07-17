@@ -4,15 +4,16 @@
 // Two buffers: store 40 in buf1, store 60 in buf2, then load both and
 // sum. Tests alternating writes to different buffers in sequence.
 
+layout Buf_buf1 = { data: [u8; 8] }
+layout Buf_buf2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 40;
-    *(buf2 + 0) = 60;
-    a: u64 = *(buf1 + 0);
-    b: u64 = *(buf2 + 0);
+    let buf1 = state_new(Buf_buf1);
+    let buf2 = state_new(Buf_buf2);
+    buf1.data[0] = 40;
+    buf2.data[0] = 60;
+    a: u64 = buf1.data[0];
+    b: u64 = buf2.data[0];
     s: u64 = a + b;
-    free(buf1);
-    free(buf2);
     return s;
 }

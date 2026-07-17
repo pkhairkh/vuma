@@ -8,8 +8,10 @@
 // (overwrites middle node, not last) and s6_ls_overwrite_first
 // (overwrites first node).
 
+layout Buf_block = { data: [u8; 24] }
+
 fn main() -> i32 {
-    block = allocate(24);
+    let block = state_new(Buf_block);
     n0 = block;
     n1 = block + 8;
     n2 = block + 16;
@@ -22,6 +24,5 @@ fn main() -> i32 {
     c: u64 = *n2;
     t1: u64 = a + b;
     s: u64 = t1 + c;
-    free(block);
     return s;
 }

@@ -6,15 +6,15 @@
 // 255 once the atomics bridge is wired through.
 // Distinct from s30_atom_two_cell_xor (xor, 255) and s26_atom_two_cell_or (or, 255).
 // Expected exit code: 255
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    atomic_store(c1, 100);
-    atomic_store(c2, 155);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    c1.v = 100;
+    c2.v = 155;
+    a = c1.v;
+    b = c2.v;
     r: i32 = a + b;          // 255
-    free(c1);
-    free(c2);
     return r;
 }

@@ -7,8 +7,9 @@
 // s5_mem_overwrite_at_diff_offsets (overwrites all three offsets) and
 // s6_mem_overwrite_3x (overwrites single offset 3 times).
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    buf = allocate(16);
+    let buf = state_new(_L1);
     p0 = buf;
     p8 = buf + 8;
     *p0 = 11;
@@ -17,6 +18,5 @@ fn main() -> i32 {
     a: u64 = *p0;
     b: u64 = *p8;
     s: u64 = a + b;
-    free(buf);
     return s;
 }

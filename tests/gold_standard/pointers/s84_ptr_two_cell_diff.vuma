@@ -1,19 +1,17 @@
-// s84_ptr_two_cell_diff.vuma — two cells, diff = 32 (80 - 48)
+// Migrated from pointers/s84_ptr_two_cell_diff.vuma
 // Expected exit code: 32
 //
-// Two 8-byte cells. Store 80/48 via `*ptr = literal`, load
-// both, a - b -> 32. Uses `*ptr = literal` form (no offsets).
-// Distinct from s82_ptr_two_cell_diff (205), s78_ptr_two_cell_
-// diff (2) and s74_ptr_two_cell_sum (71).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 80;
-    *p2 = 48;
-    a: i32 = *p1;
-    b: i32 = *p2;
-    d: i32 = a - b;        // 32
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 80;
+    __s.b = 48;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a - b;
     return d;
 }

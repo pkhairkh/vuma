@@ -1,22 +1,18 @@
-// ptr_chain_store.vuma — chain stores across 3 buffers
+// Migrated from pointers/ptr_chain_store.vuma
 // Expected exit code: 7
 //
-// Stores 7 in buf1 (at offset 0 via *buf), copies the value to buf2,
-// then to buf3, loads buf3, and returns it. Verifies that values
-// propagate through a chain of pointer stores/loads.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
 
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    buf3 = allocate(8);
-    *buf1 = 7;
-    tmp1: i32 = *buf1;
-    *buf2 = tmp1;
-    tmp2: i32 = *buf2;
-    *buf3 = tmp2;
-    val: i32 = *buf3;
-    free(buf1);
-    free(buf2);
-    free(buf3);
+    let __s = state_new(Triple);
+    __s.a = 7;
+    let tmp1 = __s.a;
+    __s.b = tmp1;
+    let tmp2 = __s.b;
+    __s.c = tmp2;
+    let val = __s.c;
     return val;
 }

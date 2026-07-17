@@ -9,14 +9,15 @@
 // is silently dropped). The `| 0` is an identity-expression workaround
 // that forces the codegen down the "store expression" path, which works.
 
+layout Buf_src = { data: [u8; 8] }
+layout Buf_dst = { data: [u8; 8] }
+
 fn main() -> i32 {
-    src = allocate(8);
-    dst = allocate(8);
-    *(src + 0) = 42;
-    tmp: u32 = *(src + 0);
-    *(dst + 0) = tmp | 0;
-    out: u32 = *(dst + 0);
-    free(src);
-    free(dst);
+    let src = state_new(Buf_src);
+    let dst = state_new(Buf_dst);
+    src.data[0] = 42;
+    tmp: u32 = src.data[0];
+    dst.data[0] = tmp | 0;
+    out: u32 = dst.data[0];
     return out;
 }

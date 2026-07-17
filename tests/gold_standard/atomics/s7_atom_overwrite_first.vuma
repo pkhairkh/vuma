@@ -8,16 +8,16 @@
 // (single-cell overwrite) and s6_atom_overwrite_load (different
 // values).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    atomic_store(c1, 50);
-    atomic_store(c1, 90);
-    atomic_store(c2, 30);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    c1.v = 50;
+    c1.v = 90;
+    c2.v = 30;
+    a = c1.v;
+    b = c2.v;
     s = a + b;
-    free(c1);
-    free(c2);
     return s;
 }

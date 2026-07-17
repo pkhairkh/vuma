@@ -1,16 +1,15 @@
-// s80_mem_overwrite_first.vuma — store 1, overwrite with 37, load = 37
+// Migrated from memory/s80_overwrite_first.vuma
 // Expected exit code: 37
 //
-// Single 8-byte cell. Store 1 via `*ptr = literal`, overwrite with
-// 37 via `*ptr = literal`, load and return 37. Uses `*ptr =
-// literal` form (no offsets). Distinct from s78_mem_overwrite_first
-// (3), s74_mem_overwrite_first (165) and s73_mem_overwrite_first
-// (175).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    *c1 = 1;
-    *c1 = 37;
-    r: u64 = *c1;          // 37
-    free(c1);
+    let __s = state_new(Single);
+    __s.v = 1;
+    __s.v = 37;
+    let r = __s.v;
     return r;
 }

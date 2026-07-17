@@ -1,19 +1,17 @@
-// s76_mem_two_cell_sum.vuma — two cells, sum = 151 (100 + 51)
+// Migrated from memory/s76_mem_two_cell_sum.vuma
 // Expected exit code: 151
 //
-// Two 8-byte cells. Store 100/51 via `*ptr = literal`, load
-// both, sum -> 151. Uses `*ptr = literal` form. Distinct from
-// s74_mem_two_cell_sum (199), s73_mem_two_cell_sum (116) and
-// s72_mem_two_cell_diff (135).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 100;
-    *c2 = 51;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    s: u64 = a + b;        // 151
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 100;
+    __s.b = 51;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
     return s;
 }

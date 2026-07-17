@@ -1,22 +1,19 @@
-// mem_multi_alloc.vuma — multiple allocations
+// Migrated from memory/mem_multi_alloc.vuma
 // Expected exit code: 60
 //
-// Allocates 3 buffers, stores distinct values, loads them back, sums.
-// Sum = 10 + 20 + 30 = 60.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
 
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    c = allocate(8);
-    *a = 10;
-    *b = 20;
-    *c = 30;
-    va: i32 = *a;
-    vb: i32 = *b;
-    vc: i32 = *c;
-    sum: i32 = va + vb + vc;
-    free(a);
-    free(b);
-    free(c);
+    let __s = state_new(Triple);
+    __s.a = 10;
+    __s.b = 20;
+    __s.c = 30;
+    let va = __s.a;
+    let vb = __s.b;
+    let vc = __s.c;
+    let sum = va + vb + vc;
     return sum;
 }

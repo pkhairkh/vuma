@@ -1,19 +1,16 @@
-// s24_ptr_overwrite_via_workaround.vuma — overwrite via *p = variable + 0 = 83
+// Migrated from pointers/s24_ptr_overwrite_via_workaround.vuma
 // Expected exit code: 83
 //
-// Single 8-byte cell. Store literal 14 via `*p = 14`. Load 83 into a
-// local, then overwrite the cell via `*p = variable + 0` (the documented
-// workaround for the silent-drop bug on `*p = variable`). Load and
-// return 83 (the overwritten value). Distinct from
-// s22_ptr_overwrite_via_workaround (19 then 91) and
-// s14_ptr_overwrite_via_workaround (7 then 77).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 14;
-    v: i32 = 83;
-    *p = v + 0;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 14;
+    let v = 83;
+    __s.v = v;
+    let r = __s.v;
     return r;
 }

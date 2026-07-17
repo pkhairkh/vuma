@@ -5,12 +5,12 @@
 // observe 25 (last write wins). Distinct from s5_mem_overwrite_at_diff_offsets
 // (overwrites at different offsets, not same).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *(p + 0) = 10;
-    *(p + 0) = 20;
-    *(p + 0) = 25;
-    v: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 10;
+    p.data[0] = 20;
+    p.data[0] = 25;
+    v: u64 = p.data[0];
     return v;
 }

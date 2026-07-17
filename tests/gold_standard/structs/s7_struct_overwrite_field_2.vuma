@@ -14,8 +14,9 @@ struct Triple {
     c: u64,
 }
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    p = allocate(24);
+    let p = state_new(_L1);
     f0 = p;
     f1 = p + 8;
     f2 = p + 16;
@@ -28,6 +29,5 @@ fn main() -> i32 {
     c: u64 = *f2;
     t1: u64 = a + b;
     s: u64 = t1 + c;
-    free(p);
     return s;
 }

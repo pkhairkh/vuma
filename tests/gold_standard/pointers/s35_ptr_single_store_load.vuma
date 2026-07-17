@@ -1,15 +1,14 @@
-// s35_ptr_single_store_load.vuma — store 167, load = 167
+// Migrated from pointers/s35_ptr_single_store_load.vuma
 // Expected exit code: 167
 //
-// Single 8-byte cell. Store 167 via `*p = literal`, load and
-// return 167. Uses `*p = literal` form (no offsets). Distinct from
-// s34_ptr_single_store_load (145) and s30_ptr_single_store_load
-// (different value).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 167;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 167;
+    let r = __s.v;
     return r;
 }

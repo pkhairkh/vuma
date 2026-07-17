@@ -6,11 +6,11 @@
 // variable form). Load back from same offset via variable. Distinct
 // from s4_ptr_offset_store (uses literal offset).
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
+    let p = state_new(_L1);
     off: i32 = 8;
     *(p + off) = 33;
     v: i32 = *(p + off);
-    free(p);
     return v;
 }

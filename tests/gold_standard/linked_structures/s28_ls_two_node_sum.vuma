@@ -7,15 +7,16 @@
 // before the add. Distinct from s26_ls_two_node_xor (xor, 255) and
 // s22_ls_two_node_sum (sum, 90).
 
+layout Buf_n1 = { data: [u8; 8] }
+layout Buf_n2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    n2 = allocate(8);
-    *n1 = 70;
-    *n2 = 80;
-    a: u64 = *n1;
-    b: u64 = *n2;
+    let n1 = state_new(Buf_n1);
+    let n2 = state_new(Buf_n2);
+    n1.data[0] = 70;
+    n2.data[0] = 80;
+    a: u64 = n1.data[0];
+    b: u64 = n2.data[0];
     s: u64 = a + b;       // 150
-    free(n1);
-    free(n2);
     return s;
 }

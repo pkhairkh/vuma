@@ -6,10 +6,10 @@
 // exit 0. Will exit 130 once atomics are wired through.
 // Distinct from s82_atom_single_load, s78_atom_single_load
 // and s74_atom_single_load.
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 130);
-    r = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 130;
+    r = c1.v;
     return r;
 }

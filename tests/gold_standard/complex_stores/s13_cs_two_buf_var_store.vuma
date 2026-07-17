@@ -1,23 +1,24 @@
 // s13_cs_two_buf_var_store.vuma — literal store + workaround store, sum = 110
 // Expected exit code: 110  (44 + 66)
 //
-// Two 8-byte cells. Store literal 44 in c1 via `*c1 = 44`. Store 66
-// in c2 via the `*c2 = variable + 0` workaround (plain `*c2 = variable`
+// Two 8-byte cells. Store literal 44 in c1 via `c1.data[0] = 44`. Store 66
+// in c2 via the `c2.data[0] = variable + 0` workaround (plain `c2.data[0] = variable`
 // is silently dropped). Load both, sum -> 110. Exercises both working
 // store forms in one program. Distinct from s9_cs_two_buf_overwrite_both
 // (both cells literal-overwritten) and s9_ptr_workaround_roundtrip
 // (single-cell workaround round-trip).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 44;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 44;
     tmp: u64 = 66;
-    *c2 = tmp + 0;
-    a: u64 = *c1;
-    b: u64 = *c2;
+    c2.data[0] = tmp + 0;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
     s: u64 = a + b;
-    free(c1);
-    free(c2);
     return s;
 }

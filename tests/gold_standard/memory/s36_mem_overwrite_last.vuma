@@ -1,21 +1,18 @@
-// s36_mem_overwrite_last.vuma — cells 40 and 40, overwrite last to 180, sum = 220
+// Migrated from memory/s36_mem_overwrite_last.vuma
 // Expected exit code: 220
 //
-// Two 8-byte cells. Store 40 in each, then overwrite the
-// last cell to 180 via `*p2 = literal`; load both, sum ->
-// 220. Uses `*ptr = literal` form (no offsets).
-// Distinct from s30_mem_overwrite_first (overwrite, 0) and s27_mem_overwrite_last (different cell).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 40;
-    *p2 = 40;
-    *p2 = 180;
-    a: u64 = *p1;
-    b: u64 = *p2;
-    s: u64 = a + b;        // 220
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 40;
+    __s.b = 40;
+    __s.b = 180;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
     return s;
 }

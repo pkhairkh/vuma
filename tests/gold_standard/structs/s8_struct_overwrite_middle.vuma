@@ -12,16 +12,16 @@ struct Triple {
     c: u64,
 }
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    p = allocate(24);
-    *(p + 0) = 5;
-    *(p + 8) = 10;
-    *(p + 16) = 15;
-    *(p + 8) = 99;
-    a: u64 = *(p + 0);
-    b: u64 = *(p + 8);
-    c: u64 = *(p + 16);
+    let p = state_new(_L1);
+    p.data[0] = 5;
+    p.data[8] = 10;
+    p.data[16] = 15;
+    p.data[8] = 99;
+    a: u64 = p.data[0];
+    b: u64 = p.data[8];
+    c: u64 = p.data[16];
     s: u64 = a + b + c;
-    free(p);
     return s;
 }

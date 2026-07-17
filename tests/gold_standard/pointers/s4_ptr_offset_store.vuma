@@ -4,10 +4,10 @@
 // 16-byte allocation; store 60 at offset 8 (skipping the first 8
 // bytes), load it back from the same offset. Tests offset addressing.
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 8) = 60;
-    v: i32 = *(p + 8);
-    free(p);
+    let p = state_new(_L1);
+    p.data[8] = 60;
+    v: i32 = p.data[8];
     return v;
 }

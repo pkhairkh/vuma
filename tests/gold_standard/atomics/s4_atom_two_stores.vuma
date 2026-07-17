@@ -6,15 +6,15 @@
 // cell2, load both, sum. On the current backend both loads return 0,
 // so exit is 0. Will exit 110 once atomic ops are wired through.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    cell1 = allocate(8);
-    cell2 = allocate(8);
-    atomic_store(cell1, 40);
-    atomic_store(cell2, 70);
-    a = atomic_load(cell1);
-    b = atomic_load(cell2);
+    let cell1 = state_new(_L1);
+    let cell2 = state_new(_L2);
+    cell1.v = 40;
+    cell2.v = 70;
+    a = cell1.v;
+    b = cell2.v;
     s = a + b;
-    free(cell1);
-    free(cell2);
     return s;
 }

@@ -6,18 +6,18 @@
 // 40, 50, 60. Verifies that all three offsets retain their latest
 // written values.
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    buf = allocate(24);
-    *(buf + 0) = 1;
-    *(buf + 8) = 2;
-    *(buf + 16) = 3;
-    *(buf + 0) = 40;
-    *(buf + 8) = 50;
-    *(buf + 16) = 60;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
+    let buf = state_new(_L1);
+    buf.data[0] = 1;
+    buf.data[8] = 2;
+    buf.data[16] = 3;
+    buf.data[0] = 40;
+    buf.data[8] = 50;
+    buf.data[16] = 60;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
     s: u64 = a + b + c;
-    free(buf);
     return s;
 }

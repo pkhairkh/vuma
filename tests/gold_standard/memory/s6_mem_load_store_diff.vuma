@@ -7,17 +7,17 @@
 // silently dropped). dst now holds 10 (overwriting 70). Reload both
 // and sum -> 10 + 10 = 20. Tests the workaround form across cells.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    src = allocate(8);
-    dst = allocate(8);
-    *(src + 0) = 10;
-    *(dst + 0) = 70;
-    tmp: u64 = *(src + 0);
-    *(dst + 0) = tmp + 0;   // overwrite dst with 10 via workaround
-    vsrc: u64 = *(src + 0);
-    vdst: u64 = *(dst + 0);
+    let src = state_new(_L1);
+    let dst = state_new(_L2);
+    src.data[0] = 10;
+    dst.data[0] = 70;
+    tmp: u64 = src.data[0];
+    dst.data[0] = tmp + 0;   // overwrite dst with 10 via workaround;
+    vsrc: u64 = src.data[0];
+    vdst: u64 = dst.data[0];
     s: u64 = vsrc + vdst;
-    free(src);
-    free(dst);
     return s;
 }

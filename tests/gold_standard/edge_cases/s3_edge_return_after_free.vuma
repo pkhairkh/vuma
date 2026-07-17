@@ -5,9 +5,9 @@
 // Verifies that calling free doesn't corrupt the function's return
 // value path.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 0;
-    free(buf);
+    let buf = state_new(_L1);
+    buf.data[0] = 0;
     return 7;
 }

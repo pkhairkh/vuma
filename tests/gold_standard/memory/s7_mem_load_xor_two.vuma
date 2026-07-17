@@ -8,8 +8,9 @@
 // Distinct from s5_mem_load_chain (multiplies + adds, no XOR) and
 // s6_mem_load_store_diff (sum, not XOR).
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    buf = allocate(16);
+    let buf = state_new(_L1);
     p0 = buf;
     p8 = buf + 8;
     *p0 = 170;    // 0xAA
@@ -17,6 +18,5 @@ fn main() -> i32 {
     a: u64 = *p0;
     b: u64 = *p8;
     r: u64 = a ^ b;   // 0xFF = 255
-    free(buf);
     return r;
 }

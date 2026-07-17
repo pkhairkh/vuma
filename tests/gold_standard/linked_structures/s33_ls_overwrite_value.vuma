@@ -5,11 +5,12 @@
 // variables before any bitwise op; all stores use `*ptr = literal` (or the
 // `*ptr = variable + 0` workaround). Result lands in 0-255.
 // Distinct from s30_ls_overwrite_middle (overwrites middle) and s26_ls_overwrite_first (overwrites first).
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 80;
-    *n1 = 190;
-    a: u64 = *n1;            // 190
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 80;
+    n1.data[0] = 190;
+    a: u64 = n1.data[0];            // 190
     return a;
 }

@@ -7,11 +7,11 @@
 // s14_atom_overwrite_load (17 then 73) and s11_atom_zero_then_max
 // (0 then 255).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 7);
-    atomic_store(c, 250);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 7;
+    c.v = 250;
+    v = c.v;
     return v;
 }

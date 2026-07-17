@@ -3,19 +3,19 @@
 // 
 // Three 8-byte cells. atomic_store 100, 10, 5; atomic_load each, return 100 - 10 - 5 = 85. On the current backend atomic_load returns 0 -> 0 - 0 - 0 = 0 -> exit 0. Will exit 85 once atomics are wired through.
 // Distinct from s102_atom_three_cell_diff (197), s101_atom_three_cell_diff (110), s100_atom_three_cell_diff (0).
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    atomic_store(c1, 100);
-    atomic_store(c2, 10);
-    atomic_store(c3, 5);
-    a = atomic_load(c1);          // 100
-    b = atomic_load(c2);          // 10
-    c = atomic_load(c3);          // 5
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 100;
+    c2.v = 10;
+    c3.v = 5;
+    a = c1.v;          // 100
+    b = c2.v;          // 10
+    c = c3.v;          // 5
     d = a - b - c;                // 85
-    free(c1);
-    free(c2);
-    free(c3);
     return d;
 }

@@ -4,6 +4,7 @@
 // Allocates a buffer in main(), passes it to a helper that fills it, then
 // to another helper that verifies it.
 
+layout _L1 = { v: u32 }
 fn fill_buf(buf: Address, n: u32) {
     i: u32 = 0;
     while i < n {
@@ -24,9 +25,8 @@ fn verify_buf(buf: Address, n: u32) -> u32 {
 }
 
 fn main() -> i32 {
-    buf = allocate(8);
+    let buf = state_new(_L1);
     fill_buf(buf, 4);
     result: u32 = verify_buf(buf, 4);
-    free(buf);
     return result;
 }

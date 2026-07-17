@@ -5,14 +5,14 @@
 // to 100. Returns the updated c. Verifies that an individual field
 // can be overwritten while the others retain their original values.
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    p = allocate(24);
-    *(p + 0) = 10;
-    *(p + 8) = 20;
-    *(p + 16) = 30;
+    let p = state_new(_L1);
+    p.data[0] = 10;
+    p.data[8] = 20;
+    p.data[16] = 30;
     // Update only field c (offset 16)
-    *(p + 16) = 100;
-    val: u64 = *(p + 16);
-    free(p);
+    p.data[16] = 100;
+    val: u64 = p.data[16];
     return val;
 }

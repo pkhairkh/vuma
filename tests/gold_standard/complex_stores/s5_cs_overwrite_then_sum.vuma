@@ -5,16 +5,17 @@
 // offset 0 with 88. Load all three, sum = 88 + 20 + 22 = 130.
 // Distinct from s4_cs_overwrite_then_load (single value return).
 
+layout Buf_buf = { data: [u8; 24] }
+
 fn main() -> i32 {
-    buf = allocate(24);
-    *(buf + 0) = 1;
-    *(buf + 8) = 20;
-    *(buf + 16) = 22;
-    *(buf + 0) = 88;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 1;
+    buf.data[8] = 20;
+    buf.data[16] = 22;
+    buf.data[0] = 88;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
     s: u64 = a + b + c;
-    free(buf);
     return s;
 }

@@ -7,19 +7,19 @@
 // Will exit 30 once atomic ops are wired through. Distinct from
 // s6_atom_two_cells_sum (two cells, different values).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    atomic_store(c1, 5);
-    atomic_store(c2, 10);
-    atomic_store(c3, 15);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
-    c = atomic_load(c3);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 5;
+    c2.v = 10;
+    c3.v = 15;
+    a = c1.v;
+    b = c2.v;
+    c = c3.v;
     s = a + b + c;
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

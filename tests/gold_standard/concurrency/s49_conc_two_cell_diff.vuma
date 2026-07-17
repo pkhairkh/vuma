@@ -1,20 +1,17 @@
-// s49_conc_two_cell_diff.vuma — two cells, diff = 120 (200 - 80)
+// Migrated from concurrency/s49_conc_two_cell_diff.vuma
 // Expected exit code: 120
 //
-// Two independent 8-byte cells. Store 200/80 via `*ptr = literal`,
-// load both, subtract -> 120. Uses `*ptr = literal` form. Distinct
-// from s46_conc_two_cell_sum (200, sum) and s42_conc_two_cell_diff
-// (150, diff).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 200;
-    *c2 = 80;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    d: i32 = v1 - v2;      // 120
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 200;
+    __s.b = 80;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let d = v1 - v2;
     return d;
 }

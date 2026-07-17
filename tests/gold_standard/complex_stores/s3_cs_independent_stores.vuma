@@ -4,15 +4,16 @@
 // 32-byte buffer; stores happen at offset 0 and offset 24 (skipping
 // the middle 16 bytes). main loads both stored slots and returns sum.
 
-fn main() -> i32 {
-    buf = allocate(32);
-    *(buf + 0) = 3;
-    *(buf + 24) = 30;
+layout Buf_buf = { data: [u8; 32] }
 
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 24);
+fn main() -> i32 {
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 3;
+    buf.data[24] = 30;
+
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[24];
     s: u64 = a + b;
 
-    free(buf);
     return s;
 }
