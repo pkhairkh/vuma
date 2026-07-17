@@ -65,6 +65,9 @@ pub mod constraint;
 pub mod debt;
 pub mod escape;
 pub mod constant_time;
+/// FFI Safety Verifier (Wave 10) — proves states are not read after
+/// invalidation by a non-pure foreign call.
+pub mod ffi;
 pub mod exclusivity;
 pub mod inference;
 pub mod interpretation;
