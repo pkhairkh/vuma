@@ -7234,6 +7234,7 @@ impl Backend for Arm32Backend {
                 ("recv", 291), ("send", 290), ("shutdown", 293),
                 ("bind", 282), ("listen", 284), ("accept", 285),
                 ("setsockopt", 294),
+                ("getsockopt", 295),
                 // ── W7: more POSIX syscall stubs ──
                 // waitpid is the same syscall as wait4 (caller passes NULL
                 // rusage in R3 if it doesn't care).

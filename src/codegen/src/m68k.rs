@@ -1984,6 +1984,7 @@ impl Backend for M68kBackend {
                 ("listen", 342),
                 ("accept", 344),
                 ("setsockopt", 346),
+                ("getsockopt", 362),
                 ("shutdown", 348),
                 ("sendto", 349),
                 ("recvfrom", 350),

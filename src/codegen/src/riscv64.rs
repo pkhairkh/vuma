@@ -6071,6 +6071,7 @@ impl Backend for RiscV64Backend {
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
                 ("setsockopt", 208),
+                ("getsockopt", 209),
                 ("waitpid", 260),
                 ("brk", 214),
                 ("clock_gettime", 113),
@@ -6115,6 +6116,7 @@ impl Backend for RiscV64Backend {
                 // asm-generic → callers use getpgid(0))
                 ("getppid", 173), ("getsid", 156), ("setsid", 157),
                 ("setpgid", 154), ("getpgid", 155),
+                ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
                 // callers use clone(CLONE_VFORK))
                 ("clone3", 435), ("waitid", 95),

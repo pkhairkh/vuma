@@ -2387,6 +2387,7 @@ impl Backend for S390XBackend {
                 ("listen", 361),
                 ("accept", 362),
                 ("setsockopt", 371),
+                ("getsockopt", 365),
                 ("shutdown", 370),
                 ("dup3", 326),
                 ("recvfrom", 367),
