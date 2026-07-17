@@ -2,6 +2,22 @@
 // No main() — importable library module.
 // Provides: write_str, write_int, write_hex, write_u64, read_line, file ops
 // Uses the vuma-native syscall() intrinsic for write & read syscalls (asm-generic nrs 64/63).
+//
+// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers
+// (sized 1, 12, 16, 20, 24, 68 bytes) used by the various write_* /
+// read_* / eprint_* helpers are replaced by typed `State<BufN>` states
+// with `data: [u8; N]` array fields. Access via `*(buf + i)` becomes
+// `buf.data[i]`. The states are passed to syscall(63)/syscall(64) /
+// write_str/eprint_str where the codegen lowers `State<T>` to its
+// underlying buffer address (and callees treat it as a raw `Address`).
+// All `allocate`/`free` sites in this file are eliminated.
+
+layout Buf1  = { data: [u8; 1]  }
+layout Buf12 = { data: [u8; 12] }
+layout Buf16 = { data: [u8; 16] }
+layout Buf20 = { data: [u8; 20] }
+layout Buf24 = { data: [u8; 24] }
+layout Buf68 = { data: [u8; 68] }
 
 const STDOUT: i64 = 1;
 const STDERR: i64 = 2;
@@ -28,94 +44,86 @@ fn write_bytes(fd: i64, buf: Address, len: u32) -> i64 {
 }
 
 fn write_char(c: u32) -> i64 {
-    buf = allocate(1);
-    *(buf + 0) = c & 255;
+    let buf = state_new(Buf1);
+    buf.data[0] = c & 255;
     ret: i64 = syscall(64, STDOUT, buf, 1);
-    free(buf);
     return ret;
 }
 
 fn write_newline() -> i64 {
-    buf = allocate(1);
-    *(buf + 0) = 10;
+    let buf = state_new(Buf1);
+    buf.data[0] = 10;
     ret: i64 = syscall(64, STDOUT, buf, 1);
-    free(buf);
     return ret;
 }
 
 fn write_int(val: i64) -> i64 {
-    buf = allocate(24);
+    let buf = state_new(Buf24);
     if val == 0 {
-        *(buf + 0) = 48;
-        *(buf + 1) = 0;
+        buf.data[0] = 48;
+        buf.data[1] = 0;
         write_str(buf);
-        free(buf);
         return 1;
     }
     v: i64 = val;
     pos: u32 = 0;
     if val < 0 { v = 0 - val; }
 
-    temp = allocate(24);
+    let temp = state_new(Buf24);
     tp: u32 = 0;
     while v > 0 {
         d: u32 = v % 10;
-        *(temp + tp) = 48 + d;
+        temp.data[tp] = 48 + d;
         tp = tp + 1;
         v = v / 10;
     }
 
-    if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
+    if val < 0 { buf.data[pos] = 45; pos = pos + 1; }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        buf.data[pos] = temp.data[tp];
         pos = pos + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
     ret: i64 = write_str(buf);
-    free(temp);
-    free(buf);
     return ret;
 }
 
 fn write_uint(val: u64) -> i64 {
-    buf = allocate(24);
+    let buf = state_new(Buf24);
     if val == 0 {
-        *(buf + 0) = 48;
-        *(buf + 1) = 0;
+        buf.data[0] = 48;
+        buf.data[1] = 0;
         write_str(buf);
-        free(buf);
         return 1;
     }
     v: u64 = val;
     pos: u32 = 0;
-    temp = allocate(24);
+    let temp = state_new(Buf24);
     tp: u32 = 0;
     while v > 0 {
         d: u64 = v % 10;
-        *(temp + tp) = 48 + d;
+        temp.data[tp] = 48 + d;
         tp = tp + 1;
         v = v / 10;
     }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        buf.data[pos] = temp.data[tp];
         pos = pos + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
     ret: i64 = write_str(buf);
-    free(temp);
-    free(buf);
     return ret;
 }
 
 fn write_hex(val: u64) -> i64 {
-    buf = allocate(20);
-    *(buf + 0) = 48;  // '0'
-    *(buf + 1) = 120; // 'x'
+    let buf = state_new(Buf20);
+    buf.data[0] = 48;  // '0'
+    buf.data[1] = 120; // 'x'
     pos: u32 = 2;
 
-    temp = allocate(16);
+    let temp = state_new(Buf16);
     tp: u32 = 0;
     v: u64 = val;
     i: u32 = 0;
@@ -123,7 +131,7 @@ fn write_hex(val: u64) -> i64 {
         nibble: u64 = (v >> 60) & 15;
         c: u32 = 0;
         if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
-        *(temp + tp) = c;
+        temp.data[tp] = c;
         tp = tp + 1;
         v = v << 4;
         i = i + 1;
@@ -132,61 +140,57 @@ fn write_hex(val: u64) -> i64 {
     // Skip leading zeros
     start: u32 = 0;
     while start < tp - 1 {
-        if *(temp + start) != 48 { break; }
+        if temp.data[start] != 48 { break; }
         start = start + 1;
     }
 
     i = start;
     while i < tp {
-        *(buf + pos) = *(temp + i);
+        buf.data[pos] = temp.data[i];
         pos = pos + 1;
         i = i + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
 
     ret: i64 = write_str(buf);
-    free(temp);
-    free(buf);
     return ret;
 }
 
 fn write_hex_u32(val: u32) -> i64 {
-    buf = allocate(12);
-    *(buf + 0) = 48;
-    *(buf + 1) = 120;
+    let buf = state_new(Buf12);
+    buf.data[0] = 48;
+    buf.data[1] = 120;
     pos: u32 = 2;
     i: u32 = 0;
     while i < 8 {
         nibble: u32 = (val >> 28) & 15;
         c: u32 = 0;
         if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
-        *(buf + pos) = c;
+        buf.data[pos] = c;
         pos = pos + 1;
         val = val << 4;
         i = i + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
     ret: i64 = write_str(buf);
-    free(buf);
     return ret;
 }
 
 fn write_bin(val: u64) -> i64 {
-    buf = allocate(68);
-    *(buf + 0) = 48;
-    *(buf + 1) = 98;
+    let buf = state_new(Buf68);
+    buf.data[0] = 48;
+    buf.data[1] = 98;
     pos: u32 = 2;
     i: u32 = 0;
     while i < 64 {
         bit: u32 = (val >> 63) & 1;
-        *(buf + pos) = 48 + bit;
+        buf.data[pos] = 48 + bit;
         pos = pos + 1;
         val = val << 1;
         i = i + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
     ret: i64 = write_str(buf);
-    free(buf);
     return ret;
 }
 
@@ -249,20 +253,17 @@ fn printf_str_hex_str(part1: Address, val: u64, part2: Address) -> i64 {
 fn read_line(buf: Address, max_len: u32) -> u32 {
     pos: u32 = 0;
     while pos < max_len - 1 {
-        char_buf = allocate(1);
+        let char_buf = state_new(Buf1);
         n: i64 = syscall(63, STDIN, char_buf, 1);
         if n <= 0 {
-            free(char_buf);
             break;
         }
-        c: u32 = *(char_buf + 0);
+        c: u32 = char_buf.data[0];
         if c == 10 {  // newline
-            free(char_buf);
             break;
         }
         *(buf + pos) = c;
         pos = pos + 1;
-        free(char_buf);
     }
     *(buf + pos) = 0;
     return pos;
@@ -273,14 +274,12 @@ fn read_bytes(buf: Address, max_len: u32) -> i64 {
 }
 
 fn read_byte() -> u32 {
-    char_buf = allocate(1);
+    let char_buf = state_new(Buf1);
     n: i64 = syscall(63, STDIN, char_buf, 1);
     if n <= 0 {
-        free(char_buf);
         return 4294967295;  // EOF
     }
-    c: u32 = *(char_buf + 0);
-    free(char_buf);
+    c: u32 = char_buf.data[0];
     return c;
 }
 
@@ -295,43 +294,39 @@ fn eprint_str(s: Address) -> i64 {
 }
 
 fn eprint_int(val: i64) -> i64 {
-    buf = allocate(24);
+    let buf = state_new(Buf24);
     if val == 0 {
-        *(buf + 0) = 48;
-        *(buf + 1) = 0;
+        buf.data[0] = 48;
+        buf.data[1] = 0;
         eprint_str(buf);
-        free(buf);
         return 1;
     }
     v: i64 = val;
     pos: u32 = 0;
     if val < 0 { v = 0 - val; }
-    temp = allocate(24);
+    let temp = state_new(Buf24);
     tp: u32 = 0;
     while v > 0 {
         d: u32 = v % 10;
-        *(temp + tp) = 48 + d;
+        temp.data[tp] = 48 + d;
         tp = tp + 1;
         v = v / 10;
     }
-    if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
+    if val < 0 { buf.data[pos] = 45; pos = pos + 1; }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        buf.data[pos] = temp.data[tp];
         pos = pos + 1;
     }
-    *(buf + pos) = 0;
+    buf.data[pos] = 0;
     ret: i64 = eprint_str(buf);
-    free(temp);
-    free(buf);
     return ret;
 }
 
 fn eprintln_str(s: Address) -> i64 {
     eprint_str(s);
-    nl = allocate(1);
-    *(nl + 0) = 10;
+    let nl = state_new(Buf1);
+    nl.data[0] = 10;
     ret: i64 = syscall(64, STDERR, nl, 1);
-    free(nl);
     return ret;
 }
