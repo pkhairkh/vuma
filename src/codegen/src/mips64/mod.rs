@@ -3737,6 +3737,15 @@ impl Backend for Mips64Backend {
                 code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
                 code.extend_from_slice(&encode_nop());
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+                stubs.push(("__arena_overflow".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A0, rs: Gpr::Zero, imm: 1 }.encode());
+                    code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5058 }.encode());
+                    code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+                    code.extend_from_slice(&encode_nop());
+                    code
+                }));
             }
 
             stubs

@@ -2103,6 +2103,16 @@ impl Backend for M68kBackend {
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
+            // __arena_overflow: real exit(1) syscall
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());  // exit code = 1
+                code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 1 }.encode()); // sys_exit
+                code.extend(Instruction::Trap0.encode());
+                code.extend(Instruction::Rts.encode());
+                stubs.push(("__arena_overflow".to_string(), code));
+            }
+
             stubs
         };
 

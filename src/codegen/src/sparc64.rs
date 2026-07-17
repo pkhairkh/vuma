@@ -4032,6 +4032,15 @@ impl Backend for Sparc64Backend {
                 code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
                 code.extend_from_slice(&encode_nop());
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+                stubs.push(("__arena_overflow".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 1 }.encode());
+                    code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 1 }.encode());
+                    code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+                    code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                    code.extend_from_slice(&encode_nop());
+                    code
+                }));
             }
 
             stubs
