@@ -9029,7 +9029,6 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                                 span: vuma_parser::Span::synthetic(),
                             }, &mut stmts, ctx);
                             let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
-                            eprintln!("[W2-DBG] state-write: bv={} layout={} chain={:?} offset={} ty={:?} ptr={:?} value={:?}", bv, layout_name, chain, offset, field_ty, ptr, value);
                             stmts.push(ScgStatement::Access(AccessNode::Store {
                                 ptr,
                                 offset: Some(ScgExpr::Int(offset as i64)),
@@ -9038,10 +9037,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                             }));
                             return stmts;
                         } else {
-                            eprintln!("[W2-DBG] state-write: resolve FAILED bv={} layout={} chain={:?}", bv, layout_name, chain);
                         }
                     } else {
-                        eprintln!("[W2-DBG] state-write: bv={} not in state_var_layouts", bv);
                     }
                 }
                 // Not a state-typed field write — fall through to the
