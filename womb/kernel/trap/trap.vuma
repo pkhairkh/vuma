@@ -1,0 +1,329 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/trap/trap.vuma
+// VWK Trap Dispatcher — routes traps by vector number (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64 trap dispatcher. After trap_entry (K3a's
+// trap_trampoline.vuma) saves the 22-word TrapFrame and calls into C
+// with a pointer to it, control reaches trap_handler(tf) here. The
+// dispatcher routes by `tf.vector` (the interrupt-vector number the
+// trap_entry stub pushed — 0..255 on x86_64):
+//
+//     vector 0..31   → CPU exception  → trap_panic(tf)
+//                                       (in real kernel: panic with msg;
+//                                        K12 adds real panic; hosted: nop)
+//     vector 32..127 → hardware IRQ    → trap_irq(tf)
+//     vector 128     → syscall (int 0x80 on x86_64) → trap_syscall(tf)
+//                                       (K3e provides the real syscall
+//                                        table; hosted: nop)
+//     vector 129..255→ hardware IRQ    → trap_irq(tf)
+//
+// The contract simplifies the routing: anything in [0,32) is an
+// exception; 128 (int 0x80) is the syscall ABI; everything else in
+// [32,256) \ {128} is treated as a hardware IRQ and handed to
+// trap_irq, which calls irq_dispatch from the sibling irq.vuma module
+// (re-declared locally — see "Why re-declare nothing here?" below).
+//
+// ── TrapFrame re-declaration (x86_64, 22 fields) ────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the x86_64
+// TrapFrame byte-identically to womb/kernel/arch/x86_64/trap_trampoline.vuma
+// (K3a). The layout is 22 u64 fields in the order trap_entry pushes them
+// (15 GP regs rax..r15 + vector + error_code + rip + cs + rflags + rsp + ss
+// = 22 × 8 = 176 bytes — the field order MUST match trap.S, which K11 will
+// write to match this layout). See K3a's trap_trampoline.vuma header for
+// the full push-order derivation (CPU-pushed + stub-pushed + trap_entry-
+// pushed); the byte-identical-redeclaration invariant (K2c "extern
+// signatures MUST stay byte-identical") extends to layouts — this file's
+// `trap_handler(tf: State<TrapFrame>)` MUST see the same field offsets,
+// field names, and field types as K3a's file.
+//
+// ── Why is this file separate from K3a's trap_trampoline.vuma? ──────────────
+// Separation of concerns: K3a declares the TrapFrame LAYOUT + the extern
+// "C" trampolines (idt_load, irq_mask, irq_unmask, pic_eoi, cr2_read) and
+// the bare helpers (trap_frame_init, trap_page_fault_addr). K3d (this file)
+// declares the DISPATCHER — the per-vector routing logic that decides
+// whether a trap is a CPU exception, a syscall, or an IRQ. K3a is the
+// arch-specific "what is a TrapFrame and how do I touch the PIC/CR2";
+// K3d is the arch-agnostic "given a TrapFrame, what do I do with it". K3e
+// (syscall dispatch) will add the syscall-number → handler-table lookup
+// inside trap_syscall; K11 (bare-metal parity) will replace trap_panic's
+// no-op with a real panic-on-exception path.
+//
+// ── Why is trap_irq a stub? ─────────────────────────────────────────────────
+// trap_irq is the IRQ-path entry point: in real kernel it would call
+// irq_dispatch(tbl, vector - 32) from the sibling irq.vuma module. But
+// VUMA has no `import` and the dispatcher doesn't have an IrqTable in
+// hand (the IrqTable is a per-CPU global allocated by kmain and passed
+// to irq_dispatch explicitly). In hosted mode, trap_irq is a no-op (the
+// host kernel handles hardware IRQs — VUMA code never sees them). In
+// bare-metal K11, trap.S will load the per-CPU IrqTable pointer into RDI
+// before calling trap_handler, OR trap_handler will receive the IrqTable
+// as a second State<T> parameter (K11 will pick one). For now, trap_irq
+// is a no-op stub — this is NOT a violation of "no stubs" because the
+// DoD explicitly says "IRQ handler stub — calls irq_dispatch (re-declared
+// locally). For now, just return (stub)." K11 removes the stub.
+//
+// ── Why is trap_syscall a stub? ─────────────────────────────────────────────
+// trap_syscall is the syscall-path entry point: in real kernel it reads
+// tf.rax (syscall number), indexes into a syscall table, calls the handler
+// with tf.rdi (arg0), tf.rsi (arg1), tf.rdx (arg2), and writes the return
+// value back to tf.rax. K3e will provide the syscall table + dispatch
+// logic. For now, trap_syscall is a no-op stub (the DoD says "Syscall
+// handler stub — K3e provides the real implementation"). Same "not a
+// violation" rationale as trap_irq.
+//
+// ── Why is trap_panic a stub? ───────────────────────────────────────────────
+// trap_panic is the CPU-exception path: in real kernel it would print a
+// panic message with the trap info (vector, error_code, rip) and halt.
+// K12 (the panic/log wave) adds real panic; until then, trap_panic is a
+// no-op stub (the DoD says "CPU exception handler — just return (in real
+// kernel: panic with msg)"). Hosted mode never delivers real CPU
+// exceptions (the host kernel does), so the stub is never exercised from
+// the self-test except as a "did we crash?" smoke check.
+//
+// ── Why nested ifs instead of else-if? ──────────────────────────────────────
+// VUMA's if-expression syntax (K2a) supports `if cond { ... } else { ... }`
+// but not `else if` chained. The dispatcher therefore uses nested ifs:
+//     if v < 32 { panic } else { if v == 128 { syscall } else { irq } }
+// This is the same nested-if pattern K3c's trap_is_page_fault uses for
+// its range check (12 <= scause <= 15 → nested-if form).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// TrapFrame is a 22-word struct held in a `___pmt_buffer`-backed
+// State<TrapFrame>; the CALLER allocates it via `state_new(TrapFrame)`
+// and passes it by reference to `trap_handler` / `trap_frame_init`
+// (init-style API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for
+// the codegen rationale). No externs are declared in this file (the
+// dispatcher doesn't directly touch the PIC or CR2 — those are K3a's
+// trap_trampoline.vuma's externs, used by trap_page_fault_addr in K3a
+// and by the K3e/K11 page-fault handler). The dispatcher's sub-handlers
+// (trap_panic, trap_syscall, trap_irq) take State<TrapFrame> by regular
+// VUMA-fn borrow (NOT an extern #[borrow] — VUMA fn calls don't need the
+// attribute, only extern "C" calls do, because the codegen tracks the
+// State's lifetime through regular fn calls but conservatively
+// invalidates on extern calls). None of the sub-handlers call any extern,
+// so there is no use-after-invalidate risk.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares TrapFrame byte-identically
+// to K3a's trap_trampoline.vuma and re-declares trap_frame_init
+// byte-identically (the dispatcher's self-test needs a zeroed TrapFrame
+// to test vector routing, and the init helper is the canonical way to
+// zero one — same pattern as K3a's self-test). The sibling irq.vuma
+// module (also K3d) re-declares the irq_mask/irq_unmask/pic_eoi externs
+// byte-identically to K3a's trap_trampoline.vuma; this file does NOT
+// re-declare those externs because the dispatcher's hosted-mode sub-
+// handlers (trap_panic, trap_syscall, trap_irq) are all no-ops and don't
+// call any extern. K11 will swap the stubs for real handlers that DO
+// call the externs; at that point K11 will either re-declare the externs
+// in this file or pass them through the call chain from kmain.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL (32, 128) per the K3d
+// contract's "IMPORTANT" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14 and
+// rip=4096). The constants:
+//     32  = boundary between CPU exceptions (0..31) and IRQs (32..255)
+//           on x86_64 (the 8259 PIC's IRQs are remapped to vectors 32..47
+//           by the IDT setup in K11's boot path)
+//     128 = 0x80 = the int 0x80 syscall vector on x86_64 (Linux's legacy
+//           32-bit syscall ABI; modern Linux uses SYSCALL/SYSRET but the
+//           VUMA kernel follows the simpler int 0x80 convention for
+//           portability across all three arches — aarch64 uses SVC #0,
+//           riscv64 uses ECALL from U-mode; the dispatcher's per-arch
+//           re-declaration will check vector==128 on x86_64,
+//           trap_is_syscall (EC==0x15) on aarch64, and scause==8 on
+//           riscv64)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/trap/trap.vuma \
+//         /tmp/trap.bin x86_64 --verify
+//     /tmp/trap.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (the 3 self-test dispatches all succeed
+// without crashing — vector 0 → trap_panic, vector 128 → trap_syscall,
+// vector 32 → trap_irq).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// The x86_64 TrapFrame. Re-declared byte-identically to K3a's
+// trap_trampoline.vuma. The field order MUST match trap.S exactly (K11
+// will write trap.S to match). 22 fields × 8 bytes = 176 bytes. See the
+// header comment for the push-order derivation (CPU-pushed + stub-pushed
+// + trap_entry-pushed).
+layout TrapFrame = {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    vector: u64,      // interrupt vector number (0..255)
+    error_code: u64,  // CPU error code (0 if the exception pushes none)
+    rip: u64,         // instruction pointer at the trap
+    cs: u64,          // code segment
+    rflags: u64,      // flags register
+    rsp: u64,         // stack pointer
+    ss: u64,          // stack segment
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// Init-style API (caller allocates `tf` via state_new(TrapFrame), passes
+// by reference). Re-declared byte-identically to K3a's trap_trampoline.vuma
+// because this file's self-test needs a zeroed TrapFrame and the helper
+// is the canonical way to zero one (the contract says "Re-declare
+// trap_frame_init (from K3a)" — same pattern as the no-import rule above).
+// Writes all 22 fields to 0.
+
+// Initialize a TrapFrame to zeros. Useful both for the self-test and
+// for the early-boot allocator (the trap dispatcher can call this on a
+// scratch TrapFrame before populating it from the live save area, so
+// stale stack garbage in the unused-error-code case can't leak into the
+// handler).
+fn trap_frame_init(tf: State<TrapFrame>) {
+    tf.rax = 0;
+    tf.rbx = 0;
+    tf.rcx = 0;
+    tf.rdx = 0;
+    tf.rsi = 0;
+    tf.rdi = 0;
+    tf.rbp = 0;
+    tf.r8 = 0;
+    tf.r9 = 0;
+    tf.r10 = 0;
+    tf.r11 = 0;
+    tf.r12 = 0;
+    tf.r13 = 0;
+    tf.r14 = 0;
+    tf.r15 = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.rip = 0;
+    tf.cs = 0;
+    tf.rflags = 0;
+    tf.rsp = 0;
+    tf.ss = 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Trap dispatcher.
+// ────────────────────────────────────────────────────────────────────────────
+// Routes by `tf.vector`. The three branches are documented in the file
+// header. The nested-if structure (instead of else-if) is required by
+// VUMA's if-expression syntax (K2a — see "Why nested ifs" above).
+// `tf` is passed by regular VUMA-fn borrow to all sub-handlers; none of
+// the sub-handlers call any extern, so the State's lifetime is preserved
+// across the calls (the codegen's conservative invalidation only fires
+// on extern "C" calls).
+
+// Trap dispatcher: routes by vector number.
+//   vector 0..31   → CPU exception → trap_panic
+//   vector 32..255 → IRQ or syscall → trap_irq / trap_syscall
+fn trap_handler(tf: State<TrapFrame>) {
+    let v = tf.vector;
+    if v < 32 {
+        // CPU exception — panic path.
+        trap_panic(tf);
+    } else {
+        if v == 128 {
+            // Syscall (int 0x80 on x86_64).
+            trap_syscall(tf);
+        } else {
+            // Hardware IRQ.
+            trap_irq(tf);
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-vector-class sub-handlers (hosted-mode stubs — K3e/K11/K12 fill in).
+// ────────────────────────────────────────────────────────────────────────────
+
+// CPU exception handler — just return (in real kernel: panic with msg).
+// K12 adds the real panic path (print the trap frame + halt). Hosted
+// mode never delivers real CPU exceptions, so this stub is never
+// exercised from the self-test except as a "did we crash?" check.
+fn trap_panic(tf: State<TrapFrame>) {
+    // In hosted mode, just return. K12 adds real panic.
+    return;
+}
+
+// Syscall handler stub — K3e provides the real implementation.
+// K3e will read tf.rax (syscall number), index into a syscall table,
+// call the handler with tf.rdi/rsi/rdx (args 0..2), and write the
+// return value back to tf.rax. Hosted mode never delivers syscalls via
+// int 0x80 (the host kernel uses its own syscall ABI), so this stub is
+// never exercised from the self-test except as a "did we crash?" check.
+fn trap_syscall(tf: State<TrapFrame>) {
+    // In hosted mode, just return.
+    return;
+}
+
+// IRQ handler stub — calls irq_dispatch (re-declared locally).
+// In real kernel (K11), trap_irq would:
+//   1. Read tf.vector
+//   2. Subtract 32 (the PIC's vector-base offset) to get the IRQ number
+//   3. Look up the per-CPU IrqTable
+//   4. Call irq_dispatch(tbl, irq) (from the sibling irq.vuma module)
+// For now, just return (stub). K11 removes the stub.
+fn trap_irq(tf: State<TrapFrame>) {
+    // K3d irq.vuma provides irq_dispatch.
+    // For now, just return (stub).
+    return;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a TrapFrame via state_new, zero it via trap_frame_init, then
+// exercise all three dispatcher branches:
+//   (1) vector 0   → trap_panic path (CPU exception)
+//   (2) vector 128 → trap_syscall path (int 0x80 syscall)
+//   (3) vector 32  → trap_irq path (timer IRQ, the first PIC vector)
+// Each dispatch is a "did we crash?" smoke check — the hosted-mode sub-
+// handlers are all no-ops, so the only failure mode is a codegen/IVE
+// issue (e.g. invalid State<TrapFrame> access, malformed if-expression
+// lowering). If all three dispatches complete without crashing, main
+// returns 0.
+//
+// Per the K3d contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (32, 128) — decimal avoids the parser's hex-
+// literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14 and
+// rip=4096).
+
+fn main() -> i32 {
+    let tf = state_new(TrapFrame);
+    trap_frame_init(tf);
+
+    // Test 1: vector 0 (CPU exception) → trap_panic (no crash).
+    tf.vector = 0;
+    trap_handler(tf);
+
+    // Test 2: vector 128 (syscall) → trap_syscall (no crash).
+    tf.vector = 128;
+    trap_handler(tf);
+
+    // Test 3: vector 32 (IRQ) → trap_irq (no crash).
+    tf.vector = 32;
+    trap_handler(tf);
+
+    return 0;
+}

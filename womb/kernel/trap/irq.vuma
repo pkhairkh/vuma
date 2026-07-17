@@ -1,0 +1,333 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/trap/irq.vuma
+// VWK IRQ Subsystem — IRQ handler table + register/dispatch (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64 IRQ subsystem. It maintains a 256-entry IRQ
+// handler table (one slot per interrupt vector 0..255, each slot holding
+// a u64 handler-function address or 0 if unregistered) and provides the
+// register / dispatch / enable / disable API the trap dispatcher uses.
+//
+// The handler table is stored as a flat [u8; 2048] array (256 × 8 bytes,
+// each u64 handler address packed little-endian) rather than [u64; 256].
+// This is the same codegen limitation that forces womb/kernel/mm/pmm.vuma
+// to store its FreeNode pool as three parallel [u8; N] arrays (bases,
+// orders, nexts): the codegen only lowers `state.array[idx]` correctly
+// for [u8; N] arrays. See pmm.vuma header (K2a, "Why are PmmState fields
+// [u8; N] instead of [u64; N]?") for the full rationale. The pack/unpack
+// helpers (irq_get_handler / irq_set_handler) are byte-identical in
+// structure to pmm.vuma's pool_get_base / pool_set_base (K2a) and
+// kmalloc.vuma's slab helpers (K2f): 8-iteration while loop, shift by
+// i*8, mask 255 on writes.
+//
+// ── IRQ handler lifecycle ───────────────────────────────────────────────────
+//   1. kmain allocates an IrqTable via state_new(IrqTable), zero-inits
+//      it (count = 0, all handler slots = 0). [K11 — early boot]
+//   2. Drivers call register_irq(tbl, irq, handler) to install a handler
+//      for their IRQ line. register_irq:
+//        a. Packs the handler address into tbl.handlers[irq*8..irq*8+8]
+//           via irq_set_handler.
+//        b. Increments tbl.count.
+//        c. Calls the irq_unmask(irq) extern to clear the IRQ's mask bit
+//           at the 8259 PIC, allowing the PIC to deliver that IRQ.
+//   3. On a hardware interrupt, trap_entry saves the TrapFrame and calls
+//      trap_handler (sibling trap.vuma). The dispatcher routes vector
+//      32..255 \ {128} to trap_irq, which (in K11) calls
+//      irq_dispatch(tbl, vector - 32). irq_dispatch:
+//        a. Reads the handler via irq_get_handler(tbl, irq).
+//        b. If non-zero: calls the handler (K11 — VUMA has no fn-pointer
+//           call today, so the dispatch is a stub that just sends EOI;
+//           K11 adds the real fn-pointer dispatch).
+//        c. If zero (spurious IRQ): also sends EOI (the 8259 PIC will
+//           re-deliver spurious IRQ 7 / 15 if you don't EOI them).
+//        d. Calls pic_eoi(irq) to send End-Of-Interrupt to the PIC.
+//   4. Drivers can also enable/disable an IRQ on the fly via
+//      enable_irq(irq) / disable_irq(irq) (thin wrappers around the
+//      irq_unmask / irq_mask externs).
+//
+// ── Why is irq_dispatch a stub for the handler call? ────────────────────────
+// VUMA has no function-pointer call today: `handler()` where `handler` is
+// a u64 won't compile (the parser only accepts direct fn-identifier
+// calls, not indirect calls through a u64). The contract's "Note"
+// explicitly says: "VUMA has no function-pointer call — `handler()`
+// where handler is a u64 won't compile. The irq_dispatch stub just sends
+// EOI; K11 adds real fn-pointer dispatch." So the stub:
+//   - reads the handler (via irq_get_handler) — exercises the pack/unpack
+//   - branches on handler != 0 (both branches just call pic_eoi)
+//   - sends EOI
+// This is NOT a violation of the "no stubs" rule because the DoD
+// explicitly documents this as a stub for K11 to replace. The hosted-
+// mode path never actually delivers hardware IRQs (the host kernel
+// owns the real IRQ delivery), so the stub's no-op behavior is correct
+// for hosted mode.
+//
+// ── Why re-declare the irq_mask / irq_unmask / pic_eoi externs? ─────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the three
+// extern "C" trampolines byte-identically to K3a's
+// womb/kernel/arch/x86_64/trap_trampoline.vuma. (K3a's file declares FIVE
+// externs — idt_load, irq_mask, irq_unmask, pic_eoi, cr2_read — but this
+// file only needs the three IRQ-related ones.) The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical") extends to extern declarations too: this file's
+// `irq_mask(irq: u8)` MUST see the same SysV AMD64 RDI argument as K3a's
+// `irq_mask(irq: u8)`.
+//
+// Hosted: these resolve to __ffi_fallback_stub (returns 0, void calls
+//         no-op) — so register_irq's irq_unmask and irq_dispatch's
+//         pic_eoi are no-ops in hosted mode. Fine for self-test.
+// Bare-metal (K11): real asm stubs registered in
+//         src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
+//     irq_mask(irq)    — K11 stub: `mov al, 0xFF; out 0x21, al` (mask
+//                        all — refined in K11 to per-IRQ bit-masking via
+//                        `mov al, ~(1 << irq); out 0x21, al`).
+//     irq_unmask(irq)  — K11 stub: `mov al, 0xFE; out 0x21, al` (unmask
+//                        IRQ 0 — refined in K11 to per-IRQ bit-clearing).
+//     pic_eoi(irq)     — K11 stub: `mov al, 0x20; out 0x20, al; ret`
+//                        (non-specific EOI to the master PIC's command
+//                        port — required after every hardware IRQ).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// IrqTable is a 2052-byte struct (2048-byte handlers array + 4-byte
+// count) held in a `___pmt_buffer`-backed State<IrqTable>; the CALLER
+// allocates it via `state_new(IrqTable)` and passes it by reference to
+// register_irq / irq_dispatch / irq_get_handler / irq_set_handler
+// (init-style API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for
+// the codegen rationale). The enable_irq / disable_irq helpers don't
+// take a State<T> at all — they're thin wrappers around the irq_unmask /
+// irq_mask externs (each takes only the irq number as a u8). The
+// State<IrqTable> params to register_irq / irq_dispatch / irq_get_handler
+// / irq_set_handler are regular VUMA-fn borrows (NOT extern #[borrow] —
+// VUMA fn calls don't need the attribute, only extern "C" calls do).
+// register_irq and irq_dispatch DO call externs (irq_unmask, pic_eoi) —
+// but the State<IrqTable> is preserved across the extern call because
+// the codegen's conservative invalidation only fires on extern #[borrow]
+// State<T> params, and IrqTable is passed as a regular VUMA-fn borrow
+// (the externs don't take IrqTable at all). So there is no use-after-
+// invalidate risk.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3d contract's
+// "IMPORTANT" rule:
+//     2048 = 0x800 = 256 entries × 8 bytes (handler-table array size)
+//     4096 = 0x1000 (the dummy handler address used in the self-test —
+//                    also confirms u64 round-trip through pack/unpack for
+//                    a value larger than 255, catching any accidental
+//                    u8 truncation in the codegen's [u8; N] access
+//                    lowering — same rationale as K3a's rip=4096 check)
+//     8    = bytes per u64 handler entry (loop bound for pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule).
+//
+// ── Why `(irq as u32) * 8` and not `irq * 8`? ───────────────────────────────
+// `irq` is a u8. The codegen's binary-multiply on u8 would compute
+// `(u8 * u8) as u32`, which overflows for irq >= 32 (32 * 8 = 256 > 255).
+// The `(irq as u32) * 8` form widens FIRST, then multiplies — producing
+// a u32 offset that won't overflow until irq = 2^29 (way beyond the 256-
+// entry table). This is the same pattern pmm.vuma's pool_get_base uses
+// (`idx * 8` where idx is already u32 — pmm.vuma gets away with it
+// because its caller passes u32; irq.vuma's caller passes u8, so the
+// explicit cast is needed). Verified in probe before touching the kernel
+// tree (probe_irq.vuma — IVE Pass, exit=0).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares the IrqTable layout for the
+// FIRST time (no prior VUMA file has it) and re-declares the three IRQ
+// externs byte-identically to K3a's trap_trampoline.vuma. Future files
+// that want to call register_irq / irq_dispatch / enable_irq /
+// disable_irq will re-declare the IrqTable layout byte-identically to
+// this file (same pattern as womb/kernel/mm/vmm.vuma re-declaring
+// PageTable byte-identically to womb/kernel/arch/x86_64/mm_trampoline.vuma).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/trap/irq.vuma \
+//         /tmp/irq.bin x86_64 --verify
+//     /tmp/irq.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (the 3 self-test checks all pass — handler
+// round-trip, count increment, dispatch no-crash).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// The IRQ handler table. 256 entries (one per interrupt vector), each a
+// u64 handler-function address (or 0 if unregistered). Stored as a flat
+// [u8; 2048] array (256 × 8 bytes) because the codegen only lowers
+// `state.array[idx]` correctly for [u8; N] arrays (see file header and
+// pmm.vuma's "Why are PmmState fields [u8; N] instead of [u64; N]?" note
+// for the full rationale). `count` tracks how many handlers are
+// registered (incremented by register_irq, never decremented — there is
+// no unregister_irq in this wave; K11 may add one if needed for driver
+// hot-unplug).
+layout IrqTable = {
+    handlers: [u8; 2048],  // 256 * 8 bytes — u64 handler addr per IRQ
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — PIC mask/unmask/EOI (re-declared from K3a).
+// ────────────────────────────────────────────────────────────────────────────
+// Re-declared byte-identically to K3a's trap_trampoline.vuma. K3a's file
+// also declares idt_load and cr2_read; this file does NOT re-declare
+// those because the IRQ subsystem doesn't use them (idt_load is called
+// once during early boot by kmain, cr2_read is called by the page-fault
+// handler). Hosted: __ffi_fallback_stub (returns 0, void calls no-op).
+// K11 swaps these for real asm stubs registered in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs.
+extern "C" {
+    // Mask an IRQ line at the 8259 PIC. `irq` is the IRQ number 0..15.
+    // K11 stub: `mov al, 0xFF; out 0x21, al` (mask all — refined in K11
+    // to per-IRQ bit-masking via `mov al, ~(1 << irq); out 0x21, al`).
+    fn irq_mask(irq: u8);
+    // Unmask an IRQ line at the PIC. K11 stub:
+    // `mov al, 0xFE; out 0x21, al` (unmask IRQ 0 — refined in K11 to
+    // per-IRQ bit-clearing). Pairs with irq_mask.
+    fn irq_unmask(irq: u8);
+    // Send End-Of-Interrupt to the PIC. Must be called at the end of
+    // every hardware-IRQ handler so the PIC will deliver the next one.
+    // K11 stub: `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to
+    // the master PIC's command port).
+    fn pic_eoi(irq: u8);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers for IrqTable.handlers.
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical in structure to pmm.vuma's pool_get_base / pool_set_base
+// (K2a) and kmalloc.vuma's slab helpers (K2f): 8-iteration while loop,
+// shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads. The
+// only difference is the index type: pmm.vuma takes u32, this file takes
+// u8 (and widens to u32 for the offset multiply — see "Why (irq as u32)
+// * 8" above).
+
+// Read the u64 handler address for IRQ `irq` from IrqTable.handlers.
+// Returns 0 if no handler is registered for that IRQ (the slot is all
+// zero bytes — register_irq hasn't been called for that IRQ yet, or the
+// IRQ was never registered in the first place).
+fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
+    let off = (irq as u32) * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 handler address for IRQ `irq` into IrqTable.handlers.
+// Packs the 8 bytes little-endian (byte 0 = bits 7..0, byte 7 = bits
+// 63..56). The mask-255 truncates each shifted byte to its low 8 bits
+// (the (handler >> sh) >> 8 path would lose the high bits — same
+// pattern as pmm.vuma's pool_set_base).
+fn irq_set_handler(tbl: State<IrqTable>, irq: u8, handler: u64) {
+    let off = (irq as u32) * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (handler >> sh) & 255;
+        tbl.handlers[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// IRQ lifecycle: register / dispatch / enable / disable.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Register an IRQ handler.
+//   1. Pack the handler address into tbl.handlers[irq*8..irq*8+8].
+//   2. Increment tbl.count.
+//   3. Call irq_unmask(irq) to clear the IRQ's mask bit at the PIC,
+//      allowing the PIC to deliver that IRQ.
+// In hosted mode, irq_unmask is __ffi_fallback_stub (no-op), so this is
+// just a pack-and-count-increment. In bare-metal (K11), irq_unmask
+// actually writes the PIC's mask register.
+fn register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
+    irq_set_handler(tbl, irq, handler);
+    tbl.count = tbl.count + 1;
+    irq_unmask(irq);
+}
+
+// Dispatch an IRQ: look up handler, call it (K11), send EOI.
+//   - If handler != 0: call the handler (K11 — VUMA has no fn-pointer
+//     call today, so the call is omitted; K11 adds it). Then send EOI.
+//   - If handler == 0: spurious IRQ — just send EOI (the 8259 PIC will
+//     re-deliver spurious IRQ 7 / 15 if you don't EOI them).
+// In hosted mode, pic_eoi is __ffi_fallback_stub (no-op), so this is a
+// pure no-op except for the handler lookup (which exercises the
+// pack/unpack helper — useful for self-test verification).
+fn irq_dispatch(tbl: State<IrqTable>, irq: u8) {
+    let handler = irq_get_handler(tbl, irq);
+    if handler != 0 {
+        // In hosted mode, we can't call a function pointer directly
+        // (VUMA has no fn-pointer call). K11 will add this.
+        // For now, just send EOI.
+        pic_eoi(irq);
+    } else {
+        // Spurious IRQ — just EOI.
+        pic_eoi(irq);
+    }
+}
+
+// Enable an IRQ (thin wrapper around irq_unmask).
+// `irq` is the IRQ number 0..15 (the 8259 PIC only has 16 lines). K11
+// may extend this to handle the slave PIC's IRQs 8..15 via the cascade.
+fn enable_irq(irq: u8) {
+    irq_unmask(irq);
+}
+
+// Disable an IRQ (thin wrapper around irq_mask).
+// Pairs with enable_irq. Used by drivers to temporarily mask an IRQ
+// during critical sections (e.g. while modifying a shared data structure
+// the IRQ handler also touches).
+fn disable_irq(irq: u8) {
+    irq_mask(irq);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate an IrqTable via state_new, zero-init count, then:
+//   (1) Register a handler for IRQ 0 (the timer IRQ — the first PIC
+//       vector) at address 4096. register_irq should pack the address
+//       into the table and increment count.
+//   (2) Verify the handler round-trips: irq_get_handler(tbl, 0) returns
+//       4096. Catches any pack/unpack byte-order bug AND any u8-vs-u64
+//       truncation bug (4096 > 255, so a u8-truncating codegen path
+//       would return 0).
+//   (3) Verify count was incremented to 1.
+//   (4) Dispatch IRQ 0 (should not crash — pic_eoi is a no-op in hosted
+//       mode, and the handler-call stub is also a no-op).
+// Returns 0 on success, 1 on handler round-trip failure, 2 on count
+// failure (so a future CI failure pinpoints the broken check).
+//
+// Per the K3d contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (4096) — decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to rip=4096).
+
+fn main() -> i32 {
+    let tbl = state_new(IrqTable);
+    tbl.count = 0;
+
+    // Register a handler for IRQ 0 (timer).
+    register_irq(tbl, 0, 4096);
+
+    // Check 1: handler round-trips (4096 > 255 — catches u8 truncation).
+    if irq_get_handler(tbl, 0) != 4096 { return 1; }
+
+    // Check 2: count was incremented.
+    if tbl.count != 1 { return 2; }
+
+    // Dispatch IRQ 0 (should not crash).
+    irq_dispatch(tbl, 0);
+
+    return 0;
+}
