@@ -60,6 +60,10 @@ pub enum InvariantKind {
     /// function summaries.  Only checked under
     /// [`VerificationLevel::Modular`] and [`VerificationLevel::Hardened`].
     Modular,
+    /// (Wave 3d) PMT state verification: state-field reads/writes +
+    /// state transformations.  Only checked under
+    /// [`VerificationLevel::Pmt`].  Skips the 5 pointer invariants.
+    Pmt,
 }
 
 impl InvariantKind {
@@ -98,6 +102,7 @@ impl InvariantKind {
             InvariantKind::ConstantTime => "constant-time",
             InvariantKind::Interprocedural => "interprocedural",
             InvariantKind::Modular => "modular",
+            InvariantKind::Pmt => "pmt-state",
         }
     }
 }
@@ -136,6 +141,12 @@ pub enum VerificationLevel {
     /// (Wave 16) Run all 6 invariants (5 core + constant-time) plus
     /// interprocedural and modular analyses.  The most thorough level.
     Hardened,
+    /// (Wave 3d) PMT state verification only — runs the 3 state verifiers
+    /// (state-read, state-write, state-transform) and SKIPS the 5 pointer
+    /// invariants.  Used for PMT (Programs as Memory Transformations)
+    /// verification where memory safety is established by type-checking
+    /// rather than pointer proofs.
+    Pmt,
 }
 
 impl fmt::Display for VerificationLevel {
@@ -147,6 +158,7 @@ impl fmt::Display for VerificationLevel {
             VerificationLevel::Modular => write!(f, "MODULAR"),
             VerificationLevel::ConstantTime => write!(f, "CONSTANT_TIME"),
             VerificationLevel::Hardened => write!(f, "HARDENED"),
+            VerificationLevel::Pmt => write!(f, "PMT"),
         }
     }
 }
@@ -745,6 +757,10 @@ impl InvariantAggregator {
                 v.push(InvariantKind::Modular);
                 v
             }
+            VerificationLevel::Pmt => {
+                // Wave 3d: only PMT state verification (skips 5 pointer invariants).
+                vec![InvariantKind::Pmt]
+            }
         }
     }
 
@@ -778,6 +794,7 @@ impl InvariantAggregator {
             InvariantKind::ConstantTime => self.verify_constant_time(input),
             InvariantKind::Interprocedural => self.verify_interprocedural(input),
             InvariantKind::Modular => self.verify_modular(input),
+            InvariantKind::Pmt => self.verify_pmt(input),
         };
 
         // Wave 18: The fake FormalProof string-evidence was removed.
@@ -999,6 +1016,284 @@ impl InvariantAggregator {
             )
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Wave 3d: PMT state verification
+    // -----------------------------------------------------------------------
+
+    /// (Wave 3d) Verify PMT (Programs as Memory Transformations) state
+    /// safety: state-field reads, state-field writes (with linearity), and
+    /// state transformations.
+    ///
+    /// Walks the SCG for `StateRead` / `StateWrite` / `StateTransform` /
+    /// `StateInit` nodes, builds the per-verifier input tuples, and
+    /// delegates to [`crate::state_read::verify_state_reads`],
+    /// [`crate::state_write::verify_state_writes`], and
+    /// [`crate::state_transform::verify_all_transforms`].
+    ///
+    /// # Layout registry
+    ///
+    /// The SCG does not retain structured layout info — `Item::LayoutDef`
+    /// is lowered to a `Computation` node with a descriptive label (see
+    /// `parser::to_scg::convert_item`).  The pipeline therefore attaches
+    /// the layout registry to [`VerificationInput::pmt_layouts`] before
+    /// invoking the aggregator at the [`VerificationLevel::Pmt`] level.
+    /// If `pmt_layouts` is absent, the verifiers will report "layout not
+    /// found" for every state operation (a FAIL verdict) — this is the
+    /// correct behaviour for an unconfigured run.
+    ///
+    /// # Vreg → var-name mapping
+    ///
+    /// The SCG's `StateReadNode` / `StateWriteNode` use a `state_vreg: u32`
+    /// field rather than a source variable name.  The verifiers work in
+    /// terms of variable names, so we synthesise a stable name
+    /// `"_state_{vreg}"` per distinct vreg and use the node's
+    /// `layout_name` to populate `state_var_layouts`.  This is sufficient
+    /// for the verifiers' current API (which only consults the layout
+    /// name).
+    fn verify_pmt(&self, input: &VerificationInput) -> VerificationResult {
+        use crate::state_read::{verify_state_reads, LayoutInfo as ReadLayout, FieldInfo as ReadField};
+        use crate::state_write::{
+            verify_state_writes, LayoutInfo as WriteLayout, FieldInfo as WriteField,
+            StateWriteOp,
+        };
+        use crate::state_transform::{
+            verify_all_transforms, LayoutInfo as TransformLayout, FieldInfo as TransformField,
+        };
+        use std::collections::{HashMap, HashSet};
+        use vuma_scg::node::{NodePayload, NodeType, StateReadNode, StateWriteNode, StateTransformNode};
+
+        let scg = &input.scg;
+
+        // ── Build the per-verifier layout registries ──────────────────────
+        //
+        // The 3 verifiers each carry their own duplicated `LayoutInfo` /
+        // `FieldInfo` structs (Wave 3c/3b parallel-development artefact).
+        // We convert the unified `PmtLayoutSpec` to each one on demand.
+        let empty: HashMap<String, crate::verification::PmtLayoutSpec> = HashMap::new();
+        let pmt_layouts = input.pmt_layouts.as_ref().unwrap_or(&empty);
+
+        let mut read_layouts: HashMap<String, ReadLayout> = HashMap::new();
+        let mut write_layouts: HashMap<String, WriteLayout> = HashMap::new();
+        let mut transform_layouts: HashMap<String, TransformLayout> = HashMap::new();
+        for (name, spec) in pmt_layouts {
+            read_layouts.insert(
+                name.clone(),
+                ReadLayout {
+                    name: spec.name.clone(),
+                    total_size: spec.total_size,
+                    fields: spec
+                        .fields
+                        .iter()
+                        .map(|f| ReadField {
+                            name: f.name.clone(),
+                            offset: f.offset,
+                            size: f.size,
+                            type_name: f.type_name.clone(),
+                        })
+                        .collect(),
+                },
+            );
+            write_layouts.insert(
+                name.clone(),
+                WriteLayout {
+                    name: spec.name.clone(),
+                    total_size: spec.total_size,
+                    fields: spec
+                        .fields
+                        .iter()
+                        .map(|f| WriteField {
+                            name: f.name.clone(),
+                            offset: f.offset,
+                            size: f.size,
+                            type_name: f.type_name.clone(),
+                        })
+                        .collect(),
+                },
+            );
+            transform_layouts.insert(
+                name.clone(),
+                TransformLayout {
+                    name: spec.name.clone(),
+                    total_size: spec.total_size,
+                    fields: spec
+                        .fields
+                        .iter()
+                        .map(|f| TransformField {
+                            name: f.name.clone(),
+                            offset: f.offset,
+                            size: f.size,
+                            type_name: f.type_name.clone(),
+                        })
+                        .collect(),
+                },
+            );
+        }
+
+        // ── Walk SCG nodes; collect reads / writes / transforms ───────────
+        //
+        // We also track which vregs have been "consumed" by a transform
+        // (the input vreg of a StateTransform is linearly consumed).  The
+        // write verifier's linearity check uses this set.
+        let mut state_var_layouts: HashMap<String, String> = HashMap::new();
+        let mut consumed_vars: HashSet<String> = HashSet::new();
+        let mut reads: Vec<(String, String, String)> = Vec::new();
+        let mut writes: Vec<StateWriteOp> = Vec::new();
+        let mut transforms: Vec<(String, String)> = Vec::new();
+        let mut state_init_count: usize = 0;
+
+        // First pass: collect transforms (to populate `consumed_vars`)
+        // before writes, so the linearity check sees them.  SCG node
+        // iteration order is not guaranteed to match source order; we
+        // sort by NodeId to get a stable, source-approximating order.
+        let mut state_nodes: Vec<(u64, NodeType, NodePayload)> = Vec::new();
+        for node in scg.nodes() {
+            state_nodes.push((node.id.as_u64(), node.node_type.clone(), node.payload.clone()));
+        }
+        state_nodes.sort_by_key(|(id, _, _)| *id);
+
+        for (_, _, payload) in &state_nodes {
+            match payload {
+                NodePayload::StateInit(_) => {
+                    state_init_count += 1;
+                }
+                NodePayload::StateTransform(t) => {
+                    let StateTransformNode {
+                        input_vreg,
+                        input_layout,
+                        output_layout,
+                        ..
+                    } = t;
+                    let in_var = format!("_state_{}", input_vreg);
+                    state_var_layouts
+                        .entry(in_var.clone())
+                        .or_insert_with(|| input_layout.clone());
+                    consumed_vars.insert(in_var);
+                    transforms.push((input_layout.clone(), output_layout.clone()));
+                }
+                NodePayload::StateRead(r) => {
+                    let StateReadNode {
+                        state_vreg,
+                        layout_name,
+                        field_name,
+                        ..
+                    } = r;
+                    let var = format!("_state_{}", state_vreg);
+                    state_var_layouts
+                        .entry(var.clone())
+                        .or_insert_with(|| layout_name.clone());
+                    // Look up the field's declared type so the verifier's
+                    // type-mismatch check has a non-empty expected_type to
+                    // compare against.  If the layout/field is absent,
+                    // pass "" — the verifier will report "field not found"
+                    // or "layout not found" before reaching the type check.
+                    let expected_type = pmt_layouts
+                        .get(layout_name)
+                        .and_then(|spec| spec.fields.iter().find(|f| &f.name == field_name))
+                        .map(|f| f.type_name.clone())
+                        .unwrap_or_default();
+                    reads.push((var, field_name.clone(), expected_type));
+                }
+                NodePayload::StateWrite(w) => {
+                    let StateWriteNode {
+                        state_vreg,
+                        layout_name,
+                        field_name,
+                        ..
+                    } = w;
+                    let var = format!("_state_{}", state_vreg);
+                    state_var_layouts
+                        .entry(var.clone())
+                        .or_insert_with(|| layout_name.clone());
+                    // The SCG StateWriteNode does not carry the value's
+                    // type; infer it from the layout's field declaration.
+                    let value_type = pmt_layouts
+                        .get(layout_name)
+                        .and_then(|spec| spec.fields.iter().find(|f| &f.name == field_name))
+                        .map(|f| f.type_name.clone())
+                        .unwrap_or_default();
+                    writes.push(StateWriteOp {
+                        var_name: var,
+                        field_name: field_name.clone(),
+                        value_type,
+                        after_consume: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // ── Run the 3 verifiers ───────────────────────────────────────────
+        let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
+        let write_results =
+            verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
+        let transform_results = verify_all_transforms(&transform_layouts, &transforms);
+
+        let read_ok = read_results.iter().all(|r| r.valid);
+        let write_ok = write_results.iter().all(|r| r.valid);
+        let transform_ok = transform_results.iter().all(|r| r.valid);
+
+        let read_errs: Vec<String> = read_results
+            .iter()
+            .filter_map(|r| r.error.clone())
+            .collect();
+        let write_errs: Vec<String> = write_results
+            .iter()
+            .filter_map(|r| r.error.clone())
+            .collect();
+        let transform_errs: Vec<String> = transform_results
+            .iter()
+            .filter_map(|r| r.error.clone())
+            .collect();
+
+        let all_errs: Vec<String> = read_errs
+            .iter()
+            .chain(write_errs.iter())
+            .chain(transform_errs.iter())
+            .cloned()
+            .collect();
+
+        let total_ops = reads.len() + writes.len() + transforms.len();
+        let all_ok = read_ok && write_ok && transform_ok;
+
+        if all_ok {
+            VerificationResult::new(
+                "pmt-state",
+                VerificationStatus::Proven,
+                format!(
+                    "pmt-state check passed ({} init(s), {} read(s), {} write(s), {} transform(s))",
+                    state_init_count,
+                    reads.len(),
+                    writes.len(),
+                    transforms.len()
+                ),
+            )
+        } else if total_ops == 0 {
+            // No state operations in the SCG — trivially safe.
+            VerificationResult::new(
+                "pmt-state",
+                VerificationStatus::Proven,
+                "pmt-state check passed (no state operations found)".to_string(),
+            )
+        } else {
+            VerificationResult::new(
+                "pmt-state",
+                VerificationStatus::Violated {
+                    counterexample: crate::result::CounterExample::new(
+                        Vec::new(),
+                        default_program_point(),
+                        all_errs.join("; "),
+                    ),
+                },
+                format!(
+                    "pmt-state violations: {} read-error(s), {} write-error(s), {} transform-error(s)",
+                    read_errs.len(),
+                    write_errs.len(),
+                    transform_errs.len()
+                ),
+            )
+        }
+    }
 }
 
 impl Default for InvariantAggregator {
@@ -1054,11 +1349,12 @@ fn invariant_index(kind: InvariantKind) -> Option<usize> {
         InvariantKind::ConstantTime => Some(5),
         InvariantKind::Interprocedural => Some(6),
         InvariantKind::Modular => Some(7),
+        InvariantKind::Pmt => Some(8),
     }
 }
 
-/// The total number of invariant kinds (5 core + 3 extended = 8).
-const EXTENDED_INVARIANT_COUNT: usize = 8;
+/// The total number of invariant kinds (5 core + 3 extended + 1 PMT = 9).
+const EXTENDED_INVARIANT_COUNT: usize = 9;
 
 /// Construct a default [`ProgramPoint`] (empty string) for use in
 /// counterexamples where the exact source location is not known.
@@ -1115,6 +1411,7 @@ mod tests {
         assert_eq!(format!("{}", VerificationLevel::Modular), "MODULAR");
         assert_eq!(format!("{}", VerificationLevel::ConstantTime), "CONSTANT_TIME");
         assert_eq!(format!("{}", VerificationLevel::Hardened), "HARDENED");
+        assert_eq!(format!("{}", VerificationLevel::Pmt), "PMT");
     }
 
     #[test]
@@ -1215,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn invariant_index_covers_all_eight_kinds() {
+    fn invariant_index_covers_all_nine_kinds() {
         assert_eq!(invariant_index(InvariantKind::Liveness), Some(0));
         assert_eq!(invariant_index(InvariantKind::Exclusivity), Some(1));
         assert_eq!(invariant_index(InvariantKind::Interpretation), Some(2));
@@ -1224,15 +1521,17 @@ mod tests {
         assert_eq!(invariant_index(InvariantKind::ConstantTime), Some(5));
         assert_eq!(invariant_index(InvariantKind::Interprocedural), Some(6));
         assert_eq!(invariant_index(InvariantKind::Modular), Some(7));
+        assert_eq!(invariant_index(InvariantKind::Pmt), Some(8));
     }
 
     #[test]
-    fn extended_invariant_count_is_eight() {
-        assert_eq!(EXTENDED_INVARIANT_COUNT, 8);
+    fn extended_invariant_count_is_nine() {
+        // Wave 3d: 5 core + 3 extended (CT/Interprocedural/Modular) + 1 PMT = 9.
+        assert_eq!(EXTENDED_INVARIANT_COUNT, 9);
     }
 
     #[test]
-    fn cache_sized_for_all_eight_kinds() {
+    fn cache_sized_for_all_nine_kinds() {
         let aggregator = InvariantAggregator::new();
         assert_eq!(aggregator.cache.len(), EXTENDED_INVARIANT_COUNT);
     }
@@ -1517,5 +1816,295 @@ mod tests {
         let result = aggregator.verify_all(&input);
         // Must produce a valid verdict (not panic).
         let _ = result.overall; // touching the field confirms no panic
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Wave 3d tests — PMT state verification level
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Helper: build a `PmtLayoutSpec` for `Point = { x: u32, y: u32 }`.
+    fn pmt_layout_point() -> crate::verification::PmtLayoutSpec {
+        use crate::verification::{PmtFieldSpec, PmtLayoutSpec};
+        PmtLayoutSpec {
+            name: "Point".to_string(),
+            total_size: 8,
+            fields: vec![
+                PmtFieldSpec {
+                    name: "x".to_string(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "u32".to_string(),
+                },
+                PmtFieldSpec {
+                    name: "y".to_string(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "u32".to_string(),
+                },
+            ],
+        }
+    }
+
+    /// Helper: build a `PmtLayoutSpec` for `Vec2 = { a: u32, b: u32 }`
+    /// (same total_size as Point — exercises reinterpret transform).
+    fn pmt_layout_vec2() -> crate::verification::PmtLayoutSpec {
+        use crate::verification::{PmtFieldSpec, PmtLayoutSpec};
+        PmtLayoutSpec {
+            name: "Vec2".to_string(),
+            total_size: 8,
+            fields: vec![
+                PmtFieldSpec {
+                    name: "a".to_string(),
+                    offset: 0,
+                    size: 4,
+                    type_name: "u32".to_string(),
+                },
+                PmtFieldSpec {
+                    name: "b".to_string(),
+                    offset: 4,
+                    size: 4,
+                    type_name: "u32".to_string(),
+                },
+            ],
+        }
+    }
+
+    /// Helper: construct an SCG with a single StateRead node.
+    fn scg_with_state_read(layout: &str, field: &str) -> SCG {
+        use vuma_scg::node::{
+            NodeType, ProgramPoint, StateReadNode,
+        };
+        let mut scg = SCG::new();
+        scg.add_node(
+            NodeType::StateRead,
+            vuma_scg::node::NodePayload::StateRead(StateReadNode {
+                state_vreg: 1,
+                layout_name: layout.to_string(),
+                field_name: field.to_string(),
+                result_vreg: 2,
+            }),
+            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+        );
+        scg
+    }
+
+    /// Helper: construct an SCG with a single StateWrite node.
+    fn scg_with_state_write(layout: &str, field: &str) -> SCG {
+        use vuma_scg::node::{
+            NodeType, ProgramPoint, StateWriteNode,
+        };
+        let mut scg = SCG::new();
+        scg.add_node(
+            NodeType::StateWrite,
+            vuma_scg::node::NodePayload::StateWrite(StateWriteNode {
+                state_vreg: 1,
+                layout_name: layout.to_string(),
+                field_name: field.to_string(),
+                value_vreg: 2,
+            }),
+            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+        );
+        scg
+    }
+
+    /// Helper: construct an SCG with a StateTransform node followed by a
+    /// StateWrite to the same input vreg (linearity violation).
+    fn scg_with_transform_then_write(
+        in_layout: &str,
+        out_layout: &str,
+        write_layout: &str,
+        write_field: &str,
+    ) -> SCG {
+        use vuma_scg::node::{
+            NodeType, ProgramPoint, StateTransformNode, StateWriteNode,
+        };
+        let mut scg = SCG::new();
+        let pp = ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None };
+        scg.add_node(
+            NodeType::StateTransform,
+            vuma_scg::node::NodePayload::StateTransform(StateTransformNode {
+                input_vreg: 1,
+                input_layout: in_layout.to_string(),
+                output_layout: out_layout.to_string(),
+                result_vreg: 2,
+            }),
+            pp.clone(),
+        );
+        scg.add_node(
+            NodeType::StateWrite,
+            vuma_scg::node::NodePayload::StateWrite(StateWriteNode {
+                state_vreg: 1,
+                layout_name: write_layout.to_string(),
+                field_name: write_field.to_string(),
+                value_vreg: 3,
+            }),
+            pp,
+        );
+        scg
+    }
+
+    /// Helper: construct an SCG with a single StateTransform node.
+    fn scg_with_state_transform(in_layout: &str, out_layout: &str) -> SCG {
+        use vuma_scg::node::{
+            NodeType, ProgramPoint, StateTransformNode,
+        };
+        let mut scg = SCG::new();
+        scg.add_node(
+            NodeType::StateTransform,
+            vuma_scg::node::NodePayload::StateTransform(StateTransformNode {
+                input_vreg: 1,
+                input_layout: in_layout.to_string(),
+                output_layout: out_layout.to_string(),
+                result_vreg: 2,
+            }),
+            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+        );
+        scg
+    }
+
+    #[test]
+    fn wave3d_pmt_level_runs_single_invariant() {
+        // Pmt level runs ONLY the PMT state verifier (skips 5 pointer invariants).
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.per_invariant.len(), 1, "Pmt level must run exactly 1 check");
+        assert_eq!(result.level, VerificationLevel::Pmt);
+        assert_eq!(result.per_invariant[0].kind, InvariantKind::Pmt);
+    }
+
+    #[test]
+    fn wave3d_pmt_empty_scg_passes() {
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Pass);
+        assert!(result.per_invariant[0].is_pass());
+    }
+
+    #[test]
+    fn wave3d_pmt_valid_read_passes() {
+        // SCG has a StateRead(Point.x) + layout registry has Point.
+        // → verifier finds layout, finds field, type matches → PASS.
+        let scg = scg_with_state_read("Point", "x");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Pass,
+            "valid read must PASS, got {:?}: {}",
+            result.overall,
+            result.per_invariant[0].result.message
+        );
+    }
+
+    #[test]
+    fn wave3d_pmt_unknown_field_fails() {
+        // SCG has a StateRead(Point.z) but Point only has {x, y}.
+        // → verifier reports "field 'z' not found".
+        let scg = scg_with_state_read("Point", "z");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Fail);
+        let msg = &result.per_invariant[0].result.message;
+        assert!(msg.contains("pmt-state violations"), "got: {}", msg);
+    }
+
+    #[test]
+    fn wave3d_pmt_unknown_layout_fails() {
+        // SCG has a StateTransform referencing an undeclared layout "Ghost".
+        // → transform verifier reports "input layout 'Ghost' not found".
+        let scg = scg_with_state_transform("Ghost", "Point");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Fail);
+        let msg = &result.per_invariant[0].result.message;
+        assert!(msg.contains("pmt-state violations"), "got: {}", msg);
+    }
+
+    #[test]
+    fn wave3d_pmt_write_after_consume_fails() {
+        // SCG has StateTransform(Point→Vec2) followed by StateWrite(Point.x).
+        // The transform consumes vreg 1 (Point), so the subsequent write
+        // violates linearity.
+        let scg = scg_with_transform_then_write("Point", "Vec2", "Point", "x");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        layouts.insert("Vec2".to_string(), pmt_layout_vec2());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Fail);
+        // Counterexample description should mention linearity / consumed.
+        let pir = &result.per_invariant[0];
+        match &pir.result.status {
+            VerificationStatus::Violated { counterexample } => {
+                assert!(
+                    counterexample.description.contains("linearity")
+                        || counterexample.description.contains("consumed"),
+                    "expected linearity violation, got: {}",
+                    counterexample.description
+                );
+            }
+            other => panic!("expected Violated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn wave3d_pmt_valid_transform_passes() {
+        // SCG has StateTransform(Point→Vec2); both layouts declared and
+        // same total_size (8) → reinterpret transform, valid.
+        let scg = scg_with_state_transform("Point", "Vec2");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        layouts.insert("Vec2".to_string(), pmt_layout_vec2());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Pass,
+            "valid transform must PASS, got {:?}: {}",
+            result.overall,
+            result.per_invariant[0].result.message
+        );
+    }
+
+    #[test]
+    fn wave3d_pmt_valid_write_passes() {
+        // SCG has StateWrite(Point.x); layout declares x: u32 → valid.
+        let scg = scg_with_state_write("Point", "x");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Point".to_string(), pmt_layout_point());
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Pass,
+            "valid write must PASS, got {:?}: {}",
+            result.overall,
+            result.per_invariant[0].result.message
+        );
+    }
+
+    #[test]
+    fn wave3d_pmt_no_layouts_fails_on_state_ops() {
+        // SCG has StateRead(Point.x) but no layout registry attached
+        // (the default path when pipeline doesn't populate pmt_layouts).
+        // → verifier reports "layout 'Point' not found".
+        let scg = scg_with_state_read("Point", "x");
+        let input = VerificationInput::from_scg(scg); // no pmt_layouts
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Fail);
+    }
+
+    #[test]
+    fn wave3d_pmt_kind_label() {
+        assert_eq!(InvariantKind::Pmt.label(), "pmt-state");
     }
 }

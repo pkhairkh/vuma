@@ -1,0 +1,14 @@
+// alloc_test.vuma — Wave 6 negative test: uses `allocate(N)` (pointer syntax)
+// Expected exit code: 0
+//
+// Default mode: compiles with a deprecation warning, runs, exits 0.
+// --pmt-only mode: hard compile error (pointer syntax 'allocate' rejected).
+//
+// The PMT replacement is `state_new(Layout)` + a transform that performs
+// the equivalent allocation as a typed state initialisation.
+
+fn main() -> i32 {
+    buf = allocate(64);
+    free(buf);
+    return 0;
+}

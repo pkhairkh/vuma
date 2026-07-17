@@ -1,0 +1,17 @@
+// addrof_test.vuma — Wave 6 negative test: uses `&x` (address-of)
+// Expected exit code: 7
+//
+// Default mode: compiles with a deprecation warning, runs, exits 7.
+// --pmt-only mode: hard compile error (pointer syntax '&x (address-of)'
+// rejected).
+//
+// The PMT model has no address-of: state buffers are first-class values
+// produced by `state_new(Layout)` and consumed by transforms; there is no
+// way (or need) to take the address of a stack local.
+
+fn main() -> i32 {
+    x: u32 = 7;
+    p = &x;
+    v = *p;
+    return v;
+}

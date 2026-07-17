@@ -34,6 +34,12 @@ pub enum TemporalKind {
     Precedes,
     /// The first lifetime succeeds (starts after) the second.
     Succeeds,
+    /// State transformation A happened before B (A's epoch < B's epoch).
+    /// Used to prove that a StateRead of an epoch-N state by an epoch-M
+    /// context (M < N) is invalid — the state hasn't been produced yet.
+    EpochBefore,
+    /// State transformation A happened after B (A's epoch > B's epoch).
+    EpochAfter,
 }
 
 impl fmt::Display for TemporalKind {
@@ -43,8 +49,15 @@ impl fmt::Display for TemporalKind {
             TemporalKind::Coincides => write!(f, "Coincides"),
             TemporalKind::Precedes => write!(f, "Precedes"),
             TemporalKind::Succeeds => write!(f, "Succeeds"),
+            TemporalKind::EpochBefore => write!(f, "EpochBefore"),
+            TemporalKind::EpochAfter => write!(f, "EpochAfter"),
         }
     }
+}
+
+/// Check if state with epoch_a is available at epoch_b (i.e., a was produced before b).
+pub fn is_state_available(producer_epoch: u64, consumer_epoch: u64) -> bool {
+    producer_epoch <= consumer_epoch
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +227,19 @@ impl RelD {
         // Coincides is compatible with everything, but precedes + succeeds
         // is contradictory.
         if has_precedes && has_succeeds {
+            return false;
+        }
+
+        // Epoch ordering: EpochBefore and EpochAfter are mutually exclusive
+        // for the same pair — a state cannot be both produced-before and
+        // produced-after the same consumer epoch.
+        let has_epoch_before = self
+            .relations
+            .contains(&Relation::Temporal(TemporalKind::EpochBefore));
+        let has_epoch_after = self
+            .relations
+            .contains(&Relation::Temporal(TemporalKind::EpochAfter));
+        if has_epoch_before && has_epoch_after {
             return false;
         }
 
@@ -707,5 +733,130 @@ mod tests {
         assert!(empty.refines(&empty));
         assert!(!empty.refines(&nonempty));
         assert!(nonempty.refines(&empty));
+    }
+
+    // =======================================================================
+    // New RelD tests — Wave 4b: EpochBefore / EpochAfter
+    // =======================================================================
+
+    #[test]
+    fn epoch_before_displays() {
+        assert_eq!(format!("{}", TemporalKind::EpochBefore), "EpochBefore");
+    }
+
+    #[test]
+    fn epoch_after_displays() {
+        assert_eq!(format!("{}", TemporalKind::EpochAfter), "EpochAfter");
+    }
+
+    #[test]
+    fn epoch_before_alone_is_consistent() {
+        let r = RelD {
+            relations: [Relation::Temporal(TemporalKind::EpochBefore)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(r.is_consistent());
+    }
+
+    #[test]
+    fn epoch_after_alone_is_consistent() {
+        let r = RelD {
+            relations: [Relation::Temporal(TemporalKind::EpochAfter)]
+                .into_iter()
+                .collect(),
+        };
+        assert!(r.is_consistent());
+    }
+
+    #[test]
+    fn epoch_before_and_after_contradictory() {
+        // A state cannot be both produced-before and produced-after the same
+        // consumer epoch — that's a contradiction.
+        let r = RelD {
+            relations: [
+                Relation::Temporal(TemporalKind::EpochBefore),
+                Relation::Temporal(TemporalKind::EpochAfter),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(!r.is_consistent());
+    }
+
+    #[test]
+    fn epoch_before_with_liveness_consistent() {
+        let r = RelD {
+            relations: [
+                Relation::Temporal(TemporalKind::EpochBefore),
+                Relation::Liveness,
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(r.is_consistent());
+    }
+
+    #[test]
+    fn epoch_before_compose_with_epoch_after_inconsistent() {
+        let a = RelD {
+            relations: [Relation::Temporal(TemporalKind::EpochBefore)]
+                .into_iter()
+                .collect(),
+        };
+        let b = RelD {
+            relations: [Relation::Temporal(TemporalKind::EpochAfter)]
+                .into_iter()
+                .collect(),
+        };
+        let composed = a.compose(&b);
+        assert!(!composed.is_consistent());
+    }
+
+    #[test]
+    fn epoch_relations_are_distinct_from_lifetime_temporal() {
+        // EpochBefore is not Precedes; EpochAfter is not Succeeds.
+        // Mixing an epoch variant with its lifetime counterpart must be
+        // consistent (they describe different axes of ordering).
+        let r = RelD {
+            relations: [
+                Relation::Temporal(TemporalKind::EpochBefore),
+                Relation::Temporal(TemporalKind::Precedes),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert!(r.is_consistent());
+    }
+
+    // =======================================================================
+    // is_state_available helper — Wave 4b
+    // =======================================================================
+
+    #[test]
+    fn state_available_when_producer_epoch_equals_consumer() {
+        assert!(is_state_available(5, 5));
+    }
+
+    #[test]
+    fn state_available_when_producer_older_than_consumer() {
+        assert!(is_state_available(3, 10));
+    }
+
+    #[test]
+    fn state_unavailable_when_producer_newer_than_consumer() {
+        // Producer epoch N consumed at epoch M where M < N — the state
+        // hasn't been produced yet.
+        assert!(!is_state_available(10, 3));
+    }
+
+    #[test]
+    fn state_available_at_epoch_zero_from_epoch_zero() {
+        assert!(is_state_available(0, 0));
+    }
+
+    #[test]
+    fn state_unavailable_at_epoch_zero_from_epoch_one() {
+        assert!(!is_state_available(1, 0));
     }
 }
