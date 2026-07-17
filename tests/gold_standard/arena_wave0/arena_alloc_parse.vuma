@@ -3,13 +3,18 @@
 //
 // Wave 1 test: arena_alloc parses and returns a State<T> that supports
 // field access (same syntax as static states).
+//
+// NOTE: VUMA's parser doesn't support tuple destructuring in `let`, so
+// we use the form `let w = arena_alloc(arena, Widget)` — the arena is
+// mutated in-place (it's a pointer), and the return value is the new
+// State<T>.
 
 layout Arena = { base: u64, offset: u64, capacity: u64 }
 layout Widget = { x: u32, y: u32 }
 
 fn main() -> i32 {
     let arena = arena_new(4096);
-    let (arena, w) = arena_alloc(arena, Widget);
+    let w = arena_alloc(arena, Widget);
     w.x = 100;
     w.y = 200;
     arena_free(arena);
