@@ -3186,6 +3186,32 @@ impl Backend for AArch64Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (aarch64 sys_mmap=222).
+            // Allocates 4096 bytes for the scratchpad frame.
+            {
+                let mut code = Vec::new();
+                // Set up mmap args: X0=0(NULL), X1=4096, X2=3(PROT), X3=0x22(MAP), X4=-1(fd), X5=0(off)
+                code.extend_from_slice(&movz_reg(0, 0));       // X0 = 0 (NULL)
+                code.extend_from_slice(&movz_reg(1, 4096));    // X1 = 4096
+                code.extend_from_slice(&movz_reg(2, 3));       // X2 = PROT_READ|PROT_WRITE
+                code.extend_from_slice(&movz_reg(3, 0x22));    // X3 = MAP_PRIVATE|MAP_ANONYMOUS
+                code.extend_from_slice(&movn_reg(4, 0));       // X4 = -1 (fd)
+                code.extend_from_slice(&movz_reg(5, 0));       // X5 = 0 (offset)
+                code.extend_from_slice(&movz_x8(222));         // sys_mmap
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (RET). Real munmap will be wired
+            // when marshal_cstr is fully integrated.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&ret);
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

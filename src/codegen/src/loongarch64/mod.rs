@@ -3121,6 +3121,29 @@ impl Backend for LoongArch64Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (loongarch64 sys_mmap=222).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 0 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A1, rj: Gpr::R0, imm12: 4096 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A2, rj: Gpr::R0, imm12: 3 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A3, rj: Gpr::R0, imm12: 0x22 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A4, rj: Gpr::R0, imm12: -1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A5, rj: Gpr::R0, imm12: 0 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 222 }.encode()); // sys_mmap
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (JIRL R0, RA, 0).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 
