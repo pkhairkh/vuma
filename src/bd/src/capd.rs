@@ -81,6 +81,14 @@ pub enum Capability {
     Move,
     /// Permission to pin the value (prevent moves).
     Pin,
+    /// Read a field from a state (typed offset access, not pointer deref).
+    StateRead,
+    /// Write a field to a state (typed offset access).
+    StateWrite,
+    /// Transform a state from one layout to another (consumes the input state).
+    StateTransform,
+    /// Consume a state (it's no longer usable after this — linear ownership).
+    StateConsume,
 }
 
 impl fmt::Display for Capability {
@@ -103,6 +111,10 @@ impl fmt::Display for Capability {
             Capability::Share => write!(f, "Share"),
             Capability::Move => write!(f, "Move"),
             Capability::Pin => write!(f, "Pin"),
+            Capability::StateRead => write!(f, "StateRead"),
+            Capability::StateWrite => write!(f, "StateWrite"),
+            Capability::StateTransform => write!(f, "StateTransform"),
+            Capability::StateConsume => write!(f, "StateConsume"),
         }
     }
 }
@@ -176,6 +188,16 @@ impl CapD {
 
     /// Construct a `CapD` containing *all* capabilities and no conditions
     /// (top element of the lattice).
+    ///
+    /// # Wave 4c note
+    ///
+    /// `Capability::StateConsume` is intentionally **excluded** from the
+    /// top element. Because `StateConsume` is exclusive (once a state is
+    /// consumed, no other capability is possible — see [`CapD::join`]),
+    /// it cannot coexist with the other capabilities in the lattice top.
+    /// Conceptually, `StateConsume` is an *absorbing* element of the join
+    /// (a "post-consumption" marker) rather than a member of the universe
+    /// of cohabiting capabilities.
     pub fn all() -> Self {
         Self {
             caps: [
@@ -196,6 +218,9 @@ impl CapD {
                 Capability::Share,
                 Capability::Move,
                 Capability::Pin,
+                Capability::StateRead,
+                Capability::StateWrite,
+                Capability::StateTransform,
             ]
             .into_iter()
             .collect(),
@@ -232,15 +257,51 @@ impl CapD {
     ///
     /// * Capabilities: union
     /// * Conditions: intersection (less restrictive)
+    ///
+    /// # State-capability lattice rules (Wave 4c)
+    ///
+    /// Two state-specific rules refine the plain set-union:
+    ///
+    /// 1. **`StateConsume` is exclusive** — once a state is consumed it is no
+    ///    longer usable, so no other capability may coexist with
+    ///    `StateConsume`. If either operand carries `StateConsume`, the join
+    ///    collapses to `{StateConsume}` (plus the intersection of conditions).
+    ///
+    /// 2. **`StateRead` + `StateWrite` ⇒ `StateTransform`** — a state
+    ///    transformation is, by definition, an operation that both reads and
+    ///    writes the state. When the union of two operands contains both
+    ///    `StateRead` and `StateWrite`, the join additionally materializes
+    ///    `StateTransform`.
     pub fn join(&self, other: &CapD) -> CapD {
-        CapD {
-            caps: self.caps.union(&other.caps).copied().collect(),
-            conditions: self
-                .conditions
-                .intersection(&other.conditions)
-                .copied()
-                .collect(),
+        let conditions: HashSet<Condition> = self
+            .conditions
+            .intersection(&other.conditions)
+            .copied()
+            .collect();
+
+        // Rule 1: StateConsume is exclusive — if either side has it, the
+        // result is {StateConsume} only (with the shared conditions).
+        let self_has_consume = self.caps.contains(&Capability::StateConsume);
+        let other_has_consume = other.caps.contains(&Capability::StateConsume);
+        if self_has_consume || other_has_consume {
+            return CapD {
+                caps: [Capability::StateConsume].into_iter().collect(),
+                conditions,
+            };
         }
+
+        // Plain union of capabilities.
+        let mut caps: HashSet<Capability> =
+            self.caps.union(&other.caps).copied().collect();
+
+        // Rule 2: StateRead + StateWrite ⇒ StateTransform.
+        if caps.contains(&Capability::StateRead)
+            && caps.contains(&Capability::StateWrite)
+        {
+            caps.insert(Capability::StateTransform);
+        }
+
+        CapD { caps, conditions }
     }
 
     /// Resolve the effective set of capabilities given an execution [`Context`].
@@ -412,5 +473,269 @@ mod tests {
             conditions: HashSet::new(),
         };
         assert_eq!(a.partial_cmp(&b), None);
+    }
+
+    #[test]
+    fn all_join_idempotent() {
+        // Regression for Wave 4c: CapD::all() must be idempotent under join.
+        // This held before adding the exclusive StateConsume rule (which
+        // would otherwise collapse all → {StateConsume} and break the
+        // lattice law a ⊔ a = a). The fix is to exclude StateConsume from
+        // CapD::all().
+        let all = CapD::all();
+        assert_eq!(all.join(&all), all);
+    }
+
+    // =======================================================================
+    // New CapD tests — Wave 4c: state-access capabilities
+    // =======================================================================
+
+    #[test]
+    fn state_capabilities_display() {
+        assert_eq!(format!("{}", Capability::StateRead), "StateRead");
+        assert_eq!(format!("{}", Capability::StateWrite), "StateWrite");
+        assert_eq!(
+            format!("{}", Capability::StateTransform),
+            "StateTransform"
+        );
+        assert_eq!(
+            format!("{}", Capability::StateConsume),
+            "StateConsume"
+        );
+    }
+
+    #[test]
+    fn all_includes_state_capabilities() {
+        let all = CapD::all();
+        assert!(all.caps.contains(&Capability::StateRead));
+        assert!(all.caps.contains(&Capability::StateWrite));
+        assert!(all.caps.contains(&Capability::StateTransform));
+        // StateConsume is intentionally excluded from the top element because
+        // it is exclusive — it cannot coexist with other capabilities.
+        assert!(
+            !all.caps.contains(&Capability::StateConsume),
+            "StateConsume is exclusive and must not be in CapD::all()"
+        );
+    }
+
+    #[test]
+    fn state_capabilities_are_distinct() {
+        // The four state capabilities must be distinct enum variants.
+        let caps = [
+            Capability::StateRead,
+            Capability::StateWrite,
+            Capability::StateTransform,
+            Capability::StateConsume,
+        ];
+        for (i, a) in caps.iter().enumerate() {
+            for (j, b) in caps.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b, "state caps at indices {i} and {j} collided");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn join_state_read_and_state_write_yields_state_transform() {
+        // StateRead + StateWrite ⇒ StateTransform (a transform reads & writes).
+        let r = CapD::empty().strengthen(&[Capability::StateRead]);
+        let w = CapD::empty().strengthen(&[Capability::StateWrite]);
+        let j = r.join(&w);
+        assert!(j.caps.contains(&Capability::StateRead));
+        assert!(j.caps.contains(&Capability::StateWrite));
+        assert!(
+            j.caps.contains(&Capability::StateTransform),
+            "join must materialize StateTransform when both StateRead and \
+             StateWrite are present"
+        );
+    }
+
+    #[test]
+    fn join_state_read_alone_does_not_synthesize_transform() {
+        let r1 = CapD::empty().strengthen(&[Capability::StateRead]);
+        let r2 = CapD::empty().strengthen(&[Capability::StateRead]);
+        let j = r1.join(&r2);
+        assert!(j.caps.contains(&Capability::StateRead));
+        assert!(
+            !j.caps.contains(&Capability::StateTransform),
+            "StateTransform must not be synthesized without StateWrite"
+        );
+    }
+
+    #[test]
+    fn join_state_write_alone_does_not_synthesize_transform() {
+        let w1 = CapD::empty().strengthen(&[Capability::StateWrite]);
+        let w2 = CapD::empty().strengthen(&[Capability::StateWrite]);
+        let j = w1.join(&w2);
+        assert!(j.caps.contains(&Capability::StateWrite));
+        assert!(
+            !j.caps.contains(&Capability::StateTransform),
+            "StateTransform must not be synthesized without StateRead"
+        );
+    }
+
+    #[test]
+    fn join_state_consume_is_exclusive_from_self() {
+        // Once consumed, nothing else is possible.
+        let consume = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let read = CapD::empty().strengthen(&[Capability::StateRead]);
+        let j = consume.join(&read);
+        assert!(
+            j.caps.contains(&Capability::StateConsume),
+            "StateConsume must survive the join"
+        );
+        assert_eq!(
+            j.caps.len(),
+            1,
+            "StateConsume is exclusive — no other capability may coexist"
+        );
+        assert!(!j.caps.contains(&Capability::StateRead));
+        assert!(!j.caps.contains(&Capability::StateWrite));
+        assert!(!j.caps.contains(&Capability::StateTransform));
+    }
+
+    #[test]
+    fn join_state_consume_is_exclusive_from_other_side() {
+        // Symmetry: StateConsume on the *other* operand must also collapse
+        // the result to {StateConsume}.
+        let read = CapD::empty().strengthen(&[Capability::StateRead]);
+        let consume = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let j = read.join(&consume);
+        assert_eq!(j.caps.len(), 1);
+        assert!(j.caps.contains(&Capability::StateConsume));
+        assert!(!j.caps.contains(&Capability::StateRead));
+    }
+
+    #[test]
+    fn join_state_consume_drops_all_other_caps() {
+        // Even when the other operand has many capabilities (including the
+        // synthesized StateTransform pair), StateConsume wins outright.
+        let rich = CapD::empty()
+            .strengthen(&[
+                Capability::StateRead,
+                Capability::StateWrite,
+                Capability::Read,
+                Capability::Write,
+                Capability::Move,
+            ]);
+        let consume = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let j = rich.join(&consume);
+        assert_eq!(j.caps.len(), 1);
+        assert!(j.caps.contains(&Capability::StateConsume));
+    }
+
+    #[test]
+    fn join_state_consume_with_state_consume_still_exclusive() {
+        let a = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let b = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let j = a.join(&b);
+        assert_eq!(j.caps.len(), 1);
+        assert!(j.caps.contains(&Capability::StateConsume));
+    }
+
+    #[test]
+    fn join_state_transform_with_state_read_keeps_both() {
+        // StateTransform already implies read+write; joining with StateRead
+        // keeps StateTransform (and the explicit StateRead).
+        let t = CapD::empty().strengthen(&[Capability::StateTransform]);
+        let r = CapD::empty().strengthen(&[Capability::StateRead]);
+        let j = t.join(&r);
+        assert!(j.caps.contains(&Capability::StateTransform));
+        assert!(j.caps.contains(&Capability::StateRead));
+    }
+
+    #[test]
+    fn meet_state_capabilities_is_set_intersection() {
+        // meet = intersection. StateRead ∩ StateWrite = ∅.
+        let r = CapD::empty().strengthen(&[Capability::StateRead]);
+        let w = CapD::empty().strengthen(&[Capability::StateWrite]);
+        let m = r.meet(&w);
+        assert!(m.caps.is_empty());
+    }
+
+    #[test]
+    fn meet_state_consume_with_state_consume_keeps_consume() {
+        let a = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let b = CapD::empty().strengthen(&[Capability::StateConsume]);
+        let m = a.meet(&b);
+        assert_eq!(m.caps.len(), 1);
+        assert!(m.caps.contains(&Capability::StateConsume));
+    }
+
+    #[test]
+    fn strengthen_with_state_capabilities() {
+        let capd = CapD::empty().strengthen(&[
+            Capability::StateRead,
+            Capability::StateWrite,
+            Capability::StateTransform,
+            Capability::StateConsume,
+        ]);
+        assert!(capd.caps.contains(&Capability::StateRead));
+        assert!(capd.caps.contains(&Capability::StateWrite));
+        assert!(capd.caps.contains(&Capability::StateTransform));
+        assert!(capd.caps.contains(&Capability::StateConsume));
+    }
+
+    #[test]
+    fn weaken_drops_state_capabilities() {
+        let capd = CapD::empty().strengthen(&[
+            Capability::StateRead,
+            Capability::StateWrite,
+        ]);
+        let weakened = capd.weaken(&[Capability::StateRead]);
+        assert!(!weakened.caps.contains(&Capability::StateRead));
+        assert!(weakened.caps.contains(&Capability::StateWrite));
+    }
+
+    #[test]
+    fn join_state_read_write_with_other_condition_propagates_condition() {
+        // The state-lattice rules must not interfere with condition
+        // intersection. StateRead+StateWrite should still materialize
+        // StateTransform AND carry only the shared condition.
+        let r = CapD {
+            caps: [Capability::StateRead].into_iter().collect(),
+            conditions: [Condition::InPhase(7), Condition::RequiresLock(42)]
+                .into_iter()
+                .collect(),
+        };
+        let w = CapD {
+            caps: [Capability::StateWrite].into_iter().collect(),
+            conditions: [Condition::InPhase(7)].into_iter().collect(),
+        };
+        let j = r.join(&w);
+        assert!(j.caps.contains(&Capability::StateRead));
+        assert!(j.caps.contains(&Capability::StateWrite));
+        assert!(j.caps.contains(&Capability::StateTransform));
+        // Conditions: intersection of {InPhase(7), RequiresLock(42)} and
+        // {InPhase(7)} = {InPhase(7)}.
+        assert_eq!(j.conditions.len(), 1);
+        assert!(j.conditions.contains(&Condition::InPhase(7)));
+        assert!(!j.conditions.contains(&Condition::RequiresLock(42)));
+    }
+
+    #[test]
+    fn join_state_consume_preserves_shared_conditions() {
+        let a = CapD {
+            caps: [Capability::StateConsume].into_iter().collect(),
+            conditions: [Condition::InPhase(3), Condition::RequiresLock(1)]
+                .into_iter()
+                .collect(),
+        };
+        let b = CapD {
+            caps: [Capability::StateRead, Capability::StateWrite]
+                .into_iter()
+                .collect(),
+            conditions: [Condition::InPhase(3)].into_iter().collect(),
+        };
+        let j = a.join(&b);
+        assert_eq!(j.caps.len(), 1);
+        assert!(j.caps.contains(&Capability::StateConsume));
+        // Even though StateConsume collapses the caps, the shared conditions
+        // (InPhase(3)) are still carried.
+        assert!(j.conditions.contains(&Condition::InPhase(3)));
+        assert!(!j.conditions.contains(&Condition::RequiresLock(1)));
     }
 }

@@ -120,4 +120,4 @@ pub use result::{
     Assumption, BatchedViolations, ConfidenceLevel, CounterExample, Evidence, InvariantName,
     InvariantViolation, ProgramPoint, ProofStep, Severity, VerificationResult, VerificationStatus,
 };
-pub use verification::{VerificationEngine, VerificationInput};
+pub use verification::{VerificationEngine, VerificationInput, PmtFieldSpec, PmtLayoutSpec};

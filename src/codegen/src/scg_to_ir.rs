@@ -64,6 +64,22 @@
 //! (using `vuma_scg::digraph::toposort` on the hand-written `DiGraph`
 //! that backs the SCG — see Wave 39 of the VUMA remediation plan),
 //! ensuring that data-flow dependencies are respected.
+//!
+//! # Wave 4a — RepD as the canonical type system
+//!
+//! As of Wave 4a, `vuma_bd::repd::LayoutRegistry` is the canonical
+//! source for state sizes and field offsets/sizes/RepDs in VUMA. The
+//! `IRBuilder` consumes layout-derived quantities (e.g. the `size` field
+//! on [`AllocationNode::Stack`] for state-typed allocations) that the
+//! bridge (`src/pipeline.rs`) currently computes via a parallel ad-hoc
+//! `HashMap` (`build_layout_registry`, which mirrors
+//! `LayoutRegistry::register` field-by-field). The bridge-computed values
+//! are functionally identical to `LayoutRegistry::state_size` /
+//! `LayoutRegistry::field_offset` for the same layout definition, so the
+//! IRBuilder does not re-query the registry at lowering time — it trusts
+//! the bridge-computed `size` and `offset` fields. Future waves should
+//! migrate the bridge to call `LayoutRegistry` directly so there is a
+//! single source of truth.
 
 use crate::ir::*;
 use crate::Result;
@@ -2611,6 +2627,27 @@ impl IRBuilder {
     ///
     /// - `AllocationNode::Stack` → `IRInstruction::Alloc` + stack slot tracking
     /// - `AllocationNode::Heap` → `IRInstruction::Syscall` (mmap, nr 222) — P2
+    ///
+    /// # Wave 4a — RepD is the canonical source for State sizes
+    ///
+    /// For state-typed allocations (`let p = state_new(Layout)`), the
+    /// `AllocationNode::Stack.size` field is the layout's `total_size` —
+    /// the same quantity exposed by `vuma_bd::repd::LayoutRegistry::state_size`
+    /// (the canonical RepD query added in Wave 4a). The bridge
+    /// (`build_layout_registry` in `src/pipeline.rs`) currently computes
+    /// this ad-hoc by mirroring `LayoutRegistry::register` field-by-field
+    /// into a parallel `HashMap<String, (u64, Vec<…>)>` and stuffing the
+    /// resulting `total_size` into `AllocationNode::Stack.size`. The
+    /// IRBuilder therefore consumes the RepD-canonical value here
+    /// unchanged.
+    ///
+    /// Future waves should migrate the bridge to populate
+    /// `AllocationNode::Stack.size` via
+    /// `LayoutRegistry::state_size(layout_id)` directly (deprecating
+    /// `build_layout_registry`) so there is a single source of truth for
+    /// state sizes. Until then, this lowering site trusts the
+    /// bridge-computed `size` because it is functionally identical to
+    /// `LayoutRegistry::state_size` for the same layout definition.
     fn lower_allocation(
         &mut self,
         alloc: &AllocationNode,
@@ -2624,6 +2661,10 @@ impl IRBuilder {
                 names.insert(name.clone(), vreg);
                 // Mark this vreg as a pointer for Store/Load width
                 self.pointer_vregs.insert(vreg);
+                // Wave 4a: `*size` is the RepD-canonical state_size() value
+                // for state-typed allocations (see the doc comment on
+                // `lower_allocation`). It is forwarded verbatim to the IR
+                // Alloc instruction — no ad-hoc recomputation here.
                 ir_func.current_block().push(IRInstruction::Alloc {
                     dst: IRValue::Register(vreg),
                     size: *size,

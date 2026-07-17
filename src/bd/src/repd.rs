@@ -349,12 +349,30 @@ impl std::hash::Hash for RepD {
 impl RepD {
     // -----------------------------------------------------------------------
     // Size & alignment queries
+    //
+    // Wave 4a: RepD is the **primary type system** for VUMA. The methods on
+    // this impl block (and on `LayoutRegistry` below) are the canonical
+    // queries every other crate should use — ad-hoc size/offset computation
+    // (e.g. the bridge-side `build_layout_registry` in `src/pipeline.rs`,
+    // which mirrors `LayoutRegistry::register` field-by-field) should be
+    // migrated to call into RepD/LayoutRegistry directly. See
+    // `src/bd/src/repd.rs` and the Wave 4a worklog entry for details.
     // -----------------------------------------------------------------------
 
     /// Returns the size in bytes of this representation.
     ///
     /// For compound types this is the *padded* total size so that arrays of
     /// the type are correctly laid out.
+    ///
+    /// # Wave 4a — Canonical name
+    ///
+    /// This is the historical name; **[`RepD::size_of`] is the canonical
+    /// name going forward.** Both methods delegate to the same logic and
+    /// return the same value — callers should prefer `size_of()` for new
+    /// code so the codebase converges on a single size-query vocabulary.
+    /// The free function [`size_of`](crate::repd_compat::size_of) (in
+    /// `repd_compat.rs`) is a `usize`-returning wrapper around this method
+    /// and is likewise superseded by `RepD::size_of()` for new callers.
     pub fn size(&self) -> u64 {
         match self {
             RepD::Byte(b) => b.size,
@@ -384,6 +402,35 @@ impl RepD {
             // it is stored as a pointer-sized offset.
             RepD::Ref { .. } => POINTER_SIZE,
         }
+    }
+
+    /// **Canonical (Wave 4a):** Returns the size in bytes of this
+    /// representation.
+    ///
+    /// This is the canonical size-query method for VUMA going forward.
+    /// It delegates to [`RepD::size`] (the historical name) — both return
+    /// the same value. New code should call `size_of()` so the codebase
+    /// converges on a single size-query vocabulary.
+    ///
+    /// For `RepD::State { layout }` this returns `0` because the RepD
+    /// itself only carries the `LayoutId` handle — callers that need the
+    /// resolved state size must query the owning `LayoutRegistry` via
+    /// [`LayoutRegistry::state_size`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vuma_bd::repd::{RepD, ByteRep};
+    ///
+    /// let r = RepD::Byte(ByteRep { size: 4, align: 4 });
+    /// assert_eq!(r.size_of(), 4);
+    /// ```
+    pub fn size_of(&self) -> u64 {
+        // Delegate to the historical `size()` so all existing call sites
+        // and the canonical `size_of()` share a single source of truth.
+        // Future waves may inline the match here if the migration to
+        // `size_of()` as the sole entry point is completed.
+        self.size()
     }
 
     /// Returns the required alignment in bytes of this representation.
@@ -753,6 +800,19 @@ pub struct LayoutField {
 /// the resolved [`LayoutDef`]; subsequent `get` / `field_offset` / `field_size`
 /// queries are O(field-count) lookups against the cached layout.
 ///
+/// # Wave 4a — Canonical PMT type system
+///
+/// As of Wave 4a, `LayoutRegistry` is the **canonical** source for state
+/// sizes and field offsets/size/RepD in VUMA. The methods
+/// [`state_size`](Self::state_size), [`field_offset`](Self::field_offset),
+/// [`field_size`](Self::field_size), and [`field_repd`](Self::field_repd)
+/// form the canonical query API — code elsewhere in the codebase that
+/// computes these quantities ad-hoc (notably `build_layout_registry` in
+/// `src/pipeline.rs`, which mirrors `LayoutRegistry::register`
+/// field-by-field into a `HashMap<String, (u64, Vec<...>)>`) should be
+/// migrated to call into `LayoutRegistry` directly so there is a single
+/// source of truth.
+///
 /// # Example
 ///
 /// ```
@@ -763,8 +823,11 @@ pub struct LayoutField {
 ///     ("x".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
 ///     ("y".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
 /// ]);
-/// assert_eq!(registry.field_offset(id, "y"), Some(4));
-/// assert_eq!(registry.field_size(id, "x"), Some(4));
+/// // Wave 4a canonical queries:
+/// assert_eq!(registry.state_size(id), 8);           // total size of the state
+/// assert_eq!(registry.field_offset(id, "y"), Some(4));  // y's byte offset
+/// assert_eq!(registry.field_size(id, "x"), Some(4));    // x's byte size
+/// assert!(matches!(registry.field_repd(id, "x"), Some(RepD::Byte(_))));
 /// let layout = registry.get(id).unwrap();
 /// assert_eq!(layout.total_size, 8);
 /// assert_eq!(layout.alignment, 4);
@@ -855,7 +918,43 @@ impl LayoutRegistry {
         self.layouts.get(id.0 as usize)
     }
 
-    /// Get the offset of a field within a layout.
+    // -----------------------------------------------------------------------
+    // Wave 4a — Canonical PMT queries
+    //
+    // These are the canonical RepD/LayoutRegistry queries for the PMT
+    // (Programs as Memory Transformations) type system. Code elsewhere in
+    // the codebase that computes state sizes / field offsets ad-hoc (e.g.
+    // `build_layout_registry` in `src/pipeline.rs`, which mirrors
+    // `LayoutRegistry::register` field-by-field) should be migrated to
+    // call these methods directly so there is a single source of truth.
+    // -----------------------------------------------------------------------
+
+    /// **Canonical (Wave 4a):** Get a state's total size in bytes.
+    ///
+    /// Returns the layout's `total_size` (including tail padding so arrays
+    /// of the layout are correctly strided), or `0` if the layout id is
+    /// unknown to this registry. Returning `0` for unknown layouts matches
+    /// the historical bridge behavior (`build_layout_registry` in
+    /// `src/pipeline.rs` falls back to a 0-byte allocation when a layout
+    /// name isn't found) and avoids panicking on a missing layout — the
+    /// IVE StateRead/StateWrite/StateTransform verifiers (Wave 3a/3b/3c)
+    /// surface the missing-layout error separately as a verification
+    /// failure.
+    ///
+    /// This is the canonical way to size a `RepD::State { layout }` value
+    /// — `RepD::size`/`RepD::size_of` return `0` for `State` because the
+    /// RepD only carries the `LayoutId` handle, not the resolved size.
+    pub fn state_size(&self, layout_id: LayoutId) -> u64 {
+        self.get(layout_id).map(|l| l.total_size).unwrap_or(0)
+    }
+
+    /// **Canonical (Wave 4a):** Get a field's byte offset within a layout.
+    ///
+    /// Returns `None` if the layout id is unknown or the field name is not
+    /// present in the layout. This is the canonical field-offset query —
+    /// callers should prefer it over ad-hoc offset arithmetic. See also
+    /// [`LayoutDef::fields`] for direct access to the resolved
+    /// [`LayoutField`] entries (each carries `offset`, `size`, and `repd`).
     pub fn field_offset(&self, layout: LayoutId, field: &str) -> Option<u64> {
         self.get(layout)?
             .fields
@@ -864,13 +963,34 @@ impl LayoutRegistry {
             .map(|f| f.offset)
     }
 
-    /// Get the size of a field within a layout.
+    /// **Canonical (Wave 4a):** Get a field's byte size.
+    ///
+    /// Returns `None` if the layout id is unknown or the field name is not
+    /// present in the layout. This is the canonical field-size query —
+    /// callers should prefer it over `field.repd.size_of()` for fields
+    /// looked up from a `LayoutRegistry` (the registry caches the size
+    /// at `register` time, avoiding a re-walk of nested RepDs).
     pub fn field_size(&self, layout: LayoutId, field: &str) -> Option<u64> {
         self.get(layout)?
             .fields
             .iter()
             .find(|f| f.name == field)
             .map(|f| f.size)
+    }
+
+    /// **Canonical (Wave 4a):** Get a field's `RepD` type.
+    ///
+    /// Returns `None` if the layout id is unknown or the field name is not
+    /// present in the layout. Use this to descend into nested layouts
+    /// (e.g. for multi-level field access `p.inner.x`) or to check a
+    /// field's structural kind (Byte/Struct/Array/Ptr/...) without
+    /// re-resolving it.
+    pub fn field_repd(&self, layout: LayoutId, field: &str) -> Option<&RepD> {
+        self.get(layout)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| &f.repd)
     }
 }
 
@@ -1551,5 +1671,197 @@ mod tests {
         } else {
             panic!("expected Generic variant");
         }
+    }
+
+    // =======================================================================
+    // Wave 4a — RepD as primary type system
+    // (canonical state_size / field_offset / field_size / field_repd /
+    //  RepD::size_of queries on LayoutRegistry)
+    // =======================================================================
+
+    #[test]
+    fn wave4a_size_of_matches_size_for_all_variants() {
+        // size_of() is the canonical alias for size() — both must agree.
+        let cases: Vec<RepD> = vec![
+            RepD::Byte(ByteRep { size: 4, align: 4 }),
+            RepD::Struct(StructRep {
+                fields: vec![
+                    (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
+                    (4, RepD::Byte(ByteRep { size: 2, align: 2 })),
+                ],
+                total_size: 8,
+                align: 4,
+            }),
+            RepD::Array(ArrayRep {
+                element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+                count: 3,
+            }),
+            RepD::Ptr(PtrRep {
+                pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+            }),
+            RepD::State { layout: LayoutId(0) },  // returns 0 (needs registry)
+            RepD::Ref { layout: LayoutId(0), field: FieldId(0) },  // POINTER_SIZE
+        ];
+        for r in &cases {
+            assert_eq!(r.size_of(), r.size(), "size_of != size for {r}");
+        }
+        // Ref is pointer-sized.
+        assert_eq!(
+            RepD::Ref {
+                layout: LayoutId(0),
+                field: FieldId(0)
+            }
+            .size_of(),
+            POINTER_SIZE
+        );
+        // State returns 0 (resolved via LayoutRegistry::state_size).
+        assert_eq!(RepD::State { layout: LayoutId(0) }.size_of(), 0);
+    }
+
+    #[test]
+    fn wave4a_state_size_returns_total_size() {
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register(
+            "Pair",
+            vec![
+                ("a".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+                ("b".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+        );
+        // total_size = 8 (no tail padding — already aligned to 4).
+        assert_eq!(reg.state_size(id), 8);
+    }
+
+    #[test]
+    fn wave4a_state_size_returns_zero_for_unknown_id() {
+        let reg = LayoutRegistry::new();
+        // No layouts registered → LayoutId(0) is unknown.
+        assert_eq!(reg.state_size(LayoutId(0)), 0);
+        assert_eq!(reg.state_size(LayoutId(999)), 0);
+    }
+
+    #[test]
+    fn wave4a_state_size_includes_tail_padding() {
+        let mut reg = LayoutRegistry::new();
+        // 3 bytes + 1 byte = 4 bytes; alignment is 4 (from the u32). The
+        // total_size must be padded up to 4 so arrays of this layout are
+        // correctly strided (LayoutRegistry::register rounds up to align).
+        let id = reg.register(
+            "Padded",
+            vec![
+                ("a".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+                ("b".to_string(), RepD::Byte(ByteRep { size: 1, align: 1 })),
+            ],
+        );
+        assert_eq!(reg.state_size(id), 8); // 5 rounded up to 8
+    }
+
+    #[test]
+    fn wave4a_field_offset_canonical_query() {
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register(
+            "Point",
+            vec![
+                ("x".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+                ("y".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+        );
+        assert_eq!(reg.field_offset(id, "x"), Some(0));
+        assert_eq!(reg.field_offset(id, "y"), Some(4));
+        assert_eq!(reg.field_offset(id, "z"), None); // unknown field
+    }
+
+    #[test]
+    fn wave4a_field_size_canonical_query() {
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register(
+            "Mixed",
+            vec![
+                ("a".to_string(), RepD::Byte(ByteRep { size: 8, align: 8 })),
+                ("b".to_string(), RepD::Byte(ByteRep { size: 1, align: 1 })),
+                ("c".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+            ],
+        );
+        assert_eq!(reg.field_size(id, "a"), Some(8));
+        assert_eq!(reg.field_size(id, "b"), Some(1));
+        assert_eq!(reg.field_size(id, "c"), Some(4));
+        assert_eq!(reg.field_size(id, "missing"), None);
+    }
+
+    #[test]
+    fn wave4a_field_repd_canonical_query() {
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register(
+            "Typed",
+            vec![
+                ("byte4".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (
+                    "ptr".to_string(),
+                    RepD::Ptr(PtrRep {
+                        pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
+                    }),
+                ),
+                (
+                    "arr".to_string(),
+                    RepD::Array(ArrayRep {
+                        element: Box::new(RepD::Byte(ByteRep { size: 2, align: 2 })),
+                        count: 4,
+                    }),
+                ),
+            ],
+        );
+        assert!(matches!(reg.field_repd(id, "byte4"), Some(RepD::Byte(_))));
+        assert!(matches!(reg.field_repd(id, "ptr"), Some(RepD::Ptr(_))));
+        assert!(matches!(reg.field_repd(id, "arr"), Some(RepD::Array(_))));
+        assert!(reg.field_repd(id, "missing").is_none());
+    }
+
+    #[test]
+    fn wave4a_field_repd_returns_same_size_as_field_size() {
+        // The RepD returned by field_repd must agree with the cached size
+        // returned by field_size — both are derived from the same LayoutField.
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register(
+            "Consistency",
+            vec![
+                ("a".to_string(), RepD::Byte(ByteRep { size: 7, align: 1 })),
+                (
+                    "b".to_string(),
+                    RepD::Array(ArrayRep {
+                        element: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
+                        count: 5,
+                    }),
+                ),
+            ],
+        );
+        for fname in &["a", "b"] {
+            let cached = reg.field_size(id, fname).unwrap();
+            let computed = reg.field_repd(id, fname).unwrap().size_of();
+            assert_eq!(
+                cached, computed,
+                "field_size != field_repd().size_of() for {fname}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave4a_canonical_queries_return_none_for_unknown_layout() {
+        let reg = LayoutRegistry::new();
+        // No layouts registered → all canonical queries return None / 0.
+        assert_eq!(reg.state_size(LayoutId(0)), 0);
+        assert_eq!(reg.field_offset(LayoutId(0), "x"), None);
+        assert_eq!(reg.field_size(LayoutId(0), "x"), None);
+        assert!(reg.field_repd(LayoutId(0), "x").is_none());
+    }
+
+    #[test]
+    fn wave4a_canonical_queries_on_empty_layout() {
+        let mut reg = LayoutRegistry::new();
+        let id = reg.register("Empty", vec![]);
+        // Empty layout: total_size = 0, no fields.
+        assert_eq!(reg.state_size(id), 0);
+        assert_eq!(reg.field_offset(id, "any"), None);
+        assert_eq!(reg.field_size(id, "any"), None);
+        assert!(reg.field_repd(id, "any").is_none());
     }
 }

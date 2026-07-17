@@ -265,6 +265,10 @@ impl BinaryWrite for Capability {
             Capability::Share => 14,
             Capability::Move => 15,
             Capability::Pin => 16,
+            Capability::StateRead => 17,
+            Capability::StateWrite => 18,
+            Capability::StateTransform => 19,
+            Capability::StateConsume => 20,
         };
         write_u8(w, tag)
     }
@@ -291,6 +295,10 @@ impl BinaryRead for Capability {
             14 => Ok(Capability::Share),
             15 => Ok(Capability::Move),
             16 => Ok(Capability::Pin),
+            17 => Ok(Capability::StateRead),
+            18 => Ok(Capability::StateWrite),
+            19 => Ok(Capability::StateTransform),
+            20 => Ok(Capability::StateConsume),
             other => Err(BinaryError::InvalidData(format!(
                 "invalid Capability discriminant: {other}"
             ))),
@@ -380,6 +388,8 @@ impl BinaryWrite for TemporalKind {
             TemporalKind::Coincides => 1,
             TemporalKind::Precedes => 2,
             TemporalKind::Succeeds => 3,
+            TemporalKind::EpochBefore => 4,
+            TemporalKind::EpochAfter => 5,
         };
         write_u8(w, tag)
     }
@@ -392,6 +402,8 @@ impl BinaryRead for TemporalKind {
             1 => Ok(TemporalKind::Coincides),
             2 => Ok(TemporalKind::Precedes),
             3 => Ok(TemporalKind::Succeeds),
+            4 => Ok(TemporalKind::EpochBefore),
+            5 => Ok(TemporalKind::EpochAfter),
             other => Err(BinaryError::InvalidData(format!(
                 "invalid TemporalKind discriminant: {other}"
             ))),

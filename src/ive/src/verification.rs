@@ -55,12 +55,60 @@ pub struct VerificationInput {
     pub scg: SCG,
     /// Pre-inferred BD map (optional — will be inferred if absent).
     pub bd_map: Option<HashMap<NodeId, BD>>,
+    /// (Wave 3d) Optional PMT layout registry — maps layout name →
+    /// [`PmtLayoutSpec`].  Used by `InvariantAggregator::verify_pmt` when
+    /// the verification level is [`VerificationLevel::Pmt`].  Populated
+    /// from the program's `Item::LayoutDef` AST nodes by the pipeline
+    /// (the SCG itself does not retain structured layout info — see
+    /// `parser::to_scg::convert_item`'s `Item::LayoutDef` arm, which
+    /// emits a Computation node with a descriptive label but discards
+    /// the field types/sizes).
+    pub pmt_layouts: Option<HashMap<String, PmtLayoutSpec>>,
+}
+
+/// (Wave 3d) A unified layout spec for PMT state verification.
+///
+/// The three PMT state verifiers (`state_read`, `state_write`,
+/// `state_transform`) each carry their own duplicated `LayoutInfo` /
+/// `FieldInfo` structs (a parallel-development artefact noted in
+/// worklog Wave 3c/3b).  `PmtLayoutSpec` is the IVE-public shape that
+/// the pipeline constructs from the AST; `InvariantAggregator::verify_pmt`
+/// converts it to each verifier's local `LayoutInfo` type on demand.
+///
+/// Fields are kept minimal — `name`, `total_size`, and a list of
+/// `(field_name, byte_offset, byte_size, type_name)` tuples — so the
+/// verifiers can validate offset+size bounds and type compatibility.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PmtLayoutSpec {
+    /// Layout name (e.g. `"Point"`).
+    pub name: String,
+    /// Total layout size in bytes (including tail padding).
+    pub total_size: u64,
+    /// Fields in declaration order with computed offsets/sizes.
+    pub fields: Vec<PmtFieldSpec>,
+}
+
+/// (Wave 3d) A single field within a [`PmtLayoutSpec`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PmtFieldSpec {
+    /// Field name (unique within the layout).
+    pub name: String,
+    /// Byte offset of the field within the layout.
+    pub offset: u64,
+    /// Field size in bytes.
+    pub size: u64,
+    /// Field type as a display string (e.g. `"u32"`, `"[u8; 16]"`).
+    pub type_name: String,
 }
 
 impl VerificationInput {
     /// Create verification input from an SCG (without pre-inferred BDs).
     pub fn from_scg(scg: SCG) -> Self {
-        Self { scg, bd_map: None }
+        Self {
+            scg,
+            bd_map: None,
+            pmt_layouts: None,
+        }
     }
 
     /// Create verification input with a pre-inferred BD map.
@@ -68,7 +116,15 @@ impl VerificationInput {
         Self {
             scg,
             bd_map: Some(bd_map),
+            pmt_layouts: None,
         }
+    }
+
+    /// (Wave 3d) Attach a PMT layout registry (used by
+    /// `VerificationLevel::Pmt`).
+    pub fn with_pmt_layouts(mut self, layouts: HashMap<String, PmtLayoutSpec>) -> Self {
+        self.pmt_layouts = Some(layouts);
+        self
     }
 }
 
