@@ -1,0 +1,622 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/mm/kmalloc.vuma
+// VWK Kernel Slab Allocator — power-of-2 free-list allocator over mmap (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A slab allocator for small kernel allocations. Rounds the requested size up
+// to the next power of 2 in {8, 16, 32, 64, 128, 256, 512, 1024, 4096}
+// (9 size classes), then allocates from the corresponding slab. Each slab
+// owns exactly one 4096-byte page obtained from mmap and splits it into
+// N = (4096 / slot_size) equal-sized slots.
+//
+// Per-class slot counts:
+//     8 B  → 512 slots      16 B → 256 slots      32 B → 128 slots
+//     64 B →  64 slots     128 B →  32 slots     256 B →  16 slots
+//    512 B →   8 slots    1024 B →   4 slots    4096 B →   1 slot
+//
+// Allocation policy: pop from the slab's free-stack if non-empty, else bump
+// the next-slot counter. Freeing pushes the slot index back onto the slab's
+// free-stack. When both the free-stack is empty AND the next-slot counter
+// has reached n_slots, the slab is full and kmalloc returns 0 (OOM).
+//
+// Build & run self-test (hosted x86_64):
+//     ./target/release-fast/compile_dump womb/kernel/mm/kmalloc.vuma \
+//         /tmp/kmalloc.bin x86_64 --verify
+//     /tmp/kmalloc.bin ; echo "exit=$?"
+// Expected exit: 0
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
+// lives in ___pmt_buffer-backed State<T> buffers:
+//   - State<SlabState> — per-class bookkeeping (base, slot_size, n_slots,
+//     n_used, free-stack, free-top, init flag — one slot per size class).
+// The CALLER allocates SlabState via state_new(SlabState) and passes it by
+// reference to kmalloc / kfree / slab_init (init-style API — see "Why
+// init-style?" in womb/kernel/mm/pmm.vuma for the codegen rationale).
+//
+// The slab pages themselves are obtained from the host via the mmap extern
+// (pre-registered on x86_64 as syscall 9 — see
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs). The slab
+// allocator never dereferences these addresses; it only hands them back to
+// the caller (kmalloc's return value) or to munmap (on slab destruction,
+// which is not yet implemented — the slabs are leaked at process exit, the
+// same as arena_alloc'd buffers in womb/alloc/arena.vuma). The free-list
+// is tracked in the SlabState's flat byte arrays, NOT in the slab pages'
+// memory (which would require pointer derefs — a PMT violation).
+//
+// ── Why a flat byte-array layout? ───────────────────────────────────────────
+// The K2f contract specified a `Slab` struct held in a `[Slab; 9]` array,
+// but VUMA's current codegen (src/pipeline.rs::flatten_expr, Expr::Index
+// arm) does NOT scale the index by the element size for non-u8 array
+// element types — every `state.array[i]` is lowered to `*(base_addr + i)`
+// with a U8 Load/Store, and the same arm hardcodes `ty: None` on the
+// AccessNode, which the IR-lowering path defaults to U8. (Verified during
+// K2a via /home/z/probes/probe_u32_index3.vuma.) So a `[Slab; 9]` array
+// would have all 9 slabs aliasing the same 1-byte slot at offset 0.
+//
+// Workaround (per the K2f contract's "REVISED SlabState"): store each
+// per-class field in a separate flat byte array, with pack/unpack helpers
+// that read/write the multi-byte little-endian values byte-by-byte. This
+// is byte-identical to the K2a pmm.vuma `FlatPool` pattern (bases / orders
+// / nexts) — same codegen limitation, same workaround.
+//
+// ── Deviation: extra free_stacks / free_tops / inited fields ────────────────
+// The K2f contract's REVISED SlabState has 5 fields (bases / slot_sizes /
+// free_heads / n_slots / n_used). The contract's prose describes the free
+// list as "each free slot's first 8 bytes hold the index of the next free
+// slot (or 256 = end)" — i.e. the canonical in-place linked-list slab.
+// That design REQUIRES dereferencing the slab page (writing the next-free
+// index into the freed slot's first 8 bytes), which is a PMT violation
+// (no `*ptr` / no Address→State<T> cast exists in VUMA today — see "Why
+// init-style?" note about no `as State<T>` casts).
+//
+// Workaround: store the free list OUTSIDE the slab page, in a per-class
+// free-stack array (free_stacks: 9 slabs × 512 u16 slots = 9216 bytes;
+// free_tops: 9 u32 stack-top counters = 36 bytes). Allocation pops from
+// the free-stack; freeing pushes back. The semantic is identical to the
+// in-place linked-list (LIFO reuse), just stored in the bookkeeping
+// buffer instead of the slab page. The `free_heads` field is repurposed
+// from "first free slot index" to "next-bump-counter" — i.e. the next
+// slot index that has never been allocated (the bump allocator's cursor).
+// Once `free_heads == n_slots`, all slots have been bumped at least once
+// and subsequent allocations must come from the free-stack. An `inited`
+// field supports lazy initialization (slab_init is called on the first
+// kmalloc to each size class, not by the caller up-front — see slab_init
+// below). When the codegen gains Address→State<T> casts and the slab
+// pages can hold their own free-lists, this file can collapse back to
+// the contract's 5-field layout.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. If a future kmain.vuma wants to call
+// kmalloc / kfree, it must re-declare the SlabState layout and the
+// mmap / munmap externs byte-identically (same pattern as console.vuma
+// re-declaring its extern `write`). The mmap / munmap extern signatures
+// here are byte-identical to womb/kernel/arch/x86_64/trampoline.vuma and
+// womb/kernel/hosted/host.vuma.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Externs — pre-registered on x86_64 as real syscalls (mmap=9, munmap=11).
+// On other backends they resolve to __ffi_fallback_stub (returns 0) — the
+// slab allocator's self-test only runs on x86_64 hosted mode.
+// ────────────────────────────────────────────────────────────────────────────
+extern "C" {
+    // mmap(addr, length, prot, flags, fd, offset) — anonymous private mapping.
+    //   prot  = 3 (PROT_READ | PROT_WRITE)
+    //   flags = 34 (MAP_PRIVATE | MAP_ANONYMOUS)
+    //   fd    = -1, offset = 0  (anonymous)
+    // Returns the base address of the mapped region, or MAP_FAILED (-1
+    // cast to Address) on error.
+    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    // munmap(addr, length) — release the mapping. Returns 0 on success.
+    fn munmap(addr: Address, length: u64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (flat byte arrays per the K2f contract's REVISED SlabState).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Slab bookkeeping for 9 size classes (8 B, 16 B, ..., 4096 B). Each
+// per-class field is a flat byte array indexed by `slab_idx * width + byte`,
+// packed little-endian. The free_stacks field holds 9 per-class free-stacks
+// of 512 u16 slot indices each (1024 bytes per slab × 9 slabs = 9216 bytes).
+//
+// Field semantics (per the contract's REVISED layout, with the documented
+// free_stacks / free_tops / inited additions — see "Deviation" above):
+//   - bases[i]       = u64 base address of slab i's mmap'd page (or 0 if
+//                      the slab is uninitialized).
+//   - slot_sizes[i]  = u32 slot size for slab i (8, 16, ..., 4096).
+//   - free_heads[i]  = u32 next-bump-counter: the next slot index that has
+//                      never been allocated. Starts at 0, increments to
+//                      n_slots. Once equal to n_slots, all slots have been
+//                      bumped and allocations come from the free-stack.
+//                      (Repurposed from the contract's "first free slot"
+//                      meaning — see "Deviation" above.)
+//   - n_slots[i]     = u32 total slot count for slab i (4096 / slot_size).
+//   - n_used[i]      = u32 currently allocated slot count for slab i.
+//   - free_stacks[i] = u16[512] LIFO stack of freed-but-not-reallocated
+//                      slot indices for slab i. Empty when free_tops[i]=0.
+//   - free_tops[i]   = u32 stack-top for slab i's free-stack (count of
+//                      entries currently on the stack, 0..512).
+//   - inited[i]      = u8 init flag: 0 = slab_init not yet called, 1 = slab
+//                      is initialized and ready to serve allocations.
+layout SlabState = {
+    bases: [u8; 72],         // 9 * 8 bytes  — u64 base per slab, LE-packed
+    slot_sizes: [u8; 36],    // 9 * 4 bytes  — u32 slot_size per slab, LE
+    free_heads: [u8; 36],    // 9 * 4 bytes  — u32 next-bump-counter per slab, LE
+    n_slots: [u8; 36],       // 9 * 4 bytes  — u32 total slots per slab, LE
+    n_used: [u8; 36],        // 9 * 4 bytes  — u32 used slots per slab, LE
+    free_stacks: [u8; 9216], // 9 * 512 * 2  — u16[512] free-stack per slab, LE
+    free_tops: [u8; 36],     // 9 * 4 bytes  — u32 free-stack top per slab, LE
+    inited: [u8; 9],         // 9 bytes      — u8 init flag per slab
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Constants (documented inline; VUMA has no top-level `const` for non-extern
+// use in this code path).
+// ────────────────────────────────────────────────────────────────────────────
+// PAGE_SIZE       = 4096                 (one page per slab)
+// NUM_SLABS       = 9                    (size classes 8 B .. 4096 B)
+// MAX_SLOTS       = 512                  (max slots per slab — for 8 B class)
+// PROT_READ|WRITE = 3
+// MAP_PRIVATE|ANON= 34
+// MAP_FAILED      = 0xFFFFFFFFFFFFFFFF   (mmap's error sentinel)
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers — u64 fields (bases).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Read the u64 base address for slab `idx` from SlabState.bases.
+fn slab_get_base(slabs: State<SlabState>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.bases[byte_off] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 base address for slab `idx` into SlabState.bases.
+fn slab_set_base(slabs: State<SlabState>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.bases[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers — u32 fields (slot_sizes, free_heads,
+// n_slots, n_used, free_tops).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn slab_get_slot_size(slabs: State<SlabState>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.slot_sizes[byte_off] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn slab_set_slot_size(slabs: State<SlabState>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.slot_sizes[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn slab_get_free_head(slabs: State<SlabState>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.free_heads[byte_off] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn slab_set_free_head(slabs: State<SlabState>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.free_heads[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn slab_get_n_slots(slabs: State<SlabState>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.n_slots[byte_off] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn slab_set_n_slots(slabs: State<SlabState>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.n_slots[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn slab_get_n_used(slabs: State<SlabState>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.n_used[byte_off] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn slab_set_n_used(slabs: State<SlabState>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.n_used[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn slab_get_free_top(slabs: State<SlabState>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = slabs.free_tops[byte_off] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn slab_set_free_top(slabs: State<SlabState>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        slabs.free_tops[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers — u8 fields (inited).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn slab_get_inited(slabs: State<SlabState>, idx: u32) -> u8 {
+    return slabs.inited[idx];
+}
+
+fn slab_set_inited(slabs: State<SlabState>, idx: u32, val: u8) {
+    slabs.inited[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers — u16 free-stack entries.
+// ────────────────────────────────────────────────────────────────────────────
+// free_stacks layout: 9 slabs × 1024 bytes/slab = 9216 bytes total. Each
+// slab owns a contiguous 1024-byte slice holding up to 512 u16 slot indices
+// (2 bytes each, little-endian). Slab `slab_idx`'s free-stack starts at
+// byte offset `slab_idx * 1024`; stack slot `stack_idx` is at byte offset
+// `slab_idx * 1024 + stack_idx * 2`.
+
+fn slab_free_stack_get(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32) -> u32 {
+    let off = slab_idx * 1024 + stack_idx * 2;
+    let lo = slabs.free_stacks[off] as u32;
+    let hi = slabs.free_stacks[off + 1] as u32;
+    return lo + (hi << 8);
+}
+
+fn slab_free_stack_set(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32, val: u32) {
+    let off = slab_idx * 1024 + stack_idx * 2;
+    let lo = val & 255;
+    let hi = (val >> 8) & 255;
+    slabs.free_stacks[off] = lo as u8;
+    slabs.free_stacks[off + 1] = hi as u8;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Size-class helpers.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Round up to the next power of 2 (minimum 8). Sizes > 2048 round up to 4096.
+fn kmalloc_roundup(size: u64) -> u32 {
+    let s = size;
+    if s <= 8 { return 8; }
+    if s <= 16 { return 16; }
+    if s <= 32 { return 32; }
+    if s <= 64 { return 64; }
+    if s <= 128 { return 128; }
+    if s <= 256 { return 256; }
+    if s <= 512 { return 512; }
+    if s <= 1024 { return 1024; }
+    return 4096;
+}
+
+// Get the slab index for a given size (0=8B, 1=16B, ..., 8=4096B).
+fn kmalloc_slab_idx(size: u64) -> u32 {
+    let s = kmalloc_roundup(size);
+    let idx = 0;
+    if s == 8 { idx = 0; }
+    if s == 16 { idx = 1; }
+    if s == 32 { idx = 2; }
+    if s == 64 { idx = 3; }
+    if s == 128 { idx = 4; }
+    if s == 256 { idx = 5; }
+    if s == 512 { idx = 6; }
+    if s == 1024 { idx = 7; }
+    if s == 4096 { idx = 8; }
+    return idx;
+}
+
+// Get the slot size (in bytes) for a given slab index.
+fn slab_slot_size_for_idx(idx: u32) -> u32 {
+    if idx == 0 { return 8; }
+    if idx == 1 { return 16; }
+    if idx == 2 { return 32; }
+    if idx == 3 { return 64; }
+    if idx == 4 { return 128; }
+    if idx == 5 { return 256; }
+    if idx == 6 { return 512; }
+    if idx == 7 { return 1024; }
+    return 4096;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// slab_init — initialize a slab for size class `idx`.
+// ────────────────────────────────────────────────────────────────────────────
+// mmap a 4096-byte page, set up the bookkeeping (base, slot_size, n_slots,
+// free_heads=0, n_used=0, free_tops=0, inited=1). On mmap failure (base ==
+// MAP_FAILED = 0xFFFFFFFFFFFFFFFF), leaves inited=0 so kmalloc treats the
+// slab as uninitialized and returns 0 (OOM).
+//
+// Init-style API (caller allocates `slabs` via state_new(SlabState), passes
+// by reference). The slab is initialized lazily — kmalloc calls slab_init
+// on the first allocation to each size class. The CALLER may also call
+// slab_init explicitly if it wants to pre-initialize slabs (useful for
+// bare-metal mode where mmap is replaced by pmm_alloc — K11 will swap the
+// mmap call here for a pmm_alloc call).
+
+fn slab_init(slabs: State<SlabState>, idx: u32) {
+    let slot_size = slab_slot_size_for_idx(idx);
+    // mmap a 4096-byte anonymous private page.
+    let base_addr: Address = mmap(0 as Address, 4096, 3, 34, -1, 0);
+    let base: u64 = base_addr as u64;
+    // Check for MAP_FAILED (mmap returns -1 on error).
+    if base == 0xFFFFFFFFFFFFFFFF {
+        // mmap failed — leave inited=0.
+        return;
+    }
+    slab_set_base(slabs, idx, base);
+    slab_set_slot_size(slabs, idx, slot_size);
+    slab_set_n_slots(slabs, idx, 4096 / slot_size);
+    slab_set_free_head(slabs, idx, 0);   // next bump-counter = 0
+    slab_set_n_used(slabs, idx, 0);
+    slab_set_free_top(slabs, idx, 0);    // free-stack empty
+    slab_set_inited(slabs, idx, 1);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// kmalloc — allocate `size` bytes. Returns the slot's address, or 0 on OOM.
+// ────────────────────────────────────────────────────────────────────────────
+// Rounds `size` up to the next power of 2, finds the corresponding slab,
+// lazily initializes it if needed, then pops a slot from the free-stack if
+// non-empty or bumps the next-slot counter. Returns 0 if the slab is full
+// (free-stack empty AND next-slot counter has reached n_slots) or if slab
+// initialization failed (mmap error).
+//
+// Init-style API: caller allocates `slabs` via state_new(SlabState), passes
+// by reference.
+
+fn kmalloc(slabs: State<SlabState>, size: u64) -> u64 {
+    let idx = kmalloc_slab_idx(size);
+    // Lazy init.
+    if slab_get_inited(slabs, idx) == 0 {
+        slab_init(slabs, idx);
+    }
+    if slab_get_inited(slabs, idx) == 0 {
+        // slab_init failed (mmap error).
+        return 0;
+    }
+
+    let slot_idx = 0;
+    let top = slab_get_free_top(slabs, idx);
+    if top > 0 {
+        // Pop from free-stack.
+        let new_top = top - 1;
+        slot_idx = slab_free_stack_get(slabs, idx, new_top);
+        slab_set_free_top(slabs, idx, new_top);
+    } else {
+        // Bump the next-slot counter.
+        let next = slab_get_free_head(slabs, idx);
+        let n_slots = slab_get_n_slots(slabs, idx);
+        if next >= n_slots {
+            // Slab full.
+            return 0;
+        }
+        slot_idx = next;
+        slab_set_free_head(slabs, idx, next + 1);
+    }
+
+    // Compute the slot's address: base + slot_idx * slot_size.
+    let base = slab_get_base(slabs, idx);
+    let slot_size = slab_get_slot_size(slabs, idx);
+    let addr = base + (slot_idx as u64) * (slot_size as u64);
+    slab_set_n_used(slabs, idx, slab_get_n_used(slabs, idx) + 1);
+    return addr;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// kfree — return the slot at `addr` to its slab's free-stack.
+// ────────────────────────────────────────────────────────────────────────────
+// Walks the 9 slabs to find the one whose page contains `addr` (i.e.
+// base <= addr < base + n_slots * slot_size AND (addr - base) is a multiple
+// of slot_size). Pushes the slot index onto that slab's free-stack and
+// decrements n_used. If `addr` does not match any initialized slab (e.g.
+// it was not allocated by kmalloc, or the slab has been destroyed), the
+// function is a no-op (silent ignore — the kernel has no good way to
+// recover from a double-free or stray free in hosted mode).
+//
+// Init-style API: caller allocates `slabs` via state_new(SlabState), passes
+// by reference.
+
+fn kfree(slabs: State<SlabState>, addr: u64) {
+    let i = 0;
+    while i < 9 {
+        if slab_get_inited(slabs, i) == 1 {
+            let base = slab_get_base(slabs, i);
+            let slot_size = slab_get_slot_size(slabs, i);
+            let n_slots = slab_get_n_slots(slabs, i);
+            // Range check: base <= addr < base + n_slots * slot_size.
+            if addr >= base {
+                let span = (n_slots as u64) * (slot_size as u64);
+                let end = base + span;
+                if addr < end {
+                    // Alignment check: (addr - base) must be a multiple
+                    // of slot_size (the caller passed a slot-aligned addr).
+                    let offset = addr - base;
+                    if (offset % (slot_size as u64)) == 0 {
+                        let slot_idx = (offset / (slot_size as u64)) as u32;
+                        // Push onto the free-stack (if there's room).
+                        let top = slab_get_free_top(slabs, i);
+                        if top < 512 {
+                            slab_free_stack_set(slabs, i, top, slot_idx);
+                            slab_set_free_top(slabs, i, top + 1);
+                            let used = slab_get_n_used(slabs, i);
+                            if used > 0 {
+                                slab_set_n_used(slabs, i, used - 1);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    // Not found in any slab — silent ignore (see function header).
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K2f DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate from a few size classes, free, and re-allocate to confirm the
+// free-stack reuse path. Verifies:
+//   1. kmalloc(10) returns a non-zero address (the 16 B slab — 10 rounds
+//      up to 16, slab_idx=1).
+//   2. The address lies within the 16 B slab's mmap'd page (base <= addr <
+//      base + n_slots * slot_size, and addr is slot-aligned).
+//   3. n_used is 1 after the first alloc.
+//   4. kfree brings n_used back to 0 and pushes the slot onto the
+//      free-stack (free_top == 1).
+//   5. The next kmalloc of the same size reuses the freed slot (returns
+//      the same address, free_top goes back to 0, n_used goes back to 1).
+//   6. A second slab (kmalloc(4096) → 4096 B slab, slab_idx=8) is also
+//      initialized and returns a distinct address.
+//
+// All paths exercise the lazy-init + bump + free-stack-reuse code paths
+// without crashes or PMT violations. Returns 0 on pass.
+
+fn main() -> i32 {
+    let slabs = state_new(SlabState);
+
+    // 1. First alloc: 10 rounds up to 16, slab_idx=1.
+    let p1 = kmalloc(slabs, 10);
+    if p1 == 0 { return 1; }
+
+    // 2. p1 must lie in the 16 B slab's page.
+    if slab_get_inited(slabs, 1) == 0 { return 2; }
+    let base1 = slab_get_base(slabs, 1);
+    let slot_size1 = slab_get_slot_size(slabs, 1);
+    let n_slots1 = slab_get_n_slots(slabs, 1);
+    if slot_size1 != 16 { return 3; }
+    if n_slots1 != 256 { return 4; }       // 4096 / 16
+    if p1 < base1 { return 5; }
+    let end1 = base1 + (n_slots1 as u64) * (slot_size1 as u64);
+    if p1 >= end1 { return 6; }
+    let off1 = p1 - base1;
+    if (off1 % (slot_size1 as u64)) != 0 { return 7; }
+
+    // 3. n_used should be 1.
+    if slab_get_n_used(slabs, 1) != 1 { return 8; }
+    // free-stack should be empty.
+    if slab_get_free_top(slabs, 1) != 0 { return 9; }
+
+    // 4. Free p1 — pushes onto free-stack, decrements n_used.
+    kfree(slabs, p1);
+    if slab_get_n_used(slabs, 1) != 0 { return 10; }
+    if slab_get_free_top(slabs, 1) != 1 { return 11; }
+
+    // 5. Next kmalloc(10) should reuse the freed slot (LIFO).
+    let p2 = kmalloc(slabs, 10);
+    if p2 == 0 { return 12; }
+    if p2 != p1 { return 13; }              // reused
+    if slab_get_n_used(slabs, 1) != 1 { return 14; }
+    if slab_get_free_top(slabs, 1) != 0 { return 15; }
+
+    // 6. Different size class (4096 B, slab_idx=8).
+    let p3 = kmalloc(slabs, 4096);
+    if p3 == 0 { return 16; }
+    if slab_get_inited(slabs, 8) == 0 { return 17; }
+    if slab_get_slot_size(slabs, 8) != 4096 { return 18; }
+    if slab_get_n_slots(slabs, 8) != 1 { return 19; }   // 4096 / 4096
+    if p3 == p2 { return 20; }              // distinct from p2 (different slab)
+
+    // Cleanup (not strictly required — the host reclaims mmap'd pages on
+    // process exit, same as arena_alloc'd buffers in womb/alloc/arena.vuma).
+    kfree(slabs, p2);
+    kfree(slabs, p3);
+    if slab_get_n_used(slabs, 1) != 0 { return 21; }
+    if slab_get_n_used(slabs, 8) != 0 { return 22; }
+
+    return 0;
+}
