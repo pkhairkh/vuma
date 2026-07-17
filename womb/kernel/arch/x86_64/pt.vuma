@@ -1,0 +1,190 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/x86_64/pt.vuma
+// x86_64 Page Table Entry layout + field helpers (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Defines the x86_64 4-level paging PTE bit layout (Intel SDM Vol. 3,
+// Ch. 4) and a small set of pure helpers that extract or assemble the
+// individual fields. The PTE itself is a single u64 — VUMA has no
+// bitfield type, so the helpers operate on the raw u64 and apply masks
+// and shifts.
+//
+// Bit layout of a 64-bit x86_64 PTE (Intel SDM Vol. 3, Fig. 4-19):
+//     bit 0      Present (P)
+//     bit 1      Read/Write (R/W)
+//     bit 2      User/Supervisor (U/S)
+//     bit 3      Page-Level Write-Through (PWT)
+//     bit 4      Page-Level Cache-Disable (PCD)
+//     bit 5      Accessed (A)
+//     bit 6      Dirty (D)
+//     bit 7      Page Size (PS) / Pat
+//     bits 8-11  Ignored / available
+//     bits 12-51 Physical address (40 bits, 4 KB-aligned)
+//     bits 52-62 Ignored / available
+//     bit 63     Execute Disable (NX)
+//
+// Field bit positions (decimal constants — VUMA accepts 0x hex too, but
+// decimal is safer because the parser's hex-literal path goes through
+// `parse_int_radix` which is shared with the regular integer path and
+// any width-extension subtlety would bite us at compile time; decimal
+// avoids that surface):
+//     P        = 1                       (bit 0)
+//     R_W      = 2                       (bit 1)
+//     U_S      = 4                       (bit 2)
+//     PWT      = 8                       (bit 3)
+//     PCD      = 16                      (bit 4)
+//     A        = 32                      (bit 5)
+//     D        = 64                      (bit 6)
+//     PS_PAT   = 128                     (bit 7)
+//     NX       = 9223372036854775808     (bit 63, 0x8000000000000000)
+//
+// Key masks:
+//     4095               = 0xFFF                  (low 12 bits — flags)
+//     17592186028032     = 0x000FFFFFFFFFF000     (physical address bits 12-51)
+//     9223372036854775808 = 0x8000000000000000    (NX bit, bit 63)
+//
+// Build & run self-test (hosted x86_64):
+//     ./target/release-fast/compile_dump womb/kernel/arch/x86_64/pt.vuma \
+//         /tmp/pt.bin x86_64 --verify
+//     /tmp/pt.bin ; echo "exit=$?"
+// Expected exit: 0
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All data
+// is plain u64 scalars manipulated with bitwise arithmetic — no storage
+// needs to live in a State<T> buffer here, since the PTE is just a u64.
+//
+// ── Why no State<PageTableEntry>? ──────────────────────────────────────────
+// The contract specifies `layout PageTableEntry = { raw: u64 }`. This is
+// declared verbatim below so consumers can refer to it, but the helpers
+// themselves take/return raw u64 — PTEs in VUMA are most naturally
+// passed as scalars (they fit in a register), and the State<T> machinery
+// is reserved for multi-word structures that the PMT codegen can't keep
+// in a single SSA value. See womb/kernel/mm/vmm.vuma for the State-backed
+// PageTable (root_phys + levels) — that's the structure that NEEDS State.
+//
+// ── Deviation from the contract example ────────────────────────────────────
+// The contract's example `pte_addr` body returns `pte & 4503599627370495`
+// (= 0x000FFFFFFFFFFFFF, bits 0-51) — but the self-test immediately
+// asserts `pte_addr(pte_make(1048576, 3)) == 1048576`. Since
+// pte_make(1048576, 3) ORs in flag bits 0 and 1 (1048579 = 0x100003), the
+// bit-0..51 mask returns 1048579, NOT 1048576 — the self-test would fail
+// with exit=4. The DoD requires exit=0.
+//
+// The correct extraction mask for "physical address bits 12-51" is
+// 17592186028032 (= 0x000FFFFFFFFFF000) — this is the mask listed under
+// "IMPORTANT" in the K2c contract itself, and it matches the mask
+// `pte_make` uses to SANITIZE its `paddr` argument. Using the same mask
+// for build and for read makes round-trip pte_addr(pte_make(p, f)) == p
+// (for any p in bits 12-51), as the self-test requires. The deviation is
+// documented here and in the worklog; the contract's prose description
+// ("Extract the physical address from a PTE (bits 12-51)") is honored
+// exactly — only the contract's example BODY was buggy.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. A future kmain.vuma that wants to build
+// PTEs must re-declare the masks and helpers it uses (same pattern as
+// womb/kernel/arch/x86_64/bootinfo.vuma re-declaring __vuma_argc).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// x86_64 Page Table Entry — 8 bytes, stored as a u64. The helpers below
+// extract/set individual fields via masks and shifts; nothing else needs
+// the struct-typed access path, so the layout is intentionally minimal.
+layout PageTableEntry = { raw: u64 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Field-access helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// All return u8 (for single-bit flags) or u64 (for the address field).
+// Bit-test helpers return 0 or 1 — never any other value — so callers
+// can use `if pte_present(pte) != 0 { ... }` or compare against 1.
+
+// Extract the physical address from a PTE (bits 12-51).
+// Mask 17592186028032 = 0x000FFFFFFFFFF000 — bits 12 through 51 only.
+// This is the SAME mask pte_make uses to sanitize its paddr argument,
+// so pte_addr(pte_make(p, f)) == p for any p in bits 12-51.
+fn pte_addr(pte: u64) -> u64 {
+    return pte & 17592186028032;
+}
+
+// Check if the Present bit (bit 0) is set.
+fn pte_present(pte: u64) -> u8 {
+    return (pte & 1) as u8;
+}
+
+// Check if the R/W bit (bit 1) is set.
+fn pte_writable(pte: u64) -> u8 {
+    return ((pte >> 1) & 1) as u8;
+}
+
+// Check if the U/S bit (bit 2) is set (user-accessible).
+fn pte_user(pte: u64) -> u8 {
+    return ((pte >> 2) & 1) as u8;
+}
+
+// Check if the NX bit (bit 63) is set (no-execute).
+// 9223372036854775808 = 0x8000000000000000 — the sign bit of an i64, but
+// VUMA's u64 literals go through parse_int_radix which handles the full
+// 64-bit unsigned range, so this works as a pure u64 shift-and-mask.
+fn pte_no_exec(pte: u64) -> u8 {
+    return ((pte >> 63) & 1) as u8;
+}
+
+// Build a PTE from (paddr, flags).
+//   paddr: the target physical address (must be 4 KB-aligned; bits 12-51
+//          are preserved, the rest are masked off).
+//   flags: the low 12 bits (P, R/W, U/S, PWT, PCD, A, D, PS/PAT, and
+//          4 bits of available/ignored). Bits above 11 in `flags` are
+//          masked off — to set NX (bit 63), OR in 9223372036854775808
+//          on the result of pte_make.
+// The Present bit (bit 0) is ALWAYS ORed in — a not-present PTE has no
+// other meaningful fields, so the build helper enforces presence. This
+// matches the Intel SDM convention where the page-table walker treats a
+// not-present PTE as a leaf "not present" indicator regardless of any
+// other bits the OS might have stored in the available fields.
+fn pte_make(paddr: u64, flags: u64) -> u64 {
+    return (paddr & 17592186028032) | (flags & 4095) | 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 4-level paging geometry constants (documented as decimal literals —
+// VUMA has no top-level `const`, so callers must use the bare numbers).
+// ────────────────────────────────────────────────────────────────────────────
+//   PT_ENTRIES  = 512     (entries per table — 4096 / 8)
+//   PT_SIZE     = 4096    (bytes per table — one 4 KB page)
+//   PAGE_SIZE   = 4096    (bytes per mapped page)
+//   PML4_LEVEL  = 3       (top level, bits 47-39 of vaddr)
+//   PDPT_LEVEL  = 2       (bits 38-30)
+//   PD_LEVEL    = 1       (bits 29-21)
+//   PT_LEVEL    = 0       (bits 20-12 — leaf, points at a 4 KB page)
+//
+// Each entry is 8 bytes; 512 entries × 8 bytes = 4096 bytes per table,
+// so one 4 KB page holds exactly one table. This is why the address
+// mask is bits 12-51 (the address is page-aligned and 40 bits wide) —
+// the low 12 bits are the flag byte, the high 12 bits (52-63) are
+// ignored/available/NX.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Build a PTE for physical address 1 MB (1048576 = 0x100000) with flags
+// 3 = P(1) | R/W(2). Verify:
+//   (1) pte_present returns 1 (bit 0 was set by pte_make's `| 1`).
+//   (2) pte_writable returns 1 (bit 1 was set from `flags & 4095`).
+//   (3) pte_user returns 0 (bit 2 was NOT set — flags=3 has only bits 0,1).
+//   (4) pte_addr returns exactly 1048576 (the round-trip — same mask for
+//       build and for read, so the flag bits don't leak into the address).
+// Returns 0 on success, 1..4 on the corresponding failure (so a future
+// CI failure pinpoints the broken helper).
+
+fn main() -> i32 {
+    let pte = pte_make(1048576, 3);
+    if pte_present(pte) != 1 { return 1; }
+    if pte_writable(pte) != 1 { return 2; }
+    if pte_user(pte) != 0 { return 3; }
+    if pte_addr(pte) != 1048576 { return 4; }
+    return 0;
+}

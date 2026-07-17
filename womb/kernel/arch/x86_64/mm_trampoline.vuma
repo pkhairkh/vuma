@@ -1,0 +1,146 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/x86_64/mm_trampoline.vuma
+// x86_64 MM trampolines — extern declarations for page-table + TLB ops.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64-specific swap point for the MM externs declared
+// in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
+//     extern "C" {
+//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         fn tlb_flush();
+//         fn invlpg(vaddr: u64);
+//     }
+// In hosted mode, those four names resolve to `__ffi_fallback_stub`
+// (xor eax, eax; ret — returns 0, no-op for void functions) at link time.
+// In bare-metal mode (Wave K11), the same four names link against REAL
+// asm stubs registered by the x86_64 backend:
+//     pte_read / pte_write — direct 8-byte load/store at the PTE's
+//         physical address (x86_64 page tables live in regular memory,
+//         not behind an MMIO indirection — the table is reached via the
+//         kernel's identity-mapped physmem window OR with CR3.PCIDE-aware
+//         translation; the precise mechanism is K11's concern).
+//     tlb_flush    — `mov rax, cr3; mov cr3, rax` (reload CR3, flushes
+//                    all non-global TLB entries for the current PCID).
+//     invlpg(vaddr)— `invlpg [rdi]` (single-page invalidation; RDI = vaddr
+//                    under the SysV AMD64 ABI).
+//
+// This file ADDS two x86_64-specific externs that vmm.vuma does NOT
+// declare:
+//     cr3_read()  — `mov rax, cr3` (returns the current CR3 value — the
+//                   physical address of the current PML4 table, plus
+//                   PCID / flags bits).
+//     cr3_write(v)— `mov cr3, rdi` (switches address spaces — RDI = new
+//                   CR3 under SysV AMD64; flushes the TLB as a side
+//                   effect).
+// These are needed by a future scheduler (K4+) for context switching
+// between address spaces; they live here rather than in vmm.vuma because
+// they're x86_64-specific (aarch64 uses TTBR0/1, riscv64 uses satp).
+//
+// ── Why re-declare PageTable here? ──────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so every kernel module re-declares
+// the layouts it uses byte-identically (same pattern as
+// womb/kernel/arch/x86_64/bootinfo.vuma re-declaring __vuma_argc). The
+// PageTable layout here MUST match the one in womb/kernel/mm/vmm.vuma:
+//     layout PageTable = { root_phys: u64, levels: u8 }
+//
+// ── Why #[borrow] on pte_read / pte_write? ──────────────────────────────────
+// `#[borrow]` is load-bearing (K2b note in worklog.md): it tells the
+// marshal module (src/codegen/src/marshal.rs::classify_arg_mode) to pass
+// the State<PageTable> buffer's BASE ADDRESS and NOT invalidate the state
+// after the call. Without #[borrow], the default mode is `Invalidate`,
+// which marks `pt` as consumed after the first pte_read — the very next
+// pte_read in vmm.vuma's walk would then trip the use-after-invalidate
+// verifier. Keeping #[borrow] on the re-declaration here is therefore
+// essential, not stylistic.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// extern block is pure declaration — no storage, no pointer arithmetic.
+// The State<PageTable> parameter is a borrow-by-reference handle (the
+// marshal module lowers it to the buffer's base Address under the hood);
+// we never write `&pt` or `*pt` in VUMA source.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/x86_64/mm_trampoline.vuma \
+//         /tmp/mm_trampoline.bin x86_64 --verify
+//     /tmp/mm_trampoline.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (no top-level code; main() returns 0).
+//
+// In hosted mode the externs are never called from THIS file's main, so
+// __ffi_fallback_stub's "returns 0" behavior is not exercised — the
+// trampoline exists for OTHER modules (vmm.vuma, future kmain.vuma) to
+// link against. K2b's vmm.vuma calls pte_read / pte_write / tlb_flush /
+// invlpg and exercises the stubs at runtime; this file only declares
+// them so the symbol table is complete when both files are linked into
+// the same kernel image.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared byte-identically to womb/kernel/mm/vmm.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+
+// A page table. `root_phys` is the physical address of the top-level
+// table (PML4 for x86_64). `levels` is the number of paging levels (4
+// for x86_64 4-level paging). The walk uses `levels` to know how deep
+// to descend; see womb/kernel/mm/vmm.vuma::vmm_walk_idx for the
+// bit-extraction formula (9-bit indices, 4 KB pages, 512 entries/table).
+layout PageTable = {
+    root_phys: u64,
+    levels: u8,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — page-table access + TLB/CR3 ops.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
+// these for per-arch asm stubs registered in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs.
+extern "C" {
+    // Read a page-table entry. On x86_64, page tables are in regular
+    // memory, so this is a direct 8-byte load from the table's physical
+    // address (mapped to kernel virtual space via the identity-mapped
+    // physmem window OR with CR3.PCIDE-aware translation — K11's job).
+    // `#[borrow]` keeps the PageTable state alive across the call (see
+    // header note); without it, vmm.vuma's walk would trip the
+    // use-after-invalidate verifier after the first pte_read.
+    #[borrow]
+    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    // Write a page-table entry. Same address-resolution story as
+    // pte_read; the write goes to the same 8-byte cell. Callers are
+    // responsible for the appropriate tlb_flush / invlpg after a write
+    // that changes an entry the hardware walker may have cached.
+    #[borrow]
+    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    // Full TLB flush — reload CR3 to flush all non-global TLB entries
+    // for the current PCID. K11 stub: `mov rax, cr3; mov cr3, rax`.
+    fn tlb_flush();
+    // Per-vaddr TLB invalidation — invalidate the TLB entry for `vaddr`
+    // (if any) in the current address space. K11 stub: `invlpg [rdi]`
+    // (RDI = vaddr under SysV AMD64).
+    fn invlpg(vaddr: u64);
+    // CR3 read — returns the current CR3 value (physical address of the
+    // current PML4 table, plus PCID / flag bits). K11 stub:
+    // `mov rax, cr3; ret`. Used by the future scheduler (K4+) to save
+    // the current address space before a context switch.
+    fn cr3_read() -> u64;
+    // CR3 write — switches address spaces. K11 stub: `mov cr3, rdi; ret`
+    // (RDI = new CR3 under SysV AMD64). Side-effect: flushes the TLB
+    // (same as tlb_flush, but for the NEW address space — callers do
+    // not need to call tlb_flush separately after cr3_write).
+    fn cr3_write(val: u64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// main entry stub.
+// ────────────────────────────────────────────────────────────────────────────
+// This file is a pure declaration module (extern block + layout only, no
+// top-level execution). The compiler requires a `fn main()` entry to
+// compile as a standalone program; the real kmain (K1d) lives in
+// womb/kernel/kernel.vuma and will call the externs declared here via
+// womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
+// and directly (cr3_read / cr3_write) during context switches.
+
+fn main() -> i32 {
+    return 0;
+}
