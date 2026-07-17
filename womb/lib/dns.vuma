@@ -3,6 +3,21 @@
 // Builds and parses DNS query/response packets.
 // Uses the vuma-native syscall() intrinsic for socket / sendto / recvfrom /
 // close (asm-generic nrs 198 / 206 / 207 / 57).
+//
+// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers in
+// `dns_resolve` (`query` 512 bytes, `dest_addr`/`src_addr` 16 bytes for
+// sockaddr_in, `response` 512 bytes, `addrlen` 4 bytes for socklen_t)
+// are replaced by typed `State<Dns*>` states with `data: [u8; N]` array
+// fields. Byte writes via `*(ptr + i) = X` become `state.data[i] = X`.
+// The states are passed to syscall(206)/syscall(207) and to
+// `dns_build_query` / `dns_parse_response_a` (which take `Address` —
+// the codegen lowers `State<T>` to its underlying buffer address).
+// All `allocate`/`free` sites in this file are eliminated.
+
+layout DnsQuery    = { data: [u8; 512] }
+layout DnsResponse = { data: [u8; 512] }
+layout DnsSockaddr = { data: [u8; 16]  }
+layout DnsSockLen  = { data: [u8; 4]   }
 
 const AF_INET: i64 = 2;
 const SOCK_DGRAM: i64 = 2;
@@ -201,27 +216,25 @@ fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
     if sockfd < 0 { return 0; }
 
     // Build query
-    query = allocate(512);
+    let query = state_new(DnsQuery);
     txn_id: u32 = 0x1234;  // In production, use random
     query_len: u32 = dns_build_query(query, domain, DNS_TYPE_A, txn_id);
 
     // Build destination address
-    dest_addr = allocate(16);
-    *(dest_addr + 0) = AF_INET & 255;
-    *(dest_addr + 1) = (AF_INET >> 8) & 255;
-    *(dest_addr + 2) = (DNS_PORT >> 8) & 255;
-    *(dest_addr + 3) = DNS_PORT & 255;
-    *(dest_addr + 4) = (dns_server_ip >> 24) & 255;
-    *(dest_addr + 5) = (dns_server_ip >> 16) & 255;
-    *(dest_addr + 6) = (dns_server_ip >> 8) & 255;
-    *(dest_addr + 7) = dns_server_ip & 255;
+    let dest_addr = state_new(DnsSockaddr);
+    dest_addr.data[0] = AF_INET & 255;
+    dest_addr.data[1] = (AF_INET >> 8) & 255;
+    dest_addr.data[2] = (DNS_PORT >> 8) & 255;
+    dest_addr.data[3] = DNS_PORT & 255;
+    dest_addr.data[4] = (dns_server_ip >> 24) & 255;
+    dest_addr.data[5] = (dns_server_ip >> 16) & 255;
+    dest_addr.data[6] = (dns_server_ip >> 8) & 255;
+    dest_addr.data[7] = dns_server_ip & 255;
     i: u32 = 0;
-    while i < 8 { *(dest_addr + 8 + i) = 0; i = i + 1; }
+    while i < 8 { dest_addr.data[8 + i] = 0; i = i + 1; }
 
     // Send query
     sent: i64 = syscall(206, sockfd, query, query_len as i64, 0, dest_addr, 16);
-    free(query);
-    free(dest_addr);
 
     if sent < 0 {
         syscall(57, sockfd);
@@ -229,24 +242,20 @@ fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
     }
 
     // Receive response
-    response = allocate(DNS_RESPONSE_MAX);
-    src_addr = allocate(16);
-    addrlen = allocate(4);
-    *(addrlen + 0) = 16;
+    let response = state_new(DnsResponse);
+    let src_addr = state_new(DnsSockaddr);
+    let addrlen = state_new(DnsSockLen);
+    addrlen.data[0] = 16;
 
     recv_len: i64 = syscall(207, sockfd, response, DNS_RESPONSE_MAX as i64, 0, src_addr, addrlen);
 
     syscall(57, sockfd);
-    free(src_addr);
-    free(addrlen);
 
     if recv_len <= 0 {
-        free(response);
         return 0;
     }
 
     // Parse response
     result: u32 = dns_parse_response_a(response, recv_len, ip_out);
-    free(response);
     return result;
 }

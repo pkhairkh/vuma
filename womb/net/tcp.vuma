@@ -1,5 +1,5 @@
 // womb/net/tcp.vuma — TCP/IP Socket Layer
-// Expected exit code: 0 (self-test creates socket and closes)
+// Expected exit code: 0
 //
 // This is a COMPILABLE VUMA implementation of TCP/IP networking using
 // Linux socket syscalls. It provides a simple client/server API.
@@ -21,6 +21,17 @@
 //        (RESHAPE: recvfrom with NULL src_addr/addrlen — same semantics)
 //   close(fd)                                         -> syscall(57, fd)
 //   setsockopt(sockfd, level, optname, optval, optlen) -> syscall(208, ...)
+//
+// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers
+// (`addr` for sockaddr_in, `optval`/`addrlen` for socklen_t) are replaced
+// by typed `State<SockaddrIn>` and `State<SockLen>` with `data: [u8; N]`
+// array fields. The `make_sockaddr_in` helper takes `State<SockaddrIn>`.
+// The states are passed to syscall(203)/syscall(200)/syscall(202)/
+// syscall(208) where the codegen lowers `State<T>` to its underlying
+// buffer address. All `allocate`/`free` sites in this file are eliminated.
+
+layout SockaddrIn = { data: [u8; 16] }
+layout SockLen    = { data: [u8; 4]  }
 
 // Constants
 const AF_INET: i64 = 2;
@@ -37,31 +48,31 @@ const INET_ADDRSTRLEN: u32 = 16;
 //   [8..15]  sin_zero (8 bytes padding)
 // ===========================================================================
 
-fn make_sockaddr_in(addr: Address, port: u32, ip: u32) {
+fn make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
     // sin_family = AF_INET (2), little-endian on most archs
-    *(addr + 0) = 2;
-    *(addr + 1) = 0;
+    addr.data[0] = 2;
+    addr.data[1] = 0;
 
     // sin_port = htons(port)
     p0: u32 = (port >> 8) & 255;
     p1: u32 = port & 255;
-    *(addr + 2) = p0;
-    *(addr + 3) = p1;
+    addr.data[2] = p0;
+    addr.data[3] = p1;
 
     // sin_addr = htonl(ip)
     b0: u32 = (ip >> 24) & 255;
     b1: u32 = (ip >> 16) & 255;
     b2: u32 = (ip >> 8) & 255;
     b3: u32 = ip & 255;
-    *(addr + 4) = b3;
-    *(addr + 5) = b2;
-    *(addr + 6) = b1;
-    *(addr + 7) = b0;
+    addr.data[4] = b3;
+    addr.data[5] = b2;
+    addr.data[6] = b1;
+    addr.data[7] = b0;
 
     // sin_zero = 0 (8 bytes)
     i: u32 = 0;
     while i < 8 {
-        *(addr + 8 + i) = 0;
+        addr.data[8 + i] = 0;
         i = i + 1;
     }
 }
@@ -77,11 +88,10 @@ fn tcp_connect(ip: u32, port: u32) -> i64 {
         return -1;
     }
 
-    addr = allocate(16);
+    let addr = state_new(SockaddrIn);
     make_sockaddr_in(addr, port, ip);
 
     ret: i64 = syscall(203, sockfd, addr, 16);
-    free(addr);
 
     if ret < 0 {
         syscall(57, sockfd);
@@ -102,19 +112,17 @@ fn tcp_listen(port: u32) -> i64 {
     }
 
     // SO_REUSEADDR
-    optval = allocate(4);
-    *(optval + 0) = 1;
-    *(optval + 1) = 0;
-    *(optval + 2) = 0;
-    *(optval + 3) = 0;
+    let optval = state_new(SockLen);
+    optval.data[0] = 1;
+    optval.data[1] = 0;
+    optval.data[2] = 0;
+    optval.data[3] = 0;
     syscall(208, sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
-    free(optval);
 
     // Bind to 0.0.0.0:port
-    addr = allocate(16);
+    let addr = state_new(SockaddrIn);
     make_sockaddr_in(addr, port, 0);
     ret: i64 = syscall(200, sockfd, addr, 16);
-    free(addr);
 
     if ret < 0 {
         syscall(57, sockfd);
@@ -135,17 +143,14 @@ fn tcp_listen(port: u32) -> i64 {
 // ===========================================================================
 
 fn tcp_accept(listen_fd: i64) -> i64 {
-    client_addr = allocate(16);
-    addrlen = allocate(4);
-    *(addrlen + 0) = 16;
-    *(addrlen + 1) = 0;
-    *(addrlen + 2) = 0;
-    *(addrlen + 3) = 0;
+    let client_addr = state_new(SockaddrIn);
+    let addrlen = state_new(SockLen);
+    addrlen.data[0] = 16;
+    addrlen.data[1] = 0;
+    addrlen.data[2] = 0;
+    addrlen.data[3] = 0;
 
     client_fd: i64 = syscall(202, listen_fd, client_addr, addrlen);
-
-    free(client_addr);
-    free(addrlen);
 
     return client_fd;
 }

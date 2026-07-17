@@ -41,24 +41,34 @@ const UTF8_SURROGATE_LOW: u32 = 55296;      // U+D800
 const UTF8_SURROGATE_HIGH: u32 = 57343;     // U+DFFF
 const UTF8_U32_MAX: u32 = 4294967295;       // 0xFFFFFFFF
 
+// womb/lib/unicode.vuma — Unicode (UTF-8) String Utilities
+// No main() — importable library module.
+//
+// PMT migration (Wave 8c): the local `allocate(4)` scratch buffers
+// (`pos_buf` for the byte-cursor, `enc_buf` for re-encoding scratch)
+// are replaced by typed `State<PosBuf>` (single `v: u32` field) and
+// `State<EncBuf>` (`data: [u8; 4]` array field). The `utf8_load_pos` /
+// `utf8_store_pos` / `utf8_encode` / `utf8_decode_safe` helpers take
+// `State<PosBuf>` / `State<EncBuf>` instead of `Address`. Address-typed
+// string parameters (`s`, `src`, `dst`, `buf`) remain raw pointers
+// (callers pass caller-allocated buffers — PMT field-access would
+// require changing the public API). All `allocate`/`free` sites in
+// this file are eliminated.
+
+layout PosBuf = { v: u32 }
+layout EncBuf = { data: [u8; 4] }
+
 // ===========================================================================
 // Internal helpers — load/store the 4-byte little-endian position value
 // pointed to by `pos`. (Same convention as stdlib.vuma's strtol endptr.)
 // ===========================================================================
 
-fn utf8_load_pos(pos: Address) -> u32 {
-    b0: u32 = *(pos + 0);
-    b1: u32 = *(pos + 1);
-    b2: u32 = *(pos + 2);
-    b3: u32 = *(pos + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+fn utf8_load_pos(pos: State<PosBuf>) -> u32 {
+    return pos.v;
 }
 
-fn utf8_store_pos(pos: Address, val: u32) {
-    *(pos + 0) = val & 255;
-    *(pos + 1) = (val >> 8) & 255;
-    *(pos + 2) = (val >> 16) & 255;
-    *(pos + 3) = (val >> 24) & 255;
+fn utf8_store_pos(pos: State<PosBuf>, val: u32) {
+    pos.v = val;
 }
 
 // ===========================================================================
@@ -98,34 +108,34 @@ fn utf8_seq_len(s: Address, pos: u32, max: u32) -> u32 {
 // Encodes a Unicode codepoint to UTF-8 bytes at `buf`. Returns the number
 // of bytes written (1..4), or 0 if the codepoint is invalid
 // (i.e. > U+10FFFF or in the surrogate range U+D800..U+DFFF).
-fn utf8_encode(cp: u32, buf: Address) -> u32 {
+fn utf8_encode(cp: u32, buf: State<EncBuf>) -> u32 {
     // Reject out-of-range and surrogate codepoints.
     if cp > 1114111 { return 0; }
     if cp >= 55296 { if cp <= 57343 { return 0; } }
 
     // 1 byte: 0xxxxxxx                       (U+0000 .. U+007F)
     if cp < 128 {
-        *(buf + 0) = cp;
+        buf.data[0] = cp;
         return 1;
     }
     // 2 bytes: 110xxxxx 10xxxxxx             (U+0080 .. U+07FF)
     if cp < 2048 {
-        *(buf + 0) = 192 | (cp >> 6);
-        *(buf + 1) = 128 | (cp & 63);
+        buf.data[0] = 192 | (cp >> 6);
+        buf.data[1] = 128 | (cp & 63);
         return 2;
     }
     // 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx    (U+0800 .. U+FFFF)
     if cp < 65536 {
-        *(buf + 0) = 224 | (cp >> 12);
-        *(buf + 1) = 128 | ((cp >> 6) & 63);
-        *(buf + 2) = 128 | (cp & 63);
+        buf.data[0] = 224 | (cp >> 12);
+        buf.data[1] = 128 | ((cp >> 6) & 63);
+        buf.data[2] = 128 | (cp & 63);
         return 3;
     }
     // 4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx  (U+10000 .. U+10FFFF)
-    *(buf + 0) = 240 | (cp >> 18);
-    *(buf + 1) = 128 | ((cp >> 12) & 63);
-    *(buf + 2) = 128 | ((cp >> 6) & 63);
-    *(buf + 3) = 128 | (cp & 63);
+    buf.data[0] = 240 | (cp >> 18);
+    buf.data[1] = 128 | ((cp >> 12) & 63);
+    buf.data[2] = 128 | ((cp >> 6) & 63);
+    buf.data[3] = 128 | (cp & 63);
     return 4;
 }
 
@@ -141,7 +151,7 @@ fn utf8_encode(cp: u32, buf: Address) -> u32 {
 //   - overlong encoding (more bytes than necessary)
 //   - surrogate codepoint (U+D800..U+DFFF encoded as 3 bytes)
 //   - codepoint > U+10FFFF (encoded as 4 bytes)
-fn utf8_decode_safe(buf: Address, len: u32, pos: Address) -> u32 {
+fn utf8_decode_safe(buf: Address, len: u32, pos: State<PosBuf>) -> u32 {
     p: u32 = utf8_load_pos(pos);
     b0: u32 = 0;
     b1: u32 = 0;
@@ -238,7 +248,7 @@ fn utf8_decode_safe(buf: Address, len: u32, pos: Address) -> u32 {
 // Convenience wrapper: decodes one UTF-8 character without an explicit
 // upper bound. Suitable for null-terminated strings; callers must ensure
 // the buffer is well-formed or null-terminated to avoid runaway reads.
-fn utf8_decode(buf: Address, pos: Address) -> u32 {
+fn utf8_decode(buf: Address, pos: State<PosBuf>) -> u32 {
     return utf8_decode_safe(buf, 4294967295, pos);
 }
 
@@ -249,18 +259,17 @@ fn utf8_decode(buf: Address, pos: Address) -> u32 {
 // Counts the number of codepoints in a null-terminated UTF-8 string.
 fn utf8_strlen(s: Address) -> u32 {
     count: u32 = 0;
-    pos_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     p: u32 = 0;
     cur: u32 = 0;
     while 1 == 1 {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
-        if cur == 0 { free(pos_buf); return count; }
+        if cur == 0 { return count; }
         utf8_decode_safe(s, 4294967295, pos_buf);
         count = count + 1;
     }
-    free(pos_buf);
     return count;
 }
 
@@ -268,7 +277,7 @@ fn utf8_strlen(s: Address) -> u32 {
 // a null terminator.
 fn utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
     count: u32 = 0;
-    pos_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     p: u32 = 0;
     new_p: u32 = 0;
@@ -276,13 +285,12 @@ fn utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
     while utf8_load_pos(pos_buf) < max_bytes {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
-        if cur == 0 { free(pos_buf); return count; }
+        if cur == 0 { return count; }
         utf8_decode_safe(s, max_bytes, pos_buf);
         new_p = utf8_load_pos(pos_buf);
-        if new_p <= p { free(pos_buf); return count; }  // safety: never spin
+        if new_p <= p { return count; }  // safety: never spin
         count = count + 1;
     }
-    free(pos_buf);
     return count;
 }
 
@@ -293,7 +301,7 @@ fn utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
 // Returns a pointer to the first occurrence of codepoint `cp` in `s`, or
 // 0 (null) if not found.
 fn utf8_strchr(s: Address, cp: u32) -> Address {
-    pos_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     result: Address = 0;
     p: u32 = 0;
@@ -303,16 +311,14 @@ fn utf8_strchr(s: Address, cp: u32) -> Address {
     while 1 == 1 {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
-        if cur == 0 { free(pos_buf); return result; }
+        if cur == 0 { return result; }
         start = s + p;
         decoded = utf8_decode_safe(s, 4294967295, pos_buf);
         if decoded == cp {
             result = start;
-            free(pos_buf);
             return result;
         }
     }
-    free(pos_buf);
     return result;
 }
 
@@ -321,7 +327,7 @@ fn utf8_strchr(s: Address, cp: u32) -> Address {
 // `dst_max` bytes). Returns the number of bytes written. Stops early if
 // `src` ends or `dst` fills.
 fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -> u32 {
-    pos_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     i: u32 = 0;
     p: u32 = 0;
@@ -338,7 +344,6 @@ fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -
         p = utf8_load_pos(pos_buf);
         cur = *(src + p);
         if cur == 0 {
-            free(pos_buf);
             return 0;
         }
         utf8_decode_safe(src, 4294967295, pos_buf);
@@ -349,12 +354,12 @@ fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -
     while copied < len {
         p = utf8_load_pos(pos_buf);
         cur = *(src + p);
-        if cur == 0 { free(pos_buf); return written; }
+        if cur == 0 { return written; }
         start_off = p;
         utf8_decode_safe(src, 4294967295, pos_buf);
         end_off = utf8_load_pos(pos_buf);
         char_bytes = end_off - start_off;
-        if written + char_bytes > dst_max { free(pos_buf); return written; }
+        if written + char_bytes > dst_max { return written; }
         j = 0;
         while j < char_bytes {
             *(dst + written + j) = *(src + start_off + j);
@@ -363,7 +368,6 @@ fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -
         written = written + char_bytes;
         copied = copied + 1;
     }
-    free(pos_buf);
     return written;
 }
 
@@ -407,7 +411,7 @@ fn utf8_next_char(s: Address, pos: u32) -> u32 {
 // Returns the codepoint at codepoint index `index` in `s`, or 0 if the
 // index is out of range.
 fn utf8_char_at(s: Address, index: u32) -> u32 {
-    pos_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     i: u32 = 0;
     p: u32 = 0;
@@ -417,7 +421,6 @@ fn utf8_char_at(s: Address, index: u32) -> u32 {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
         if cur == 0 {
-            free(pos_buf);
             return 0;
         }
         utf8_decode_safe(s, 4294967295, pos_buf);
@@ -426,11 +429,9 @@ fn utf8_char_at(s: Address, index: u32) -> u32 {
     p = utf8_load_pos(pos_buf);
     cur = *(s + p);
     if cur == 0 {
-        free(pos_buf);
         return 0;
     }
     cp = utf8_decode_safe(s, 4294967295, pos_buf);
-    free(pos_buf);
     return cp;
 }
 
@@ -611,8 +612,8 @@ fn utf8_is_control(cp: u32) -> u32 {
 // Stops at end of source or when `dst` would overflow. Returns bytes
 // written. Codepoints outside the ASCII range are copied unchanged.
 fn utf8_str_to_lower(s: Address, dst: Address, dst_max: u32) -> u32 {
-    pos_buf = allocate(4);
-    enc_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
+    let enc_buf = state_new(EncBuf);
     utf8_store_pos(pos_buf, 0);
     written: u32 = 0;
     p: u32 = 0;
@@ -624,36 +625,34 @@ fn utf8_str_to_lower(s: Address, dst: Address, dst_max: u32) -> u32 {
     while 1 == 1 {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
-        if cur == 0 { free(pos_buf); free(enc_buf); return written; }
+        if cur == 0 { return written; }
         cp = utf8_decode_safe(s, 4294967295, pos_buf);
         new_cp = utf8_to_lower(cp);
         n = utf8_encode(new_cp, enc_buf);
         if n == 0 {
             // Could not re-encode (shouldn't happen for valid cps); copy
             // the original bytes verbatim.
-            if written + 1 > dst_max { free(pos_buf); free(enc_buf); return written; }
+            if written + 1 > dst_max { return written; }
             *(dst + written) = *(s + p);
             written = written + 1;
             // Note: pos was already advanced by decode_safe.
         } else {
-            if written + n > dst_max { free(pos_buf); free(enc_buf); return written; }
+            if written + n > dst_max { return written; }
             j = 0;
             while j < n {
-                *(dst + written + j) = *(enc_buf + j);
+                *(dst + written + j) = enc_buf.data[j];
                 j = j + 1;
             }
             written = written + n;
         }
     }
-    free(pos_buf);
-    free(enc_buf);
     return written;
 }
 
 // Same as utf8_str_to_lower but applies ASCII uppercasing.
 fn utf8_str_to_upper(s: Address, dst: Address, dst_max: u32) -> u32 {
-    pos_buf = allocate(4);
-    enc_buf = allocate(4);
+    let pos_buf = state_new(PosBuf);
+    let enc_buf = state_new(EncBuf);
     utf8_store_pos(pos_buf, 0);
     written: u32 = 0;
     p: u32 = 0;
@@ -665,26 +664,24 @@ fn utf8_str_to_upper(s: Address, dst: Address, dst_max: u32) -> u32 {
     while 1 == 1 {
         p = utf8_load_pos(pos_buf);
         cur = *(s + p);
-        if cur == 0 { free(pos_buf); free(enc_buf); return written; }
+        if cur == 0 { return written; }
         cp = utf8_decode_safe(s, 4294967295, pos_buf);
         new_cp = utf8_to_upper(cp);
         n = utf8_encode(new_cp, enc_buf);
         if n == 0 {
-            if written + 1 > dst_max { free(pos_buf); free(enc_buf); return written; }
+            if written + 1 > dst_max { return written; }
             *(dst + written) = *(s + p);
             written = written + 1;
         } else {
-            if written + n > dst_max { free(pos_buf); free(enc_buf); return written; }
+            if written + n > dst_max { return written; }
             j = 0;
             while j < n {
-                *(dst + written + j) = *(enc_buf + j);
+                *(dst + written + j) = enc_buf.data[j];
                 j = j + 1;
             }
             written = written + n;
         }
     }
-    free(pos_buf);
-    free(enc_buf);
     return written;
 }
 
