@@ -4140,6 +4140,34 @@ impl Backend for Wasm32Backend {
             body: stub_body,
         });
 
+        // ── Explicitly register ALL remaining asm-generic syscalls as
+        //    -ENOSYS stubs. These syscalls don't make sense on wasm (fork,
+        //    clone, epoll, futex, signals, etc.) but VUMA programs may
+        //    still call them. Resolving to -ENOSYS (not crashing) is the
+        //    correct wasm32 behavior. ──
+        for name in [
+            "brk", "chdir", "chroot", "clone", "clone3", "dup", "dup3",
+            "epoll_create1", "epoll_ctl", "epoll_wait", "eventfd2",
+            "execveat", "exit_group", "faccessat", "fchdir", "fchmod",
+            "fchmodat", "fchown", "fchownat", "fcntl", "fdatasync",
+            "fsync", "ftruncate", "futex", "getcwd", "getegid", "geteuid",
+            "getgid", "getpgid", "getpid", "getppid", "getrlimit",
+            "getrusage", "getsid", "gettimeofday", "getuid",
+            "inotify_add_watch", "inotify_init1", "inotify_rm_watch",
+            "ioctl", "kill", "linkat", "madvise", "mincore", "mlock",
+            "mlockall", "mremap", "msync", "munlock", "munlockall",
+            "newfstatat", "openat", "pread", "preadv", "prlimit64",
+            "ptrace", "pwrite", "pwritev", "readlinkat", "readv",
+            "renameat", "rt_sigaction", "rt_sigprocmask", "rt_sigreturn",
+            "setgid", "setpgid", "setresgid", "setresuid", "setrlimit",
+            "setsid", "setuid", "signalfd4", "symlinkat", "sync",
+            "syncfs", "tgkill", "timerfd_create", "timerfd_gettime",
+            "timerfd_settime", "times", "tkill", "umask", "unlinkat",
+            "wait4", "waitid", "writev",
+        ] {
+            func_name_to_idx.insert(name.to_string(), stub_func_idx);
+        }
+
         // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
         // ffi_scratch_push_frame / ffi_scratch_pop_frame: no-op stubs that
         // do NOTHING (no mem[0] write, no return value). The scratchpad is

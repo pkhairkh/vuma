@@ -3996,7 +3996,10 @@ impl Backend for Sparc64Backend {
                 ("getdents64", 154), ("getdents", 174),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 147), ("uname", 189), ("sysinfo", 214),
-            ] {
+                            ("eventfd2", 318),
+                ("newfstatat", 289),
+                ("signalfd4", 327),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
