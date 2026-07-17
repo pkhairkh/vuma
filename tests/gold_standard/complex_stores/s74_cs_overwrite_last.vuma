@@ -5,17 +5,18 @@
 // c3 to 191. Load c3 -> 191 (the overwritten value). Uses `*ptr
 // = literal` form. Distinct from s70_cs_overwrite_last (230),
 // s66_cs_overwrite_last (175) and s62_cs_overwrite_last (200).
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 50;
-    *c2 = 100;
-    *c3 = 80;
-    *c3 = 191;
-    v: i32 = *c3;          // 191
-    free(c1);
-    free(c2);
-    free(c3);
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 50;
+    c2.data[0] = 100;
+    c3.data[0] = 80;
+    c3.data[0] = 191;
+    v: i32 = c3.data[0];          // 191
     return v;
 }

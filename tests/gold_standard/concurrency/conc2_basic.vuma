@@ -1,18 +1,14 @@
-// conc2_basic.vuma — store 42, load, return
+// Migrated from concurrency/conc2_basic.vuma
 // Expected exit code: 42
 //
-// The smallest "atomic-like" roundtrip: store 42 into a freshly
-// allocated cell, load it back, return. Single-threaded, but the
-// pattern (publish-then-observe through shared memory) is the
-// foundation of every higher-level concurrency primitive.
-//
-// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
-// conc_atomic_basic.vuma.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    cell = allocate(8);
-    *cell = 42;
-    val: i32 = *cell;
-    free(cell);
+    let __s = state_new(Single);
+    __s.v = 42;
+    let val = __s.v;
     return val;
 }

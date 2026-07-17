@@ -5,11 +5,11 @@
 // observe 66 (last write wins). On the current backend the load returns 0.
 // Distinct from s6_atom_overwrite_load (different values 10/60).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 33);
-    atomic_store(c, 66);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 33;
+    c.v = 66;
+    v = c.v;
     return v;
 }

@@ -8,11 +8,11 @@
 // s4_edge_double_overwrite (uses *(p+N) form, values 200/100/33,
 // currently broken on backend).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 255;
-    *p = 0;
-    v: u64 = *p;
-    free(p);
+    let p = state_new(_L1);
+    p.v = 255;
+    p.v = 0;
+    v: u64 = p.v;
     return v;
 }

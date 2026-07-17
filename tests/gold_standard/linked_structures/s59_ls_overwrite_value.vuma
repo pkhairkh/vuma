@@ -7,11 +7,12 @@
 // s58_ls_two_node_sum (220), s58_ls_three_node_diff (100) and s58_ls_
 // overwrite_value (180).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 30;
-    *n1 = 200;
-    v: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 30;
+    n1.data[0] = 200;
+    v: u64 = n1.data[0];
     return v;
 }

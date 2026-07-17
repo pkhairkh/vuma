@@ -6,15 +6,15 @@
 // using a literal rather than the loaded variable).  Loads from buf2
 // and returns.  Straight-line code only.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 55;
-    v1: u32 = *(buf1 + 0);     // 55
+    let buf1 = state_new(_L1);
+    let buf2 = state_new(_L2);
+    buf1.data[0] = 55;
+    v1: u32 = buf1.data[0];     // 55
     // Re-store as a literal (the value of v1 is known to be 55)
-    *(buf2 + 0) = 55;
-    v2: u32 = *(buf2 + 0);     // 55
-    free(buf1);
-    free(buf2);
+    buf2.data[0] = 55;
+    v2: u32 = buf2.data[0];     // 55
     return v2;
 }

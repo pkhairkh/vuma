@@ -6,11 +6,12 @@
 // return 200. Uses `*p = literal` form (no offsets). Distinct from
 // s50_ls_overwrite_value (190) and s49_ls_overwrite_value (195).
 
+layout Buf_n = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n = allocate(8);
-    *n = 60;
-    *n = 200;
-    a: u64 = *n;
-    free(n);
+    let n = state_new(Buf_n);
+    n.data[0] = 60;
+    n.data[0] = 200;
+    a: u64 = n.data[0];
     return a;
 }

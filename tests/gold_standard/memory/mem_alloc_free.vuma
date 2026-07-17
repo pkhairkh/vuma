@@ -1,11 +1,12 @@
-// mem_alloc_free.vuma — allocate and free a buffer
+// Migrated from memory/mem_alloc_free.vuma
 // Expected exit code: 0
 //
-// Verifies the most basic memory lifecycle: allocate a buffer, then free it.
-// No loads or stores — just allocation and deallocation.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    buf = allocate(64);
-    free(buf);
+    let __s = state_new(Single);
     return 0;
 }

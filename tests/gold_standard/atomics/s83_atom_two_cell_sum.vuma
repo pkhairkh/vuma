@@ -6,15 +6,15 @@
 // -> exit 0. Will exit 28 once atomics are wired through.
 // Distinct from s78_atom_two_cell_sum (2), s74_atom_two_cell_sum
 // (90) and s72_atom_two_cell_sum (120).
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    atomic_store(c1, 16);
-    atomic_store(c2, 12);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    c1.v = 16;
+    c2.v = 12;
+    a = c1.v;
+    b = c2.v;
     s: i32 = a + b;                   // 28
-    free(c1);
-    free(c2);
     return s;
 }

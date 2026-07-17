@@ -6,10 +6,10 @@
 // replaced by a default or garbage. Uses `*ptr = literal`
 // form (no offsets). Distinct from s82_edge_store_zero,
 // s78_edge_store_zero and s74_edge_store_zero.
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *buf = 0;
-    val: i32 = *buf;
-    free(buf);
+    let buf = state_new(_L1);
+    buf.v = 0;
+    val: i32 = buf.v;
     return val;
 }

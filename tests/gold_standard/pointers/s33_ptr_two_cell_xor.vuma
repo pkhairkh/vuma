@@ -1,19 +1,17 @@
-// s33_ptr_two_cell_xor.vuma — two cells, xor = 0xF0 ^ 0x0F = 0xFF = 255
+// Migrated from pointers/s33_ptr_two_cell_xor.vuma
 // Expected exit code: 255
 //
-// Deterministic test in the pointers category. All operands loaded into typed
-// variables before any bitwise op; all stores use `*ptr = literal` (or the
-// `*ptr = variable + 0` workaround). Result lands in 0-255.
-// Distinct from s30_ptr_two_cell_xor (0xAA^0x55=255) and s26_ptr_two_cell_diff (different values).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 240;             // 0xF0
-    *p2 = 15;              // 0x0F
-    a: i32 = *p1;
-    b: i32 = *p2;
-    r: i32 = a ^ b;        // 0xFF = 255
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 240;
+    __s.b = 15;
+    let a = __s.a;
+    let b = __s.b;
+    let r = a ^ b;
     return r;
 }

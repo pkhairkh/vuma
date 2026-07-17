@@ -6,13 +6,13 @@
 // and loads it back. Verifies that freed memory can be reallocated
 // and used normally — no allocator corruption or use-after-free.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    p1 = allocate(8);
-    *(p1 + 0) = 99;
-    free(p1);
-    p2 = allocate(8);
-    *(p2 + 0) = 42;
-    val: u64 = *(p2 + 0);
-    free(p2);
+    let p1 = state_new(_L1);
+    p1.data[0] = 99;
+    let p2 = state_new(_L2);
+    p2.data[0] = 42;
+    val: u64 = p2.data[0];
     return val;
 }

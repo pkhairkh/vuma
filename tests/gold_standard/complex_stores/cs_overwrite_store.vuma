@@ -3,11 +3,12 @@
 //
 // Verifies that a second store to the same offset overwrites the first.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 42;
-    *(buf + 0) = 99;
-    val: u32 = *(buf + 0);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 42;
+    buf.data[0] = 99;
+    val: u32 = buf.data[0];
     return val;
 }

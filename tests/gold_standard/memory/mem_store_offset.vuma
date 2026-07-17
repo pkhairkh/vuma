@@ -3,11 +3,11 @@
 //
 // Stores a value at a computed offset (base + 2 * 3 = 6) and loads it back.
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    buf = allocate(16);
+    let buf = state_new(_L1);
     off: u64 = 2 * 3;  // = 6
     *(buf + off) = 42;
     val: u32 = *(buf + off);
-    free(buf);
     return val;
 }

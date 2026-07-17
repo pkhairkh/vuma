@@ -6,14 +6,15 @@
 // literal` form (no offsets). Distinct from s62_cs_overwrite_
 // last (130), s58_cs_overwrite_first (200) and s55_cs_overwrite_
 // first (180).
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 80;
-    *c1 = 175;
-    *c2 = 40;
-    a: u64 = *c1;          // 175
-    free(c1);
-    free(c2);
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 80;
+    c1.data[0] = 175;
+    c2.data[0] = 40;
+    a: u64 = c1.data[0];          // 175
     return a;
 }

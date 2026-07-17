@@ -6,10 +6,11 @@
 // basic create-store-load-free cycle for a single node. All stored
 // values are ≤ 255 to avoid the known U8 truncation bug.
 
+layout Buf_node = { data: [u8; 16] }
+
 fn main() -> i32 {
-    node = allocate(16);
-    *(node + 0) = 42;
-    val: u64 = *(node + 0);
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 42;
+    val: u64 = node.data[0];
     return val;
 }

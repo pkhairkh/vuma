@@ -1,20 +1,17 @@
-// s23_conc_two_cell_sum.vuma — two cells, sum = 150 (65 + 85)
+// Migrated from concurrency/s23_conc_two_cell_sum.vuma
 // Expected exit code: 150
 //
-// Two independent 8-byte cells. Each gets a distinct literal at offset 0
-// (65/85). Both loaded back and summed. Distinct from s22_conc_two_cell_xor
-// (xor, 41 ^ 98 = 75) and s20_conc_two_cell_diff (sub, 100 - 60 = 40).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 65;
-    *c2 = 85;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    s: i32 = v1 + v2;     // 150
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 65;
+    __s.b = 85;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let s = v1 + v2;
     return s;
 }
-

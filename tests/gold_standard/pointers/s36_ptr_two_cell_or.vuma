@@ -1,21 +1,17 @@
-// s36_ptr_two_cell_or.vuma — cells 0xF0 and 0x0F, OR = 0xFF = 255
+// Migrated from pointers/s36_ptr_two_cell_or.vuma
 // Expected exit code: 255
 //
-// Two 8-byte cells. Store 240/15 (0xF0/0x0F) via `*ptr =
-// literal`, load both, OR -> 0xFF = 255. All bitwise
-// operands loaded into typed locals first. Uses `*ptr =
-// literal` form (no offsets).
-// Distinct from s30_ptr_two_cell_xor (xor, 102) and s27_ptr_two_cell_or (different values).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 240;             // 0xF0
-    *p2 = 15;              // 0x0F
-    a: i32 = *p1;
-    b: i32 = *p2;
-    r: i32 = a | b;        // 0xFF = 255
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 240;
+    __s.b = 15;
+    let a = __s.a;
+    let b = __s.b;
+    let r = a | b;
     return r;
 }

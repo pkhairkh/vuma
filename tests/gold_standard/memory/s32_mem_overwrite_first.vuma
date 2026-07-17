@@ -1,17 +1,15 @@
-// s32_mem_overwrite_first.vuma - overwrite cell, load = 235
+// Migrated from memory/s32_mem_overwrite_first.vuma
 // Expected exit code: 235
 //
-// overwrite cell, load = 235. All operands loaded into typed variables
-// before any bitwise op (immediate-RHS drop workaround where applicable);
-// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
-// `*(ptr + offset)` indexing. Distinct from s30_mem_overwrite_last
-// (different value) and s26_mem_overwrite_first (different value).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 55;
-    *p = 235;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 55;
+    __s.v = 235;
+    let r = __s.v;
     return r;
 }

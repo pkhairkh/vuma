@@ -16,6 +16,7 @@
 // Read/write u32 from array at given index (4-byte stride)
 // ===========================================================================
 
+layout _L1 = { data: [u8; 52] }
 fn arr_read(arr: Address, idx: u64) -> u32 {
     return *(arr + idx * 4);
 }
@@ -54,7 +55,7 @@ fn binary_search(arr: Address, len: u64, target: u32) -> u64 {
 
 fn main() -> i32 {
     // Allocate array of 13 u32 elements (52 bytes)
-    arr = allocate(52);
+    let arr = state_new(_L1);
 
     // Initialize sorted array
     arr_write_val(arr, 0, 2);
@@ -77,7 +78,6 @@ fn main() -> i32 {
     // Also search for a value NOT in the array (sanity check)
     not_found: u64 = binary_search(arr, 13, 99);
 
-    free(arr);
 
     // If 42 was found at index 7 and 99 was not found, return 7
     if idx == 7 {

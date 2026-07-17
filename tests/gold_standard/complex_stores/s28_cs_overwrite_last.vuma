@@ -7,11 +7,12 @@
 // (overwrite middle of three, 160) and s22_cs_overwrite_first
 // (overwrite first).
 
+layout Buf_c1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    *c1 = 15;
-    *c1 = 115;
-    a: u64 = *c1;
-    free(c1);
+    let c1 = state_new(Buf_c1);
+    c1.data[0] = 15;
+    c1.data[0] = 115;
+    a: u64 = c1.data[0];
     return a;
 }

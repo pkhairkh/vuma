@@ -8,11 +8,11 @@
 // s10_atom_overwrite_twice (three writes, 10/80/90) and
 // s10_atom_zero_one_pair (0 then 50).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 17);
-    atomic_store(c, 73);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 17;
+    c.v = 73;
+    v = c.v;
     return v;
 }

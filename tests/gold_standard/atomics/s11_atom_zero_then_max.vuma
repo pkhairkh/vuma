@@ -6,11 +6,11 @@
 // backend the load returns 0. Distinct from s10_atom_zero_one_pair
 // (zero then 50) and s6_atom_store_zero_load (single zero store).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 0);
-    atomic_store(c, 250);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 0;
+    c.v = 250;
+    v = c.v;
     return v;
 }

@@ -8,15 +8,15 @@
 // values).
 // Expected exit code: 255
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
     atomic_store(c1, 170);          // 0xAA
     atomic_store(c2, 85);           // 0x55
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    a = c1.v;
+    b = c2.v;
     r: i32 = a | b;                 // 0xFF = 255
-    free(c1);
-    free(c2);
     return r;
 }

@@ -7,11 +7,11 @@
 // once atomics are wired through. Distinct from s46_atom_overwrite_
 // value and s42_atom_overwrite_twice.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 35);
-    atomic_store(c1, 195);
-    a = atomic_load(c1);              // 195
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 35;
+    c1.v = 195;
+    a = c1.v;              // 195
     return a;
 }

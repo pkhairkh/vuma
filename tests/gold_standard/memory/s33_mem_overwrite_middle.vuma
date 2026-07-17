@@ -1,24 +1,20 @@
-// s33_mem_overwrite_middle.vuma — overwrite middle cell, sum = 20 + 90 + 40 = 150
+// Migrated from memory/s33_mem_overwrite_middle.vuma
 // Expected exit code: 150
 //
-// Deterministic test in the memory category. All operands loaded into typed
-// variables before any bitwise op; all stores use `*ptr = literal` (or the
-// `*ptr = variable + 0` workaround). Result lands in 0-255.
-// Distinct from s30_mem_overwrite_last (overwrites last) and s26_mem_overwrite_first (overwrites first).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 20;
-    *c2 = 30;
-    *c3 = 40;
-    *c2 = 90;
-    a: i32 = *c1;
-    b: i32 = *c2;
-    c: i32 = *c3;
-    s: i32 = a + b + c;     // 150
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 20;
+    __s.b = 30;
+    __s.c = 40;
+    __s.b = 90;
+    let a = __s.a;
+    let b = __s.b;
+    let c = __s.c;
+    let s = a + b + c;
     return s;
 }

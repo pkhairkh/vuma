@@ -4,8 +4,9 @@
 // Simulates a queue in a memory buffer. Enqueues 3 values, then dequeues
 // them and verifies FIFO order. Uses head and tail pointers.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    queue = allocate(8);
+    let queue = state_new(_L1);
     head: u32 = 0;
     tail: u32 = 0;
     // Enqueue 11, 22, 33
@@ -16,7 +17,6 @@ fn main() -> i32 {
     d1: u32 = *(queue + head); head = head + 1;
     d2: u32 = *(queue + head); head = head + 1;
     d3: u32 = *(queue + head); head = head + 1;
-    free(queue);
     if d1 == 11 {
         if d2 == 22 {
             if d3 == 33 { return 0; }

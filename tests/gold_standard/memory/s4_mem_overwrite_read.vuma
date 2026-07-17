@@ -6,11 +6,11 @@
 // Verifies that subsequent stores to the same cell clobber earlier
 // ones.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 50;
-    *(buf + 0) = 80;
-    v: u64 = *(buf + 0);
-    free(buf);
+    let buf = state_new(_L1);
+    buf.data[0] = 50;
+    buf.data[0] = 80;
+    v: u64 = buf.data[0];
     return v;
 }

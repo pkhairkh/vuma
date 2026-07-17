@@ -9,6 +9,8 @@
 // Uses separate allocations for each component.
 // ===========================================================================
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
     // Read head and tail indices (stored as single byte, values 0-255)
     head: u32 = *(head_ptr + 0);
@@ -60,12 +62,12 @@ fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) 
 fn main() -> i32 {
     capacity: u32 = 4;
     buf = allocate(capacity * 4);  // 4 elements × 4 bytes = 16 bytes
-    head_ptr = allocate(8);
-    tail_ptr = allocate(8);
+    let head_ptr = state_new(_L1);
+    let tail_ptr = state_new(_L2);
 
     // Initialize head and tail to 0
-    *(head_ptr + 0) = 0;
-    *(tail_ptr + 0) = 0;
+    head_ptr.data[0] = 0;
+    tail_ptr.data[0] = 0;
 
     // Push two values
     queue_push(buf, head_ptr, tail_ptr, capacity, 42);
@@ -76,9 +78,6 @@ fn main() -> i32 {
     val2: u32 = queue_pop(buf, head_ptr, tail_ptr, capacity);
 
     // Clean up
-    free(buf);
-    free(head_ptr);
-    free(tail_ptr);
 
     // Verify results
     if val1 != 42 {

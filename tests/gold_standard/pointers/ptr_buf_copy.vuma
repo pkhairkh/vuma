@@ -1,19 +1,16 @@
-// ptr_buf_copy.vuma — copy single value between buffers
+// Migrated from pointers/ptr_buf_copy.vuma
 // Expected exit code: 42
 //
-// Stores 42 in src (at offset 0 via *buf), loads it into a temp
-// variable, stores the temp into dst, then loads dst and returns it.
-// Verifies that a value can be copied from one buffer to another
-// through a scalar intermediate.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    src = allocate(8);
-    dst = allocate(8);
-    *src = 42;
-    tmp: i32 = *src;
-    *dst = tmp;
-    val: i32 = *dst;
-    free(src);
-    free(dst);
+    let __s = state_new(Pair);
+    __s.a = 42;
+    let tmp = __s.a;
+    __s.b = tmp;
+    let val = __s.b;
     return val;
 }

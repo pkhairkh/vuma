@@ -7,12 +7,12 @@
 // Deterministic on the current backend. Distinct from
 // s4_mem_load_then_store (load-then-store) and s5_mem_load_chain.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 50;
-    v: u64 = *p;
+    let p = state_new(_L1);
+    p.v = 50;
+    v: u64 = p.v;
     two: u64 = 2;
     r: u64 = v * two;     // 100
-    free(p);
     return r;
 }

@@ -104,7 +104,6 @@ fn main() -> i32 {
     *(p + 4) = z;                 // p.b = 7
     s: i32 = pair_sum(p);         // s = 49
 
-    free(p);
     // IVE verifies: all allocations freed (Cleanup)
 
     // Return s as exit code

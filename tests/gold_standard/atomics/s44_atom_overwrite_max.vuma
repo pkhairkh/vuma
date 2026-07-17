@@ -7,11 +7,11 @@
 // Distinct from s42_atom_overwrite_max (start 90, overwrite 255) and
 // s38_atom_overwrite_max (start 80, overwrite 255).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 70);
-    atomic_store(c1, 250);
-    v = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 70;
+    c1.v = 250;
+    v = c1.v;
     return v;
 }

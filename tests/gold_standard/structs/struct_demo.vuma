@@ -40,6 +40,7 @@ struct Rect {
 // Compute the area of a rectangle
 // ===========================================================================
 
+layout _L1 = { a: u32, b: u32 }
 fn rect_area(r: Address) -> u32 {
     w: u32 = *(r + 8);
     h: u32 = *(r + 12);
@@ -52,19 +53,18 @@ fn rect_area(r: Address) -> u32 {
 
 fn main() -> i32 {
     // Allocate a Rect struct (16 bytes)
-    r = allocate(16);
+    let r = state_new(_L1);
 
     // Initialize the rectangle: origin=(10,20), width=100, height=50
-    *(r + 0) = 10;
-    *(r + 4) = 20;
-    *(r + 8) = 100;
-    *(r + 12) = 50;
+    r.data[0] = 10;
+    r.data[4] = 20;
+    r.data[8] = 100;
+    r.data[12] = 50;
 
     // Compute area
     area: u32 = rect_area(r);
 
     // Clean up
-    free(r);
 
     // Return the area as exit code
     // Expected: 100 * 50 = 5000

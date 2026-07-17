@@ -1,19 +1,17 @@
-// s98_conc_two_cell_sum.vuma — two cells, sum = 117 (80 + 37)
+// Migrated from concurrency/s98_conc_two_cell_sum.vuma
 // Expected exit code: 117
 //
-// Two independent 8-byte cells. Store 80/37 via `*ptr = literal`,
-// load both, a + b -> 117. Uses `*ptr = literal` form. Distinct
-// from s94_conc_two_cell_sum (120), s90_conc_two_cell_diff (5) and
-// s86_conc_two_cell_sum (210).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 80;
-    *c2 = 37;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    r: i32 = v1 + v2;      // 117
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 80;
+    __s.b = 37;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let r = v1 + v2;
     return r;
 }

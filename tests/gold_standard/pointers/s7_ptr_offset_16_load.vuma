@@ -7,11 +7,11 @@
 // Distinct from s6_ptr_offset_via_var (offset 8 via variable) and
 // s4_ptr_offset_store (literal offset, different value).
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    p = allocate(24);
+    let p = state_new(_L1);
     q = p + 16;
     *q = 77;
     v: i32 = *q;
-    free(p);
     return v;
 }

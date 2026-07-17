@@ -7,15 +7,15 @@ struct Single {
     a: u64,
 }
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    s1 = allocate(8);
-    s2 = allocate(8);
-    *s1 = 30;
-    *s2 = 68;
-    a: u64 = *s1;          // 30
-    b: u64 = *s2;          // 68
+    let s1 = state_new(_L1);
+    let s2 = state_new(_L2);
+    s1.v = 30;
+    s2.v = 68;
+    a: u64 = s1.v;          // 30
+    b: u64 = s2.v;          // 68
     s: u64 = a + b;        // 98
-    free(s1);
-    free(s2);
     return s;
 }

@@ -6,15 +6,16 @@
 // Distinct from s11_cs_two_buf_offset_diff (uses broken *(p+N) form) and
 // s9_cs_two_buf_overwrite_both (sum, not XOR).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 85;            // 0x55
-    *c2 = 51;            // 0x33
-    a: u64 = *c1;
-    b: u64 = *c2;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 85;            // 0x55
+    c2.data[0] = 51;            // 0x33
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
     r: u64 = a ^ b;      // 0x66 = 102
-    free(c1);
-    free(c2);
     return r;
 }

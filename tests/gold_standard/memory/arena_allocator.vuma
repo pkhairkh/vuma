@@ -34,7 +34,6 @@ fn main() -> i32 {
 
     // Verify bounds
     if offset > size {
-        free(base);
         return 1;
     }
 
@@ -47,7 +46,6 @@ fn main() -> i32 {
     val_b: u64 = *b;
 
     // Free entire arena in one call
-    free(base);
 
     if val_a == 1 {
         if val_b == 2 {

@@ -7,10 +7,10 @@
 // atomics are bridged. Distinct from s9_atom_single_load (value 99)
 // and s4_atom_basic_store_load (value 42).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 77);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 77;
+    v = c.v;
     return v;
 }

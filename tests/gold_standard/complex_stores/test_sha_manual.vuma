@@ -1,6 +1,9 @@
 // Test: SHA-256 compression with loops and memory
 // Expected: exit 79
 
+layout _L1 = { data: [u8; 32] }
+layout _L2 = { data: [u8; 256] }
+layout _L3 = { data: [u8; 64] }
 fn rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
@@ -46,9 +49,9 @@ fn read_u32(buf: Address, offset: u64) -> u32 {
 
 fn main() -> u64 {
     // Allocate state and a single block for "abc"
-    state = allocate(32);
-    w = allocate(256);
-    block = allocate(64);
+    let state = state_new(_L1);
+    let w = state_new(_L2);
+    let block = state_new(_L3);
 
     // Initialize state (SHA-256 initial hash values)
     write_u32(state, 0,  1779033703);
@@ -107,8 +110,5 @@ fn main() -> u64 {
 
     // Return low byte of new_a
     result: u32 = new_a & 0xFF;
-    free(state);
-    free(w);
-    free(block);
     return result;
 }

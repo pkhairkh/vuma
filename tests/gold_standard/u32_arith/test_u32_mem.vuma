@@ -1,6 +1,7 @@
 // Test: u32 store/load through pointers (like SHA256d)
 // Expected: exit 79
 
+layout _L1 = { a: u32, b: u32 }
 fn write_u32(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
@@ -22,7 +23,7 @@ fn rotr32(x: u32, n: u32) -> u32 {
 
 fn main() -> u64 {
     // Allocate a buffer and store/load u32 values
-    buf = allocate(16);
+    let buf = state_new(_L1);
 
     // Store 0x4F000000 at offset 0
     write_u32(buf, 0, 0x4F000000);
@@ -35,6 +36,5 @@ fn main() -> u64 {
     
     // Return low byte
     result: u32 = rotated & 0xFF;
-    free(buf);
     return result;
 }

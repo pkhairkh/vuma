@@ -4,14 +4,15 @@
 // Treats a buffer as a null-terminated string. Scans until 0 byte and
 // returns the length. String = "Hello\0" → length 5.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 72;   // 'H'
-    *(buf + 1) = 101;  // 'e'
-    *(buf + 2) = 108;  // 'l'
-    *(buf + 3) = 108;  // 'l'
-    *(buf + 4) = 111;  // 'o'
-    *(buf + 5) = 0;    // null terminator
+    let buf = state_new(_L1);
+    buf.data[0] = 72;   // 'H';
+    buf.data[1] = 101;  // 'e';
+    buf.data[2] = 108;  // 'l';
+    buf.data[3] = 108;  // 'l';
+    buf.data[4] = 111;  // 'o';
+    buf.data[5] = 0;    // null terminator;
     len: u32 = 0;
     i: u32 = 0;
     while i < 8 {
@@ -24,6 +25,5 @@ fn main() -> i32 {
             i = i + 1;
         }
     }
-    free(buf);
     return len;
 }

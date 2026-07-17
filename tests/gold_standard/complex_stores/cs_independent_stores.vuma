@@ -4,13 +4,14 @@
 // Verifies that stores to two independent buffers don't interfere — a
 // store into buf2 must not corrupt buf1.
 
+layout Buf_buf1 = { data: [u8; 8] }
+layout Buf_buf2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 42;
-    *(buf2 + 0) = 99;
-    val: u32 = *(buf1 + 0);
-    free(buf1);
-    free(buf2);
+    let buf1 = state_new(Buf_buf1);
+    let buf2 = state_new(Buf_buf2);
+    buf1.data[0] = 42;
+    buf2.data[0] = 99;
+    val: u32 = buf1.data[0];
     return val;
 }

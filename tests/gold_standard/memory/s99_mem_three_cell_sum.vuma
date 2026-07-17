@@ -1,23 +1,19 @@
-// s99_mem_three_cell_sum.vuma — three cells, sum = 130 (60 + 50 + 20)
+// Migrated from memory/s99_mem_three_cell_sum.vuma
 // Expected exit code: 130
 //
-// Three 8-byte cells. Store 60/50/20 via `*ptr = literal`, load all
-// three, a + b + c -> 130. Uses `*ptr = literal` form (no offsets).
-// Distinct from s95_mem_three_cell_sum (52),
-// s91_mem_three_cell_diff (47) and s87_mem_three_cell_diff (160).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 60;
-    *c2 = 50;
-    *c3 = 20;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
-    s: u64 = a + b + c;    // 130
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 60;
+    __s.b = 50;
+    __s.c = 20;
+    let a = __s.a;
+    let b = __s.b;
+    let c = __s.c;
+    let s = a + b + c;
     return s;
 }

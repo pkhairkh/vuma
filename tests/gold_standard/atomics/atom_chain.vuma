@@ -20,18 +20,18 @@
 // "AtomicLoad"/"AtomicStore"/"AtomicCas" (which scg_to_ir.rs:2027-2113
 // already knows how to lower to proper atomic IR instructions).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    c = allocate(8);
-    atomic_store(a, 3);
-    v1 = atomic_load(a);
-    atomic_store(b, v1);
-    v2 = atomic_load(b);
-    atomic_store(c, v2);
-    v3 = atomic_load(c);
-    free(a);
-    free(b);
-    free(c);
+    let a = state_new(_L1);
+    let b = state_new(_L2);
+    let c = state_new(_L3);
+    a.v = 3;
+    v1 = a.v;
+    b.v = v1;
+    v2 = b.v;
+    c.v = v2;
+    v3 = c.v;
     return v3;
 }

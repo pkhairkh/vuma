@@ -7,12 +7,12 @@
 // wired. Distinct from s18_atom_overwrite_then_load (two writes, 5/75)
 // and s14_atom_overwrite_load (two writes, 17/73).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 8);
-    atomic_store(c, 80);
-    atomic_store(c, 180);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 8;
+    c.v = 80;
+    c.v = 180;
+    v = c.v;
     return v;
 }

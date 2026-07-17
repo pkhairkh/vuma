@@ -7,12 +7,13 @@
 // Actually we want exit 4 so buffer = [1, 2, 4, 7] → 1^2=3, 3^4=7, 7^7=0... no.
 // Buffer = [4, 0, 0, 0] → XOR = 4.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(4);
-    *(buf + 0) = 4;
-    *(buf + 1) = 0;
-    *(buf + 2) = 0;
-    *(buf + 3) = 0;
+    let buf = state_new(_L1);
+    buf.data[0] = 4;
+    buf.data[1] = 0;
+    buf.data[2] = 0;
+    buf.data[3] = 0;
     x: u32 = 0;
     i: u32 = 0;
     while i < 4 {
@@ -20,6 +21,5 @@ fn main() -> i32 {
         x = x ^ v;
         i = i + 1;
     }
-    free(buf);
     return x;
 }

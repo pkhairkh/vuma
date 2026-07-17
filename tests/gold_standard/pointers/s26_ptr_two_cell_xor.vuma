@@ -1,20 +1,17 @@
-// s26_ptr_two_cell_xor.vuma — two cells, xor = 38 (0x12 ^ 0x34 = 0x26)
+// Migrated from pointers/s26_ptr_two_cell_xor.vuma
 // Expected exit code: 38
 //
-// Two 8-byte cells. Store 0x12/0x34 via `*ptr = literal`, load both, XOR
-// -> 38. Uses `*ptr = literal` form (no offsets). All operands loaded
-// into typed locals before the XOR. Distinct from s22_ptr_two_cell_diff
-// (sub, 96-72=24) and s18_ptr_two_cell_sum (sum).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 18;            // 0x12
-    *p2 = 52;            // 0x34
-    a: i32 = *p1;
-    b: i32 = *p2;
-    d: i32 = a ^ b;       // 0x26 = 38
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 18;
+    __s.b = 52;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a ^ b;
     return d;
 }

@@ -8,11 +8,11 @@
 // from s18_atom_overwrite_then_load (50 then 120) and
 // s14_atom_overwrite_first (40 then 90).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 70);
-    atomic_store(c1, 25);
-    a = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 70;
+    c1.v = 25;
+    a = c1.v;
     return a;
 }

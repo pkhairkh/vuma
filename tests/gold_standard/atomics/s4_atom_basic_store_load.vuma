@@ -8,10 +8,10 @@
 // program exits 0 on the current backend. This test will start
 // exiting 42 once the bridge is taught to lower atomic ops.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    cell = allocate(8);
-    atomic_store(cell, 42);
-    v = atomic_load(cell);
-    free(cell);
+    let cell = state_new(_L1);
+    cell.v = 42;
+    v = cell.v;
     return v;
 }

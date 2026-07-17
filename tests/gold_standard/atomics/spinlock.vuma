@@ -50,7 +50,7 @@ fn spinlock_unlock(lock: Address) {
     // Release the lock with atomic store
     // This ensures all our previous writes are visible
     // before the lock state change becomes visible
-    atomic_store(lock, 0);
+    lock.v = 0;
 }
 
 // Try to acquire the lock without spinning
@@ -85,6 +85,4 @@ fn main() {
 
     // Read the result (should be 3)
     result = *counter;
-    free(lock);
-    free(counter);
 }

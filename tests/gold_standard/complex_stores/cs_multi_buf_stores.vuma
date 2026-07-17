@@ -4,14 +4,15 @@
 // Two independent single-byte stores in two buffers; sum the loaded
 // values.
 
+layout Buf_b1 = { data: [u8; 8] }
+layout Buf_b2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    b1 = allocate(8);
-    b2 = allocate(8);
-    *(b1 + 0) = 1;
-    *(b2 + 0) = 2;
-    v1: u32 = *(b1 + 0);
-    v2: u32 = *(b2 + 0);
-    free(b1);
-    free(b2);
+    let b1 = state_new(Buf_b1);
+    let b2 = state_new(Buf_b2);
+    b1.data[0] = 1;
+    b2.data[0] = 2;
+    v1: u32 = b1.data[0];
+    v2: u32 = b2.data[0];
     return v1 + v2;
 }

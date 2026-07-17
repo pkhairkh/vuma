@@ -13,19 +13,19 @@ struct Array {
     e4: u64,
 }
 
+layout _L1 = { data: [u8; 40] }
 fn main() -> i32 {
-    a = allocate(40);
-    *(a + 0) = 1;
-    *(a + 8) = 1;
-    *(a + 16) = 1;
-    *(a + 24) = 1;
-    *(a + 32) = 1;
-    v0: u64 = *(a + 0);
-    v1: u64 = *(a + 8);
-    v2: u64 = *(a + 16);
-    v3: u64 = *(a + 24);
-    v4: u64 = *(a + 32);
+    let a = state_new(_L1);
+    a.data[0] = 1;
+    a.data[8] = 1;
+    a.data[16] = 1;
+    a.data[24] = 1;
+    a.data[32] = 1;
+    v0: u64 = a.data[0];
+    v1: u64 = a.data[8];
+    v2: u64 = a.data[16];
+    v3: u64 = a.data[24];
+    v4: u64 = a.data[32];
     sum: u64 = v0 + v1 + v2 + v3 + v4;
-    free(a);
     return sum;
 }

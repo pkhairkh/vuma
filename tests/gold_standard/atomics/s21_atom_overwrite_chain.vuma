@@ -7,12 +7,12 @@
 // atomic ops are wired. Distinct from s14_atom_overwrite_load (single
 // overwrite) and s10_atom_overwrite_twice (two overwrites, different vals).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 20);
-    atomic_store(c, 40);
-    atomic_store(c, 80);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 20;
+    c.v = 40;
+    c.v = 80;
+    v = c.v;
     return v;
 }

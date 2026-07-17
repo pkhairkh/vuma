@@ -6,15 +6,15 @@
 // that the sum (84, well within U8 range as exit code) is computed.
 // Straight-line code only.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 42;
-    *(buf2 + 0) = 42;
-    v1: u32 = *(buf1 + 0);   // 42
-    v2: u32 = *(buf2 + 0);   // 42
+    let buf1 = state_new(_L1);
+    let buf2 = state_new(_L2);
+    buf1.data[0] = 42;
+    buf2.data[0] = 42;
+    v1: u32 = buf1.data[0];   // 42
+    v2: u32 = buf2.data[0];   // 42
     sum: u32 = v1 + v2;      // 84
-    free(buf1);
-    free(buf2);
     return sum;
 }

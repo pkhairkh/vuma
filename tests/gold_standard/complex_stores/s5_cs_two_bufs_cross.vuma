@@ -6,15 +6,16 @@
 // Tests that cross-buffer loads at different offsets work.
 // Distinct from s4_cs_two_buf_stores (both buffers use offset 0).
 
+layout Buf_a = { data: [u8; 16] }
+layout Buf_b = { data: [u8; 16] }
+
 fn main() -> i32 {
-    a = allocate(16);
-    b = allocate(16);
-    *(a + 0) = 40;
-    *(b + 8) = 60;
-    va: u64 = *(a + 0);
-    vb: u64 = *(b + 8);
+    let a = state_new(Buf_a);
+    let b = state_new(Buf_b);
+    a.data[0] = 40;
+    b.data[8] = 60;
+    va: u64 = a.data[0];
+    vb: u64 = b.data[8];
     s: u64 = va + vb;
-    free(a);
-    free(b);
     return s;
 }

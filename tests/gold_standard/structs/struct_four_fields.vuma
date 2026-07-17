@@ -12,17 +12,17 @@ struct Quad {
     d: u64,
 }
 
+layout _L1 = { data: [u8; 32] }
 fn main() -> i32 {
-    q = allocate(32);
-    *(q + 0) = 1;
-    *(q + 8) = 2;
-    *(q + 16) = 3;
-    *(q + 24) = 4;
-    a: u64 = *(q + 0);
-    b: u64 = *(q + 8);
-    c: u64 = *(q + 16);
-    d: u64 = *(q + 24);
+    let q = state_new(_L1);
+    q.data[0] = 1;
+    q.data[8] = 2;
+    q.data[16] = 3;
+    q.data[24] = 4;
+    a: u64 = q.data[0];
+    b: u64 = q.data[8];
+    c: u64 = q.data[16];
+    d: u64 = q.data[24];
     sum: u64 = a + b + c + d;
-    free(q);
     return sum;
 }

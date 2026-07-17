@@ -1,20 +1,14 @@
-// conc_large_buf.vuma — allocate 256 bytes, use first 8 as the "atomic"
+// Migrated from concurrency/conc_large_buf.vuma
 // Expected exit code: 42
 //
-// In real lock-free code the atomic counter is often embedded at a
-// known offset in a larger shared struct (e.g. the head/tail fields of
-// a ring buffer). This test allocates a 256-byte block, treats the
-// first 8 bytes as the "atomic cell", stores 42 there via `*buf`, and
-// loads it back. The larger allocation exercises the heap allocator's
-// sizing path while keeping the actual atomic access at offset 0.
-//
-// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
-// conc_atomic_basic.vuma.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    buf = allocate(256);
-    *buf = 42;
-    val: i32 = *buf;
-    free(buf);
+    let __s = state_new(Single);
+    __s.v = 42;
+    let val = __s.v;
     return val;
 }

@@ -6,11 +6,11 @@
 // Returns the loaded value. Fresh mmap'd memory is zero-initialized,
 // so the uninitialized field reads as 0.
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 42;
+    let p = state_new(_L1);
+    p.data[0] = 42;
     // Field 1 (offset 8) was never written — should be 0
-    val: u64 = *(p + 8);
-    free(p);
+    val: u64 = p.data[8];
     return val;
 }

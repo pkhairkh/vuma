@@ -7,15 +7,16 @@
 // (uses `*(p+0)` form, non-deterministic) and s4_ls_two_nodes
 // (single allocation, two nodes via offsets).
 
+layout Buf_a = { data: [u8; 8] }
+layout Buf_b = { data: [u8; 8] }
+
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    *a = 30;
-    *b = 70;
-    va: u64 = *a;
-    vb: u64 = *b;
+    let a = state_new(Buf_a);
+    let b = state_new(Buf_b);
+    a.data[0] = 30;
+    b.data[0] = 70;
+    va: u64 = a.data[0];
+    vb: u64 = b.data[0];
     s: u64 = va + vb;
-    free(a);
-    free(b);
     return s;
 }

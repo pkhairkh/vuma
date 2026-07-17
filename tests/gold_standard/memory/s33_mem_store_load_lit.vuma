@@ -1,14 +1,14 @@
-// s33_mem_store_load_lit.vuma — store 195, load = 195
+// Migrated from memory/s33_mem_store_load_lit.vuma
 // Expected exit code: 195
 //
-// Deterministic test in the memory category. All operands loaded into typed
-// variables before any bitwise op; all stores use `*ptr = literal` (or the
-// `*ptr = variable + 0` workaround). Result lands in 0-255.
-// Distinct from s30_mem_store_load_lit (value 175) and s26_mem_store_load_lit (different value).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 195;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 195;
+    let r = __s.v;
     return r;
 }

@@ -1,19 +1,17 @@
-// s54_ptr_two_cell_sum.vuma — two cells, sum = 245 (85 + 160)
+// Migrated from pointers/s54_ptr_two_cell_sum.vuma
 // Expected exit code: 245
 //
-// Two 8-byte cells. Store 85/160 via `*ptr = literal`, load both,
-// sum -> 245. Uses `*ptr = literal` form. Distinct from s50_ptr_two_
-// cell_sum (215) and s49_ptr_two_cell_sum (225).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 85;
-    *p2 = 160;
-    a: i32 = *p1;
-    b: i32 = *p2;
-    s: i32 = a + b;        // 245
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 85;
+    __s.b = 160;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
     return s;
 }

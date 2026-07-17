@@ -6,15 +6,16 @@
 // loaded into typed locals before the AND. Distinct from
 // s26_cs_two_buf_xor (xor, 102) and s22_cs_two_buf_sum (two-cell add).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 240;           // 0xF0
-    *c2 = 60;            // 0x3C
-    a: u64 = *c1;
-    b: u64 = *c2;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 240;           // 0xF0
+    c2.data[0] = 60;            // 0x3C
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
     s: u64 = a & b;       // 0x30 = 48
-    free(c1);
-    free(c2);
     return s;
 }

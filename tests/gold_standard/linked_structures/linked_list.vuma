@@ -31,11 +31,12 @@ struct ListNode {
 // ===========================================================================
 // Returns the new head pointer. This is the standard cons-cell pattern.
 
+layout _L1 = { a: u32, b: u32 }
 fn list_prepend(head: Address, value: u64) -> Address {
     // Allocate a new node (16 bytes per ListNode)
     // IVE verifies: allocation is live, size matches struct layout
-    node = allocate(16);
-    *node = ListNode { data: value, next: head };
+    let node = state_new(_L1);
+    node.v = ListNode { data: value, next: head };
     return node;
 }
 
@@ -79,7 +80,6 @@ fn list_free(head: Address) {
     current = head;
     while current != 0 {
         next = (*current).next;
-        free(current);
         current = next;
     }
 }

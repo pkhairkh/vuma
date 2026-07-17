@@ -10,13 +10,13 @@ struct Pair {
     b: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 40;
-    *(p + 8) = 50;
-    a: u64 = *(p + 0);
-    b: u64 = *(p + 8);
+    let p = state_new(_L1);
+    p.data[0] = 40;
+    p.data[8] = 50;
+    a: u64 = p.data[0];
+    b: u64 = p.data[8];
     s: u64 = a + b;
-    free(p);
     return s;
 }

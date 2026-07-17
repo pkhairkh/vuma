@@ -1,6 +1,8 @@
 // Test: Loop with memory operations (simplified SHA256d W schedule)
 // Expected: exit 79
 
+layout _L1 = { data: [u8; 256] }
+layout _L2 = { data: [u8; 64] }
 fn write_u32(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
@@ -30,8 +32,8 @@ fn small_sigma1(x: u32) -> u32 {
 
 fn main() -> u64 {
     // Allocate W schedule and a block
-    w = allocate(256);
-    block = allocate(64);
+    let w = state_new(_L1);
+    let block = state_new(_L2);
 
     // Store a known value into the block at offset 0: 0x61626380
     write_u32(block, 0, 1668247168);  // 0x61626380
@@ -43,8 +45,6 @@ fn main() -> u64 {
     // Read it back
     result: u32 = read_u32(w, 0);
 
-    free(block);
-    free(w);
 
     // Return low byte
     return result & 0xFF;

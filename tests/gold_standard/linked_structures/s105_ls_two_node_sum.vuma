@@ -3,15 +3,16 @@
 // 
 // Two 8-byte "nodes". Store 28 at n1, store 18 at n2, load each and return the sum (46). Uses `*ptr = literal` form. Straight-line code only.
 // Distinct from s102_ls_two_node_sum (4), s101_ls_two_node_sum (205), s100_ls_two_node_diff (16).
+layout Buf_n1 = { data: [u8; 8] }
+layout Buf_n2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    n2 = allocate(8);
-    *n1 = 28;
-    *n2 = 18;
-    a: u64 = *n1;          // 28
-    b: u64 = *n2;          // 18
+    let n1 = state_new(Buf_n1);
+    let n2 = state_new(Buf_n2);
+    n1.data[0] = 28;
+    n2.data[0] = 18;
+    a: u64 = n1.data[0];          // 28
+    b: u64 = n2.data[0];          // 18
     s: u64 = a + b;        // 46
-    free(n1);
-    free(n2);
     return s;
 }

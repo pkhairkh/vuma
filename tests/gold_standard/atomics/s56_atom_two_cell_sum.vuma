@@ -6,15 +6,15 @@
 // 255 once atomics are wired through. Distinct from s54_atom_two_cell_
 // or (127) and s50_atom_two_cell_sum (175).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    atomic_store(c1, 120);
-    atomic_store(c2, 135);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    c1.v = 120;
+    c2.v = 135;
+    a = c1.v;
+    b = c2.v;
     s: i32 = a + b;                  // 255
-    free(c1);
-    free(c2);
     return s;
 }

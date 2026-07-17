@@ -11,12 +11,13 @@
 // a pointer is miscompiled (silently dropped); storing an expression
 // works. Storing the arithmetic expression directly sidesteps the bug.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf = allocate(8);
+    let buf = state_new(Buf_buf);
     a: u32 = 3;
     b: u32 = 7;
-    *(buf + 0) = a + b;
-    out: u32 = *(buf + 0);
-    free(buf);
+    buf.data[0] = a + b;
+    out: u32 = buf.data[0];
     return out;
 }

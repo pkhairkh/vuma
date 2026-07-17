@@ -5,17 +5,18 @@
 // marker byte (99). main reads both fields and returns only the value
 // field. Tests that adjacent fields in a node don't interfere.
 
-fn main() -> i32 {
-    node = allocate(16);
-    // node.val = 17
-    *(node + 0) = 17;
-    // node.marker = 99
-    *(node + 8) = 99;
+layout Buf_node = { data: [u8; 16] }
 
-    val: u64 = *(node + 0);
-    marker: u64 = *(node + 8);
+fn main() -> i32 {
+    let node = state_new(Buf_node);
+    // node.val = 17
+    node.data[0] = 17;
+    // node.marker = 99
+    node.data[8] = 99;
+
+    val: u64 = node.data[0];
+    marker: u64 = node.data[8];
     // Confirm we read the right slot (marker is read but ignored)
     ignore: u64 = marker + 0;
-    free(node);
     return val;
 }

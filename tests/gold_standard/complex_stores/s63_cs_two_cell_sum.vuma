@@ -6,15 +6,16 @@
 // from s51_cs_three_cell_sum (215), s58_cs_three_cell_diff (120)
 // and s55_cs_overwrite_first (220).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 130;
-    *c2 = 75;
-    a: u64 = *c1;
-    b: u64 = *c2;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 130;
+    c2.data[0] = 75;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
     s: u64 = a + b;        // 205
-    free(c1);
-    free(c2);
     return s;
 }

@@ -6,18 +6,19 @@
 // 81. main reads node1.next_offset, dereferences node2 via
 // (block + offset), returns node2.val. All values <= 255.
 
+layout Buf_block = { data: [u8; 24] }
+
 fn main() -> i32 {
-    block = allocate(24);
+    let block = state_new(Buf_block);
     // node1.val = 0
-    *(block + 0) = 0;
+    block.data[0] = 0;
     // node1.next_offset = 16
-    *(block + 8) = 16;
+    block.data[8] = 16;
     // node2.val = 81
-    *(block + 16) = 81;
+    block.data[16] = 81;
 
-    off: u64 = *(block + 8);
-    val: u64 = *(block + off);
+    off: u64 = block.data[8];
+    val: u64 = block.data[off];
 
-    free(block);
     return val;
 }

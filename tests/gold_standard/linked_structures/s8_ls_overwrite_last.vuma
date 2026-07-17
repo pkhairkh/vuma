@@ -6,16 +6,17 @@
 // all three, sums, returns 10 + 20 + 99 = 129. Distinct from
 // s6_ls_overwrite_first (overwrites first node).
 
+layout Buf_block = { data: [u8; 24] }
+
 fn main() -> i32 {
-    block = allocate(24);
-    *(block + 0) = 10;
-    *(block + 8) = 20;
-    *(block + 16) = 30;
-    *(block + 16) = 99;
-    a: u64 = *(block + 0);
-    b: u64 = *(block + 8);
-    c: u64 = *(block + 16);
+    let block = state_new(Buf_block);
+    block.data[0] = 10;
+    block.data[8] = 20;
+    block.data[16] = 30;
+    block.data[16] = 99;
+    a: u64 = block.data[0];
+    b: u64 = block.data[8];
+    c: u64 = block.data[16];
     s: u64 = a + b + c;
-    free(block);
     return s;
 }

@@ -7,11 +7,12 @@
 // overwrite_value (210), s66_ls_overwrite_value (220) and s74_ls_
 // overwrite_value (149).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 100;
-    *n1 = 162;
-    a: u64 = *n1;          // 162
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 100;
+    n1.data[0] = 162;
+    a: u64 = n1.data[0];          // 162
     return a;
 }

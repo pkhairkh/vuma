@@ -1,19 +1,17 @@
-// s85_conc_two_cell_sum.vuma — two cells, sum = 203 (95 + 108)
+// Migrated from concurrency/s85_conc_two_cell_sum.vuma
 // Expected exit code: 203
 //
-// Two independent 8-byte cells. Store 95/108 via `*ptr =
-// literal`, load both, sum -> 203. Uses non-atomic `*ptr` per
-// the bridge-gap workaround. Distinct from s82_conc_two_cell_
-// sum, s78_conc_two_cell_sum and s74_conc_two_cell_sum.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 95;
-    *c2 = 108;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    r: i32 = v1 + v2;     // 203
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 95;
+    __s.b = 108;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let r = v1 + v2;
     return r;
 }

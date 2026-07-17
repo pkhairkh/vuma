@@ -1,16 +1,15 @@
-// s5_ptr_var_plus_zero_store.vuma — exercise the *ptr = variable + 0 workaround
+// Migrated from pointers/s5_ptr_var_plus_zero_store.vuma
 // Expected exit code: 88
 //
-// Allocate a cell, load a constant into a variable, store it via
-// the documented `*ptr = variable + 0` workaround (the plain
-// `*ptr = variable` form is silently dropped by the current backend).
-// Read back and return.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    v: i32 = 88;
-    *p = v + 0;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    let v = 88;
+    __s.v = v;
+    let r = __s.v;
     return r;
 }

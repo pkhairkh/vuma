@@ -20,6 +20,7 @@
 // Read a u64 from array at given index (8-byte stride)
 // ===========================================================================
 
+layout _L1 = { data: [u8; 80] }
 fn arr_read(arr: Address, idx: u64) -> u64 {
     // Each element is 8 bytes (u64)
     return *(arr + idx * 8);
@@ -90,7 +91,7 @@ fn quicksort(arr: Address, lo: u64, hi: u64) {
 
 fn main() -> i32 {
     // Allocate array of 10 u64 elements (80 bytes)
-    arr = allocate(80);
+    let arr = state_new(_L1);
 
     // Initialize with unsorted data
     arr_write(arr, 0, 64);
@@ -111,6 +112,5 @@ fn main() -> i32 {
     // After sorting: [7, 11, 12, 22, 25, 33, 42, 55, 64, 90]
     median: u64 = arr_read(arr, 5);
 
-    free(arr);
     return median;
 }

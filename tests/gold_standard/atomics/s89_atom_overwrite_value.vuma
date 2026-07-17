@@ -6,11 +6,11 @@
 // returns 0 -> exit 0. Will exit 18 once atomics are wired
 // through. Distinct from s86_atom_overwrite_value (240),
 // s82_atom_overwrite_value (30) and s78_atom_overwrite_value (3).
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 7);
-    atomic_store(c1, 18);
-    r = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 7;
+    c1.v = 18;
+    r = c1.v;
     return r;
 }

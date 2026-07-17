@@ -1,7 +1,7 @@
 // Test: allocate, store, return
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    msg = allocate(3);
-    *(msg + 0) = 97;
-    free(msg);
+    let msg = state_new(_L1);
+    msg.data[0] = 97;
     return 0;
 }

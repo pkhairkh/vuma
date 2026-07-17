@@ -7,11 +7,11 @@
 // through. Distinct from s30_atom_overwrite_first (overwrite, 100)
 // and s27_atom_overwrite_load (different values).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 50);
-    atomic_store(c1, 250);
-    a = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 50;
+    c1.v = 250;
+    a = c1.v;
     return a;
 }

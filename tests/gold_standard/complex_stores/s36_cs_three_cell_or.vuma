@@ -7,20 +7,21 @@
 // form (no offsets).
 // Distinct from s30_cs_three_cell_xor (xor, 0) and s27_cs_three_cell_or (different values).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 128;             // 0x80
-    *c2 = 64;              // 0x40
-    *c3 = 32;              // 0x20
-    a: u64 = *c1;
-    b: u64 = *c2;
-    d: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 128;             // 0x80
+    c2.data[0] = 64;              // 0x40
+    c3.data[0] = 32;              // 0x20
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    d: u64 = c3.data[0];
     x: u64 = a | b;        // 0xC0 = 192
     r: u64 = x | d;        // 0xE0 = 224
-    free(c1);
-    free(c2);
-    free(c3);
     return r;
 }

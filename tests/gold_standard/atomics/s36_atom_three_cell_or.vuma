@@ -8,20 +8,20 @@
 // Distinct from s30_atom_three_cell_xor (xor, 0) and s27_atom_three_cell_or (different values).
 // Expected exit code: 126
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    atomic_store(c1, 100);
-    atomic_store(c2, 20);
-    atomic_store(c3, 10);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
-    d = atomic_load(c3);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 100;
+    c2.v = 20;
+    c3.v = 10;
+    a = c1.v;
+    b = c2.v;
+    d = c3.v;
     r = a | b;
     r = r | d;
-    free(c1);
-    free(c2);
-    free(c3);
     return r;
 }

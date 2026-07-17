@@ -5,13 +5,13 @@
 // offsets, then loads offset 0.  Confirms that bulk pattern writes don't
 // corrupt the first byte.  Straight-line code only.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 42;
-    *(buf + 1) = 42;
-    *(buf + 2) = 42;
-    *(buf + 3) = 42;
-    val: u32 = *(buf + 0);
-    free(buf);
+    let buf = state_new(_L1);
+    buf.data[0] = 42;
+    buf.data[1] = 42;
+    buf.data[2] = 42;
+    buf.data[3] = 42;
+    val: u32 = buf.data[0];
     return val;
 }

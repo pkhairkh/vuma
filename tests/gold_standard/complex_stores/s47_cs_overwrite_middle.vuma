@@ -6,21 +6,22 @@
 // Uses `*ptr = literal` form (no offsets). Distinct from s46_cs_
 // overwrite_first (250) and s42_cs_overwrite_last (210).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 40;
-    *c2 = 50;
-    *c3 = 60;
-    *c2 = 100;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 40;
+    c2.data[0] = 50;
+    c3.data[0] = 60;
+    c2.data[0] = 100;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    c: u64 = c3.data[0];
     t: u64 = a + b;
     s: u64 = t + c;        // 200
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

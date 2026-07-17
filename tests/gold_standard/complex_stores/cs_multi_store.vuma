@@ -4,14 +4,15 @@
 // Writes three small bytes at consecutive offsets, loads them all back,
 // sums them. Verifies multi-byte scatter stores and independent loads.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 2;
-    *(buf + 1) = 3;
-    *(buf + 2) = 5;
-    a: u32 = *(buf + 0);
-    b: u32 = *(buf + 1);
-    c: u32 = *(buf + 2);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 2;
+    buf.data[1] = 3;
+    buf.data[2] = 5;
+    a: u32 = buf.data[0];
+    b: u32 = buf.data[1];
+    c: u32 = buf.data[2];
     return a + b + c;
 }

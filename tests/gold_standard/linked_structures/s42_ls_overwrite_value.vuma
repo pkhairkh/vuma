@@ -8,11 +8,12 @@
 // but different shape: single-node overwrite vs three-node
 // overwrite-last).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 80;
-    *n1 = 140;
-    v: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 80;
+    n1.data[0] = 140;
+    v: u64 = n1.data[0];
     return v;
 }

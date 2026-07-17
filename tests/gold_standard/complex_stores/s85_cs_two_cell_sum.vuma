@@ -5,15 +5,16 @@
 // both, sum -> 210. Uses `*ptr = literal` form (no offsets).
 // Distinct from s82_cs_two_cell_sum, s78_cs_two_cell_sum and
 // s74_cs_two_cell_sum.
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 100;
-    *c2 = 110;
-    a: u64 = *c1;
-    b: u64 = *c2;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 100;
+    c2.data[0] = 110;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
     s: u64 = a + b;        // 210
-    free(c1);
-    free(c2);
     return s;
 }

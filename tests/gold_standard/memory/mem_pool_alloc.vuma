@@ -29,8 +29,6 @@ fn main() -> i32 {
     *(free_list + 0) = 0;
     *(pool + 0) = 150;
     v0_new: u32 = *(pool + 0);
-    free(pool);
-    free(free_list);
     if v0 == 100 {
         if v1 == 200 {
             if v0_new == 150 { return 0; }

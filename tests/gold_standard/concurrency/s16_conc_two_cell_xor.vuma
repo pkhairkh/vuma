@@ -1,20 +1,17 @@
-// s16_conc_two_cell_xor.vuma — two cells 0x55/0xAA, XOR = 255
+// Migrated from concurrency/s16_conc_two_cell_xor.vuma
 // Expected exit code: 255
 //
-// Two independent 8-byte cells. Each gets a distinct literal at offset 0
-// (0x55 / 0xAA). Both loaded back and XORed -> 0xFF = 255. Distinct from
-// s8_conc_two_cells_xor (values 0x33/0x66 = 0x55) and s14_conc_two_cell_diff
-// (sum, not XOR).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 85;            // 0x55
-    *c2 = 170;           // 0xAA
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    r: i32 = v1 ^ v2;    // 0xFF = 255
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 85;
+    __s.b = 170;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let r = v1 ^ v2;
     return r;
 }

@@ -5,22 +5,23 @@
 // five, sum, return 75. Distinct from s6_cs_four_offsets (four offsets)
 // and s5_cs_long_scatter (different values).
 
+layout Buf_buf = { data: [u8; 40] }
+
 fn main() -> i32 {
-    buf = allocate(40);
-    *(buf + 0) = 5;
-    *(buf + 8) = 10;
-    *(buf + 16) = 15;
-    *(buf + 24) = 20;
-    *(buf + 32) = 25;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
-    d: u64 = *(buf + 24);
-    e: u64 = *(buf + 32);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 5;
+    buf.data[8] = 10;
+    buf.data[16] = 15;
+    buf.data[24] = 20;
+    buf.data[32] = 25;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
+    d: u64 = buf.data[24];
+    e: u64 = buf.data[32];
     t1: u64 = a + b;
     t2: u64 = t1 + c;
     t3: u64 = t2 + d;
     s: u64 = t3 + e;
-    free(buf);
     return s;
 }

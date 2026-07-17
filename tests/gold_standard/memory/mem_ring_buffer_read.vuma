@@ -4,19 +4,19 @@
 // Sets up a ring buffer with capacity 4 containing [10, 20, 30, 40], then
 // reads 4 values in order (with wraparound). Verifies the read order.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(4);
+    let buf = state_new(_L1);
     tail: u32 = 0;
-    *(buf + 0) = 10;
-    *(buf + 1) = 20;
-    *(buf + 2) = 30;
-    *(buf + 3) = 40;
+    buf.data[0] = 10;
+    buf.data[1] = 20;
+    buf.data[2] = 30;
+    buf.data[3] = 40;
     // Read 4 values
     v0: u32 = *(buf + tail); tail = (tail + 1) & 3;
     v1: u32 = *(buf + tail); tail = (tail + 1) & 3;
     v2: u32 = *(buf + tail); tail = (tail + 1) & 3;
     v3: u32 = *(buf + tail); tail = (tail + 1) & 3;
-    free(buf);
     if v0 == 10 {
         if v1 == 20 {
             if v2 == 30 {

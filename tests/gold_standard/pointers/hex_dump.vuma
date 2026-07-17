@@ -23,6 +23,8 @@
 // ===========================================================================
 // 0-9 → '0'-'9' (48-57), 10-15 → 'A'-'F' (65-70)
 
+layout _L1 = { v: u32 }
+layout _L2 = { a: u32, b: u32 }
 fn nybble_to_hex(n: u64) -> u64 {
     if n < 10 {
         return n + 48;    // '0' = 48
@@ -76,24 +78,22 @@ fn hex_dump(input: Address, output: Address, len: u64) -> u64 {
 
 fn main() -> i32 {
     // Allocate input buffer (8 bytes)
-    input = allocate(8);
-    *(input + 0) = 222;   // 0xDE
-    *(input + 1) = 173;   // 0xAD
-    *(input + 2) = 190;   // 0xBE
-    *(input + 3) = 239;   // 0xEF
-    *(input + 4) = 202;   // 0xCA
-    *(input + 5) = 254;   // 0xFE
-    *(input + 6) = 66;    // 0x42
-    *(input + 7) = 0;     // 0x00
+    let input = state_new(_L1);
+    input.data[0] = 222;   // 0xDE;
+    input.data[1] = 173;   // 0xAD;
+    input.data[2] = 190;   // 0xBE;
+    input.data[3] = 239;   // 0xEF;
+    input.data[4] = 202;   // 0xCA;
+    input.data[5] = 254;   // 0xFE;
+    input.data[6] = 66;    // 0x42;
+    input.data[7] = 0;     // 0x00;
 
     // Allocate output buffer (16 bytes = 2 * 8 input bytes)
-    output = allocate(16);
+    let output = state_new(_L2);
 
     // Perform hex dump and get checksum
     checksum: u64 = hex_dump(input, output, 8);
 
-    free(input);
-    free(output);
 
     // Return the checksum as exit code
     // XOR of ASCII: D^E^A^D^B^E^E^F^C^A^F^E^4^2^0^0

@@ -7,6 +7,7 @@
 
 const GPIO_BASE_SIZE: u64 = 4096;
 
+layout _L1 = { data: [u8; 256] }
 fn gpio_set_output(gpio: Address, pin: u32) {
     // GPFSEL0 register at offset 0x00
     fsel: Address = gpio + 0;
@@ -32,7 +33,7 @@ fn gpio_clear(gpio: Address, pin: u32) {
 
 fn main() -> i32 {
     // Simulate GPIO register space with allocate
-    gpio = allocate(256);
+    let gpio = state_new(_L1);
 
     led_pin: u32 = 25;
 
@@ -42,6 +43,5 @@ fn main() -> i32 {
     gpio_clear(gpio, led_pin);
     gpio_set(gpio, led_pin);
 
-    free(gpio);
     return 0;
 }

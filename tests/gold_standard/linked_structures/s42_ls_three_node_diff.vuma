@@ -7,20 +7,21 @@
 // three_node_diff (160) and s34_ls_three_node_diff (120, same
 // total but different operands 180/40/20).
 
+layout Buf_n1 = { data: [u8; 8] }
+layout Buf_n2 = { data: [u8; 8] }
+layout Buf_n3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    n2 = allocate(8);
-    n3 = allocate(8);
-    *n1 = 220;
-    *n2 = 60;
-    *n3 = 40;
-    a: u64 = *n1;
-    b: u64 = *n2;
-    c: u64 = *n3;
+    let n1 = state_new(Buf_n1);
+    let n2 = state_new(Buf_n2);
+    let n3 = state_new(Buf_n3);
+    n1.data[0] = 220;
+    n2.data[0] = 60;
+    n3.data[0] = 40;
+    a: u64 = n1.data[0];
+    b: u64 = n2.data[0];
+    c: u64 = n3.data[0];
     t: u64 = a - b;
     d: u64 = t - c;
-    free(n1);
-    free(n2);
-    free(n3);
     return d;
 }

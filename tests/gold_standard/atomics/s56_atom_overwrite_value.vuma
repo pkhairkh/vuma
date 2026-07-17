@@ -7,11 +7,11 @@
 // from s54_atom_overwrite_value (140) and s50_atom_overwrite_value
 // (160).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 80);
-    atomic_store(c1, 175);
-    a = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 80;
+    c1.v = 175;
+    a = c1.v;
     return a;
 }

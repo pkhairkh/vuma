@@ -6,11 +6,11 @@
 // value. main simply calls the helper and returns its result.
 // Exercises self-contained buffer lifetime inside a single function.
 
+layout _L1 = { v: u32 }
 fn make_and_load() -> i32 {
-    buf = allocate(8);
-    *buf = 42;
-    val: i32 = *buf;
-    free(buf);
+    let buf = state_new(_L1);
+    buf.v = 42;
+    val: i32 = buf.v;
     return val;
 }
 

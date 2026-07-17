@@ -1,16 +1,15 @@
-// s18_mem_overwrite_load.vuma — store 8 then 92, load = 92
+// Migrated from memory/s18_mem_overwrite_load.vuma
 // Expected exit code: 92
 //
-// Single 8-byte cell. Store literal 8, then overwrite with literal
-// 92 (last write wins). Load and return 92. Uses `*p = literal`
-// form. Distinct from s14_mem_overwrite_load (5 then 95) and
-// s9_mem_overwrite_then_load (10 then 90).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 8;
-    *p = 92;
-    v: u64 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 8;
+    __s.v = 92;
+    let v = __s.v;
     return v;
 }

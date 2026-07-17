@@ -4,15 +4,16 @@
 // 24-byte buffer, three stores at offsets 0, 8, 16. Loads them back
 // in the same order, sums, returns 90.
 
+layout Buf_buf = { data: [u8; 24] }
+
 fn main() -> i32 {
-    buf = allocate(24);
-    *(buf + 0) = 15;
-    *(buf + 8) = 25;
-    *(buf + 16) = 50;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 15;
+    buf.data[8] = 25;
+    buf.data[16] = 50;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
     s: u64 = a + b + c;
-    free(buf);
     return s;
 }
