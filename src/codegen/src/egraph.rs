@@ -39,6 +39,39 @@
 //! - **Associativity** (both directions, all 5 ops).
 //! - **Distributivity** (`a*(b+c) ↔ a*b + a*c`).
 //! - **Constant-folding-across-ops** (`(x+0)+0 → x`, `(x*1)*1 → x`).
+//!
+//! # Wave 5 Additions — PMT state-operation ENodes + rewrite rules
+//!
+//! Wave 5 extends the e-graph to reason about PMT (Programs as Memory
+//! Transformations) state operations. Four new ENode variants are added:
+//! `StateInit`, `StateRead`, `StateWrite`, `StateTransform`. These let the
+//! e-graph discover equivalences between state-operation sequences —
+//! most importantly, **store-load forwarding** (a Store immediately
+//! followed by a Load of the same field can be replaced by the stored
+//! value) and **transform elision** (a transform whose source and
+//! destination layouts are the same is a no-op).
+//!
+//! ## New rewrite rules
+//!
+//! - `state_dead_init_elim`: `StateInit(L)` whose e-class is referenced by
+//!   no `StateRead`/`StateWrite`/`StateTransform` → merge with `Lit(0)`
+//!   (the state is provably unused; its value is irrelevant).
+//! - `state_store_load_forward`: `StateRead(StateWrite(s, off, v), off, _)`
+//!   → `v` (the read forwards the just-written value).
+//! - `state_transform_elision`: `StateTransform(x, L, L)` → `x` (same
+//!   src/dst layout means no-op).
+//! - `state_merge_compatible_layouts`: stub (`verified: false`) — merging
+//!   two `StateInit`s with compatible layouts requires lifetime analysis
+//!   the e-graph cannot perform; deferred to a future wave.
+//!
+//! ## Wiring status
+//!
+//! The optimizer pass in `opt.rs::equality_saturation_with_cost` currently
+//! feeds only `BinOp` instructions to the e-graph. The Wave 5 state-op
+//! rules therefore do not yet fire on real programs — they are exercised
+//! by the unit tests in this module and by the `tests/gold_standard/
+//! pmt_wave5/*.vuma` golden tests (which serve as forward-looking test
+//! cases for the wave that wires state ops into the optimizer).
 
 use std::collections::{HashMap, HashSet};
 use crate::ir::{BinOpKind};
@@ -52,6 +85,39 @@ pub enum ENode {
     VReg(u32),
     /// A binary operation.
     BinOp(BinOpKind, u32, u32), // (op, lhs_eclass, rhs_eclass)
+
+    // ============================================================
+    // Wave 5 — PMT state-operation ENodes.
+    //
+    // These model the PMT (Programs as Memory Transformations) state
+    // operations: `state_new(Layout)`, `state.field` (read), `state.field
+    // = val` (write), and `transform T(s)` (layout conversion). The
+    // e-class IDs in the variant fields refer to the *child* e-classes
+    // (e.g. `state` is the e-class of the input state buffer; `value` is
+    // the e-class of the value being stored).
+    //
+    // `layout_id` is a compile-time-assigned numeric ID identifying a
+    // declared layout (Point, Triple, etc.). Two `StateInit`s with the
+    // same `layout_id` allocate buffers of the same shape — a prerequisite
+    // for the (deferred) state-merge rule.
+    // ============================================================
+
+    /// State initialization — `state_new(Layout)`. Produces a fresh state
+    /// buffer. `layout_id` identifies the layout (shapes the buffer's size
+    /// and field offsets).
+    StateInit { layout_id: u64 },
+    /// State field read — `state.field` (read). Loads `size` bytes from
+    /// `state` at byte offset `offset`. The result is the field's value.
+    StateRead { state: u32, offset: u64, size: u64 },
+    /// State field write — `state.field = value`. Stores `value` to `state`
+    /// at byte offset `offset`. The result is the *new* state (the write
+    /// produces a fresh state e-class — PMT states are linear/immutable).
+    StateWrite { state: u32, offset: u64, value: u32 },
+    /// State layout transform — `transform T(s)`. Converts `input` from
+    /// `src_layout` to `dst_layout`. If `src_layout == dst_layout`, the
+    /// transform is a no-op (identity) — the `state_transform_elision`
+    /// rewrite rule exploits this.
+    StateTransform { input: u32, src_layout: u64, dst_layout: u64 },
 }
 
 /// An e-class ID.
@@ -244,6 +310,33 @@ impl EGraph {
             ENode::VReg(_) => node.clone(),
             ENode::BinOp(op, a, b) => {
                 ENode::BinOp(*op, self.find(*a), self.find(*b))
+            }
+            // Wave 5: canonicalize the child e-class references in state
+            // ops. Layout IDs and offsets are static metadata (not e-class
+            // references), so they're preserved verbatim.
+            ENode::StateInit { layout_id } => {
+                ENode::StateInit { layout_id: *layout_id }
+            }
+            ENode::StateRead { state, offset, size } => {
+                ENode::StateRead {
+                    state: self.find(*state),
+                    offset: *offset,
+                    size: *size,
+                }
+            }
+            ENode::StateWrite { state, offset, value } => {
+                ENode::StateWrite {
+                    state: self.find(*state),
+                    offset: *offset,
+                    value: self.find(*value),
+                }
+            }
+            ENode::StateTransform { input, src_layout, dst_layout } => {
+                ENode::StateTransform {
+                    input: self.find(*input),
+                    src_layout: *src_layout,
+                    dst_layout: *dst_layout,
+                }
             }
         }
     }
@@ -461,6 +554,60 @@ impl EGraph {
         !self.get_provenance(class_id).is_empty()
     }
 
+    /// **Wave 5 — dead-state-elimination helper.**
+    ///
+    /// Returns true if any e-node in the e-graph references `target` as a
+    /// child e-class. Used by the `state_dead_init_elim` rewrite rule's
+    /// guard: a `StateInit` whose e-class has zero consumers is provably
+    /// dead (no `StateRead`/`StateWrite`/`StateTransform`/`BinOp` reads
+    /// from it), so its value is irrelevant and the e-class can be merged
+    /// with `Lit(0)` without changing program semantics.
+    ///
+    /// This is O(n) in the number of e-nodes — acceptable because state-op
+    /// e-nodes are rare (one per `state_new` call) and the rule only fires
+    /// on `StateInit` nodes (not on every node).
+    pub fn is_eclass_referenced(&self, target: EClassId) -> bool {
+        let target_canon = self.find(target);
+        // DETERMINISM: iterate classes in sorted order (HashMap.keys() is
+        // randomized). The result is order-independent (it's a boolean
+        // OR), but sorting makes the scan deterministic for profiling.
+        let mut class_ids: Vec<EClassId> = self.classes.keys().copied().collect();
+        class_ids.sort_unstable();
+        for cid in &class_ids {
+            let canon = self.find(*cid);
+            if canon != *cid {
+                continue; // skip merged-away classes
+            }
+            if let Some(nodes) = self.classes.get(&canon) {
+                for node in nodes {
+                    for child in self.node_children(node) {
+                        if self.find(child) == target_canon {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// **Wave 5 — helper for `is_eclass_referenced`.**
+    ///
+    /// Returns the e-class IDs of all *child* references in `node`. For
+    /// leaf nodes (`Lit`, `VReg`, `StateInit`) this is empty. For
+    /// `BinOp`/`StateRead`/`StateWrite`/`StateTransform`, returns the
+    /// child e-class IDs (excluding static metadata like `layout_id`,
+    /// `offset`, `size`).
+    fn node_children(&self, node: &ENode) -> Vec<EClassId> {
+        match node {
+            ENode::Lit(_) | ENode::VReg(_) | ENode::StateInit { .. } => vec![],
+            ENode::BinOp(_, a, b) => vec![*a, *b],
+            ENode::StateRead { state, .. } => vec![*state],
+            ENode::StateWrite { state, value, .. } => vec![*state, *value],
+            ENode::StateTransform { input, .. } => vec![*input],
+        }
+    }
+
     /// Extract the cheapest expression from an e-class (Wave 31: bottom-up DP).
     ///
     /// Computes the best (lowest-cost) e-node per e-class via fixpoint
@@ -521,6 +668,28 @@ impl EGraph {
                             let ca = best_cost.get(&a_canon).copied().unwrap_or(usize::MAX / 2);
                             let cb = best_cost.get(&b_canon).copied().unwrap_or(usize::MAX / 2);
                             ca.saturating_add(cb)
+                        }
+                        // Wave 5: state-op e-nodes. Leaves have no
+                        // children (StateInit); the others have 1-2 child
+                        // e-classes whose best costs contribute to the
+                        // total. Unknown child costs default to MAX/2
+                        // (same convention as BinOp) so an unresolved
+                        // child doesn't artificially lower the cost.
+                        ENode::StateInit { .. } => 0,
+                        ENode::StateRead { state, .. } => {
+                            let s_canon = self.find(*state);
+                            best_cost.get(&s_canon).copied().unwrap_or(usize::MAX / 2)
+                        }
+                        ENode::StateWrite { state, value, .. } => {
+                            let s_canon = self.find(*state);
+                            let v_canon = self.find(*value);
+                            let cs = best_cost.get(&s_canon).copied().unwrap_or(usize::MAX / 2);
+                            let cv = best_cost.get(&v_canon).copied().unwrap_or(usize::MAX / 2);
+                            cs.saturating_add(cv)
+                        }
+                        ENode::StateTransform { input, .. } => {
+                            let i_canon = self.find(*input);
+                            best_cost.get(&i_canon).copied().unwrap_or(usize::MAX / 2)
                         }
                     };
                     let total = node_cost.saturating_add(child_cost);
@@ -1281,6 +1450,197 @@ pub fn standard_rules() -> Vec<RewriteRule> {
                 None
             },
         },
+
+        // ============================================================
+        // Wave 5: PMT state-operation rewrite rules.
+        //
+        // These rules reason about StateInit / StateRead / StateWrite /
+        // StateTransform e-nodes. They are sound by construction (the
+        // semantic equivalences they encode are consequences of the PMT
+        // state-operation semantics), but only two of them
+        // (`state_store_load_forward`, `state_transform_elision`) can be
+        // encoded as bitvector identities for `bv_verify` — the other two
+        // require structural / lifetime analysis. See `bv_verify.rs`'s
+        // `verify_all_rules()` for the encodable subset and the
+        // per-rule doc comments below for the structural soundness
+        // arguments.
+        // ============================================================
+
+        // ------------------------------------------------------------
+        // Rule 1: Dead-state elimination.
+        //
+        // `StateInit(L)` whose e-class is referenced by no other e-node
+        // (no `StateRead`/`StateWrite`/`StateTransform`/`BinOp` consumes
+        // it) → merge with `Lit(0)`. The state buffer is provably unused;
+        // its value is irrelevant, so replacing it with any constant
+        // (including 0) doesn't change program semantics.
+        //
+        // `verified: false` — this is a structural / dead-code-style
+        // rule (the guard checks "no consumers"), not a bitvector
+        // identity. `bv_verify` cannot encode the "unreferenced" guard.
+        // The rule is sound by construction: the guard ensures the
+        // StateInit's result is never observed. The Wave 36 bv_verify
+        // gate accepts unknown rule names as sound-by-construction
+        // (see `verify_rules_with_counterexample`'s doc comment), so
+        // this rule is admitted without an explicit bv_verify entry.
+        //
+        // COST NOTE: merging StateInit's class with Lit(0) lets the
+        // extractor pick `Lit(0)` (cost 1) over `StateInit{L}` (cost
+        // 500). A future wave that wires state ops into `opt.rs` would
+        // then emit no allocation instruction for the dead state — the
+        // `Lit(0)` placeholder is dropped by the existing dead-vreg
+        // elimination pass.
+        // ------------------------------------------------------------
+        RewriteRule {
+            name: "state_dead_init_elim",
+            verified: false,
+            apply: |node, eg| match node {
+                ENode::StateInit { layout_id: _ } => {
+                    // Guard: the StateInit's e-class must have ZERO
+                    // consumers (no parent e-node references it). We
+                    // determine this by scanning all e-classes for child
+                    // references to this class. The scan is O(n) in the
+                    // number of e-nodes — acceptable because StateInit
+                    // nodes are rare (one per `state_new` call).
+                    //
+                    // We need the e-class ID of this StateInit node to
+                    // check consumers. `eg.hashcons` maps the node → its
+                    // e-class ID; we look it up here.
+                    let class_id = eg.hashcons.get(node).copied();
+                    if let Some(cid) = class_id {
+                        if !eg.is_eclass_referenced(cid) {
+                            // No consumer: the state is dead. Merge with
+                            // Lit(0) so extraction picks the cheaper form.
+                            let replacement = ENode::Lit(0);
+                            let repl_id = eg.add(replacement.clone());
+                            return Some((repl_id, replacement));
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+        },
+
+        // ------------------------------------------------------------
+        // Rule 2: Store-load forwarding (the most impactful rule).
+        //
+        // `StateRead(StateWrite(s, off, v), off, _) → v`
+        //
+        // If a `StateRead`'s `state` child is in the same e-class as a
+        // `StateWrite` with the same `offset`, the read forwards the
+        // just-written value. The rule scans the state's e-class for a
+        // matching StateWrite and merges the StateRead's class with the
+        // write's `value` e-class.
+        //
+        // Soundness: PMT states are linear/immutable — a `StateWrite`
+        // produces a *new* state e-class, so the only way a StateRead's
+        // state child can be in the same e-class as a StateWrite's
+        // *output* is if the read directly consumes the write's result.
+        // There is no intervening write to the same offset (it would
+        // produce a different state e-class). Therefore the read returns
+        // exactly the written value.
+        //
+        // `verified: true` — encodable as the 2-variable bitvector
+        // identity `v == v` (the read returns the written value). See
+        // `verify_all_rules()` in `bv_verify.rs`.
+        // ------------------------------------------------------------
+        RewriteRule {
+            name: "state_store_load_forward",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::StateRead { state, offset, size: _ } => {
+                    let state_canon = eg.find(*state);
+                    // Collect all e-nodes in the state's e-class. A
+                    // StateWrite whose *output* is in this class is a
+                    // candidate (its `state` field is the *input* state;
+                    // the write itself produces this class).
+                    let nodes: Vec<ENode> = eg.classes.get(&state_canon)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    for n in &nodes {
+                        if let ENode::StateWrite { state: _, offset: w_off, value } = n {
+                            if *w_off == *offset {
+                                // Forward the written value. The
+                                // replacement is a VReg reference to the
+                                // value's e-class (same convention as
+                                // `add_zero_left` etc.).
+                                let v_canon = eg.find(*value);
+                                let replacement = ENode::VReg(v_canon);
+                                let repl_id = eg.add(replacement.clone());
+                                return Some((repl_id, replacement));
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+        },
+
+        // ------------------------------------------------------------
+        // Rule 3: Transform elision (identity transform).
+        //
+        // `StateTransform(x, L, L) → x` — when `src_layout == dst_layout`,
+        // the transform is a no-op (the state's bitvector representation
+        // is unchanged). The rule merges the transform's e-class with
+        // the input's e-class.
+        //
+        // Soundness: a same-layout transform is, by definition of the
+        // PMT transform semantics, the identity function on the state
+        // buffer. The output state IS the input state (no copy, no
+        // field reshuffle).
+        //
+        // `verified: true` — encodable as the 1-variable bitvector
+        // identity `x == x`. See `verify_all_rules()` in `bv_verify.rs`.
+        // ------------------------------------------------------------
+        RewriteRule {
+            name: "state_transform_elision",
+            verified: true,
+            apply: |node, eg| match node {
+                ENode::StateTransform { input, src_layout, dst_layout } => {
+                    if src_layout == dst_layout {
+                        let input_canon = eg.find(*input);
+                        let replacement = ENode::VReg(input_canon);
+                        let repl_id = eg.add(replacement.clone());
+                        return Some((repl_id, replacement));
+                    }
+                    None
+                }
+                _ => None,
+            },
+        },
+
+        // ------------------------------------------------------------
+        // Rule 4: State merge (DEFERRED — stub).
+        //
+        // Two `StateInit`s with compatible layouts whose lifetimes don't
+        // overlap → merge into one `StateInit` (reuse the buffer).
+        //
+        // This rule is **not implemented** — it requires lifetime
+        // analysis (the e-graph would need to know that state A is dead
+        // before state B is born, which is a whole-program dataflow
+        // property the e-graph cannot express). The stub is registered
+        // here so the rule name appears in the rule set and the
+        // `bv_verify` gate's "unknown rule" path admits it; the
+        // `verified: false` flag and this comment document that the
+        // rule is a no-op placeholder for a future wave.
+        //
+        // When a future wave implements this, it will likely live in a
+        // separate pass (not the e-graph) — e.g., a lifetime-aware
+        // buffer-merging pass that runs after `equality_saturation`.
+        // ------------------------------------------------------------
+        RewriteRule {
+            name: "state_merge_compatible_layouts",
+            verified: false,
+            apply: |_node, _eg| {
+                // Intentional no-op: see doc comment above. The rule
+                // is registered so its name is in the rule set (for
+                // documentation / future bv_verify entries), but it
+                // never fires.
+                None
+            },
+        },
     ]
 }
 
@@ -1307,6 +1667,18 @@ pub fn default_cost(node: &ENode) -> usize {
                 _ => 100,
             }
         }
+        // Wave 5: PMT state-operation costs.
+        //
+        // StateInit is an allocation (heap/stack) — expensive, but cheaper
+        // than a Div. StateRead/StateWrite are memory loads/stores. StateTransform
+        // is a layout conversion (typically a sequence of field copies).
+        // These costs incentivise the e-graph to prefer the *elided* forms
+        // (VReg reference to the input) over the raw state ops when a
+        // rewrite rule makes them equivalent.
+        ENode::StateInit { .. } => 500,
+        ENode::StateRead { .. } => 150,
+        ENode::StateWrite { .. } => 160,
+        ENode::StateTransform { .. } => 300,
     }
 }
 
@@ -1334,6 +1706,25 @@ pub fn target_cost_fn(latency_table: &crate::target_desc::LatencyTable)
                 };
                 let (latency, _, _) = lt.lookup(category);
                 (latency as usize) * 100
+            }
+            // Wave 5: state-op costs via the latency table. StateInit is
+            // an allocation (modeled as "arithmetic" — a stack-pointer
+            // adjust + tagged-pointer materialise). StateRead/StateWrite
+            // are memory accesses (use "arithmetic" as a proxy for the
+            // address-compute latency; the load/store itself is accounted
+            // for by the regalloc cost model). StateTransform is a
+            // sequence of field copies (treat as "arithmetic").
+            ENode::StateInit { .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                (latency as usize) * 500 / 100
+            }
+            ENode::StateRead { .. } | ENode::StateWrite { .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                (latency as usize) * 150 / 100
+            }
+            ENode::StateTransform { .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                (latency as usize) * 300 / 100
             }
         }
     })
@@ -1378,6 +1769,35 @@ pub fn pgo_cost_fn(
                 // Cold operations: accept expensive form (higher cost = less likely extracted)
                 let base = (latency as usize) * 100;
                 base / (1 + op_hotness as usize)
+            }
+            // Wave 5: PMT state-op PGO costs. State ops are biased by
+            // the hotness of their child e-classes — a hot state (one
+            // accessed in a tight loop) gets a lower cost, encouraging
+            // the e-graph to keep the state op rather than eliding it
+            // when the elided form would actually be slower (e.g., a
+            // forwarded store-load pair that defeats the cache).
+            ENode::StateInit { .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                let base = (latency as usize) * 500 / 100;
+                base
+            }
+            ENode::StateRead { state, .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                let base = (latency as usize) * 150 / 100;
+                let hotness = prof.vreg_hotness(*state);
+                base / (1 + hotness as usize)
+            }
+            ENode::StateWrite { state, value, .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                let base = (latency as usize) * 160 / 100;
+                let hotness = prof.vreg_hotness(*state).max(prof.vreg_hotness(*value));
+                base / (1 + hotness as usize)
+            }
+            ENode::StateTransform { input, .. } => {
+                let (latency, _, _) = lt.lookup("arithmetic");
+                let base = (latency as usize) * 300 / 100;
+                let hotness = prof.vreg_hotness(*input);
+                base / (1 + hotness as usize)
             }
         };
         base_cost.max(1) // Never return 0
@@ -2311,5 +2731,280 @@ mod tests {
         assert!(eg.has_provenance(xor_id));
         let best = eg.extract(xor_id, &default_cost);
         assert_eq!(best, ENode::Lit(0), "x^x should extract to Lit(0)");
+    }
+
+    // ============================================================
+    // Wave 5 tests — PMT state-operation ENode variants + rules.
+    // ============================================================
+
+    /// Wave 5: the four new ENode variants can be added to an e-graph
+    /// and retrieved via `find`. Verifies the variants are hashable /
+    /// comparable (required by the EGraph hashcons).
+    #[test]
+    fn test_wave5_state_enodes_roundtrip() {
+        let mut eg = EGraph::new();
+        let init = eg.add(ENode::StateInit { layout_id: 42 });
+        let val = eg.add(ENode::Lit(99));
+        let write = eg.add(ENode::StateWrite {
+            state: init,
+            offset: 0,
+            value: val,
+        });
+        let read = eg.add(ENode::StateRead {
+            state: write,
+            offset: 0,
+            size: 4,
+        });
+        let transform = eg.add(ENode::StateTransform {
+            input: init,
+            src_layout: 42,
+            dst_layout: 42,
+        });
+        // Each distinct ENode gets its own e-class.
+        assert_ne!(eg.find(init), eg.find(write));
+        assert_ne!(eg.find(write), eg.find(read));
+        assert_ne!(eg.find(read), eg.find(transform));
+        // Adding the same ENode twice returns the same e-class (hashcons).
+        assert_eq!(eg.find(init), eg.find(eg.add(ENode::StateInit { layout_id: 42 })));
+    }
+
+    /// Wave 5 [dead-state elimination]: `StateInit(L)` whose e-class is
+    /// referenced by no other e-node → `state_dead_init_elim` fires and
+    /// merges the class with `Lit(0)`. After saturation, extraction
+    /// should pick `Lit(0)` (cost 1) over `StateInit{L}` (cost 500).
+    #[test]
+    fn test_wave5_dead_state_elimination_fires() {
+        let mut eg = EGraph::new();
+        let init_id = eg.add(ENode::StateInit { layout_id: 7 });
+        // No StateRead / StateWrite / StateTransform references init_id.
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        // The rule should have fired (provenance records the step).
+        let saw_dead_elim = eg.get_provenance(init_id)
+            .iter()
+            .any(|s| s.rule_name == "state_dead_init_elim");
+        assert!(
+            saw_dead_elim,
+            "state_dead_init_elim should fire on unreferenced StateInit"
+        );
+        // Extraction should pick Lit(0) (cheaper than StateInit).
+        let best = eg.extract(init_id, &default_cost);
+        assert_eq!(
+            best, ENode::Lit(0),
+            "dead StateInit should extract to Lit(0), got {:?}", best
+        );
+    }
+
+    /// Wave 5 [dead-state elimination, negative]: when a `StateRead`
+    /// consumes the `StateInit`, the dead-state rule must NOT fire
+    /// (the state is live — its value matters).
+    #[test]
+    fn test_wave5_dead_state_elimination_skipped_when_referenced() {
+        let mut eg = EGraph::new();
+        let init_id = eg.add(ENode::StateInit { layout_id: 7 });
+        let _read = eg.add(ENode::StateRead {
+            state: init_id,
+            offset: 0,
+            size: 4,
+        });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        // The rule should NOT have fired on init_id (it's referenced).
+        let saw_dead_elim = eg.get_provenance(init_id)
+            .iter()
+            .any(|s| s.rule_name == "state_dead_init_elim");
+        assert!(
+            !saw_dead_elim,
+            "state_dead_init_elim must NOT fire when StateInit is referenced"
+        );
+    }
+
+    /// Wave 5 [store-load forwarding]: `StateRead(StateWrite(s, off, v),
+    /// off, _) → v`. After saturation, the read's e-class should be
+    /// merged with the value's e-class.
+    #[test]
+    fn test_wave5_store_load_forward_fires() {
+        let mut eg = EGraph::new();
+        let s = eg.add(ENode::StateInit { layout_id: 1 });
+        let v = eg.add(ENode::Lit(42));
+        let sw = eg.add(ENode::StateWrite {
+            state: s,
+            offset: 8,
+            value: v,
+        });
+        let sr = eg.add(ENode::StateRead {
+            state: sw,
+            offset: 8,
+            size: 4,
+        });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        // The rule should have fired.
+        let saw_fwd = eg.get_provenance(sr)
+            .iter()
+            .any(|s| s.rule_name == "state_store_load_forward");
+        assert!(
+            saw_fwd,
+            "state_store_load_forward should fire on StateRead(StateWrite(_, off, v), off, _)"
+        );
+        // The read's e-class should now be equivalent to the value's.
+        assert_eq!(
+            eg.find(sr), eg.find(v),
+            "StateRead should be merged with the forwarded value's e-class"
+        );
+        // Extraction should pick Lit(42) (cheaper than StateRead).
+        let best = eg.extract(sr, &default_cost);
+        assert_eq!(
+            best, ENode::Lit(42),
+            "forwarded StateRead should extract to Lit(42), got {:?}", best
+        );
+    }
+
+    /// Wave 5 [store-load forwarding, no match]: if the offsets don't
+    /// match, the rule must NOT fire (the read returns the *old* value,
+    /// not the written one).
+    #[test]
+    fn test_wave5_store_load_forward_skipped_on_offset_mismatch() {
+        let mut eg = EGraph::new();
+        let s = eg.add(ENode::StateInit { layout_id: 1 });
+        let v = eg.add(ENode::Lit(42));
+        let sw = eg.add(ENode::StateWrite {
+            state: s,
+            offset: 0,  // write at offset 0
+            value: v,
+        });
+        let sr = eg.add(ENode::StateRead {
+            state: sw,
+            offset: 4,  // read at offset 4 (different field)
+            size: 4,
+        });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        let saw_fwd = eg.get_provenance(sr)
+            .iter()
+            .any(|s| s.rule_name == "state_store_load_forward");
+        assert!(
+            !saw_fwd,
+            "state_store_load_forward must NOT fire when offsets differ"
+        );
+        assert_ne!(
+            eg.find(sr), eg.find(v),
+            "StateRead must NOT be merged with the value when offsets differ"
+        );
+    }
+
+    /// Wave 5 [transform elision]: `StateTransform(x, L, L) → x`. After
+    /// saturation, the transform's e-class should be merged with the
+    /// input's e-class.
+    #[test]
+    fn test_wave5_transform_elision_fires() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(100));
+        let t = eg.add(ENode::StateTransform {
+            input: x,
+            src_layout: 5,
+            dst_layout: 5,  // same layout → identity
+        });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        let saw_elide = eg.get_provenance(t)
+            .iter()
+            .any(|s| s.rule_name == "state_transform_elision");
+        assert!(
+            saw_elide,
+            "state_transform_elision should fire on StateTransform(x, L, L)"
+        );
+        assert_eq!(
+            eg.find(t), eg.find(x),
+            "StateTransform(x, L, L) should be merged with x's e-class"
+        );
+    }
+
+    /// Wave 5 [transform elision, no match]: if `src_layout != dst_layout`,
+    /// the transform is a real conversion — the rule must NOT fire.
+    #[test]
+    fn test_wave5_transform_elision_skipped_on_layout_mismatch() {
+        let mut eg = EGraph::new();
+        let x = eg.add(ENode::VReg(100));
+        let t = eg.add(ENode::StateTransform {
+            input: x,
+            src_layout: 5,
+            dst_layout: 6,  // different layout → real conversion
+        });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        let saw_elide = eg.get_provenance(t)
+            .iter()
+            .any(|s| s.rule_name == "state_transform_elision");
+        assert!(
+            !saw_elide,
+            "state_transform_elision must NOT fire when src_layout != dst_layout"
+        );
+        assert_ne!(
+            eg.find(t), eg.find(x),
+            "StateTransform must NOT be merged with input when layouts differ"
+        );
+    }
+
+    /// Wave 5 [state merge stub]: the `state_merge_compatible_layouts`
+    /// rule is registered as a no-op stub. Verify it never fires (no
+    /// provenance recorded under its name) even when two same-layout
+    /// StateInits are present.
+    #[test]
+    fn test_wave5_state_merge_stub_never_fires() {
+        let mut eg = EGraph::new();
+        let _a = eg.add(ENode::StateInit { layout_id: 1 });
+        let _b = eg.add(ENode::StateInit { layout_id: 1 });
+        let rules = standard_rules();
+        eg.saturate(&rules, 10);
+        let mut saw_merge = false;
+        let class_ids: Vec<EClassId> = eg.classes.keys().copied().collect();
+        for cid in class_ids {
+            for step in eg.get_provenance(cid) {
+                if step.rule_name == "state_merge_compatible_layouts" {
+                    saw_merge = true;
+                }
+            }
+        }
+        assert!(
+            !saw_merge,
+            "state_merge_compatible_layouts is a stub and must NOT fire"
+        );
+    }
+
+    /// Wave 5 [bv_verify gate]: the standard rule set now includes the
+    /// four Wave 5 state-op rules. Verify the bv_verify gate still
+    /// accepts the full rule set (the new rule names are either in the
+    /// bv_verify table as sound, or unknown → assumed sound-by-
+    /// construction).
+    #[test]
+    fn test_wave5_standard_rules_pass_bv_verify_gate() {
+        let eg = EGraph::new();
+        let standard = standard_rules();
+        let result = eg.verify_rules_before_saturate(&standard);
+        assert!(
+            result.is_ok(),
+            "Wave 5 standard rule set must pass the bv_verify gate: {:?}",
+            result.err()
+        );
+    }
+
+    /// Wave 5 [is_eclass_referenced helper]: the helper correctly
+    /// identifies referenced vs. unreferenced e-classes.
+    #[test]
+    fn test_wave5_is_eclass_referenced_helper() {
+        let mut eg = EGraph::new();
+        let a = eg.add(ENode::VReg(1));
+        let b = eg.add(ENode::VReg(2));
+        // a is referenced by a BinOp; b is not.
+        let _add = eg.add(ENode::BinOp(BinOpKind::Add, a, a));
+        assert!(
+            eg.is_eclass_referenced(a),
+            "a should be referenced (it's a child of the BinOp)"
+        );
+        assert!(
+            !eg.is_eclass_referenced(b),
+            "b should NOT be referenced (no e-node has it as a child)"
+        );
     }
 }

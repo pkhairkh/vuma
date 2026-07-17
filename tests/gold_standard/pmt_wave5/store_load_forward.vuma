@@ -1,0 +1,30 @@
+// store_load_forward — PMT Wave 5: store-load forwarding
+// Expected exit code: 42
+//
+// Writes 42 to p.x, then immediately reads p.x back. The store-load
+// forwarding rewrite rule (`state_store_load_forward`) targets exactly
+// this pattern: `StateRead(StateWrite(s, off, v), off, _)` → `v`. When
+// the optimizer is wired to feed state ops into the e-graph, the Load
+// should be eliminated (the read returns the just-written value, which
+// is already in a register).
+//
+// Under the *current* optimizer, both the Store and Load are emitted
+// — but the program's observable behaviour is unchanged (exit 42),
+// so this test passes either way. The file serves as a forward-looking
+// test case for the wave that wires state ops into
+// `equality_saturation_with_cost`.
+//
+// VUMA Key Concepts:
+//   - state.field = val lowers to Store at the field's offset
+//   - state.field (read) lowers to Load at the field's offset
+//   - when the Load immediately follows the Store to the same offset,
+//     the e-graph's `state_store_load_forward` rule forwards the
+//     stored value (eliminating the Load)
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 42;
+    return p.x;
+}

@@ -1,0 +1,39 @@
+// large_buffer — PMT Wave 8a: 4 states with large layouts, no corruption
+// Expected exit code: 100
+//
+// Allocates FOUR states with progressively larger layouts (Point=8B,
+// Triple=12B, Quad=16B, Wide=32B). Under Wave 8a, the single buffer is
+// sized to the sum of all state sizes aligned to 16 bytes:
+//   Point:  8B  → aligned 16B  (offset 0)
+//   Triple: 12B → aligned 16B  (offset 16)
+//   Quad:   16B → aligned 16B  (offset 32)
+//   Wide:   32B → aligned 32B  (offset 48)
+// Total buffer size: 80 bytes (one Alloc).
+//
+// Writes a distinctive value to the FIRST field of each state, then
+// reads them all back and sums them: 10 + 20 + 30 + 40 = 100. If any
+// two states' slots were to alias (e.g. due to a bug in the offset
+// assignment or alignment computation), the sum would be wrong.
+//
+// VUMA Key Concepts:
+//   - 4 state-typed allocations in one function (main)
+//   - varying layout sizes (8, 12, 16, 32 bytes)
+//   - 16-byte alignment between slots
+//   - single buffer of 80 bytes holds all 4 states without corruption
+
+layout Point = { x: u32, y: u32 }
+layout Triple = { a: u32, b: u32, c: u32 }
+layout Quad = { a: u32, b: u32, c: u32, d: u32 }
+layout Wide = { a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    let t = state_new(Triple);
+    let q = state_new(Quad);
+    let w = state_new(Wide);
+    p.x = 10;
+    t.a = 20;
+    q.a = 30;
+    w.a = 40;
+    return p.x + t.a + q.a + w.a;
+}
