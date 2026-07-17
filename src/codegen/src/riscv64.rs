@@ -6417,6 +6417,30 @@ impl Backend for RiscV64Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (riscv64 sys_mmap=222).
+            // Args: a0=0(NULL), a1=4096, a2=3(PROT), a3=0x22(MAP), a4=-1(fd), a5=0(off), a7=222.
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());    // a0 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 4096 }.encode());  // a1 = 4096
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 3 }.encode());     // a2 = PROT
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x22 }.encode());  // a3 = MAP
+                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: -1 }.encode());    // a4 = -1
+                code.extend(Instruction::Addi { rd: Gpr::A5, rs1: Gpr::Zero, imm: 0 }.encode());     // a5 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 222 }.encode());   // a7 = sys_mmap
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());    // ret
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (ret).
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

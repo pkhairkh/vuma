@@ -1766,6 +1766,32 @@ impl Backend for AlphaBackend {
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
+
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (alpha sys_mmap=113).
+            // Args: R16=0(NULL), R17=4096, R18=3(PROT), R19=0x22(MAP), R20=-1(fd), R21=0(off).
+            // Syscall nr in R0=113. CALL_PAL 0x83=callsys. RET.
+            {
+                let mut code = Vec::new();
+                code.extend(ss_load_imm(Gpr::R16, 0));       // addr = NULL
+                code.extend(ss_load_imm(Gpr::R17, 4096));    // len = 4096
+                code.extend(ss_load_imm(Gpr::R18, 3));       // prot = PROT_READ|PROT_WRITE
+                code.extend(ss_load_imm(Gpr::R19, 0x22));    // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                code.extend(ss_load_imm(Gpr::R20, -1));      // fd = -1
+                code.extend(ss_load_imm(Gpr::R21, 0));       // offset = 0
+                code.extend(ss_load_imm(Gpr::R0, 113));      // sys_mmap
+                code.extend(Instruction::CallPal { palcode: 0x83 }.encode()); // callsys
+                code.extend(Instruction::Ret.encode());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (RET). Real munmap when marshal_cstr wired.
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Ret.encode());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

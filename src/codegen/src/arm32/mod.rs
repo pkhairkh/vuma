@@ -7495,6 +7495,41 @@ impl Backend for Arm32Backend {
                 stubs.push(("mmap".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (arm32 sys_mmap2=192).
+            // Args: R0=0(NULL), R1=4096, R2=3(PROT), R3=0x22(MAP), R4=-1(fd), R5=0(pgoff).
+            // R4/R5 are callee-saved, so we use the six_arg_stub pattern.
+            {
+                let mut code = Vec::new();
+                // PUSH {R4, R5}
+                code.extend_from_slice(&encode_stm(
+                    Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
+                ));
+                // Set up mmap args: R0=0, R1=4096, R2=3, R3=0x22, R4=-1, R5=0
+                code.extend(load_immediate_arm32(Gpr::R0, 0));
+                code.extend(load_immediate_arm32(Gpr::R1, 4096));
+                code.extend(load_immediate_arm32(Gpr::R2, 3));
+                code.extend(load_immediate_arm32(Gpr::R3, 0x22));
+                code.extend(load_immediate_arm32(Gpr::R4, 0xFFFFFFFF));  // -1
+                code.extend(load_immediate_arm32(Gpr::R5, 0));
+                code.extend(load_immediate_arm32(Gpr::R7, 192));  // sys_mmap2
+                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                // POP {R4, R5} — 7 args (cond, p, u, s, w, rn, register_list)
+                code.extend_from_slice(&encode_ldm(
+                    Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x0030,
+                ));
+                // BX LR
+                code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (BX LR).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 
