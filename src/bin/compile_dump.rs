@@ -2,7 +2,7 @@
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::IRBuilder;
 use vuma_parser::{Parser, AstToScg, ModuleResolver};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, run_ir_pipeline, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
+use vuma::pipeline::{CompileConfig, run_scg_transforms, run_ir_pipeline, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg, build_pmt_layout_specs};
 use std::path::Path;
 use std::process::Command;
 use std::fs;
@@ -76,10 +76,10 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
-    compile_for_backend_with_path(source, kind, None, false)
+    compile_for_backend_with_path(source, kind, None, false, false)
 }
 
-fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool) -> Result<(Vec<u8>, Option<String>), String> {
+fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool, pmt: bool) -> Result<(Vec<u8>, Option<String>), String> {
     // Resolve imports if a file path is provided
     let ast = if let Some(path) = file_path {
         let mut resolver = ModuleResolver::new();
@@ -93,6 +93,20 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         if result.has_errors() { return Err(format!("parse: {} errors", result.errors.len())); }
         result.unwrap()
     };
+
+    // (Wave 7) If --pmt is set, build the PMT layout registry up-front from
+    // the AST's `Item::LayoutDef` items so the IVE's `VerificationLevel::Pmt`
+    // can run the 3 state verifiers (state_read / state_write /
+    // state_transform) with full layout info — skipping the 5 pointer
+    // invariants that `VerificationLevel::Normal` would otherwise run.
+    // Built unconditionally here (cheap — walks layout defs only); attached
+    // to the `VerificationInput` only when `pmt` is true (see below).
+    let pmt_layouts = if pmt {
+        Some(build_pmt_layout_specs(&ast))
+    } else {
+        None
+    };
+
     let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e))? };
 
     // Run InterproceduralAllocFlow pass to connect factory-function
@@ -125,12 +139,30 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // redundant O0 run_scg_transforms call have been removed so there is
     // a single consistent SCG state. Wave 7 double-checks IVE
     // correctness on the optimized SCG.
+    //
+    // Wave 7: When `--pmt` is set, the IVE runs ONLY the 3 state
+    // verifiers (state_read / state_write / state_transform) via
+    // `VerificationLevel::Pmt` — skipping the 5 pointer invariants that
+    // `Normal` runs. Memory safety for PMT programs is a type-checking
+    // property (layouts + state ops), not a verification problem.
+    // The PmtLayoutSpec registry built above is attached to the
+    // VerificationInput so the state verifiers have field offset/size
+    // info. Without `--pmt`, the default `Normal` level is used (5
+    // pointer invariants) and no pmt_layouts are attached.
     let mut ive_status: Option<String> = None;
     let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
     if verify && !ive_skip {
-        let ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let mut ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let (level_label, level) = if pmt {
+            if let Some(layouts) = &pmt_layouts {
+                ive_input = ive_input.with_pmt_layouts(layouts.clone());
+            }
+            ("PMT", vuma_ive::invariant_aggregator::VerificationLevel::Pmt)
+        } else {
+            ("Normal", vuma_ive::invariant_aggregator::VerificationLevel::Normal)
+        };
         let aggregator = vuma_ive::invariant_aggregator::InvariantAggregator::new()
-            .with_level(vuma_ive::invariant_aggregator::VerificationLevel::Normal);
+            .with_level(level);
         let result = aggregator.verify_all(&ive_input);
         let verdict = format!("{:?}", result.overall);
         let summary = format!(
@@ -139,8 +171,8 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
             result.summary.failed,
             result.summary.total_checked
         );
-        ive_status = Some(format!("{} {}", verdict, summary));
-        eprintln!("IVE: {} {}", verdict, summary);
+        ive_status = Some(format!("{} {} {}", level_label, verdict, summary));
+        eprintln!("IVE: {} {} {}", level_label, verdict, summary);
     } else if verify && ive_skip {
         ive_status = Some("Skip ive_skip".to_string());
         eprintln!("IVE: Skip (ive_skip marker)");
@@ -293,18 +325,30 @@ fn main() {
     //   --verify    enables IVE verification (non-fatal).
     //   --pmt-only  rejects pointer syntax (`allocate`, `free`, `*ptr`,
     //               `&x`, `*T`, `&T`) as a hard compile error.  Wave 6b.
+    //   --pmt       (Wave 7) run ONLY the 3 state verifiers (state_read /
+    //               state_write / state_transform) via VerificationLevel::Pmt,
+    //               skipping the 5 pointer invariants that `Normal` runs.
+    //               Memory safety for PMT programs is a type-checking
+    //               property, not a verification problem. Implies the PMT
+    //               layout registry is built from the AST and attached to
+    //               the VerificationInput. Combines with `--verify`.
     let mut verify = false;
     let mut pmt_only = false;
+    let mut pmt = false;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
         else if *a == "--pmt-only" {
             pmt_only = true;
             false
         }
+        else if *a == "--pmt" {
+            pmt = true;
+            false
+        }
         else { true }
     }).cloned().collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--pmt-only]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--pmt-only] [--pmt]");
         std::process::exit(1);
     }
     // Propagate --pmt-only to the parser via the process-global flag.
@@ -321,7 +365,7 @@ fn main() {
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
-    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify) {
+    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify, pmt) {
         Ok(v) => v,
         Err(e) => {
             // Wave 6b: print a clean compile-error message to stderr and

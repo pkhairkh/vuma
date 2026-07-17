@@ -1,0 +1,35 @@
+// pmt_return_field.vuma — PMT Wave 7: return a field from a state param
+// Expected exit code: 42
+//
+// `fn get_y(p: State<Point>) -> u32 { return p.y; }` — the callee reads
+// the `y` field (offset 4) from the state-typed parameter. main
+// allocates a Point, sets p.y=42, calls get_y, returns the result.
+// Verifies that the state buffer pointer is correctly passed as a
+// function argument and the callee's field-read Load uses the correct
+// offset (4 for y).
+//
+// This is the PMT analog of the pointer-based "deref a struct pointer
+// in a function" pattern: instead of `fn get_y(p: *Point) -> u32 {
+// return (*p).y; }`, the parameter is typed `State<Point>` and the
+// field access is `p.y` — no dereference, no pointer arithmetic, no
+// aliasing.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via
+// VerificationLevel::Pmt — skipping the 5 pointer invariants that
+// `Normal` would otherwise run. The state_read verifier checks that
+// field `y` exists in layout `Point` (it does — declared at offset 4).
+//
+// Passes when compiled normally AND when compiled with `--pmt --verify`.
+
+layout Point = { x: u32, y: u32 }
+
+fn get_y(p: State<Point>) -> u32 {
+    return p.y;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    p.y = 42;
+    return get_y(p);
+}

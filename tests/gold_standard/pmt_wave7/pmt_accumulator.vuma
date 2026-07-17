@@ -1,0 +1,31 @@
+// pmt_accumulator.vuma — PMT Wave 7: running sum via State accumulator
+// Expected exit code: 60
+//
+// A running sum held in a `State<Acc>` rather than a local variable.
+// Each "add" is a StateRead (load current sum) + StateWrite (store new
+// sum). Returns the final accumulator value (10 + 20 + 30 = 60).
+//
+// This is the PMT analog of the pointer-based "accumulate via pointer"
+// pattern: instead of `acc = allocate(4); *acc = 0; *acc = *acc + 10;
+// ...`, we use `acc = state_new(Acc); acc.sum = 0; acc.sum = acc.sum +
+// 10; ...`. No pointers, no manual memory management — the buffer is a
+// typed `State<Acc>` and the field access is `acc.sum`.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via
+// VerificationLevel::Pmt — skipping the 5 pointer invariants that
+// `Normal` would otherwise run. Multiple read-modify-write cycles on
+// the same state field exercise the state_read and state_write
+// verifiers.
+//
+// Passes when compiled normally AND when compiled with `--pmt --verify`.
+
+layout Acc = { sum: u32 }
+
+fn main() -> i32 {
+    let acc = state_new(Acc);
+    acc.sum = 0;
+    acc.sum = acc.sum + 10;
+    acc.sum = acc.sum + 20;
+    acc.sum = acc.sum + 30;
+    return acc.sum;
+}
