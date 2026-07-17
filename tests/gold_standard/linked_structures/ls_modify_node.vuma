@@ -11,18 +11,10 @@
 // bodies (the store is silently dropped, see Task 5-b workaround (c))
 // and `*(node + 0)` loads do not reliably observe `*p` stores.
 
-
-
-layout _L1 = { v: u32 }
-fn set_val(p: Address) -> i32 {
-    *p = 99;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let node = state_new(_L1);
-    node.v = 42;
-    set_val(node);
-    v: u64 = node.v;
-    return v;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }
