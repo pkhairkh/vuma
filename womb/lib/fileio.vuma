@@ -6,8 +6,7 @@
 //
 // This module wraps Linux asm-generic syscalls behind high-level VUMA functions
 // using the vuma-native `syscall(nr, args...)` intrinsic. Memory is managed
-// with allocate()/free(); byte-level loads/stores use the *(ptr + offset)
-// primitive.
+// with PMT State<T> buffers; field access uses typed `state.field` syntax.
 //
 // Several legacy syscall NAMES do not exist in the modern asm-generic/unistd.h
 // ABI and are reshaped to their modern *at / 3-arg / 4-arg replacements:
@@ -22,6 +21,20 @@
 //   waitpid(pid, status, opts)           -> wait4(pid, status, opts, rusage=0)        (nr 260)
 // fstat, close, read, write, lseek, getcwd, chdir, pipe, execve, kill, exit
 // exist natively in asm-generic and are passed through with their literal nr.
+//
+// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers in
+// `file_size` / `file_exists` (struct stat, 144 bytes) and `proc_wait`
+// (wait status, 4 bytes) are replaced by typed `State<StatBuf>` and
+// `State<WaitStatus>`. The `mem_load_i64` byte-stitched loader is
+// eliminated — `st_size` is accessed directly as `sb.st_size`. The
+// `sb`/`status` states are passed to syscall(79)/syscall(260) where the
+// codegen lowers `State<T>` to its underlying buffer address. All
+// `allocate`/`free` sites in this file are eliminated.
+
+// 144-byte struct stat with st_size at offset 48 (8 bytes, off_t on x86_64).
+layout StatBuf    = { _pad: [u8; 48], st_size: i64, _tail: [u8; 88] }
+// 4-byte wait status cell filled by wait4.
+layout WaitStatus = { code: i32 }
 
 // ===========================================================================
 // Constants
@@ -53,21 +66,9 @@ const AT_REMOVEDIR: i64 = 512;
 // ===========================================================================
 // Internal helpers
 // ===========================================================================
-
-// Load a little-endian i64 from 8 bytes starting at `ptr`.
-// Used to pull st_size out of struct stat.
-fn mem_load_i64(ptr: Address) -> i64 {
-    let b0: i64 = *(ptr + 0) as i64;
-    let b1: i64 = *(ptr + 1) as i64;
-    let b2: i64 = *(ptr + 2) as i64;
-    let b3: i64 = *(ptr + 3) as i64;
-    let b4: i64 = *(ptr + 4) as i64;
-    let b5: i64 = *(ptr + 5) as i64;
-    let b6: i64 = *(ptr + 6) as i64;
-    let b7: i64 = *(ptr + 7) as i64;
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
+// (Wave 8c: the previous byte-stitched `mem_load_i64(ptr: Address)` helper
+// is eliminated — `StatBuf.st_size` is now accessed directly as a typed
+// `i64` field.)
 
 // ===========================================================================
 // 1. File operations
@@ -160,24 +161,20 @@ fn file_lseek(fd: i64, offset: i64, whence: i64) -> i64 {
 // Return the size of `path` in bytes (via stat), or -1 on error.
 // On x86_64 Linux, struct stat.st_size is at offset 48, 8 bytes, little-endian.
 fn file_size(path: Address) -> i64 {
-    let sb: Address = allocate(STAT_SIZE);
+    let sb = state_new(StatBuf);
     // newfstatat(AT_FDCWD, path, sb, 0)
     let rc: i64 = syscall(79, AT_FDCWD, path, sb, 0);
     if rc < 0 {
-        free(sb);
         return -1;
     }
-    let size: i64 = mem_load_i64(sb + STAT_ST_SIZE_OFF);
-    free(sb);
-    return size;
+    return sb.st_size;
 }
 
 // Return 1 if `path` exists (stat succeeds), 0 otherwise.
 fn file_exists(path: Address) -> u32 {
-    let sb: Address = allocate(STAT_SIZE);
+    let sb = state_new(StatBuf);
     // newfstatat(AT_FDCWD, path, sb, 0)
     let rc: i64 = syscall(79, AT_FDCWD, path, sb, 0);
-    free(sb);
     if rc == 0 {
         return 1;
     }
@@ -247,10 +244,9 @@ fn proc_exec(path: Address, argv: Address, envp: Address) -> i64 {
 // Wait for child `pid` (blocking, no options). Returns the reaped pid,
 // or -1 on error. The child's exit status is discarded internally.
 fn proc_wait(pid: i64) -> i64 {
-    let status: Address = allocate(4);
+    let status = state_new(WaitStatus);
     // waitpid is absent on asm-generic; use wait4(pid, status, opts=0, rusage=0).
     let rc: i64 = syscall(260, pid, status, 0, 0);
-    free(status);
     return rc;
 }
 

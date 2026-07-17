@@ -2,6 +2,15 @@
 // No main() — importable library module.
 // Provides: trig, exp/log, power, rounding, classification, constants
 // Uses VUMA's native f64/f32 arithmetic (compiled to FP instructions on all 10 backends)
+//
+// PMT migration (Wave 8c): the single `allocate(8)` scratch buffer in
+// `ln_f64` (used to receive the `exp_out` integer from `frexp_f64`) is
+// replaced by a `State<ExpBuf>` with a typed `v: i32` field. The
+// `frexp_f64` API takes `State<ExpBuf>` instead of `Address`; callers
+// allocate the state with `state_new(ExpBuf)` and read `exp_buf.v`.
+// No `allocate`/`free`/`*ptr` sites remain in this file.
+
+layout ExpBuf = { v: i32 }
 
 // ===========================================================================
 // Constants
@@ -297,16 +306,16 @@ fn ldexp_f64(x: f64, n: i32) -> f64 {
     return result;
 }
 
-fn frexp_f64(x: f64, exp_out: Address) -> f64 {
+fn frexp_f64(x: f64, exp_out: State<ExpBuf>) -> f64 {
     if x == 0.0 {
-        *(exp_out + 0) = 0;
+        exp_out.v = 0;
         return 0.0;
     }
     e: i32 = 0;
     v: f64 = fabs_f64(x);
     while v >= 1.0 { v = v * 0.5; e = e + 1; }
     while v < 0.5 { v = v * 2.0; e = e - 1; }
-    *(exp_out + 0) = e;
+    exp_out.v = e;
     if x < 0.0 { return 0.0 - v; }
     return v;
 }
@@ -320,10 +329,9 @@ fn ln_f64(x: f64) -> f64 {
     if x == 1.0 { return 0.0; }
 
     // Range reduction: x = 2^k * m, ln(x) = k*ln2 + ln(m)
-    exp_buf = allocate(8);
+    let exp_buf = state_new(ExpBuf);
     m: f64 = frexp_f64(x, exp_buf);
-    k: i32 = *(exp_buf + 0);
-    free(exp_buf);
+    k: i32 = exp_buf.v;
 
     // Adjust so m is in [sqrt(2)/2, sqrt(2)) = [0.707, 1.414)
     if m > FRAC_1_SQRT_2 {

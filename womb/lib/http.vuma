@@ -8,6 +8,17 @@
 //   1. Request parser    http_parse_request(data, len, method, path, version, headers, body)
 //   2. Request builder   http_build_request(method, path, host, headers, body, out)
 //   3. Response parser   http_parse_response(data, len, status, reason, headers, body)
+//
+// PMT migration (Wave 8c): the local `temp = allocate(N)` scratch buffers
+// in `http_u32_to_decimal` / `http_u32_to_hex_minimal` and the `mtmp`
+// scratch buffer in `http_build_request` are replaced by typed
+// `State<HttpTempN>` states with `data: [u8; N]` array fields. The
+// `http_method_name` API takes `State<HttpMtmp16>` instead of `Address`.
+// All `allocate`/`free` sites in this file are eliminated.
+
+layout HttpTemp8  = { data: [u8; 8]  }
+layout HttpTemp12 = { data: [u8; 12] }
+layout HttpMtmp16 = { data: [u8; 16] }
 //   4. Response builder  http_build_response(status, reason, headers, body, out)
 //   5. Chunked transfer  http_decode_chunked(data, len, out)
 //                        http_encode_chunked(data, len, out)
@@ -172,50 +183,49 @@ fn http_str_eq_nc(a: Address, alen: u32, b: Address, blen: u32) -> u32 {
 // Writes minimal decimal ASCII representation (no leading zeros, but at
 // least one digit). Returns number of bytes written.
 fn http_u32_to_decimal(value: u32, out: Address) -> u32 {
-    temp = allocate(12);
+    let temp = state_new(HttpTemp12);
     tp: u32 = 0;
     v: u32 = value;
     zero: u32 = 0;
     if v == 0 { zero = 1; }
     if zero == 1 {
-        *(temp + 0) = 48;  // '0'
+        temp.data[0] = 48;  // '0'
         tp = 1;
     }
     if zero == 0 {
         while v > 0 {
-            *(temp + tp) = 48 + (v % 10);
+            temp.data[tp] = 48 + (v % 10);
             tp = tp + 1;
             v = v / 10;
         }
     }
     i: u32 = 0;
     while i < tp {
-        *(out + i) = *(temp + tp - 1 - i);
+        *(out + i) = temp.data[tp - 1 - i];
         i = i + 1;
     }
-    free(temp);
     return tp;
 }
 
 // Writes minimal lowercase hex ASCII representation (no leading zeros, but
 // at least one digit). Returns number of bytes written.
 fn http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
-    temp = allocate(8);
+    let temp = state_new(HttpTemp8);
     tp: u32 = 0;
     v: u32 = value;
     zero: u32 = 0;
     if v == 0 { zero = 1; }
     if zero == 1 {
-        *(temp + 0) = 48;  // '0'
+        temp.data[0] = 48;  // '0'
         tp = 1;
     }
     if zero == 0 {
         while v > 0 {
             nibble: u32 = v & 15;
             if nibble < 10 {
-                *(temp + tp) = 48 + nibble;
+                temp.data[tp] = 48 + nibble;
             } else {
-                *(temp + tp) = 87 + nibble;  // 'a'-10
+                temp.data[tp] = 87 + nibble;  // 'a'-10
             }
             tp = tp + 1;
             v = v >> 4;
@@ -223,10 +233,9 @@ fn http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
     }
     i: u32 = 0;
     while i < tp {
-        *(out + i) = *(temp + tp - 1 - i);
+        *(out + i) = temp.data[tp - 1 - i];
         i = i + 1;
     }
-    free(temp);
     return tp;
 }
 
@@ -271,18 +280,18 @@ fn http_parse_method(buf: Address, end: u32) -> u32 {
 
 // Method code -> ASCII name. Writes NUL-terminated name to `out`.
 // Returns name length (excluding NUL).
-fn http_method_name(method: u32, out: Address) -> u32 {
+fn http_method_name(method: u32, out: State<HttpMtmp16>) -> u32 {
     n: u32 = 0;
-    if method == HTTP_GET       { *(out + 0) = 71; *(out + 1) = 69; *(out + 2) = 84;                                                                 n = 3; }
-    if method == HTTP_POST      { *(out + 0) = 80; *(out + 1) = 79; *(out + 2) = 83; *(out + 3) = 84;                                                n = 4; }
-    if method == HTTP_PUT       { *(out + 0) = 80; *(out + 1) = 85; *(out + 2) = 84;                                                                 n = 3; }
-    if method == HTTP_DELETE    { *(out + 0) = 68; *(out + 1) = 69; *(out + 2) = 76; *(out + 3) = 69; *(out + 4) = 84; *(out + 5) = 69;              n = 6; }
-    if method == HTTP_HEAD      { *(out + 0) = 72; *(out + 1) = 69; *(out + 2) = 65; *(out + 3) = 68;                                                n = 4; }
-    if method == HTTP_OPTIONS   { *(out + 0) = 79; *(out + 1) = 80; *(out + 2) = 84; *(out + 3) = 73; *(out + 4) = 79; *(out + 5) = 78; *(out + 6) = 83; n = 7; }
-    if method == HTTP_PATCH     { *(out + 0) = 80; *(out + 1) = 65; *(out + 2) = 84; *(out + 3) = 67; *(out + 4) = 72;                              n = 5; }
-    if method == HTTP_CONNECT   { *(out + 0) = 67; *(out + 1) = 79; *(out + 2) = 78; *(out + 3) = 78; *(out + 4) = 69; *(out + 5) = 67; *(out + 6) = 84; n = 7; }
-    if method == HTTP_TRACE     { *(out + 0) = 84; *(out + 1) = 82; *(out + 2) = 65; *(out + 3) = 67; *(out + 4) = 69;                              n = 5; }
-    *(out + n) = 0;
+    if method == HTTP_GET       { out.data[0] = 71; out.data[1] = 69; out.data[2] = 84;                                                                 n = 3; }
+    if method == HTTP_POST      { out.data[0] = 80; out.data[1] = 79; out.data[2] = 83; out.data[3] = 84;                                                n = 4; }
+    if method == HTTP_PUT       { out.data[0] = 80; out.data[1] = 85; out.data[2] = 84;                                                                 n = 3; }
+    if method == HTTP_DELETE    { out.data[0] = 68; out.data[1] = 69; out.data[2] = 76; out.data[3] = 69; out.data[4] = 84; out.data[5] = 69;              n = 6; }
+    if method == HTTP_HEAD      { out.data[0] = 72; out.data[1] = 69; out.data[2] = 65; out.data[3] = 68;                                                n = 4; }
+    if method == HTTP_OPTIONS   { out.data[0] = 79; out.data[1] = 80; out.data[2] = 84; out.data[3] = 73; out.data[4] = 79; out.data[5] = 78; out.data[6] = 83; n = 7; }
+    if method == HTTP_PATCH     { out.data[0] = 80; out.data[1] = 65; out.data[2] = 84; out.data[3] = 67; out.data[4] = 72;                              n = 5; }
+    if method == HTTP_CONNECT   { out.data[0] = 67; out.data[1] = 79; out.data[2] = 78; out.data[3] = 78; out.data[4] = 69; out.data[5] = 67; out.data[6] = 84; n = 7; }
+    if method == HTTP_TRACE     { out.data[0] = 84; out.data[1] = 82; out.data[2] = 65; out.data[3] = 67; out.data[4] = 69;                              n = 5; }
+    out.data[n] = 0;
     return n;
 }
 
@@ -627,12 +636,11 @@ fn http_build_request(method: u32, path: Address, host: Address,
     pos: u32 = 0;
 
     // Method name
-    mtmp = allocate(16);
+    let mtmp = state_new(HttpMtmp16);
     mlen: u32 = http_method_name(method, mtmp);
     i: u32 = 0;
-    while i < mlen { *(out + pos + i) = *(mtmp + i); i = i + 1; }
+    while i < mlen { *(out + pos + i) = mtmp.data[i]; i = i + 1; }
     pos = pos + mlen;
-    free(mtmp);
 
     // " "
     *(out + pos) = 32; pos = pos + 1;

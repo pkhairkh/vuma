@@ -1,6 +1,18 @@
 // womb/lib/stdlib.vuma — Standard Library Utility Functions (POSIX stdlib.h)
 // No main() — importable library module.
 // Provides: atoi, atol, itoa, utoa, abs, min, max, clamp, min_u32, max_u32, etc.
+//
+// PMT migration (Wave 8c): the local `temp = allocate(N)` scratch buffers
+// used by `itoa`/`utoa`/`u64toa` for digit accumulation are replaced by
+// `State<Temp32>` / `State<Temp64>` with a `data: [u8; N]` array field.
+// Access via `*(temp + tp)` becomes `temp.data[tp]`. Address-typed
+// parameters (`s`, `buf`, `endptr`) and their `*(param + i)` access remain
+// (callers pass raw pointers — PMT field-access would require changing
+// the public API, deferred to a future wave). All `allocate`/`free` sites
+// in this file are eliminated.
+
+layout Temp32 = { data: [u8; 32] }
+layout Temp64 = { data: [u8; 64] }
 
 const MASK32: u32 = 4294967295;
 
@@ -71,13 +83,13 @@ fn itoa(val: i32, buf: Address, base: u32) -> Address {
     pos: u32 = 0;
     if val < 0 { v = 0 - val; }
 
-    temp = allocate(32);
+    let temp = state_new(Temp32);
     tp: u32 = 0;
     while v > 0 {
         d: u32 = v % base;
         c: u32 = 48;
         if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
-        *(temp + tp) = c;
+        temp.data[tp] = c;
         tp = tp + 1;
         v = v / base;
     }
@@ -85,11 +97,10 @@ fn itoa(val: i32, buf: Address, base: u32) -> Address {
     if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        *(buf + pos) = temp.data[tp];
         pos = pos + 1;
     }
     *(buf + pos) = 0;
-    free(temp);
     return buf;
 }
 
@@ -100,24 +111,23 @@ fn utoa(val: u32, buf: Address, base: u32) -> Address {
         return buf;
     }
     v: u32 = val;
-    temp = allocate(32);
+    let temp = state_new(Temp32);
     tp: u32 = 0;
     pos: u32 = 0;
     while v > 0 {
         d: u32 = v % base;
         c: u32 = 0;
         if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
-        *(temp + tp) = c;
+        temp.data[tp] = c;
         tp = tp + 1;
         v = v / base;
     }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        *(buf + pos) = temp.data[tp];
         pos = pos + 1;
     }
     *(buf + pos) = 0;
-    free(temp);
     return buf;
 }
 
@@ -128,24 +138,23 @@ fn u64toa(val: u64, buf: Address, base: u32) -> Address {
         return buf;
     }
     v: u64 = val;
-    temp = allocate(64);
+    let temp = state_new(Temp64);
     tp: u32 = 0;
     pos: u32 = 0;
     while v > 0 {
         d: u64 = v % base;
         c: u64 = 0;
         if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
-        *(temp + tp) = c;
+        temp.data[tp] = c;
         tp = tp + 1;
         v = v / base;
     }
     while tp > 0 {
         tp = tp - 1;
-        *(buf + pos) = *(temp + tp);
+        *(buf + pos) = temp.data[tp];
         pos = pos + 1;
     }
     *(buf + pos) = 0;
-    free(temp);
     return buf;
 }
 
