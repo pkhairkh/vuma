@@ -1,0 +1,18 @@
+// sum_fields — PMT Wave 2: sum two state fields
+// Expected exit code: 12
+//
+// Initializes a Point with x=5 y=7, returns x+y (=12). Verifies that
+// multiple state-field reads can be combined in a binary operation.
+//
+// VUMA Key Concepts:
+//   - two state.field reads feeding a BinOp (Add)
+//   - the Load results flow through flatten_expr into a Computation
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    p.y = 7;
+    return p.x + p.y;
+}

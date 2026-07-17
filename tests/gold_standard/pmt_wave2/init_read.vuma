@@ -1,0 +1,19 @@
+// init_read — PMT Wave 2: state_new + field write + field read
+// Expected exit code: 42
+//
+// Initializes a State<Point>, writes 42 to p.x, then reads p.x back.
+// Verifies the full state-operation pipeline: StateInit → Alloc, StateWrite
+// → Store, StateRead → Load.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocates a typed buffer
+//   - state.field = val lowers to Store at the field's offset
+//   - state.field (read) lowers to Load at the field's offset
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 42;
+    return p.x;
+}

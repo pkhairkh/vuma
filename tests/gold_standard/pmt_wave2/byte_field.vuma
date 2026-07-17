@@ -1,0 +1,19 @@
+// byte_field — PMT Wave 2: u8 field round-trip
+// Expected exit code: 255
+//
+// Declares a layout with a u8 field, writes 255, reads it back. Verifies
+// that the Store/Load width inference picks U8 (1 byte) for a u8 field
+// so the full 0xFF value is preserved.
+//
+// VUMA Key Concepts:
+//   - u8-typed layout field (size=1, align=1)
+//   - access_size=1 → IRType::U8 for Store and Load
+//   - 255 is the max u8 value — verifies no truncation
+
+layout Byte = { v: u8 }
+
+fn main() -> i32 {
+    let b = state_new(Byte);
+    b.v = 255;
+    return b.v;
+}

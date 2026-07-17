@@ -1,0 +1,27 @@
+// state_param — PMT Wave 2: state-typed param, read field in callee
+// Expected exit code: 77
+//
+// `fn get_x(p: State<Point>) -> i32 { return p.x; }` — the callee reads
+// a field from the state-typed parameter. main allocates a Point, sets
+// p.x=77, calls get_x, returns the result.
+//
+// Verifies that the state buffer pointer is correctly passed as a
+// function argument and the callee's field-read Load uses the correct
+// offset (0 for x).
+//
+// VUMA Key Concepts:
+//   - State<T> as a function parameter type
+//   - caller writes to the state, callee reads
+//   - the buffer pointer is passed by value (8-byte ABI arg)
+
+layout Point = { x: u32, y: u32 }
+
+fn get_x(p: State<Point>) -> i32 {
+    return p.x;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 77;
+    return get_x(p);
+}
