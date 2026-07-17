@@ -3074,7 +3074,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // All take ≤5 args; x86_64 has 6 reg args → simple_stub.
         // eventfd→eventfd2(290), signalfd→signalfd4(289) = modern flag-accepting variants.
         ("mlock", 149), ("munlock", 150), ("mlockall", 151), ("munlockall", 152),
-        ("mincore", 27), ("madvise", 28), ("msync", 26), ("mremap", 25),
+        ("mincore", 27), ("madvise", 28), ("msync", 26),
         ("getrlimit", 97), ("setrlimit", 160), ("prlimit64", 302),
         ("getrusage", 98), ("times", 100),
         ("getrandom", 318),
@@ -3132,6 +3132,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());                      // syscall
         code.extend(encode_ret());                          // ret
         stubs.push(("mmap".to_string(), code));
+    }
+
+    // mremap(old_addr, old_size, new_size, flags) -> void*  [syscall 25]
+    // Need to move 4th arg from RCX -> R10 before syscall (same as mmap).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 25));   // sys_mremap
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
+        code.extend(encode_syscall());                      // syscall
+        code.extend(encode_ret());                          // ret
+        stubs.push(("mremap".to_string(), code));
     }
 
     // exit(code) -> void  [syscall 60]
