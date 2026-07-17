@@ -1587,11 +1587,18 @@ fn emit_instr(
             args,
             is_extern,
         } => {
-            // Move args into R2-R6 (up to 5 args).
+            // Move args into R2-R6 (up to 5 args in registers).
+            // Args 6+ go on the stack at R15+160, R15+168, etc.
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {
                     code.extend(ss_load_value(arg, vreg_stack_slots, S0));
                     code.extend_from_slice(&encode_lgr(arg_reg, S0));
+                } else {
+                    // Stack arg: store at R15 + (160 + (i - 5) * 8)
+                    let stack_off = (160 + (i - 5) * 8) as i32;
+                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
+                    // STG S0, stack_off(R15) — store 64-bit
+                    code.extend_from_slice(&encode_stg(S0, SP, stack_off));
                 }
             }
             // BRASL R14, func — placeholder disp=0; record a relocation.
@@ -2348,7 +2355,7 @@ impl Backend for S390XBackend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                ("mmap", 90),
+                // mmap is a custom stub (6 args, s390x has 5 C ABI regs)
                 ("munmap", 91),
                 ("exit", 1),
                 ("alarm", 27),
@@ -2487,6 +2494,24 @@ impl Backend for S390XBackend {
                 code.extend_from_slice(&encode_lgfi(Gpr::R1, 1));       // sys_exit
                 code.extend_from_slice(&encode_svc(0));
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // mmap custom stub: s390x has 5 C ABI arg regs (R2-R6), but
+            // mmap takes 6 args. The 6th arg (offset) is on the stack at
+            // R15+160. The syscall ABI uses R2-R7. Load arg 6 from stack
+            // into R7 before the syscall.
+            {
+                let mut code = Vec::new();
+                // R7 = *(R15 + 160) — load 6th arg from stack
+                // LG R7, 160(R15) — load 64-bit from R15+160
+                // LG R1, D2(X2, B2): op1=0xE3, op2=0x04
+                // R1=R7(7), X2=0, B2=R15(15), D2=160
+                code.extend_from_slice(&[0xE3, 0x70, 0xF0, 0x00, 0xA0, 0x04]); // LG R7, 160(R15)
+                // R1 = 90 (sys_mmap)
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
+                code.extend_from_slice(&encode_svc(0));
+                code.extend_from_slice(&encode_br(LR)); // BR R14
+                stubs.push(("mmap".to_string(), code));
             }
 
             stubs

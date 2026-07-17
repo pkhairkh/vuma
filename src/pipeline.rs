@@ -8970,19 +8970,41 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             // arena.base (offset 0) is already 0 (mmap zeroes the region).
-            // Store arena.offset = 24 at [arena_ptr+8] via StructAccessNode
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Store {
-                ptr: ScgExpr::Var(arena_ptr.clone()),
-                field_offset: 8,
-                value: ScgExpr::Int(24),
-                field_ty: ScgType::U64,
+            // Store arena.offset = 24 at [arena_ptr+8] via ComputationNode::Add
+            // + AccessNode::Store (the SAME path as PMT state.field writes —
+            // proven to work on ALL 19 backends. StructAccessNode::Store
+            // crashes on mips64 because the mips64 Store instruction selector
+            // doesn't handle IR Store with non-zero offset correctly.)
+            let off_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(arena_ptr.clone()),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
             }));
-            // Store arena.capacity at [arena_ptr+16] via StructAccessNode
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Store {
-                ptr: ScgExpr::Var(arena_ptr.clone()),
-                field_offset: 16,
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(off_addr),
+                offset: None,
+                value: ScgExpr::Int(24),
+                ty: Some(vuma_codegen::ir::IRType::U64),
+            }));
+            // Store arena.capacity at [arena_ptr+16]
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(arena_ptr.clone()),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
                 value: cap_expr,
-                field_ty: ScgType::U64,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             ScgExpr::Var(arena_ptr)
         }
@@ -8993,13 +9015,23 @@ pub fn flatten_expr(
         //   bump the offset, and return ptr as the new State<Layout>.
         Expr::ArenaAlloc { arena, layout_name, .. } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
-            // Load arena.offset at [arena_ptr+8] via StructAccessNode
+            // Load arena.offset at [arena_ptr+8] via ComputationNode::Add
+            // + AccessNode::Load (the SAME path as PMT state.field reads).
+            let off_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }));
             let offset_val = ctx.alloc_temp();
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Load {
+            stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: offset_val.clone(),
-                ptr: arena_ptr.clone(),
-                field_offset: 8,
-                field_ty: ScgType::U64,
+                ptr: ScgExpr::Var(off_addr),
+                offset: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Get layout_size from the layout registry
             let layout_size = ctx.layouts.get(layout_name)
@@ -9026,31 +9058,48 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             // Store new_offset back to arena.offset at [arena_ptr+8]
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Store {
-                ptr: arena_ptr,
-                field_offset: 8,
+            let off_addr2 = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: off_addr2.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr,
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(off_addr2),
+                offset: None,
                 value: ScgExpr::Var(new_offset),
-                field_ty: ScgType::U64,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             ScgExpr::Var(state_ptr)
         }
 
         // arena_grow(arena, min_capacity) → State<Arena>:
         //   Load arena.capacity, call mremap, store new capacity.
-        //   arena_ptr is the old mmap'd base. mremap may return a NEW base
-        //   (MREMAP_MAYMOVE). If it moves, we must use the new base for
-        //   all subsequent arena operations. The arena_ptr variable is
-        //   updated in-place (the caller's let rebinds it).
+        //   mremap may return a NEW base (MREMAP_MAYMOVE). Return the
+        //   new_base as the updated arena pointer.
         Expr::ArenaGrow { arena, min_capacity, .. } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
             let min_cap_expr = flatten_expr(min_capacity, stmts, ctx);
-            // Load arena.capacity at [arena_ptr+16] via StructAccessNode
+            // Load arena.capacity at [arena_ptr+16] via ComputationNode::Add
+            // + AccessNode::Load
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
             let cap_val = ctx.alloc_temp();
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Load {
+            stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: cap_val.clone(),
-                ptr: arena_ptr.clone(),
-                field_offset: 16,
-                field_ty: ScgType::U64,
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Call mremap(arena_ptr, capacity, min_capacity, MREMAP_MAYMOVE=1)
             let new_base = ctx.alloc_temp();
@@ -9058,7 +9107,7 @@ pub fn flatten_expr(
                 dst: Some(new_base.clone()),
                 func: "mremap".to_string(),
                 args: vec![
-                    arena_ptr.clone(),
+                    arena_ptr,
                     ScgExpr::Var(cap_val),
                     min_cap_expr.clone(),
                     ScgExpr::Int(1),
@@ -9066,22 +9115,22 @@ pub fn flatten_expr(
                 is_extern: true,
                 reassigns: None,
             }));
-            // Store the new base at [arena_ptr+0] via StructAccessNode.
-            // This is needed because mremap with MREMAP_MAYMOVE may return
-            // a different address. arena_alloc uses arena_ptr directly as
-            // the base, so we need arena_ptr to point to the valid region.
-            // BUT: if mremap moved the region, arena_ptr is now STALE.
-            // The correct approach: return the new_base as the updated
-            // arena_ptr. The caller's `let arena = arena_grow(arena, ...)`
-            // rebinds arena to the new_base.
-            // Store min_capacity at [new_base+16] via StructAccessNode
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Store {
-                ptr: ScgExpr::Var(new_base.clone()),
-                field_offset: 16,
-                value: min_cap_expr,
-                field_ty: ScgType::U64,
+            // Store min_capacity at [new_base+16]
+            let cap_addr2 = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr2.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(new_base.clone()),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
             }));
-            // Return the new_base (the caller rebinds arena to this)
+            stmts.push(ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var(cap_addr2),
+                offset: None,
+                value: min_cap_expr,
+                ty: Some(vuma_codegen::ir::IRType::U64),
+            }));
             ScgExpr::Var(new_base)
         }
 
@@ -9089,13 +9138,23 @@ pub fn flatten_expr(
         //   Load arena.capacity, call munmap(arena_ptr, capacity).
         Expr::ArenaFree { arena, .. } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
-            // Load arena.capacity at [arena_ptr+16] via StructAccessNode
+            // Load arena.capacity at [arena_ptr+16] via ComputationNode::Add
+            // + AccessNode::Load
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
             let cap_val = ctx.alloc_temp();
-            stmts.push(ScgStatement::StructAccess(StructAccessNode::Load {
+            stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: cap_val.clone(),
-                ptr: arena_ptr.clone(),
-                field_offset: 16,
-                field_ty: ScgType::U64,
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Call munmap(arena_ptr, capacity)
             stmts.push(ScgStatement::Call(CallNode {
