@@ -11,6 +11,8 @@
 // bodies (the store is silently dropped, see Task 5-b workaround (c))
 // and `*(node + 0)` loads do not reliably observe `*p` stores.
 
+
+
 layout _L1 = { v: u32 }
 fn set_val(p: Address) -> i32 {
     *p = 99;

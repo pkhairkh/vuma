@@ -40,14 +40,12 @@
 // pattern does not work because VUMA lowers `allocate(<literal>)` to a
 // stack allocation that is freed on function return.
 
-// ===========================================================================
-// Demo 1: Basic atomic load and store
-// ===========================================================================
-// atomic_load reads a value with Acquire semantics, ensuring all prior
-// writes (Release stores) by another thread are visible.
-// atomic_store writes a value with Release semantics, ensuring all
-// prior writes by this thread are visible before the store becomes
-// visible to other threads.
+layout _L1 = { v: u64 }
+layout _L2 = { v: u64 }
+layout _L3 = { v: u64 }
+layout _L4 = { v: u64 }
+
+
 fn demo_load_store(cell: Address) -> u64 {
     cell.v = 100;
     val = cell.v;

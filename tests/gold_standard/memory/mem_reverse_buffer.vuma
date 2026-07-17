@@ -20,10 +20,10 @@ fn main() -> i32 {
     i: u32 = 0;
     while i < 4 {
         j: u32 = 8 - 1 - i;
-        vi: u32 = *(buf + i);
-        vj: u32 = *(buf + j);
-        *(buf + i) = vj;
-        *(buf + j) = vi;
+        vi: u32 = buf.data[i];
+        vj: u32 = buf.data[j];
+    buf.data[i] = vj;
+    buf.data[j] = vi;
         i = i + 1;
     }
     // Verify: position 0 should be 8, position 7 should be 1

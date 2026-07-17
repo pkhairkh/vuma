@@ -14,7 +14,7 @@ struct Point {
 
 layout _L1 = { a: u32, b: u32 }
 fn load_val(p: Address) -> u64 {
-    v: u64 = *p;
+    v: u64 = p.v;
     return v;
 }
 

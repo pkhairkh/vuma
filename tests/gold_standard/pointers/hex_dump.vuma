@@ -18,10 +18,8 @@
 //   - allocate/free for both input and output buffers
 //   - IVE verifies all accesses stay within allocation bounds
 
-// ===========================================================================
-// Convert a 4-bit nybble (0–15) to its ASCII hex character
-// ===========================================================================
-// 0-9 → '0'-'9' (48-57), 10-15 → 'A'-'F' (65-70)
+
+
 
 layout _L1 = { v: u32 }
 layout _L2 = { a: u32, b: u32 }
@@ -40,8 +38,8 @@ fn nybble_to_hex(n: u64) -> u64 {
 fn byte_to_hex(dst: Address, byte: u64) {
     hi: u64 = nybble_to_hex((byte >> 4) & 15);
     lo: u64 = nybble_to_hex(byte & 15);
-    *dst = hi;
-    *(dst + 1) = lo;
+    dst.v = hi;
+    dst.data[1] = lo;
 }
 
 // ===========================================================================
@@ -54,7 +52,7 @@ fn hex_dump(input: Address, output: Address, len: u64) -> u64 {
     checksum: u64 = 0;
     i: u64 = 0;
     while i < len {
-        byte: u64 = *(input + i);
+        byte: u64 = input.data[i];
         byte_to_hex(output + i * 2, byte);
         // Accumulate XOR checksum of the two hex chars written
         checksum = checksum ^ *(output + i * 2);

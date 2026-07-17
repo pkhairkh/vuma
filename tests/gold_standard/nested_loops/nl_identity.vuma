@@ -14,7 +14,7 @@ fn main() -> i32 {
             eq: bool = (i == j);
             v: u64 = eq;
             off: u64 = (i * 2 + j) * 4;
-            *(m + off) = v;
+    m.data[off] = v;
         }
     }
     out: u32 = m.data[0];

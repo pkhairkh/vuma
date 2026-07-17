@@ -13,11 +13,8 @@
 //   - Pure computation returning meaningful checksum
 // Expected exit code: 20
 
-// ===========================================================================
-// Base64 alphabet lookup (6-bit index → ASCII character)
-// ===========================================================================
-// 0-25: A-Z (65-90), 26-51: a-z (97-122), 52-61: 0-9 (48-57),
-// 62: + (43), 63: / (47)
+
+
 
 layout _L1 = { a: u32, b: u32 }
 layout _L2 = { data: [u8; 20] }
@@ -52,10 +49,10 @@ fn encode_triple(dst: Address, b0: u64, b1: u64, b2: u64) {
     g3: u64 = b2 & 63;
 
     // Map to Base64 alphabet
-    *(dst + 0) = b64_char(g0);
-    *(dst + 1) = b64_char(g1);
-    *(dst + 2) = b64_char(g2);
-    *(dst + 3) = b64_char(g3);
+    dst.data[0] = b64_char(g0);
+    dst.data[1] = b64_char(g1);
+    dst.data[2] = b64_char(g2);
+    dst.data[3] = b64_char(g3);
 }
 
 // ===========================================================================
@@ -68,18 +65,18 @@ fn encode_final(dst: Address, b0: u64, b1: u64, remaining: u64) {
 
     if remaining == 1 {
         // 1 remaining byte: 2 Base64 chars + 2 padding
-        *(dst + 0) = b64_char(g0);
-        *(dst + 1) = b64_char(g1);
-        *(dst + 2) = 61;   // '='
-        *(dst + 3) = 61;   // '='
+    dst.data[0] = b64_char(g0);
+    dst.data[1] = b64_char(g1);
+    dst.data[2] = 61;   // '=';
+    dst.data[3] = 61;   // '=';
     } else {
         // 2 remaining bytes: 3 Base64 chars + 1 padding
         g2: u64 = ((b1 & 15) << 2);
         g1 = g1 | ((b1 >> 4) & 15);
-        *(dst + 0) = b64_char(g0);
-        *(dst + 1) = b64_char(g1);
-        *(dst + 2) = b64_char(g2);
-        *(dst + 3) = 61;   // '='
+    dst.data[0] = b64_char(g0);
+    dst.data[1] = b64_char(g1);
+    dst.data[2] = b64_char(g2);
+    dst.data[3] = 61;   // '=';
     }
 }
 
@@ -98,12 +95,12 @@ fn base64_encode(input: Address, in_len: u64, output: Address) -> u64 {
     full_triples: u64 = in_len / 3;
     triple: u64 = 0;
     while triple < full_triples {
-        b0: u64 = *(input + i);
+        b0: u64 = input.data[i];
         b1: u64 = *(input + i + 1);
         b2: u64 = *(input + i + 2);
         encode_triple(output + out_idx, b0, b1, b2);
         // Accumulate checksum
-        checksum = checksum ^ *(output + out_idx);
+        checksum = checksum ^ output.data[out_idx];
         checksum = checksum ^ *(output + out_idx + 1);
         checksum = checksum ^ *(output + out_idx + 2);
         checksum = checksum ^ *(output + out_idx + 3);
@@ -115,13 +112,13 @@ fn base64_encode(input: Address, in_len: u64, output: Address) -> u64 {
     // Process remaining bytes (1 or 2) with padding
     remaining: u64 = in_len % 3;
     if remaining > 0 {
-        b0: u64 = *(input + i);
+        b0: u64 = input.data[i];
         b1: u64 = 0;
         if remaining == 2 {
             b1 = *(input + i + 1);
         }
         encode_final(output + out_idx, b0, b1, remaining);
-        checksum = checksum ^ *(output + out_idx);
+        checksum = checksum ^ output.data[out_idx];
         checksum = checksum ^ *(output + out_idx + 1);
         checksum = checksum ^ *(output + out_idx + 2);
         checksum = checksum ^ *(output + out_idx + 3);

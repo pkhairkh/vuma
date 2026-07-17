@@ -31,9 +31,8 @@
 //
 // Expected: exit code = ASCII value of first hex char of SHA256d("VUMA-SELF-EXEC-TEST")
 
-// ===========================================================================
-// External C function declarations
-// ===========================================================================
+
+
 
 extern "C" {
 layout _L1 = { data: [u8; 32] }
@@ -107,7 +106,7 @@ fn small_sigma1(x: u32) -> u32 {
 // ===========================================================================
 
 fn read_u32_be(buf: Address, offset: u64) -> u32 {
-    b0: u32 = *(buf + offset);
+    b0: u32 = buf.data[offset];
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
     b3: u32 = *(buf + offset + 3);
@@ -115,7 +114,7 @@ fn read_u32_be(buf: Address, offset: u64) -> u32 {
 }
 
 fn write_u32_be(buf: Address, offset: u64, val: u32) {
-    *(buf + offset) = (val >> 24) & 255;
+    buf.data[offset] = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
     *(buf + offset + 3) = val & 255;
@@ -284,24 +283,24 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     // Copy message bytes
     i: u64 = 0;
     for i in 0..msg_len {
-        *(block + i) = *(msg + i);
+    block.data[i] = *(msg + i);
     }
     // Append '1' bit (0x80 byte)
-    *(block + msg_len) = 128;
+    block.data[msg_len] = 128;
     // Zero-fill (except last 8 for length)
     for i in msg_len + 1..56 {
-        *(block + i) = 0;
+    block.data[i] = 0;
     }
     // Append 64-bit big-endian message length in bits
     bit_len: u64 = msg_len * 8;
-    *(block + 56) = (bit_len >> 56) & 255;
-    *(block + 57) = (bit_len >> 48) & 255;
-    *(block + 58) = (bit_len >> 40) & 255;
-    *(block + 59) = (bit_len >> 32) & 255;
-    *(block + 60) = (bit_len >> 24) & 255;
-    *(block + 61) = (bit_len >> 16) & 255;
-    *(block + 62) = (bit_len >> 8) & 255;
-    *(block + 63) = bit_len & 255;
+    block.data[56] = (bit_len >> 56) & 255;
+    block.data[57] = (bit_len >> 48) & 255;
+    block.data[58] = (bit_len >> 40) & 255;
+    block.data[59] = (bit_len >> 32) & 255;
+    block.data[60] = (bit_len >> 24) & 255;
+    block.data[61] = (bit_len >> 16) & 255;
+    block.data[62] = (bit_len >> 8) & 255;
+    block.data[63] = bit_len & 255;
 }
 
 // ===========================================================================
@@ -311,7 +310,7 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
 fn copy32(dst: Address, src: Address) {
     i: u64 = 0;
     for i in 0..32 {
-        *(dst + i) = *(src + i);
+    dst.data[i] = *(src + i);
     }
 }
 
@@ -361,7 +360,7 @@ fn nibble_to_hex(n: u32) -> u32 {
 fn bytes_to_hex(data: Address, len: u64, out: Address) {
     i: u64 = 0;
     for i in 0..len {
-        byte: u32 = *(data + i);
+        byte: u32 = data.data[i];
         hi: u32 = nibble_to_hex((byte >> 4) & 15);
         lo: u32 = nibble_to_hex(byte & 15);
         *(out + i * 2) = hi & 255;
@@ -394,7 +393,7 @@ fn bytes_to_hex(data: Address, len: u64, out: Address) {
 // a kernel-produced value (like pipefd's) which is written in native
 // byte order.
 fn detect_be_from_pipefd(fd_buf: Address) -> bool {
-    b0: u64 = *(fd_buf + 0) as u64;
+    b0: u64 = fd_buf.data[0] as u64;
     be: bool = false;
     if b0 == 0 {
         be = true;
@@ -425,7 +424,7 @@ fn ptr_size(argv: Address) -> u64 {
 
 // Read an unsigned 32-bit value in native byte order.
 fn read_u32_native(buf: Address, offset: u64, be: bool) -> u64 {
-    b0: u64 = *(buf + offset) as u64;
+    b0: u64 = buf.data[offset] as u64;
     b1: u64 = *(buf + offset + 1) as u64;
     b2: u64 = *(buf + offset + 2) as u64;
     b3: u64 = *(buf + offset + 3) as u64;
@@ -441,12 +440,12 @@ fn read_u32_native(buf: Address, offset: u64, be: bool) -> u64 {
 // Write an unsigned 32-bit value in native byte order.
 fn write_u32_native(buf: Address, offset: u64, val: u64, be: bool) {
     if be {
-        *(buf + offset)     = (val >> 24) & 255;
+    buf.data[offset] = (val >> 24) & 255;
         *(buf + offset + 1) = (val >> 16) & 255;
         *(buf + offset + 2) = (val >> 8) & 255;
         *(buf + offset + 3) = val & 255;
     } else {
-        *(buf + offset)     = val & 255;
+    buf.data[offset] = val & 255;
         *(buf + offset + 1) = (val >> 8) & 255;
         *(buf + offset + 2) = (val >> 16) & 255;
         *(buf + offset + 3) = (val >> 24) & 255;

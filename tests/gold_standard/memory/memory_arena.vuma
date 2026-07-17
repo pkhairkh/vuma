@@ -37,10 +37,11 @@
 //       unsupported by the bridge. The arena/scope state is kept in
 //       local u64 variables in main instead of in struct allocations.
 
-// Read 8 little-endian bytes from `buf + offset` and reconstruct a u64.
+
+
 layout _L1 = { data: [u8; 4096] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
-    b0: u64 = *(buf + offset);
+    b0: u64 = buf.data[offset];
     b1: u64 = *(buf + offset + 1);
     b2: u64 = *(buf + offset + 2);
     b3: u64 = *(buf + offset + 3);
@@ -63,22 +64,22 @@ fn align_up(current: u64, align: u64) -> u64 {
 // through a pointer with a literal-size allocation backing it work
 // reliably when called from main.
 fn write_point(slot: Address, x: u64, y: u64) {
-    *(slot + 0) = x & 255;
-    *(slot + 1) = (x >> 8)  & 255;
-    *(slot + 2) = (x >> 16) & 255;
-    *(slot + 3) = (x >> 24) & 255;
-    *(slot + 4) = (x >> 32) & 255;
-    *(slot + 5) = (x >> 40) & 255;
-    *(slot + 6) = (x >> 48) & 255;
-    *(slot + 7) = (x >> 56) & 255;
-    *(slot + 8)  = y & 255;
-    *(slot + 9)  = (y >> 8)  & 255;
-    *(slot + 10) = (y >> 16) & 255;
-    *(slot + 11) = (y >> 24) & 255;
-    *(slot + 12) = (y >> 32) & 255;
-    *(slot + 13) = (y >> 40) & 255;
-    *(slot + 14) = (y >> 48) & 255;
-    *(slot + 15) = (y >> 56) & 255;
+    slot.data[0] = x & 255;
+    slot.data[1] = (x >> 8)  & 255;
+    slot.data[2] = (x >> 16) & 255;
+    slot.data[3] = (x >> 24) & 255;
+    slot.data[4] = (x >> 32) & 255;
+    slot.data[5] = (x >> 40) & 255;
+    slot.data[6] = (x >> 48) & 255;
+    slot.data[7] = (x >> 56) & 255;
+    slot.data[8] = y & 255;
+    slot.data[9] = (y >> 8)  & 255;
+    slot.data[10] = (y >> 16) & 255;
+    slot.data[11] = (y >> 24) & 255;
+    slot.data[12] = (y >> 32) & 255;
+    slot.data[13] = (y >> 40) & 255;
+    slot.data[14] = (y >> 48) & 255;
+    slot.data[15] = (y >> 56) & 255;
 }
 
 fn main() -> i32 {

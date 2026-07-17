@@ -35,8 +35,8 @@ fn main() -> i32 {
 
     // Walk the chain: s3 -> s2 -> s1 -> val=3
     off1: u64 = block.data[16];      // s3.next = 8 (address of s2)
-    off2: u64 = *(block + off1);    // s2.next = 0 (address of s1)
-    val: u64 = *(block + off2);     // s1.val = 3
+    off2: u64 = block.data[off1];    // s2.next = 0 (address of s1)
+    val: u64 = block.data[off2];     // s1.val = 3
 
     return val;
 }

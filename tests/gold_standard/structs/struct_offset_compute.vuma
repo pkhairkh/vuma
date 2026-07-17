@@ -16,7 +16,7 @@ layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
     let p = state_new(_L1);
     off: u64 = 0;
-    *(p + off) = 42;
-    val: u64 = *(p + off);
+    p.data[off] = 42;
+    val: u64 = p.data[off];
     return val;
 }

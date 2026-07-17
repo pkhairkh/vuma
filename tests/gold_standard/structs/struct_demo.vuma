@@ -42,8 +42,8 @@ struct Rect {
 
 layout _L1 = { a: u32, b: u32 }
 fn rect_area(r: Address) -> u32 {
-    w: u32 = *(r + 8);
-    h: u32 = *(r + 12);
+    w: u32 = r.data[8];
+    h: u32 = r.data[12];
     return (w * h) & 4294967295;
 }
 

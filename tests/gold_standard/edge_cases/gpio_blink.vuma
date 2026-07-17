@@ -11,24 +11,24 @@ layout _L1 = { data: [u8; 256] }
 fn gpio_set_output(gpio: Address, pin: u32) {
     // GPFSEL0 register at offset 0x00
     fsel: Address = gpio + 0;
-    val: u32 = *fsel;
+    val: u32 = fsel.v;
     // Clear 3 bits for this pin, set to output (001)
     mask: u32 = 7 << (pin * 3);
     val = val & (4294967295 ^ mask);
     val = val | (1 << (pin * 3));
-    *fsel = val;
+    fsel.v = val;
 }
 
 fn gpio_set(gpio: Address, pin: u32) {
     // GPSET0 register at offset 0x1c
     set_reg: Address = gpio + 28;
-    *set_reg = 1 << pin;
+    set_reg.v = 1 << pin;
 }
 
 fn gpio_clear(gpio: Address, pin: u32) {
     // GPCLR0 register at offset 0x28
     clr_reg: Address = gpio + 40;
-    *clr_reg = 1 << pin;
+    clr_reg.v = 1 << pin;
 }
 
 fn main() -> i32 {

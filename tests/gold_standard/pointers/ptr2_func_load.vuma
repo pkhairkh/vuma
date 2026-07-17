@@ -9,7 +9,7 @@
 
 layout _L1 = { v: u32 }
 fn load_val(p: Address) -> i32 {
-    v: i32 = *p;
+    v: i32 = p.v;
     return v;
 }
 

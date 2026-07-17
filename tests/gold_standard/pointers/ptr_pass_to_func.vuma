@@ -8,7 +8,7 @@
 
 layout _L1 = { data: [u8; 64] }
 fn helper(buf: Address) -> i32 {
-    *buf = 42;
+    buf.v = 42;
     return 0;
 }
 

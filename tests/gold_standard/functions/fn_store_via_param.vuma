@@ -5,6 +5,8 @@
 // function is visible to the caller after the function returns. The
 // function stores 99 at *p; main then reads *buf and observes 99.
 
+
+
 layout _L1 = { v: u32 }
 fn store_val(p: Address) -> u32 {
     *p = 99;

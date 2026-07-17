@@ -9,14 +9,14 @@ fn main() -> i32 {
     let buf = state_new(_L1);
     i: u32 = 0;
     while i < 16 {
-        *(buf + i) = 0xAB;
+    buf.data[i] = 0xAB;
         i = i + 1;
     }
     // Verify
     ok: u32 = 1;
     j: u32 = 0;
     while j < 16 {
-        v: u32 = *(buf + j);
+        v: u32 = buf.data[j];
         if v != 0xAB { ok = 0; }
         j = j + 1;
     }

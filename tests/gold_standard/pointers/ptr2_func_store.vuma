@@ -7,6 +7,8 @@
 // literal store executed inside a callee through a passed-in Address
 // is visible to the caller.
 
+
+
 layout _L1 = { v: u32 }
 fn store_42(p: Address) -> i32 {
     *p = 42;
