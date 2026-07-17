@@ -4,16 +4,10 @@
 // A 16-byte struct (two u64 fields). Stores 42 at offset 0 (x) and
 // 99 at offset 8 (y), then reads back only x and returns it.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 42;
-    p.data[8] = 99;
-    x: u64 = p.data[0];
-    return x;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

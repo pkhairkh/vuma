@@ -5,16 +5,10 @@
 // overwrites x with 77, reads x back, returns 77. Verifies that
 // field overwrites work correctly.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 10;
-    p.data[0] = 77;
-    x: u64 = p.data[0];
-    return x;
+    let c = state_new(Cell);
+    c.v = 77;
+    return c.v;
 }

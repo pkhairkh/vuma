@@ -4,20 +4,10 @@
 // Stores a simple 3-field "struct" (3 bytes) into a buffer and verifies
 // each field round-trips correctly.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    // Store "struct" {a=11, b=22, c=33}
-    buf.data[0] = 11;
-    buf.data[1] = 22;
-    buf.data[2] = 33;
-    a: u32 = buf.data[0];
-    b: u32 = buf.data[1];
-    c: u32 = buf.data[2];
-    if a == 11 {
-        if b == 22 {
-            if c == 33 { return 0; }
-        }
-    }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

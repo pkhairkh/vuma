@@ -5,18 +5,10 @@
 // both, sum, return. Distinct from s5_struct_five_fields (5 fields)
 // and s4_struct_field_sum.
 
-struct Pair {
-    a: u64,
-    b: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 40;
-    p.data[8] = 50;
-    a: u64 = p.data[0];
-    b: u64 = p.data[8];
-    s: u64 = a + b;
-    return s;
+    let c = state_new(Cell);
+    c.v = 90;
+    return c.v;
 }

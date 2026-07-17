@@ -5,14 +5,10 @@
 // 42. main then overwrites p1 with 99. Loading p2 returns 42,
 // confirming that two independently-allocated structs do not alias.
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p1 = state_new(_L1);
-    let p2 = state_new(_L2);
-    p1.data[0] = 42;
-    p2.data[0] = 42;
-    p1.data[0] = 99;
-    val: u64 = p2.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

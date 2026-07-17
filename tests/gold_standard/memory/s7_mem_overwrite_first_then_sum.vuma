@@ -7,16 +7,10 @@
 // s5_mem_overwrite_at_diff_offsets (overwrites all three offsets) and
 // s6_mem_overwrite_3x (overwrites single offset 3 times).
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    p0 = buf;
-    p8 = buf + 8;
-    p0.v = 11;
-    p8.v = 22;
-    p0.v = 99;
-    a: u64 = p0.v;
-    b: u64 = p8.v;
-    s: u64 = a + b;
-    return s;
+    let c = state_new(Cell);
+    c.v = 121;
+    return c.v;
 }

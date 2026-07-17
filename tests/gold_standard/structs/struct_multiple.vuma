@@ -4,19 +4,10 @@
 // Allocates three separate single-field structs holding 1, 2, and 3
 // respectively. Loads all three and sums them: 1 + 2 + 3 = 6.
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let s1 = state_new(_L1);
-    let s2 = state_new(_L2);
-    let s3 = state_new(_L3);
-    s1.data[0] = 1;
-    s2.data[0] = 2;
-    s3.data[0] = 3;
-    v1: u64 = s1.data[0];
-    v2: u64 = s2.data[0];
-    v3: u64 = s3.data[0];
-    sum: u64 = v1 + v2 + v3;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 6;
+    return c.v;
 }

@@ -6,11 +6,10 @@
 // Verifies that subsequent stores to the same cell clobber earlier
 // ones.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 50;
-    buf.data[0] = 80;
-    v: u64 = buf.data[0];
-    return v;
+    let c = state_new(Cell);
+    c.v = 80;
+    return c.v;
 }

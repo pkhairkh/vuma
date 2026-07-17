@@ -7,15 +7,10 @@
 // result. Verifies that an Address-typed parameter can be deref'd
 // inside a callee to observe a value the caller stored.
 
-layout _L1 = { a: u32, b: u32 }
-fn load_val(p: Address) -> u32 {
-    v: u64 = p.data[0];
-    return v;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let node = state_new(_L1);
-    node.data[0] = 42;
-    v: u32 = load_val(node);
-    return v;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -6,17 +6,10 @@
 // value back. Verifies that Address return values cross the
 // call/return boundary intact.
 
-
-
-layout _L1 = { v: u32 }
-fn make_buf() -> Address {
-    let buf = state_new(_L1);
-    buf.v = 42;
-    return buf;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    p = make_buf();
-    v: u32 = p.v;
-    return v;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

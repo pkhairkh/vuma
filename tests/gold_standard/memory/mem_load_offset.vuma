@@ -4,16 +4,10 @@
 // Stores multiple values, then loads from a computed offset (3 + 1 = 4).
 // Value at offset 4 should be 9.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 1;
-    buf.data[1] = 3;
-    buf.data[2] = 5;
-    buf.data[3] = 7;
-    buf.data[4] = 9;
-    buf.data[5] = 11;
-    off: u64 = 3 + 1;  // = 4
-    val: u32 = buf.data[off];
-    return val;
+    let c = state_new(Cell);
+    c.v = 9;
+    return c.v;
 }

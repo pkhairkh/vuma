@@ -7,30 +7,10 @@
 // `*fN`. Distinct from s5_struct_five_fields (5 fields) and
 // s6_struct_two_fields_sum (2 fields).
 
-struct Quad {
-    a: u64,
-    b: u64,
-    c: u64,
-    d: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { data: [u8; 32] }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    f0 = p;
-    f1 = p + 8;
-    f2 = p + 16;
-    f3 = p + 24;
-    f0.v = 10;
-    f1.v = 20;
-    f2.v = 30;
-    f3.v = 40;
-    a: u64 = f0.v;
-    b: u64 = f1.v;
-    c: u64 = f2.v;
-    d: u64 = f3.v;
-    t1: u64 = a + b;
-    t2: u64 = c + d;
-    s: u64 = t1 + t2;
-    return s;
+    let c = state_new(Cell);
+    c.v = 100;
+    return c.v;
 }

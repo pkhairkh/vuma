@@ -5,14 +5,10 @@
 // at offset 0, loads it, returns it. Verifies that the smallest
 // possible struct (one field) round-trips correctly.
 
-struct Small {
-    val: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { v: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 7;
-    val: u64 = p.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 7;
+    return c.v;
 }

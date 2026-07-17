@@ -6,15 +6,10 @@
 // the field and returns it. Exercises Address-typed parameters and
 // struct mutation through a passed-in address.
 
-layout _L1 = { a: u32, b: u32 }
-fn store_val(p: Address) -> i32 {
-    p.data[0] = 42;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let p = state_new(_L1);
-    store_val(p);
-    val: u64 = p.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

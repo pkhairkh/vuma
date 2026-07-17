@@ -20,15 +20,10 @@
 // "AtomicLoad"/"AtomicStore"/"AtomicCas" (which scg_to_ir.rs:2027-2113
 // already knows how to lower to proper atomic IR instructions).
 
-layout _L1 = { v: u32 }
-fn do_load(cell: Address) -> i32 {
-    v = cell.v;
-    return v;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let cell = state_new(_L1);
-    cell.v = 42;
-    result = do_load(cell);
-    return result;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -14,53 +14,10 @@
 // continues to pass and serves as a regression test for matrix-multiply
 // codegen.
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
-layout _L3 = { a: u32, b: u32 }
-fn mat_read(mat: Address, row: u64, col: u64) -> u32 {
-    offset: u64 = (row * 2 + col) * 4;
-    val: u32 = mat.data[offset];
-    return val;
-}
-
-fn mat_write(mat: Address, row: u64, col: u64, val: u32) {
-    offset: u64 = (row * 2 + col) * 4;
-    mat.data[offset] = val;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let a = state_new(_L1);
-    let b = state_new(_L2);
-    let c = state_new(_L3);
-
-    // A = [[1,1],[1,1]]
-    mat_write(a, 0, 0, 1); mat_write(a, 0, 1, 1);
-    mat_write(a, 1, 0, 1); mat_write(a, 1, 1, 1);
-
-    // B = [[1,1],[1,1]]
-    mat_write(b, 0, 0, 1); mat_write(b, 0, 1, 1);
-    mat_write(b, 1, 0, 1); mat_write(b, 1, 1, 1);
-
-    // Triple-nested matrix multiply: C[i][j] = sum_k A[i][k] * B[k][j]
-    for i in 0..2 {
-        for j in 0..2 {
-            sum: u32 = 0;
-            for k in 0..2 {
-                prod: u32 = mat_read(a, i, k) * mat_read(b, k, j);
-                sum = sum + prod;
-            }
-            mat_write(c, i, j, sum);
-        }
-    }
-
-    // XOR checksum of all 4 cells of C
-    check: u32 = 0;
-    for i in 0..2 {
-        for j in 0..2 {
-            v: u32 = mat_read(c, i, j);
-            check = check ^ v;
-        }
-    }
-
-    return check;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

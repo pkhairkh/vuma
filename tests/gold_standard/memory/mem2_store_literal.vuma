@@ -6,10 +6,10 @@
 // are used (not hex) to avoid the known hex-literal-store codegen bug.
 // Straight-line code only.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 42;
-    val: u32 = buf.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

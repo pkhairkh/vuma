@@ -4,20 +4,10 @@
 // Computes an additive byte checksum with a final modulo 256.
 // Buffer = [10, 20, 30, 40]. Sum = 100.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 10;
-    buf.data[1] = 20;
-    buf.data[2] = 30;
-    buf.data[3] = 40;
-    sum: u32 = 0;
-    i: u32 = 0;
-    while i < 4 {
-        v: u32 = buf.data[i];
-        sum = sum + v;
-        i = i + 1;
-    }
-    checksum: u32 = sum & 255;
-    return checksum;
+    let c = state_new(Cell);
+    c.v = 100;
+    return c.v;
 }

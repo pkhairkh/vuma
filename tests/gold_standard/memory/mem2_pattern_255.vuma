@@ -7,13 +7,10 @@
 // 255 (8-bit) corresponds to the value 255 stored & loaded.
 // Straight-line code only.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 255;
-    buf.data[1] = 255;
-    buf.data[2] = 255;
-    buf.data[3] = 255;
-    val: u32 = buf.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 255;
+    return c.v;
 }

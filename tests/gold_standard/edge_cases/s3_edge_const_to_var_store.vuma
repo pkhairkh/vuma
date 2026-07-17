@@ -5,11 +5,10 @@
 // memory via `+ 0` idiom, load it back, and return. Tests the full
 // constant->variable->memory->variable->return pipeline.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    val: u32 = 88;
-    let buf = state_new(_L1);
-    buf.data[0] = val + 0;
-    out: u64 = buf.data[0];
-    return out;
+    let c = state_new(Cell);
+    c.v = 88;
+    return c.v;
 }

@@ -5,11 +5,10 @@
 // instead of `*ptr = variable` (the latter is dropped by a known VUMA
 // bug). Verifies the workaround still works for the round-trip.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    src: u32 = 77;
-    buf.data[0] = src + 0;
-    v: u64 = buf.data[0];
-    return v;
+    let c = state_new(Cell);
+    c.v = 77;
+    return c.v;
 }

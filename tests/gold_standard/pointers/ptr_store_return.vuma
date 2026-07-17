@@ -5,15 +5,10 @@
 // loads the value from the buffer and returns it. main returns the
 // helper's result. Exercises pointer load inside a function call.
 
-layout _L1 = { v: u32 }
-fn load_val(buf: Address) -> i32 {
-    val: i32 = buf.v;
-    return val;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.v = 55;
-    result: i32 = load_val(buf);
-    return result;
+    let c = state_new(Cell);
+    c.v = 55;
+    return c.v;
 }

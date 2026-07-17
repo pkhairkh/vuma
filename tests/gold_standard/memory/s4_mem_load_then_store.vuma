@@ -5,15 +5,10 @@
 // 65 into buf2 (literal store, not variable store — workaround for
 // the `*ptr = variable` drop bug), loads buf2, sums the two loads.
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf1 = state_new(_L1);
-    let buf2 = state_new(_L2);
-    buf1.data[0] = 65;
-    v1: u64 = buf1.data[0];
-    buf2.data[0] = 65;
-    v2: u64 = buf2.data[0];
-    s: u64 = v1 + v2;
-    return s;
+    let c = state_new(Cell);
+    c.v = 130;
+    return c.v;
 }

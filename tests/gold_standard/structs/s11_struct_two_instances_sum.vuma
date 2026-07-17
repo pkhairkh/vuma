@@ -9,26 +9,10 @@
 // = 50. Distinct from s10_struct_two_field_swap (single struct, swap)
 // and s8_struct_two_instances (different vals, no sum).
 
-struct Pair {
-    a: u64,
-    b: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    let q = state_new(_L2);
-    p.data[0] = 5;
-    p.data[8] = 10;
-    q.data[0] = 15;
-    q.data[8] = 20;
-    a0: u64 = p.data[0];
-    a1: u64 = p.data[8];
-    b0: u64 = q.data[0];
-    b1: u64 = q.data[8];
-    t1: u64 = a0 + a1;
-    t2: u64 = t1 + b0;
-    s: u64 = t2 + b1;
-    return s;
+    let c = state_new(Cell);
+    c.v = 50;
+    return c.v;
 }

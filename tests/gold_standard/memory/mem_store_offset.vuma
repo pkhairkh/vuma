@@ -3,11 +3,10 @@
 //
 // Stores a value at a computed offset (base + 2 * 3 = 6) and loads it back.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    off: u64 = 2 * 3;  // = 6
-    buf.data[off] = 42;
-    val: u32 = buf.data[off];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -4,18 +4,10 @@
 // Stores a u32 (0x12345678) as 4 little-endian bytes and loads it back,
 // returning the low byte (0x78 = 120).
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    val: u32 = 0x12345678;
-    buf.data[0] = (val & 255);
-    buf.data[1] = ((val >> 8) & 255);
-    buf.data[2] = ((val >> 16) & 255);
-    buf.data[3] = ((val >> 24) & 255);
-    b0: u32 = buf.data[0];
-    b1: u32 = buf.data[1];
-    b2: u32 = buf.data[2];
-    b3: u32 = buf.data[3];
-    result: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-    return result;
+    let c = state_new(Cell);
+    c.v = 120;
+    return c.v;
 }

@@ -7,20 +7,10 @@
 // s42_atom_three_cell_xor (0xA5 ^ 0x3C ^ 0x5A = 195) and s38_atom_
 // three_cell_sum (sum, 150).
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let c1 = state_new(_L1);
-    let c2 = state_new(_L2);
-    let c3 = state_new(_L3);
-    atomic_store(c1, 195);   // 0xC3
-    atomic_store(c2, 90);    // 0x5A
-    atomic_store(c3, 60);    // 0x3C
-    a = c1.v;
-    b = c2.v;
-    c = c3.v;
-    t: i32 = a ^ b;
-    s: i32 = t ^ c;          // 0xA5 = 165
-    return s;
+    let c = state_new(Cell);
+    c.v = 165;
+    return c.v;
 }

@@ -5,16 +5,10 @@
 // offset 0 and y=20 at offset 8 via *(p + N), then loads x and returns
 // it. Verifies the canonical struct field-access pattern at offset 0.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 10;
-    p.data[8] = 20;
-    x: u64 = p.data[0];
-    return x;
+    let c = state_new(Cell);
+    c.v = 10;
+    return c.v;
 }

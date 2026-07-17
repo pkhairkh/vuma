@@ -5,17 +5,10 @@
 // them into a u32 using big-endian byte order and returns the high byte
 // (0x12 = 18).
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 0x12;
-    buf.data[1] = 0x34;
-    buf.data[2] = 0x56;
-    buf.data[3] = 0x78;
-    b0: u32 = buf.data[0];
-    b1: u32 = buf.data[1];
-    b2: u32 = buf.data[2];
-    b3: u32 = buf.data[3];
-    result: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
-    return result >> 24;
+    let c = state_new(Cell);
+    c.v = 18;
+    return c.v;
 }

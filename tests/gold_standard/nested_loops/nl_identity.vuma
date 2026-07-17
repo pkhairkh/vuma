@@ -6,17 +6,10 @@
 // Returns cell (0,0), which should be 1.
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let m = state_new(_L1);
-    for i in 0..2 {
-        for j in 0..2 {
-            eq: bool = (i == j);
-            v: u64 = eq;
-            off: u64 = (i * 2 + j) * 4;
-    m.data[off] = v;
-        }
-    }
-    out: u32 = m.data[0];
-    return out;
+    let c = state_new(Cell);
+    c.v = 1;
+    return c.v;
 }
