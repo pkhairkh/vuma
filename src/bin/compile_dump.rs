@@ -289,15 +289,31 @@ fn main() {
         run_diag(backend, examples_dir, qemu);
         return;
     }
-    // Parse flags: --verify enables IVE verification (non-fatal).
+    // Parse flags:
+    //   --verify    enables IVE verification (non-fatal).
+    //   --pmt-only  rejects pointer syntax (`allocate`, `free`, `*ptr`,
+    //               `&x`, `*T`, `&T`) as a hard compile error.  Wave 6b.
     let mut verify = false;
+    let mut pmt_only = false;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
+        else if *a == "--pmt-only" {
+            pmt_only = true;
+            false
+        }
         else { true }
     }).cloned().collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--pmt-only]");
         std::process::exit(1);
+    }
+    // Propagate --pmt-only to the parser via the process-global flag.
+    // `ModuleResolver::resolve_source` constructs `Parser::new` internally
+    // (in src/parser/src/resolver.rs, which this wave is not allowed to
+    // modify), so the only way to reach those inner Parser instances is
+    // through `vuma_parser::parser::set_global_pmt_only`.
+    if pmt_only {
+        vuma_parser::parser::set_global_pmt_only(true);
     }
     let path = &positional[0];
     let out_path = &positional[1];
@@ -305,7 +321,18 @@ fn main() {
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
-    let (binary, _ive_status) = compile_for_backend_with_path(&source, kind, Some(file_path), verify).unwrap();
+    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify) {
+        Ok(v) => v,
+        Err(e) => {
+            // Wave 6b: print a clean compile-error message to stderr and
+            // exit non-zero instead of panicking via `.unwrap()`.  The
+            // iso_test driver treats any non-zero exit as `CE` (compile
+            // error), which is the desired outcome for --pmt-only
+            // violations.
+            eprintln!("compile error: {}", e);
+            std::process::exit(1);
+        }
+    };
     std::fs::write(out_path, &binary).unwrap();
     // Set executable permissions (0o755) so QEMU can run the output.
     #[cfg(unix)]

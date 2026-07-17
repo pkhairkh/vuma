@@ -618,6 +618,12 @@ impl RelDRefined {
                         TemporalKind::Coincides => TemporalRel::Concurrent,
                         TemporalKind::Precedes => TemporalRel::Before,
                         TemporalKind::Succeeds => TemporalRel::After,
+                        // Epoch ordering (Wave 4b) maps lossily onto the
+                        // lifetime temporal relations: a state produced
+                        // before a consumer behaves like `Before`; a state
+                        // produced after behaves like `After`.
+                        TemporalKind::EpochBefore => TemporalRel::Before,
+                        TemporalKind::EpochAfter => TemporalRel::After,
                     };
                     refined.insert(DetailedRelation::Temporal(tr));
                 }

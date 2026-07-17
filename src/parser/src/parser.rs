@@ -27,6 +27,39 @@ use crate::error::{
 };
 use crate::lexer::{Lexer, Token, TokenKind};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ---------------------------------------------------------------------------
+// Global --pmt-only flag (Wave 6b)
+// ---------------------------------------------------------------------------
+//
+// `ModuleResolver` (src/parser/src/resolver.rs) constructs `Parser::new(..)`
+// internally and does not expose a way to inject a `pmt_only` flag.  Because
+// the Wave 6 task constraint forbids modifying `resolver.rs`, we route the
+// `--pmt-only` setting through a process-global `AtomicBool` that
+// `Parser::new` reads at construction time.  The compile_dump CLI calls
+// `set_global_pmt_only(true)` before invoking the resolver so that every
+// `Parser` instance — including the ones created inside the resolver for
+// imported modules — honours the flag.
+static GLOBAL_PMT_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-global `--pmt-only` flag (Wave 6b).
+///
+/// When set to `true`, every `Parser` constructed afterwards (including the
+/// ones `ModuleResolver` creates internally for imported files) will treat
+/// pointer syntax (`allocate`, `free`, `*ptr`, `&x`, `*T`, `&T`) as a **hard
+/// parse error** instead of a non-fatal deprecation warning.
+///
+/// Call this from the CLI driver (`compile_dump`) when the `--pmt-only` flag
+/// is present on the command line.
+pub fn set_global_pmt_only(flag: bool) {
+    GLOBAL_PMT_ONLY.store(flag, Ordering::SeqCst);
+}
+
+/// Read the current process-global `--pmt-only` flag.
+pub fn global_pmt_only() -> bool {
+    GLOBAL_PMT_ONLY.load(Ordering::SeqCst)
+}
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -64,6 +97,25 @@ pub struct Parser<'src> {
     /// the SCG->IR bridge as a call and produces a relocation, which in
     /// turn yields a `SHN_UNDEF` symbol in the emitted ELF.
     extern_fn_names: HashSet<String>,
+    /// **Wave 6a**: non-fatal deprecation warnings accumulated for uses of
+    /// pointer syntax (`allocate`, `free`, `*ptr`, `&x`, `*T`, `&T`).
+    /// Kept separate from `errors` so that `ParseResult::has_errors()`
+    /// remains false and the program still compiles in the default mode.
+    /// Printed to stderr at the end of `parse_program`.
+    warnings: Vec<String>,
+    /// **Wave 6b**: when true, pointer syntax is a **hard parse error**
+    /// instead of a deprecation warning.  Initialised from
+    /// [`GLOBAL_PMT_ONLY`] so that `ModuleResolver`'s internal
+    /// `Parser::new` calls honour the `--pmt-only` CLI flag without
+    /// modifying `resolver.rs`.
+    pmt_only: bool,
+    /// **Wave 6b**: count of `--pmt-only` hard-parse-error violations
+    /// accumulated during `parse_program`.  If non-zero at the end of
+    /// `parse_program`, the result is downgraded to `ParseResult::err`
+    /// (`value: None`) so that `ModuleResolver::parse_source` — which
+    /// only bails on `result.is_err()` — propagates the failure to the
+    /// CLI driver.
+    pmt_only_violations: usize,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -136,6 +188,9 @@ impl<'src> Parser<'src> {
             no_struct_literal: false,
             current_fn_name: None,
             extern_fn_names: HashSet::new(),
+            warnings: Vec::new(),
+            pmt_only: global_pmt_only(),
+            pmt_only_violations: 0,
         }
     }
 
@@ -189,6 +244,22 @@ impl<'src> Parser<'src> {
             err.resolve_location(source, None);
         }
 
+        // Wave 6a: emit accumulated pointer-syntax deprecation warnings to
+        // stderr so they are visible regardless of whether the caller
+        // inspects `parser.warnings()`.  Non-fatal: the program still
+        // compiles.
+        for w in &self.warnings {
+            eprintln!("{}", w);
+        }
+
+        // Wave 6b: if --pmt-only mode produced any hard pointer-syntax
+        // violations, downgrade the result to `err` (value `None`) so
+        // that `ModuleResolver::parse_source` — which only bails on
+        // `result.is_err()` — propagates the failure to the CLI driver.
+        if self.pmt_only_violations > 0 {
+            return ParseResult::err(std::mem::take(&mut self.errors));
+        }
+
         if self.errors.is_empty() {
             ParseResult::ok(program)
         } else {
@@ -199,6 +270,65 @@ impl<'src> Parser<'src> {
     /// Return all accumulated parse errors.
     pub fn errors(&self) -> &[ParseError] {
         &self.errors
+    }
+
+    /// **Wave 6a**: return all accumulated pointer-syntax deprecation
+    /// warnings (non-fatal in default mode).
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// **Wave 6a**: drain and return all accumulated pointer-syntax
+    /// deprecation warnings.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// **Wave 6b**: override the `--pmt-only` setting on this parser
+    /// instance.  Prefer [`set_global_pmt_only`] for the common case of
+    /// honouring the CLI flag across the resolver's internal `Parser`
+    /// constructions.
+    pub fn set_pmt_only(&mut self, flag: bool) {
+        self.pmt_only = flag;
+    }
+
+    /// **Wave 6b**: true if this parser is in `--pmt-only` mode.
+    pub fn is_pmt_only(&self) -> bool {
+        self.pmt_only
+    }
+
+    /// **Wave 6a/6b**: unified check for pointer-syntax sites.
+    ///
+    /// In the default mode (`pmt_only == false`) this records a non-fatal
+    /// deprecation warning in `self.warnings` and returns `Ok(())` — the
+    /// program continues to compile.
+    ///
+    /// In `--pmt-only` mode (`pmt_only == true`) this increments
+    /// `pmt_only_violations` and returns a hard `Err(ParseError)` which
+    /// propagates up through `parse_statement` / `parse_expr` /
+    /// `parse_type` into `parse_program`'s error-recovery loop, where it
+    /// is pushed onto `self.errors`.  At the end of `parse_program` a
+    /// non-zero `pmt_only_violations` count downgrades the
+    /// [`ParseResult`] to `err` (value `None`) so that
+    /// `ModuleResolver::parse_source` propagates the failure.
+    fn check_pointer_syntax(&mut self, kind: &str, span: Span) -> Result<(), ParseError> {
+        if self.pmt_only {
+            self.pmt_only_violations = self.pmt_only_violations.saturating_add(1);
+            Err(ParseError::new(
+                format!(
+                    "pointer syntax '{}' is not allowed in --pmt-only mode; use state_new(Layout) and transforms",
+                    kind
+                ),
+                span,
+                ParseErrorKind::InvalidSyntax,
+            ))
+        } else {
+            self.warnings.push(format!(
+                "warning: pointer syntax '{}' is deprecated; use state_new(Layout) and transforms (see --pmt-only)",
+                kind
+            ));
+            Ok(())
+        }
     }
 
     // -- lookahead -----------------------------------------------------------
@@ -711,6 +841,11 @@ impl<'src> Parser<'src> {
         let name = self.expect_name()?;
 
         self.expect(TokenKind::Assign)?;
+        // Wave 6a/6b: `region X = allocate(N);` uses pointer syntax —
+        // deprecation warning (default) or hard parse error (--pmt-only).
+        // Checked BEFORE consuming the `allocate` token so the error span
+        // points at `allocate`.
+        self.check_pointer_syntax("allocate (region)", self.current.span)?;
         self.expect(TokenKind::Allocate)?;
         self.expect(TokenKind::LParen)?;
 
@@ -1475,6 +1610,10 @@ impl<'src> Parser<'src> {
     /// `free` `(` <expr> `)` `;`
     fn parse_free_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
+        // Wave 6a/6b: `free(ptr)` is pointer syntax — deprecation warning
+        // (default) or hard parse error (--pmt-only).  Checked BEFORE
+        // consuming the `free` token so the error span points at `free`.
+        self.check_pointer_syntax("free", self.current.span)?;
         self.expect(TokenKind::Free)?;
         self.expect(TokenKind::LParen)?;
         let ptr = self.parse_expr()?;
@@ -1489,6 +1628,11 @@ impl<'src> Parser<'src> {
     /// `allocate` `(` <expr> `)` `;` — as a statement.
     fn parse_allocate_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
+        // Wave 6a/6b: `allocate(size)` is pointer syntax — deprecation
+        // warning (default) or hard parse error (--pmt-only).  Checked
+        // BEFORE consuming the `allocate` token so the error span points
+        // at `allocate`.
+        self.check_pointer_syntax("allocate", self.current.span)?;
         self.expect(TokenKind::Allocate)?;
         self.expect(TokenKind::LParen)?;
         let size = self.parse_expr()?;
@@ -2200,6 +2344,11 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::Star => {
+                // Wave 6a/6b: `*ptr` (deref) is pointer syntax —
+                // deprecation warning (default) or hard parse error
+                // (--pmt-only).  Checked BEFORE consuming the `*` token
+                // so the error span points at `*`.
+                self.check_pointer_syntax("*ptr (deref)", self.current.span)?;
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
@@ -2210,6 +2359,11 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Ampersand => {
                 // Borrow / address-of: `&expr`
+                // Wave 6a/6b: `&x` (address-of) is pointer syntax —
+                // deprecation warning (default) or hard parse error
+                // (--pmt-only).  Checked BEFORE consuming the `&` token
+                // so the error span points at `&`.
+                self.check_pointer_syntax("&x (address-of)", self.current.span)?;
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
@@ -2220,6 +2374,11 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Ampersat => {
                 // Address-of: `@expr` (VUMA-specific)
+                // Wave 6a/6b: `@x` (address-of) is pointer syntax —
+                // deprecation warning (default) or hard parse error
+                // (--pmt-only).  Checked BEFORE consuming the `@` token
+                // so the error span points at `@`.
+                self.check_pointer_syntax("@x (address-of)", self.current.span)?;
                 self.advance();
                 let expr = self.parse_unary()?;
                 let end = expr.span().end;
@@ -2715,6 +2874,11 @@ impl<'src> Parser<'src> {
             // ---- VUMA-specific expression forms ----
             TokenKind::Allocate => {
                 // `allocate(expr)` as an expression
+                // Wave 6a/6b: `allocate(N)` is pointer syntax —
+                // deprecation warning (default) or hard parse error
+                // (--pmt-only).  Checked BEFORE consuming the `allocate`
+                // token so the error span points at `allocate`.
+                self.check_pointer_syntax("allocate", self.current.span)?;
                 self.advance(); // consume 'allocate'
                 self.expect(TokenKind::LParen)?;
                 let size = self.parse_expr()?;
@@ -3102,25 +3266,26 @@ impl<'src> Parser<'src> {
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         // Detect Rust-style reference: `&T` or `&mut T`
         // VUMA doesn't use `&` for references — use pointer types `*T` instead.
+        //
+        // Wave 6a/6b: `&T` / `&mut T` are pointer syntax — emit a
+        // deprecation warning (default mode) or return a hard parse error
+        // (--pmt-only mode).  Previously these forms pushed an
+        // `LlmMistake` error to `self.errors` which `compile_dump` (via
+        // `ParseResult::has_errors()`) treated as fatal; the warning-only
+        // path now lets the program compile while still nudging the user
+        // toward the PMT model (`state_new(Layout)` + transforms).
         if self.at(TokenKind::Ampersand) {
             let span = self.current.span;
             // Check for `&mut` pattern
             let next = self.peek_next();
             let is_mut_ref = next.kind == TokenKind::Mut;
+            self.check_pointer_syntax(
+                if is_mut_ref { "&mut T (reference type)" } else { "&T (reference type)" },
+                span,
+            )?;
             self.advance(); // consume '&'
             if is_mut_ref {
                 self.advance(); // consume 'mut'
-                self.errors.push(ParseError::llm_mistake(
-                    "`&mut` references are not used in VUMA — use pointer types `*T` instead",
-                    span,
-                    "use `*T` for mutable pointers",
-                ));
-            } else {
-                self.errors.push(ParseError::llm_mistake(
-                    "`&` references are not used in VUMA — use pointer types `*T` instead",
-                    span,
-                    "use `*T` for pointers",
-                ));
             }
             // Continue parsing the inner type and return a pointer type
             let inner = self.parse_type()?;
@@ -3128,7 +3293,13 @@ impl<'src> Parser<'src> {
         }
 
         // Pointer type: `*T` or `*T @ region`
+        //
+        // Wave 6a/6b: `*T` and `*T @ region` are pointer syntax —
+        // deprecation warning (default mode) or hard parse error
+        // (--pmt-only mode).  Checked BEFORE consuming the `*` token so
+        // the error span points at `*`.
         if self.at(TokenKind::Star) {
+            self.check_pointer_syntax("*T (pointer type)", self.current.span)?;
             self.advance(); // consume '*'
             let inner = self.parse_type()?;
 

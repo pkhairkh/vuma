@@ -1,0 +1,17 @@
+// ptr_type.vuma — Wave 6 negative test: uses `*T` (pointer type annotation)
+// Expected exit code: 0
+//
+// Default mode: compiles with deprecation warnings (*T type annotation
+// plus allocate/deref/free at runtime), runs, exits 0.
+// --pmt-only mode: hard compile error (pointer syntax '*T (pointer
+// type)' rejected at the type annotation).
+//
+// The PMT replacement uses `State<LayoutName>` instead of `*T` as the
+// typed handle for a memory buffer.
+
+fn main() -> i32 {
+    p: *u32 = allocate(8);
+    *p = 0;
+    free(p);
+    return 0;
+}
