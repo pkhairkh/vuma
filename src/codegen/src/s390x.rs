@@ -2300,48 +2300,62 @@ impl Backend for S390XBackend {
         // s390x Linux syscall convention: syscall # in R1, args in R2-R7,
         // return in R2, invoke via SVC 0.
         //
-        // __vuma_alloc(size in R2) -> R2 = brk-allocated region of `size` bytes.
-        //   QEMU user-mode s390x does NOT implement syscall 90 (mmap), so we
-        //   use brk(45) instead — the SAME approach as the hppa backend.
-        //   1. brk(0) → R2 = current_brk
-        //   2. Save current_brk to R8
-        //   3. brk(current_brk + size) → extend heap
-        //   4. R2 = R8 (return old brk = start of new region)
-        // __vuma_free(addr in R2) -> no-op (brk can't shrink; memory freed on exit)
+        // __vuma_alloc(size in R2) -> R2 = mmap(NULL, size, PROT_READ|PROT_WRITE,
+        //                                         MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        //   s390x syscall 90 is old_mmap (struct pointer). The stub builds a
+        //   mmap_arg_struct on the stack and passes R2 = &struct.
+        // __vuma_free(addr in R2) -> munmap(addr, 0) via syscall 91.
         //
         // Linux s390x syscall numbers:
-        //   exit=1, read=3, write=4, open=5, close=6, brk=45, munmap=91,
+        //   exit=1, read=3, write=4, open=5, close=6, brk=45, mmap=90 (old_mmap),
+        //   munmap=91, mremap=163,
         //   rt_sigaction=139, pipe=42, dup2=63, alarm=27, getpid=20,
         //   socket=359, clone=120, fork=2, execve=11, wait4=114,
         //   exit_group=246, ...
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // Save size (R2) to R3 (will be used as brk extension size)
-            // LGR R3, R2 (R3 = size)
-            code.extend_from_slice(&encode_lgr(Gpr::R3, Gpr::R2));
-            // Step 1: brk(0) → R2 = current_brk
-            code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+            // Incoming: R2 = size. Build mmap_arg_struct on stack:
+            //   { addr=0, len=size, prot=3, flags=0x22, fd=-1, offset=0 }
+            // R15 -= 64 (48-byte struct + 16-byte alignment)
+            code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+            code.extend_from_slice(&encode_sgr(SP, Gpr::R0));
+            // [R15+0] = addr = 0
+            code.extend_from_slice(&encode_lghi(Gpr::R1, 0));
+            code.extend_from_slice(&encode_stg(Gpr::R1, SP, 0));
+            // [R15+8] = len = size (R2 — the incoming arg, still intact)
+            code.extend_from_slice(&encode_stg(Gpr::R2, SP, 8));
+            // [R15+16] = prot = 3
+            code.extend_from_slice(&encode_lghi(Gpr::R1, 3));
+            code.extend_from_slice(&encode_stg(Gpr::R1, SP, 16));
+            // [R15+24] = flags = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 0x22));
+            code.extend_from_slice(&encode_stg(Gpr::R1, SP, 24));
+            // [R15+32] = fd = -1
+            code.extend_from_slice(&encode_lghi(Gpr::R1, -1));
+            code.extend_from_slice(&encode_stg(Gpr::R1, SP, 32));
+            // [R15+40] = offset = 0
+            code.extend_from_slice(&encode_lghi(Gpr::R1, 0));
+            code.extend_from_slice(&encode_stg(Gpr::R1, SP, 40));
+            // R2 = R15 (struct pointer)
+            code.extend_from_slice(&encode_lgr(Gpr::R2, SP));
+            // R1 = 90 (sys_old_mmap); SVC 0
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
             code.extend_from_slice(&encode_svc(0));
-            // R8 = R2 (save current_brk — R8 is callee-saved)
-            code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
-            // Step 2: brk(current_brk + size)
-            // R2 = R8 + R3 (current_brk + size)
-            code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
-            code.extend_from_slice(&encode_svc(0));
-            // R2 = R8 (return old brk = start of new region)
-            code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
-            // BR R14 (return)
+            // R15 += 64 (restore stack)
+            code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+            code.extend_from_slice(&encode_agr(SP, Gpr::R0));
+            // BR R14 (return — R2 holds the mmap result)
             code.extend_from_slice(&encode_br(LR));
             code
         };
         let vuma_free_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // No-op: brk'd memory can't be individually freed.
-            // R2 = 0 (success return)
-            code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+            // R3 = 0 (size = 0)
+            code.extend_from_slice(&encode_lghi(Gpr::R3, 0));
+            // R1 = 91 (sys_munmap)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 91));
+            code.extend_from_slice(&encode_svc(0));
             // BR R14
             code.extend_from_slice(&encode_br(LR));
             code
@@ -2474,24 +2488,44 @@ impl Backend for S390XBackend {
             }
 
             // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
-            // ffi_scratch_push_frame: brk-based allocation (QEMU s390x has no mmap).
-            // Allocates 4096 bytes via brk() and returns the start of the new region.
+            // ffi_scratch_push_frame: REAL mmap via old_mmap (s390x syscall 90).
+            // s390x syscall 90 is old_mmap (struct pointer). The stub builds a
+            // mmap_arg_struct on the stack with:
+            //   addr=0, len=4096, prot=3, flags=0x22, fd=-1, offset=0
+            // and passes R2 = &struct.
             {
                 let mut code = Vec::new();
-                // Step 1: brk(0) → R2 = current_brk
-                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                // R15 -= 64 (48-byte struct + 16-byte alignment)
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_sgr(SP, Gpr::R0));
+                // [R15+0] = addr = 0
+                code.extend_from_slice(&encode_lghi(Gpr::R1, 0));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 0));
+                // [R15+8] = len = 4096
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 4096));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 8));
+                // [R15+16] = prot = 3
+                code.extend_from_slice(&encode_lghi(Gpr::R1, 3));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 16));
+                // [R15+24] = flags = 0x22
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 0x22));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 24));
+                // [R15+32] = fd = -1
+                code.extend_from_slice(&encode_lghi(Gpr::R1, -1));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 32));
+                // [R15+40] = offset = 0
+                code.extend_from_slice(&encode_lghi(Gpr::R1, 0));
+                code.extend_from_slice(&encode_stg(Gpr::R1, SP, 40));
+                // R2 = R15 (struct pointer)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, SP));
+                // R1 = 90 (sys_old_mmap); SVC 0
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
                 code.extend_from_slice(&encode_svc(0));
-                // R8 = R2 (save current_brk)
-                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
-                // Step 2: brk(current_brk + 4096)
-                code.extend_from_slice(&encode_lgfi(Gpr::R3, 4096));
-                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
-                code.extend_from_slice(&encode_svc(0));
-                // R2 = R8 (return old brk = start of new region)
-                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
-                code.extend_from_slice(&encode_br(LR));                  // BR R14 (return)
+                // R15 += 64 (restore stack)
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_agr(SP, Gpr::R0));
+                // BR R14 (return — R2 holds the mmap'd address)
+                code.extend_from_slice(&encode_br(LR));
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
             }
 
@@ -2511,87 +2545,80 @@ impl Backend for S390XBackend {
                 stubs.push(("__arena_overflow".to_string(), code));
             }
 
-            // mmap custom stub: s390x uses brk() for memory allocation.
+            // mmap custom stub: s390x syscall 90 is old_mmap (struct pointer).
             //
-            // QEMU user-mode s390x does NOT implement syscall 90 (mmap) —
-            // it returns EFAULT for all variants (direct 6-arg, old_mmap
-            // struct-pointer). The only working memory-allocation syscall
-            // on QEMU s390x is brk(45). This is the SAME approach already
-            // used by the hppa backend's __vuma_alloc stub.
+            // QEMU user-mode s390x implements syscall 90 as `old_mmap`, which
+            // takes a SINGLE argument: R2 = pointer to a `mmap_arg_struct`:
+            //   struct mmap_arg_struct { u64 addr, len, prot, flags, fd, offset; }
+            //   = 48 bytes (6 × 8-byte unsigned long on 64-bit s390x).
             //
-            // The stub receives the mmap args (R2=addr, R3=len, R4=prot,
-            // R5=flags, R6=fd, R7=offset) but ignores them — it allocates
-            // via brk instead:
-            //   1. brk(0) → R2 = current_brk
-            //   2. Save current_brk to R8
-            //   3. brk(current_brk + len) → extend heap by len
-            //   4. R2 = R8 (return old brk = start of new region)
+            // This is NOT the direct 6-arg mmap. Passing R2=0 (NULL) causes
+            // QEMU to dereference R2 as a struct pointer → EFAULT. The fix:
+            // build the struct on the stack and pass R2 = &struct.
             //
-            // R8 is callee-saved on s390x, so it survives the brk syscall.
-            // len (R3) is preserved across the first brk call because brk
-            // only clobbers R1, R2 (and the CC).
+            // The arena passes 6 args via C ABI: R2=addr, R3=len, R4=prot,
+            // R5=flags, R6=fd, arg6=offset at R15+160. The stub:
+            //   1. Load arg6 (offset) from R15+160 into R7 (BEFORE decrementing R15)
+            //   2. R15 -= 64 (allocate 48-byte struct + 16-byte alignment)
+            //   3. Store the 6 args into the struct at R15+0..R15+40
+            //   4. R2 = R15 (struct pointer)
+            //   5. R1 = 90; SVC 0 (old_mmap)
+            //   6. R15 += 64 (restore stack)
+            //   7. BR R14 (return — R2 already holds the mmap result)
             {
                 let mut code = Vec::new();
-                // Step 1: brk(0) → R2 = current_brk
-                // R2 = 0
-                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-                // R1 = 45 (sys_brk)
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                // Step 1: Load arg6 (offset) from R15+160 into R7.
+                // This MUST happen BEFORE we decrement R15, because after
+                // decrementing, the offset changes.
+                code.extend_from_slice(&encode_lg(Gpr::R7, SP, 160));
+                // Step 2: R15 -= 64
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_sgr(SP, Gpr::R0));
+                // Step 3: Store the 6 args into the struct.
+                // [R15+0] = addr (R2)
+                code.extend_from_slice(&encode_stg(Gpr::R2, SP, 0));
+                // [R15+8] = len (R3)
+                code.extend_from_slice(&encode_stg(Gpr::R3, SP, 8));
+                // [R15+16] = prot (R4)
+                code.extend_from_slice(&encode_stg(Gpr::R4, SP, 16));
+                // [R15+24] = flags (R5)
+                code.extend_from_slice(&encode_stg(Gpr::R5, SP, 24));
+                // [R15+32] = fd (R6)
+                code.extend_from_slice(&encode_stg(Gpr::R6, SP, 32));
+                // [R15+40] = offset (R7)
+                code.extend_from_slice(&encode_stg(Gpr::R7, SP, 40));
+                // Step 4: R2 = R15 (struct pointer)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, SP));
+                // Step 5: R1 = 90 (sys_old_mmap); SVC 0
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
                 code.extend_from_slice(&encode_svc(0));
-                // R8 = R2 (save current_brk — R8 is callee-saved)
-                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
-                // Step 2: brk(current_brk + len)
-                // R2 = R8 + R3 (current_brk + len)
-                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
-                code.extend_from_slice(&encode_svc(0));
-                // R2 = R8 (return old brk = start of new region)
-                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
-                // BR R14 (return)
+                // Step 6: R15 += 64 (restore stack)
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_agr(SP, Gpr::R0));
+                // Step 7: BR R14 (return — R2 holds the mmap result)
                 code.extend_from_slice(&encode_br(LR));
                 stubs.push(("mmap".to_string(), code));
             }
 
-            // mremap stub: s390x mremap(163) works under QEMU, but the arena
-            // calls mremap(old_addr, old_size, new_size, flags). Since we use
-            // brk-based allocation (not mmap), mremap on a brk'd region won't
-            // work. Instead, we allocate a NEW brk region of new_size and
-            // return it. The old region is leaked (brk can't shrink reliably).
-            // This is correct for the arena use case (arena_grow just needs
-            // a bigger region; the old data is within the first old_size bytes
-            // of the old brk region, and arena_grow stores the new capacity).
-            // Actually — mremap with MREMAP_MAYMOVE on a brk'd address will
-            // fail because brk'd memory isn't an mmap'd region. So we must
-            // allocate new space via brk and return it.
+            // mremap stub: s390x mremap(163) is the direct 4-arg version.
+            // Args: R2=old_addr, R3=old_size, R4=new_size, R5=flags.
+            // s390x has 5 reg args (R2-R6), so all 4 fit in registers.
+            // This is just a simple_stub(163).
+            // (Kept as an explicit push to override any simple_stub entry.)
             {
                 let mut code = Vec::new();
-                // Args: R2=old_addr(ignored), R3=old_size(ignored),
-                //       R4=new_size, R5=flags(ignored)
-                // Step 1: brk(0) → R2 = current_brk
-                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 163));
                 code.extend_from_slice(&encode_svc(0));
-                // R8 = R2 (save current_brk)
-                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
-                // Step 2: brk(current_brk + new_size)
-                // R2 = R8 + R4 (new_size)
-                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R4));
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
-                code.extend_from_slice(&encode_svc(0));
-                // R2 = R8 (return new region start)
-                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
-                // BR R14 (return)
                 code.extend_from_slice(&encode_br(LR));
                 stubs.push(("mremap".to_string(), code));
             }
 
-            // munmap stub: brk'd memory can't be individually freed.
-            // This is a no-op (BR LR). The memory is reclaimed on process exit.
-            // This matches the hppa backend's __vuma_free behavior.
+            // munmap stub: s390x munmap(91) is the direct 2-arg version.
+            // Args: R2=addr, R3=len. Simple_stub(91).
             {
                 let mut code = Vec::new();
-                // R2 = 0 (success return)
-                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 91));
+                code.extend_from_slice(&encode_svc(0));
                 code.extend_from_slice(&encode_br(LR));
                 stubs.push(("munmap".to_string(), code));
             }
