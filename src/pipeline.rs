@@ -8177,6 +8177,63 @@ fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(Str
     layouts
 }
 
+/// (Wave 7) Build a `PmtLayoutSpec` registry from the AST's `Item::LayoutDef`
+/// items, suitable for attaching to a `VerificationInput` via
+/// `with_pmt_layouts()` so the IVE's `VerificationLevel::Pmt` can run the 3
+/// state verifiers (state_read / state_write / state_transform) without the
+/// 5 pointer invariants.
+///
+/// This is the IVE-public counterpart of the internal `build_layout_registry`:
+/// it walks the same `Item::LayoutDef` AST nodes and computes the same
+/// per-field offset/size using the same `bridge_type_*` helpers, but emits
+/// the IVE's unified `PmtLayoutSpec` shape (`{name, total_size, fields}`).
+/// The conversion is mechanical — `build_layout_registry` is the
+/// codegen-side representation (`(total_size, Vec<(name, IRType, off, size,
+/// type_name)>)`); `build_pmt_layout_specs` is the verification-side
+/// representation.
+pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive::PmtLayoutSpec> {
+    let mut layouts: HashMap<String, vuma_ive::PmtLayoutSpec> = HashMap::new();
+    for item in &program.items {
+        if let Item::LayoutDef(ld) = item {
+            let mut offset: u64 = 0;
+            let mut max_align: u64 = 1;
+            let mut fields: Vec<vuma_ive::PmtFieldSpec> = Vec::new();
+            for (fname, ftype) in &ld.fields {
+                let falign = bridge_type_align(ftype).max(1);
+                let fsize = bridge_type_size(ftype);
+                if falign > 1 && offset % falign != 0 {
+                    offset = (offset + falign - 1) & !(falign - 1);
+                }
+                max_align = max_align.max(falign);
+                let type_name = match ftype {
+                    vuma_parser::ast::Type::BDBase(n) => n.clone(),
+                    other => other.to_string(),
+                };
+                fields.push(vuma_ive::PmtFieldSpec {
+                    name: fname.clone(),
+                    offset,
+                    size: fsize,
+                    type_name,
+                });
+                offset += fsize;
+            }
+            let alignment = max_align.max(1);
+            if offset > 0 && offset % alignment != 0 {
+                offset = (offset + alignment - 1) & !(alignment - 1);
+            }
+            layouts.insert(
+                ld.name.clone(),
+                vuma_ive::PmtLayoutSpec {
+                    name: ld.name.clone(),
+                    total_size: offset,
+                    fields,
+                },
+            );
+        }
+    }
+    layouts
+}
+
 /// PMT (Wave 2): resolve a state-field chain `(layout_name, [field1, field2, ...])`
 /// against the layout registry. Returns `(cumulative_offset, size, ir_type)`
 /// of the leaf field, descending into nested layout-typed fields. Returns

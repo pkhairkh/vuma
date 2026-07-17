@@ -1,0 +1,39 @@
+// pmt_linked.vuma — PMT Wave 7: two linked state nodes
+// Expected exit code: 60
+//
+// A simple linked structure using State (not a full linked list — just
+// 2 linked nodes). Two `State<Node>` instances, where `head`'s
+// `next_val` field stores `tail`'s `val` (the "link" is logical, not a
+// pointer — VUMA State is a typed buffer, not a heap object with an
+// address). PMT programs don't need pointer-based linking: the
+// relationship between nodes is captured in the data, not in addresses.
+//
+// This is the PMT analog of the pointer-based linked-list-node pattern:
+// instead of `Node { val: u32, next: *Node }` with `head->next = tail`
+// (pointer assignment + aliasing), we use `Node { val: u32, next_val:
+// u32 }` with `head.next_val = tail.val` (a field read from one state
+// stored into a field of another). No pointers, no aliasing, no
+// use-after-free — the relationship is data, not references.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via
+// VerificationLevel::Pmt — skipping the 5 pointer invariants that
+// `Normal` would otherwise run.
+//
+// head.val = 10, tail.val = 50
+// head.next_val = tail.val (the "link")
+// Returns head.val + head.next_val (= 10 + 50 = 60).
+//
+// Passes when compiled normally AND when compiled with `--pmt --verify`.
+
+layout Node = { val: u32, next_val: u32 }
+
+fn main() -> i32 {
+    let head = state_new(Node);
+    let tail = state_new(Node);
+    head.val = 10;
+    tail.val = 50;
+    tail.next_val = 0;
+    // "Link" head to tail by storing tail.val into head.next_val
+    head.next_val = tail.val;
+    return head.val + head.next_val;
+}
