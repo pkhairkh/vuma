@@ -1,11 +1,11 @@
-VUMA Test Failures — 2026-07-17 15:17:26 UTC
-Total: 40 failures across 7 tests
+VUMA Test Failures — 2026-07-17 18:23:06 UTC
+Total: 37 failures across 7 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  arena_wave0          arena_alloc_parse.vuma                        exp=   0 [('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
-  arena_wave0          arena_grow_free_parse.vuma                    exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
-  arena_wave0          arena_new_parse.vuma                          exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
-  arena_wave1          arena_basic.vuma                              exp=  42 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
-  arena_wave1          arena_grow.vuma                               exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
-  arena_wave1          arena_multiple.vuma                           exp=   0 [('aarch64_be', 1, 'MM'), ('armeb', -11, 'CR'), ('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('ppc64', 1, 'MM'), ('m68k', -11, 'CR'), ('alpha', -11, 'CR'), ('s390x', -11, 'CR'), ('sparc64', 1, 'MM'), ('hppa', -11, 'CR')]
-  arena_wave2          mixed_static_arena.vuma                       exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
+  arena_wave0          arena_alloc_parse.vuma                        exp=   0 [('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('alpha', -11, 'CR'), ('s390x', -11, 'CR'), ('hppa', -11, 'CR')]
+  arena_wave0          arena_grow_free_parse.vuma                    exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('alpha', -11, 'CR'), ('s390x', -11, 'CR'), ('hppa', -11, 'CR'), ('wasm32', 1, 'MM')]
+  arena_wave0          arena_new_parse.vuma                          exp=   0 [('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('alpha', -11, 'CR'), ('s390x', -11, 'CR'), ('hppa', -11, 'CR')]
+  arena_wave1          arena_basic.vuma                              exp=  42 [('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
+  arena_wave1          arena_grow.vuma                               exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR'), ('wasm32', 1, 'MM')]
+  arena_wave1          arena_multiple.vuma                           exp=   0 [('mips64', -7, 'CR'), ('mips64be', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
+  arena_wave2          mixed_static_arena.vuma                       exp=   0 [('mips64be', -7, 'CR'), ('mips64', -7, 'CR'), ('s390x', -11, 'CR'), ('alpha', -11, 'CR'), ('hppa', -11, 'CR')]
