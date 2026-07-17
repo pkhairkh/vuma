@@ -59,6 +59,7 @@ mod vuma_log_w44 {
         }};
     }
 }
+pub mod borrow_region;
 pub mod cache;
 pub mod cleanup;
 pub mod constraint;
