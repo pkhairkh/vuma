@@ -1,0 +1,74 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/x86_64/bootinfo.vuma
+// Hosted-mode boot info layout for x86_64.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// In bare-metal mode (deferred to Wave K11) this layout will be replaced with
+// the multiboot2 / stivale2 structure passed by the bootloader. For hosted
+// mode (Wave K1a) it carries the argc/argv values that the existing
+// `_start` stub in src/codegen/src/x86_64/mod.rs has pre-loaded into BSS at
+// process entry (see RUNTIME_ARGV_STORAGE_SIZE / RUNTIME_ARGV_STORAGE_PLACEHOLDER
+// and the `__vuma_argc` / `__vuma_argv` runtime stubs in
+// build_runtime_syscall_stubs).
+//
+// The fields are intentionally all `u64` so the layout is a plain 4-word
+// (32-byte) record with no padding. `argv` and `cmdline` are stored as
+// raw addresses (`u64` rather than `Address` because the BootInfo itself is
+// a typed PMT buffer, not an extern boundary; the addresses inside are just
+// 64-bit integers we can hand back to host code via `as Address` casts).
+//
+// `mem_size` is the host's reported usable memory for arenas. Hosted mode
+// starts with a 16 MB ceiling (16 * 1024 * 1024 = 16777216 bytes); a later
+// wave will query /proc/meminfo via mmap probes to refine this.
+
+layout BootInfo = {
+    argc: u64,        // process argc, as captured by the _start stub
+    argv: u64,        // address of the argv[] array (NULL-terminated)
+    mem_size: u64,    // usable memory for arenas (start with 16 MB)
+    cmdline: u64,     // address of cmdline string (argv[0] for now)
+}
+
+// bootinfo_init: read argc/argv from the runtime stubs and populate a
+// fresh BootInfo state. The state is allocated here via `state_new` so
+// the caller receives a populated record without needing to know about
+// the runtime stubs directly. `mem_size` defaults to 16 MB; `cmdline`
+// is set to argv[0] (the first string in argv[]) for now — real cmdline
+// parsing (concatenating argv[0..argc] with spaces) is a later wave.
+fn bootinfo_init() -> State<BootInfo> {
+    let b = state_new(BootInfo);
+    let ac: i64 = __vuma_argc();
+    let av: Address = __vuma_argv();
+    b.argc = ac as u64;
+    b.argv = av as u64;
+    b.mem_size = 16777216u64;
+    // For now, treat argv[0] as the cmdline. argv points to the argv[]
+    // array; argv[0] is the address of the program-name string. We
+    // approximate by storing the array base address itself; a later wave
+    // will dereference argv[0] once the kernel has a safe deref helper.
+    b.cmdline = av as u64;
+    return b;
+}
+
+// ── Trampoline entry declarations ────────────────────────────────────────────
+// bootinfo_init needs the two runtime stubs that the x86_64 backend
+// pre-registers (see build_runtime_syscall_stubs in
+// src/codegen/src/x86_64/mod.rs). They read the 16-byte BSS slot
+// populated by the _start stub at process entry. Declared here so this
+// file is fully self-contained — the canonical declarations live in
+// womb/kernel/arch/x86_64/trampoline.vuma, but VUMA has no `import` yet
+// (Open Work §7), so each kernel module re-declares the externs it uses.
+
+extern "C" {
+    fn __vuma_argc() -> i64;
+    fn __vuma_argv() -> Address;
+}
+
+// ── main entry stub ──────────────────────────────────────────────────────────
+// This file is a pure declaration + helper module (no top-level execution).
+// The compiler requires a `fn main()` entry to compile as a standalone
+// program; the real kmain (K1d) lives in womb/kernel/kernel.vuma and will
+// call bootinfo_init() through the host abstraction layer.
+
+fn main() -> i32 {
+    return 0;
+}
