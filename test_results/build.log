@@ -1,18 +1,4 @@
-   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
-   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
-   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
-warning: unused import: `Condition`
-    --> src/codegen/src/backend.rs:2553:60
-     |
-2553 |         use crate::arm64::{Instruction, Register, Operand, Condition};
-     |                                                            ^^^^^^^^^
-     |
-     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
 warning: variable does not need to be mutable
   --> src/ive/src/arena_bounds.rs:30:9
    |
@@ -23,9 +9,26 @@ warning: variable does not need to be mutable
    |
    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+warning: `vuma-ive` (lib) generated 1 warning (run `cargo fix --lib -p vuma-ive` to apply 1 suggestion)
+warning: unused import: `Condition`
+    --> src/codegen/src/backend.rs:2553:60
+     |
+2553 |         use crate::arm64::{Instruction, Register, Operand, Condition};
+     |                                                            ^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-warning: `vuma-ive` (lib) generated 1 warning (run `cargo fix --lib -p vuma-ive` to apply 1 suggestion)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
+warning: unused import: `StructAccessNode`
+  --> src/pipeline.rs:52:78
+   |
+52 | ...e, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
+   |                                        ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma` (lib) generated 1 warning (run `cargo fix --lib -p vuma` to apply 1 suggestion)
 warning: `vuma-codegen` (lib) generated 1 warning (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 1m 37s
+    Finished `release-fast` profile [optimized] target(s) in 41.42s
