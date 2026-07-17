@@ -76,10 +76,10 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
-    compile_for_backend_with_path(source, kind, None, false, false)
+    compile_for_backend_with_path(source, kind, None, false)
 }
 
-fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool, pmt: bool) -> Result<(Vec<u8>, Option<String>), String> {
+fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool) -> Result<(Vec<u8>, Option<String>), String> {
     // Resolve imports if a file path is provided
     let ast = if let Some(path) = file_path {
         let mut resolver = ModuleResolver::new();
@@ -94,14 +94,14 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         result.unwrap()
     };
 
-    // (Wave 7) If --pmt is set, build the PMT layout registry up-front from
-    // the AST's `Item::LayoutDef` items so the IVE's `VerificationLevel::Pmt`
-    // can run the 3 state verifiers (state_read / state_write /
-    // state_transform) with full layout info — skipping the 5 pointer
-    // invariants that `VerificationLevel::Normal` would otherwise run.
-    // PMT layouts are built unconditionally — every program is now PMT.
-    // If the program has no `layout` items, this returns an empty map.
-    let mut pmt_layouts = Some(build_pmt_layout_specs(&ast));
+    // (Wave A / PMT-only) Build the PMT layout registry up-front from
+    // the AST's `Item::LayoutDef` items so the IVE's
+    // `VerificationLevel::Pmt` can run the 3 state verifiers
+    // (state_read / state_write / state_transform) with full layout info.
+    // PMT is always on in VUMA 2.0 — there is no "Normal" mode and no
+    // `--pmt` flag. If the program has no `layout` items, this returns an
+    // empty map (cheap — no work to do).
+    let pmt_layouts = Some(build_pmt_layout_specs(&ast));
 
     let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e))? };
 
@@ -136,23 +136,21 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // a single consistent SCG state. Wave 7 double-checks IVE
     // correctness on the optimized SCG.
     //
-    // Wave 7: When `--pmt` is set, the IVE runs ONLY the 3 state
-    // verifiers (state_read / state_write / state_transform) via
-    // `VerificationLevel::Pmt` — skipping the 5 pointer invariants that
-    // `Normal` runs. Memory safety for PMT programs is a type-checking
-    // property (layouts + state ops), not a verification problem.
-    // The PmtLayoutSpec registry built above is attached to the
+    // Wave 7 / Wave A: the IVE ALWAYS runs ONLY the 3 state verifiers
+    // (state_read / state_write / state_transform) via
+    // `VerificationLevel::Pmt`. Memory safety for PMT programs is a
+    // type-checking property (layouts + state ops), not a verification
+    // problem. The PmtLayoutSpec registry built above is attached to the
     // VerificationInput so the state verifiers have field offset/size
-    // info. Without `--pmt`, the default `Normal` level is used (5
-    // pointer invariants) and no pmt_layouts are attached.
+    // info. There is no `Normal` mode anymore — VUMA 2.0 is PMT-only.
     let mut ive_status: Option<String> = None;
     let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
-    // Auto-detect PMT programs: if the AST contains any LayoutDef items or
-    // the source uses state_new(), use VerificationLevel::Pmt automatically.
-    // This ensures PMT tests get the right verification without needing --pmt.
-    // ALL programs use VerificationLevel::Pmt now. There is no "Normal" mode.
+    // VUMA 2.0 is PMT-only — every program uses VerificationLevel::Pmt.
     // PMT programs (with layouts/state_new) get the 3 state verifiers.
-    // Legacy pointer programs: the state verifiers see no state nodes → pass vacuously.
+    // Legacy pointer programs never reach this point: pointer syntax
+    // (`allocate`, `free`, `*ptr`, `&x`, `*T`) is now a hard parse error
+    // (see src/parser/src/parser.rs `check_pointer_syntax`), so the
+    // compile aborts before IVE verification runs.
     if verify && !ive_skip {
         let mut ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
         if let Some(layouts) = &pmt_layouts {
@@ -321,41 +319,20 @@ fn main() {
     }
     // Parse flags:
     //   --verify    enables IVE verification (non-fatal).
-    //   --pmt-only  rejects pointer syntax (`allocate`, `free`, `*ptr`,
-    //               `&x`, `*T`, `&T`) as a hard compile error.  Wave 6b.
-    //   --pmt       (Wave 7) run ONLY the 3 state verifiers (state_read /
-    //               state_write / state_transform) via VerificationLevel::Pmt,
-    //               skipping the 5 pointer invariants that `Normal` runs.
-    //               Memory safety for PMT programs is a type-checking
-    //               property, not a verification problem. Implies the PMT
-    //               layout registry is built from the AST and attached to
-    //               the VerificationInput. Combines with `--verify`.
+    //
+    // PMT is always on in VUMA 2.0 (PMT-only mode). Pointer syntax
+    // (`allocate`, `free`, `*ptr`, `&x`, `*T`) is always a hard parse
+    // error at the parser level — no flag required. The IVE always uses
+    // `VerificationLevel::Pmt` and the PMT layout registry is always
+    // built (cheap — empty map if no `layout` items).
     let mut verify = false;
-    let mut pmt_only = false;
-    let mut pmt = false;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
-        else if *a == "--pmt-only" {
-            pmt_only = true;
-            false
-        }
-        else if *a == "--pmt" {
-            pmt = true;
-            false
-        }
         else { true }
     }).cloned().collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--pmt-only] [--pmt]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify]");
         std::process::exit(1);
-    }
-    // Propagate --pmt-only to the parser via the process-global flag.
-    // `ModuleResolver::resolve_source` constructs `Parser::new` internally
-    // (in src/parser/src/resolver.rs, which this wave is not allowed to
-    // modify), so the only way to reach those inner Parser instances is
-    // through `vuma_parser::parser::set_global_pmt_only`.
-    if pmt_only {
-        vuma_parser::parser::set_global_pmt_only(true);
     }
     let path = &positional[0];
     let out_path = &positional[1];
@@ -363,14 +340,14 @@ fn main() {
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
-    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify, pmt) {
+    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify) {
         Ok(v) => v,
         Err(e) => {
-            // Wave 6b: print a clean compile-error message to stderr and
-            // exit non-zero instead of panicking via `.unwrap()`.  The
-            // iso_test driver treats any non-zero exit as `CE` (compile
-            // error), which is the desired outcome for --pmt-only
-            // violations.
+            // Wave A (PMT-only): print a clean compile-error message to
+            // stderr and exit non-zero instead of panicking via
+            // `.unwrap()`. The iso_test driver treats any non-zero exit as
+            // `CE` (compile error), which is the desired outcome for
+            // pointer-syntax violations (now always hard errors).
             eprintln!("compile error: {}", e);
             std::process::exit(1);
         }
