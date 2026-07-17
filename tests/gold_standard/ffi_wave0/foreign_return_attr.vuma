@@ -1,0 +1,17 @@
+// ffi_wave0/foreign_return_attr — #[foreign_return(raw)] on an extern fn (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[foreign_return(raw)] declares the return mode: the C return
+// value (a raw pointer) is wrapped into a State<ForeignLayout> whose `raw`
+// field holds the pointer.
+
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_return(raw)]
+    fn sqlite3_open(path: Address) -> State<DbHandle>;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,13 @@
+// ffi_wave0/may_retain_attr — #[may_retain] on an extern fn param (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[may_retain] declares that C may stash the pointer past
+// the call return (e.g. epoll_ctl, sigaction). Forces scratchpad routing.
+
+extern "C" {
+    fn epoll_ctl(epfd: i32, op: i32, fd: i32, #[may_retain] ev: Address) -> i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

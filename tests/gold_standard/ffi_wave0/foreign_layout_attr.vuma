@@ -1,0 +1,18 @@
+// ffi_wave0/foreign_layout_attr — #[foreign(raw)] on a layout decl (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[foreign(raw)] on a layout declares that the layout wraps
+// an opaque C pointer. The `raw` field (a u64) holds the C pointer; passing
+// State<ForeignLayout> to an extern fn passes the `raw` field value, not
+// a pointer into ___pmt_buffer.
+
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    fn sqlite3_db_handle(x: i64) -> i64;
+}
+
+fn main() -> i32 {
+    return 0;
+}
