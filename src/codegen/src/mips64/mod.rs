@@ -3385,7 +3385,8 @@ impl Backend for Mips64Backend {
             // Simple stubs (args already in correct registers $a0-$a7):
             for (name, num) in [
                 ("write", 5001), ("read", 5000), ("open", 5002), ("close", 5003),
-                ("mmap", 5009), ("munmap", 5011), ("exit", 5058), ("alarm", 5037),
+                // mmap is a CUSTOM stub (flags translation) — see below.
+                ("munmap", 5011), ("exit", 5058), ("alarm", 5037),
                 ("getpid", 5038), ("socket", 5040), ("epoll_create1", 5285),
                 ("futex", 5194), ("execve", 5057), ("wait4", 5059),
                 ("epoll_ctl", 5208), ("epoll_wait", 5209),
@@ -3715,13 +3716,15 @@ impl Backend for Mips64Backend {
             // MIPS n64 passes args 5-6 on the stack; for a 6-arg syscall we'd
             // need stack setup. Since push_frame has no caller args, we clobber
             // a4/a5 directly (they're caller-saved $t0/$t1).
+            // CRITICAL: mips MAP_ANONYMOUS = 0x800 (NOT 0x20 like x86).
+            // MAP_PRIVATE = 0x02. So MAP_PRIVATE|MAP_ANONYMOUS = 0x802.
             {
                 let mut code = Vec::new();
-                // a0=0, a1=4096, a2=3, a3=0x22, a4(t0)=-1, a5(t1)=0
+                // a0=0, a1=4096, a2=3, a3=0x802, a4(t0)=-1, a5(t1)=0
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A0, rs: Gpr::Zero, imm: 0 }.encode());
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A1, rs: Gpr::Zero, imm: 4096 }.encode());
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A2, rs: Gpr::Zero, imm: 3 }.encode());
-                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x22 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x802 }.encode()); // MAP_PRIVATE|MAP_ANONYMOUS (mips)
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T0, rs: Gpr::Zero, imm: -1 }.encode());
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T1, rs: Gpr::Zero, imm: 0 }.encode());
                 code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5009 }.encode()); // sys_mmap
@@ -3746,6 +3749,38 @@ impl Backend for Mips64Backend {
                     code.extend_from_slice(&encode_nop());
                     code
                 }));
+            }
+
+            // ── Custom mmap stub (mips64 n64) ─────────────────────────
+            // The arena lowering passes flags=0x22 (MAP_PRIVATE|MAP_ANONYMOUS
+            // using the x86/generic MAP_ANONYMOUS=0x20 value). On MIPS,
+            // MAP_ANONYMOUS=0x800, so 0x22 lacks the anonymous bit. Without
+            // MAP_ANONYMOUS, the kernel tries to use fd=-1 → EBADF.
+            // Fix: translate flags from generic (0x22) to mips (0x802):
+            //   clear bit 0x20, set bit 0x800.
+            // Args arrive in $a0-$a5 ($a0-$a3, $t0, $t1). We modify $a3 (flags).
+            // MIPS has 8 reg args ($a0-$a7 = $4-$11), so all 6 mmap args are
+            // in registers — no stack arg plumbing needed.
+            {
+                let mut code = Vec::new();
+                // a3 = a3 | 0x800 (set mips MAP_ANONYMOUS bit)
+                // ORI uses zero-extended 16-bit immediate: 0x800 fits.
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::T2, rs: Gpr::A3, rt: Gpr::Zero }.encode()); // T2 = a3 (save)
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T3, rs: Gpr::Zero, imm: 0x800 }.encode()); // T3 = 0x800
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A3, rs: Gpr::T2, rt: Gpr::T3 }.encode()); // a3 = a3 | 0x800
+                // a3 = a3 & ~0x20 (clear x86 MAP_ANONYMOUS bit)
+                // Load 0xFFDF into T3 (ANDI zero-extends, but we need full 64-bit AND)
+                // Use: T3 = 0x20; T3 = ~T3 (XOR with -1); a3 = a3 & T3
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T3, rs: Gpr::Zero, imm: 0x20 }.encode()); // T3 = 0x20
+                code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T4, rs: Gpr::Zero, imm: -1 }.encode()); // T4 = -1 (0xFFFF...FFFF)
+                code.extend_from_slice(&Instruction::Xor { rd: Gpr::T3, rs: Gpr::T3, rt: Gpr::T4 }.encode()); // T3 = ~0x20
+                code.extend_from_slice(&Instruction::And { rd: Gpr::A3, rs: Gpr::A3, rt: Gpr::T3 }.encode()); // a3 &= ~0x20
+                // v0 = 5009 (sys_mmap)
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5009 }.encode());
+                code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("mmap".to_string(), code));
             }
 
             stubs

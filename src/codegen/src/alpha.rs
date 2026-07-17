@@ -1623,23 +1623,26 @@ impl Backend for AlphaBackend {
         //     __NR_exit = 1, __NR_read = 3, __NR_write = 4, __NR_open = 5,
         //     __NR_close = 6, __NR_mmap = 113, __NR_munmap = 111, __NR_brk = 17,
         //     __NR_mprotect = 50, etc.
-        //   [wave 6 — mmap ABI normalization, verified] alpha's __NR_mmap (113) is
+        //   [wave 6 — mmap ABI normalization, verified] alpha's __NR_mmap (71) is
         //   the DIRECT 6-arg form: (addr, len, prot, flags, fd, offset) all passed
         //   in R16-R21, with `offset` in BYTES (alpha has no mmap2; the generic
         //   sys_mmap handles byte→page conversion in-kernel). Both __vuma_alloc
-        //   (which sets R21=0) and the bare `mmap` simple_stub pass the caller's
+        //   (which sets R21=0) and the custom `mmap` stub pass the caller's
         //   R16-R21 straight through with the SAME offset unit (bytes, via R21),
         //   satisfying the wave-6 "same offset-unit handling as __vuma_alloc"
         //   requirement. Alpha passes 6 args in R16-R21, so no stack-arg plumbing
-        //   is needed. (NOTE: an earlier draft of this comment incorrectly stated
-        //   __NR_mmap=90; that was wrong — alpha mmap is 113. 90 is `osf_old_mmap`
-        //   / dup2 on alpha, NOT the modern mmap.)
+        //   is needed.
+        //
+        //   CRITICAL: alpha MAP_ANONYMOUS = 0x10 (NOT 0x20 like x86/aarch64).
+        //   MAP_PRIVATE = 0x02 (generic). So MAP_PRIVATE|MAP_ANONYMOUS = 0x12.
+        //   The arena lowering passes 0x22 (the x86 value), so the custom mmap
+        //   stub must translate flags: clear bit 0x20, set bit 0x10.
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
             // Incoming: R16 = size.  We need:
             //   R16 = NULL (0), R17 = size, R18 = PROT_READ|PROT_WRITE (3),
-            //   R19 = MAP_PRIVATE|MAP_ANONYMOUS (0x22), R20 = -1 (fd), R21 = 0 (offset)
+            //   R19 = MAP_PRIVATE|MAP_ANONYMOUS (0x12 on alpha), R20 = -1 (fd), R21 = 0 (offset)
             // Save size: BIS ZERO, R16, R1 (S0 = R16).
             code.extend(Instruction::Or { ra: ZERO, rb: Gpr::R16, rc: S0 }.encode());
             // R17 = S0 (size)
@@ -1648,14 +1651,15 @@ impl Backend for AlphaBackend {
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R16 }.encode());
             // R18 = 3 (PROT)
             code.extend(Instruction::AddqLi { ra: ZERO, lit: 3, rc: Gpr::R18 }.encode());
-            // R19 = 0x22 — needs LDA + LDAH.  Actually 0x22 = 34, fits in lit8.
-            code.extend(Instruction::AddqLi { ra: ZERO, lit: 0x22, rc: Gpr::R19 }.encode());
+            // R19 = 0x12 (MAP_PRIVATE|MAP_ANONYMOUS on alpha)
+            // alpha MAP_ANONYMOUS = 0x10 (NOT 0x20 like x86). MAP_PRIVATE = 0x02.
+            code.extend(Instruction::AddqLi { ra: ZERO, lit: 0x12, rc: Gpr::R19 }.encode());
             // R20 = -1 (fd). -1 fits in LDA's 16-bit displacement.
             code.extend(Instruction::Lda { ra: Gpr::R20, disp: -1, rb: ZERO }.encode());
             // R21 = 0 (offset)
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R21 }.encode());
-            // R0 = 113 (alpha __NR_mmap — direct 6-arg, offset in bytes via R21=0)
-            code.extend(ss_load_imm(Gpr::R0, 113));
+            // R0 = 71 (alpha __NR_mmap — direct 6-arg, offset in bytes via R21=0)
+            code.extend(ss_load_imm(Gpr::R0, 71));
             // CALL_PAL 0x83
             code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
             // RET
@@ -1667,8 +1671,8 @@ impl Backend for AlphaBackend {
             let mut code = Vec::new();
             // Incoming: R16 = addr.  R17 = 0 (size).
             code.extend(Instruction::Or { ra: ZERO, rb: ZERO, rc: Gpr::R17 }.encode());
-            // R0 = 91 (sys_munmap)
-            code.extend(ss_load_imm(Gpr::R0, 91));
+            // R0 = 73 (alpha sys_munmap)
+            code.extend(ss_load_imm(Gpr::R0, 73));
             code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
             code.extend(Instruction::Ret.encode());
             code
@@ -1686,7 +1690,9 @@ impl Backend for AlphaBackend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
             for (name, num) in [
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
-                ("mmap", 113), ("munmap", 111), ("exit", 1), ("exit_group", 4293),
+                // mmap is a CUSTOM stub (flags translation) — see below.
+                // munmap=73, exit_group=405 (alpha OSF/1 syscall numbers).
+                ("munmap", 73), ("exit", 1), ("exit_group", 405),
                 ("brk", 17), ("getpid", 20), ("alarm", 27), ("kill", 42),
                 ("dup", 41), ("dup2", 90), ("execve", 59),
                 ("wait4", 84), ("unlink", 10), ("chdir", 12), ("lseek", 19),
@@ -1772,18 +1778,19 @@ impl Backend for AlphaBackend {
             }
 
             // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
-            // ffi_scratch_push_frame: REAL mmap syscall (alpha sys_mmap=113).
-            // Args: R16=0(NULL), R17=4096, R18=3(PROT), R19=0x22(MAP), R20=-1(fd), R21=0(off).
-            // Syscall nr in R0=113. CALL_PAL 0x83=callsys. RET.
+            // ffi_scratch_push_frame: REAL mmap syscall (alpha sys_mmap=71).
+            // Args: R16=0(NULL), R17=4096, R18=3(PROT), R19=0x12(MAP), R20=-1(fd), R21=0(off).
+            // Syscall nr in R0=71. CALL_PAL 0x83=callsys. RET.
+            // CRITICAL: alpha MAP_ANONYMOUS = 0x10 (NOT 0x20 like x86).
             {
                 let mut code = Vec::new();
                 code.extend(ss_load_imm(Gpr::R16, 0));       // addr = NULL
                 code.extend(ss_load_imm(Gpr::R17, 4096));    // len = 4096
                 code.extend(ss_load_imm(Gpr::R18, 3));       // prot = PROT_READ|PROT_WRITE
-                code.extend(ss_load_imm(Gpr::R19, 0x22));    // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                code.extend(ss_load_imm(Gpr::R19, 0x12));    // flags = MAP_PRIVATE(0x02)|MAP_ANONYMOUS(0x10)
                 code.extend(ss_load_imm(Gpr::R20, -1));      // fd = -1
                 code.extend(ss_load_imm(Gpr::R21, 0));       // offset = 0
-                code.extend(ss_load_imm(Gpr::R0, 113));      // sys_mmap
+                code.extend(ss_load_imm(Gpr::R0, 71));       // sys_mmap (alpha __NR_mmap=71)
                 code.extend(Instruction::CallPal { palcode: 0x83 }.encode()); // callsys
                 code.extend(Instruction::Ret.encode());
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
@@ -1804,6 +1811,46 @@ impl Backend for AlphaBackend {
                 code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
                 code.extend(Instruction::Ret.encode());
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // ── Custom mmap stub (alpha) ──────────────────────────────
+            // The arena lowering passes flags=0x22 (MAP_PRIVATE|MAP_ANONYMOUS
+            // using the x86/generic MAP_ANONYMOUS=0x20 value). On alpha,
+            // MAP_ANONYMOUS=0x10, so 0x22 lacks the anonymous bit and sets
+            // MAP_FIXED (alpha 0x100) incorrectly... actually 0x20 on alpha
+            // is just MAP_PRIVATE again (no, MAP_PRIVATE=0x02). Bit 0x20 on
+            // alpha is unused. The fix: translate flags from generic (0x22)
+            // to alpha (0x12): clear bit 0x20, set bit 0x10.
+            //
+            // Args arrive in R16-R21 (same as syscall ABI). We modify R19
+            // (flags) in place: R19 = (R19 & ~0x20) | 0x10.
+            {
+                let mut code = Vec::new();
+                // R1 = 0x10 (alpha MAP_ANONYMOUS bit)
+                code.extend(Instruction::AddqLi { ra: ZERO, lit: 0x10, rc: Gpr::R1 }.encode());
+                // R19 = R19 | R1 (set the alpha MAP_ANONYMOUS bit)
+                code.extend(Instruction::Or { ra: Gpr::R19, rb: Gpr::R1, rc: Gpr::R19 }.encode());
+                // R1 = 0xFFFFFFDF (all bits except 0x20). Load via LDAH+LDA.
+                // LDAH R1, 0xFFDF(zero-extended high) ... actually use a different approach:
+                // R1 = 0x20 (the x86 MAP_ANONYMOUS bit to clear)
+                code.extend(Instruction::AddqLi { ra: ZERO, lit: 0x20, rc: Gpr::R1 }.encode());
+                // R19 = R19 & ~R1 = R19 ANDNOT R1. Alpha has ANDNOT as:
+                //   BIC Ra, Rb, Rc -> Rc = Ra & ~Rb. But our Instruction enum
+                //   doesn't have BIC. Use: R19 = R19 XOR (R19 AND R1) ... no.
+                //   Simplest: R1 = ~R1 (XOR with -1). But we don't have NOT.
+                //   Use: R19 = R19 AND (NOT R1). NOT R1 = R1 XOR 0xFFFF...FFFF.
+                //   Actually alpha has ORNOT: Rc = Ra | ~Rb. We can build mask:
+                //   mask = 0 | ~R1 = ORNOT(ZERO, R1). But we don't have ORNOT.
+                //   Alternative: R1 = R1 XOR 0xFFFFFFFFFFFFFFFF = ~R1.
+                //   Load -1 into R2, then XOR.
+                code.extend(Instruction::Lda { ra: Gpr::R2, disp: -1, rb: ZERO }.encode()); // R2 = -1 (0xFFFF...FFFF)
+                code.extend(Instruction::Xor { ra: Gpr::R1, rb: Gpr::R2, rc: Gpr::R1 }.encode()); // R1 = ~R1 = ~0x20
+                code.extend(Instruction::And { ra: Gpr::R19, rb: Gpr::R1, rc: Gpr::R19 }.encode()); // R19 &= ~0x20
+                // R0 = 71 (alpha __NR_mmap)
+                code.extend(ss_load_imm(Gpr::R0, 71));
+                code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+                code.extend(Instruction::Ret.encode());
+                stubs.push(("mmap".to_string(), code));
             }
 
             stubs
