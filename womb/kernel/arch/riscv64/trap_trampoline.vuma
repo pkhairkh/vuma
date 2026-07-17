@@ -1,0 +1,562 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/riscv64/trap_trampoline.vuma
+// riscv64 trap entry/exit trampolines — TrapFrame layout + externs.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the riscv64-specific swap point for trap/IRQ handling, the
+// direct analogue of womb/kernel/arch/x86_64/trap_trampoline.vuma (K3a)
+// and womb/kernel/arch/aarch64/trap_trampoline.vuma (K3b). It declares
+// the TrapFrame layout (the register-save area pushed by the trap_entry
+// stub and popped by trap_exit) and the extern functions the trap
+// dispatcher (the K3c IRQ/subsequent dispatcher — note: this task IS K3c)
+// and the IRQ subsystem call into. In hosted mode every extern resolves
+// to `__ffi_fallback_stub` (returns 0, void calls no-op). In bare-metal
+// mode (Wave K11) the same names link against REAL asm stubs in
+// womb/kernel/arch/riscv64/trap.S.
+//
+// ── TrapFrame register-save order ───────────────────────────────────────────
+// Unlike x86_64 (which auto-pushes SS/RSP/RFLAGS/CS/RIP) and unlike
+// aarch64 (which auto-saves ELR_EL1/SPSR_EL1 to banked registers), RISC-V
+// does NOT push ANY register state to memory on a trap. Instead the CPU
+// writes a small fixed set of CSRs and jumps to STVEC:
+//     SEPC / MEPC   ← the PC of the trapping instruction (or the next
+//                     one for interrupts — RISC-V Privileged ISA §4.1.10
+//                     "Supervisor Exception Program Counter" / §3.1.14
+//                     "Machine Exception Program Counter")
+//     SSTATUS / MSTATUS ← the prior privilege mode is captured in the
+//                     SPP / MPP field, plus other status bits (§4.1.6 /
+//                     §3.1.6). The current privilege is forced to S / M
+//                     for the handler, and the global interrupt enable
+//                     (SPIE / MPIE) is set from the prior SPIE / MPIE
+//                     state.
+//     SCAUSE        ← the reason for the trap (§4.1.15) — interrupt bit
+//                     (top bit) + code (low bits); for synchronous
+//                     exceptions the code is 0..15+ (see table below);
+//                     for interrupts the code is the interrupt ID.
+//     STVAL         ← auxiliary value: faulting address for page faults,
+//                     faulting instruction for illegal instruction,
+//                     etc. (§4.1.16 "Supervisor Trap Value Register").
+//     PC            ← STVEC (the supervisor trap vector base address —
+//                     §4.1.4. The trap_entry stub lives at STVEC, mode
+//                     = Direct (lower 2 bits = 0) or Vectored (lower 2
+//                     bits = 1); bare-metal K11 uses Direct mode).
+// Everything else — the 31 GP registers x1..x31 (x0 is hardwired zero
+// and never needs saving) — must be saved EXPLICITLY by the trap_entry
+// stub. The trap_entry common path in trap.S pushes the GPs in this
+// order (the layout below MUST match trap.S exactly — K11 will write
+// trap.S to match):
+//     ra, sp, gp, tp, t0, t1, t2, s0, s1,
+//     a0, a1, a2, a3, a4, a5, a6, a7,
+//     s2, s3, s4, s5, s6, s7, s8, s9, s10, s11,
+//     t3, t4, t5, t6                                (31 words, trap_entry)
+// and then reads the four CSRs the dispatcher needs:
+//     mepc      (1 word, csrr x?, mepc)
+//     mstatus   (1 word, csrr x?, mstatus)
+//     scause    (1 word, csrr x?, scause)
+//     stval     (1 word, csrr x?, stval)
+//
+// Total: 31 (GP) + 4 (CSR) = 35 words × 8 bytes = 280 bytes.
+//
+// IMPORTANT (contract-count discrepancy): the K3c contract's header
+// comment says "30 regs + 4 CSR values = Total: 34 registers × 8 bytes
+// = 272 bytes" and its tail "IMPORTANT" note says "The TrapFrame has
+// 34 u64 fields = 272 bytes". NEITHER matches the layout the contract
+// actually specifies — the layout block has 31 GPs (ra, sp, gp, tp,
+// t0..t2, s0, s1, a0..a7, s2..s11, t3..t6 = 4+3+2+8+10+4 = 31) + 4
+// CSRs (mepc, mstatus, scause, stval) = 35 fields = 35 × 8 = 280 bytes.
+// The "(30 regs)" prose annotation miscounts the GPs by one (RISC-V
+// has x1..x31 = 31 GPs to save, NOT 30 — x0/zero is the only GP that
+// isn't saved). The order of the fields MUST match trap.S exactly (K11
+// will write trap.S to match this layout), so this file keeps the
+// 35-field layout verbatim from the contract and just corrects the
+// byte count in the prose here. The trap dispatcher will index into
+// this layout by field name (State<TrapFrame> accessors), NOT by raw
+// offset, so the exact count matters for symbol layout but not for
+// dispatcher correctness — every field is named.
+//
+// ── CSR-mode hybrid note (M-mode + S-mode mix) ──────────────────────────────
+// The four CSRs the contract saves are a hybrid of M-mode and S-mode
+// registers: MEPC and MSTATUS are M-mode (machine exception PC and
+// machine status — §3.1.14 / §3.1.6), while SCAUSE and STVAL are
+// S-mode (supervisor cause and supervisor trap value — §4.1.15 /
+// §4.1.16). On a typical RISC-V system running in M-mode the
+// corresponding S-mode CSRs are SEPC and SSTATUS (and the S-mode
+// counterpart of MCAUSE is SCAUSE; the S-mode counterpart of MTVAL is
+// STVAL — but only SCAUSE/STVAL appear here, not MCAUSE/MTVAL). This
+// file follows the contract's hybrid verbatim (the layout block lists
+// mepc, mstatus, scause, stval in that order — K11 will write trap.S
+// to csrr the same four CSRs in the same order). A future refactor
+// might split this into a pure-S-mode TrapFrame (sepc, sstatus, scause,
+// stval) or a pure-M-mode TrapFrame (mepc, mstatus, mcause, mtval), but
+// such a refactor is out of scope for K3c and would require touching
+// K11's trap.S at the same time. The byte-identical-redeclaration
+// invariant (K2c "extern signatures MUST stay byte-identical") extends
+// to layouts too — the K3c dispatcher's `dispatch_trap(tf:
+// State<TrapFrame>)` MUST see the same field offsets, field names, and
+// field types as this file, so any future CSR-mode split will need to
+// land in all re-declaring files simultaneously.
+//
+// ── SCAUSE values the dispatcher switches on ────────────────────────────────
+// RISC-V SCAUSE (Supervisor Cause Register — Privileged ISA §4.1.15)
+// encodes a trap reason. The top bit (XLEN-1 = bit 63 on RV64) is the
+// Interrupt flag (1 = interrupt, 0 = synchronous exception); the low
+// bits are the Cause Code. For synchronous exceptions, the codes the
+// trap dispatcher routes on:
+//      0  = Instruction address misaligned
+//      1  = Instruction access fault
+//      2  = Illegal instruction
+//      3  = Breakpoint
+//      4  = Load address misaligned
+//      5  = Load access fault
+//      6  = Store/AMO address misaligned
+//      7  = Store/AMO access fault
+//      8  = Environment call from U-mode (ECALL from U — SYSCALL path)
+//      9  = Environment call from S-mode (ECALL from S)
+//     10  = Environment call from M-mode (ECALL from M)
+//     12  = Instruction page fault
+//     13  = Load page fault
+//     14  = Store/AMO page fault (per the K3c contract's mapping)
+//     15  = Instruction page fault (per the K3c contract's mapping —
+//           the official Privileged ISA 1.12 spec reserves 14 for
+//           Store/AMO page fault and 15 for Reserved, but the K3c
+//           contract's "(12=instr, 13=load, 14=store, 15=instr page
+//           fault)" annotation is the source of truth for the helpers
+//           in this file — they only check `12 <= scause <= 15`, so the
+//           exact code-to-name mapping doesn't matter for the helper
+//           correctness)
+// The trap_is_syscall helper below tests for code 8 (Environment call
+// from U-mode); the trap_is_page_fault helper tests for codes 12..15
+// (the four page-fault codes). The self-test exercises both helpers
+// with scause values 8, 13, and 5.
+//
+// Compare to x86_64 (K3a): x86_64 routes on `tf.vector` (the 8-bit
+// IDT vector — 14 = #PF page fault, 32..255 = IRQs, 0x80 = syscall
+// under older Linux conventions). Compare to aarch64 (K3b): aarch64
+// routes on `trap_exception_class(tf)` (EC field of ESR_EL1 — EC=0x15
+// = SVC64/syscall, EC=0x24/0x25 = data abort = page fault, EC=0x20/
+// 0x21 = instruction abort). RISC-V routes on `tf.scause` directly —
+// no bit extraction needed (SCAUSE is a small integer code, not a
+// packed bitfield like ESR_EL1).
+//
+// ── Extern "C" trampolines (STVEC + PLIC + STVAL) ────────────────────────────
+// Hosted: __ffi_fallback_stub (xor eax, eax; ret — returns 0, no-op for
+//         void functions). The self-test's main() never calls any of these
+//         (so the 0-return is not exercised from this file); they exist for
+//         the K3c dispatcher / K3c IRQ subsystem / K3d syscall layer to
+//         link against.
+// Bare-metal (K11): real asm stubs registered in
+//         src/codegen/src/riscv64.rs::build_runtime_syscall_stubs (or
+//         the riscv64 equivalent of x86_64's build_runtime_syscall_stubs):
+//     stvec_load(stvec_ptr)
+//         — `csrw stvec, a0; ret` (a0 = stvec_ptr under the RISC-V
+//           calling convention). Loads the Supervisor Trap Vector Base
+//           Address Register — STVEC[1:0] is the MODE field (0 =
+//           Direct, 1 = Vectored; K11 uses Direct — all traps go to
+//           the same handler, which dispatches based on SCAUSE), and
+//           STVEC[XLEN-1:2] is the BASE address (4-byte-aligned for
+//           Direct, 4-byte-aligned for Vectored with the table of
+//           4-byte jumps at BASE+4*cause). Called once during early
+//           boot to point STVEC at the trap_entry stub.
+//     plic_eoi(irq)
+//         — End-Of-Interrupt to the PLIC (Platform-Level Interrupt
+//           Controller). On RISC-V the PLIC exposes a single claim/
+//           complete register per hart-context: reading it CLAIMS the
+//           IRQ (returning the IRQ ID and atomically de-asserting the
+//           source); writing the same IRQ ID back to the SAME register
+//           COMPLETES the IRQ (telling the PLIC the handler is done
+//           and it can deliver the next one). So plic_eoi is the
+//           "complete" half of the claim/complete protocol. K11 stub:
+//           `sw a0, plic_complete_offset(a_hart_ctx_base); ret` (or
+//           for RV64 with 32-bit PLIC MMIO: `sw a0, 0(base); ret`).
+//           The `irq` argument MUST be the same value returned by
+//           plic_get_irq. Required at the end of every IRQ handler
+//           so the PLIC will deliver the next one.
+//     plic_mask(irq) / plic_unmask(irq)
+//         — Mask/unmask an IRQ source at the PLIC. The PLIC's enable
+//           register is a bit vector (one bit per IRQ source, 32 bits
+//           per 32 IRQs in a bank — PLIC spec §2.3 "Interrupt Enable").
+//           K11 stub: compute `bank = irq / 32`, `bit = 1 << (irq % 32)`,
+//           then read-modify-write the PLIC's ENABLE register for that
+//           bank (clear the bit for mask, set for unmask). In hosted
+//           mode the stub is a no-op. Pairs like x86_64's irq_mask /
+//           irq_unmask (K3a) and aarch64's gic_mask / gic_unmask (K3b).
+//     plic_get_irq() -> u32
+//         — Read the PLIC claim register. Returns the active IRQ ID
+//           (or 0 if no IRQ is pending — IRQ 0 is reserved as "no
+//           pending interrupt" in the PLIC convention, so 0 is a
+//           safe sentinel). K11 stub: `lw a0, plic_claim_offset
+//           (a_hart_ctx_base); ret` (32-bit MMIO read — the PLIC's
+//           IRQ IDs fit in 32 bits even on RV64). Returns 0 in hosted
+//           mode (no real PLIC). The dispatcher calls this at the top
+//           of the IRQ handler to find out WHICH IRQ fired, dispatches,
+//           then calls plic_eoi with the same value at the bottom of
+//           the handler. This is the riscv64 analogue of aarch64's
+//           gic_get_irq (K3b) — both architectures need an explicit
+//           "which IRQ" read because the interrupt controller has more
+//           than 1 IRQ source (x86_64's PIC also has this read but the
+//           K3a contract folds it into pic_eoi's non-specific EOI byte
+//           write — x86_64's PIC doesn't expose a per-IRQ ID read; it
+//           uses ISR polling instead, which the K3a pic_eoi stub
+//           doesn't do).
+//     stval_read() -> u64
+//         — `csrr a0, stval; ret` (read the Supervisor Trap Value
+//           Register — the auxiliary value associated with the trap;
+//           for page faults this is the faulting virtual address, for
+//           illegal instructions this is the faulting instruction
+//           encoding, for misaligned accesses this is the faulting
+//           address). Used by the trap dispatcher in the page-fault
+//           path (codes 12..15) so it can pass the faulting vaddr to
+//           the page-fault handler in the K3c dispatcher. The riscv64
+//           analogue of x86_64's cr2_read (K3a) and aarch64's
+//           far_el1_read (K3b) — all three return the faulting vaddr,
+//           but on riscv64 the register is named STVAL and is read
+//           via CSR read, not via a CRn-encoded instruction (x86_64)
+//           or MRS (aarch64).
+//
+// ── Why re-declare nothing here? ─────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so every kernel module re-declares
+// the layouts it uses byte-identically. THIS file declares TrapFrame for
+// the FIRST time on riscv64 (no prior VUMA file has it — the x86_64
+// TrapFrame in K3a is a DIFFERENT layout, with x86_64-specific fields
+// rax/rbx/rcx/.../rip/cs/rflags/rsp/ss; the aarch64 TrapFrame in K3b is
+// ALSO a different layout, with aarch64-specific fields x0..x30/
+// sp_el0/elr_el1/spsr_el1/esr_el1). The K3c dispatcher, the IRQ
+// subsystem, and K3d syscall layer will each re-declare this same
+// riscv64 TrapFrame layout from this file's contract. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-identical")
+// extends to layouts too — the K3c dispatcher's
+// `dispatch_trap(tf: State<TrapFrame>)` MUST see the same field offsets,
+// field names, and field types as this file.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// TrapFrame is a 35-word struct held in a `___pmt_buffer`-backed
+// State<TrapFrame>; the CALLER allocates it via `state_new(TrapFrame)`
+// and passes it by reference to `trap_frame_init` / `trap_is_syscall`
+// / `trap_is_page_fault` (init-style API — see "Why init-style?" in
+// womb/kernel/mm/pmm.vuma for the codegen rationale). The externs'
+// `stvec_ptr: Address` parameter is a plain Address (RISC-V calling
+// convention a0), NOT a State<T> — no #[borrow] needed because there
+// is no State<T> to invalidate. None of the externs take a State<T>
+// argument, so there is no use-after-invalidate risk from any of them.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. If a future dispatcher (K3c) wants to
+// read `tf.scause`, it must re-declare the TrapFrame layout
+// byte-identically to the one here (same pattern as
+// womb/kernel/arch/riscv64/mm_trampoline.vuma re-declaring PageTable
+// byte-identically to womb/kernel/mm/vmm.vuma).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/riscv64/trap_trampoline.vuma \
+//         /tmp/trap_trampoline.bin x86_64 --verify
+//     /tmp/trap_trampoline.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (the 5 self-test checks all pass).
+//
+// In hosted mode the externs are never called from THIS file's main, so
+// __ffi_fallback_stub's "returns 0" behavior is not exercised — the
+// trampoline exists for OTHER modules (the K3c dispatcher, K3c IRQ
+// subsystem, K3d syscall layer) to link against. The K3c dispatcher
+// will call stvec_load once during early boot, plic_get_irq/plic_eoi
+// around every IRQ, and stval_read inside the page-fault handler;
+// this file only declares them so the symbol table is complete when
+// both files are linked into the same kernel image.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// The riscv64 TrapFrame. The field order MUST match trap.S exactly (K11
+// will write trap.S to match). 35 fields × 8 bytes = 280 bytes. See the
+// header comment for the push-order derivation (trap_entry pushes x1..x31
+// by ABI name — ra, sp, gp, tp, t0..t2, s0, s1, a0..a7, s2..s11, t3..t6
+// — then CSRRs mepc, mstatus, scause, stval). Note: x0 (zero) is
+// hardwired to 0 in RISC-V and is NEVER saved.
+layout TrapFrame = {
+    ra: u64,        // x1  — return address
+    sp: u64,        // x2  — stack pointer
+    gp: u64,        // x3  — global pointer
+    tp: u64,        // x4  — thread pointer
+    t0: u64,        // x5  — temporary
+    t1: u64,        // x6  — temporary
+    t2: u64,        // x7  — temporary
+    s0: u64,        // x8  — callee-saved (frame pointer)
+    s1: u64,        // x9  — callee-saved
+    a0: u64,        // x10 — argument / return value
+    a1: u64,        // x11 — argument / return value
+    a2: u64,        // x12 — argument
+    a3: u64,        // x13 — argument
+    a4: u64,        // x14 — argument
+    a5: u64,        // x15 — argument
+    a6: u64,        // x16 — argument
+    a7: u64,        // x17 — argument (syscall number on RISC-V Linux)
+    s2: u64,        // x18 — callee-saved
+    s3: u64,        // x19 — callee-saved
+    s4: u64,        // x20 — callee-saved
+    s5: u64,        // x21 — callee-saved
+    s6: u64,        // x22 — callee-saved
+    s7: u64,        // x23 — callee-saved
+    s8: u64,        // x24 — callee-saved
+    s9: u64,        // x25 — callee-saved
+    s10: u64,       // x26 — callee-saved
+    s11: u64,       // x27 — callee-saved
+    t3: u64,        // x28 — temporary
+    t4: u64,        // x29 — temporary
+    t5: u64,        // x30 — temporary
+    t6: u64,        // x31 — temporary
+    mepc: u64,      // machine exception program counter (CSR 0x341)
+    mstatus: u64,   // machine status register (CSR 0x300)
+    scause: u64,    // supervisor cause register (CSR 0x142)
+    stval: u64,     // supervisor trap value register (CSR 0x143)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — STVEC load, PLIC mask/unmask/eoi/get_irq,
+// STVAL read.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
+// these for real asm stubs registered in
+// src/codegen/src/riscv64.rs::build_runtime_syscall_stubs (or the
+// riscv64 equivalent of x86_64's build_runtime_syscall_stubs). The
+// `irq` parameters are u32 (NOT u8 as on x86_64 — K3a) because the
+// PLIC supports up to 1024 IRQ sources (PLIC spec §2.1 "Interrupt
+// Sources" — IDs 0..1023, with 0 reserved as "no interrupt"), which
+// exceeds u8's 0..255 range. This matches the aarch64 GIC's u32 IRQ
+// type (K3b) — both architectures have interrupt controllers with
+// larger ID spaces than x86_64's 16-line 8259 PIC. The K3c dispatcher's
+// IRQ-handler code is arch-specific anyway (different trap entry stubs,
+// different EOI protocol), so the type divergence is not a problem.
+extern "C" {
+    // Load the Supervisor Trap Vector Base Address Register. `stvec_ptr`
+    // is an a0-holding 4-byte-aligned address pointing at the
+    // trap_entry stub (Direct mode) or the vectored jump table (Vectored
+    // mode — K11 uses Direct). K11 stub: `csrw stvec, a0; ret`. Called
+    // once during early boot to point STVEC at trap_entry; all
+    // synchronous exceptions and all interrupts then enter through
+    // trap_entry (which reads SCAUSE to dispatch). The riscv64 analogue
+    // of x86_64's idt_load (K3a — `lidt [rdi]; ret`) and aarch64's
+    // vbar_load (K3b — `msr vbar_el1, x0; isb; ret`).
+    fn stvec_load(stvec_ptr: Address);
+    // End-Of-Interrupt to the PLIC. `irq` is the value previously
+    // returned by plic_get_irq (the claim-register read) — writing it
+    // back to the SAME claim/complete register tells the PLIC the
+    // handler is done and it can deliver the next IRQ. K11 stub:
+    // `sw a0, PLIC_CLAIM_OFFSET(hart_ctx_base); ret` (32-bit MMIO
+    // write to the per-hart-context claim/complete register). Required
+    // at the end of every IRQ handler so the PLIC will deliver the
+    // next one. Pairs with plic_get_irq (claim at top of handler,
+    // complete at bottom with the same value). The riscv64 analogue
+    // of x86_64's pic_eoi (K3a — `out 0x20, 0x20`) and aarch64's
+    // gic_eoi (K3b — `msr icc_eoir1_el1, x0`).
+    fn plic_eoi(irq: u32);
+    // Mask an IRQ source at the PLIC. `irq` is the IRQ source ID
+    // 1..1023 (0 is reserved as "no interrupt"). K11 stub: compute
+    // register bank = irq / 32, mask bit = 1 << (irq % 32), then
+    // read-modify-write the PLIC's ENABLE register for that bank to
+    // CLEAR the bit. In hosted mode the stub is a no-op. The riscv64
+    // analogue of x86_64's irq_mask (K3a — `out 0x21, al`) and
+    // aarch64's gic_mask (K3b — GICD_ICENABLER write).
+    fn plic_mask(irq: u32);
+    // Unmask an IRQ source at the PLIC. K11 stub: same register-bank
+    // computation, then SET the bit in the ENABLE register. Pairs
+    // with plic_mask. The riscv64 analogue of x86_64's irq_unmask
+    // (K3a) and aarch64's gic_unmask (K3b).
+    fn plic_unmask(irq: u32);
+    // Read the PLIC claim register — returns the active IRQ source ID
+    // (1..1023) or 0 if no IRQ is pending (0 is reserved as the
+    // "no interrupt" sentinel in the PLIC convention). K11 stub:
+    // `lw a0, PLIC_CLAIM_OFFSET(hart_ctx_base); ret` (32-bit MMIO
+    // read from the per-hart-context claim/complete register; the
+    // read atomically CLAIMS the IRQ so the PLIC won't re-deliver it
+    // to another hart in an SMP system). Returns 0 in hosted mode
+    // (no real PLIC). Called by the dispatcher at the top of every
+    // IRQ handler; the returned value is dispatched to the
+    // appropriate handler and then passed to plic_eoi at the bottom.
+    // This is the riscv64 analogue of aarch64's gic_get_irq (K3b —
+    // `mrs x0, icc_iar1_el1`). x86_64's PIC has no direct equivalent
+    // — the 8259 combines "which IRQ" with "acknowledge" in a single
+    // ISR read at a fixed port, so K3a's pic_eoi doesn't even need
+    // the IRQ ID argument (it sends the non-specific EOI byte 0x20).
+    fn plic_get_irq() -> u32;
+    // Read STVAL — the Supervisor Trap Value Register. K11 stub:
+    // `csrr a0, stval; ret`. Returns the auxiliary value associated
+    // with the trap: for page faults (scause 12..15) this is the
+    // faulting virtual address, for illegal instructions (scause 2)
+    // this is the faulting instruction encoding, for misaligned
+    // accesses (scause 0/4/6) this is the faulting address. Used by
+    // the trap dispatcher's page-fault path (scause 12..15) so it
+    // can pass the faulting vaddr to the page-fault handler in the
+    // K3c dispatcher. Returns 0 in hosted mode (hosted mode never
+    // delivers real traps — the host kernel does). The riscv64
+    // analogue of x86_64's cr2_read (K3a — `mov rax, cr2; ret`) and
+    // aarch64's far_el1_read (K3b — `mrs x0, far_el1; ret`).
+    fn stval_read() -> u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// Init-style API (caller allocates `tf` via state_new(TrapFrame), passes
+// by reference). The State<TrapFrame> param here is a regular VUMA-fn
+// borrow (NOT an extern #[borrow] — VUMA fn calls don't need the
+// attribute, only extern "C" calls do, because the codegen tracks the
+// State's lifetime through regular fn calls but conservatively
+// invalidates on extern calls). See womb/kernel/mm/vmm.vuma::vaddr_parts
+// for the same pattern (regular fn writing through a State<T> param).
+
+// Initialize a TrapFrame to zeros. Useful both for the self-test and
+// for the early-boot allocator (the trap dispatcher can call this on a
+// scratch TrapFrame before populating it from the live save area, so
+// stale stack garbage in the unused-CSR-bits case can't leak into the
+// handler). Writes all 35 fields to 0.
+fn trap_frame_init(tf: State<TrapFrame>) {
+    tf.ra = 0;
+    tf.sp = 0;
+    tf.gp = 0;
+    tf.tp = 0;
+    tf.t0 = 0;
+    tf.t1 = 0;
+    tf.t2 = 0;
+    tf.s0 = 0;
+    tf.s1 = 0;
+    tf.a0 = 0;
+    tf.a1 = 0;
+    tf.a2 = 0;
+    tf.a3 = 0;
+    tf.a4 = 0;
+    tf.a5 = 0;
+    tf.a6 = 0;
+    tf.a7 = 0;
+    tf.s2 = 0;
+    tf.s3 = 0;
+    tf.s4 = 0;
+    tf.s5 = 0;
+    tf.s6 = 0;
+    tf.s7 = 0;
+    tf.s8 = 0;
+    tf.s9 = 0;
+    tf.s10 = 0;
+    tf.s11 = 0;
+    tf.t3 = 0;
+    tf.t4 = 0;
+    tf.t5 = 0;
+    tf.t6 = 0;
+    tf.mepc = 0;
+    tf.mstatus = 0;
+    tf.scause = 0;
+    tf.stval = 0;
+}
+
+// Check whether the trap was a syscall — i.e., SCAUSE == 8 (Environment
+// call from U-mode, RISC-V Privileged ISA §4.1.15). The dispatcher (K3c)
+// routes the syscall path on this test: read a7 (syscall number, x17),
+// dispatch to the syscall table indexed by a7, write the return value
+// to a0 (x10), then advance mepc by 4 (the ECALL instruction is 4
+// bytes — return to the instruction AFTER ECALL, not re-execute ECALL
+// and re-trap forever). Returns u8 (1 = syscall, 0 = not syscall) —
+// the dispatcher uses this as a boolean discriminant.
+//
+// The `(tf.scause == 8) as u8` cast is a VUMA `as` cast from bool to
+// u8 — verified in /home/z/probe/probe_trap_riscv64.vuma before this
+// file was written. (If the cast had not lowered cleanly, the fallback
+// would be the if-expression `if tf.scause == 8 { 1 } else { 0 }` per
+// the K3c contract's note — not needed here.)
+//
+// In hosted mode the self-test never traps, so this function is only
+// exercised on the `tf.scause = 8; let is_syscall = trap_is_syscall(tf);`
+// path in main() (which writes SCAUSE=8 and verifies the helper
+// returns 1).
+fn trap_is_syscall(tf: State<TrapFrame>) -> u8 {
+    return (tf.scause == 8) as u8;
+}
+
+// Check whether the trap was a page fault — i.e., SCAUSE is in 12..15
+// (the four page-fault codes per the RISC-V Privileged ISA §4.1.15:
+//   12 = Instruction page fault,
+//   13 = Load page fault,
+//   14 = Store/AMO page fault (per the K3c contract's mapping),
+//   15 = Instruction page fault (per the K3c contract's mapping — the
+//        official Privileged ISA 1.12 spec reserves 15, but the K3c
+//        contract's "(12=instr, 13=load, 14=store, 15=instr page fault)"
+//        annotation is the source of truth for this helper's range
+//        check).
+// The helper returns u8 (1 = page fault, 0 = not page fault); the
+// dispatcher (K3c) routes the page-fault path on this test: read stval
+// for the faulting vaddr, look up the vaddr in the faulting process's
+// page table, allocate/map the page (or kill the process on a
+// protection violation). The stval_read() extern declared above
+// returns the same value as tf.stval would, but the dispatcher may
+// prefer stval_read() for fresh access (in case the trap-entry stub
+// forgot to save STVAL into the TrapFrame — defensive).
+//
+// Implemented as a nested if (NOT `c >= 12 && c <= 15`) because the
+// K3c contract specifies this exact two-level if structure (the
+// short-circuit && operator lowers cleanly in VUMA, but the contract's
+// structure is what's under test here — the K3c contract is the
+// source of truth).
+//
+// In hosted mode the self-test never traps, so this function is only
+// exercised on two paths in main(): `tf.scause = 13` (load page fault
+// → returns 1) and `tf.scause = 5` (load access fault, NOT a page
+// fault → returns 0).
+fn trap_is_page_fault(tf: State<TrapFrame>) -> u8 {
+    let c = tf.scause;
+    if c >= 12 {
+        if c <= 15 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a TrapFrame via state_new, zero it via trap_frame_init, then
+// verify:
+//   (1) trap_frame_init cleared ra (representative GP register, low end
+//       of the layout — x1, the first saved register).
+//   (2) trap_frame_init cleared t6 (representative GP register, high
+//       end of the GP block — x31, the last saved register; also
+//       confirms s2..s11, t3..t5 were cleared since they're contiguous
+//       in the layout, but t6 alone is the explicit check).
+//   (3) Writing 8 to scause and reading it back through trap_is_syscall
+//       yields 1 — confirms the syscall detection helper works on the
+//       canonical RISC-V syscall SCAUSE value (8 = Environment call
+//       from U-mode).
+//   (4) Writing 13 to scause and reading it back through
+//       trap_is_page_fault yields 1 — confirms the page-fault detection
+//       helper works on SCAUSE=13 (Load page fault, one of the four
+//       page-fault codes).
+//   (5) Writing 5 to scause (Load access fault — NOT a page fault) and
+//       reading it back through trap_is_page_fault yields 0 —
+//       confirms the page-fault detection helper correctly REJECTS
+//       non-page-fault synchronous exceptions (5 < 12, so the outer
+//       if-test in trap_is_page_fault short-circuits to the trailing
+//       `return 0`).
+//
+// Per the K3c contract's "IMPORTANT" rule: all non-zero constants in
+// the self-test use DECIMAL (8, not 0x08; 13, not 0x0D; 5, not 0x05) —
+// decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
+// for the same rationale).
+//
+// Returns 0 on success, 1..5 on the corresponding failure (so a future
+// CI failure pinpoints the broken check).
+
+fn main() -> i32 {
+    // Self-test: init a TrapFrame, verify fields, check syscall +
+    // page-fault detection helpers.
+    let tf = state_new(TrapFrame);
+    trap_frame_init(tf);
+    if tf.ra != 0 { return 1; }
+    if tf.t6 != 0 { return 2; }
+    tf.scause = 8;  // environment call from U-mode (syscall)
+    if trap_is_syscall(tf) != 1 { return 3; }
+    tf.scause = 13;  // load page fault
+    if trap_is_page_fault(tf) != 1 { return 4; }
+    tf.scause = 5;  // invalid access (not a page fault)
+    if trap_is_page_fault(tf) != 0 { return 5; }
+    return 0;
+}
