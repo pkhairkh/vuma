@@ -380,6 +380,26 @@ fn encode_or(r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
+/// Encode AND — `AND r1, r2, dst`. Computes dst = r1 & r2.
+/// PA-RISC AND function code: 0x08000200 (same format as OR/ADD).
+fn encode_and(r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
+    let word = 0x08000200u32
+        | ((r1 as u32 & 0x1F) << 16)
+        | ((r2 as u32 & 0x1F) << 21)
+        | (dst as u32 & 0x1F);
+    word.to_be_bytes()
+}
+
+/// Encode XOR — `XOR r1, r2, dst`. Computes dst = r1 ^ r2.
+/// PA-RISC XOR function code: 0x08000280 (same format as OR/ADD).
+fn encode_xor(r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
+    let word = 0x08000280u32
+        | ((r1 as u32 & 0x1F) << 16)
+        | ((r2 as u32 & 0x1F) << 21)
+        | (dst as u32 & 0x1F);
+    word.to_be_bytes()
+}
+
 /// Encode COPY (OR) — `COPY r1, dst`. Moves r1 to dst.
 /// PA-RISC OR: 000010 00 r1 0 0 0000000 dst 0000 1001 00 r2
 /// With r2=r0: dst = r1 | 0 = r1.
@@ -2338,14 +2358,27 @@ impl Backend for HppaBackend {
         // Actually, hppa Linux kernel reads args 5-6 from the stack frame
         // at R30-36 and R30-32 (the standard outgoing args area).
         // The C ABI already put args 5-6 there before the CALL.
-        // So the simple_stub SHOULD work — but it doesn't because hppa's
-        // mmap (syscall 90) is actually old_mmap which takes a struct ptr.
-        // hppa Linux: __NR_mmap = 90, but it's the 6-arg version, not old_mmap.
-        // The issue is that the GATE instruction may not pass stack args.
-        // FIX: use a custom stub that copies args 5-6 from the stack into
-        // R22 and R21 (which the kernel may use for args 5-6), then GATE.
+        //
+        // CRITICAL: hppa MAP_ANONYMOUS = 0x10 (NOT 0x20 like x86).
+        // MAP_PRIVATE = 0x02. So MAP_PRIVATE|MAP_ANONYMOUS = 0x12.
+        // The arena lowering passes 0x22 (the x86 value). The stub must
+        // translate flags in R23 (arg 4): clear bit 0x20, set bit 0x10.
         syscall_stubs.push(("mmap".to_string(), {
             let mut code = Vec::new();
+            // Translate flags: R23 = (R23 & ~0x20) | 0x10
+            // R19 = 0x10 (hppa MAP_ANONYMOUS bit)
+            code.extend(ss_load_imm(R19, 0x10));
+            // R23 = R23 | R19 (set hppa MAP_ANONYMOUS bit)
+            code.extend_from_slice(&encode_or(R23, R19, R23));
+            // R19 = 0x20 (x86 MAP_ANONYMOUS bit to clear)
+            code.extend(ss_load_imm(R19, 0x20));
+            // R19 = ~R19 = R19 XOR R0... no, need -1. Load -1 into R18.
+            // Actually: R19 = R19 XOR 0xFFFF...FFFF. Load -1 into R18.
+            code.extend(ss_load_imm(R18, -1));
+            // R19 = R19 ^ R18 = ~0x20
+            code.extend_from_slice(&encode_xor(R19, R18, R19));
+            // R23 = R23 & R19 (clear bit 0x20)
+            code.extend_from_slice(&encode_and(R23, R19, R23));
             // Load arg 5 (fd) from [R30 - 32] into R22
             code.extend_from_slice(&encode_ldw(R30, -32, R22));
             // Load arg 6 (offset) from [R30 - 28] into R21

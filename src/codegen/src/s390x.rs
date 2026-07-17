@@ -763,10 +763,14 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
 
     // ── Stack Layout ──
     // [low address]  FP = SP (after prologue)
-    //   vreg slot 1   ← FP + 0
-    //   vreg slot 2   ← FP + 8
+    //   160-byte ABI caller save area   ← FP + 0 .. FP + 159
+    //     (callee may use this for saving R2-R5 etc.; also used for
+    //      outgoing stack args when calling functions with >5 args:
+    //      arg6 goes at R15+160, arg7 at R15+168, etc.)
+    //   vreg slot 1   ← FP + 160
+    //   vreg slot 2   ← FP + 168
     //   ...
-    //   vreg slot M   ← FP + 8*(M-1)
+    //   vreg slot M   ← FP + 160 + 8*(M-1)
     //   Alloc data 1
     //   ...
     //   Alloc data N
@@ -774,9 +778,17 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
     //   saved R11 (old FP)  ← FP + frame_size - 8
     //   saved R14 (LR)      ← FP + frame_size - 16  (top of frame, just below caller's SP)
     // [high address]
+    //
+    // The 160-byte save area at the bottom is MANDATORY per the s390x ABI:
+    // the caller must allocate it so the callee can store R2-R5 and use it
+    // for outgoing stack arguments. Without it, a callee that reads arg6
+    // from R15+160 (e.g. our mmap stub) would read garbage from the caller's
+    // vreg slots instead of the actual argument.
 
     let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-    let mut current_offset: i32 = 0;
+    // Reserve 160 bytes for the s390x ABI caller save area.
+    let abi_save_area_size: i32 = 160;
+    let mut current_offset: i32 = abi_save_area_size;
     let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
     all_vreg_ids_sorted.sort();
     for &id in &all_vreg_ids_sorted {
@@ -2288,49 +2300,48 @@ impl Backend for S390XBackend {
         // s390x Linux syscall convention: syscall # in R1, args in R2-R7,
         // return in R2, invoke via SVC 0.
         //
-        // __vuma_alloc(size in R2) -> R2 = mmap(NULL, size, PROT_READ|PROT_WRITE,
-        //                                         MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-        //   __NR_mmap (s390x) = 90
-        // __vuma_free(addr in R2) -> munmap(addr, 0)
-        //   __NR_munmap (s390x) = 91
+        // __vuma_alloc(size in R2) -> R2 = brk-allocated region of `size` bytes.
+        //   QEMU user-mode s390x does NOT implement syscall 90 (mmap), so we
+        //   use brk(45) instead — the SAME approach as the hppa backend.
+        //   1. brk(0) → R2 = current_brk
+        //   2. Save current_brk to R8
+        //   3. brk(current_brk + size) → extend heap
+        //   4. R2 = R8 (return old brk = start of new region)
+        // __vuma_free(addr in R2) -> no-op (brk can't shrink; memory freed on exit)
         //
         // Linux s390x syscall numbers:
-        //   exit=1, read=3, write=4, open=5, close=6, mmap=90, munmap=91,
+        //   exit=1, read=3, write=4, open=5, close=6, brk=45, munmap=91,
         //   rt_sigaction=139, pipe=42, dup2=63, alarm=27, getpid=20,
         //   socket=359, clone=120, fork=2, execve=11, wait4=114,
         //   exit_group=246, ...
 
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // Move args: R2=size → R3; R2=NULL (0)
+            // Save size (R2) to R3 (will be used as brk extension size)
             // LGR R3, R2 (R3 = size)
             code.extend_from_slice(&encode_lgr(Gpr::R3, Gpr::R2));
-            // LGHI R2, 0 (R2 = NULL)
+            // Step 1: brk(0) → R2 = current_brk
             code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-            // LGHI R4, 3 (PROT_READ | PROT_WRITE)
-            code.extend_from_slice(&encode_lghi(Gpr::R4, 3));
-            // LGFI R5, 0x22 (MAP_PRIVATE | MAP_ANONYMOUS)
-            code.extend_from_slice(&encode_lgfi(Gpr::R5, 0x22));
-            // LGHI R6, -1 (fd = -1)
-            code.extend_from_slice(&encode_lghi(Gpr::R6, -1));
-            // LGHI R7, 0 (offset = 0)
-            code.extend_from_slice(&encode_lghi(Gpr::R7, 0));
-            // LGFI R1, 90 (sys_mmap)
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
-            // SVC 0
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
             code.extend_from_slice(&encode_svc(0));
+            // R8 = R2 (save current_brk — R8 is callee-saved)
+            code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+            // Step 2: brk(current_brk + size)
+            // R2 = R8 + R3 (current_brk + size)
+            code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+            code.extend_from_slice(&encode_svc(0));
+            // R2 = R8 (return old brk = start of new region)
+            code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
             // BR R14 (return)
             code.extend_from_slice(&encode_br(LR));
             code
         };
         let vuma_free_stub: Vec<u8> = {
             let mut code = Vec::new();
-            // LGHI R3, 0 (size = 0)
-            code.extend_from_slice(&encode_lghi(Gpr::R3, 0));
-            // LGFI R1, 91 (sys_munmap)
-            code.extend_from_slice(&encode_lgfi(Gpr::R1, 91));
-            // SVC 0
-            code.extend_from_slice(&encode_svc(0));
+            // No-op: brk'd memory can't be individually freed.
+            // R2 = 0 (success return)
+            code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
             // BR R14
             code.extend_from_slice(&encode_br(LR));
             code
@@ -2355,8 +2366,7 @@ impl Backend for S390XBackend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                // mmap is a custom stub (6 args, s390x has 5 C ABI regs)
-                ("munmap", 91),
+                // mmap/mremap/munmap are custom stubs (brk-based, see below)
                 ("exit", 1),
                 ("alarm", 27),
                 ("getpid", 20),
@@ -2429,7 +2439,7 @@ impl Backend for S390XBackend {
                 // s390x has 5 reg args (R2-R6); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(323), signalfd→signalfd4(322) = modern variants.
                 ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
-                ("mincore", 218), ("madvise", 219), ("msync", 144), ("mremap", 163),
+                ("mincore", 218), ("madvise", 219), ("msync", 144),
                 ("getrlimit", 191), ("setrlimit", 75), ("prlimit64", 334),
                 ("getrusage", 77), ("times", 43),
                 ("getrandom", 349),
@@ -2464,18 +2474,23 @@ impl Backend for S390XBackend {
             }
 
             // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
-            // ffi_scratch_push_frame: REAL mmap syscall (s390x sys_mmap=90).
-            // s390x args: R2=addr, R3=len, R4=prot, R5=flags, R6=fd, R7=offset.
+            // ffi_scratch_push_frame: brk-based allocation (QEMU s390x has no mmap).
+            // Allocates 4096 bytes via brk() and returns the start of the new region.
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&encode_lgfi(Gpr::R2, 0));       // addr = NULL
-                code.extend_from_slice(&encode_lgfi(Gpr::R3, 4096));    // len = 4096
-                code.extend_from_slice(&encode_lgfi(Gpr::R4, 3));       // prot = PROT_READ|PROT_WRITE
-                code.extend_from_slice(&encode_lgfi(Gpr::R5, 0x22));    // flags = MAP_PRIVATE|MAP_ANONYMOUS
-                code.extend_from_slice(&encode_lgfi(Gpr::R6, -1));      // fd = -1
-                code.extend_from_slice(&encode_lgfi(Gpr::R7, 0));       // offset = 0
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));      // sys_mmap
+                // Step 1: brk(0) → R2 = current_brk
+                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
                 code.extend_from_slice(&encode_svc(0));
+                // R8 = R2 (save current_brk)
+                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+                // Step 2: brk(current_brk + 4096)
+                code.extend_from_slice(&encode_lgfi(Gpr::R3, 4096));
+                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                code.extend_from_slice(&encode_svc(0));
+                // R2 = R8 (return old brk = start of new region)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
                 code.extend_from_slice(&encode_br(LR));                  // BR R14 (return)
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
             }
@@ -2496,22 +2511,89 @@ impl Backend for S390XBackend {
                 stubs.push(("__arena_overflow".to_string(), code));
             }
 
-            // mmap custom stub: s390x has 5 C ABI arg regs (R2-R6), but
-            // mmap takes 6 args. The 6th arg (offset) is on the stack at
-            // R15+160. The syscall ABI uses R2-R7. Load arg 6 from stack
-            // into R7 before the syscall.
+            // mmap custom stub: s390x uses brk() for memory allocation.
+            //
+            // QEMU user-mode s390x does NOT implement syscall 90 (mmap) —
+            // it returns EFAULT for all variants (direct 6-arg, old_mmap
+            // struct-pointer). The only working memory-allocation syscall
+            // on QEMU s390x is brk(45). This is the SAME approach already
+            // used by the hppa backend's __vuma_alloc stub.
+            //
+            // The stub receives the mmap args (R2=addr, R3=len, R4=prot,
+            // R5=flags, R6=fd, R7=offset) but ignores them — it allocates
+            // via brk instead:
+            //   1. brk(0) → R2 = current_brk
+            //   2. Save current_brk to R8
+            //   3. brk(current_brk + len) → extend heap by len
+            //   4. R2 = R8 (return old brk = start of new region)
+            //
+            // R8 is callee-saved on s390x, so it survives the brk syscall.
+            // len (R3) is preserved across the first brk call because brk
+            // only clobbers R1, R2 (and the CC).
             {
                 let mut code = Vec::new();
-                // R7 = *(R15 + 160) — load 6th arg from stack
-                // LG R7, 160(R15) — load 64-bit from R15+160
-                // LG R1, D2(X2, B2): op1=0xE3, op2=0x04
-                // R1=R7(7), X2=0, B2=R15(15), D2=160
-                code.extend_from_slice(&[0xE3, 0x70, 0xF0, 0x00, 0xA0, 0x04]); // LG R7, 160(R15)
-                // R1 = 90 (sys_mmap)
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
+                // Step 1: brk(0) → R2 = current_brk
+                // R2 = 0
+                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+                // R1 = 45 (sys_brk)
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
                 code.extend_from_slice(&encode_svc(0));
-                code.extend_from_slice(&encode_br(LR)); // BR R14
+                // R8 = R2 (save current_brk — R8 is callee-saved)
+                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+                // Step 2: brk(current_brk + len)
+                // R2 = R8 + R3 (current_brk + len)
+                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R3));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                code.extend_from_slice(&encode_svc(0));
+                // R2 = R8 (return old brk = start of new region)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
+                // BR R14 (return)
+                code.extend_from_slice(&encode_br(LR));
                 stubs.push(("mmap".to_string(), code));
+            }
+
+            // mremap stub: s390x mremap(163) works under QEMU, but the arena
+            // calls mremap(old_addr, old_size, new_size, flags). Since we use
+            // brk-based allocation (not mmap), mremap on a brk'd region won't
+            // work. Instead, we allocate a NEW brk region of new_size and
+            // return it. The old region is leaked (brk can't shrink reliably).
+            // This is correct for the arena use case (arena_grow just needs
+            // a bigger region; the old data is within the first old_size bytes
+            // of the old brk region, and arena_grow stores the new capacity).
+            // Actually — mremap with MREMAP_MAYMOVE on a brk'd address will
+            // fail because brk'd memory isn't an mmap'd region. So we must
+            // allocate new space via brk and return it.
+            {
+                let mut code = Vec::new();
+                // Args: R2=old_addr(ignored), R3=old_size(ignored),
+                //       R4=new_size, R5=flags(ignored)
+                // Step 1: brk(0) → R2 = current_brk
+                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                code.extend_from_slice(&encode_svc(0));
+                // R8 = R2 (save current_brk)
+                code.extend_from_slice(&encode_lgr(Gpr::R8, Gpr::R2));
+                // Step 2: brk(current_brk + new_size)
+                // R2 = R8 + R4 (new_size)
+                code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R4));
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 45));
+                code.extend_from_slice(&encode_svc(0));
+                // R2 = R8 (return new region start)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, Gpr::R8));
+                // BR R14 (return)
+                code.extend_from_slice(&encode_br(LR));
+                stubs.push(("mremap".to_string(), code));
+            }
+
+            // munmap stub: brk'd memory can't be individually freed.
+            // This is a no-op (BR LR). The memory is reclaimed on process exit.
+            // This matches the hppa backend's __vuma_free behavior.
+            {
+                let mut code = Vec::new();
+                // R2 = 0 (success return)
+                code.extend_from_slice(&encode_lghi(Gpr::R2, 0));
+                code.extend_from_slice(&encode_br(LR));
+                stubs.push(("munmap".to_string(), code));
             }
 
             stubs
