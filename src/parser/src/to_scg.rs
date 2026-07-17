@@ -3316,6 +3316,20 @@ impl AstToScg {
                 self.collect_uses(state, uses);
                 self.collect_uses(value, uses);
             }
+            // Arena State Model (Wave 1)
+            Expr::ArenaNew { capacity, .. } => {
+                self.collect_uses(capacity, uses);
+            }
+            Expr::ArenaAlloc { arena, .. } => {
+                self.collect_uses(arena, uses);
+            }
+            Expr::ArenaGrow { arena, min_capacity, .. } => {
+                self.collect_uses(arena, uses);
+                self.collect_uses(min_capacity, uses);
+            }
+            Expr::ArenaFree { arena, .. } => {
+                self.collect_uses(arena, uses);
+            }
         }
     }
 
@@ -3493,6 +3507,11 @@ impl AstToScg {
             Expr::StateInit { layout_name, .. } => format!("State<{}>", layout_name),
             Expr::StateRead { .. } => "unknown".to_string(),
             Expr::StateWrite { .. } => "unknown".to_string(),
+            // Arena State Model (Wave 1)
+            Expr::ArenaNew { .. } => "State<Arena>".to_string(),
+            Expr::ArenaAlloc { layout_name, .. } => format!("State<{}>", layout_name),
+            Expr::ArenaGrow { .. } => "State<Arena>".to_string(),
+            Expr::ArenaFree { .. } => "void".to_string(),
         }
     }
 
@@ -3702,6 +3721,19 @@ impl AstToScg {
                     field,
                     self.expr_to_string(value)
                 )
+            }
+            // Arena State Model (Wave 1)
+            Expr::ArenaNew { capacity, .. } => {
+                format!("arena_new({})", self.expr_to_string(capacity))
+            }
+            Expr::ArenaAlloc { arena, layout_name, .. } => {
+                format!("arena_alloc({}, {})", self.expr_to_string(arena), layout_name)
+            }
+            Expr::ArenaGrow { arena, min_capacity, .. } => {
+                format!("arena_grow({}, {})", self.expr_to_string(arena), self.expr_to_string(min_capacity))
+            }
+            Expr::ArenaFree { arena, .. } => {
+                format!("arena_free({})", self.expr_to_string(arena))
             }
         }
     }

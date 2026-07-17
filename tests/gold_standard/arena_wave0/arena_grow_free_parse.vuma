@@ -1,0 +1,13 @@
+// arena_wave0/arena_grow_free_parse — arena_grow + arena_free parse test
+// Expected exit code: 0
+//
+// Wave 1 test: arena_grow parses and returns the updated State<Arena>.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+
+fn main() -> i32 {
+    let arena = arena_new(4096);
+    let arena = arena_grow(arena, 65536);
+    arena_free(arena);
+    return 0;
+}
