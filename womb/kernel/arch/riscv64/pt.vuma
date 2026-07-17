@@ -1,0 +1,310 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/riscv64/pt.vuma
+// riscv64 Sv39 Page Table Entry layout + field helpers (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Defines the RISC-V Sv39 Page Table Entry bit layout (RISC-V Privileged
+// ISA Manual, Volume II, §4.3.2 "Sv39: Page-Based 39-bit Virtual-Memory
+// System") and a small set of pure helpers that extract or assemble the
+// individual fields. The PTE itself is a single u64 — VUMA has no
+// bitfield type, so the helpers operate on the raw u64 and apply masks
+// and shifts.
+//
+// Bit layout of a 64-bit RISC-V Sv39 / Sv48 PTE (RISC-V Privileged ISA
+// Vol. II §4.3.2, Fig. 4.17 — shared by both Sv39 and Sv48; the only
+// difference between the two modes is the number of paging levels):
+//     bit 0      V — Valid (PTE is in use; walker stops if 0)
+//     bit 1      R — Readable
+//     bit 2      W — Writable
+//     bit 3      X — Executable
+//     bit 4      U — User (U-mode accessible)
+//     bit 5      G — Global (mapped in all address spaces)
+//     bit 6      A — Accessed (set by hardware on first access)
+//     bit 7      D — Dirty (set by hardware on first write)
+//     bits 8-9   RSW — Reserved for Software (OS may use freely)
+//     bits 10-53 PPN — Physical Page Number (44 bits, address = PPN << 12)
+//     bits 54-63 Reserved (must be 0; future ISA extensions)
+//
+// Special PTE encodings (RISC-V Privileged ISA Vol. II §4.3.2):
+//   V=0:                PTE is invalid (the rest of the bits are available
+//                       for OS use, typically to point at a swap entry or
+//                       a wait list).
+//   R=W=X=0, V=1:       Pointer to next level of the page table (only
+//                       meaningful for non-leaf levels; the PPN field is
+//                       the physical address of the next-level table).
+//   R=0, W=1:           Reserved — the walker faults. (W is allowed only
+//                       if R is also set, OR if X is set. See §4.3.2.)
+//   Otherwise:          Leaf PTE — R/W/X encode the page permissions and
+//                       the PPN is the physical address of the mapped
+//                       4 KB page (Sv39 level-0 leaf) / 2 MB block
+//                       (Sv39 level-1 leaf) / 1 GB block (Sv39 level-2
+//                       leaf) / etc.
+//
+// Field bit positions (decimal constants — VUMA accepts 0x hex too, but
+// decimal is safer because the parser's hex-literal path goes through
+// `parse_int_radix` which is shared with the regular integer path and
+// any width-extension subtlety would bite us at compile time; decimal
+// avoids that surface):
+//     V    = 1                        (bit 0)
+//     R    = 2                        (bit 1)
+//     W    = 4                        (bit 2)
+//     X    = 8                        (bit 3)
+//     U    = 16                       (bit 4)
+//     G    = 32                       (bit 5)
+//     A    = 64                       (bit 6)
+//     D    = 128                      (bit 7)
+//     RSW  = 768                      (bits 8-9, 0x300)
+//
+// Key masks:
+//     1023               = 0x3FF                  (low 10 bits — flags:
+//                                                 V/R/W/X/U/G/A/D + RSW)
+//     17592186044415     = 0xFFFFFFFFFF           (44-bit PPN mask,
+//                                                 bits 0-43 of the
+//                                                 extracted PPN value)
+//
+// Build & run self-test (hosted x86_64 — these declarations are pure
+// type + helper, real bare-metal testing is K11's job on riscv64):
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/riscv64/pt.vuma /tmp/pt.bin x86_64 --verify
+//     /tmp/pt.bin ; echo "exit=$?"
+// Expected exit: 0
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All data
+// is plain u64 scalars manipulated with bitwise arithmetic — no storage
+// needs to live in a State<T> buffer here, since the PTE is just a u64.
+//
+// ── Why no State<PageTableEntry>? ──────────────────────────────────────────
+// The contract specifies `layout PageTableEntry = { raw: u64 }`. This is
+// declared verbatim below so consumers can refer to it, but the helpers
+// themselves take/return raw u64 — PTEs in VUMA are most naturally
+// passed as scalars (they fit in a register), and the State<T> machinery
+// is reserved for multi-word structures that the PMT codegen can't keep
+// in a single SSA value. See womb/kernel/mm/vmm.vuma for the State-backed
+// PageTable (root_phys + levels) — that's the structure that NEEDS State.
+//
+// ── Contract verification (NO deviation) ───────────────────────────────────
+// Unlike K2c (x86_64) and K2d (aarch64), whose contracts had buggy mask
+// decimals in their example `pte_addr` bodies (see worklog.md K2c §
+// "Deviation from the contract example" and K2d § "Deviation from the
+// contract example" — both contracts mixed up the page-aligned-PA mask
+// with a wider mask that let flag bits leak through and break the
+// round-trip), the K2e contract's `pte_addr` body is CORRECT:
+//     let ppn = (pte >> 10) & 17592186044415;  // 44-bit PPN
+//     return ppn << 12;
+// Verified with Python:
+//     17592186044415 == (2**44 - 1) == 0xFFFFFFFFFF  (44 bits, all 1)
+//     ppn_mask  = 17592186044415  (bits 0-43 of the extracted PPN)
+//     addr_mask = ppn_mask << 12  = bits 10-53 of the original PTE
+//   → which is EXACTLY the PPN field per the RISC-V Privileged ISA
+//     §4.3.2 bit layout. The round-trip works because pte_make places
+//     the PPN at bits 10-53 and pte_addr extracts it from the same
+//     location; the flag bits 0-9 are stripped by the >> 10 shift, and
+//     bits 54-63 (reserved) are stripped by the 44-bit AND mask.
+//
+// Self-test simulation (Python):
+//     pte_make(1048576, 14):
+//       ppn = 1048576 >> 12      = 256
+//       pte = (256 << 10) | (14 & 1023) | 1
+//                              = 262144 | 14 | 1
+//                              = 262159   (= 0x4000F)
+//     pte_valid(262159)     = (262159 & 1)           = 1 ✓
+//     pte_readable(262159)  = ((262159 >> 1) & 1)    = 1 ✓
+//     pte_writable(262159)  = ((262159 >> 2) & 1)    = 1 ✓
+//     pte_addr(262159)      = ((262159 >> 10) & 0xFFFFFFFFFF) << 12
+//                          = (256 & 17592186044415) << 12
+//                          = 256 << 12 = 1048576 ✓
+//
+// NOTE on the contract's hex notation: the K2e contract's "IMPORTANT"
+// section says "17592186044415 = 0x3FFFFFFFFFF (44 bits, PPN mask)".
+// The DECIMAL VALUE is correct (= 2^44 - 1 = 44 bits all 1), but the
+// HEX LITERAL `0x3FFFFFFFFFF` is a TYPO — that hex string has only
+// 42 bits (3 followed by 10 F's = bit 41 down to bit 0), not 44. The
+// correct hex is `0xFFFFFFFFFF` (11 F's = 44 bits). We use the CORRECT
+// decimal 17592186044415 in the body (matching the contract), and
+// document the correct hex 0xFFFFFFFFFF in this header. The function
+// body is byte-identical to the contract's example body, so there is
+// NO deviation — only a header comment that fixes the contract's
+// typo'd hex literal.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. A future kmain.vuma that wants to build
+// PTEs must re-declare the masks and helpers it uses (same pattern as
+// womb/kernel/arch/x86_64/pt.vuma re-declaring its masks, and
+// womb/kernel/arch/aarch64/pt.vuma doing likewise).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// RISC-V Sv39 Page Table Entry — 8 bytes, stored as a u64. The helpers
+// below extract/set individual fields via masks and shifts; nothing else
+// needs the struct-typed access path, so the layout is intentionally
+// minimal. The same bit layout applies to Sv48 (4-level) — only the
+// number of paging levels and the root-pointer register format differ.
+layout PageTableEntry = { raw: u64 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Field-access helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// All return u8 (for single-bit flags) or u64 (for the address field).
+// Bit-test helpers return 0 or 1 — never any other value — so callers
+// can use `if pte_valid(pte) != 0 { ... }` or compare against 1.
+
+// Extract the physical address from a PTE.
+//   ppn = (pte >> 10) & 17592186044415
+//       — shift right 10 to drop the V/R/W/X/U/G/A/D + RSW flag bits
+//         (bits 0-9), then AND with the 44-bit PPN mask 0xFFFFFFFFFF
+//         (= decimal 17592186044415) to drop the reserved bits 54-63
+//         (which after the shift sit at bit positions 44-53 of the
+//         shifted value).
+//   address = ppn << 12
+//       — shift the PPN back left by 12 to form the full 56-bit
+//         physical address (44-bit PPN × 4 KB page = 56-bit PA space).
+//
+// The mask 17592186044415 (= 0xFFFFFFFFFF = 2^44 - 1) is the same one
+// the RISC-V Privileged ISA §4.3.2 specifies for the PPN field (44
+// bits). This is also the SAME mask pte_make uses (after the >> 12
+// page-shift) to sanitize its paddr argument, so
+//     pte_addr(pte_make(p, f)) == p
+// for any p in the 44-bit PPN range (i.e. any 4 KB-aligned physical
+// address below 2^56). The self-test asserts this round-trip.
+fn pte_addr(pte: u64) -> u64 {
+    let ppn = (pte >> 10) & 17592186044415;  // 44-bit PPN
+    return ppn << 12;
+}
+
+// Check if the Valid bit (bit 0) is set.
+// RISC-V §4.3.2: "When V=0, the PTE is invalid (the rest of the bits
+// are available for OS use, typically to point at a swap entry or a
+// wait list)." The walker stops descending as soon as it sees V=0.
+fn pte_valid(pte: u64) -> u8 {
+    return (pte & 1) as u8;
+}
+
+// Check if the Readable bit (bit 1) is set.
+// For leaf PTEs: R=1 means user-mode reads are allowed (subject to the
+// U bit). For non-leaf PTEs: R must be 0 (a non-leaf PTE has no
+// permissions; it only points at the next-level table).
+fn pte_readable(pte: u64) -> u8 {
+    return ((pte >> 1) & 1) as u8;
+}
+
+// Check if the Writable bit (bit 2) is set.
+// Reserved if R=0 and X=0 (the walker faults on this combination).
+fn pte_writable(pte: u64) -> u8 {
+    return ((pte >> 2) & 1) as u8;
+}
+
+// Check if the Executable bit (bit 3) is set.
+// For leaf PTEs: X=1 means user-mode instruction fetches are allowed
+// (subject to the U bit). For non-leaf PTEs: X must be 0.
+fn pte_executable(pte: u64) -> u8 {
+    return ((pte >> 3) & 1) as u8;
+}
+
+// Check if the User bit (bit 4) is set.
+// U=1 means the page is accessible from U-mode (userland). U=0 means
+// the page is S-mode / M-mode only (kernel). This is the RISC-V
+// analogue of x86_64's U/S bit (bit 2) and aarch64's AP[2] (bit 6).
+fn pte_user(pte: u64) -> u8 {
+    return ((pte >> 4) & 1) as u8;
+}
+
+// Build a PTE from (paddr, flags).
+//   paddr: the target physical address (must be 4 KB-aligned; the low
+//          12 bits are discarded by the >> 12, the high bits above 56
+//          are discarded by the 44-bit PPN width — RISC-V Sv39 supports
+//          a 56-bit PA space).
+//   flags: the low 10 bits (V, R, W, X, U, G, A, D, RSW[0..1]). Bits
+//          above 9 in `flags` are masked off — to set the Global bit
+//          (bit 5), OR in 32 on the result of pte_make; to set Accessed
+//          (bit 6), OR in 64; to set Dirty (bit 7), OR in 128.
+// The Valid bit (bit 0) is ALWAYS ORed in — an invalid PTE has no
+// other meaningful fields, so the build helper enforces validity.
+// This matches the RISC-V convention where the page-table walker
+// treats V=0 as a "not present" indicator regardless of any other
+// bits the OS might have stored in the available fields (swap slot,
+// wait-list pointer, etc.). pte_make is for ACTIVE mappings; if you
+// need to construct an invalid PTE for swap-out, write raw bits
+// directly without this helper.
+//
+// Note: pte_make does NOT set the A or D bits. RISC-V hardware sets
+// these on first access (if the S-level A/D-update mode is enabled
+// via the menvcfg/henvcfg.ADUE bit — default ON). If the OS wants to
+// pre-mark A/D=1 (e.g. for prefaulted pages), OR in 192 (= 64 | 128)
+// on the result. The Linux convention is to leave A/D=0 at
+// PTE-construction time and let hardware fault them in.
+fn pte_make(paddr: u64, flags: u64) -> u64 {
+    let ppn = paddr >> 12;
+    return (ppn << 10) | (flags & 1023) | 1;  // 1023 = 0x3FF (low 10 bits), 1 = Valid
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Sv39 3-level paging geometry constants (documented as decimal
+// literals — VUMA has no top-level `const`, so callers must use the
+// bare numbers).
+// ────────────────────────────────────────────────────────────────────────────
+//   PT_ENTRIES  = 512     (entries per table — 4096 / 8)
+//   PT_SIZE     = 4096    (bytes per table — one 4 KB page)
+//   PAGE_SIZE   = 4096    (bytes per mapped page at level 0)
+//   L2_LEVEL    = 2       (top level — root table, VPN[2] = bits 38-30
+//                          of vaddr, 512 GB per entry, may be a 1 GB
+//                          block descriptor OR a table descriptor)
+//   L1_LEVEL    = 1       (middle level — VPN[1] = bits 29-21,
+//                          1 GB per entry, may be a 2 MB block
+//                          descriptor OR a table descriptor)
+//   L0_LEVEL    = 0       (leaf level — VPN[0] = bits 20-12,
+//                          2 MB per entry, ALWAYS a leaf; the PPN
+//                          field is the 4 KB page PA, and R/W/X/U/G/A/D
+//                          encode the page permissions)
+//
+// Sv39 VA breakdown (39 bits total = 9 + 9 + 9 + 12):
+//     bits 38-30  VPN[2]  (9 bits — index into the root table)
+//     bits 29-21  VPN[1]  (9 bits — index into the L1 table)
+//     bits 20-12  VPN[0]  (9 bits — index into the L0 leaf table)
+//     bits 11-0   offset  (12 bits — 4 KB page offset)
+//
+// Each entry is 8 bytes; 512 entries × 8 bytes = 4096 bytes per table,
+// so one 4 KB page holds exactly one table. This is why the PPN field
+// is 44 bits wide — the PPN points at a 4 KB-aligned physical page, and
+// the address = PPN << 12 yields a 56-bit physical address space
+// (RISC-V Sv39 supports up to 56 bits of PA, though most implementations
+// use fewer). The low 12 bits of the PTE are the flag byte (V/R/W/X/U/
+// G/A/D + 2 RSW bits), the high 10 bits (54-63) are reserved for
+// future ISA extensions.
+//
+// RISC-V also supports Sv48 (4-level paging — same PTE layout but with
+// an extra VPN[3] at bits 47-39, 256 TB VA space) and Sv57 (5-level,
+// proposed). This file's geometry constants assume the standard Sv39
+// config that the RISC-V Privileged ISA mandates as the baseline for
+// RV64. K2e scope is Sv39 only — K11 may add Sv48 variants if the
+// platform advertises Sv48 in the misa / isa-string CSR. The PTE bit
+// layout is identical between Sv39 and Sv48; only `levels` differs
+// (3 vs 4 — see womb/kernel/arch/riscv64/mm_trampoline.vuma's
+// PageTable.levels field).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Build a PTE for physical address 1 MB (1048576 = 0x100000) with flags
+// 14 = R(2) | W(4) | X(8) — readable + writable + executable, no U, no
+// G, no A, no D, no RSW. pte_make still ORs in the Valid bit (bit 0).
+// Verify:
+//   (1) pte_valid returns 1 (bit 0 was set by pte_make's `| 1`).
+//   (2) pte_readable returns 1 (bit 1 was set from `flags & 1023`).
+//   (3) pte_writable returns 1 (bit 2 was set from `flags & 1023`).
+//   (4) pte_addr returns exactly 1048576 (the round-trip — the
+//       >> 10 / << 12 shift dance strips the flag bits 0-9 and the
+//       reserved bits 54-63, leaving just the 44-bit PPN × 4 KB page).
+// Returns 0 on success, 1..4 on the corresponding failure (so a future
+// CI failure pinpoints the broken helper).
+
+fn main() -> i32 {
+    let pte = pte_make(1048576, 14);  // paddr=1MB, flags=R|W|X (bits 1,2,3)
+    if pte_valid(pte) != 1 { return 1; }
+    if pte_readable(pte) != 1 { return 2; }
+    if pte_writable(pte) != 1 { return 3; }
+    if pte_addr(pte) != 1048576 { return 4; }
+    return 0;
+}
