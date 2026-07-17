@@ -85,6 +85,14 @@ pub enum NodeType {
     /// verifier treats this the same as a `StateTransform` consume: any
     /// subsequent read/write to the consumed vreg is a linearity error.
     ForeignConsume,
+    /// Arena creation node (Arena Model — `arena_new(capacity)`).
+    ArenaNew,
+    /// Arena allocation node (Arena Model — `arena_alloc(arena, Layout)`).
+    ArenaAlloc,
+    /// Arena growth node (Arena Model — `arena_grow(arena, min_cap)`).
+    ArenaGrow,
+    /// Arena destruction node (Arena Model — `arena_free(arena)`).
+    ArenaFree,
 }
 
 impl std::fmt::Display for NodeType {
@@ -110,6 +118,10 @@ impl std::fmt::Display for NodeType {
             NodeType::StateWrite => write!(f, "StateWrite"),
             NodeType::StateTransform => write!(f, "StateTransform"),
             NodeType::ForeignConsume => write!(f, "ForeignConsume"),
+            NodeType::ArenaNew => write!(f, "ArenaNew"),
+            NodeType::ArenaAlloc => write!(f, "ArenaAlloc"),
+            NodeType::ArenaGrow => write!(f, "ArenaGrow"),
+            NodeType::ArenaFree => write!(f, "ArenaFree"),
         }
     }
 }
@@ -206,6 +218,14 @@ pub enum NodePayload {
     StateTransform(StateTransformNode),
     /// Payload for `NodeType::ForeignConsume`.
     ForeignConsume(ForeignConsumeNode),
+    /// Payload for `NodeType::ArenaNew`.
+    ArenaNew(ArenaNewNode),
+    /// Payload for `NodeType::ArenaAlloc`.
+    ArenaAlloc(ArenaAllocNode),
+    /// Payload for `NodeType::ArenaGrow`.
+    ArenaGrow(ArenaGrowNode),
+    /// Payload for `NodeType::ArenaFree`.
+    ArenaFree(ArenaFreeNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -775,6 +795,61 @@ pub struct ForeignConsumeNode {
     pub input_vreg: u32,
     /// Name of the State's layout (for diagnostics).
     pub layout_name: String,
+}
+
+// ── Arena State Model nodes (Wave 2) ─────────────────────────────────────
+
+/// Data specific to an arena-new node (`NodeType::ArenaNew`).
+///
+/// `arena_new(capacity)` → `State<Arena>`. The arena is backed by an
+/// mmap'd region of `capacity` bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArenaNewNode {
+    /// Virtual register holding the capacity argument.
+    pub capacity_vreg: u32,
+    /// Virtual register receiving the resulting `State<Arena>`.
+    pub result_vreg: u32,
+}
+
+/// Data specific to an arena-alloc node (`NodeType::ArenaAlloc`).
+///
+/// `arena_alloc(arena, Layout)` → `(State<Arena>, State<Layout>)`.
+/// Bump-allocates inside the arena. The arena is consumed and re-produced
+/// (linear consumption, same as StateTransform).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArenaAllocNode {
+    /// Virtual register holding the input arena.
+    pub arena_vreg: u32,
+    /// Name of the layout to allocate.
+    pub layout_name: String,
+    /// Virtual register receiving the updated arena.
+    pub result_arena_vreg: u32,
+    /// Virtual register receiving the allocated `State<Layout>`.
+    pub result_state_vreg: u32,
+}
+
+/// Data specific to an arena-grow node (`NodeType::ArenaGrow`).
+///
+/// `arena_grow(arena, min_capacity)` → `State<Arena>`. Grows the arena's
+/// mmap'd region via mremap.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArenaGrowNode {
+    /// Virtual register holding the input arena.
+    pub arena_vreg: u32,
+    /// Virtual register holding the min_capacity argument.
+    pub min_capacity_vreg: u32,
+    /// Virtual register receiving the updated arena.
+    pub result_vreg: u32,
+}
+
+/// Data specific to an arena-free node (`NodeType::ArenaFree`).
+///
+/// `arena_free(arena)` → void. Unmaps the arena's mmap'd region.
+/// The arena is consumed (linear).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArenaFreeNode {
+    /// Virtual register holding the arena being freed.
+    pub arena_vreg: u32,
 }
 
 #[cfg(test)]

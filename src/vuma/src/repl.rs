@@ -176,6 +176,10 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::ForeignConsume(s) => {
             format!("foreign_consume({})", s.layout_name)
         }
+        NodePayload::ArenaNew(_) => "arena_new".to_string(),
+        NodePayload::ArenaAlloc(s) => format!("arena_alloc({})", s.layout_name),
+        NodePayload::ArenaGrow(_) => "arena_grow".to_string(),
+        NodePayload::ArenaFree(_) => "arena_free".to_string(),
     }
 }
 

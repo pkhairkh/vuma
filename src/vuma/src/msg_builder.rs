@@ -517,7 +517,11 @@ impl MsgBuilder {
             | ScgNodeType::StateRead
             | ScgNodeType::StateWrite
             | ScgNodeType::StateTransform
-            | ScgNodeType::ForeignConsume => ScgNodeMapping::None,
+            | ScgNodeType::ForeignConsume
+            | ScgNodeType::ArenaNew
+            | ScgNodeType::ArenaAlloc
+            | ScgNodeType::ArenaGrow
+            | ScgNodeType::ArenaFree => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);

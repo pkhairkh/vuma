@@ -408,7 +408,11 @@ impl BDInferenceEngine {
             | NodeType::StateRead
             | NodeType::StateWrite
             | NodeType::StateTransform
-            | NodeType::ForeignConsume => self.compute_phantom_bd(scg, node_id, bd_map),
+            | NodeType::ForeignConsume
+            | NodeType::ArenaNew
+            | NodeType::ArenaAlloc
+            | NodeType::ArenaGrow
+            | NodeType::ArenaFree => self.compute_phantom_bd(scg, node_id, bd_map),
         }
     }
 
@@ -883,7 +887,11 @@ impl BDInferenceEngine {
             | NodeType::StateRead
             | NodeType::StateWrite
             | NodeType::StateTransform
-            | NodeType::ForeignConsume => None,
+            | NodeType::ForeignConsume
+            | NodeType::ArenaNew
+            | NodeType::ArenaAlloc
+            | NodeType::ArenaGrow
+            | NodeType::ArenaFree => None,
         }
     }
 

@@ -378,7 +378,11 @@ fn process_node(
         | NodeType::StateRead
         | NodeType::StateWrite
         | NodeType::StateTransform
-        | NodeType::ForeignConsume => {
+        | NodeType::ForeignConsume
+        | NodeType::ArenaNew
+        | NodeType::ArenaAlloc
+        | NodeType::ArenaGrow
+        | NodeType::ArenaFree => {
             process_passthrough(scg, ctx, node)?;
         }
     }
