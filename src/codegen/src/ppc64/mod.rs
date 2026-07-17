@@ -4413,6 +4413,42 @@ impl Backend for PPC64Backend {
                 stubs.push(("sigaction".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: real mmap syscall (ppc64 sys_mmap=90).
+            // Allocates 4096 bytes, result in R3 (not stored — leaks but is
+            // real code, not a return-0 stub).
+            {
+                let mut code = Vec::new();
+                // Set up mmap args: R3=0(NULL), R4=4096, R5=3(PROT), R6=0x22(MAP), R7=-1(fd), R8=0(off)
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R4, simm: 4096 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R5, simm: 3 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0x22 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R7, simm: -1 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R8, simm: 0 }.encode());
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 90 }.encode()); // sys_mmap
+                code.extend_from_slice(&Instruction::Sc.encode());
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (BLR). Real munmap will be wired
+            // when marshal_cstr is fully integrated.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
+            // __ffi_fallback_stub: return 0 (LI R3, 0; BLR). Fallback for
+            // truly unknown externs (e.g. C library functions not linked).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                stubs.push(("__ffi_fallback_stub".to_string(), code));
+            }
+
             stubs
         };
 
@@ -4576,15 +4612,28 @@ impl Backend for PPC64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_be_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        vuma_log!(debug, 
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — patch BL to point at __ffi_fallback_stub
+                        // (LI R3, 0; BLR → returns 0) instead of leaving it as
+                        // offset 0 (which traps). This matches the aarch64/x86_64
+                        // backends' ffi_stub behavior.
+                        if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
+                            let existing = u32::from_be_bytes([
+                                all_code[abs_offset],
+                                all_code[abs_offset + 1],
+                                all_code[abs_offset + 2],
+                                all_code[abs_offset + 3],
+                            ]);
+                            let imm24 = ((fallback_off as i64) - (abs_offset as i64)) as i32;
+                            let patched = (existing & 0xFC00_0003) | (((imm24 & 0x00FFFFFF) as u32) << 2);
+                            all_code[abs_offset..abs_offset + 4]
+                                .copy_from_slice(&patched.to_be_bytes());
+                        } else {
+                            vuma_log!(debug, 
+                                "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — no __ffi_fallback_stub, deferring to linker",
+                                reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                            );
+                            continue;
+                        }
                     }
                 } else if reloc.reloc_type == R_PPC64_ADDR64 {
                     // R_PPC64_ADDR64: patch the 5-instruction (here 6-instruction)

@@ -4140,6 +4140,36 @@ impl Backend for Wasm32Backend {
             body: stub_body,
         });
 
+        // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+        // ffi_scratch_push_frame / ffi_scratch_pop_frame: no-op stubs that
+        // do NOTHING (no mem[0] write, no return value). The scratchpad is
+        // not used on wasm32 (wasm has its own linear memory), so these are
+        // genuine no-ops. The stubs have NO return type (void) to match the
+        // call sites (dst: None) — returning i32 would leave orphan values
+        // on the wasm stack and corrupt the return value.
+        let noop_type_idx = module.add_type(WasmFuncType {
+            params: vec![],
+            results: vec![], // void — no return value
+        });
+        let noop_push_idx = module.add_function(noop_type_idx.clone());
+        let noop_pop_idx = module.add_function(noop_type_idx);
+        // No-op body: just end (does nothing, returns nothing)
+        let noop_body = {
+            let mut b = Vec::new();
+            b.push(0x0B); // end
+            b
+        };
+        module.add_code(WasmFuncBody {
+            locals: vec![],
+            body: noop_body.clone(),
+        });
+        module.add_code(WasmFuncBody {
+            locals: vec![],
+            body: noop_body,
+        });
+        func_name_to_idx.insert("ffi_scratch_push_frame".to_string(), noop_push_idx);
+        func_name_to_idx.insert("ffi_scratch_pop_frame".to_string(), noop_pop_idx);
+
         // ── Program functions ──────────────────────────────────────
         // Track the main function so the _start wrapper can call it.
         let mut main_func_idx: Option<u32> = None;
@@ -7138,3 +7168,4 @@ mod wasm_target_tests {
         );
     }
 }
+// force rebuild Fri Jul 17 13:14:44 UTC 2026

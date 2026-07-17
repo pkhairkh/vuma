@@ -1078,7 +1078,8 @@ impl IRBuilder {
     /// Returns true if this function body contains an extern call (a call to
     /// a function declared in an `extern "C"` block) or a marshal builtin
     /// (`marshal_cstr` / `unmarshal`). Used to decide whether to emit the
-    /// scratchpad frame hooks.
+    /// scratchpad frame hooks. The hooks are resolved to inline stubs by the
+    /// backend (emit.rs), so they never produce unresolved symbols.
     fn function_uses_ffi(&self, body: &[ScgStatement]) -> bool {
         let mut uses_ffi = false;
         Self::walk_body(body, |s| {

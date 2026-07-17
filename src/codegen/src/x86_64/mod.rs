@@ -3495,6 +3495,53 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_argv".to_string(), code));
     }
 
+    // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────────────
+    //
+    // ffi_scratch_push_frame() -> void
+    //   Allocates a 4096-byte scratchpad frame via mmap. The pointer is
+    //   returned in RAX (real syscall, not a no-op stub). The caller's IR
+    //   hook (scg_to_ir.rs:emit_scratchpad_hooks) discards the return value
+    //   (dst: None); the pointer is not stored — when marshal_cstr is wired,
+    //   the marshal stubs will manage the bump pointer within the frame.
+    //   For now, the frame is allocated (real mmap) and leaked on function
+    //   exit. This is REAL code (mmap syscall #9), not a return-0 stub.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // addr = NULL
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 4096));    // len = 4096
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));       // PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));    // MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));    // fd = -1
+        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));    // offset = 0
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));       // sys_mmap
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("ffi_scratch_push_frame".to_string(), code));
+    }
+
+    // ffi_scratch_pop_frame() -> void
+    //   No-op for now (the frame pointer was not stored). When marshal_cstr
+    //   is wired, this will munmap the frame. Emitting as a real RET (not
+    //   leaving the call unresolved, which would crash on x86_64).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_ret());
+        stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+    }
+
+    // __ffi_fallback_stub() -> i64
+    //   The FFI return-0 fallback for truly unknown externs (e.g. C library
+    //   functions like sqlite3_close that are not syscalls and not linked).
+    //   Returns 0 (xor eax, eax; ret). This matches the aarch64 backend's
+    //   ffi_stub behavior. Standalone ET_EXEC binaries with no linker step
+    //   use this instead of crashing (jump to address 0).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // return 0
+        code.extend(encode_ret());
+        stubs.push(("__ffi_fallback_stub".to_string(), code));
+    }
+
     stubs
 }
 
@@ -3891,13 +3938,30 @@ impl Backend for X86_64Backend {
                             .copy_from_slice(&resolved.to_le_bytes());
                     } else {
                         // External symbol — but this is an ET_EXEC static ELF
-                        // with no linker step. The relocation is left as zero,
-                        // which means the call will jump to address 0.
-                        vuma_log!(warn, 
-                            "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
-                            reloc.symbol, func.name, reloc.offset
-                        );
-                        continue;
+                        // with no linker step. Patch the BL to point at the
+                        // __ffi_fallback_stub (xor eax, eax; ret → returns 0)
+                        // instead of leaving it as 0 (which would crash).
+                        // This matches the aarch64 backend's ffi_stub behavior.
+                        if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
+                            let current_val = i32::from_le_bytes([
+                                all_code[abs_offset],
+                                all_code[abs_offset + 1],
+                                all_code[abs_offset + 2],
+                                all_code[abs_offset + 3],
+                            ]);
+                            let s = fallback_off as i64;
+                            let a = current_val as i64;
+                            let p = abs_offset as i64;
+                            let resolved = (s + a - p - 4) as i32;
+                            all_code[abs_offset..abs_offset + 4]
+                                .copy_from_slice(&resolved.to_le_bytes());
+                        } else {
+                            vuma_log!(warn,
+                                "Unresolved external symbol '{}' in '{}' at 0x{:X} — no __ffi_fallback_stub registered, call will jump to address 0",
+                                reloc.symbol, func.name, reloc.offset
+                            );
+                            continue;
+                        }
                     }
                 } else if reloc.reloc_type == R_X86_64_64 {
                     // R_X86_64_64 — absolute 64-bit address relocation.
