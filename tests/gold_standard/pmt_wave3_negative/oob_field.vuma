@@ -1,0 +1,45 @@
+// oob_field — PMT Wave 3 negative: out-of-bounds field access
+// Expected: IVE rejects at verification (VerificationLevel::Pmt).
+//
+// Pattern:
+//   layout Tiny = { tag: u8 }       // total_size = 1
+//   layout Big  = { tag: u8, blob: [u8; 64] }  // total_size = 65
+//   ...
+//   // A bug in the layout registry (or a hand-crafted PmtLayoutSpec)
+//   // declares Tiny with total_size=1 but with a field at offset 60
+//   // of size 4 — offset+size (64) > total_size (1) → OOB.
+//
+// The state_read / state_write verifiers each check:
+//   if fi.offset + fi.size > layout.total_size {
+//       return error "field '...' at offset N size M exceeds layout
+//                     '...' total_size T";
+//   }
+//
+// In normal pipeline use, `build_layout_registry` (pipeline.rs:8144)
+// computes offsets sequentially with alignment, and `total_size` is the
+// final cumulative offset (with tail padding).  So `offset + size <=
+// total_size` always holds for parser-generated layouts — the OOB path
+// is only reachable when a `PmtLayoutSpec` is constructed with
+// inconsistent offset/size/total_size values (e.g., a bug in a future
+// layout-compression pass, or a hand-crafted test).
+//
+// IVE coverage:
+//   ✓ implemented in state_read::verify_state_reads and
+//     state_write::verify_state_writes (offset-overflow branch).
+//   ~ the existing pipeline never produces an inconsistent layout, so
+//     this path is not currently exercised end-to-end.  A future wave
+//     that lowers the `offset + size > total_size` check from a
+//     hand-crafted PmtLayoutSpec will close the gap.
+//
+// This file is NOT expected to compile or run — it documents a PMT
+// violation pattern.  The IVE catches it ONLY when the layout registry
+// is mis-constructed (see verify_pmt unit tests for the API-level
+// coverage).
+
+layout Small = { tag: u8 }
+
+fn main() -> i32 {
+    let s = state_new(Small);
+    s.tag = 42;
+    return s.tag;
+}

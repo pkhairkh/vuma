@@ -1,0 +1,38 @@
+// unknown_layout — PMT Wave 3 negative: transform referencing an undeclared layout
+// Expected: IVE rejects at verification (VerificationLevel::Pmt).
+//
+// Pattern:
+//   layout Point = { x: u32, y: u32 }
+//   ...
+//   let q = transform(p);   // transform produces State<Ghost> — but
+//                            // Ghost is never declared
+//
+// The state_transform verifier looks up both the input and output
+// layout names against the layout registry.  If either is missing, it
+// reports:
+//   "input layout 'Ghost' not found"  (or "output layout ...")
+// and `InvariantAggregator::verify_pmt` returns `OverallVerdict::Fail`.
+//
+// IVE coverage:
+//   ✓ caught by `state_transform::verify_transform` (layout-not-found path)
+//   ✓ unit-tested in `wave3d_pmt_unknown_layout_fails`
+//
+// This file is NOT expected to compile or run — it documents a PMT
+// violation pattern.  The IVE catches it via the SCG-level state node
+// inspection (the StateTransform node carries input_layout="Ghost" and
+// output_layout="Whatever"; the verifier looks both up against the
+// registry and rejects).
+
+layout Point = { x: u32, y: u32 }
+
+transform to_ghost(p: State<Point>) -> State<Ghost> {
+    // VIOLATION: Ghost is not a declared layout.
+    return p;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    let q = to_ghost(p);
+    return 0;
+}

@@ -2107,4 +2107,42 @@ mod tests {
     fn wave3d_pmt_kind_label() {
         assert_eq!(InvariantKind::Pmt.label(), "pmt-state");
     }
+
+    #[test]
+    fn wave3d_pmt_oob_field_fails() {
+        // Hand-craft an inconsistent PmtLayoutSpec: layout "Tiny" with
+        // total_size=1 but a field at offset 60 of size 4 → OOB.
+        // (The normal pipeline never produces this; the test exercises
+        // the state_read verifier's offset-overflow branch via the
+        // aggregator.)
+        use crate::verification::{PmtFieldSpec, PmtLayoutSpec};
+        let tiny = PmtLayoutSpec {
+            name: "Tiny".to_string(),
+            total_size: 1,
+            fields: vec![PmtFieldSpec {
+                name: "tag".to_string(),
+                offset: 60,
+                size: 4,
+                type_name: "u32".to_string(),
+            }],
+        };
+        let scg = scg_with_state_read("Tiny", "tag");
+        let mut layouts = std::collections::HashMap::new();
+        layouts.insert("Tiny".to_string(), tiny);
+        let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.overall, OverallVerdict::Fail);
+        match &result.per_invariant[0].result.status {
+            VerificationStatus::Violated { counterexample } => {
+                assert!(
+                    counterexample.description.contains("exceeds layout")
+                        || counterexample.description.contains("out"),
+                    "expected OOB error, got: {}",
+                    counterexample.description
+                );
+            }
+            other => panic!("expected Violated, got {:?}", other),
+        }
+    }
 }

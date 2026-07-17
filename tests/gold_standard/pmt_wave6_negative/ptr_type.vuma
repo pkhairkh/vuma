@@ -2,16 +2,18 @@
 // Expected exit code: 0
 //
 // Default mode: compiles with deprecation warnings (*T type annotation
-// plus allocate/deref/free at runtime), runs, exits 0.
+// in the `as *u32` cast, plus allocate/deref/free at runtime), runs,
+// exits 0.
 // --pmt-only mode: hard compile error (pointer syntax '*T (pointer
-// type)' rejected at the type annotation).
+// type)' rejected at the `*` token in the cast target type).
 //
 // The PMT replacement uses `State<LayoutName>` instead of `*T` as the
 // typed handle for a memory buffer.
 
 fn main() -> i32 {
-    p: *u32 = allocate(8);
-    *p = 0;
-    free(p);
+    buf = allocate(8);
+    header = buf as *u32;
+    *header = 0;
+    free(buf);
     return 0;
 }
