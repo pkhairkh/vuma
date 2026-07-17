@@ -1,0 +1,17 @@
+// Migrated from memory/mem_alloc_loop.vuma
+// Expected exit code: 0
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let i = 0;
+    while i < 5 {
+    let __s = state_new(Single);
+    __s.v = i;
+        i = i + 1;
+    }
+    return 0;
+}

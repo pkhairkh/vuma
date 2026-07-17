@@ -1,0 +1,20 @@
+// Migrated from concurrency/conc2_swap.vuma
+// Expected exit code: 1
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.b = 2;
+    __s.a = 1;
+    let v1 = __s.b;
+    let v2 = __s.a;
+    let tmp = v1 + 0;
+    __s.b = v2;
+    __s.a = tmp;
+    let result = __s.b;
+    return result;
+}

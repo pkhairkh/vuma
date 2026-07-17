@@ -1,0 +1,17 @@
+// Migrated from pointers/s31_ptr_two_cell_or.vuma
+// Expected exit code: 153
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 17;
+    __s.b = 136;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a | b;
+    return d;
+}

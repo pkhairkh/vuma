@@ -1,0 +1,14 @@
+// Migrated from pointers/s83_ptr_single_store_load.vuma
+// Expected exit code: 228
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 228;
+    let v = __s.v;
+    return v;
+}

@@ -1,0 +1,17 @@
+// Migrated from memory/s104_mem_overwrite_last.vuma
+// Expected exit code: 62
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Triple);
+    __s.a = 100;
+    __s.b = 200;
+    __s.c = 50;
+    __s.c = 62;
+    let v = __s.c;
+    return v;
+}

@@ -1,0 +1,16 @@
+// Migrated from memory/s12_mem_load_then_add.vuma
+// Expected exit code: 55
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 30;
+    let v = __s.v;
+    let c = 25;
+    let r = v + c;
+    return r;
+}

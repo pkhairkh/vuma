@@ -1,0 +1,15 @@
+// Migrated from memory/s9_mem_overwrite_then_load.vuma
+// Expected exit code: 120
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 50;
+    __s.v = 120;
+    let v = __s.v;
+    return v;
+}

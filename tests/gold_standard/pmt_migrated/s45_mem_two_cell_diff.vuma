@@ -1,0 +1,17 @@
+// Migrated from memory/s45_mem_two_cell_diff.vuma
+// Expected exit code: 150
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 190;
+    __s.b = 40;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a - b;
+    return d;
+}
