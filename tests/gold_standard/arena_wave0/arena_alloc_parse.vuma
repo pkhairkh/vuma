@@ -1,0 +1,17 @@
+// arena_wave0/arena_alloc_parse — arena_alloc + field access parse test
+// Expected exit code: 0
+//
+// Wave 1 test: arena_alloc parses and returns a State<T> that supports
+// field access (same syntax as static states).
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+layout Widget = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let arena = arena_new(4096);
+    let (arena, w) = arena_alloc(arena, Widget);
+    w.x = 100;
+    w.y = 200;
+    arena_free(arena);
+    return 0;
+}
