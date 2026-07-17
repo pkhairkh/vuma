@@ -30,17 +30,14 @@
 //     through helper functions get silently dropped, so all allocate()
 //     calls use literal sizes and writes are inlined where needed.
 
-// ─── Message layout: 24 bytes per message ────────────────────────────────
-//   offset  0: sender_id (u64, 8 bytes)
-//   offset  8: payload   (u64, 8 bytes)
-//   offset 16: timestamp (u64, 8 bytes)
+
+
 
 const MSG_SIZE: u64 = 24;
 
-// ─── Read u64 helper (read-only-from-function works reliably) ───────────
 layout _L1 = { data: [u8; 512] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
-    b0: u64 = *(buf + offset);
+    b0: u64 = buf.data[offset];
     b1: u64 = *(buf + offset + 1);
     b2: u64 = *(buf + offset + 2);
     b3: u64 = *(buf + offset + 3);

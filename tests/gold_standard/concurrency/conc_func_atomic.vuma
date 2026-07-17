@@ -12,9 +12,11 @@
 // conc_atomic_basic.vuma. The function stores an immediate (42), which
 // the current codegen handles correctly.
 
+
+
 layout _L1 = { v: u32 }
 fn store_val(cell: Address) -> i32 {
-    *cell = 42;
+    cell.v = 42;
     return 0;
 }
 

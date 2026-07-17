@@ -12,9 +12,9 @@ fn main() -> i32 {
         // Pattern: even positions get 0xAA, odd positions get 0x55
         bit: u32 = i & 1;
         if bit == 0 {
-            *(buf + i) = 0xAA;
+    buf.data[i] = 0xAA;
         } else {
-            *(buf + i) = 0x55;
+    buf.data[i] = 0x55;
         }
         i = i + 1;
     }
@@ -22,7 +22,7 @@ fn main() -> i32 {
     ok: u32 = 1;
     j: u32 = 0;
     while j < 8 {
-        v: u32 = *(buf + j);
+        v: u32 = buf.data[j];
         bit2: u32 = j & 1;
         if bit2 == 0 {
             if v != 0xAA { ok = 0; }

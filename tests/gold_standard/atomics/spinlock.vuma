@@ -12,15 +12,16 @@
 //   - Atomic operations target correct addresses
 //   - Values come from valid writes (Origin invariant)
 
-// Spinlock struct — uses a single u64 as the lock state
-// 0 = unlocked, 1 = locked
+layout _L1 = { v: u64 }
+layout _L2 = { v: u64 }
+
+
 struct SpinLock {
     state: u64,
 }
 
-// Initialize a new spinlock in the unlocked state
 fn spinlock_init(lock: Address) {
-    *lock = SpinLock { state: 0 };
+    lock.v = SpinLock { state: 0 };
 }
 
 // Acquire the spinlock — spins until the lock is available
@@ -64,8 +65,8 @@ fn spinlock_trylock(lock: Address) -> bool {
 fn increment_with_lock(lock: Address, counter: Address) {
     spinlock_lock(lock);
     // Critical section — only one thread at a time
-    val = *counter;
-    *counter = val + 1;
+    val = counter.v;
+    counter.v = val + 1;
     spinlock_unlock(lock);
 }
 
@@ -76,7 +77,7 @@ fn main() {
 
     // Initialize
     spinlock_init(lock);
-    *counter = 0;
+    counter.v = 0;
 
     // Increment the counter under the lock
     increment_with_lock(lock, counter);
@@ -84,5 +85,5 @@ fn main() {
     increment_with_lock(lock, counter);
 
     // Read the result (should be 3)
-    result = *counter;
+    result = counter.v;
 }

@@ -10,20 +10,20 @@ fn main() -> i32 {
     // Fill with non-zero
     i: u32 = 0;
     while i < 16 {
-        *(buf + i) = 0xFF;
+    buf.data[i] = 0xFF;
         i = i + 1;
     }
     // Zero out
     j: u32 = 0;
     while j < 16 {
-        *(buf + j) = 0;
+    buf.data[j] = 0;
         j = j + 1;
     }
     // Verify all zero
     ok: u32 = 1;
     k: u32 = 0;
     while k < 16 {
-        v: u32 = *(buf + k);
+        v: u32 = buf.data[k];
         if v != 0 { ok = 0; }
         k = k + 1;
     }

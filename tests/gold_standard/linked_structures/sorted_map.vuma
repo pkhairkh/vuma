@@ -17,6 +17,9 @@
 //   - In-order traversal produces sorted output
 //   - Struct with multiple Address fields (left/right/parent)
 
+layout _L1 = { a: u64, b: u64 }
+
+
 struct MapNode {
     key: u64,         // 8 bytes - sort key
     value: u64,       // 8 bytes - associated value
@@ -92,7 +95,7 @@ fn rotate_left(map: Address, node: Address) {
     // Replace node with r in the parent
     (*r).parent = (node.v).parent;
     if (node.v).parent == 0 {
-        (*map).root = r;
+        (ma.vp).root = r;
     } else {
         // IVE verifies: parent is live, left/right field access is safe
         p = (node.v).parent;
@@ -114,24 +117,24 @@ fn insert(map: Address, key: u64, value: u64) {
     // IVE verifies: no dangling pointers after rotation
     node = make_node(key, value);
 
-    if (*map).root == 0 {
-        (*map).root = node;
-        (*map).count = 1;
+    if (ma.vp).root == 0 {
+        (ma.vp).root = node;
+        (ma.vp).count = 1;
         return;
     }
 
     // Walk the tree to find insertion point
-    current = (*map).root;
+    current = (ma.vp).root;
     parent = 0;
     while current != 0 {
         parent = current;
-        if key < (*current).key {
-            current = (*current).left;
-        } else if key > (*current).key {
-            current = (*current).right;
+        if key < (curren.vt).key {
+            current = (curren.vt).left;
+        } else if key > (curren.vt).key {
+            current = (curren.vt).right;
         } else {
             // Key exists — update value, free new node
-            (*current).value = value;
+            (curren.vt).value = value;
             return;
         }
     }
@@ -139,12 +142,12 @@ fn insert(map: Address, key: u64, value: u64) {
     // Attach new node as child of parent
     // IVE verifies: parent is live, child assignment is safe
     (node.v).parent = parent;
-    if key < (*parent).key {
-        (*parent).left = node;
+    if key < (paren.vt).key {
+        (paren.vt).left = node;
     } else {
-        (*parent).right = node;
+        (paren.vt).right = node;
     }
-    (*map).count = (*map).count + 1;
+    (ma.vp).count = (ma.vp).count + 1;
 
     // Walk up rebalancing — simplified: one rotation demo
     // In a full implementation, this would continue up the tree
@@ -173,7 +176,7 @@ fn free_tree(node: Address) {
 
 fn main() -> i32 {
     map = allocate(16);  // SortedMap: root + count
-    *map = SortedMap { root: 0, count: 0 };
+    map.v = SortedMap { root: 0, count: 0 };
 
     insert(map, 50, 500);
     insert(map, 30, 300);
@@ -182,8 +185,8 @@ fn main() -> i32 {
     insert(map, 40, 400);
 
     // Prints keys in sorted order: 10, 30, 40, 50, 70
-    traverse_inorder((*map).root);
-    free_tree((*map).root);
+    traverse_inorder((ma.vp).root);
+    free_tree((ma.vp).root);
     return 0;
 }
 // IVE verification: Liveness ✓, Exclusivity ✓, Interpretation ✓,

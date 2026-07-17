@@ -12,6 +12,6 @@ fn main() -> i32 {
     let p = state_new(_L1);
     q = p;
     p.v = 55;
-    v: i32 = *q;
+    v: i32 = q.v;
     return v;
 }

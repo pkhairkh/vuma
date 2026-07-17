@@ -13,8 +13,8 @@ layout _L1 = { v: u32 }
 layout _L2 = { v: u32 }
 fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
     // Read head and tail indices (stored as single byte, values 0-255)
-    head: u32 = *(head_ptr + 0);
-    tail: u32 = *(tail_ptr + 0);
+    head: u32 = head_ptr.data[0];
+    tail: u32 = tail_ptr.data[0];
     next_head: u32 = head + 1;
 
     if next_head % capacity == tail % capacity {
@@ -24,19 +24,19 @@ fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32,
     // Write 32-bit value at slot = buf + (head % capacity) * 4
     // slot must be Address type for pointer arithmetic to work
     slot: Address = buf + (head % capacity) * 4;
-    *(slot + 0) = value & 255;
-    *(slot + 1) = (value >> 8) & 255;
-    *(slot + 2) = (value >> 16) & 255;
-    *(slot + 3) = (value >> 24) & 255;
+    slot.data[0] = value & 255;
+    slot.data[1] = (value >> 8) & 255;
+    slot.data[2] = (value >> 16) & 255;
+    slot.data[3] = (value >> 24) & 255;
 
     // Update head index (single byte store, value 0-255)
-    *(head_ptr + 0) = next_head;
+    head_ptr.data[0] = next_head;
     return 1;
 }
 
 fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) -> u32 {
-    head: u32 = *(head_ptr + 0);
-    tail: u32 = *(tail_ptr + 0);
+    head: u32 = head_ptr.data[0];
+    tail: u32 = tail_ptr.data[0];
 
     if tail % capacity == head % capacity {
         return 4294967295;  // Queue is empty — return sentinel
@@ -44,14 +44,14 @@ fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) 
 
     // Read 32-bit value from slot
     slot: Address = buf + (tail % capacity) * 4;
-    b0: u32 = *(slot + 0);
-    b1: u32 = *(slot + 1);
-    b2: u32 = *(slot + 2);
-    b3: u32 = *(slot + 3);
+    b0: u32 = slot.data[0];
+    b1: u32 = slot.data[1];
+    b2: u32 = slot.data[2];
+    b3: u32 = slot.data[3];
     value: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
     // Update tail index (single byte store, value 0-255)
-    *(tail_ptr + 0) = tail + 1;
+    tail_ptr.data[0] = tail + 1;
     return value;
 }
 

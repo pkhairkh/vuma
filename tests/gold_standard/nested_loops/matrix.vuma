@@ -23,13 +23,13 @@ layout _L2 = { data: [u8; 64] }
 layout _L3 = { data: [u8; 64] }
 fn mat_read(mat: Address, row: u64, col: u64) -> u32 {
     offset: u64 = (row * 4 + col) * 4;
-    val: u32 = *(mat + offset);
+    val: u32 = mat.data[offset];
     return val;
 }
 
 fn mat_write(mat: Address, row: u64, col: u64, val: u32) {
     offset: u64 = (row * 4 + col) * 4;
-    *(mat + offset) = val;
+    mat.data[offset] = val;
 }
 
 // ===========================================================================

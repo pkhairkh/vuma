@@ -12,6 +12,8 @@
 // Note: every value stored into the table is a decimal literal (the
 // codegen drops hex literals stored through `*ptr = 0xNN`).
 
+
+
 layout _L1 = { v: u32 }
 fn main() -> i32 {
     let table = state_new(_L1);
@@ -20,6 +22,6 @@ fn main() -> i32 {
     table.data[2] = 42;             // 0x2A  <- target;
     table.data[3] = 64;             // 0x40;
     idx: i32 = 2;
-    val: i32 = *(table + idx);
+    val: i32 = table.data[idx];
     return val;
 }

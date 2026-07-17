@@ -8,17 +8,19 @@
 // and sums across offsets) and s6_cs_overwrite_then_load (single
 // offset overwrite + load).
 
+
+
 layout Buf_buf = { data: [u8; 16] }
 
 fn main() -> i32 {
     let buf = state_new(Buf_buf);
     p0 = buf;
     p8 = buf + 8;
-    *p0 = 100;
-    *p8 = 50;
-    *p8 = 20;
-    a: u64 = *p0;
-    b: u64 = *p8;
+    p0.v = 100;
+    p8.v = 50;
+    p8.v = 20;
+    a: u64 = p0.v;
+    b: u64 = p8.v;
     s: u64 = a + b;
     return s;
 }

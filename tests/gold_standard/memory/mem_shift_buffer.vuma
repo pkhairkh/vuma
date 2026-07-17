@@ -16,7 +16,7 @@ fn main() -> i32 {
     i: u32 = 0;
     while i < 3 {
         v: u32 = *(buf + (i + 1));
-        *(buf + i) = v;
+    buf.data[i] = v;
         i = i + 1;
     }
     buf.data[3] = 0;

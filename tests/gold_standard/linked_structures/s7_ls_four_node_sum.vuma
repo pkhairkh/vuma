@@ -8,6 +8,8 @@
 // s5_ls_four_node_chain (values 10/20/30/40 -> 100) and
 // s6_ls_three_node_chain (3 nodes).
 
+
+
 layout Buf_block = { data: [u8; 32] }
 
 fn main() -> i32 {
@@ -16,14 +18,14 @@ fn main() -> i32 {
     n1 = block + 8;
     n2 = block + 16;
     n3 = block + 24;
-    *n0 = 5;
-    *n1 = 15;
-    *n2 = 25;
-    *n3 = 35;
-    a: u64 = *n0;
-    b: u64 = *n1;
-    c: u64 = *n2;
-    d: u64 = *n3;
+    n0.v = 5;
+    n1.v = 15;
+    n2.v = 25;
+    n3.v = 35;
+    a: u64 = n0.v;
+    b: u64 = n1.v;
+    c: u64 = n2.v;
+    d: u64 = n3.v;
     t1: u64 = a + b;
     t2: u64 = c + d;
     s: u64 = t1 + t2;

@@ -10,9 +10,11 @@
 // Uses non-atomic `*ptr` per the bridge-gap workaround documented in
 // conc_atomic_basic.vuma.
 
+
+
 layout _L1 = { v: u32 }
 fn fill_cell(cell: Address) -> i32 {
-    *cell = 42;
+    cell.v = 42;
     return 0;
 }
 

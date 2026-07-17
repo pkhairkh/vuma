@@ -8,7 +8,7 @@
 
 layout _L1 = { a: u32, b: u32 }
 fn store_val(p: Address) -> i32 {
-    *(p + 0) = 42;
+    p.data[0] = 42;
     return 0;
 }
 

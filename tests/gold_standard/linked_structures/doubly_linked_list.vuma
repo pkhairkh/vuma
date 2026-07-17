@@ -34,10 +34,11 @@
 //   offset  8: next (Address, 8 bytes)
 //   offset 16: data (u64,     8 bytes)
 
-// ─── Read 8 little-endian bytes from `ptr + offset` and reconstruct u64 ─
+
+
 layout _L1 = { data: [u8; 96] }
 fn read_u64(ptr: Address, offset: u64) -> u64 {
-    b0: u64 = *(ptr + offset);
+    b0: u64 = ptr.data[offset];
     b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2);
     b3: u64 = *(ptr + offset + 3);
@@ -51,7 +52,7 @@ fn read_u64(ptr: Address, offset: u64) -> u64 {
 
 // ─── Write `val` as 8 little-endian bytes to `ptr + offset` ────────────
 fn write_u64(ptr: Address, offset: u64, val: u64) {
-    *(ptr + offset)     = (val & 255);
+    ptr.data[offset] = (val & 255);
     *(ptr + offset + 1) = ((val >> 8)  & 255);
     *(ptr + offset + 2) = ((val >> 16) & 255);
     *(ptr + offset + 3) = ((val >> 24) & 255);

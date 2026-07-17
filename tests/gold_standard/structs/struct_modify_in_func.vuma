@@ -8,7 +8,7 @@
 
 layout _L1 = { a: u32, b: u32 }
 fn set_field(p: Address) -> i32 {
-    *(p + 0) = 99;
+    p.data[0] = 99;
     return 0;
 }
 

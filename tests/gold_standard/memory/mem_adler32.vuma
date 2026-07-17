@@ -19,7 +19,7 @@ fn main() -> i32 {
     b: u32 = 0;
     i: u32 = 0;
     while i < 8 {
-        v: u32 = *(buf + i);
+        v: u32 = buf.data[i];
         a = (a + v) & 65535;
         b = (b + a) & 65535;
         i = i + 1;

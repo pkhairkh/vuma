@@ -7,7 +7,7 @@
 
 layout _L1 = { v: u32 }
 fn load_val(buf: Address) -> i32 {
-    val: i32 = *buf;
+    val: i32 = buf.v;
     return val;
 }
 

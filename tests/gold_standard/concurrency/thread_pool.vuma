@@ -27,18 +27,14 @@
 //     through helper functions get silently dropped, so all allocate()
 //     calls use literal sizes and writes are inlined where needed.
 
-// ─── Field offsets for the 32-byte TaskQueue header ───────────────────────
-//   offset  0: head         (u64) — index of next task to pop
-//   offset  8: tail         (u64) — index of next free slot for push
-//   offset 16: len          (u64) — current number of pending tasks
-//   offset 24: capacity     (u64) — max tasks before push fails
 
-// ─── Read/write u64 helpers (read-only-from-function works reliably) ────
+
+
 layout _L1 = { data: [u8; 32] }
 layout _L2 = { data: [u8; 128] }
 layout _L3 = { data: [u8; 64] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
-    b0: u64 = *(buf + offset);
+    b0: u64 = buf.data[offset];
     b1: u64 = *(buf + offset + 1);
     b2: u64 = *(buf + offset + 2);
     b3: u64 = *(buf + offset + 3);
@@ -84,14 +80,14 @@ fn main() -> i32 {
     // ─── Allocate the task queue header (32 bytes) ────────────────────
     let queue = state_new(_L1);
     // Initialize: head=0, tail=0, len=0, capacity=8
-    queue.data[0] = 0; *(queue + 1)  = 0; *(queue + 2)  = 0; *(queue + 3)  = 0;
-    queue.data[4] = 0; *(queue + 5)  = 0; *(queue + 6)  = 0; *(queue + 7)  = 0;
-    queue.data[8] = 0; *(queue + 9)  = 0; *(queue + 10) = 0; *(queue + 11) = 0;
-    queue.data[12] = 0; *(queue + 13) = 0; *(queue + 14) = 0; *(queue + 15) = 0;
-    queue.data[16] = 0; *(queue + 17) = 0; *(queue + 18) = 0; *(queue + 19) = 0;
-    queue.data[20] = 0; *(queue + 21) = 0; *(queue + 22) = 0; *(queue + 23) = 0;
-    queue.data[24] = 8; *(queue + 25) = 0; *(queue + 26) = 0; *(queue + 27) = 0;
-    queue.data[28] = 0; *(queue + 29) = 0; *(queue + 30) = 0; *(queue + 31) = 0;
+    queue.data[0] = 0; queue.data[1]  = 0; queue.data[2]  = 0; queue.data[3]  = 0;
+    queue.data[4] = 0; queue.data[5]  = 0; queue.data[6]  = 0; queue.data[7]  = 0;
+    queue.data[8] = 0; queue.data[9]  = 0; queue.data[10] = 0; queue.data[11] = 0;
+    queue.data[12] = 0; queue.data[13] = 0; queue.data[14] = 0; queue.data[15] = 0;
+    queue.data[16] = 0; queue.data[17] = 0; queue.data[18] = 0; queue.data[19] = 0;
+    queue.data[20] = 0; queue.data[21] = 0; queue.data[22] = 0; queue.data[23] = 0;
+    queue.data[24] = 8; queue.data[25] = 0; queue.data[26] = 0; queue.data[27] = 0;
+    queue.data[28] = 0; queue.data[29] = 0; queue.data[30] = 0; queue.data[31] = 0;
 
     // ─── Allocate the task slots: 8 tasks × 16 bytes (task_id + arg) ──
     let tasks = state_new(_L2);
