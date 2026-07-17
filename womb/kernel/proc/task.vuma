@@ -1,0 +1,603 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/proc/task.vuma
+// VWK Process/Thread Subsystem — Task layout + ProcessTable + lifecycle
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K4a layer of the VWK kernel: the Task control block
+// (process/thread descriptor), the ProcessTable (a 256-slot array of
+// Tasks stored as parallel flat byte arrays — VUMA has no struct arrays),
+// and the lifecycle primitives task_alloc / task_free / pt_init. K4b
+// (scheduler) will consume ProcessTable to pick the next runnable task;
+// K4d (fork/exec) will call task_alloc to spawn a new task and populate
+// its mm_root / fs_root / fds; K4e (exit/wait) will call task_free and
+// flip state to ZOMBIE.
+//
+// ── Task states ─────────────────────────────────────────────────────────────
+// Stored as u8 in Task.state. The values are the standard Linux-style
+// task-state numbers (slightly simplified — Linux has more):
+//     RUNNING = 1  — currently running on a CPU (at most one per CPU)
+//     READY   = 2  — runnable, waiting for a CPU
+//     BLOCKED = 3  — sleeping/waiting on a resource (IRQ, sleep, I/O)
+//     ZOMBIE  = 4  — exited but not yet reaped (parent hasn't wait()'d)
+// state == 0 means the slot is FREE (unused). task_alloc scans for state
+// == 0; task_free writes state = 0 (or 4 then later 0 — K4e).
+//
+// ── Task layout (control-block fields) ──────────────────────────────────────
+//   pid       (u32) — process ID (slot + 1, so PID 0 is never handed out;
+//                     matches Linux where PID 0 is the swapper/idle task)
+//   ppid      (u32) — parent PID (set by K4d's fork; 0 for init/kthreadd)
+//   state     (u8)  — task state (see above)
+//   prio      (u8)  — static priority (0 = highest; CFS uses vruntime
+//                     for dynamic ordering but keeps prio for the run-
+//                     queue's priority bucketing)
+//   vruntime  (u64) — CFS virtual runtime (nanoseconds of CPU time
+//                     weighted by prio; K4b's scheduler picks min vruntime)
+//   regs      (TrapFrame) — saved register state for context switch
+//                     (K4b's switch_to loads this back into the CPU)
+//   mm_root   (u64) — page-table root physical address (CR3 on x86_64;
+//                     K4b's switch_to writes this to CR3)
+//   fs_root   (u64) — VFS root dentry (K5 wires this; 0 = kernel task)
+//   fds       (u64) — file-descriptor table address (K5; 0 = no open files)
+//   next      (u64) — next task in a linked list (arena offset or 0;
+//                     K4b uses this for the run queue; 0 = end of list)
+//
+// ── TrapFrame re-declaration (x86_64, 22 fields) ────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the x86_64
+// TrapFrame byte-identically to:
+//   - K3a's womb/kernel/arch/x86_64/trap_trampoline.vuma (canonical source)
+//   - K3d's womb/kernel/trap/trap.vuma (re-declaration #1)
+//   - K3e's womb/kernel/syscall/abi.vuma (re-declaration #2)
+// This file's re-declaration is re-declaration #3. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical" — extended to layouts in K3d) extends to layouts: this
+// file's `Task.regs` field MUST see the same field offsets, field names,
+// and field types as K3a's and K3d's files. 22 fields × 8 bytes = 176
+// bytes.
+//
+// The Task layout embeds TrapFrame by value (as a nested struct field).
+// VUMA supports nested layouts — `tf.regs.rip` works (the codegen lowers
+// nested field access as a chained GEP). K4b's context-switch code will
+// access task.regs.rsp, task.regs.rip, etc. to load the saved state back
+// into the CPU; K4d's fork will copy the parent's regs into the child's
+// regs.
+//
+// ── Why parallel flat byte arrays for ProcessTable? ─────────────────────────
+// The contract specifies:
+//     layout ProcessTable = { tasks: [Task; 256], count: u32 }
+// and access like `pt.tasks[i].pid`. The current VUMA codegen
+// (src/pipeline.rs::flatten_expr, Expr::Index arm) does NOT scale the
+// index by the element size for non-u8 array element types — every
+// `state.array[i]` is lowered to `*(base_addr + i)` with a U8 Load/Store
+// (verified via /home/z/probes/probe_u32_index3.vuma — see
+// womb/kernel/mm/pmm.vuma header for the same limitation). VUMA also
+// doesn't support `[Task; 256]` (array of structs) in the parser at all
+// (only `[u8; N]` and other primitive-u8 arrays parse). So instead the
+// ProcessTable stores each Task field in a SEPARATE flat [u8; N] array,
+// and the field accessors (pt_get_pid / pt_set_pid / pt_get_vruntime /
+// pt_set_vruntime / etc.) pack/unpack the multi-byte values byte-by-byte.
+// This is byte-identical in spirit to K2a's pmm.vuma FlatPool (parallel
+// arrays of bases/orders/nexts) and K3e's SyscallTable (flat [u8; 4096]
+// of packed u64 handlers). When the codegen gains proper typed-array
+// index lowering (Open Work §"Pipeline: typed array index"), this file
+// can collapse back to `[Task; 256]` with `pt.tasks[i].pid` access.
+//
+// ── Array sizes (decimal) ───────────────────────────────────────────────────
+// Per the K4a contract, every ProcessTable array field is sized for 256
+// slots × the field's byte width:
+//     pids:      [u8; 1024]   = 256 * 4 bytes (u32 per task)
+//     ppids:     [u8; 1024]   = 256 * 4 bytes (u32 per task)
+//     states:    [u8; 256]    = 256 * 1 byte  (u8 per task)
+//     prios:     [u8; 256]    = 256 * 1 byte  (u8 per task)
+//     vruntimes: [u8; 2048]   = 256 * 8 bytes (u64 per task)
+//     mm_roots:  [u8; 2048]   = 256 * 8 bytes (u64 per task)
+//     fs_roots:  [u8; 2048]   = 256 * 8 bytes (u64 per task)
+//     fds:       [u8; 2048]   = 256 * 8 bytes (u64 per task)
+//     nexts:     [u8; 2048]   = 256 * 8 bytes (u64 per task)
+//     count:     u32          — number of slots in use (0..256)
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K4a contract's main() allocates `tbl = state_new(ProcessTable)` and
+// passes it by reference to pt_init / task_alloc / task_free. This is the
+// canonical PMT pattern (K2a's pmm_init(pool, pmm, ...), K3d's
+// trap_frame_init(tf), K3e's syscall_args_from_frame(tf, args) — see
+// womb/kernel/mm/pmm.vuma header "Why init-style?" for the codegen
+// rationale: the current codegen does NOT propagate State-typedness
+// through function return values, so `fn pt_new() -> State<ProcessTable>`
+// would produce broken field-access code in callers). All task.vuma
+// helpers take `tbl: State<ProcessTable>` by regular VUMA-fn borrow (NOT
+// extern #[borrow] — VUMA fn calls don't need the attribute; only extern
+// "C" calls do, and none of these helpers call any extern).
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Two flavors:
+//   (1) u32 fields (pids, ppids): 4-byte pack/unpack loop.
+//   (2) u64 fields (vruntimes, mm_roots, fs_roots, fds, nexts): 8-byte
+//       pack/unpack loop.
+// Both use the same pattern as K2a's pool_get_base / pool_set_base and
+// K3e's syscall_table_get / syscall_table_set: little-endian byte order
+// (byte i goes to bit i*8), shift-and-mask-255 on writes, sum-of-
+// shifted-bytes on reads. u8 fields (states, prios) need no pack/unpack
+// (direct array index).
+//
+// The self-test only exercises pids + states + count (the contract says
+// so explicitly), but ALL helpers must exist for K4b/K4d/K4e to use
+// (K4b's scheduler reads vruntime + next; K4d's fork writes ppid +
+// mm_root + fs_root + fds; K4e's exit reads ppid to find the parent).
+// Hence this file declares all 18 helpers (9 getters + 9 setters) even
+// though only 4 (pt_get_pid, pt_set_pid, pt_get_state, pt_set_state)
+// are exercised by the self-test.
+//
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+//   pt_init(tbl)            — zero all 256 states (mark every slot FREE),
+//                             set count = 0. Idempotent. Called by kmain
+//                             at boot before the first task_alloc.
+//   task_alloc(tbl) -> u32  — find the first slot with state == 0
+//                             (FREE), mark it READY (state = 2), assign
+//                             PID = slot + 1 (so PID 0 is never handed
+//                             out — matches Linux where PID 0 is the
+//                             swapper/idle task), bump count, return the
+//                             slot index. Returns 256 if the table is
+//                             full (the caller MUST check this — K4d's
+//                             fork returns -EAGAIN in that case).
+//   task_free(tbl, idx)     — mark slot `idx` as FREE (state = 0),
+//                             decrement count. Does NOT zero the other
+//                             fields (pid, regs, etc. stay stale until
+//                             task_alloc reuses the slot — task_alloc
+//                             only writes state + pid, leaving the other
+//                             fields for K4d's fork to populate).
+//
+//   The slot-reuse semantics are important: task_free'ing slot 0 and
+//   then task_alloc'ing again returns slot 0 (lowest free slot wins —
+//   same as Linux's find_next_zero_bit). The self-test verifies this.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// ProcessTable is a flat-byte-array struct held in a `___pmt_buffer`-
+// backed State<ProcessTable>; the CALLER allocates it via
+// `state_new(ProcessTable)` and passes it by reference to pt_init /
+// task_alloc / task_free / all pt_get_* / pt_set_* helpers (init-style
+// API — see "Why init-style?" above). No externs are declared in this
+// file (the lifecycle primitives are pure-PM — K4b's context-switch
+// will declare its own externs for CR3 write, RSP load, IRET, etc.).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K4a contract's
+// "Use decimal constants (not hex)" rule. Decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096). The constants:
+//     256  = number of Task slots in the ProcessTable (and the
+//            "table full" sentinel returned by task_alloc)
+//     4    = bytes per u32 field (loop bound for pid/ppid pack/unpack)
+//     8    = bytes per u64 field (loop bound for vruntime/mm_root/
+//            fs_root/fds/next pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     2    = READY state value (set by task_alloc on the new slot)
+//     0    = FREE state value (set by task_free and pt_init)
+//     1    = PID offset (PID = slot + 1, so slot 0 → PID 1)
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares TrapFrame byte-identically
+// to K3a's trap_trampoline.vuma (see "TrapFrame re-declaration" above).
+// K4b's scheduler.vuma will re-declare ProcessTable, Task, and the
+// pt_get_* / pt_set_* helpers byte-identically to this file (same
+// pattern as K3d's irq.vuma re-declaring irq_mask/irq_unmask/pic_eoi
+// from K3a). K4d's fork.vuma and K4e's exit.vuma will do the same.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/proc/task.vuma \
+//         /tmp/task.bin x86_64 --verify
+//     /tmp/task.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — alloc,
+// state=READY, pid=1, count=1, second alloc, count=2, free, state=FREE,
+// count=1, reuse-slot-0 alloc).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// The x86_64 TrapFrame. Re-declared byte-identically to K3a's
+// trap_trampoline.vuma (canonical source), K3d's trap.vuma (re-
+// declaration #1), and K3e's abi.vuma (re-declaration #2). This file's
+// re-declaration is #3. 22 fields × 8 bytes = 176 bytes. The field
+// order MUST match trap.S exactly (K11 will write trap.S to match).
+// See K3a's trap_trampoline.vuma header for the push-order derivation
+// (CPU-pushed + stub-pushed + trap_entry-pushed).
+layout TrapFrame = {
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    vector: u64,
+    error_code: u64,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+    rsp: u64,
+    ss: u64,
+}
+
+// A Task (process/thread control block). The fields are documented in
+// the file header. `regs` is the TrapFrame nested by value — VUMA
+// supports nested-layout fields (the codegen lowers `task.regs.rip` as
+// a chained GEP). K4b's context-switch code reads/writes task.regs.* to
+// save/restore the CPU state across a switch.
+layout Task = {
+    pid: u32,
+    ppid: u32,
+    state: u8,
+    prio: u8,
+    vruntime: u64,
+    regs: TrapFrame,
+    mm_root: u64,
+    fs_root: u64,
+    fds: u64,
+    next: u64,
+}
+
+// ProcessTable: 256 Task slots stored as parallel flat byte arrays
+// (VUMA has no struct-array support — see "Why parallel flat byte
+// arrays?" in the file header). Each field is a separate [u8; N] array
+// sized for 256 slots × the field's byte width. `count` tracks how many
+// slots are in use (0..256). Field accessors (pt_get_* / pt_set_*)
+// pack/unpack the multi-byte values byte-by-byte.
+layout ProcessTable = {
+    pids: [u8; 1024],
+    ppids: [u8; 1024],
+    states: [u8; 256],
+    prios: [u8; 256],
+    vruntimes: [u8; 2048],
+    mm_roots: [u8; 2048],
+    fs_roots: [u8; 2048],
+    fds: [u8; 2048],
+    nexts: [u8; 2048],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u32 pack/unpack helpers (pids, ppids).
+// ────────────────────────────────────────────────────────────────────────────
+// 4-byte little-endian pack/unpack. Same pattern as K3e's
+// syscall_table_get / syscall_table_set but with a 4-byte loop bound
+// (u32, not u64). The 4-byte loop is correct because u32 fits in 4
+// bytes — bytes 4..7 would be zero-shifted out anyway.
+
+// Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
+fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.pids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
+fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.pids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `ppid` field of Task slot `idx` from ProcessTable.ppids.
+fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.ppids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
+fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ppids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessors (states, prios) — direct array index, no pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
+fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.states[idx];
+}
+
+// Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
+fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.states[idx] = val;
+}
+
+// Read the u8 `prio` field of Task slot `idx` from ProcessTable.prios.
+fn pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.prios[idx];
+}
+
+// Write the u8 `prio` field of Task slot `idx` into ProcessTable.prios.
+fn pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.prios[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (vruntimes, mm_roots, fs_roots, fds, nexts).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K2a's
+// pool_get_base / pool_set_base (pmm.vuma) and K3e's syscall_table_get /
+// syscall_table_set (table.vuma / dispatch.vuma): 8-iteration while
+// loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
+
+// Read the u64 `vruntime` field of Task slot `idx` from ProcessTable.vruntimes.
+fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.vruntimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `vruntime` field of Task slot `idx` into ProcessTable.vruntimes.
+fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.vruntimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `mm_root` field of Task slot `idx` from ProcessTable.mm_roots.
+fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.mm_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `mm_root` field of Task slot `idx` into ProcessTable.mm_roots.
+fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.mm_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fs_root` field of Task slot `idx` from ProcessTable.fs_roots.
+fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fs_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fs_root` field of Task slot `idx` into ProcessTable.fs_roots.
+fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fs_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
+fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fds[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fds` field of Task slot `idx` into ProcessTable.fds.
+fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fds[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
+fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
+fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives.
+// ────────────────────────────────────────────────────────────────────────────
+
+// pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
+// Idempotent. Called by kmain at boot before the first task_alloc.
+// Does NOT zero the other Task fields (pids, ppids, vruntimes, etc.)
+// — those are populated by task_alloc / K4d's fork on first use, so
+// zeroing them here would be wasted work (and VUMA has no memset).
+fn pt_init(tbl: State<ProcessTable>) {
+    let i = 0;
+    while i < 256 {
+        pt_set_state(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// task_alloc: find the first FREE slot (state == 0), mark it READY
+// (state = 2), assign PID = slot + 1 (so PID 0 is never handed out),
+// bump count, return the slot index. Returns 256 if the table is full
+// (the caller MUST check — K4d's fork returns -EAGAIN in that case).
+//
+// The lowest-free-slot-wins policy matches Linux's find_next_zero_bit
+// (verified by the self-test: free slot 0, alloc → returns 0, not 2).
+fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+    let i = 0;
+    while i < 256 {
+        if pt_get_state(tbl, i) == 0 {
+            pt_set_state(tbl, i, 2);  // READY
+            pt_set_pid(tbl, i, i + 1);  // PID = slot + 1
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 256;  // table full
+}
+
+// task_free: mark slot `idx` as FREE (state = 0), decrement count.
+// Does NOT zero the other Task fields (pid, regs, etc. stay stale until
+// task_alloc reuses the slot — task_alloc only writes state + pid,
+// leaving the other fields for K4d's fork to repopulate). K4e (exit/
+// wait) will flip state to ZOMBIE first (state = 4) and only call
+// task_free (state = 0) when the parent reaps via waitpid.
+fn task_free(tbl: State<ProcessTable>, idx: u32) {
+    pt_set_state(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K4a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ProcessTable via state_new, init it via pt_init, then:
+//   (1) task_alloc → returns 0 (first slot).
+//   (2) pt_get_state(0) == 2 (READY).
+//   (3) pt_get_pid(0) == 1 (PID = slot + 1).
+//   (4) tbl.count == 1.
+//   (5) task_alloc → returns 1 (second slot).
+//   (6) tbl.count == 2.
+//   (7) task_free(0); pt_get_state(0) == 0 (FREE).
+//   (8) tbl.count == 1.
+//   (9) task_alloc → returns 0 (reuses the freed slot — lowest-free-
+//       slot-wins policy).
+// Returns 0 on success, 1..9 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K4a contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (1, 2, 9) — decimal avoids
+// the parser's hex-literal path (parse_int_radix width-extension
+// subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the
+// same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096).
+
+fn main() -> i32 {
+    let tbl = state_new(ProcessTable);
+    pt_init(tbl);
+
+    // Alloc a task — should return slot 0.
+    let t0 = task_alloc(tbl);
+    if t0 != 0 { return 1; }
+
+    // The new slot should be READY (state == 2).
+    if pt_get_state(tbl, 0) != 2 { return 2; }
+
+    // The new slot's PID should be 1 (slot + 1).
+    if pt_get_pid(tbl, 0) != 1 { return 3; }
+
+    // count should be 1.
+    if tbl.count != 1 { return 4; }
+
+    // Alloc another — should return slot 1.
+    let t1 = task_alloc(tbl);
+    if t1 != 1 { return 5; }
+
+    // count should be 2.
+    if tbl.count != 2 { return 6; }
+
+    // Free slot 0 — state should go to 0 (FREE).
+    task_free(tbl, t0);
+    if pt_get_state(tbl, 0) != 0 { return 7; }
+
+    // count should be 1.
+    if tbl.count != 1 { return 8; }
+
+    // Alloc should reuse slot 0 (lowest-free-slot-wins).
+    let t2 = task_alloc(tbl);
+    if t2 != 0 { return 9; }
+
+    return 0;
+}
