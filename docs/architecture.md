@@ -20,6 +20,7 @@ standard library, and the self-hosting bootstrap compiler.
 4. [Code Generation](#4-code-generation)
 5. [Standard Library (`womb/`)](#5-standard-library-womb)
 6. [Self-Hosting](#6-self-hosting)
+7. [VUMA 2.0: Programs as Memory Transformations (PMT)](#7-vuma-20-programs-as-memory-transformations-pmt)
 
 ---
 
@@ -464,3 +465,218 @@ language can compile itself, and to anchor the standard library in VUMA
 rather than Rust. Closing each gap (verification, optimisation, additional
 backends) is tracked as open work on the Rust-hosted side, which remains the
 production compiler.
+
+---
+
+## 7. VUMA 2.0: Programs as Memory Transformations (PMT)
+
+VUMA 2.0 introduces a new programming model — **Programs as Memory
+Transformations** (PMT) — that supersedes the pointer-based memory model of
+VUMA 1.x. Under PMT, a program is a sequence of *state transformations* over
+typed memory layouts, rather than a graph of pointer derivations and accesses.
+The pointer model (§1–§6 above) remains available for backwards compatibility;
+PMT is opt-in via the `--pmt` flag and exclusive via `--pmt-only` (see
+[§7.6](#76-the---pmt-and---pmt-only-flags)).
+
+PMT collapses the five pointer invariants of §3.1 into three structural state
+verifiers, lowers all program state into a single program-wide buffer, and
+extends the e-graph optimiser with layout-aware rewrites. The 19-backend
+codegen is unchanged — PMT is a front-end and verification reform, not an ISA
+reform.
+
+### 7.1 The PMT Pipeline
+
+A PMT program introduces three surface-level constructs: `layout` (a typed
+record shape, the PMT analogue of a struct), `State` (a linear handle to a
+range of bytes interpreted as a layout), and `transform` (a state-to-state
+function that consumes its input state and produces a new one). The
+compilation flow for a PMT program is:
+
+```
+AST (with layout / State / transform)
+   │
+   ▼
+SCG with state nodes            (parser lowers to CodegenScg with StateInit /
+   │                            StateRead / StateWrite / StateTransform / StateConsume)
+   ▼
+bridge_ast_to_codegen_scg      (state ops lowered to existing IR:
+   │                             Alloc / Load / Store / Offset / Free)
+   ▼
+run_ir_pipeline (full O2)      (monomorphize → closures → bv_verify →
+   │                             run_optimizations_with_target → escape/effects/SROA → vectorize)
+   ▼
+Codegen (19 backends, unchanged)
+```
+
+The lowering is intentionally a *defunctionalisation* of state semantics
+onto the existing IR — no new IR instructions are introduced. `StateInit`
+lowers to a `Store` of the layout's default representation at a computed
+offset; `StateRead` lowers to a `Load`; `StateWrite` lowers to a `Store`;
+`StateTransform` lowers to either a no-op reinterpret (same layout size) or
+a copy (different size); `StateConsume` is a linear-use marker that lowers
+to nothing at the IR level but is enforced by the state verifiers.
+
+#### Single-Buffer Lowering
+
+A defining property of the PMT runtime is the **single-buffer lowering**.
+Rather than emitting one `Alloc` per `StateInit` (which would produce O(n)
+heap allocations and frees at runtime), the lowering allocates a single
+program-wide `Alloc` of size `Σ layout_sizes` at program entry and assigns
+each `State` an offset into it. The buffer is freed exactly once at program
+exit. Net effect: **zero `malloc` / `free` calls in the steady state** —
+all state traffic becomes offset arithmetic plus `Load` / `Store` into the
+shared buffer.
+
+Offsets are determined by a layout-planner that walks every `StateInit` in
+dominance order, assigns each a `base + sizeof(layout)` slot, and records
+the offset in the SCG node's annotation so that downstream verifiers and
+the optimiser both see concrete offsets. Because all offsets are known at
+compile time, alias analysis collapses to integer comparison and the
+scheduler can reorder independent state operations freely.
+
+### 7.2 State Verification (Replaces the Five Pointer Invariants)
+
+Under PMT, the five pointer invariants of §3.1 are no longer checked
+independently — they collapse into **structural properties of the state
+type system**, leaving only three small semantic checks (see
+[§7.3](#73-the-three-state-verifiers)). The collapsed-invariant table
+below maps each VUMA 1.x pointer invariant to its PMT equivalent:
+
+| Invariant        | Current (pointer model)                              | PMT (state model)                                                        |
+|------------------|------------------------------------------------------|--------------------------------------------------------------------------|
+| **Liveness**     | Track each pointer's lifetime (O(n), complex)        | A reference is live iff its state type is in scope (O(1), type check).   |
+| **Exclusivity**  | Prove no aliasing (undecidable in general)           | States are linear — one owner, consumed on `transform` (structural).     |
+| **Cleanup**      | Track each allocation's free (O(n))                  | Buffer freed once at program exit (O(1)).                                |
+| **Origin**       | Track each pointer's derivation chain                | Every reference traces to a state transformation (structural).           |
+| **Interpretation** | Prove pointer's type matches access                | The state type *is* the interpretation (structural).                     |
+
+Three observations are worth highlighting:
+
+1. **Liveness** becomes a scope check, not a dataflow analysis. Because
+   state types are linear and consumed on `transform`, "is this reference
+   live?" reduces to "is its state type in scope at this program point?" —
+   a question the type checker answers in O(1).
+
+2. **Exclusivity**, which is *undecidable* in the general pointer model
+   (alias analysis can be made arbitrarily precise but never complete),
+   becomes a *structural* property: linearity guarantees one owner per
+   state, and `transform` consumes its input, so two writers cannot both
+   hold the same state.
+
+3. **Cleanup** drops from O(n) per-allocation tracking to O(1): the
+   single program buffer is freed once at exit, and there are no
+   per-allocation frees to track.
+
+### 7.3 The Three State Verifiers
+
+PMT replaces the five pointer-invariant verifiers of `vuma-ive` with three
+state verifiers that run under `VerificationLevel::Pmt`. Each verifier is
+small, structural, and discharges its obligation without a heuristic search
+— there is no `Inconclusive` outcome under PMT.
+
+#### StateReadVerifier
+
+Proves that a `StateRead` is well-formed. Concretely, for a read of field
+`f` of type `T` from a state of layout `L`:
+
+- `offset(f) + sizeof(T) ≤ sizeof(L)` — the read is in-bounds.
+- `T` matches the declared type of `f` in `L` — the interpretation is
+  sound.
+
+Both checks are structural lookups against the `LayoutRegistry`
+(see [§7.5](#75-bd-changes)); no path-sensitive reasoning is required.
+
+#### StateWriteVerifier
+
+Proves that a `StateWrite` is well-formed. It performs the same in-bounds
+and type-match checks as `StateReadVerifier`, and additionally proves
+**linearity**: the state being written has not yet been consumed by a
+prior `StateTransform` or `StateConsume` on any path that reaches this
+write. Linearity is checked by a single-pass scope walk, not a fixpoint.
+
+#### StateTransformVerifier
+
+Proves that a `StateTransform(A, B)` is well-formed. It checks **layout
+compatibility** between the input state's layout and the output state's
+layout:
+
+- If `sizeof(A) == sizeof(B)`, the transform is a *reinterpret* — the
+  bytes are reinterpreted in place, no copy is emitted, and the verifier
+  only needs to check alignment compatibility.
+- If `sizeof(A) != sizeof(B)`, the transform is a *copy* — a
+  size-changing copy is emitted, and the verifier checks that the source
+  bytes are a valid prefix (or extension) of the destination layout.
+
+Either way, the check is O(1) in the layout size.
+
+### 7.4 E-graph Layout Optimization
+
+The e-graph optimiser (`vuma-codegen::egraph`) gains three layout-aware
+rewrite families when PMT is enabled. Like the existing bitvector-verified
+rewrites, each new rule is checked by `bv_verify` before admission to the
+rule set.
+
+| Rewrite                  | Pattern                                     | Replacement                                | Notes                                                   |
+|--------------------------|---------------------------------------------|--------------------------------------------|---------------------------------------------------------|
+| **Dead-state elimination** | `StateInit(L)` whose result is never read | (removed)                                  | Analogous to DCE for allocations; safe because state init has no observable side effect beyond the bytes it writes. |
+| **Store-load forwarding** | `StateWrite(s, off, v); StateRead(s, off)` | `StateWrite(s, off, v); v`                 | Forwards the stored value when offset and state identity match; the read is dropped. |
+| **Transform elision**     | `StateTransform(A, A)`                      | `A` (identity)                             | A same-layout-to-same-layout transform is a no-op reinterpret and is elided entirely. |
+
+Because all state offsets are known at compile time (single-buffer
+lowering, §7.1), the e-graph's pattern matching on `(state, offset)`
+pairs is exact — no alias-disambiguation fallback is needed. The
+optimiser is therefore free to apply these rewrites aggressively without
+a may-alias oracle.
+
+### 7.5 BD Changes
+
+The Behavioural Descriptor layer (§3.3) is extended to make PMT
+first-class:
+
+- **RepD is promoted to the primary type system.** Under VUMA 1.x, RepD
+  is one of three orthogonal BD axes; under PMT, the `LayoutRegistry`
+  becomes the *canonical* source of representation facts, and RepD
+  answers are derived from it. This means layout queries
+  (`sizeof`, `alignof`, field offsets) are answered by the
+  `LayoutRegistry` rather than by BD inference, eliminating a class of
+  `Inconclusive` results that arose from BD under-inference.
+
+- **RelD gains `EpochBefore` / `EpochAfter`.** These two new relational
+  facts model state-transformation ordering: `EpochBefore(s1, s2)` means
+  `s1`'s transformation precedes `s2`'s, and `EpochAfter` is its
+  converse. They are emitted by the state verifiers and consumed by the
+  scheduler and the e-graph rewrites to reason about reordering
+  legality.
+
+- **CapD gains four state capabilities:** `StateRead`, `StateWrite`,
+  `StateTransform`, and `StateConsume`. These join the existing
+  `Read` / `Write` capability lattice and are checked by the state
+  verifiers in §7.3. A state value's CapD is determined entirely by its
+  position in the linear state chain — no capability inference is
+  required.
+
+### 7.6 The `--pmt` and `--pmt-only` Flags
+
+Two CLI flags select the PMT mode:
+
+- **`--pmt`** — enables PMT verification. Sets
+  `VerificationLevel::Pmt`, which runs the three state verifiers
+  (§7.3) in place of the five pointer-invariant verifiers (§3.1).
+  Pointer syntax in source is still accepted for backwards
+  compatibility, but pointer operations are verified under the stricter
+  state model where applicable.
+
+- **`--pmt-only`** — rejects pointer syntax as a *hard error*. The
+  parser (`vuma-parser::parser`) accumulates violations during
+  `parse_program` via a process-global `AtomicBool` flag
+  (`set_global_pmt_only` / `global_pmt_only`) so that the setting
+  propagates through `ModuleResolver`'s internal `Parser` constructions
+  without modifying `resolver.rs`. Any `*`, `&`, `deref`, `addrof`,
+  `alloc`, or `free` surface token produces a `ParseError` of the form
+  *"pointer syntax '…' is not allowed in --pmt-only mode; use
+  state_new(Layout) and transforms"*, and the program is rejected.
+
+The two flags compose: `--pmt-only` implies `--pmt`. Programs compiled
+under `--pmt-only` are guaranteed to be free of pointer syntax and
+therefore free of the undecidable aliasing obligations that the pointer
+model carries.
