@@ -1,0 +1,14 @@
+// Migrated from memory/s39_mem_store_load_lit.vuma
+// Expected exit code: 185
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Single);
+    __s.v = 185;
+    let v = __s.v;
+    return v;
+}

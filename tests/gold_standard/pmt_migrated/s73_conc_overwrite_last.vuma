@@ -1,0 +1,16 @@
+// Migrated from concurrency/s73_conc_overwrite_last.vuma
+// Expected exit code: 137
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 60;
+    __s.b = 40;
+    __s.b = 137;
+    let v = __s.b;
+    return v;
+}

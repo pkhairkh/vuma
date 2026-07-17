@@ -1,0 +1,19 @@
+// Migrated from memory/s94_mem_three_cell_sum.vuma
+// Expected exit code: 109
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Triple);
+    __s.a = 50;
+    __s.b = 40;
+    __s.c = 19;
+    let a = __s.a;
+    let b = __s.b;
+    let c = __s.c;
+    let r = a + b + c;
+    return r;
+}

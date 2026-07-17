@@ -1,0 +1,17 @@
+// Migrated from memory/s12_mem_two_buf_sum.vuma
+// Expected exit code: 80
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 35;
+    __s.b = 45;
+    let va = __s.a;
+    let vb = __s.b;
+    let s = va + vb;
+    return s;
+}

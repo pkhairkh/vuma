@@ -1,0 +1,22 @@
+// Migrated from pointers/ptr_xor_exchange.vuma
+// Expected exit code: 1
+//
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let __s = state_new(Pair);
+    __s.a = 1;
+    __s.b = 2;
+    let va = __s.a;
+    let vb = __s.b;
+    va = va ^ vb;
+    vb = va ^ vb;
+    va = va ^ vb;
+    __s.a = va;
+    __s.b = vb;
+    let result = __s.b;
+    return result;
+}
