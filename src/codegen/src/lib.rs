@@ -81,6 +81,7 @@ pub mod regalloc_emit;
 pub mod riscv_common;
 pub mod riscv64;
 pub mod riscv32;
+pub mod runtime;
 pub mod s390x;
 pub mod scg_to_ir;
 pub mod scheduler;
