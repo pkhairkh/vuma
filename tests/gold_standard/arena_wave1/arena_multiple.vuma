@@ -1,0 +1,26 @@
+// arena_wave1/arena_multiple — multiple arena_alloc with different layouts
+// Expected exit code: 0
+//
+// Wave 6 test: allocate multiple states of different layouts inside the
+// same arena. Each allocation bumps the arena offset. Verify all states
+// are writable and don't interfere.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+layout Point = { x: u32, y: u32 }
+layout Rect = { w: u32, h: u32 }
+
+fn main() -> i32 {
+    let arena = arena_new(4096);
+    let p = arena_alloc(arena, Point);
+    let r = arena_alloc(arena, Rect);
+    p.x = 10;
+    p.y = 20;
+    r.w = 100;
+    r.h = 200;
+    if p.x != 10 { return 1; }
+    if p.y != 20 { return 2; }
+    if r.w != 100 { return 3; }
+    if r.h != 200 { return 4; }
+    arena_free(arena);
+    return 0;
+}
