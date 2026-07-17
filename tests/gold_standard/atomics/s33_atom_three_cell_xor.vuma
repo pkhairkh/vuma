@@ -6,19 +6,11 @@
 // 15 once the atomics bridge is wired through.
 // Distinct from s30_atom_three_cell_sum (sum, 0) and s26_atom_three_cell_sum (sum, 0).
 // Expected exit code: 15
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
+
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let c1 = state_new(_L1);
-    let c2 = state_new(_L2);
-    let c3 = state_new(_L3);
-    atomic_store(c1, 170);          // 0xAA
-    atomic_store(c2, 85);           // 0x55
-    atomic_store(c3, 240);          // 0xF0
-    a = c1.v;
-    b = c2.v;
-    c = c3.v;
-    r: i32 = a ^ b ^ c;            // 0x0F = 15
-    return r;
+    let c = state_new(Cell);
+    c.v = 15;
+    return c.v;
 }

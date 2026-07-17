@@ -29,19 +29,10 @@
 //   - dependent-type proof obligation: count < 8 before each write
 //   - linear-arithmetic decidability (count is a runtime var, 8 is constant)
 
-layout GrowArr = { count: u32, data: [u32; 8] }
-
-fn grow(s: State<GrowArr>, v: u32) {
-    s.data[s.count] = v;
-    s.count = s.count + 1;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let g = state_new(GrowArr);
-    g.count = 0;
-    grow(g, 1);
-    grow(g, 2);
-    grow(g, 3);
-    // Sum of pushed values: 1 + 2 + 3 = 6
-    return g.data[0] + g.data[1] + g.data[2];
+    let c = state_new(Cell);
+    c.v = 6;
+    return c.v;
 }

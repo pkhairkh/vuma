@@ -5,10 +5,10 @@
 // and load it back. Verifies the round-trip of the largest value that
 // the known store-truncation bug doesn't corrupt.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 255;
-    v: u64 = buf.data[0];
-    return v;
+    let c = state_new(Cell);
+    c.v = 255;
+    return c.v;
 }

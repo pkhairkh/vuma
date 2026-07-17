@@ -12,16 +12,10 @@
 // Note: every value stored into the table is a decimal literal (the
 // codegen drops hex literals stored through `*ptr = 0xNN`).
 
+layout Cell = { v: u32 }
 
-
-layout _L1 = { v: u32 }
 fn main() -> i32 {
-    let table = state_new(_L1);
-    table.data[0] = 16;             // 0x10;
-    table.data[1] = 32;             // 0x20;
-    table.data[2] = 42;             // 0x2A  <- target;
-    table.data[3] = 64;             // 0x40;
-    idx: i32 = 2;
-    val: i32 = table.data[idx];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

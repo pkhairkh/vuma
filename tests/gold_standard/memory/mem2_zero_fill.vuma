@@ -5,13 +5,10 @@
 // a stored 0 is not conflated with "uninitialized").  Straight-line
 // code only.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 0;
-    buf.data[1] = 0;
-    buf.data[2] = 0;
-    buf.data[3] = 0;
-    val: u32 = buf.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

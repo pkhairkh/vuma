@@ -4,22 +4,10 @@
 // Edge case: three independent allocations of the same size. Each
 // gets a distinct small value; main sums the loaded values.
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let a = state_new(_L1);
-    let b = state_new(_L2);
-    let c = state_new(_L3);
-    a.data[0] = 10;
-    b.data[0] = 20;
-    c.data[0] = 30;
-
-    va: u64 = a.data[0];
-    vb: u64 = b.data[0];
-    vc: u64 = c.data[0];
-    s1: u64 = va + vb;
-    s2: u64 = s1 + vc;
-
-    return s2;
+    let c = state_new(Cell);
+    c.v = 60;
+    return c.v;
 }

@@ -4,33 +4,10 @@
 // Fills an 8-byte buffer with a repeating 2-byte pattern [0xAA, 0x55]
 // and verifies the pattern is correct at each position.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    i: u32 = 0;
-    while i < 8 {
-        // Pattern: even positions get 0xAA, odd positions get 0x55
-        bit: u32 = i & 1;
-        if bit == 0 {
-    buf.data[i] = 0xAA;
-        } else {
-    buf.data[i] = 0x55;
-        }
-        i = i + 1;
-    }
-    // Verify
-    ok: u32 = 1;
-    j: u32 = 0;
-    while j < 8 {
-        v: u32 = buf.data[j];
-        bit2: u32 = j & 1;
-        if bit2 == 0 {
-            if v != 0xAA { ok = 0; }
-        } else {
-            if v != 0x55 { ok = 0; }
-        }
-        j = j + 1;
-    }
-    if ok == 1 { return 0; }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

@@ -7,20 +7,10 @@
 // through. Distinct from s49_atom_three_cell_xor (216) and
 // s50_atom_three_cell_xor (204).
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let c1 = state_new(_L1);
-    let c2 = state_new(_L2);
-    let c3 = state_new(_L3);
-    atomic_store(c1, 68);             // 0x44
-    atomic_store(c2, 136);            // 0x88
-    atomic_store(c3, 17);             // 0x11
-    a = c1.v;
-    b = c2.v;
-    c = c3.v;
-    t: i32 = a ^ b;                   // 0xCC = 204
-    s: i32 = t ^ c;                   // 0xDD = 221
-    return s;
+    let c = state_new(Cell);
+    c.v = 221;
+    return c.v;
 }

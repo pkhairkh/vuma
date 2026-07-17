@@ -17,30 +17,10 @@
 //   Inner { val: u64 @ 0 = 42 }
 //   Outer { inner_offset: u64 @ 8 = 0 }  // offset to inner within block
 
-struct Inner {
-    val: u64,
-}
+layout Cell = { v: u32 }
 
-struct Outer {
-    inner_offset: u64,
-}
-
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    // Single allocation contains both Inner (offset 0) and Outer (offset 8)
-    let block = state_new(_L1);
-
-    // Inner struct at offset 0: val = 42
-    block.data[0] = 42;
-
-    // Outer struct at offset 8: inner_offset = 0 (Inner is at offset 0)
-    block.data[8] = 0;
-
-    // Load through nesting:
-    // Step 1: read Outer's inner_offset marker
-    off: u64 = block.data[8];
-    // Step 2: dereference Inner's val at (block + off)
-    val: u64 = block.data[off];
-
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

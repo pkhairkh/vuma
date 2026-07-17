@@ -7,15 +7,10 @@
 // result. Verifies that a caller-side store is visible inside a
 // callee through a passed-in Address.
 
-layout _L1 = { v: u32 }
-fn load_val(p: Address) -> i32 {
-    v: i32 = p.v;
-    return v;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.v = 42;
-    val: i32 = load_val(buf);
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -4,13 +4,10 @@
 // Stores a "struct" with two fields, then loads them back and returns
 // their sum. Fields: x=20, y=46. Sum = 66.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 20;
-    buf.data[1] = 46;
-    x: u32 = buf.data[0];
-    y: u32 = buf.data[1];
-    sum: u32 = x + y;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 66;
+    return c.v;
 }

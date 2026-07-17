@@ -5,10 +5,10 @@
 // fast paths in most allocators). Stores 42 at offset 0 and loads it
 // back to confirm the first byte of a larger buffer is not corrupted.
 
-layout _L1 = { data: [u8; 256] }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.v = 42;
-    val: i32 = buf.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

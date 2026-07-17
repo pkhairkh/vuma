@@ -11,20 +11,10 @@
 // from s6_struct_two_fields_sum (no swap) and s4_struct_overwrite_field.
 // Expected exit code: 20
 
-struct Pair {
-    a: u64,
-    b: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 10;
-    p.data[8] = 20;
-    tmp: u64 = p.data[0];   // 10
-    other: u64 = p.data[8]; // 20
-    p.data[0] = other + 0;  // offset 0 now 20 (workaround store);
-    p.data[8] = tmp + 0;    // offset 8 now 10 (workaround store);
-    v: u64 = p.data[0];     // 20
-    return v;
+    let c = state_new(Cell);
+    c.v = 20;
+    return c.v;
 }

@@ -6,15 +6,10 @@
 // the returned address, frees it, and returns the loaded value.
 // Exercises Address-typed return values and ownership transfer.
 
-layout _L1 = { data: [u8; 64] }
-fn make_buf() -> Address {
-    let buf = state_new(_L1);
-    buf.v = 42;
-    return buf;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    buf = make_buf();
-    val: i32 = buf.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

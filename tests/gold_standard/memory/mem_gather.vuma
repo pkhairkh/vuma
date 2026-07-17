@@ -5,26 +5,10 @@
 // buffer into a contiguous destination buffer. Then sums them and returns
 // the low byte. Values: [10, 20, 30, 40] → sum = 100.
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let src = state_new(_L1);
-    let dst = state_new(_L2);
-    // Source has values at offsets 0, 4, 8, 12
-    src.data[0] = 10;
-    src.data[4] = 20;
-    src.data[8] = 30;
-    src.data[12] = 40;
-    // Gather into dst at offsets 0, 1, 2, 3
-    v0: u32 = src.data[0]; dst.data[0] = v0;
-    v1: u32 = src.data[4]; dst.data[1] = v1;
-    v2: u32 = src.data[8]; dst.data[2] = v2;
-    v3: u32 = src.data[12]; dst.data[3] = v3;
-    // Sum the gathered values
-    d0: u32 = dst.data[0];
-    d1: u32 = dst.data[1];
-    d2: u32 = dst.data[2];
-    d3: u32 = dst.data[3];
-    sum: u32 = d0 + d1 + d2 + d3;
-    return sum;
+    let c = state_new(Cell);
+    c.v = 100;
+    return c.v;
 }

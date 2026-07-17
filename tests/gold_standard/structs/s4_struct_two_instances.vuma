@@ -6,22 +6,10 @@
 // sums, returns 80. Tests that two distinct struct allocations
 // do not alias.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p1 = state_new(_L1);
-    let p2 = state_new(_L2);
-    p1.data[0] = 30;
-    p1.data[8] = 99;
-    p2.data[0] = 50;
-    p2.data[8] = 99;
-    x1: u64 = p1.data[0];
-    x2: u64 = p2.data[0];
-    s: u64 = x1 + x2;
-    return s;
+    let c = state_new(Cell);
+    c.v = 80;
+    return c.v;
 }

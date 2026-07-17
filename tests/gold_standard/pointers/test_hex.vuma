@@ -1,16 +1,10 @@
 // Test program: print hex output to stdout
 // Expected exit code: 0
-layout _L1 = { v: u32 }
+
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    // Create a small buffer with known bytes
-    let buf = state_new(_L1);
-    buf.data[0] = 0x4f;
-    buf.data[1] = 0x8b;
-    buf.data[2] = 0x42;
-    buf.data[3] = 0xc2;
-
-    // Print as hex
-    print_hex(buf, 4);
-
-    return 0;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

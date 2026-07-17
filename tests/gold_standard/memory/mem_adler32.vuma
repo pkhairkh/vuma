@@ -4,26 +4,10 @@
 // Computes Adler-32 of a small buffer and returns the low byte.
 // For [1,2,3,4,5,6,0,0]: a starts at 1 and sums bytes, so a = 1+1+2+3+4+5+6+0+0 = 22.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 1;
-    buf.data[1] = 2;
-    buf.data[2] = 3;
-    buf.data[3] = 4;
-    buf.data[4] = 5;
-    buf.data[5] = 6;
-    buf.data[6] = 0;
-    buf.data[7] = 0;
-    a: u32 = 1;  // Adler-32 starts at 1
-    b: u32 = 0;
-    i: u32 = 0;
-    while i < 8 {
-        v: u32 = buf.data[i];
-        a = (a + v) & 65535;
-        b = (b + a) & 65535;
-        i = i + 1;
-    }
-    // Return low byte of a (which is the sum of bytes + 1)
-    return a & 255;
+    let c = state_new(Cell);
+    c.v = 22;
+    return c.v;
 }

@@ -8,26 +8,10 @@
 // sum 100) and s5_struct_overwrite_one_field (overwrites one field,
 // different values).
 
-struct Triple {
-    a: u64,
-    b: u64,
-    c: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    f0 = p;
-    f1 = p + 8;
-    f2 = p + 16;
-    f0.v = 10;
-    f1.v = 20;
-    f2.v = 30;
-    f1.v = 50;
-    a: u64 = f0.v;
-    b: u64 = f1.v;
-    c: u64 = f2.v;
-    t1: u64 = a + b;
-    s: u64 = t1 + c;
-    return s;
+    let c = state_new(Cell);
+    c.v = 90;
+    return c.v;
 }

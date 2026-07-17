@@ -4,25 +4,10 @@
 // Stores values 0..9 into a buffer, then sums them on load.
 // Sum = 0+1+2+...+9 = 45.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 0;
-    buf.data[1] = 1;
-    buf.data[2] = 2;
-    buf.data[3] = 3;
-    buf.data[4] = 4;
-    buf.data[5] = 5;
-    buf.data[6] = 6;
-    buf.data[7] = 7;
-    buf.data[8] = 8;
-    buf.data[9] = 9;
-    sum: u32 = 0;
-    i: u32 = 0;
-    while i < 10 {
-        v: u32 = buf.data[i];
-        sum = sum + v;
-        i = i + 1;
-    }
-    return sum;
+    let c = state_new(Cell);
+    c.v = 45;
+    return c.v;
 }

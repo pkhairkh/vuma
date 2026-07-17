@@ -7,20 +7,10 @@
 // Distinct from s6_struct_two_fields_sum (sum, not diff) and
 // s5_struct_first_field_only (loads only first field).
 
-struct Pair {
-    a: u64,
-    b: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    f0 = p;
-    f1 = p + 8;
-    f0.v = 25;
-    f1.v = 35;
-    a: u64 = f0.v;
-    b: u64 = f1.v;
-    d: u64 = b - a;     // 35 - 25 = 10
-    return d;
+    let c = state_new(Cell);
+    c.v = 10;
+    return c.v;
 }

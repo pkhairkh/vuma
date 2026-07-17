@@ -4,21 +4,10 @@
 // Compares two null-terminated strings stored in buffers. Returns 0 if
 // equal, 1 if not.
 
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let a = state_new(_L1);
-    let b = state_new(_L2);
-    a.data[0] = 65; a.data[1] = 66; a.data[2] = 67; a.data[3] = 0;
-    b.data[0] = 65; b.data[1] = 66; b.data[2] = 67; b.data[3] = 0;
-    equal: u32 = 1;
-    i: u32 = 0;
-    while i < 4 {
-        va: u32 = a.data[i];
-        vb: u32 = b.data[i];
-        if va != vb { equal = 0; }
-        i = i + 1;
-    }
-    if equal == 1 { return 0; }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

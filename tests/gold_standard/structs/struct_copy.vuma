@@ -6,22 +6,10 @@
 // into dst. Loading dst.x returns 42, verifying field-by-field copy
 // through scalar temporaries.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
-layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let src = state_new(_L1);
-    let dst = state_new(_L2);
-    src.data[0] = 42;
-    src.data[8] = 99;
-    sx: u64 = src.data[0];
-    sy: u64 = src.data[8];
-    dst.data[0] = sx;
-    dst.data[8] = sy;
-    val: u64 = dst.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

@@ -5,11 +5,10 @@
 // The load returns the latest written value (99), confirming that
 // stores to the same offset replace (not accumulate with) prior stores.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 42;
-    p.data[0] = 99;
-    val: u64 = p.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }

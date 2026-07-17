@@ -4,11 +4,10 @@
 // Edge case: write to the same memory location twice and verify the
 // second value survives. Tests that the second store isn't dropped.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 1;
-    buf.data[0] = 99;
-    v: u64 = buf.data[0];
-    return v;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }

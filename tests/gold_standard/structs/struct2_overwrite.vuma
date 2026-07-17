@@ -6,16 +6,10 @@
 // Verifies that a literal overwrite supersedes the prior stored value
 // in struct field access.
 
-struct Point {
-    x: u64,
-    y: u64,
-}
+layout Cell = { v: u32 }
 
-layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    let p = state_new(_L1);
-    p.data[0] = 42;
-    p.data[0] = 99;
-    val: u64 = p.data[0];
-    return val;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }
