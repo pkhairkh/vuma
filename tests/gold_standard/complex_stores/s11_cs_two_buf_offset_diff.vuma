@@ -9,21 +9,22 @@
 // from s10_cs_two_buf_offset_sum (different vals 25/35/15/45) and
 // s8_cs_interleaved_bufs (interleaved access pattern).
 
+layout Buf_a = { data: [u8; 16] }
+layout Buf_b = { data: [u8; 16] }
+
 fn main() -> i32 {
-    a = allocate(16);
-    b = allocate(16);
-    *(a + 0) = 10;
-    *(a + 8) = 20;
-    *(b + 0) = 30;
-    *(b + 8) = 40;
-    a0: u64 = *(a + 0);
-    a1: u64 = *(a + 8);
-    b0: u64 = *(b + 0);
-    b1: u64 = *(b + 8);
+    let a = state_new(Buf_a);
+    let b = state_new(Buf_b);
+    a.data[0] = 10;
+    a.data[8] = 20;
+    b.data[0] = 30;
+    b.data[8] = 40;
+    a0: u64 = a.data[0];
+    a1: u64 = a.data[8];
+    b0: u64 = b.data[0];
+    b1: u64 = b.data[8];
     t1: u64 = a0 + a1;
     t2: u64 = t1 + b0;
     s: u64 = t2 + b1;
-    free(a);
-    free(b);
     return s;
 }

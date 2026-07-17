@@ -1,19 +1,17 @@
-// s69_ptr_two_cell_diff.vuma -- two cells, diff = 145 (220 - 75)
+// Migrated from pointers/s69_ptr_two_cell_diff.vuma
 // Expected exit code: 145
 //
-// Two 8-byte cells. Store 220/75 via `*p = literal`, load both, diff
-// -> 145. Uses `*p = literal` form. Distinct from s66_ptr_two_cell_
-// sum (200), s65_ptr_two_cell_sum (220) and s64_ptr_two_cell_sum
-// (185).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 220;
-    *p2 = 75;
-    a: u64 = *p1;
-    b: u64 = *p2;
-    d: u64 = a - b;        // 145
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 220;
+    __s.b = 75;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a - b;
     return d;
 }

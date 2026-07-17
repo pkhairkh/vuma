@@ -6,15 +6,15 @@
 // s14_mem_two_cell_sum (sum framing, 35+55 = 90) and
 // s13_mem_two_buf_product (two-buf product framing).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 7;
-    *p2 = 6;
-    a: u64 = *p1;
-    b: u64 = *p2;
+    let p1 = state_new(_L1);
+    let p2 = state_new(_L2);
+    p1.v = 7;
+    p2.v = 6;
+    a: u64 = p1.v;
+    b: u64 = p2.v;
     s: u64 = a * b;
-    free(p1);
-    free(p2);
     return s;
 }

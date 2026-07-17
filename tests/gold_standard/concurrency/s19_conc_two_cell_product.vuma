@@ -6,15 +6,15 @@
 // from s18_conc_two_cell_sum (23/67 = 90, sum) and
 // s14_conc_two_cell_diff (subtraction).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 8;
-    *p2 = 12;
-    a: u64 = *p1;
-    b: u64 = *p2;
+    let p1 = state_new(_L1);
+    let p2 = state_new(_L2);
+    p1.v = 8;
+    p2.v = 12;
+    a: u64 = p1.v;
+    b: u64 = p2.v;
     s: u64 = a * b;
-    free(p1);
-    free(p2);
     return s;
 }

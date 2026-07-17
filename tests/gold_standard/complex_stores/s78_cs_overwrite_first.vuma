@@ -6,11 +6,12 @@
 // literal` form (no offsets). Distinct from s74_cs_overwrite_last
 // (85), s73_cs_overwrite_middle (155) and s72_cs_overwrite_first
 // (115).
+layout Buf_c1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    *c1 = 1;
-    *c1 = 3;
-    r: u64 = *c1;          // 3
-    free(c1);
+    let c1 = state_new(Buf_c1);
+    c1.data[0] = 1;
+    c1.data[0] = 3;
+    r: u64 = c1.data[0];          // 3
     return r;
 }

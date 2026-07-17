@@ -6,15 +6,15 @@
 // value back. Verifies that Address return values cross the
 // call/return boundary intact.
 
+layout _L1 = { v: u32 }
 fn make_buf() -> Address {
-    buf = allocate(8);
-    *buf = 42;
+    let buf = state_new(_L1);
+    buf.v = 42;
     return buf;
 }
 
 fn main() -> i32 {
     p = make_buf();
     v: u32 = *p;
-    free(p);
     return v;
 }

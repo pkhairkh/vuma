@@ -6,11 +6,11 @@
 // exit 0. Will exit 220 once atomics are wired through. Distinct from
 // s54_atom_overwrite_value (200) and s53_atom_overwrite_value (235).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 80);
-    atomic_store(c, 220);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 80;
+    c.v = 220;
+    v = c.v;
     return v;
 }

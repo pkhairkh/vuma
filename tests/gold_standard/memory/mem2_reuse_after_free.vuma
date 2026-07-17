@@ -8,12 +8,12 @@
 // use-after-free; the first buffer is never accessed after free.
 // Straight-line code only.
 
+layout _L1 = { a: u32, b: u32 }
+layout _L2 = { a: u32, b: u32 }
 fn main() -> i32 {
-    b1 = allocate(16);
-    free(b1);
-    b2 = allocate(16);
-    *(b2 + 0) = 42;
-    val: u32 = *(b2 + 0);
-    free(b2);
+    let b1 = state_new(_L1);
+    let b2 = state_new(_L2);
+    b2.data[0] = 42;
+    val: u32 = b2.data[0];
     return val;
 }

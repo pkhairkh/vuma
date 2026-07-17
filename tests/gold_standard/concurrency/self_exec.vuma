@@ -36,6 +36,20 @@
 // ===========================================================================
 
 extern "C" {
+layout _L1 = { data: [u8; 32] }
+layout _L2 = { data: [u8; 256] }
+layout _L3 = { data: [u8; 256] }
+layout _L4 = { data: [u8; 64] }
+layout _L5 = { data: [u8; 32] }
+layout _L6 = { data: [u8; 256] }
+layout _L7 = { data: [u8; 32] }
+layout _L8 = { data: [u8; 65] }
+layout _L9 = { v: u32 }
+layout _L10 = { v: u32 }
+layout _L11 = { v: u32 }
+layout _L12 = { data: [u8; 20] }
+layout _L13 = { data: [u8; 65] }
+layout _L14 = { v: u32 }
     fn pipe(pipefd: Address) -> i64;           // create pipe; pipefd[0]=read, [1]=write
     fn fork() -> i64;                          // 0 in child, child PID in parent
     fn dup2(oldfd: i64, newfd: i64) -> i64;    // duplicate fd
@@ -308,11 +322,11 @@ fn copy32(dst: Address, src: Address) {
 // Memory: state(32) + k(256) + w(256) + block(64) + inner(32) = 640 bytes
 
 fn sha256d(msg: Address, msg_len: u64, out: Address) {
-    state = allocate(32);
-    k = allocate(256);
-    w = allocate(256);
-    block = allocate(64);
-    inner = allocate(32);
+    let state = state_new(_L1);
+    let k = state_new(_L2);
+    let w = state_new(_L3);
+    let block = state_new(_L4);
+    let inner = state_new(_L5);
 
     sha256_init_k(k);
 
@@ -328,11 +342,6 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
     sha256_transform(state, k, w, block);
     copy32(out, state);
 
-    free(state);
-    free(k);
-    free(w);
-    free(block);
-    free(inner);
 }
 
 // ===========================================================================
@@ -486,24 +495,20 @@ fn write_u64_native(buf: Address, offset: u64, val: u64, be: bool) {
 // Child mode: read stdin, compute SHA256d, write hex to stdout.
 // After parent's dup2, fd 0 = pipe1 read end, fd 1 = pipe2 write end.
 fn child_mode() -> i32 {
-    in_buf = allocate(256);
+    let in_buf = state_new(_L6);
     n: i64 = read(0, in_buf, 256);
     if n <= 0 {
-        free(in_buf);
         exit(1);
         return 1;
     }
 
-    digest = allocate(32);
+    let digest = state_new(_L7);
     sha256d(in_buf, n as u64, digest);
-    free(in_buf);
 
-    hex_out = allocate(65);
+    let hex_out = state_new(_L8);
     bytes_to_hex(digest, 32, hex_out);
-    free(digest);
-    *(hex_out + 64) = 10;   // '\n'
+    hex_out.data[64] = 10;   // '\n';
     write(1, hex_out, 65);
-    free(hex_out);
 
     exit(0);
     return 0;   // unreachable — exit() does not return
@@ -513,13 +518,11 @@ fn child_mode() -> i32 {
 // Returns the first byte of the child's hex output as exit code.
 fn parent_mode(argc: i64, argv: Address) -> i32 {
     // Step 1: Create two pipes
-    pipe1fd = allocate(8);
-    pipe2fd = allocate(8);
+    let pipe1fd = state_new(_L9);
+    let pipe2fd = state_new(_L10);
 
     ret: i64 = pipe(pipe1fd);
     if ret < 0 {
-        free(pipe1fd);
-        free(pipe2fd);
         exit(2);
         return 2;
     }
@@ -534,8 +537,6 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
 
     ret = pipe(pipe2fd);
     if ret < 0 {
-        free(pipe1fd);
-        free(pipe2fd);
         exit(3);
         return 3;
     }
@@ -552,8 +553,6 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
         close(p1_write);
         close(p2_read);
         close(p2_write);
-        free(pipe1fd);
-        free(pipe2fd);
         exit(4);
         return 4;
     }
@@ -578,13 +577,13 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
         }
 
         argv_arr = allocate(3 * ps);
-        arg_str = allocate(6);
-        *(arg_str + 0) = 99;     // 'c'
-        *(arg_str + 1) = 104;    // 'h'
-        *(arg_str + 2) = 105;    // 'i'
-        *(arg_str + 3) = 108;    // 'l'
-        *(arg_str + 4) = 100;    // 'd'
-        *(arg_str + 5) = 0;      // '\0'
+    let arg_str = state_new(_L11);
+    arg_str.data[0] = 99;     // 'c';
+    arg_str.data[1] = 104;    // 'h';
+    arg_str.data[2] = 105;    // 'i';
+    arg_str.data[3] = 108;    // 'l';
+    arg_str.data[4] = 100;    // 'd';
+    arg_str.data[5] = 0;      // '\0';
 
         if ps == 4 {
             write_u32_native(argv_arr, 0,  argv0_ptr,       be);
@@ -605,11 +604,6 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
 
         execve(argv0_ptr as Address, argv_arr, envp_arr);
 
-        free(arg_str);
-        free(argv_arr);
-        free(envp_arr);
-        free(pipe1fd);
-        free(pipe2fd);
         exit(5);
         return 5;
     }
@@ -619,41 +613,38 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
     close(p2_write);
 
     // Step 3: Write "VUMA-SELF-EXEC-TEST" (19 bytes) to child via pipe1
-    msg_buf = allocate(20);
-    *(msg_buf + 0)  = 86;    // 'V'
-    *(msg_buf + 1)  = 85;    // 'U'
-    *(msg_buf + 2)  = 77;    // 'M'
-    *(msg_buf + 3)  = 65;    // 'A'
-    *(msg_buf + 4)  = 45;    // '-'
-    *(msg_buf + 5)  = 83;    // 'S'
-    *(msg_buf + 6)  = 69;    // 'E'
-    *(msg_buf + 7)  = 76;    // 'L'
-    *(msg_buf + 8)  = 70;    // 'F'
-    *(msg_buf + 9)  = 45;    // '-'
-    *(msg_buf + 10) = 69;    // 'E'
-    *(msg_buf + 11) = 88;    // 'X'
-    *(msg_buf + 12) = 69;    // 'E'
-    *(msg_buf + 13) = 67;    // 'C'
-    *(msg_buf + 14) = 45;    // '-'
-    *(msg_buf + 15) = 84;    // 'T'
-    *(msg_buf + 16) = 69;    // 'E'
-    *(msg_buf + 17) = 83;    // 'S'
-    *(msg_buf + 18) = 84;    // 'T'
+    let msg_buf = state_new(_L12);
+    msg_buf.data[0] = 86;    // 'V';
+    msg_buf.data[1] = 85;    // 'U';
+    msg_buf.data[2] = 77;    // 'M';
+    msg_buf.data[3] = 65;    // 'A';
+    msg_buf.data[4] = 45;    // '-';
+    msg_buf.data[5] = 83;    // 'S';
+    msg_buf.data[6] = 69;    // 'E';
+    msg_buf.data[7] = 76;    // 'L';
+    msg_buf.data[8] = 70;    // 'F';
+    msg_buf.data[9] = 45;    // '-';
+    msg_buf.data[10] = 69;    // 'E';
+    msg_buf.data[11] = 88;    // 'X';
+    msg_buf.data[12] = 69;    // 'E';
+    msg_buf.data[13] = 67;    // 'C';
+    msg_buf.data[14] = 45;    // '-';
+    msg_buf.data[15] = 84;    // 'T';
+    msg_buf.data[16] = 69;    // 'E';
+    msg_buf.data[17] = 83;    // 'S';
+    msg_buf.data[18] = 84;    // 'T';
 
     written: i64 = write(p1_write, msg_buf, 19);
-    free(msg_buf);
     close(p1_write);
 
     if written != 19 {
         close(p2_read);
-        free(pipe1fd);
-        free(pipe2fd);
         exit(6);
         return 6;
     }
 
     // Step 4: Read child's hex digest from pipe2
-    out_buf = allocate(65);
+    let out_buf = state_new(_L13);
     total_read: i64 = 0;
     while total_read < 65 {
         nread: i64 = read(p2_read, out_buf + (total_read as u64), 65 - total_read);
@@ -665,15 +656,11 @@ fn parent_mode(argc: i64, argv: Address) -> i32 {
     close(p2_read);
 
     // Step 5: Wait for child
-    status_buf = allocate(4);
+    let status_buf = state_new(_L14);
     waitpid(pid, status_buf, 0);
-    free(status_buf);
 
     // Step 6: Return first byte of child output as exit code
-    result: i32 = *(out_buf + 0);
-    free(out_buf);
-    free(pipe1fd);
-    free(pipe2fd);
+    result: i32 = out_buf.data[0];
 
     return result;
 }

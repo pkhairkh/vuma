@@ -5,19 +5,20 @@
 // four, sum, return 130. Distinct from s4_cs_three_offsets
 // (3 offsets) and s3_cs_scatter_3_vals (different values).
 
+layout Buf_buf = { data: [u8; 32] }
+
 fn main() -> i32 {
-    buf = allocate(32);
-    *(buf + 0) = 10;
-    *(buf + 8) = 20;
-    *(buf + 16) = 40;
-    *(buf + 24) = 60;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
-    d: u64 = *(buf + 24);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 10;
+    buf.data[8] = 20;
+    buf.data[16] = 40;
+    buf.data[24] = 60;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
+    d: u64 = buf.data[24];
     t1: u64 = a + b;
     t2: u64 = c + d;
     s: u64 = t1 + t2;
-    free(buf);
     return s;
 }

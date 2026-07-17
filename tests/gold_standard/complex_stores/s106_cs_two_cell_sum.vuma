@@ -3,15 +3,16 @@
 //
 // Two 8-byte cells. Store 16 at c1, store 18 at c2, load each and return the sum (34). Uses `*ptr = literal` form. Straight-line code only.
 // Distinct from s102_cs_two_cell_sum (23), s101_cs_two_cell_xor (192), s100_cs_two_cell_diff (19).
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 16;
-    *c2 = 18;
-    a: u64 = *c1;          // 16
-    b: u64 = *c2;          // 18
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    c1.data[0] = 16;
+    c2.data[0] = 18;
+    a: u64 = c1.data[0];          // 16
+    b: u64 = c2.data[0];          // 18
     s: u64 = a + b;        // 34
-    free(c1);
-    free(c2);
     return s;
 }

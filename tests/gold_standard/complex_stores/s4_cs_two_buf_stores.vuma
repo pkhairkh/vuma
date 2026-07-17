@@ -5,19 +5,20 @@
 // buf2[0], 30 in buf2[8]. Load all four, sum. Tests multi-buffer,
 // multi-offset store/load correctness.
 
+layout Buf_buf1 = { data: [u8; 16] }
+layout Buf_buf2 = { data: [u8; 16] }
+
 fn main() -> i32 {
-    buf1 = allocate(16);
-    buf2 = allocate(16);
-    *(buf1 + 0) = 40;
-    *(buf1 + 8) = 10;
-    *(buf2 + 0) = 50;
-    *(buf2 + 8) = 30;
-    a: u64 = *(buf1 + 0);
-    b: u64 = *(buf1 + 8);
-    c: u64 = *(buf2 + 0);
-    d: u64 = *(buf2 + 8);
+    let buf1 = state_new(Buf_buf1);
+    let buf2 = state_new(Buf_buf2);
+    buf1.data[0] = 40;
+    buf1.data[8] = 10;
+    buf2.data[0] = 50;
+    buf2.data[8] = 30;
+    a: u64 = buf1.data[0];
+    b: u64 = buf1.data[8];
+    c: u64 = buf2.data[0];
+    d: u64 = buf2.data[8];
     s: u64 = a + b + c + d;
-    free(buf1);
-    free(buf2);
     return s;
 }

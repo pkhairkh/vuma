@@ -6,10 +6,10 @@
 // confirms the allocator accepts size 1 and that loads/stores at
 // offset 0 of a 1-byte cell work the same as larger cells.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(1);
-    *(p + 0) = 7;
-    v: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 7;
+    v: u64 = p.data[0];
     return v;
 }

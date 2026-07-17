@@ -6,17 +6,18 @@
 // value). Uses `*ptr = literal` form. Distinct from
 // s94_cs_overwrite_middle (42), s90_cs_overwrite_last (8) and
 // s86_cs_overwrite_first (230).
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 100;
-    *c2 = 200;
-    *c3 = 50;
-    *c2 = 116;
-    v: u64 = *c2;          // 116
-    free(c1);
-    free(c2);
-    free(c3);
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 100;
+    c2.data[0] = 200;
+    c3.data[0] = 50;
+    c2.data[0] = 116;
+    v: u64 = c2.data[0];          // 116
     return v;
 }

@@ -1,23 +1,17 @@
-// s4_conc_signal.vuma — signal-then-observe pattern via shared cell
+// Migrated from concurrency/s4_conc_signal.vuma
 // Expected exit code: 7
 //
-// Two cells: a "signal" cell and a "data" cell. The producer writes
-// the data (7) into the data cell, then sets the signal to 1. The
-// consumer reads the signal (non-zero → data is ready), then reads
-// the data. Single-threaded simulation; returns the data value.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    signal = allocate(8);
-    data = allocate(8);
-    *data = 7;
-    *signal = 1;
-    s: i32 = *signal;
-    d: i32 = *data;
-    // In a real consumer we'd branch on s; here we just keep s live
-    // (so it isn't dead-code-eliminated) and return d.
-    sum: i32 = s + d;
-    free(signal);
-    free(data);
-    // Return d = 7. sum is computed only to keep s observable.
+    let __s = state_new(Pair);
+    __s.b = 7;
+    __s.a = 1;
+    let s = __s.a;
+    let d = __s.b;
+    let sum = s + d;
     return d;
 }

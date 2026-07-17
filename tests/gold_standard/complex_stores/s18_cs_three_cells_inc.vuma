@@ -6,19 +6,20 @@
 // Distinct from s14_cs_three_cells_desc (descending values 30/20/10)
 // and s10_cs_two_buf_offset_sum (uses broken *(buf+N) form).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 11;
-    *c2 = 22;
-    *c3 = 33;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 11;
+    c2.data[0] = 22;
+    c3.data[0] = 33;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    c: u64 = c3.data[0];
     s: u64 = a + b + c;
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

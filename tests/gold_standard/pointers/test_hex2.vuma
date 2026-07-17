@@ -1,8 +1,8 @@
 // Minimal hex test: allocate a 1-byte buffer and print_hex it
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(1);
-    *(buf + 0) = 0x41;
+    let buf = state_new(_L1);
+    buf.data[0] = 0x41;
     print_hex(buf, 1);
-    free(buf);
     return 0;
 }

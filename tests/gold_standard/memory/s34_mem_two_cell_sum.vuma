@@ -1,20 +1,17 @@
-// s34_mem_two_cell_sum.vuma — two cells, sum = 195 (95 + 100)
+// Migrated from memory/s34_mem_two_cell_sum.vuma
 // Expected exit code: 195
 //
-// Two 8-byte cells. Store 95/100 via `*ptr = literal`, load both,
-// sum -> 195. Uses `*ptr = literal` form (no offsets). Distinct
-// from s30_mem_two_cell_and (and, 15) and s27_mem_two_cell_sum
-// (different values).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    p1 = allocate(8);
-    p2 = allocate(8);
-    *p1 = 95;
-    *p2 = 100;
-    a: u64 = *p1;
-    b: u64 = *p2;
-    s: u64 = a + b;        // 195
-    free(p1);
-    free(p2);
+    let __s = state_new(Pair);
+    __s.a = 95;
+    __s.b = 100;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
     return s;
 }

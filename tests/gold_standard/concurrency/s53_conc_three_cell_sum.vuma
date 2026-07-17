@@ -1,25 +1,20 @@
-// s53_conc_three_cell_sum.vuma — three cells, sum = 170 (55 + 85 + 30)
+// Migrated from concurrency/s53_conc_three_cell_sum.vuma
 // Expected exit code: 170
 //
-// Three independent 8-byte cells. Store 55/85/30 via `*ptr =
-// literal`, load all three, sum -> 170. Uses `*ptr = literal` form.
-// Distinct from s49_conc_three_cell_sum (165) and s50_conc_three_
-// cell_diff (120).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 55;
-    *c2 = 85;
-    *c3 = 30;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    v3: i32 = *c3;
-    t: i32 = v1 + v2;
-    s: i32 = t + v3;       // 170
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 55;
+    __s.b = 85;
+    __s.c = 30;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let v3 = __s.c;
+    let t = v1 + v2;
+    let s = t + v3;
     return s;
 }

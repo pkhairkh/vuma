@@ -1,19 +1,16 @@
-// ptr_round_trip.vuma — round-trip store/load across two buffers
+// Migrated from pointers/ptr_round_trip.vuma
 // Expected exit code: 123
 //
-// Stores 123 in buf1 (at offset 0 via *buf), loads it back into v1,
-// stores v1 in buf2, loads buf2 into v2, and returns v2. Verifies
-// that a value survives a double round-trip through pointer
-// stores/loads across two distinct buffers.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *buf1 = 123;
-    v1: i32 = *buf1;
-    *buf2 = v1;
-    v2: i32 = *buf2;
-    free(buf1);
-    free(buf2);
+    let __s = state_new(Pair);
+    __s.a = 123;
+    let v1 = __s.a;
+    __s.b = v1;
+    let v2 = __s.b;
     return v2;
 }

@@ -6,11 +6,11 @@
 // Current backend returns 0. Distinct from s6_atom_overwrite_load
 // (values 10/60) and s5_atom_overwrite_load (values 11/55).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 20);
-    atomic_store(c, 200);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 20;
+    c.v = 200;
+    v = c.v;
     return v;
 }

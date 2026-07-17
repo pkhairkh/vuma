@@ -5,10 +5,10 @@
 // that the known *(buf+offset) U8-truncation bug allows to round-trip
 // correctly), load it back, return 255. Confirms 255 is preserved.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *(p + 0) = 255;
-    v: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 255;
+    v: u64 = p.data[0];
     return v;
 }

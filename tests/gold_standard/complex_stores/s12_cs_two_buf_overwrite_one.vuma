@@ -7,16 +7,17 @@
 // drop bug. Distinct from s9_cs_two_buf_overwrite_both (overwrites
 // both) and s9_cs_overwrite_middle (three cells, middle overwrite).
 
+layout Buf_a = { data: [u8; 8] }
+layout Buf_b = { data: [u8; 8] }
+
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    *a = 20;
-    *b = 40;
-    *a = 99;
-    va: u64 = *a;
-    vb: u64 = *b;
+    let a = state_new(Buf_a);
+    let b = state_new(Buf_b);
+    a.data[0] = 20;
+    b.data[0] = 40;
+    a.data[0] = 99;
+    va: u64 = a.data[0];
+    vb: u64 = b.data[0];
     s: u64 = va + vb;
-    free(a);
-    free(b);
     return s;
 }

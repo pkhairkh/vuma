@@ -60,7 +60,6 @@ fn main() -> i32 {
     result: u64 = stage3_sum(buf, len);
 
     // Cleanup
-    free(buf);
 
     // Return result as exit code
     // With len=16, key=0x55:

@@ -38,6 +38,7 @@
 const MSG_SIZE: u64 = 24;
 
 // ─── Read u64 helper (read-only-from-function works reliably) ───────────
+layout _L1 = { data: [u8; 512] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
     b0: u64 = *(buf + offset);
     b1: u64 = *(buf + offset + 1);
@@ -139,7 +140,7 @@ fn main() -> i32 {
     // on real concurrency to drain the buffer concurrently, but our
     // sequential simulation runs both producers before the consumer.
     capacity: u64 = 16;
-    buf = allocate(512);
+    let buf = state_new(_L1);
 
     // ─── Run producer 1 (sends 0..4) ──────────────────────────────────
     head_after_p1: u64 = producer_1(buf, 0, capacity, 1);
@@ -167,7 +168,6 @@ fn main() -> i32 {
     //   sender_ids: 1×5 + 2×5 = 5 + 10 = 15
 
     // ─── Clean up ─────────────────────────────────────────────────────
-    free(buf);
 
     // ─── Verify the checksum and return ───────────────────────────────
     if payload_sum == 520 {

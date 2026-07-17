@@ -34,6 +34,9 @@
 //   offset 24: capacity     (u64) — max tasks before push fails
 
 // ─── Read/write u64 helpers (read-only-from-function works reliably) ────
+layout _L1 = { data: [u8; 32] }
+layout _L2 = { data: [u8; 128] }
+layout _L3 = { data: [u8; 64] }
 fn read_u64(buf: Address, offset: u64) -> u64 {
     b0: u64 = *(buf + offset);
     b1: u64 = *(buf + offset + 1);
@@ -79,42 +82,42 @@ fn dispatch_task(task_id: u64, arg: u64) -> u64 {
 
 fn main() -> i32 {
     // ─── Allocate the task queue header (32 bytes) ────────────────────
-    queue = allocate(32);
+    let queue = state_new(_L1);
     // Initialize: head=0, tail=0, len=0, capacity=8
-    *(queue + 0)  = 0; *(queue + 1)  = 0; *(queue + 2)  = 0; *(queue + 3)  = 0;
-    *(queue + 4)  = 0; *(queue + 5)  = 0; *(queue + 6)  = 0; *(queue + 7)  = 0;
-    *(queue + 8)  = 0; *(queue + 9)  = 0; *(queue + 10) = 0; *(queue + 11) = 0;
-    *(queue + 12) = 0; *(queue + 13) = 0; *(queue + 14) = 0; *(queue + 15) = 0;
-    *(queue + 16) = 0; *(queue + 17) = 0; *(queue + 18) = 0; *(queue + 19) = 0;
-    *(queue + 20) = 0; *(queue + 21) = 0; *(queue + 22) = 0; *(queue + 23) = 0;
-    *(queue + 24) = 8; *(queue + 25) = 0; *(queue + 26) = 0; *(queue + 27) = 0;
-    *(queue + 28) = 0; *(queue + 29) = 0; *(queue + 30) = 0; *(queue + 31) = 0;
+    queue.data[0] = 0; *(queue + 1)  = 0; *(queue + 2)  = 0; *(queue + 3)  = 0;
+    queue.data[4] = 0; *(queue + 5)  = 0; *(queue + 6)  = 0; *(queue + 7)  = 0;
+    queue.data[8] = 0; *(queue + 9)  = 0; *(queue + 10) = 0; *(queue + 11) = 0;
+    queue.data[12] = 0; *(queue + 13) = 0; *(queue + 14) = 0; *(queue + 15) = 0;
+    queue.data[16] = 0; *(queue + 17) = 0; *(queue + 18) = 0; *(queue + 19) = 0;
+    queue.data[20] = 0; *(queue + 21) = 0; *(queue + 22) = 0; *(queue + 23) = 0;
+    queue.data[24] = 8; *(queue + 25) = 0; *(queue + 26) = 0; *(queue + 27) = 0;
+    queue.data[28] = 0; *(queue + 29) = 0; *(queue + 30) = 0; *(queue + 31) = 0;
 
     // ─── Allocate the task slots: 8 tasks × 16 bytes (task_id + arg) ──
-    tasks = allocate(128);
+    let tasks = state_new(_L2);
 
     // ─── Push 3 tasks: square(7), cube(13), double(42) ────────────────
     // Push task 0: square(7) at slot 0
-    *(tasks + 0)  = 0;            // task_id = 0 (square)
-    *(tasks + 8)  = 7;            // arg = 7
+    tasks.data[0] = 0;            // task_id = 0 (square);
+    tasks.data[8] = 7;            // arg = 7;
     // Update tail and len
-    *(queue + 8)  = 1;            // tail = 1
-    *(queue + 16) = 1;            // len = 1
+    queue.data[8] = 1;            // tail = 1;
+    queue.data[16] = 1;            // len = 1;
 
     // Push task 1: cube(13) at slot 1
-    *(tasks + 16) = 1;            // task_id = 1 (cube)
-    *(tasks + 24) = 13;           // arg = 13
-    *(queue + 8)  = 2;            // tail = 2
-    *(queue + 16) = 2;            // len = 2
+    tasks.data[16] = 1;            // task_id = 1 (cube);
+    tasks.data[24] = 13;           // arg = 13;
+    queue.data[8] = 2;            // tail = 2;
+    queue.data[16] = 2;            // len = 2;
 
     // Push task 2: double(42) at slot 2
-    *(tasks + 32) = 2;            // task_id = 2 (double)
-    *(tasks + 40) = 42;           // arg = 42
-    *(queue + 8)  = 3;            // tail = 3
-    *(queue + 16) = 3;            // len = 3
+    tasks.data[32] = 2;            // task_id = 2 (double);
+    tasks.data[40] = 42;           // arg = 42;
+    queue.data[8] = 3;            // tail = 3;
+    queue.data[16] = 3;            // len = 3;
 
     // ─── Allocate the results array: 8 results × 8 bytes ──────────────
-    results = allocate(64);
+    let results = state_new(_L3);
 
     // ─── Worker loop: pop tasks until queue is empty ──────────────────
     // In a real thread pool, N worker threads would contend on the queue.
@@ -143,8 +146,8 @@ fn main() -> i32 {
         checksum = checksum + result;
 
         // Advance head, decrement len
-        *(queue + 0)  = (head_idx + 1) & 255;
-        *(queue + 16) = (read_u64(queue, 16) - 1) & 255;
+    queue.data[0] = (head_idx + 1) & 255;
+    queue.data[16] = (read_u64(queue, 16) - 1) & 255;
 
         processed = processed + 1;
     }
@@ -156,9 +159,6 @@ fn main() -> i32 {
     //   checksum   = 49 + 2197 + 84 = 2330
 
     // ─── Free remaining allocations (clean shutdown) ──────────────────
-    free(tasks);
-    free(results);
-    free(queue);
 
     // ─── Verify the checksum and return ───────────────────────────────
     if checksum == 2330 {

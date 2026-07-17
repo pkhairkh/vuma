@@ -1,24 +1,19 @@
-// s20_conc_three_cells_sum.vuma — three cells, sum = 210 (60 + 70 + 80)
+// Migrated from concurrency/s20_conc_three_cells_sum.vuma
 // Expected exit code: 210
 //
-// Three independent 8-byte cells. Each gets a distinct literal (60/70/80).
-// All loaded back and summed -> 210. Distinct from
-// s18_conc_three_cells_prime (prime-valued cells) and
-// s14_conc_three_cells_even (even-valued cells).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 60;
-    *c2 = 70;
-    *c3 = 80;
-    v1: i32 = *c1;
-    v2: i32 = *c2;
-    v3: i32 = *c3;
-    s: i32 = v1 + v2 + v3;
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 60;
+    __s.b = 70;
+    __s.c = 80;
+    let v1 = __s.a;
+    let v2 = __s.b;
+    let v3 = __s.c;
+    let s = v1 + v2 + v3;
     return s;
 }

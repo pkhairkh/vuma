@@ -17,15 +17,15 @@ struct Mixed {
     c: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    m = allocate(16);
-    *(m + 0) = 10;
-    *(m + 4) = 20;
-    *(m + 8) = 12;
-    a: u64 = *(m + 0);
-    b: u64 = *(m + 4);
-    c: u64 = *(m + 8);
+    let m = state_new(_L1);
+    m.data[0] = 10;
+    m.data[4] = 20;
+    m.data[8] = 12;
+    a: u64 = m.data[0];
+    b: u64 = m.data[4];
+    c: u64 = m.data[8];
     sum: u64 = a + b + c;
-    free(m);
     return sum;
 }

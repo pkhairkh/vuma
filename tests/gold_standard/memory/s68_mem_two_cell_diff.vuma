@@ -1,19 +1,17 @@
-// s68_mem_two_cell_diff.vuma — two cells, diff = 155 (230 - 75)
+// Migrated from memory/s68_mem_two_cell_diff.vuma
 // Expected exit code: 155
 //
-// Two 8-byte cells. Store 230/75 via `*ptr = literal`, load both,
-// diff -> 155. Uses `*ptr = literal` form. Distinct from s66_mem_
-// two_cell_sum (225), s62_mem_two_cell_diff (130) and s58_mem_two_
-// cell_sum (230).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 230;
-    *c2 = 75;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    d: u64 = a - b;        // 155
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 230;
+    __s.b = 75;
+    let a = __s.a;
+    let b = __s.b;
+    let d = a - b;
     return d;
 }

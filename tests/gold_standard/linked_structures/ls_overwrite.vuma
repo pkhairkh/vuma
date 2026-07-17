@@ -5,11 +5,12 @@
 // the original value. After storing 42 then 99, the loaded value is
 // 99 — the latest store wins.
 
+layout Buf_node = { data: [u8; 16] }
+
 fn main() -> i32 {
-    node = allocate(16);
-    *(node + 0) = 42;
-    *(node + 0) = 99;
-    val: u64 = *(node + 0);
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 42;
+    node.data[0] = 99;
+    val: u64 = node.data[0];
     return val;
 }

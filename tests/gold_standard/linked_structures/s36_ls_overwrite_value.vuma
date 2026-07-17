@@ -2,16 +2,17 @@
 // Expected exit code: 220
 //
 // Single 8-byte "node" allocation. Store 40, then
-// overwrite the node value with 220 via `*n1 = literal`.
-// Load and return 220. Uses `*n1 = literal` form (no
+// overwrite the node value with 220 via `n1.data[0] = literal`.
+// Load and return 220. Uses `n1.data[0] = literal` form (no
 // offsets).
 // Distinct from s30_ls_overwrite_value (overwrite, 0) and s27_ls_overwrite_value (different value).
 
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 40;
-    *n1 = 220;
-    a: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 40;
+    n1.data[0] = 220;
+    a: u64 = n1.data[0];
     return a;
 }

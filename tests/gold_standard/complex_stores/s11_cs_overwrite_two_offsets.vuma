@@ -2,7 +2,7 @@
 // Expected exit code: 110
 // Expected exit code (correct): 110  (40 + 20 + 50)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
-//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//   U8-truncation bug on `p.data[offset]` stores/loads with u64 type)
 //
 // 24-byte buffer. Store 10/20/30 at offsets 0/8/16, then overwrite
 // offsets 0 and 16 with 40 and 50 respectively. Load all three, sum
@@ -10,17 +10,18 @@
 // (overwrites only offset 8) and s8_cs_overwrite_first_last (overwrites
 // first and last with same value).
 
+layout Buf_p = { data: [u8; 24] }
+
 fn main() -> i32 {
-    p = allocate(24);
-    *(p + 0) = 10;
-    *(p + 8) = 20;
-    *(p + 16) = 30;
-    *(p + 0) = 40;
-    *(p + 16) = 50;
-    a: u64 = *(p + 0);
-    b: u64 = *(p + 8);
-    c: u64 = *(p + 16);
+    let p = state_new(Buf_p);
+    p.data[0] = 10;
+    p.data[8] = 20;
+    p.data[16] = 30;
+    p.data[0] = 40;
+    p.data[16] = 50;
+    a: u64 = p.data[0];
+    b: u64 = p.data[8];
+    c: u64 = p.data[16];
     s: u64 = a + b + c;
-    free(p);
     return s;
 }

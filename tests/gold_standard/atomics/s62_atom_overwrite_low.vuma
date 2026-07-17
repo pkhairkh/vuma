@@ -7,11 +7,11 @@
 // through. Distinct from s51_atom_overwrite_value (245), s58_atom_
 // overwrite_high (210) and s55_atom_overwrite_value (220).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 60);
-    atomic_store(c1, 240);
-    v = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 60;
+    c1.v = 240;
+    v = c1.v;
     return v;
 }

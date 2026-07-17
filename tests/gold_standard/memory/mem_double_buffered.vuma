@@ -5,23 +5,23 @@
 // pattern B to buf_b. Then "swaps" them by reading from buf_b (the back
 // buffer) and verifies its contents.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    front = allocate(4);
-    back = allocate(4);
+    let front = state_new(_L1);
+    let back = state_new(_L2);
     // Initial: front = [1,2,3,4], back = [0,0,0,0]
-    *(front + 0) = 1; *(front + 1) = 2; *(front + 2) = 3; *(front + 3) = 4;
-    *(back + 0) = 0; *(back + 1) = 0; *(back + 2) = 0; *(back + 3) = 0;
+    front.data[0] = 1; *(front + 1) = 2; *(front + 2) = 3; *(front + 3) = 4;
+    back.data[0] = 0; *(back + 1) = 0; *(back + 2) = 0; *(back + 3) = 0;
     // Render to back buffer
-    *(back + 0) = 5; *(back + 1) = 6; *(back + 2) = 7; *(back + 3) = 8;
+    back.data[0] = 5; *(back + 1) = 6; *(back + 2) = 7; *(back + 3) = 8;
     // Verify back buffer has new contents
-    b0: u32 = *(back + 0);
-    b1: u32 = *(back + 1);
-    b2: u32 = *(back + 2);
-    b3: u32 = *(back + 3);
+    b0: u32 = back.data[0];
+    b1: u32 = back.data[1];
+    b2: u32 = back.data[2];
+    b3: u32 = back.data[3];
     // Verify front buffer is unchanged
-    f0: u32 = *(front + 0);
-    free(front);
-    free(back);
+    f0: u32 = front.data[0];
     if b0 == 5 {
         if b1 == 6 {
             if b2 == 7 {

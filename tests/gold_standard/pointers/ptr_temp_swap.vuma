@@ -1,23 +1,21 @@
-// ptr_temp_swap.vuma — temp-variable swap of two buffer values
+// Migrated from pointers/ptr_temp_swap.vuma
 // Expected exit code: 1
 //
-// Stores 1 in buf_a and 2 in buf_b (each at offset 0 via *buf). Swaps
-// their contents in registers using a temp variable. Writes the
-// swapped values back, then loads *b (which now holds 1) and returns.
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    *a = 1;
-    *b = 2;
-    va: i32 = *a;
-    vb: i32 = *b;
-    tmp: i32 = va;
+    let __s = state_new(Pair);
+    __s.a = 1;
+    __s.b = 2;
+    let va = __s.a;
+    let vb = __s.b;
+    let tmp = va;
     va = vb;
     vb = tmp;
-    *b = vb;
-    result: i32 = *b;
-    free(a);
-    free(b);
+    __s.b = vb;
+    let result = __s.b;
     return result;
 }

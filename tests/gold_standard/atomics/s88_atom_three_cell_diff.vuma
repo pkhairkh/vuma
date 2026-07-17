@@ -7,19 +7,19 @@
 // atomics are wired through. Distinct from s86_atom_three_
 // cell_diff (170), s82_atom_three_cell_diff (26) and s78_
 // atom_three_cell_diff (148).
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
+layout _L3 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    atomic_store(c1, 250);
-    atomic_store(c2, 60);
-    atomic_store(c3, 25);
-    a = atomic_load(c1);
-    b = atomic_load(c2);
-    c = atomic_load(c3);
+    let c1 = state_new(_L1);
+    let c2 = state_new(_L2);
+    let c3 = state_new(_L3);
+    c1.v = 250;
+    c2.v = 60;
+    c3.v = 25;
+    a = c1.v;
+    b = c2.v;
+    c = c3.v;
     r: i32 = a - b - c;               // 165
-    free(c1);
-    free(c2);
-    free(c3);
     return r;
 }

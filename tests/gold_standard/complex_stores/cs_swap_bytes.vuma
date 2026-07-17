@@ -13,16 +13,17 @@
 // with the two loaded values (no temp), which keeps every pointer store
 // in the working "expression" form.
 
+layout Buf_buf = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf = allocate(8);
-    *(buf + 0) = 1;
-    *(buf + 1) = 2;
-    a: u32 = *(buf + 0);
-    b: u32 = *(buf + 1);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 1;
+    buf.data[1] = 2;
+    a: u32 = buf.data[0];
+    b: u32 = buf.data[1];
     // Swap: store b at offset 0, store a at offset 1.
-    *(buf + 0) = b | 0;
-    *(buf + 1) = a | 0;
-    out: u32 = *(buf + 1);
-    free(buf);
+    buf.data[0] = b | 0;
+    buf.data[1] = a | 0;
+    out: u32 = buf.data[1];
     return out;
 }

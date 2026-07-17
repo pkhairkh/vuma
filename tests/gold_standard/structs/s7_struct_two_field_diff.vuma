@@ -12,8 +12,9 @@ struct Pair {
     b: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
+    let p = state_new(_L1);
     f0 = p;
     f1 = p + 8;
     *f0 = 25;
@@ -21,6 +22,5 @@ fn main() -> i32 {
     a: u64 = *f0;
     b: u64 = *f1;
     d: u64 = b - a;     // 35 - 25 = 10
-    free(p);
     return d;
 }

@@ -5,15 +5,16 @@
 // and summed. Verifies that two simultaneously live buffers each
 // preserve their stored value through their respective loads.
 
+layout Buf_buf1 = { data: [u8; 8] }
+layout Buf_buf2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 42;
-    *(buf2 + 0) = 42;
-    a: u32 = *(buf1 + 0);
-    b: u32 = *(buf2 + 0);
+    let buf1 = state_new(Buf_buf1);
+    let buf2 = state_new(Buf_buf2);
+    buf1.data[0] = 42;
+    buf2.data[0] = 42;
+    a: u32 = buf1.data[0];
+    b: u32 = buf2.data[0];
     s: u32 = a + b;
-    free(buf1);
-    free(buf2);
     return s;
 }

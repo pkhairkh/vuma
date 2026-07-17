@@ -7,15 +7,15 @@
 // offsets). Distinct from s9_mem_two_buf_sum (sum, not product) and
 // s10_mem_quad_buf_sum (4 buffers, sum).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    *a = 12;
-    *b = 9;
-    va: u64 = *a;
-    vb: u64 = *b;
+    let a = state_new(_L1);
+    let b = state_new(_L2);
+    a.v = 12;
+    b.v = 9;
+    va: u64 = a.v;
+    vb: u64 = b.v;
     r: u64 = va * vb;
-    free(a);
-    free(b);
     return r;
 }

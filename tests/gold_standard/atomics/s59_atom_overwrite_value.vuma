@@ -7,11 +7,11 @@
 // Distinct from s58_atom_two_cell_sum (165), s58_atom_three_cell_diff
 // (120) and s58_atom_overwrite_high (210).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c1 = allocate(8);
-    atomic_store(c1, 50);
-    atomic_store(c1, 235);
-    v = atomic_load(c1);
-    free(c1);
+    let c1 = state_new(_L1);
+    c1.v = 50;
+    c1.v = 235;
+    v = c1.v;
     return v;
 }

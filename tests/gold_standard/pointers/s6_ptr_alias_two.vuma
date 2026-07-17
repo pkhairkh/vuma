@@ -6,12 +6,12 @@
 // write wins). Distinct from s5_ptr_two_cell_publish (two distinct
 // cells with publishing).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
+    let p = state_new(_L1);
     q = p;
-    *p = 11;
+    p.v = 11;
     *q = 44;
-    v: i32 = *p;
-    free(p);
+    v: i32 = p.v;
     return v;
 }

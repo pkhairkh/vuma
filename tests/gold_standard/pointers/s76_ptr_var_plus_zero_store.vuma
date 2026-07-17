@@ -1,18 +1,16 @@
-// s76_ptr_var_plus_zero_store.vuma — store via *p = v + 0 = 166
+// Migrated from pointers/s76_ptr_var_plus_zero_store.vuma
 // Expected exit code: 166
 //
-// Single 8-byte cell. Store literal 8 via `*p = 8`. Load 166
-// into a local, then overwrite the cell via `*p = variable + 0`
-// (the documented workaround for the silent-drop bug on `*p =
-// variable`). Load and return 166 (the overwritten value).
-// Distinct from s74_ptr_var_plus_zero_store (223), s73_ptr_var_
-// plus_zero_store (119) and s72_ptr_var_plus_zero_store (245).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
+
 fn main() -> i32 {
-    p = allocate(8);
-    *p = 8;
-    v: i32 = 166;
-    *p = v + 0;
-    r: i32 = *p;
-    free(p);
+    let __s = state_new(Single);
+    __s.v = 8;
+    let v = 166;
+    __s.v = v;
+    let r = __s.v;
     return r;
 }

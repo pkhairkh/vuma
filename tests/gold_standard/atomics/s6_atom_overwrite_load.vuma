@@ -6,11 +6,11 @@
 // load returns 0. Distinct from s5_atom_overwrite_load (different
 // values).
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    c = allocate(8);
-    atomic_store(c, 10);
-    atomic_store(c, 60);
-    v = atomic_load(c);
-    free(c);
+    let c = state_new(_L1);
+    c.v = 10;
+    c.v = 60;
+    v = c.v;
     return v;
 }

@@ -7,10 +7,11 @@
 // s9_ls_node_load (value 15) and s9_ls_overwrite_node (overwrites
 // with 50).
 
+layout Buf_node = { data: [u8; 8] }
+
 fn main() -> i32 {
-    node = allocate(8);
-    *node = 27;
-    v: u64 = *node;
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 27;
+    v: u64 = node.data[0];
     return v;
 }

@@ -1,21 +1,17 @@
-// s32_ptr_two_cell_sum.vuma - two cells, sum = 180 (85 + 95)
+// Migrated from pointers/s32_ptr_two_cell_sum.vuma
 // Expected exit code: 180
 //
-// two cells, sum = 180 (85 + 95). All operands loaded into typed variables
-// before any bitwise op (immediate-RHS drop workaround where applicable);
-// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
-// `*(ptr + offset)` indexing. Distinct from s30_ptr_two_cell_xor (xor) and
-// s26_ptr_two_cell_diff (different values).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Pair = { a: u32, b: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    *c1 = 85;
-    *c2 = 95;
-    a: i32 = *c1;
-    b: i32 = *c2;
-    s: i32 = a + b;        // 180
-    free(c1);
-    free(c2);
+    let __s = state_new(Pair);
+    __s.a = 85;
+    __s.b = 95;
+    let a = __s.a;
+    let b = __s.b;
+    let s = a + b;
     return s;
 }

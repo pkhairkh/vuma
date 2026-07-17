@@ -7,11 +7,12 @@
 // (no offsets). Distinct from s86_ls_overwrite_value (225),
 // s82_ls_overwrite_value (215) and s78_ls_overwrite_value
 // (3).
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 25;
-    *n1 = 205;
-    r: u64 = *n1;          // 205
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 25;
+    n1.data[0] = 205;
+    r: u64 = n1.data[0];          // 205
     return r;
 }

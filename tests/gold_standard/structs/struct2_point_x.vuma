@@ -10,11 +10,11 @@ struct Point {
     y: u64,
 }
 
+layout _L1 = { a: u32, b: u32 }
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 10;
-    *(p + 8) = 20;
-    x: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 10;
+    p.data[8] = 20;
+    x: u64 = p.data[0];
     return x;
 }

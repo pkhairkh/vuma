@@ -7,20 +7,21 @@
 // first cell, 5/15/25 -> 70/15/25 = 110) and s18_cs_overwrite_last
 // (overwrites the last cell, different values).
 
+layout Buf_c1 = { data: [u8; 8] }
+layout Buf_c2 = { data: [u8; 8] }
+layout Buf_c3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 8;
-    *c2 = 16;
-    *c3 = 24;
-    *c3 = 50;
-    a: u64 = *c1;
-    b: u64 = *c2;
-    c: u64 = *c3;
+    let c1 = state_new(Buf_c1);
+    let c2 = state_new(Buf_c2);
+    let c3 = state_new(Buf_c3);
+    c1.data[0] = 8;
+    c2.data[0] = 16;
+    c3.data[0] = 24;
+    c3.data[0] = 50;
+    a: u64 = c1.data[0];
+    b: u64 = c2.data[0];
+    c: u64 = c3.data[0];
     s: u64 = a + b + c;
-    free(c1);
-    free(c2);
-    free(c3);
     return s;
 }

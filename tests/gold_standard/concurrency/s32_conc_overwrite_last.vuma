@@ -1,18 +1,15 @@
-// s32_conc_overwrite_last.vuma - overwrite cell, load = 250
+// Migrated from concurrency/s32_conc_overwrite_last.vuma
 // Expected exit code: 250
 //
-// overwrite cell, load = 250. All operands loaded into typed variables
-// before any bitwise op (immediate-RHS drop workaround where applicable);
-// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
-// `*(ptr + offset)` indexing. Distinct from s30_conc_overwrite_last
-// (different value) and s26_conc_overwrite_middle (different
-// position/value).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    c1 = allocate(8);
-    *c1 = 120;
-    *c1 = 250;
-    v: i32 = *c1;
-    free(c1);
+    let __s = state_new(Single);
+    __s.v = 120;
+    __s.v = 250;
+    let v = __s.v;
     return v;
 }

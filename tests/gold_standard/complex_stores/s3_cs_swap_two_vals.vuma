@@ -5,16 +5,17 @@
 // them in swapped order into local variables (a gets 60, b gets 40),
 // sums them, returns 100. Tests offset-to-variable mapping.
 
+layout Buf_buf = { data: [u8; 16] }
+
 fn main() -> i32 {
-    buf = allocate(16);
-    *(buf + 0) = 40;
-    *(buf + 8) = 60;
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 40;
+    buf.data[8] = 60;
 
     // Read in swapped order to local variables
-    a: u64 = *(buf + 8);
-    b: u64 = *(buf + 0);
+    a: u64 = buf.data[8];
+    b: u64 = buf.data[0];
     s: u64 = a + b;
 
-    free(buf);
     return s;
 }

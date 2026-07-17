@@ -6,11 +6,12 @@
 // function and returns its result. The allocation is created and
 // freed entirely inside the function.
 
+layout Buf_node = { data: [u8; 16] }
+
 fn make_and_load() -> u32 {
-    node = allocate(16);
-    *(node + 0) = 42;
-    v: u64 = *(node + 0);
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 42;
+    v: u64 = node.data[0];
     return v;
 }
 

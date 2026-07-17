@@ -18,16 +18,17 @@
 // be rewritten to use the canonical `v1 = *n1; *n2 = v1; v2 = *n2;`
 // pattern.
 
+layout Buf_block = { data: [u8; 16] }
+
 fn main() -> i32 {
-    block = allocate(16);
+    let block = state_new(Buf_block);
     // node1.val = 123
-    *(block + 0) = 123;
+    block.data[0] = 123;
     // Load node1.val (verifies the first store/load succeeds)
-    v1: u64 = *(block + 0);
+    v1: u64 = block.data[0];
     // node2.val = 123 (the "roundtrip" — same value at the second node)
-    *(block + 8) = 123;
+    block.data[8] = 123;
     // Load node2.val
-    v2: u64 = *(block + 8);
-    free(block);
+    v2: u64 = block.data[8];
     return v2;
 }

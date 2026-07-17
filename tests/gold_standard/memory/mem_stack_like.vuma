@@ -4,8 +4,9 @@
 // Simulates a stack in a memory buffer. Pushes 3 values, then pops them
 // and verifies LIFO order. Top of stack pointer advances/retreats.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    stack = allocate(8);
+    let stack = state_new(_L1);
     top: u32 = 0;
     // Push 10, 20, 30
     *(stack + top) = 10; top = top + 1;
@@ -18,7 +19,6 @@ fn main() -> i32 {
     pop2: u32 = *(stack + top);
     top = top - 1;
     pop1: u32 = *(stack + top);
-    free(stack);
     if pop3 == 30 {
         if pop2 == 20 {
             if pop1 == 10 { return 0; }

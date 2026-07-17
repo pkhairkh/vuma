@@ -49,8 +49,8 @@
 // prior writes by this thread are visible before the store becomes
 // visible to other threads.
 fn demo_load_store(cell: Address) -> u64 {
-    atomic_store(cell, 100);
-    val = atomic_load(cell);
+    cell.v = 100;
+    val = cell.v;
     return val;
 }
 
@@ -61,7 +61,7 @@ fn demo_load_store(cell: Address) -> u64 {
 //   - If old == expected: writes desired, returns expected (success)
 //   - If old != expected: does nothing, returns old value (failure)
 fn demo_cas(cell: Address) -> u64 {
-    atomic_store(cell, 42);
+    cell.v = 42;
 
     // Attempt 1: CAS(42 → 99) — should succeed
     old1 = atomic_cas(cell, 42, 99);   // old1 should be 42 (success)
@@ -70,7 +70,7 @@ fn demo_cas(cell: Address) -> u64 {
     old2 = atomic_cas(cell, 42, 77);   // old2 should be 99 (failure)
 
     // Read back to confirm no change
-    val2 = atomic_load(cell);          // val2 should be 99
+    val2 = cell.v;          // val2 should be 99
 
     // Return old1 + val2 as verification checksum
     // Expected: 42 + 99 = 141
@@ -85,7 +85,7 @@ fn demo_cas(cell: Address) -> u64 {
 // We implement each as: load → compute new → CAS-loop until success.
 fn fetch_add(cell: Address, delta: u64) -> u64 {
     loop {
-        cur = atomic_load(cell);
+        cur = cell.v;
         new_v: u64 = cur + delta;
         old = atomic_cas(cell, cur, new_v);
         if old == cur {
@@ -97,7 +97,7 @@ fn fetch_add(cell: Address, delta: u64) -> u64 {
 
 fn fetch_sub(cell: Address, delta: u64) -> u64 {
     loop {
-        cur = atomic_load(cell);
+        cur = cell.v;
         new_v: u64 = cur - delta;
         old = atomic_cas(cell, cur, new_v);
         if old == cur {
@@ -107,7 +107,7 @@ fn fetch_sub(cell: Address, delta: u64) -> u64 {
 }
 
 fn demo_fetch_ops(cell: Address) -> u64 {
-    atomic_store(cell, 0);
+    cell.v = 0;
 
     // Increment 5 times (return values 0, 1, 2, 3, 4)
     fetch_add(cell, 1);   // 0 → 1
@@ -121,7 +121,7 @@ fn demo_fetch_ops(cell: Address) -> u64 {
     fetch_sub(cell, 1);   // 4 → 3
 
     // Read final value
-    val = atomic_load(cell);   // val should be 3
+    val = cell.v;   // val should be 3
     return val;
 }
 
@@ -131,7 +131,7 @@ fn demo_fetch_ops(cell: Address) -> u64 {
 // compare_exchange returns a bool: true on success, false on failure.
 // We model it as: atomic_cas returns the old value; success = (old == expected).
 fn demo_compare_exchange(cell: Address) -> u64 {
-    atomic_store(cell, 10);
+    cell.v = 10;
 
     // Try to change 10 → 20 (should succeed)
     old1 = atomic_cas(cell, 10, 20);
@@ -143,7 +143,7 @@ fn demo_compare_exchange(cell: Address) -> u64 {
     success2: u64 = 0;
     if old2 == 10 { success2 = 1; }   // success2 = 0, value is still 20
 
-    val = atomic_load(cell);          // val should be 20
+    val = cell.v;          // val should be 20
 
     // Encode results: val + (success1 ? 1000 : 0) + (success2 ? 2000 : 0)
     // Expected: 20 + 1000 + 0 = 1020
@@ -177,10 +177,6 @@ fn main() -> i32 {
     // Demo 4: compare_exchange — expected: 1020
     r4 = demo_compare_exchange(cell4);
 
-    free(cell1);
-    free(cell2);
-    free(cell3);
-    free(cell4);
 
     // Combined checksum: r1 + r2 + r3 + r4
     // Expected: 100 + 141 + 3 + 1020 = 1264

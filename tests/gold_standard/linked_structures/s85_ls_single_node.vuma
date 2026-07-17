@@ -5,10 +5,11 @@
 // `*ptr = literal`, load it back, return 144. Uses `*ptr =
 // literal` form (no offsets). Distinct from s82_ls_single_node,
 // s78_ls_single_node and s74_ls_single_node.
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 144;
-    r: u64 = *n1;
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 144;
+    r: u64 = n1.data[0];
     return r;
 }

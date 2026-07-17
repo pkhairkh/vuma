@@ -5,15 +5,15 @@
 // 70 in the second, loads both back, returns their sum. Tests that
 // the allocator/loads correctly distinguish two distinct allocations.
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 30;
-    *(buf2 + 0) = 70;
-    a: u64 = *(buf1 + 0);
-    b: u64 = *(buf2 + 0);
+    let buf1 = state_new(_L1);
+    let buf2 = state_new(_L2);
+    buf1.data[0] = 30;
+    buf2.data[0] = 70;
+    a: u64 = buf1.data[0];
+    b: u64 = buf2.data[0];
     s: u64 = a + b;
-    free(buf1);
-    free(buf2);
     return s;
 }

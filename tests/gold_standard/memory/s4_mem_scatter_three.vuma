@@ -5,15 +5,15 @@
 // offsets 0, 8, 16, then loads them all back and sums. Tests offset
 // arithmetic and multi-load correctness.
 
+layout _L1 = { data: [u8; 24] }
 fn main() -> i32 {
-    buf = allocate(24);
-    *(buf + 0) = 10;
-    *(buf + 8) = 20;
-    *(buf + 16) = 30;
-    a: u64 = *(buf + 0);
-    b: u64 = *(buf + 8);
-    c: u64 = *(buf + 16);
+    let buf = state_new(_L1);
+    buf.data[0] = 10;
+    buf.data[8] = 20;
+    buf.data[16] = 30;
+    a: u64 = buf.data[0];
+    b: u64 = buf.data[8];
+    c: u64 = buf.data[16];
     s: u64 = a + b + c;
-    free(buf);
     return s;
 }

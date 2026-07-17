@@ -6,12 +6,12 @@
 // store to a cell wins, even when intermediate stores use the full
 // U8 range.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
-    *(p + 0) = 200;
-    *(p + 0) = 100;
-    *(p + 0) = 33;
-    v: u64 = *(p + 0);
-    free(p);
+    let p = state_new(_L1);
+    p.data[0] = 200;
+    p.data[0] = 100;
+    p.data[0] = 33;
+    v: u64 = p.data[0];
     return v;
 }

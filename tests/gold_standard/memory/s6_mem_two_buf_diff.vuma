@@ -5,15 +5,15 @@
 // offset 0. Both loaded and summed. Distinct from s5_mem_triple_buf_sum
 // (three buffers) and s4_mem_two_buf_sum (different values).
 
+layout _L1 = { v: u32 }
+layout _L2 = { v: u32 }
 fn main() -> i32 {
-    a = allocate(8);
-    b = allocate(8);
-    *(a + 0) = 30;
-    *(b + 0) = 40;
-    va: u64 = *(a + 0);
-    vb: u64 = *(b + 0);
+    let a = state_new(_L1);
+    let b = state_new(_L2);
+    a.data[0] = 30;
+    b.data[0] = 40;
+    va: u64 = a.data[0];
+    vb: u64 = b.data[0];
     s: u64 = va + vb;
-    free(a);
-    free(b);
     return s;
 }

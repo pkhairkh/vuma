@@ -8,21 +8,22 @@
 // s30_ls_overwrite_middle (different value) and s26_ls_overwrite_first
 // (different position).
 
+layout Buf_n1 = { data: [u8; 8] }
+layout Buf_n2 = { data: [u8; 8] }
+layout Buf_n3 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    n2 = allocate(8);
-    n3 = allocate(8);
-    *n1 = 30;
-    *n2 = 120;
-    *n3 = 20;
-    *n2 = 200;             // overwrite middle
-    a: u64 = *n1;
-    b: u64 = *n2;
-    c: u64 = *n3;
+    let n1 = state_new(Buf_n1);
+    let n2 = state_new(Buf_n2);
+    let n3 = state_new(Buf_n3);
+    n1.data[0] = 30;
+    n2.data[0] = 120;
+    n3.data[0] = 20;
+    n2.data[0] = 200;             // overwrite middle
+    a: u64 = n1.data[0];
+    b: u64 = n2.data[0];
+    c: u64 = n3.data[0];
     t: u64 = a + b;
     s: u64 = t + c;        // 30 + 200 + 20 = 250
-    free(n1);
-    free(n2);
-    free(n3);
     return s;
 }

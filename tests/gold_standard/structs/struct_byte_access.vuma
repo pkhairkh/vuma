@@ -7,15 +7,15 @@
 // Demonstrates byte-level struct field access and zero-extension
 // to a wider type on load.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
+    let p = state_new(_L1);
     // Store 0x42 (=66) byte-by-byte (little-endian)
-    *(p + 0) = 66;
-    *(p + 1) = 0;
-    *(p + 2) = 0;
-    *(p + 3) = 0;
+    p.data[0] = 66;
+    p.data[1] = 0;
+    p.data[2] = 0;
+    p.data[3] = 0;
     // Load as u64 (zero-extended from byte 0)
-    val: u64 = *(p + 0);
-    free(p);
+    val: u64 = p.data[0];
     return val;
 }

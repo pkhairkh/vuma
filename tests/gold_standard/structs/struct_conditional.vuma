@@ -7,13 +7,13 @@
 // returned. Demonstrates that bool-typed scalars participate in
 // struct-field value computation.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    p = allocate(8);
+    let p = state_new(_L1);
     flag: bool = true;
     v: u64 = flag;
     val: u64 = v * 42;
-    *(p + 0) = val;
-    result: u64 = *(p + 0);
-    free(p);
+    p.data[0] = val;
+    result: u64 = p.data[0];
     return result;
 }

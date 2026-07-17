@@ -1,17 +1,16 @@
-// s9_conc_triple_publish.vuma — three publishes to one cell, observe final = 120
+// Migrated from concurrency/s9_conc_triple_publish.vuma
 // Expected exit code: 120
 //
-// Single 8-byte cell. Three sequential writes (30, 60, 120). Reader
-// observes only the final value 120. Single-threaded; simulates a
-// shared variable being mutated across multiple "producer" steps.
-// Distinct from s5_conc_triple_overwrite (writes 11/22/99).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Single = { v: u32 }
 
 fn main() -> i32 {
-    cell = allocate(8);
-    *cell = 30;
-    *cell = 60;
-    *cell = 120;
-    v: i32 = *cell;
-    free(cell);
+    let __s = state_new(Single);
+    __s.v = 30;
+    __s.v = 60;
+    __s.v = 120;
+    let v = __s.v;
     return v;
 }

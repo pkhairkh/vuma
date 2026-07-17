@@ -5,16 +5,17 @@
 // back as a literal in a second buffer (avoiding the *ptr = variable
 // codegen bug entirely). Verifies the round trip buf1 -> scalar -> buf2.
 
+layout Buf_buf1 = { data: [u8; 8] }
+layout Buf_buf2 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    buf1 = allocate(8);
-    buf2 = allocate(8);
-    *(buf1 + 0) = 42;
-    tmp: u32 = *(buf1 + 0);
+    let buf1 = state_new(Buf_buf1);
+    let buf2 = state_new(Buf_buf2);
+    buf1.data[0] = 42;
+    tmp: u32 = buf1.data[0];
     // Store the same value (42) as a literal in buf2 — sidesteps the
     // *ptr = variable store-dropped bug. tmp confirms the load worked.
-    *(buf2 + 0) = 42;
-    out: u32 = *(buf2 + 0);
-    free(buf1);
-    free(buf2);
+    buf2.data[0] = 42;
+    out: u32 = buf2.data[0];
     return out;
 }

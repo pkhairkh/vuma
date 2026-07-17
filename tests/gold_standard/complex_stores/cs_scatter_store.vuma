@@ -4,14 +4,15 @@
 // Scatters three values across a larger buffer at strided offsets, then
 // loads each back and sums them.
 
+layout Buf_buf = { data: [u8; 16] }
+
 fn main() -> i32 {
-    buf = allocate(16);
-    *(buf + 0) = 1;
-    *(buf + 4) = 2;
-    *(buf + 8) = 3;
-    a: u32 = *(buf + 0);
-    b: u32 = *(buf + 4);
-    c: u32 = *(buf + 8);
-    free(buf);
+    let buf = state_new(Buf_buf);
+    buf.data[0] = 1;
+    buf.data[4] = 2;
+    buf.data[8] = 3;
+    a: u32 = buf.data[0];
+    b: u32 = buf.data[4];
+    c: u32 = buf.data[8];
     return a + b + c;
 }

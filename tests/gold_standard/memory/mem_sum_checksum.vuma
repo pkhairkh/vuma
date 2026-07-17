@@ -4,12 +4,13 @@
 // Computes an additive byte checksum with a final modulo 256.
 // Buffer = [10, 20, 30, 40]. Sum = 100.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    buf = allocate(4);
-    *(buf + 0) = 10;
-    *(buf + 1) = 20;
-    *(buf + 2) = 30;
-    *(buf + 3) = 40;
+    let buf = state_new(_L1);
+    buf.data[0] = 10;
+    buf.data[1] = 20;
+    buf.data[2] = 30;
+    buf.data[3] = 40;
     sum: u32 = 0;
     i: u32 = 0;
     while i < 4 {
@@ -18,6 +19,5 @@ fn main() -> i32 {
         i = i + 1;
     }
     checksum: u32 = sum & 255;
-    free(buf);
     return checksum;
 }

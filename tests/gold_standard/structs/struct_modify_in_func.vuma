@@ -6,16 +6,16 @@
 // and returns the new value (99), confirming that writes through a
 // passed Address are visible to the caller.
 
+layout _L1 = { a: u32, b: u32 }
 fn set_field(p: Address) -> i32 {
     *(p + 0) = 99;
     return 0;
 }
 
 fn main() -> i32 {
-    p = allocate(16);
-    *(p + 0) = 42;
+    let p = state_new(_L1);
+    p.data[0] = 42;
     set_field(p);
-    val: u64 = *(p + 0);
-    free(p);
+    val: u64 = p.data[0];
     return val;
 }

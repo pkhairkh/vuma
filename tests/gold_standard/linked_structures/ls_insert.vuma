@@ -5,11 +5,12 @@
 // fresh node, store a value into it (the "insert"), then load the
 // value back to verify the insert succeeded. Returns 42.
 
+layout Buf_node = { data: [u8; 16] }
+
 fn main() -> i32 {
-    node = allocate(16);
+    let node = state_new(Buf_node);
     // "Insert" a value into the new node
-    *(node + 0) = 42;
-    val: u64 = *(node + 0);
-    free(node);
+    node.data[0] = 42;
+    val: u64 = node.data[0];
     return val;
 }

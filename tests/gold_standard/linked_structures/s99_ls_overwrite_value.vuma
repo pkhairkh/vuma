@@ -6,11 +6,12 @@
 // overwritten value). Uses `*ptr = literal` form. Distinct from
 // s95_ls_overwrite_value (48), s91_ls_overwrite_value (33) and
 // s87_ls_overwrite_value (215).
+layout Buf_n1 = { data: [u8; 8] }
+
 fn main() -> i32 {
-    n1 = allocate(8);
-    *n1 = 5;
-    *n1 = 128;
-    v: u64 = *n1;          // 128
-    free(n1);
+    let n1 = state_new(Buf_n1);
+    n1.data[0] = 5;
+    n1.data[0] = 128;
+    v: u64 = n1.data[0];          // 128
     return v;
 }

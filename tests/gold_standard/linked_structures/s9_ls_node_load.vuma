@@ -7,10 +7,11 @@
 // s4_ls_two_nodes (uses *(block+N) form, two nodes) and
 // s6_ls_three_node_chain (three nodes via offsets).
 
+layout Buf_node = { data: [u8; 8] }
+
 fn main() -> i32 {
-    node = allocate(8);
-    *node = 15;
-    v: u64 = *node;
-    free(node);
+    let node = state_new(Buf_node);
+    node.data[0] = 15;
+    v: u64 = node.data[0];
     return v;
 }

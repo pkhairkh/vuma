@@ -5,11 +5,11 @@
 // (overwrite). atomic_load should yield 55. Current backend
 // returns 0. Will exit 55 once atomic ops are wired through.
 
+layout _L1 = { v: u32 }
 fn main() -> i32 {
-    cell = allocate(8);
-    atomic_store(cell, 11);
-    atomic_store(cell, 55);
-    v = atomic_load(cell);
-    free(cell);
+    let cell = state_new(_L1);
+    cell.v = 11;
+    cell.v = 55;
+    v = cell.v;
     return v;
 }

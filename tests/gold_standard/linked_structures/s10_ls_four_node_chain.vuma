@@ -8,19 +8,20 @@
 // and s6_ls_three_node_chain (3 nodes).
 // Expected exit code: 100
 
+layout Buf_block = { data: [u8; 32] }
+
 fn main() -> i32 {
-    block = allocate(32);
-    *(block + 0) = 10;
-    *(block + 8) = 20;
-    *(block + 16) = 30;
-    *(block + 24) = 40;
-    a: u64 = *(block + 0);
-    b: u64 = *(block + 8);
-    c: u64 = *(block + 16);
-    d: u64 = *(block + 24);
+    let block = state_new(Buf_block);
+    block.data[0] = 10;
+    block.data[8] = 20;
+    block.data[16] = 30;
+    block.data[24] = 40;
+    a: u64 = block.data[0];
+    b: u64 = block.data[8];
+    c: u64 = block.data[16];
+    d: u64 = block.data[24];
     t1: u64 = a + b;
     t2: u64 = t1 + c;
     s: u64 = t2 + d;
-    free(block);
     return s;
 }

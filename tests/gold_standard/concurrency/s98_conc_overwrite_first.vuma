@@ -1,22 +1,17 @@
-// s98_conc_overwrite_first.vuma — overwrite c1 to 118, load = 118
+// Migrated from concurrency/s98_conc_overwrite_first.vuma
 // Expected exit code: 118
 //
-// Three independent 8-byte cells. Store 100 at c1, store 200 at c2,
-// store 50 at c3, then overwrite c1 to 118. Load c1 -> 118 (the
-// overwritten value). Uses `*ptr = literal` form. Distinct from
-// s94_conc_overwrite_first (49), s90_conc_overwrite_last (11) and
-// s86_conc_overwrite_last (195).
+// PMT migration: allocate/free/*ptr replaced with state_new(Layout)
+// + field access. Buffer lifetime auto-managed.
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
 fn main() -> i32 {
-    c1 = allocate(8);
-    c2 = allocate(8);
-    c3 = allocate(8);
-    *c1 = 100;
-    *c2 = 200;
-    *c3 = 50;
-    *c1 = 118;
-    v: i32 = *c1;          // 118
-    free(c1);
-    free(c2);
-    free(c3);
+    let __s = state_new(Triple);
+    __s.a = 100;
+    __s.b = 200;
+    __s.c = 50;
+    __s.a = 118;
+    let v = __s.a;
     return v;
 }
