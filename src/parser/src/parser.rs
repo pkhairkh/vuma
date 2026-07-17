@@ -206,7 +206,14 @@ impl<'src> Parser<'src> {
             .errors
             .iter()
             .any(|e| e.message.starts_with("pointer syntax '"));
-        if has_pointer_syntax_error {
+        // FFI attribute placement errors (from validate_extern_fn_ffi_attrs /
+        // validate_layout_ffi_attrs) are also fatal — a misplaced #[foreign(raw)]
+        // or invalid #[callback] must not silently produce a binary.
+        let has_ffi_attr_error = self
+            .errors
+            .iter()
+            .any(|e| e.message.starts_with("FFI attribute "));
+        if has_pointer_syntax_error || has_ffi_attr_error {
             return ParseResult::err(std::mem::take(&mut self.errors));
         }
 
@@ -307,7 +314,7 @@ impl<'src> Parser<'src> {
                     // — they are dispatched by lexeme so the lexer is
                     // untouched (the existing `Ref` keyword, lowercase `ref`,
                     // is unrelated to the capital-`R` `Ref<T,F>` PMT type).
-                    "layout" => self.parse_layout_def().map(Item::LayoutDef),
+                    "layout" => self.parse_layout_def(attrs).map(Item::LayoutDef),
                     "transform" => self.parse_transform_def().map(Item::TransformDef),
                     _ => self.parse_stmt().map(Item::Stmt),
                 }
@@ -464,7 +471,7 @@ impl<'src> Parser<'src> {
     /// Mirrors `parse_struct_def` but uses `=` between the name and the
     /// field list (mirroring the `region name = allocate(N)` form) and
     /// accepts an optional trailing semicolon.
-    fn parse_layout_def(&mut self) -> Result<LayoutDef, ParseError> {
+    fn parse_layout_def(&mut self, attrs: Vec<Attribute>) -> Result<LayoutDef, ParseError> {
         let start = self.current.span.start;
         // Consume 'layout' (currently lexed as Ident — see parse_item dispatch).
         self.advance();
@@ -494,9 +501,13 @@ impl<'src> Parser<'src> {
             self.advance();
         }
 
+        // Validate FFI attribute placement on this layout.
+        Self::validate_layout_ffi_attrs(&attrs, &name)?;
+
         Ok(LayoutDef {
             name,
             fields,
+            attrs,
             span: Span::new(start, self.current.span.end),
         })
     }
@@ -723,6 +734,8 @@ impl<'src> Parser<'src> {
             return Ok(params);
         }
         loop {
+            // Parse outer attributes on this parameter (e.g. #[borrow]).
+            let attrs = self.parse_outer_attributes()?;
             let span = self.current.span;
             let name = self.expect_name()?;
             let ty = if self.at(TokenKind::Colon) {
@@ -731,7 +744,7 @@ impl<'src> Parser<'src> {
             } else {
                 None
             };
-            params.push(Param { name, ty, span });
+            params.push(Param { name, ty, attrs, span });
             if self.at(TokenKind::Comma) {
                 self.advance();
             } else {
@@ -1133,7 +1146,8 @@ impl<'src> Parser<'src> {
 
         let mut functions = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            if self.at(TokenKind::Fn) {
+            // Allow attributes (#[...]) before `fn` inside extern blocks.
+            if self.at(TokenKind::Fn) || self.at(TokenKind::Hash) {
                 match self.parse_extern_fn_decl() {
                     Ok(fn_decl) => functions.push(fn_decl),
                     Err(err) => {
@@ -1159,6 +1173,9 @@ impl<'src> Parser<'src> {
     /// `fn` <name> `(` <params>? `)` [`->` <type>] `;`
     fn parse_extern_fn_decl(&mut self) -> Result<ExternFnDecl, ParseError> {
         let start = self.current.span.start;
+        // Parse outer attributes on this extern fn (e.g. #[callback],
+        // #[foreign_consume(raw)]).
+        let attrs = self.parse_outer_attributes()?;
         self.expect(TokenKind::Fn)?;
 
         let name = self.expect_name()?;
@@ -1185,12 +1202,141 @@ impl<'src> Parser<'src> {
             self.advance();
         }
 
+        // Validate FFI attribute placement on this extern fn and its params.
+        Self::validate_extern_fn_ffi_attrs(&attrs, &params, &return_type, &name)?;
+
         Ok(ExternFnDecl {
             name,
             params,
             return_type,
+            attrs,
             span: Span::new(start, self.current.span.end),
         })
+    }
+
+    // -- FFI attribute validation --------------------------------------------
+
+    /// The 8 FFI attribute names and their allowed placement targets.
+    const FFI_ATTR_BORROW: &'static str = "borrow";
+    const FFI_ATTR_MARSHAL: &'static str = "marshal";
+    const FFI_ATTR_MAY_RETAIN: &'static str = "may_retain";
+    const FFI_ATTR_UNMARSHAL: &'static str = "unmarshal";
+    const FFI_ATTR_FOREIGN_RETURN: &'static str = "foreign_return";
+    const FFI_ATTR_CALLBACK: &'static str = "callback";
+    const FFI_ATTR_FOREIGN_CONSUME: &'static str = "foreign_consume";
+    const FFI_ATTR_FOREIGN: &'static str = "foreign";
+
+    /// Returns true if `name` is one of the 8 FFI attributes.
+    fn is_ffi_attr(name: &str) -> bool {
+        matches!(
+            name,
+            Self::FFI_ATTR_BORROW
+                | Self::FFI_ATTR_MARSHAL
+                | Self::FFI_ATTR_MAY_RETAIN
+                | Self::FFI_ATTR_UNMARSHAL
+                | Self::FFI_ATTR_FOREIGN_RETURN
+                | Self::FFI_ATTR_CALLBACK
+                | Self::FFI_ATTR_FOREIGN_CONSUME
+                | Self::FFI_ATTR_FOREIGN
+        )
+    }
+
+    /// Validate FFI attribute placement on a `layout` declaration.
+    /// Only `#[foreign(raw)]` is allowed on layouts.
+    fn validate_layout_ffi_attrs(
+        attrs: &[Attribute],
+        layout_name: &str,
+    ) -> Result<(), ParseError> {
+        for attr in attrs {
+            if !Self::is_ffi_attr(&attr.name) {
+                continue; // non-FFI attr — pass through
+            }
+            if attr.name != Self::FFI_ATTR_FOREIGN {
+                return Err(ParseError::new(
+                    format!(
+                        "FFI attribute '#[{}]' is not allowed on a layout declaration; \
+                         only '#[foreign(raw)]' is permitted on layouts (layout '{}')",
+                        attr.name, layout_name
+                    ),
+                    attr.span,
+                    ParseErrorKind::InvalidSyntax,
+                ));
+            }
+            // #[foreign(raw)] is valid here — check it has a value (the field name).
+            if attr.value.is_none() {
+                return Err(ParseError::new(
+                    format!(
+                        "#[foreign(raw)] on layout '{}' requires the field name, e.g. #[foreign(raw)] \
+                         where 'raw' names the u64 field carrying the C pointer",
+                        layout_name
+                    ),
+                    attr.span,
+                    ParseErrorKind::InvalidSyntax,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate FFI attribute placement on an `extern "C"` fn declaration.
+    /// - On the fn itself: `#[callback]`, `#[foreign_consume(raw)]`,
+    ///   `#[unmarshal(Layout)]`, `#[foreign_return(raw)]`, and the fn-level
+    ///   shorthand forms `#[borrow]`/`#[marshal]`/`#[may_retain]` (apply to
+    ///   all State-typed params).
+    /// - On params: only `#[borrow]`, `#[marshal]`, `#[may_retain]`.
+    /// - `#[foreign(raw)]` is layout-only → error here.
+    fn validate_extern_fn_ffi_attrs(
+        decl_attrs: &[Attribute],
+        params: &[Param],
+        _return_type: &Option<Type>,
+        fn_name: &str,
+    ) -> Result<(), ParseError> {
+        // Validate fn-level attrs.
+        for attr in decl_attrs {
+            if !Self::is_ffi_attr(&attr.name) {
+                continue; // non-FFI attr — pass through
+            }
+            if attr.name == Self::FFI_ATTR_FOREIGN {
+                return Err(ParseError::new(
+                    format!(
+                        "FFI attribute '#[foreign(raw)]' is not allowed on an extern fn; \
+                         it belongs on a layout declaration (extern fn '{}')",
+                        fn_name
+                    ),
+                    attr.span,
+                    ParseErrorKind::InvalidSyntax,
+                ));
+            }
+            // All other FFI attrs (borrow, marshal, may_retain, unmarshal,
+            // foreign_return, callback, foreign_consume) are allowed on the
+            // fn itself.
+        }
+        // Validate param-level attrs.
+        for param in params {
+            for attr in &param.attrs {
+                if !Self::is_ffi_attr(&attr.name) {
+                    continue; // non-FFI attr — pass through
+                }
+                match attr.name.as_str() {
+                    Self::FFI_ATTR_BORROW | Self::FFI_ATTR_MARSHAL | Self::FFI_ATTR_MAY_RETAIN => {
+                        // Valid on a param.
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            format!(
+                                "FFI attribute '#[{}]' is not allowed on an extern fn parameter; \
+                                 only '#[borrow]', '#[marshal]', '#[may_retain]' are permitted \
+                                 on params (param '{}' of extern fn '{}')",
+                                attr.name, param.name, fn_name
+                            ),
+                            attr.span,
+                            ParseErrorKind::InvalidSyntax,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // -- block & statements --------------------------------------------------
@@ -3126,6 +3272,7 @@ impl<'src> Parser<'src> {
             params.push(Param {
                 name,
                 ty,
+                attrs: Vec::new(),
                 span: p_span,
             });
             if self.at(TokenKind::Comma) {

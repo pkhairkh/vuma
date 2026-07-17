@@ -1,0 +1,14 @@
+// ffi_wave0/marshal_attr — #[marshal] on an extern fn param (parse-only)
+// Expected exit code: 0
+//
+// Wave 1 test: #[marshal] forces the scratchpad marshalling path even when
+// the type looks borrowable (e.g. for APIs requiring NUL-termination or
+// C-ownership).
+
+extern "C" {
+    fn open(#[marshal] path: Address, flags: i32) -> i32;
+}
+
+fn main() -> i32 {
+    return 0;
+}
