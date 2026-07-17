@@ -1,0 +1,24 @@
+// array_field — PMT Wave 2: layout with a fixed-size array field
+// Expected exit code: 65
+//
+// Declares `Buf = { data: [u8; 4] }`. The parser represents `data[0]` as
+// `Expr::Index { expr: FieldAccess(Var("b"), "data"), index: Lit(0) }`.
+// The FieldAccess lowers to a Load of the `data` field (offset 0, u64
+// pointer to the array's first element), and the Index lowers to a Load
+// from that pointer at offset 0.
+//
+// Note: this test treats `data` as a pointer-to-array stored at offset 0
+// of the state buffer. The `data[0]` syntax reads the first byte.
+//
+// VUMA Key Concepts:
+//   - layout with array-typed field
+//   - state.field read returns a pointer; [] index dereferences it
+//   - u8 store + u8 load round-trip
+
+layout Buf = { data: [u8; 4] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 65;
+    return b.data[0];
+}

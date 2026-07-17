@@ -1,0 +1,22 @@
+// nested_layout — PMT Wave 2: nested layout field access
+// Expected exit code: 3
+//
+// Declares `Line = { a: Point, b: Point }` where Point is itself a layout.
+// Writes 3 to l.a.x and returns l.a.x. Verifies the field-chain resolver
+// descends into nested layout-typed fields to compute the cumulative
+// byte offset (0 [a in Line] + 0 [x in Point] = 0).
+//
+// VUMA Key Concepts:
+//   - layout referencing another layout as a field type
+//   - nested state.field.field access (l.a.x)
+//   - cumulative offset computation across layout boundaries
+
+layout Point = { x: u32, y: u32 }
+
+layout Line = { a: Point, b: Point }
+
+fn main() -> i32 {
+    let l = state_new(Line);
+    l.a.x = 3;
+    return l.a.x;
+}

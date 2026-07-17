@@ -1,0 +1,32 @@
+// transform_id — PMT Wave 2: state-typed function parameter
+// Expected exit code: 99
+//
+// Defines a regular `fn id(s: State<Point>) -> u32` that returns s.x.
+// main allocates a Point, sets s.x = 99, calls id(p), and returns the
+// result. Verifies that state-typed function parameters receive the
+// buffer pointer and field reads inside the callee work correctly.
+//
+// Note: the task description mentions `transform`, but Wave 2's lowering
+// focuses on the state-operations themselves. A regular `fn` with a
+// `State<T>` parameter exercises the same codepaths (state.field read
+// on a state-typed param). The `transform` keyword is parsed but not
+// yet lowered to a callable form — using `fn` here is the pragmatic
+// adaptation per the task's "adapt the tests to whatever syntax works"
+// guidance.
+//
+// VUMA Key Concepts:
+//   - State<T> as a function parameter type
+//   - state.field read on a state-typed parameter
+//   - state buffer pointer passed by value (8-byte ABI arg)
+
+layout Point = { x: u32, y: u32 }
+
+fn id(s: State<Point>) -> u32 {
+    return s.x;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 99;
+    return id(p);
+}

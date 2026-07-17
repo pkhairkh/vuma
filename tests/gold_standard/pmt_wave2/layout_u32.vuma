@@ -1,0 +1,21 @@
+// layout_u32 — PMT Wave 2: single u32 field round-trip
+// Expected exit code: 57
+//
+// Declares a layout with a single u32 field, writes 12345, reads it
+// back. The expected exit code is 12345 mod 256 = 57 (since exit codes
+// are a single byte 0-255).
+//
+// Verifies the simplest possible state-field round-trip with a u32.
+//
+// VUMA Key Concepts:
+//   - single-field layout
+//   - u32 store + u32 load
+//   - 12345 mod 256 = 57 (exit-code masking)
+
+layout Single = { v: u32 }
+
+fn main() -> i32 {
+    let s = state_new(Single);
+    s.v = 12345;
+    return s.v;
+}

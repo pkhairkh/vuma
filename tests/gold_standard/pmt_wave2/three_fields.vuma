@@ -1,0 +1,22 @@
+// three_fields — PMT Wave 2: three u32 fields, sum all
+// Expected exit code: 6
+//
+// Declares `Triple = { a: u32, b: u32, c: u32 }` (12 bytes total).
+// Sets a=1, b=2, c=3, returns a+b+c (=6). Verifies that field offsets
+// are computed correctly for layouts with more than two fields (a@0,
+// b@4, c@8).
+//
+// VUMA Key Concepts:
+//   - 3-field layout, all u32
+//   - sequential offset computation (0, 4, 8)
+//   - three Loads + two Adds
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
+fn main() -> i32 {
+    let t = state_new(Triple);
+    t.a = 1;
+    t.b = 2;
+    t.c = 3;
+    return t.a + t.b + t.c;
+}

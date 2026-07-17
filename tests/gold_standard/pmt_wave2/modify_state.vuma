@@ -1,0 +1,26 @@
+// modify_state — PMT Wave 2: callee modifies state, caller reads
+// Expected exit code: 55
+//
+// `fn set_x(p: State<Point>, v: u32)` modifies p.x in the callee. main
+// allocates a Point, calls set_x(p, 55), then reads p.x — which should
+// be 55 (the value the callee wrote). Verifies that state mutations by
+// a callee are visible to the caller (the state buffer is shared via
+// the pointer argument).
+//
+// VUMA Key Concepts:
+//   - State<T> passed by pointer to a mutating function
+//   - callee's Store writes to the caller's buffer
+//   - caller's subsequent Load reads the callee-written value
+
+layout Point = { x: u32, y: u32 }
+
+fn set_x(p: State<Point>, v: u32) {
+    p.x = v;
+    return;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    set_x(p, 55);
+    return p.x;
+}

@@ -1,0 +1,19 @@
+// overwrite — PMT Wave 2: overwrite a state field, read the latest value
+// Expected exit code: 2
+//
+// Writes 1 to p.x, then overwrites with 2. Returns p.x (=2). Verifies
+// that consecutive Stores to the same field correctly overwrite.
+//
+// VUMA Key Concepts:
+//   - two Stores to the same field offset
+//   - the Load reads the most-recently-written value
+//   - simple buffer-pointer + offset addressing
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 1;
+    p.x = 2;
+    return p.x;
+}

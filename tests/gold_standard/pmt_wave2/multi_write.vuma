@@ -1,0 +1,24 @@
+// multi_write — PMT Wave 2: write 3 fields, read them back, return sum
+// Expected exit code: 6
+//
+// Same as three_fields.vuma but structured to emphasize the multi-write
+// then multi-read pattern. Writes a=1, b=2, c=3 to a Triple state,
+// then reads them back independently and sums. Expected = 1+2+3 = 6.
+//
+// VUMA Key Concepts:
+//   - three independent Stores to distinct offsets (0, 4, 8)
+//   - three independent Loads from the same offsets
+//   - the Stores don't interfere (distinct fields, distinct offsets)
+
+layout Triple = { a: u32, b: u32, c: u32 }
+
+fn main() -> i32 {
+    let t = state_new(Triple);
+    t.a = 1;
+    t.b = 2;
+    t.c = 3;
+    let x = t.a;
+    let y = t.b;
+    let z = t.c;
+    return x + y + z;
+}
