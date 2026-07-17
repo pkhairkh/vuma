@@ -713,6 +713,24 @@ pub struct IRBuilder {
     /// shift on a 32-bit value with garbage in the upper bits corrupts
     /// the result.
     vreg_types: std::collections::HashMap<u32, crate::ir::IRType>,
+    /// Wave 8a: Set of variable names in the current function that are
+    /// state-typed (i.e. produced by `let p = state_new(Layout)`). These
+    /// are routed to the program-wide single buffer (`___pmt_buffer`)
+    /// instead of per-state `Alloc`. Populated by [`identify_state_vars`]
+    /// during [`lower_function`].
+    state_vars: std::collections::HashSet<String>,
+    /// Wave 8a: vreg of the program-wide single buffer (`___pmt_buffer`).
+    /// Allocated once at the start of `main` via a single `IRInstr::Alloc`.
+    /// State-typed `AllocationNode::Stack` lowerings produce
+    /// `IRInstr::Offset { base: ___pmt_buffer, offset: assigned_offset }`
+    /// into this buffer instead of independent `Alloc`s. `None` for
+    /// non-`main` functions (state-typed allocations in other functions
+    /// fall back to per-state `Alloc`).
+    pmt_buffer_vreg: Option<u32>,
+    /// Wave 8a: next free byte offset within `___pmt_buffer`. Incremented
+    /// by each state-typed allocation's layout size (aligned to 16 bytes).
+    /// Reset to 0 at the start of `main`.
+    next_state_offset: u32,
 }
 
 /// Backward-compatible alias.
@@ -734,6 +752,9 @@ impl IRBuilder {
             param_count: 0,
             current_return_type: None,
             vreg_types: std::collections::HashMap::new(),
+            state_vars: std::collections::HashSet::new(),
+            pmt_buffer_vreg: None,
+            next_state_offset: 0,
         }
     }
 
@@ -894,6 +915,60 @@ impl IRBuilder {
             }
         }
 
+        // Wave 8a: Single-buffer lowering for PMT state-typed allocations.
+        //
+        // Pre-pass: scan the function body to identify which
+        // `AllocationNode::Stack` variables are state-typed (i.e. produced
+        // by `let p = state_new(Layout)`). The bridge in `pipeline.rs`
+        // emits the SAME `AllocationNode::Stack { name, size, ty: Ptr }`
+        // shape for both `state_new(Layout)` and `allocate(N)`, so the
+        // IRBuilder cannot tell them apart from the allocation node alone.
+        //
+        // Heuristic: a variable is state-typed iff the body contains an
+        // `AccessNode::Load/Store` with `ty: Some(_)` (state.field reads/
+        // writes always carry the field's IR type) AND `ptr: Var(name)` OR
+        // `ptr: Var(addr_tmp)` where `addr_tmp = Add(Var(name), Int(_))`
+        // (the bridge emits an explicit `Add` for state.field accesses
+        // with `offset > 0` to give each Store a unique address vreg).
+        //
+        // This reliably distinguishes:
+        //   - `p.x = 42`        → state.field write, ty=Some(U32)         ✓
+        //   - `v = p.x`         → state.field read,  ty=Some(U32)         ✓
+        //   - `*buf = 42`       → raw deref,         ty=None              ✗
+        //   - `*(buf + 0) = 42` → raw deref w/off,   ty=None              ✗
+        //   - `*(arr + i*8)`    → stride deref,      ty=Some(U64) but
+        //                          addr_tmp = Add(Var(arr), Var(mul_tmp))  ✗
+        //                                                          (rhs≠Int)
+        self.state_vars = Self::identify_state_vars(&func.body);
+
+        // Wave 8a: For `main`, allocate ONE program-wide buffer that holds
+        // ALL state-typed allocations as offsets. This realizes the
+        // "zero runtime overhead" promise: ONE Alloc at program start,
+        // ZERO per-state Allocs during execution.
+        //
+        // The buffer is sized to the SUM of all state-typed allocation
+        // sizes (each aligned to 16 bytes). This is conservative — it
+        // never reuses slots across live ranges — but correct.
+        self.pmt_buffer_vreg = None;
+        self.next_state_offset = 0;
+        if func.name == "main" {
+            let total_buffer_size: u32 = Self::compute_total_state_buffer_size(
+                &func.body,
+                &self.state_vars,
+            );
+            if total_buffer_size > 0 {
+                let buf_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(buf_vreg, "___pmt_buffer"));
+                name_to_vreg.insert("___pmt_buffer".to_string(), buf_vreg);
+                self.pointer_vregs.insert(buf_vreg);
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(buf_vreg),
+                    size: total_buffer_size,
+                });
+                self.pmt_buffer_vreg = Some(buf_vreg);
+            }
+        }
+
         // Translate the body statements.
         self.lower_statements(&func.body, &mut ir_func, &mut name_to_vreg)?;
 
@@ -904,6 +979,143 @@ impl IRBuilder {
         ir_func.rebuild_cfg();
 
         Ok(ir_func)
+    }
+
+    // =======================================================================
+    // Wave 8a: Single-buffer state-var identification
+    // =======================================================================
+
+    /// Walk an SCG body (recursing into Control nodes) and apply a closure
+    /// to each `ScgStatement` encountered. Used by [`identify_state_vars`]
+    /// and [`compute_total_state_buffer_size`].
+    fn walk_body<F: FnMut(&ScgStatement)>(body: &[ScgStatement], mut f: F) {
+        fn walk_rec<F: FnMut(&ScgStatement)>(stmts: &[ScgStatement], f: &mut F) {
+            for s in stmts {
+                f(s);
+                if let ScgStatement::Control(ctrl) = s {
+                    match ctrl {
+                        ControlNode::If { then_body, else_body, .. } => {
+                            walk_rec(then_body, f);
+                            if let Some(eb) = else_body {
+                                walk_rec(eb, f);
+                            }
+                        }
+                        ControlNode::Loop { body, .. } => {
+                            walk_rec(body, f);
+                        }
+                        ControlNode::Switch { arms, default_body, .. } => {
+                            for arm in arms {
+                                walk_rec(&arm.body, f);
+                            }
+                            walk_rec(default_body, f);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        walk_rec(body, &mut f);
+    }
+
+    /// Wave 8a: Identify state-typed variables in a function body.
+    ///
+    /// Returns the set of variable names that are accessed as state-typed
+    /// buffers (i.e. via `state.field` reads/writes). See the doc comment
+    /// in [`lower_function`](Self::lower_function) for the heuristic.
+    ///
+    /// Detection logic:
+    /// 1. Build a map of `Add` computation temps: `addr_tmp → (lhs, rhs)`.
+    /// 2. For each `AccessNode::Load/Store` with `ty: Some(_)`:
+    ///    - If `ptr: Var(name)`, mark `name` as state-typed.
+    ///    - If `ptr: Var(addr_tmp)` and `addr_tmp = Add(Var(name), Int(_))`,
+    ///      mark `name` as state-typed.
+    /// 3. For each `StructAccessNode::Load/Store` with `ptr: Var(name)`,
+    ///    mark `name` as state-typed.
+    ///
+    /// This correctly excludes:
+    /// - `*buf` (raw deref): `ty: None` → not matched.
+    /// - `*(buf + N)`: `ty: None` → not matched.
+    /// - `*(arr + i*stride)`: `ty: Some(_)` but `addr_tmp = Add(Var(arr), Var(mul_tmp))`
+    ///   (rhs is Var, not Int) → not matched.
+    /// - Chained `**buf`: intermediate loads use `ty: Some(U64)`, but the
+    ///   `ptr` is `Var(prev_load_dst)` (a temp), and `prev_load_dst` is not
+    ///   an `AllocationNode::Stack` → not in `state_vars` consumption path.
+    fn identify_state_vars(body: &[ScgStatement]) -> HashSet<String> {
+        let mut add_defs: HashMap<String, (ScgExpr, ScgExpr)> = HashMap::new();
+        let mut state_vars: HashSet<String> = HashSet::new();
+
+        // First pass: collect all Add computation defs so we can look them
+        // up by destination temp name. We do this in a separate pass
+        // because the Add may appear after a (rare) forward reference in
+        // pathological SCGs, and a single forward pass would miss it.
+        Self::walk_body(body, |stmt| {
+            if let ScgStatement::Computation(c) = stmt {
+                if c.op == BinOpKind::Add {
+                    add_defs.insert(c.dst.clone(), (c.lhs.clone(), c.rhs.clone()));
+                }
+            }
+        });
+
+        // Second pass: scan AccessNodes for state.field patterns.
+        Self::walk_body(body, |stmt| {
+            match stmt {
+                ScgStatement::Access(a) => {
+                    let (ptr, ty) = match a {
+                        AccessNode::Load { ptr, ty, .. } => (ptr, ty),
+                        AccessNode::Store { ptr, ty, .. } => (ptr, ty),
+                    };
+                    // State.field accesses always carry an explicit IR type
+                    // (the field's type). Raw derefs have ty=None.
+                    if ty.is_none() {
+                        return;
+                    }
+                    // Case 1: ptr is the state var directly (field at offset 0).
+                    if let ScgExpr::Var(name) = ptr {
+                        state_vars.insert(name.clone());
+                    }
+                    // Case 2: ptr is an addr_tmp produced by Add(state_var, Int(_)).
+                    if let ScgExpr::Var(tmp) = ptr {
+                        if let Some((lhs, rhs)) = add_defs.get(tmp) {
+                            if let (ScgExpr::Var(name), ScgExpr::Int(_)) = (lhs, rhs) {
+                                state_vars.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                ScgStatement::StructAccess(sa) => {
+                    let ptr = match sa {
+                        StructAccessNode::Load { ptr, .. } => ptr,
+                        StructAccessNode::Store { ptr, .. } => ptr,
+                    };
+                    if let ScgExpr::Var(name) = ptr {
+                        state_vars.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        });
+
+        state_vars
+    }
+
+    /// Wave 8a: Compute the total size of the program-wide PMT buffer.
+    ///
+    /// Sums the `size` field of every `AllocationNode::Stack` whose `name`
+    /// is in `state_vars`, with each size aligned up to 16 bytes.
+    fn compute_total_state_buffer_size(
+        body: &[ScgStatement],
+        state_vars: &HashSet<String>,
+    ) -> u32 {
+        let mut total: u32 = 0;
+        Self::walk_body(body, |stmt| {
+            if let ScgStatement::Allocation(AllocationNode::Stack { name, size, .. }) = stmt {
+                if state_vars.contains(name) {
+                    let aligned = (*size + 15) & !15u32;
+                    total = total.saturating_add(aligned);
+                }
+            }
+        });
+        total
     }
 
     // =======================================================================
@@ -2656,6 +2868,57 @@ impl IRBuilder {
     ) -> Result<()> {
         match alloc {
             AllocationNode::Stack { name, size, ty } => {
+                // Wave 8a: PMT state-typed allocations (from
+                // `let p = state_new(Layout)`) are routed into the program-
+                // wide single buffer (`___pmt_buffer`) instead of per-state
+                // `Alloc`s. This realizes the "zero runtime overhead"
+                // promise: ONE `Alloc` at the start of `main` (for the
+                // entire buffer), ZERO per-state `Alloc`s during execution.
+                //
+                // Detection: the IRBuilder pre-pass (`identify_state_vars`)
+                // populates `self.state_vars` with the names of variables
+                // accessed via `state.field` patterns. Only those vars use
+                // the buffer-offset path; regular `allocate(N)` calls
+                // (which the bridge also lowers to `AllocationNode::Stack`
+                // but which are NOT in `self.state_vars`) continue to use
+                // `Alloc` as before.
+                //
+                // The buffer is only allocated in `main` (see
+                // `lower_function`); for non-`main` functions,
+                // `pmt_buffer_vreg` is `None` and state-typed allocations
+                // fall back to per-state `Alloc`.
+                if self.state_vars.contains(name)
+                    && self.pmt_buffer_vreg.is_some()
+                {
+                    let buf_vreg = self.pmt_buffer_vreg.unwrap();
+                    let vreg = self.alloc_vreg();
+                    ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                    names.insert(name.clone(), vreg);
+                    // The state var is a POINTER into the buffer (used as
+                    // the base address for subsequent field Loads/Stores).
+                    self.pointer_vregs.insert(vreg);
+                    // Assign the next free offset (aligned to 16 bytes)
+                    // within `___pmt_buffer`. `next_state_offset` advances
+                    // by the aligned size after each state-typed allocation.
+                    let assigned_offset = self.next_state_offset;
+                    let aligned_size = (*size + 15) & !15u32;
+                    self.next_state_offset = self
+                        .next_state_offset
+                        .saturating_add(aligned_size);
+                    // Emit `dst = ___pmt_buffer + assigned_offset` instead
+                    // of `Alloc { dst, size }`. The Offset instruction
+                    // lowers to a single `LEA`/`ADD` on most backends.
+                    ir_func.current_block().push(IRInstruction::Offset {
+                        dst: IRValue::Register(vreg),
+                        base: IRValue::Register(buf_vreg),
+                        offset: IRValue::Immediate(assigned_offset as i64),
+                    });
+                    let _ = ty;
+                    return Ok(());
+                }
+
+                // Regular allocate(N) path (or state-typed allocation in a
+                // non-`main` function): emit a per-state `Alloc` as before.
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);

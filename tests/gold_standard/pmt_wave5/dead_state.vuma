@@ -1,0 +1,30 @@
+// dead_state — PMT Wave 5: dead state elimination
+// Expected exit code: 0
+//
+// Allocates a Point state but never reads from it. The dead-state
+// elimination rewrite rule (`state_dead_init_elim`) targets exactly
+// this pattern: a `StateInit(L)` whose e-class has zero consumers
+// (no StateRead/StateWrite/StateTransform references it). When the
+// optimizer is wired to feed state ops into the e-graph (a future
+// wave's task), this Alloc should be eliminated entirely.
+//
+// Under the *current* optimizer (which feeds only BinOps to the
+// e-graph), the Alloc is still emitted — but the program's observable
+// behaviour is unchanged (exit 0), so this test passes either way.
+// The file serves as a forward-looking test case for the wave that
+// wires state ops into `equality_saturation_with_cost`.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocates a typed buffer
+//   - the buffer is never read or written → dead allocation
+//   - the e-graph's `state_dead_init_elim` rule targets this pattern
+//     (merges the StateInit's e-class with Lit(0) so extraction
+//     drops the allocation)
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    // p is never read or written — it's a dead state.
+    return 0;
+}
