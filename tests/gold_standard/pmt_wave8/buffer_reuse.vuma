@@ -1,0 +1,40 @@
+// buffer_reuse — PMT Wave 8a: sequential states reuse buffer design
+// Expected exit code: 30
+//
+// Allocates state p, "consumes" it by passing it to a function that
+// reads p.x, then allocates state q. Under Wave 8a's "sum of all state
+// sizes" buffer sizing, p and q get DIFFERENT offsets (p at 0, q at 16)
+// — there is no live-range-based reuse yet. The test verifies that the
+// single-buffer design correctly handles sequential state lifetimes:
+// q's slot is fresh (not aliased to p's), so writing to q does not
+// affect the value already read from p.
+//
+// This is a forward-looking test for the future live-range-based buffer
+// reuse optimisation: when state p's live range ends (after consume(p)
+// returns), a future wave could assign q the SAME offset as p (slot 0)
+// instead of a fresh slot (16). The "sum" sizing would then shrink from
+// 32 bytes to 16 bytes. This test passes either way (the observable
+// behaviour is identical); it documents the intended reuse pattern.
+//
+// VUMA Key Concepts:
+//   - state lifetime: p is "consumed" (read) before q is allocated
+//   - the single buffer is sized for the SUM of state sizes (no reuse yet)
+//   - consume(p) reads p.x; subsequent q.x = 20 must not corrupt the
+//     already-read value of p.x
+//   - future live-range analysis would let q reuse p's slot
+
+layout Point = { x: u32, y: u32 }
+
+fn consume(s: State<Point>) -> u32 {
+    return s.x;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 10;
+    let x1 = consume(p);
+    let q = state_new(Point);
+    q.x = 20;
+    let x2 = consume(q);
+    return x1 + x2;
+}

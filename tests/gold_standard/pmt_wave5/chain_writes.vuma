@@ -1,0 +1,31 @@
+// chain_writes — PMT Wave 5: chained writes, only the last matters
+// Expected exit code: 3
+//
+// Writes 1, 2, 3 to p.x in sequence, then reads p.x. Only the last
+// write (3) is observable — the first two are dead stores. When the
+// e-graph's `state_store_load_forward` rule is wired into the
+// optimizer (and combined with a dead-store-elimination pass), the
+// first two Stores should be eliminated.
+//
+// Under the *current* optimizer, all three Stores are emitted — but
+// the program's observable behaviour is unchanged (exit 3), so this
+// test passes either way. The file serves as a forward-looking test
+// case for the wave that wires state ops into
+// `equality_saturation_with_cost` and combines it with DSE.
+//
+// VUMA Key Concepts:
+//   - three Stores to the same field (offset 0)
+//   - the Load reads only the most-recently-written value (3)
+//   - the first two Stores are dead (overwritten before being read)
+//   - `state_store_load_forward` forwards the last write to the read,
+//     making the first two Stores dead (eliminated by DSE)
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 1;
+    p.x = 2;
+    p.x = 3;
+    return p.x;
+}

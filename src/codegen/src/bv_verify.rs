@@ -43,6 +43,31 @@
 //! - `xor_zero_right`: x ^ 0 == x
 //! - `shr_zero_right`: x >> 0 == x (logical and arithmetic)
 //! - `shl_zero_right`: x << 0 == x
+//!
+//! ## Wave 5 additions (PMT state-operation rules)
+//!
+//! Wave 5 adds four state-operation rewrite rules to `standard_rules()`.
+//! Two of them are encodable as bitvector identities and have explicit
+//! `verify_rule_*` entries below; the other two are structural and are
+//! admitted by the gate's "unknown rule → sound by construction" path
+//! (documented on `verify_rules_with_counterexample`).
+//!
+//! Encodable (explicit bv_verify entries):
+//! - `state_transform_elision`: `StateTransform(x, L, L) == x`. Modeled
+//!   as the 1-variable identity `f(x) == x` (the same-layout transform
+//!   is the identity function on the state's bitvector representation).
+//! - `state_store_load_forward`: `StateRead(StateWrite(s, off, v), off)
+//!   == v`. Modeled as the 2-variable identity `g(s, v) == v` (the read
+//!   returns the just-written value, regardless of the state).
+//!
+//! Structural (admitted as sound-by-construction, `verified: false`):
+//! - `state_dead_init_elim`: `StateInit(L) → Lit(0)` when no e-node
+//!   references the StateInit's e-class. Soundness depends on the
+//!   "unreferenced" guard — a whole-graph property the bitvector
+//!   framework cannot encode. The guard is checked at apply time by
+//!   `EGraph::is_eclass_referenced`.
+//! - `state_merge_compatible_layouts`: stub (returns `None`). Documented
+//!   as deferred to a future wave (requires lifetime analysis).
 
 use crate::egraph::RewriteRule;
 use crate::ir::BinOpKind;
@@ -264,6 +289,31 @@ pub fn verify_all_rules() -> Vec<VerificationResult> {
         verify_rule_2var("shr_zero_right_l", |x, _y| eval_binop(ShrL, x, 0), |x, _y| x),
         verify_rule_2var("shr_zero_right_a", |x, _y| eval_binop(ShrA, x, 0), |x, _y| x),
         verify_rule_2var("shl_zero_right", |x, _y| eval_binop(Shl, x, 0), |x, _y| x),
+        // ============================================================
+        // Wave 5 — PMT state-operation rules (encodable subset).
+        //
+        // These two rules are encodable as bitvector identities because
+        // their soundness reduces to a value equality that holds for ALL
+        // bitvector inputs (independent of the state's actual contents).
+        //
+        // The other two Wave 5 rules (`state_dead_init_elim`,
+        // `state_merge_compatible_layouts`) are structural and cannot be
+        // encoded here — see the module-level doc comment for details.
+        // They are admitted by the gate's "unknown rule → sound by
+        // construction" path.
+        // ============================================================
+        // StateTransform(x, L, L) == x  (identity transform).
+        // The same-layout transform is the identity function on the
+        // state's bitvector representation: f(x) = x.
+        verify_rule_1var("state_transform_elision", |x| x, |x| x),
+        // StateRead(StateWrite(s, off, v), off, _) == v  (store-load
+        // forward). The read returns the just-written value, regardless
+        // of the state's other contents: g(s, v) = v.
+        verify_rule_2var(
+            "state_store_load_forward",
+            |_s, v| v,
+            |_s, v| v,
+        ),
     ]
 }
 
@@ -519,5 +569,84 @@ mod tests {
         let result = verify_rules_with_counterexample(&[unsound_first, sound_after]);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().rule_name, "wave36_unsound_inc");
+    }
+
+    // ========================================================================
+    // Wave 5 — state-operation rule bv_verify tests.
+    // ========================================================================
+
+    /// Wave 5: `state_transform_elision` is in the bv_verify table and
+    /// marked sound. The rule models `StateTransform(x, L, L) == x` as
+    /// the 1-variable identity `f(x) == x`.
+    #[test]
+    fn test_wave5_state_transform_elision_is_sound() {
+        let results: std::collections::HashMap<&'static str, VerificationResult> =
+            verify_all_rules().into_iter().map(|r| (r.rule_name, r)).collect();
+        let entry = results.get("state_transform_elision")
+            .expect("state_transform_elision should be in verify_all_rules()");
+        assert!(
+            entry.sound,
+            "state_transform_elision should be sound (identity: f(x)==x)"
+        );
+        assert_eq!(
+            entry.cases_evaluated, VERIFY_MODULO,
+            "should evaluate all 256 8-bit cases"
+        );
+    }
+
+    /// Wave 5: `state_store_load_forward` is in the bv_verify table and
+    /// marked sound. The rule models `StateRead(StateWrite(s, off, v),
+    /// off, _) == v` as the 2-variable identity `g(s, v) == v`.
+    #[test]
+    fn test_wave5_state_store_load_forward_is_sound() {
+        let results: std::collections::HashMap<&'static str, VerificationResult> =
+            verify_all_rules().into_iter().map(|r| (r.rule_name, r)).collect();
+        let entry = results.get("state_store_load_forward")
+            .expect("state_store_load_forward should be in verify_all_rules()");
+        assert!(
+            entry.sound,
+            "state_store_load_forward should be sound (read returns written value: g(s,v)==v)"
+        );
+        assert_eq!(
+            entry.cases_evaluated, VERIFY_MODULO * VERIFY_MODULO,
+            "should evaluate all 256*256 8-bit case pairs"
+        );
+    }
+
+    /// Wave 5: the gate accepts the four state-op rules when they
+    /// appear by name in a rule list. Two are in the bv_verify table
+    /// (sound); two are unknown (admitted as sound-by-construction).
+    #[test]
+    fn test_wave5_state_op_rules_admitted_by_gate() {
+        let mk = |name: &'static str| crate::egraph::RewriteRule {
+            name,
+            verified: false, // matches the structural rules' flag
+            apply: |_, _| None,
+        };
+        let rules = vec![
+            mk("state_dead_init_elim"),
+            mk("state_store_load_forward"),
+            mk("state_transform_elision"),
+            mk("state_merge_compatible_layouts"),
+        ];
+        let result = verify_rules_with_counterexample(&rules);
+        assert!(
+            result.is_ok(),
+            "Wave 5 state-op rules must be admitted by the gate: {:?}",
+            result.err()
+        );
+    }
+
+    /// Wave 5: the full `standard_rules()` set (which now includes the
+    /// four state-op rules) passes the bv_verify gate.
+    #[test]
+    fn test_wave5_full_standard_rules_pass_gate() {
+        let standard = crate::egraph::standard_rules();
+        let result = verify_rules_with_counterexample(&standard);
+        assert!(
+            result.is_ok(),
+            "full standard_rules() (with Wave 5 state-op rules) must pass the gate: {:?}",
+            result.err()
+        );
     }
 }

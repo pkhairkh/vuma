@@ -3,6 +3,32 @@
 //! Defines the `TargetInfo` and `Backend` traits that allow VUMA to target
 //! multiple instruction set architectures. Each ISA implements these traits
 //! to provide target-specific information and code generation.
+//!
+//! # Wave 8a — Single-Buffer PMT State Lowering
+//!
+//! As of Wave 8a, PMT state-typed allocations (`let p = state_new(Layout)`)
+//! no longer lower to per-state `IRInstr::Alloc`s. Instead, the IRBuilder
+//! emits ONE `IRInstr::Alloc` for a program-wide buffer (`___pmt_buffer`)
+//! at the start of `main`, and each state-typed allocation becomes an
+//! `IRInstr::Offset { dst, base: ___pmt_buffer, offset: Imm(N) }` into
+//! that buffer. This realizes the "zero runtime overhead" promise: ONE
+//! stack allocation at program start, ZERO per-state stack allocations
+//! during execution.
+//!
+//! This is purely an IR-level transformation — the backends are unchanged.
+//! `IRInstr::Alloc` and `IRInstr::Offset` are both already supported by
+//! every backend (the former via stack-slot reservation, the latter via
+//! `LEA`/`ADD`/`ADDI` etc.). No `_start` stub modification or runtime
+//! helper is needed (Approach A from the Wave 8a task description).
+//!
+//! The buffer is sized to the SUM of all state-typed allocation sizes
+//! (each aligned to 16 bytes), computed by the IRBuilder's pre-pass
+//! (`compute_total_state_buffer_size`). This is conservative — slot
+//! reuse across non-overlapping live ranges is a future optimisation
+//! (would require liveness analysis). See `identify_state_vars` in
+//! `scg_to_ir.rs` for the heuristic that distinguishes state-typed
+//! allocations from regular `allocate(N)` calls (which still use the
+//! per-call `Alloc` path).
 
 use crate::arm32::Arm32Backend;
 use crate::ir::{size_of_with_ptr_width, alignment_of_with_ptr_width, IRFunction, IRInstr, IRType};

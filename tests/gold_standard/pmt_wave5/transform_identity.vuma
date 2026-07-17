@@ -1,0 +1,43 @@
+// transform_identity — PMT Wave 5: identity transform elision
+// Expected exit code: 7
+//
+// The `state_transform_elision` rewrite rule targets
+// `StateTransform(x, L, L)` — a transform whose src_layout == dst_layout
+// (an identity transform / no-op). When the optimizer is wired to feed
+// state ops into the e-graph, this rule rewrites the transform to its
+// input (eliminating the no-op conversion).
+//
+// Note: the `transform` keyword is parsed by VUMA but not yet lowered
+// to a callable form. To exercise the same state-operation pipeline
+// that the (future) transform elision will run on, this test uses a
+// regular `fn set_x(p: State<Point>, v: u32)` that mutates p.x —
+// semantically equivalent to a transform `to_set_x(p: State<Point>)
+// -> State<Point>` that writes v to p.x. The state-operation lowering
+// (StateInit → Alloc, StateWrite → Store, StateRead → Load) is the
+// same regardless of whether the mutation is in a `fn` or a
+// `transform` body.
+//
+// Under the *current* optimizer (which feeds only BinOps to the
+// e-graph), the call is emitted as-is — but the program's observable
+// behaviour is unchanged (exit 7), so this test passes either way.
+// The file serves as a forward-looking test case for the wave that
+// wires state ops into `equality_saturation_with_cost`.
+//
+// VUMA Key Concepts:
+//   - State<T> passed by pointer to a function that mutates it
+//   - same src/dst layout (the function returns the same state type)
+//     → the e-graph's `state_transform_elision` rule rewrites the
+//     transform to its input (no-op)
+
+layout Point = { x: u32, y: u32 }
+
+fn set_x(p: State<Point>, v: u32) {
+    p.x = v;
+    return;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    set_x(p, 7);
+    return p.x;
+}

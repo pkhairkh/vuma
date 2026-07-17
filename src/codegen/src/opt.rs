@@ -2228,6 +2228,13 @@ pub fn equality_saturation_with_cost(
                                         *rhs = new_rhs;
                                     }
                                 }
+                                // Wave 5: state-op ENodes (StateInit/StateRead/
+                                // StateWrite/StateTransform) are never produced
+                                // by `eg.extract()` here because this pass only
+                                // feeds BinOp instructions to the e-graph (see
+                                // the first-pass loop above). The wildcard arm
+                                // is required for exhaustiveness; it is a no-op.
+                                _ => {}
                             }
                         }
                     }
