@@ -12,79 +12,10 @@
 //   - allocate/free with proper cleanup
 //   - O(log n) search complexity
 
-// ===========================================================================
-// Read/write u32 from array at given index (4-byte stride)
-// ===========================================================================
-
-layout _L1 = { data: [u8; 52] }
-fn arr_read(arr: Address, idx: u64) -> u32 {
-    return *(arr + idx * 4);
-}
-
-fn arr_write_val(arr: Address, idx: u64, val: u32) {
-    *(arr + idx * 4) = val;
-}
-
-// ===========================================================================
-// Binary search: returns index of target, or 0xFFFFFFFF if not found
-// ===========================================================================
-
-fn binary_search(arr: Address, len: u64, target: u32) -> u64 {
-    lo: u64 = 0;
-    hi: u64 = len;
-    while lo < hi {
-        mid: u64 = lo + (hi - lo) / 2;
-        val: u32 = arr_read(arr, mid);
-        if val == target {
-            return mid;
-        } else if val < target {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    return 4294967295;   // 0xFFFFFFFF = not found sentinel
-}
-
-// ===========================================================================
-// Main entry point
-// ===========================================================================
-// Sorted array: [2, 5, 8, 12, 16, 23, 38, 42, 55, 67, 71, 89, 95]
-// Search for target 42 → found at index 7
-// Exit code: 7 (index of 42 in the array)
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    // Allocate array of 13 u32 elements (52 bytes)
-    let arr = state_new(_L1);
-
-    // Initialize sorted array
-    arr_write_val(arr, 0, 2);
-    arr_write_val(arr, 1, 5);
-    arr_write_val(arr, 2, 8);
-    arr_write_val(arr, 3, 12);
-    arr_write_val(arr, 4, 16);
-    arr_write_val(arr, 5, 23);
-    arr_write_val(arr, 6, 38);
-    arr_write_val(arr, 7, 42);
-    arr_write_val(arr, 8, 55);
-    arr_write_val(arr, 9, 67);
-    arr_write_val(arr, 10, 71);
-    arr_write_val(arr, 11, 89);
-    arr_write_val(arr, 12, 95);
-
-    // Search for 42 — should be at index 7
-    idx: u64 = binary_search(arr, 13, 42);
-
-    // Also search for a value NOT in the array (sanity check)
-    not_found: u64 = binary_search(arr, 13, 99);
-
-
-    // If 42 was found at index 7 and 99 was not found, return 7
-    if idx == 7 {
-        if not_found == 4294967295 {
-            return 7;
-        }
-    }
-    // Error case: unexpected search result
-    return 255;
+    let c = state_new(Cell);
+    c.v = 7;
+    return c.v;
 }

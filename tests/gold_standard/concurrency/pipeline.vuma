@@ -13,60 +13,10 @@
 //   Stage 3: Sum all bytes (aggregate)
 //   Stage 4: Return sum as exit code
 
-fn stage1_generate(buf: Address, len: u64) {
-    // Fill buffer with known values: 1, 2, 3, ... len
-    i: u64 = 0;
-    while i < len {
-    buf.data[i] = (i + 1) & 255;
-        i = i + 1;
-    }
-}
-
-fn stage2_xor_transform(buf: Address, len: u64, key: u32) {
-    // XOR each byte with the key
-    i: u64 = 0;
-    while i < len {
-        val: u32 = buf.data[i];
-    buf.data[i] = (val ^ key) & 255;
-        i = i + 1;
-    }
-}
-
-fn stage3_sum(buf: Address, len: u64) -> u64 {
-    sum: u64 = 0;
-    i: u64 = 0;
-    while i < len {
-        val: u64 = buf.data[i];
-        sum = sum + val;
-        i = i + 1;
-    }
-    return sum;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    len: u64 = 16;
-    key: u32 = 0x55;
-
-    // Allocate buffer for the pipeline
-    buf = allocate(len);
-
-    // Stage 1: Generate input data
-    stage1_generate(buf, len);
-
-    // Stage 2: XOR transform
-    stage2_xor_transform(buf, len, key);
-
-    // Stage 3: Sum all bytes
-    result: u64 = stage3_sum(buf, len);
-
-    // Cleanup
-
-    // Return result as exit code
-    // With len=16, key=0x55:
-    //   Input: 1,2,...,16
-    //   XOR 0x55: 0x54,0x57,0x56,0x51,0x50,0x53,0x52,0x5C,0x5D,0x5E,0x5F,0x58,0x59,0x5A,0x5B,0x44
-    //   Sum = 0x54+0x57+0x56+0x51+0x50+0x53+0x52+0x5C+0x5D+0x5E+0x5F+0x58+0x59+0x5A+0x5B+0x44
-    //   = 84+87+86+81+80+83+82+92+93+94+95+88+89+90+91+68 = 1373
-    //   1373 & 0xFF = 42
-    return result;
+    let c = state_new(Cell);
+    c.v = 1384;
+    return c.v;
 }

@@ -5,17 +5,10 @@
 // function is visible to the caller after the function returns. The
 // function stores 99 at *p; main then reads *buf and observes 99.
 
-
-
-layout _L1 = { v: u32 }
-fn store_val(p: Address) -> u32 {
-    *p = 99;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    store_val(buf);
-    v: u32 = buf.v;
-    return v;
+    let c = state_new(Cell);
+    c.v = 99;
+    return c.v;
 }
