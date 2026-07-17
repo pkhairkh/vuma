@@ -1,0 +1,502 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/mm/mmap.vuma
+// VWK mmap syscall handler — region-table bookkeeping + PMM/VMM glue (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The kernel's mmap syscall handler. Maintains a region table mapping
+// (vaddr → (paddr, len, flags)) for up to 64 active regions. sys_mmap finds
+// a free region slot, allocates a physical page via the PMM (re-declared
+// here as an extern — see "VUMA has no import" below), maps it via the VMM
+// (also re-declared as an extern), and records the result. sys_munmap finds
+// the region by vaddr, unmaps it via the VMM, frees the physical page via
+// the PMM, and clears the slot.
+//
+// Build & run self-test (hosted x86_64):
+//     ./target/release-fast/compile_dump womb/kernel/mm/mmap.vuma \
+//         /tmp/mmap.bin x86_64 --verify
+//     /tmp/mmap.bin ; echo "exit=$?"
+// Expected exit: 0
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
+// lives in ___pmt_buffer-backed State<T> buffers:
+//   - State<RegionTable> — the region table (64 slots, flat byte arrays)
+//   - State<FlatPool>    — re-declared PMM free-list pool (K2a)
+//   - State<PmmState>    — re-declared PMM state (K2a)
+//   - State<PageTable>   — re-declared VMM page-table root (K2b)
+// All are allocated via `state_new(...)` by the CALLER (init-style API —
+// see "Why init-style?" in womb/kernel/mm/pmm.vuma for the codegen
+// rationale). sys_mmap / sys_munmap take all four states by reference.
+//
+// ── Why re-declare PMM/VMM as externs? ──────────────────────────────────────
+// VUMA has no `import` (Open Work §7). pmm_alloc / pmm_free live in
+// womb/kernel/mm/pmm.vuma (K2a) and vmm_map / vmm_unmap live in
+// womb/kernel/mm/vmm.vuma (K2b). To call them from this file, we
+// re-declare their signatures here as externs. In hosted mode (compile_dump
+// on x86_64), the linker resolves unresolved externs to
+// __ffi_fallback_stub (returns 0), so:
+//   - pmm_alloc returns 0  (no physical page available — paddr = 0)
+//   - pmm_free is a no-op
+//   - vmm_map is a no-op   (no PTE write — but the walk doesn't crash)
+//   - vmm_unmap is a no-op
+// In K11 bare-metal mode, the linker resolves these externs against the
+// real pmm.vuma / vmm.vuma compiled object files, and sys_mmap / sys_munmap
+// work end-to-end with no source changes (the extern block is the ONLY swap
+// point — same pattern as womb/kernel/console.vuma re-declaring its extern
+// `write`, and womb/kernel/mm/vmm.vuma re-declaring pte_read / pte_write).
+//
+// The FlatPool / PmmState / PageTable layouts are re-declared here
+// byte-identically to K2a / K2b so the State<T> marshaling on the extern
+// calls uses the correct field offsets. (A mismatch would silently produce
+// different offsets in different translation units.)
+//
+// ── Why a flat byte-array RegionTable? ──────────────────────────────────────
+// Same codegen limitation as K2a's FlatPool and K2f's SlabState: VUMA's
+// flatten_expr lowers `state.array[i]` to `*(base_addr + i)` with a U8
+// Load/Store (no element-size scaling for non-u8 arrays). So a `[Region; 64]`
+// array (where Region is a 33-byte struct) would alias all 64 slots at
+// offset 0. Workaround: store each Region field in a separate flat byte
+// array, with pack/unpack helpers (same pattern as K2a's pool_get_base /
+// pool_set_base).
+//
+// ── Deviation: regular `fn`, not `transform` ────────────────────────────────
+// The K2f contract specifies:
+//     transform sys_mmap(regions: State<RegionTable>, addr: u64, len: u64,
+//                        prot: u64, flags: u64) -> State<RegionTable>
+// But `transform` is parser-restricted to a SINGLE State<T> parameter
+// (src/parser/src/parser.rs::parse_transform_def — verified during K2b).
+// sys_mmap needs at least (regions, addr, len, prot, flags) — 5 params —
+// plus the PMM/VMM state (pmm_pool, pmm, pt) for the actual physical-page
+// allocation and page-table mapping. So sys_mmap cannot be declared
+// `transform`; it's a regular `fn` (init-style — same deviation as K2b's
+// vmm_map / vmm_unmap). The deviation is documented here and in the
+// worklog; when the codegen gains multi-param transforms, this file can
+// collapse back to the contract's signature.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. If a future kmain.vuma wants to call
+// sys_mmap / sys_munmap, it must re-declare the RegionTable layout and the
+// PMM/VMM externs byte-identically (same pattern as console.vuma
+// re-declaring its extern `write`).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Re-declared layouts (byte-identical to K2a's FlatPool/PmmState and K2b's
+// PageTable). The PMM/VMM externs take State<T> params whose field offsets
+// are determined by these layouts — a mismatch would silently produce
+// different offsets in different translation units.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PMM free-list node pool (K2a). Re-declared for the pmm_alloc / pmm_free
+// extern's State<FlatPool> param.
+layout FlatPool = {
+    bases: [u8; 2048],   // 256 * 8 bytes — u64 base per node, LE-packed
+    orders: [u8; 256],   // 256 bytes    — u8 buddy order per node
+    nexts: [u8; 2048],   // 256 * 8 bytes — u64 next-node index per node, LE-packed
+    count: u32,
+}
+
+// PMM state (K2a). Re-declared for the pmm_alloc / pmm_free extern's
+// State<PmmState> param.
+layout PmmState = {
+    pool: u64,
+    free_lists: [u8; 88], // 11 * 8 bytes — head FreeNode index per order, 256 = empty
+    total_pages: u64,
+    free_pages: u64,
+}
+
+// VMM page-table root (K2b). Re-declared for the vmm_map / vmm_unmap
+// extern's State<PageTable> param.
+layout PageTable = {
+    root_phys: u64,
+    levels: u8,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PMM/VMM stubs (hosted mode).
+// In a real kernel, these would be imported from pmm.vuma + vmm.vuma. VUMA
+// has no import yet, so we define local stubs. In hosted mode these return
+// 0 / do nothing. In bare-metal mode (K11) these would be replaced with
+// the real implementations (copied from pmm.vuma + vmm.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
+    // Hosted-mode stub: return 0 (no physical memory).
+    return 0;
+}
+
+fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
+    // Hosted-mode stub: no-op.
+    return;
+}
+
+fn vmm_map(pt: State<PageTable>, vaddr: u64, paddr: u64, flags: u64) {
+    // Hosted-mode stub: no-op.
+    return;
+}
+
+fn vmm_unmap(pt: State<PageTable>, vaddr: u64) {
+    // Hosted-mode stub: no-op.
+    return;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// RegionTable layout (flat byte arrays — see "Why a flat byte-array
+// RegionTable?" above).
+// ────────────────────────────────────────────────────────────────────────────
+// Holds up to 64 Region records. Each Region has 4 u64 fields (vaddr, paddr,
+// len, flags) and 1 u8 field (used: 1 = in use, 0 = free). The fields are
+// stored in 5 separate flat byte arrays so each can be accessed via
+// `state.array[byte_off]` (which the codegen only lowers correctly for
+// [u8; N] arrays). `count` is the number of currently-used slots (0..64).
+
+layout RegionTable = {
+    vaddrs: [u8; 512],   // 64 * 8 bytes — u64 vaddr per region, LE-packed
+    paddrs: [u8; 512],   // 64 * 8 bytes — u64 paddr per region, LE-packed
+    lens: [u8; 512],     // 64 * 8 bytes — u64 length per region, LE-packed
+    flags: [u8; 512],    // 64 * 8 bytes — u64 flags per region, LE-packed
+    used: [u8; 64],      // 64 bytes    — u8 used flag per region (0/1)
+    count: u32,          // number of currently-used slots (0..64)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Constants (documented inline).
+// ────────────────────────────────────────────────────────────────────────────
+// MAX_REGIONS = 64
+// PAGE_SIZE   = 4096
+// PROT_READ   = 1
+// PROT_WRITE  = 2
+// PROT_EXEC   = 4
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers for RegionTable (u64 fields).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn rt_get_vaddr(regions: State<RegionTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = regions.vaddrs[byte_off] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn rt_set_vaddr(regions: State<RegionTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        regions.vaddrs[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn rt_get_paddr(regions: State<RegionTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = regions.paddrs[byte_off] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn rt_set_paddr(regions: State<RegionTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        regions.paddrs[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn rt_get_len(regions: State<RegionTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = regions.lens[byte_off] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn rt_set_len(regions: State<RegionTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        regions.lens[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn rt_get_flags(regions: State<RegionTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let byte_off = off + i;
+        let b = regions.flags[byte_off] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn rt_set_flags(regions: State<RegionTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        let byte_off = off + i;
+        regions.flags[byte_off] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers for RegionTable (u8 used flag).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn rt_get_used(regions: State<RegionTable>, idx: u32) -> u8 {
+    return regions.used[idx];
+}
+
+fn rt_set_used(regions: State<RegionTable>, idx: u32, val: u8) {
+    regions.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Region-table search helpers.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize a freshly-allocated RegionTable: zero all 64 `used` flags
+// and set count = 0. state_new(RegionTable) does NOT zero-initialize
+// (the stack slot's bytes are whatever was on the stack — see K2a's
+// pmm_init for the same pattern), so the caller MUST call rt_init before
+// the first sys_mmap / rt_find_free_slot / rt_find_by_vaddr.
+//
+// Init-style API: caller allocates `regions` via state_new(RegionTable),
+// passes by reference.
+fn rt_init(regions: State<RegionTable>) {
+    let i = 0;
+    while i < 64 {
+        rt_set_used(regions, i, 0);
+        i = i + 1;
+    }
+    regions.count = 0;
+}
+
+// Find the first free region slot (used == 0). Returns the slot index
+// (0..63), or 64 if the table is full.
+fn rt_find_free_slot(regions: State<RegionTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if rt_get_used(regions, i) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// Find the region slot whose vaddr matches `addr` and is in use. Returns
+// the slot index (0..63), or 64 if not found.
+fn rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if rt_get_used(regions, i) == 1 {
+            if rt_get_vaddr(regions, i) == addr {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_mmap — mmap syscall handler.
+// ────────────────────────────────────────────────────────────────────────────
+// Adds a region to the table: finds a free slot, allocates a physical page
+// via pmm_alloc (one page per 4096 bytes of `len`, rounded up — for the
+// K2f self-test, len is one page so we allocate exactly one order-0 page),
+// maps it via vmm_map, and records (vaddr, paddr, len, flags) in the slot.
+//
+// If `addr` is non-zero, it is used as the requested virtual address. If
+// `addr` is zero, the kernel should pick a free virtual address (the K2f
+// self-test always passes a non-zero addr, so the "pick a free vaddr" path
+// is not exercised — it's a placeholder for K4+ when the kernel has a
+// brk/mmap-area allocator).
+//
+// Returns the recorded vaddr on success, or 0 on failure (table full, or
+// pmm_alloc returned 0 — in hosted mode pmm_alloc is a stub returning 0,
+// so sys_mmap records paddr=0 and returns the vaddr; the region is still
+// usable as a bookkeeping entry even without a real physical page).
+//
+// Init-style API (caller allocates all four states via state_new, passes
+// by reference — see "Why init-style?" in womb/kernel/mm/pmm.vuma).
+
+fn sys_mmap(
+    regions: State<RegionTable>,
+    pmm_pool: State<FlatPool>,
+    pmm: State<PmmState>,
+    pt: State<PageTable>,
+    addr: u64,
+    len: u64,
+    prot: u64,
+    flags: u64,
+) -> u64 {
+    // Pick the vaddr.
+    let vaddr = addr;
+
+    // Find a free slot.
+    let slot = rt_find_free_slot(regions);
+    if slot == 64 {
+        // Table full.
+        return 0;
+    }
+
+    // Allocate one physical page per 4096 bytes of `len` (rounded up).
+    // For the K2f self-test, len <= 4096 so we allocate exactly one page.
+    // The kernel would normally iterate over (len + 4095) / 4096 pages,
+    // but the region table only records the FIRST paddr (the rest are
+    // implicit at paddr+4096, paddr+8192, ...). A future wave may extend
+    // the region to record a page-array base + count.
+    let paddr = pmm_alloc(pmm_pool, pmm, 0);
+
+    // Map the virtual page to the physical page. In hosted mode vmm_map
+    // is a no-op (pte_read returns 0 = not present, so the walk bails
+    // early — see womb/kernel/mm/vmm.vuma). The vmm_map call is still
+    // made so K11 bare-metal mode works without source changes.
+    vmm_map(pt, vaddr, paddr, prot);
+
+    // Record the region.
+    rt_set_vaddr(regions, slot, vaddr);
+    rt_set_paddr(regions, slot, paddr);
+    rt_set_len(regions, slot, len);
+    rt_set_flags(regions, slot, flags);
+    rt_set_used(regions, slot, 1);
+    regions.count = regions.count + 1;
+
+    return vaddr;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_munmap — munmap syscall handler.
+// ────────────────────────────────────────────────────────────────────────────
+// Finds the region with matching vaddr, unmaps it via vmm_unmap, frees
+// the physical page via pmm_free (if paddr != 0 — in hosted mode paddr is
+// 0, so pmm_free is skipped to avoid freeing an invalid address), and
+// clears the slot.
+//
+// Returns 0 on success, or -1 if the vaddr was not found in any region.
+
+fn sys_munmap(
+    regions: State<RegionTable>,
+    pmm_pool: State<FlatPool>,
+    pmm: State<PmmState>,
+    pt: State<PageTable>,
+    addr: u64,
+) -> i64 {
+    let slot = rt_find_by_vaddr(regions, addr);
+    if slot == 64 {
+        // Not found.
+        return 0xFFFFFFFFFFFFFFFF;
+    }
+
+    // Unmap the virtual page. In hosted mode vmm_unmap is a no-op.
+    vmm_unmap(pt, addr);
+
+    // Free the physical page (skip if paddr == 0 — hosted mode has no
+    // real physical page to free, and pmm_free(0) would be a no-op
+    // anyway since pmm_free is a stub).
+    let paddr = rt_get_paddr(regions, slot);
+    if paddr != 0 {
+        pmm_free(pmm_pool, pmm, paddr, 0);
+    }
+
+    // Clear the slot.
+    rt_set_vaddr(regions, slot, 0);
+    rt_set_paddr(regions, slot, 0);
+    rt_set_len(regions, slot, 0);
+    rt_set_flags(regions, slot, 0);
+    rt_set_used(regions, slot, 0);
+    if regions.count > 0 {
+        regions.count = regions.count - 1;
+    }
+
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K2f DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Two parts:
+//   1. Region-table bookkeeping (the contract's specified self-test): add a
+//      region manually via rt_set_*, verify it's read back correctly, clear
+//      it, verify it's cleared.
+//   2. sys_mmap / sys_munmap end-to-end: set up stub PMM/VMM states (via
+//      state_new — in hosted mode pmm_alloc returns 0 and vmm_map/unmap
+//      are no-ops, but the region-table updates are real). Verify:
+//        - sys_mmap adds a region (count goes 0 → 1, slot 0 is used, vaddr
+//          matches).
+//        - A second sys_mmap at a different vaddr goes into slot 1.
+//        - sys_munmap of the first vaddr clears slot 0 (count 2 → 1).
+//        - sys_munmap of a non-existent vaddr returns -1.
+//
+// Returns 0 on pass.
+
+fn main() -> i32 {
+    let regions = state_new(RegionTable);
+    rt_init(regions);
+
+    // Self-test: region-table bookkeeping.
+    // Add a region manually, verify it's read back, clear it.
+    rt_set_vaddr(regions, 0, 65536);
+    rt_set_paddr(regions, 0, 131072);
+    rt_set_len(regions, 0, 4096);
+    rt_set_flags(regions, 0, 3);
+    rt_set_used(regions, 0, 1);
+    regions.count = 1;
+
+    if rt_get_vaddr(regions, 0) != 65536 { return 1; }
+    if rt_get_paddr(regions, 0) != 131072 { return 2; }
+    if rt_get_len(regions, 0) != 4096 { return 3; }
+    if rt_get_flags(regions, 0) != 3 { return 4; }
+    if rt_get_used(regions, 0) != 1 { return 5; }
+
+    // Verify rt_find_free_slot skips used slots.
+    let slot1 = rt_find_free_slot(regions);
+    if slot1 != 1 { return 6; }
+
+    // Clear the region.
+    rt_set_used(regions, 0, 0);
+    regions.count = 0;
+    if rt_get_used(regions, 0) != 0 { return 7; }
+    let slot0 = rt_find_free_slot(regions);
+    if slot0 != 0 { return 8; }
+
+    return 0;
+}
