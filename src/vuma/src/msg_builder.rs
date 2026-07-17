@@ -510,6 +510,13 @@ impl MsgBuilder {
             | ScgNodeType::EnumDef
             | ScgNodeType::Match
             | ScgNodeType::ConstantTime => ScgNodeMapping::None,
+            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // nodes need proper MSG mapping — for now, map to None so the
+            // build passes and the SCG→MSG bridge skips them gracefully.
+            ScgNodeType::StateInit
+            | ScgNodeType::StateRead
+            | ScgNodeType::StateWrite
+            | ScgNodeType::StateTransform => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);

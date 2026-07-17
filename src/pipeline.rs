@@ -2461,6 +2461,14 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::StructDef(_) | NodePayload::EnumDef(_) | NodePayload::Match(_)
         | NodePayload::ConstantTime(_) => Vec::new(),
+
+        // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+        // nodes need proper lowering to ScgStatement — for now, emit no
+        // statements so the build passes. Wave 1c will wire this.
+        NodePayload::StateInit(_)
+        | NodePayload::StateRead(_)
+        | NodePayload::StateWrite(_)
+        | NodePayload::StateTransform(_) => Vec::new(),
     }
 }
 
@@ -4004,6 +4012,10 @@ fn repd_to_scg_type(repd: &RepD) -> ScgType {
         RepD::Struct(_) | RepD::Array(_) | RepD::Enum(_) | RepD::Union(_) => ScgType::Ptr,
         RepD::Generic { .. } => ScgType::I64,
         RepD::ManifoldSpatial(_) | RepD::GestaltSuperposition(_) | RepD::ConceptRelational(_) => ScgType::Ptr,
+        // PMT: a State is a buffer view (passed by reference); a Ref is a
+        // pointer-sized offset.
+        RepD::State { .. } => ScgType::Ptr,
+        RepD::Ref { .. } => ScgType::U64,
     }
 }
 
@@ -9151,6 +9163,12 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         // BD directives (bd/repd/capd/reld) are annotations consumed by
         // the BD inference pass — they produce no codegen statements.
         PStmt::BdDirective(_) => vec![],
+
+        // PMT (Wave 1a): TransformCall is parsed-but-not-emitted in Wave
+        // 1a (the parser produces Stmt::Let with a function-call RHS for
+        // transform invocations). Stub: emit no statements so the build
+        // does not crash; Wave 1c will lower this properly.
+        PStmt::TransformCall(_) => vec![],
     }
 }
 

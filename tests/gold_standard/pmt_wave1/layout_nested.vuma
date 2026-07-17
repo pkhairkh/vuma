@@ -1,0 +1,20 @@
+// layout_nested — PMT Wave 1a: nested layout (layout referencing another layout)
+// Expected exit code: 0
+//
+// Wave 1a parse-only smoke test: declares `Point` first, then `Line` whose
+// fields are themselves `Point` layouts. Verifies the parser handles layout
+// names as field types (resolving to `Type::BDBase("Point")` for now; Wave 1c
+// will promote them to first-class layout-typed fields).
+//
+// VUMA Key Concepts:
+//   - PMT layout composition (Point → Line)
+//   - Layout names appear as field types
+//   - Forward declarations are NOT needed — Point must precede Line
+
+layout Point = { x: u32, y: u32 }
+
+layout Line = { a: Point, b: Point }
+
+fn main() -> i32 {
+    return 0;
+}

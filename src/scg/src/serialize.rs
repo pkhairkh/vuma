@@ -31,7 +31,8 @@ use crate::node::{
     ComputationKind, ComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode,
     DeallocationNode, EffectNode, EnumDefNode, EnumVariantInfo, MatchArmInfo,
     MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
-    ProgramPoint, StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
+    ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
+    StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -63,6 +64,10 @@ const NODE_TYPE_ENUM_DEF: u32 = 11;
 const NODE_TYPE_MATCH: u32 = 12;
 const NODE_TYPE_CONSTANT_TIME: u32 = 13;
 const NODE_TYPE_SYSCALL: u32 = 14;
+const NODE_TYPE_STATE_INIT: u32 = 15;
+const NODE_TYPE_STATE_READ: u32 = 16;
+const NODE_TYPE_STATE_WRITE: u32 = 17;
+const NODE_TYPE_STATE_TRANSFORM: u32 = 18;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -362,6 +367,10 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::Match => NODE_TYPE_MATCH,
         NodeType::ConstantTime => NODE_TYPE_CONSTANT_TIME,
         NodeType::Syscall => NODE_TYPE_SYSCALL,
+        NodeType::StateInit => NODE_TYPE_STATE_INIT,
+        NodeType::StateRead => NODE_TYPE_STATE_READ,
+        NodeType::StateWrite => NODE_TYPE_STATE_WRITE,
+        NodeType::StateTransform => NODE_TYPE_STATE_TRANSFORM,
     }
 }
 
@@ -382,6 +391,10 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_MATCH => Ok(NodeType::Match),
         NODE_TYPE_CONSTANT_TIME => Ok(NodeType::ConstantTime),
         NODE_TYPE_SYSCALL => Ok(NodeType::Syscall),
+        NODE_TYPE_STATE_INIT => Ok(NodeType::StateInit),
+        NODE_TYPE_STATE_READ => Ok(NodeType::StateRead),
+        NODE_TYPE_STATE_WRITE => Ok(NodeType::StateWrite),
+        NODE_TYPE_STATE_TRANSFORM => Ok(NodeType::StateTransform),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -962,6 +975,32 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
                 w.write_string(arg);
             }
         }
+        NodePayload::StateInit(s) => {
+            w.write_u32_le(NODE_TYPE_STATE_INIT);
+            w.write_string(&s.layout_name);
+            w.write_u32_le(s.result_vreg);
+        }
+        NodePayload::StateRead(s) => {
+            w.write_u32_le(NODE_TYPE_STATE_READ);
+            w.write_u32_le(s.state_vreg);
+            w.write_string(&s.layout_name);
+            w.write_string(&s.field_name);
+            w.write_u32_le(s.result_vreg);
+        }
+        NodePayload::StateWrite(s) => {
+            w.write_u32_le(NODE_TYPE_STATE_WRITE);
+            w.write_u32_le(s.state_vreg);
+            w.write_string(&s.layout_name);
+            w.write_string(&s.field_name);
+            w.write_u32_le(s.value_vreg);
+        }
+        NodePayload::StateTransform(s) => {
+            w.write_u32_le(NODE_TYPE_STATE_TRANSFORM);
+            w.write_u32_le(s.input_vreg);
+            w.write_string(&s.input_layout);
+            w.write_string(&s.output_layout);
+            w.write_u32_le(s.result_vreg);
+        }
     }
 }
 
@@ -1243,6 +1282,50 @@ fn read_payload(
                 args.push(reader.read_string(&format!("{}.arg[{}]", context, i))?);
             }
             Ok(NodePayload::Syscall(SyscallNode { nr, dst, args }))
+        }
+        NodeType::StateInit => {
+            let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
+            let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
+            Ok(NodePayload::StateInit(StateInitNode {
+                layout_name,
+                result_vreg,
+            }))
+        }
+        NodeType::StateRead => {
+            let state_vreg = reader.read_u32_le(&format!("{}.state_vreg", context))?;
+            let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
+            let field_name = reader.read_string(&format!("{}.field_name", context))?;
+            let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
+            Ok(NodePayload::StateRead(StateReadNode {
+                state_vreg,
+                layout_name,
+                field_name,
+                result_vreg,
+            }))
+        }
+        NodeType::StateWrite => {
+            let state_vreg = reader.read_u32_le(&format!("{}.state_vreg", context))?;
+            let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
+            let field_name = reader.read_string(&format!("{}.field_name", context))?;
+            let value_vreg = reader.read_u32_le(&format!("{}.value_vreg", context))?;
+            Ok(NodePayload::StateWrite(StateWriteNode {
+                state_vreg,
+                layout_name,
+                field_name,
+                value_vreg,
+            }))
+        }
+        NodeType::StateTransform => {
+            let input_vreg = reader.read_u32_le(&format!("{}.input_vreg", context))?;
+            let input_layout = reader.read_string(&format!("{}.input_layout", context))?;
+            let output_layout = reader.read_string(&format!("{}.output_layout", context))?;
+            let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
+            Ok(NodePayload::StateTransform(StateTransformNode {
+                input_vreg,
+                input_layout,
+                output_layout,
+                result_vreg,
+            }))
         }
         // Womb data model variants were removed; tags 14..=25 now fall
         // through to the `tag_to_node_type` error path above before
@@ -1562,6 +1645,18 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
+        // PMT (Wave 1b): minimal stubs so this match stays exhaustive.
+        // Wave 1b will replace these with proper labels.
+        NodePayload::StateInit(s) => format!("state_init({})", s.layout_name),
+        NodePayload::StateRead(s) => {
+            format!("state_read({}.{})", s.layout_name, s.field_name)
+        }
+        NodePayload::StateWrite(s) => {
+            format!("state_write({}.{})", s.layout_name, s.field_name)
+        }
+        NodePayload::StateTransform(s) => {
+            format!("state_transform({} -> {})", s.input_layout, s.output_layout)
+        }
     };
 
     let ann = node

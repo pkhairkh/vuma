@@ -85,6 +85,14 @@ fn map_node_type(
         | vuma_scg::NodeType::Match
         | vuma_scg::NodeType::ConstantTime
         | vuma_scg::NodeType::Syscall => NodeKind::Entry,
+
+        // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+        // are memory-shape nodes — map to Memory for now. Wave 1c will
+        // refine this once the codegen knows how to lower them.
+        vuma_scg::NodeType::StateInit
+        | vuma_scg::NodeType::StateRead
+        | vuma_scg::NodeType::StateWrite
+        | vuma_scg::NodeType::StateTransform => NodeKind::Memory,
     }
 }
 

@@ -19,10 +19,30 @@
 use crate::capd::CapD;
 use crate::error_reporting::BdError;
 use crate::reld::RelD;
+use std::collections::HashMap;
 use std::fmt;
 
 /// Pointer size in bytes for the 64-bit target model.
 pub const POINTER_SIZE: u64 = 8;
+
+// ---------------------------------------------------------------------------
+// PMT (Programs as Memory Transformations) identifiers
+// ---------------------------------------------------------------------------
+
+/// Identifier for a layout definition (assigned by `LayoutRegistry`).
+///
+/// A `LayoutId` is a stable handle into the registry — the actual field
+/// offsets, sizes, and total layout are resolved by looking the id up
+/// against the owning `LayoutRegistry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayoutId(pub u32);
+
+/// Identifier for a field within a layout (assigned by `LayoutRegistry`).
+///
+/// `FieldId`s are unique within a single `LayoutDef`, not globally — they
+/// correspond to the index of the field in the layout's `fields` vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FieldId(pub u32);
 
 // ---------------------------------------------------------------------------
 // Leaf structures
@@ -215,6 +235,29 @@ pub enum RepD {
         /// Constraints that any concrete substitution must satisfy.
         constraints: Vec<BDConstraint>,
     },
+    /// A typed memory state — a view of the program's buffer with a specific
+    /// layout. The layout determines how the buffer bytes are interpreted at
+    /// this program point.
+    ///
+    /// At runtime a `State` is just a buffer region; the `layout` carries the
+    /// type-level knowledge of how to read it. The actual size/alignment of
+    /// the state is resolved by looking `layout` up against the owning
+    /// `LayoutRegistry`.
+    State {
+        /// The layout that interprets this state's buffer region.
+        layout: LayoutId,
+    },
+    /// A typed reference to a field within a state — a compile-time-verified
+    /// offset. At runtime this is just a buffer offset; the type system proves
+    /// it's valid for the given `layout`/`field` pair.
+    ///
+    /// `Ref` is pointer-sized (8 bytes on the 64-bit target model).
+    Ref {
+        /// The state's layout this reference points into.
+        layout: LayoutId,
+        /// The field within that layout.
+        field: FieldId,
+    },
 }
 
 impl std::hash::Hash for RepD {
@@ -292,6 +335,13 @@ impl std::hash::Hash for RepD {
                 c.align.hash(state);
                 c.use_soa.hash(state);
             }
+            RepD::State { layout } => {
+                layout.hash(state);
+            }
+            RepD::Ref { layout, field } => {
+                layout.hash(state);
+                field.hash(state);
+            }
         }
     }
 }
@@ -324,6 +374,15 @@ impl RepD {
             RepD::ManifoldSpatial(m) => m.total_bytes,
             RepD::GestaltSuperposition(g) => g.max_size,
             RepD::ConceptRelational(c) => c.total_size,
+            // State's size is determined by its layout's total_size, which
+            // is resolved externally via the owning `LayoutRegistry`. The
+            // RepD itself only carries the `LayoutId` handle, so we return 0
+            // here (callers that need the resolved size must query the
+            // registry — analogous to `Generic`'s "unknown until substituted").
+            RepD::State { .. } => 0,
+            // A `Ref` is a compile-time-verified buffer offset — at runtime
+            // it is stored as a pointer-sized offset.
+            RepD::Ref { .. } => POINTER_SIZE,
         }
     }
 
@@ -341,6 +400,14 @@ impl RepD {
             RepD::ManifoldSpatial(m) => m.element_size.max(8),
             RepD::GestaltSuperposition(g) => g.max_align,
             RepD::ConceptRelational(c) => c.align.max(1),
+            // State's alignment is determined by its layout's alignment,
+            // resolved externally via the owning `LayoutRegistry`. The RepD
+            // itself only carries the `LayoutId` handle, so we return 1
+            // (minimum alignment) here.
+            RepD::State { .. } => 1,
+            // A `Ref` is a pointer-sized offset, so it inherits pointer
+            // alignment.
+            RepD::Ref { .. } => POINTER_SIZE,
         }
     }
 
@@ -590,6 +657,10 @@ impl fmt::Display for RepD {
             RepD::ConceptRelational(c) => {
                 write!(f, "concept({:?}, size={}, soa={})", c.field_names, c.total_size, c.use_soa)
             }
+            RepD::State { layout } => write!(f, "state(layout={})", layout.0),
+            RepD::Ref { layout, field } => {
+                write!(f, "ref(layout={}, field={})", layout.0, field.0)
+            }
         }
     }
 }
@@ -635,6 +706,172 @@ pub fn generic_satisfies_constraints(constraints: &[BDConstraint], concrete: &Re
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// Layout Registry — PMT (Programs as Memory Transformations)
+// ---------------------------------------------------------------------------
+
+/// A resolved layout definition with computed offsets, sizes, and alignment.
+///
+/// Produced by [`LayoutRegistry::register`] from a list of `(field_name, RepD)`
+/// pairs. Field offsets include alignment padding; `total_size` includes tail
+/// padding so that arrays of the layout are correctly strided.
+#[derive(Debug, Clone)]
+pub struct LayoutDef {
+    /// The layout's human-readable name (e.g. `"Point"`, `"Buffer"`).
+    pub name: String,
+    /// Fields in declaration order, with computed offsets/sizes/ids.
+    pub fields: Vec<LayoutField>,
+    /// Total size in bytes, including tail padding to `alignment`.
+    pub total_size: u64,
+    /// Required alignment in bytes — the maximum of all field alignments,
+    /// or `1` for an empty layout.
+    pub alignment: u64,
+}
+
+/// A single field within a [`LayoutDef`], with computed offset and size.
+#[derive(Debug, Clone)]
+pub struct LayoutField {
+    /// Field name, unique within the layout.
+    pub name: String,
+    /// Stable identifier assigned by the registry (index within the layout).
+    pub field_id: FieldId,
+    /// Byte offset of the field within the layout (including alignment padding
+    /// inserted before this field).
+    pub offset: u64,
+    /// Padded size in bytes (size of the field's RepD, with no extra padding).
+    pub size: u64,
+    /// The field's type as a `RepD`.
+    pub repd: RepD,
+}
+
+/// Registry of layout definitions, indexed by [`LayoutId`].
+///
+/// Computes and caches field offsets, sizes, and total layout sizes. Each
+/// call to [`register`](Self::register) assigns a fresh `LayoutId` and stores
+/// the resolved [`LayoutDef`]; subsequent `get` / `field_offset` / `field_size`
+/// queries are O(field-count) lookups against the cached layout.
+///
+/// # Example
+///
+/// ```
+/// use vuma_bd::repd::{LayoutRegistry, RepD, ByteRep};
+///
+/// let mut registry = LayoutRegistry::new();
+/// let id = registry.register("Point", vec![
+///     ("x".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+///     ("y".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+/// ]);
+/// assert_eq!(registry.field_offset(id, "y"), Some(4));
+/// assert_eq!(registry.field_size(id, "x"), Some(4));
+/// let layout = registry.get(id).unwrap();
+/// assert_eq!(layout.total_size, 8);
+/// assert_eq!(layout.alignment, 4);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct LayoutRegistry {
+    /// Layout name → `LayoutId` (for `get_by_name` lookups).
+    pub names: HashMap<String, LayoutId>,
+    /// `LayoutId` → resolved `LayoutDef` (indexed by `LayoutId.0`).
+    pub layouts: Vec<LayoutDef>,
+}
+
+impl LayoutRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a layout by name + field list. Returns its [`LayoutId`].
+    ///
+    /// Field offsets are computed sequentially with alignment padding inserted
+    /// before each field; the total size is rounded up to the layout's
+    /// alignment (max of all field alignments, or `1` for an empty layout).
+    /// Each field is assigned a `FieldId` equal to its index within the
+    /// layout. Re-registering an existing name overwrites the previous
+    /// entry in `names` but **does not** reuse the old `LayoutId` — the
+    /// old `LayoutDef` is preserved at its original index.
+    pub fn register(&mut self, name: &str, fields: Vec<(String, RepD)>) -> LayoutId {
+        let mut resolved: Vec<LayoutField> = Vec::with_capacity(fields.len());
+        let mut current_offset: u64 = 0;
+        let mut max_align: u64 = 1;
+
+        for (index, (field_name, repd)) in fields.into_iter().enumerate() {
+            let field_align = repd.alignment().max(1);
+            let field_size = repd.size();
+
+            // Bump the running offset up to the field's required alignment.
+            if field_align > 1 && current_offset % field_align != 0 {
+                current_offset = align_to(current_offset, field_align);
+            }
+
+            max_align = max_align.max(field_align);
+
+            resolved.push(LayoutField {
+                name: field_name,
+                field_id: FieldId(index as u32),
+                offset: current_offset,
+                size: field_size,
+                repd,
+            });
+
+            current_offset += field_size;
+        }
+
+        // Pad the total size up to the layout's alignment so that arrays of
+        // this layout are correctly strided.
+        let alignment = max_align.max(1);
+        let total_size = if current_offset == 0 {
+            0
+        } else if current_offset % alignment == 0 {
+            current_offset
+        } else {
+            align_to(current_offset, alignment)
+        };
+
+        let layout = LayoutDef {
+            name: name.to_string(),
+            fields: resolved,
+            total_size,
+            alignment,
+        };
+
+        let id = LayoutId(self.layouts.len() as u32);
+        self.layouts.push(layout);
+        self.names.insert(name.to_string(), id);
+        id
+    }
+
+    /// Look up a layout by name.
+    pub fn get_by_name(&self, name: &str) -> Option<&LayoutDef> {
+        self.names
+            .get(name)
+            .and_then(|id| self.layouts.get(id.0 as usize))
+    }
+
+    /// Look up a layout by id.
+    pub fn get(&self, id: LayoutId) -> Option<&LayoutDef> {
+        self.layouts.get(id.0 as usize)
+    }
+
+    /// Get the offset of a field within a layout.
+    pub fn field_offset(&self, layout: LayoutId, field: &str) -> Option<u64> {
+        self.get(layout)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.offset)
+    }
+
+    /// Get the size of a field within a layout.
+    pub fn field_size(&self, layout: LayoutId, field: &str) -> Option<u64> {
+        self.get(layout)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.size)
+    }
 }
 
 #[cfg(test)]
