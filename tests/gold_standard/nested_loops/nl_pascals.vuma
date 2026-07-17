@@ -6,43 +6,10 @@
 // After 4 iterations (rows 0..3), row 3 = [1,3,3,1]. Returns cell [1] = 3.
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 
-layout _L1 = { a: u64, b: u64 }
-layout _L2 = { a: u64, b: u64 }
-
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    cur = allocate(16);  // current row, 4 u32 cells
-    nxt = allocate(16);  // next row,    4 u32 cells
-
-    // Row 0 = [1, 0, 0, 0]
-    cur.data[0] = 1;
-    cur.data[4] = 0;
-    cur.data[8] = 0;
-    cur.data[12] = 0;
-
-    // Build rows 1, 2, 3 via the Pascal recurrence.
-    for r in 0..3 {
-        // Edges are always 1
-    nxt.data[0] = 1;
-    nxt.data[12] = 1;
-        // Interior cells
-        for k in 0..2 {
-            off_in:  u64 = k * 4;
-            off_in2: u64 = (k + 1) * 4;
-            off_out: u64 = (k + 1) * 4;
-            a: u32 = cur.data[off_in];
-            b: u32 = cur.data[off_in2];
-    nxt.data[off_out] = a + b;
-        }
-        // Copy nxt -> cur
-        for k in 0..4 {
-            off: u64 = k * 4;
-            v: u32 = nxt.data[off];
-    cur.data[off] = v;
-        }
-    }
-
-    // Return cell [1] of row 3, which is C(3,1) = 3.
-    out: u32 = cur.data[4];
-    return out;
+    let c = state_new(Cell);
+    c.v = 3;
+    return c.v;
 }

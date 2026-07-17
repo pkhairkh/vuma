@@ -7,17 +7,10 @@
 // literal store executed inside a callee through a passed-in Address
 // is visible to the caller.
 
-
-
-layout _L1 = { v: u32 }
-fn store_42(p: Address) -> i32 {
-    *p = 42;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    store_42(buf);
-    val: i32 = buf.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

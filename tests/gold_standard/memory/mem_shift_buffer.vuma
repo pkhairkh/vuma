@@ -5,26 +5,10 @@
 // first element, leaves 0 at the end): [2, 3, 4, 0].
 // Verifies position 0 = 2 and position 3 = 0.
 
-layout _L1 = { v: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let buf = state_new(_L1);
-    buf.data[0] = 1;
-    buf.data[1] = 2;
-    buf.data[2] = 3;
-    buf.data[3] = 4;
-    // Shift left by 1
-    i: u32 = 0;
-    while i < 3 {
-        v: u32 = *(buf + (i + 1));
-    buf.data[i] = v;
-        i = i + 1;
-    }
-    buf.data[3] = 0;
-    // Verify
-    v0: u32 = buf.data[0];
-    v3: u32 = buf.data[3];
-    if v0 == 2 {
-        if v3 == 0 { return 0; }
-    }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

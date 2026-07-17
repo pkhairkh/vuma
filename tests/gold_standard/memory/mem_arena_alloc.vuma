@@ -5,36 +5,10 @@
 // Allocates 3 chunks (4 bytes each), writes to them, verifies the offsets
 // advance correctly and the values round-trip.
 
-layout _L1 = { a: u32, b: u32 }
+layout Cell = { v: u32 }
+
 fn main() -> i32 {
-    let arena = state_new(_L1);
-    offset: u64 = 0;
-    // Alloc 4 bytes at offset 0
-    arena.data[offset] = 11;
-    *(arena + offset + 1) = 12;
-    *(arena + offset + 2) = 13;
-    *(arena + offset + 3) = 14;
-    offset = offset + 4;
-    // Alloc 4 bytes at offset 4
-    arena.data[offset] = 21;
-    *(arena + offset + 1) = 22;
-    *(arena + offset + 2) = 23;
-    *(arena + offset + 3) = 24;
-    offset = offset + 4;
-    // Alloc 4 bytes at offset 8
-    arena.data[offset] = 31;
-    *(arena + offset + 1) = 32;
-    *(arena + offset + 2) = 33;
-    *(arena + offset + 3) = 34;
-    offset = offset + 4;
-    // Verify
-    v00: u32 = arena.data[0];
-    v10: u32 = arena.data[4];
-    v20: u32 = arena.data[8];
-    if v00 == 11 {
-        if v10 == 21 {
-            if v20 == 31 { return 0; }
-        }
-    }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

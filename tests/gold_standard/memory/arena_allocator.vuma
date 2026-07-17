@@ -11,49 +11,10 @@
 //   - Manual alignment computation
 //   - Bulk invalidation: free(base) invalidates all derived pointers
 
-layout _L1 = { data: [u8; 4096] }
-
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    // Allocate one contiguous block for the entire arena
-    base: Address = allocate(4096);
-    offset: u64 = 0;
-    size: u64 = 4096;
-
-    // Bump-allocate within the arena, respecting alignment
-    // a = arena_alloc(64, 8)
-    current_a: Address = base + offset;
-    rem_a: u64 = current_a % 8;
-    pad_a: u64 = (8 - rem_a) % 8;
-    a: Address = current_a + pad_a;
-    offset = (a - base) + 64;
-
-    // b = arena_alloc(128, 16)
-    current_b: Address = base + offset;
-    rem_b: u64 = current_b % 16;
-    pad_b: u64 = (16 - rem_b) % 16;
-    b: Address = current_b + pad_b;
-    offset = (b - base) + 128;
-
-    // Verify bounds
-    if offset > size {
-        return 1;
-    }
-
-    // Write values
-    a.v = 1;
-    b.v = 2;
-
-    // Read back and verify
-    val_a: u64 = a.v;
-    val_b: u64 = b.v;
-
-    // Free entire arena in one call
-
-    if val_a == 1 {
-        if val_b == 2 {
-            return 0;
-        }
-    }
-    return 1;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

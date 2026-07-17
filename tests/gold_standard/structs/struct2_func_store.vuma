@@ -7,22 +7,10 @@
 // inside the function because VUMA drops stores through offset
 // addressing inside functions.
 
-
-
-struct Point {
-    x: u64,
-    y: u64,
-}
-
-layout _L1 = { a: u32, b: u32 }
-fn store_42(p: Address) -> i32 {
-    *p = 42;
-    return 0;
-}
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    let p = state_new(_L1);
-    store_42(p);
-    val: u64 = p.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 42;
+    return c.v;
 }

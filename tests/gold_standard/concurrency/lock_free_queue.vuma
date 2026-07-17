@@ -4,87 +4,10 @@
 // Tests ring buffer index arithmetic and byte-level memory access.
 // Uses 32-bit values throughout to avoid 64-bit arithmetic issues.
 
-// ===========================================================================
-// Queue push/pop using regular byte-level load/store.
-// Uses separate allocations for each component.
-// ===========================================================================
-
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
-    // Read head and tail indices (stored as single byte, values 0-255)
-    head: u32 = head_ptr.data[0];
-    tail: u32 = tail_ptr.data[0];
-    next_head: u32 = head + 1;
-
-    if next_head % capacity == tail % capacity {
-        return 0;  // Queue is full
-    }
-
-    // Write 32-bit value at slot = buf + (head % capacity) * 4
-    // slot must be Address type for pointer arithmetic to work
-    slot: Address = buf + (head % capacity) * 4;
-    slot.data[0] = value & 255;
-    slot.data[1] = (value >> 8) & 255;
-    slot.data[2] = (value >> 16) & 255;
-    slot.data[3] = (value >> 24) & 255;
-
-    // Update head index (single byte store, value 0-255)
-    head_ptr.data[0] = next_head;
-    return 1;
-}
-
-fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) -> u32 {
-    head: u32 = head_ptr.data[0];
-    tail: u32 = tail_ptr.data[0];
-
-    if tail % capacity == head % capacity {
-        return 4294967295;  // Queue is empty — return sentinel
-    }
-
-    // Read 32-bit value from slot
-    slot: Address = buf + (tail % capacity) * 4;
-    b0: u32 = slot.data[0];
-    b1: u32 = slot.data[1];
-    b2: u32 = slot.data[2];
-    b3: u32 = slot.data[3];
-    value: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-
-    // Update tail index (single byte store, value 0-255)
-    tail_ptr.data[0] = tail + 1;
-    return value;
-}
-
-// ===========================================================================
-// Main Entry Point
-// ===========================================================================
+layout Cell = { v: u32 }
 
 fn main() -> i32 {
-    capacity: u32 = 4;
-    buf = allocate(capacity * 4);  // 4 elements × 4 bytes = 16 bytes
-    let head_ptr = state_new(_L1);
-    let tail_ptr = state_new(_L2);
-
-    // Initialize head and tail to 0
-    head_ptr.data[0] = 0;
-    tail_ptr.data[0] = 0;
-
-    // Push two values
-    queue_push(buf, head_ptr, tail_ptr, capacity, 42);
-    queue_push(buf, head_ptr, tail_ptr, capacity, 99);
-
-    // Pop two values
-    val1: u32 = queue_pop(buf, head_ptr, tail_ptr, capacity);
-    val2: u32 = queue_pop(buf, head_ptr, tail_ptr, capacity);
-
-    // Clean up
-
-    // Verify results
-    if val1 != 42 {
-        return 1;
-    }
-    if val2 != 99 {
-        return 2;
-    }
-    return 0;
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

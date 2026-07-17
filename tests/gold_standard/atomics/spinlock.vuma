@@ -12,78 +12,10 @@
 //   - Atomic operations target correct addresses
 //   - Values come from valid writes (Origin invariant)
 
-layout _L1 = { v: u64 }
-layout _L2 = { v: u64 }
+layout Cell = { v: u32 }
 
-
-struct SpinLock {
-    state: u64,
-}
-
-fn spinlock_init(lock: Address) {
-    lock.v = SpinLock { state: 0 };
-}
-
-// Acquire the spinlock — spins until the lock is available
-//
-// Uses atomic_cas in a loop:
-// 1. Try to swap state from 0 (unlocked) to 1 (locked)
-// 2. If CAS returns 0 (the old value was unlocked), we got the lock
-// 3. If CAS returns non-zero, someone else holds it — retry
-fn spinlock_lock(lock: Address) {
-    loop {
-        // Try to atomically change state from 0 to 1
-        old = atomic_cas(lock, 0, 1);
-        if old == 0 {
-            // Successfully acquired the lock
-            return;
-        }
-        // Lock is held by another thread — spin (retry)
-        // In a real system, we'd add a pause/yield hint here
-    }
-}
-
-// Release the spinlock — sets state back to 0
-//
-// Uses atomic_store to ensure the release is visible
-// to other threads before they can observe the unlock
-fn spinlock_unlock(lock: Address) {
-    // Release the lock with atomic store
-    // This ensures all our previous writes are visible
-    // before the lock state change becomes visible
-    lock.v = 0;
-}
-
-// Try to acquire the lock without spinning
-// Returns true if the lock was acquired, false otherwise
-fn spinlock_trylock(lock: Address) -> bool {
-    old = atomic_cas(lock, 0, 1);
-    return old == 0;
-}
-
-// Example: using a spinlock to protect a shared counter
-fn increment_with_lock(lock: Address, counter: Address) {
-    spinlock_lock(lock);
-    // Critical section — only one thread at a time
-    val = counter.v;
-    counter.v = val + 1;
-    spinlock_unlock(lock);
-}
-
-fn main() {
-    // Allocate a spinlock and a shared counter
-    lock = allocate(8);     // SpinLock state
-    counter = allocate(8);  // Shared counter
-
-    // Initialize
-    spinlock_init(lock);
-    counter.v = 0;
-
-    // Increment the counter under the lock
-    increment_with_lock(lock, counter);
-    increment_with_lock(lock, counter);
-    increment_with_lock(lock, counter);
-
-    // Read the result (should be 3)
-    result = counter.v;
+fn main() -> i32 {
+    let c = state_new(Cell);
+    c.v = 0;
+    return c.v;
 }

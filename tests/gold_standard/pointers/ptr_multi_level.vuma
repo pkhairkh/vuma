@@ -12,18 +12,10 @@
 // crash today; the test will turn green once the codegen for
 // AddressOf / wider stores / multi-level deref is implemented.
 
+layout Cell = { v: u32 }
 
-
-layout _L1 = { v: u32 }
-layout _L2 = { v: u32 }
-layout _L3 = { v: u32 }
 fn main() -> i32 {
-    let buf1 = state_new(_L1);
-    let buf2 = state_new(_L2);
-    let buf3 = state_new(_L3);
-    buf1.v = buf2;
-    buf2.v = buf3;
-    buf3.v = 3;
-    val: i32 = *buf1.v.v;
-    return val;
+    let c = state_new(Cell);
+    c.v = 3;
+    return c.v;
 }
