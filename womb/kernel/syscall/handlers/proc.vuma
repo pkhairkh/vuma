@@ -1,0 +1,168 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/handlers/proc.vuma
+// VWK Syscall Handlers — Process (getpid, exit) (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the process-control syscall-handler layer. It implements
+// sys_getpid (asm-generic __NR_getpid = 172) and sys_exit (asm-generic
+// __NR_exit = 93; Linux also has __NR_exit_group = 94 for exiting all
+// threads in a thread group — this file's sys_exit calls the host `exit`
+// which is sys_exit_group on x86_64, the standard "exit the whole process"
+// path). Sibling io.vuma implements sys_write / sys_read; sibling mm.vuma
+// implements sys_brk / sys_mmap / sys_munmap.
+//
+// ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
+// Same rationale as io.vuma's header: K3e's dispatch.vuma uses a stub
+// return because VUMA has no fn-pointer call today. K11 will register
+// sys_getpid / sys_exit via syscall_register and wire up real dispatch.
+// For now, this file is self-testable: main() calls sys_getpid directly
+// to verify the path works end-to-end (sys_exit is exercised via a
+// probe in /home/z/probes/probe_proc_exit.vuma — verified exit=0).
+//
+// ── Hosted vs bare-metal swap ───────────────────────────────────────────────
+// In hosted mode (compile_dump on x86_64), the `exit` and `getpid` externs
+// resolve to the pre-registered runtime stubs in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
+//   - exit      = sys_exit_group (syscall #231 on x86_64; the simple_stub
+//                 "mov eax,#231; syscall; ret" — note this is the canonical
+//                 "exit the whole process" path, NOT sys_exit (60) which
+//                 only exits the current thread)
+//   - getpid    = sys_getpid (syscall #39 on x86_64)
+// In bare-metal mode (K11), exit will become a halt-loop (e.g.
+// `cli; hlt; jmp -2` on x86_64, `wfi` on aarch64/riscv64) and getpid will
+// read from a per-CPU current-task struct. The handler signatures stay
+// byte-identical across modes — only the extern block is the swap point.
+//
+// ── Why does sys_exit have a `return;` after exit(code)? ────────────────────
+// VUMA's type system requires all paths through a function to return a
+// value matching the declared return type. sys_exit is declared `fn
+// sys_exit(code: i64)` (i.e. return type is unit/void — written as no
+// `-> T`). The `exit(code)` call is declared as `fn exit(code: i64)` in
+// the extern block, with no return value (it never returns — the syscall
+// terminates the process). However, VUMA's parser doesn't model
+// "divergent functions" (functions that never return), so the call site
+// is treated as a regular call that DOES return. To satisfy the type
+// checker, the function body must end with an explicit `return;` — even
+// though that line is unreachable. Same pattern as any VUMA fn that
+// calls a divergent extern (e.g. K11's panic handler will have the same
+// shape: `panic(msg); return;`).
+//
+// ── Why does sys_getpid return i64, not u64? ───────────────────────────────
+// Linux's getpid returns pid_t (a positive int — process IDs are 1..4194304
+// on x86_64 Linux, well within int range). The host `getpid` extern is
+// declared `fn getpid() -> i64` (matches the C signature `pid_t getpid(void)`
+// where pid_t is `int`, sign-extended to 64 bits in the SysV AMD64 ABI).
+// sys_getpid passes the i64 straight through. The CALLER (K3e's
+// syscall_write_ret) writes the i64 return value into tf.rax (a u64 field
+// — VUMA's i64/u64 implicit-conversion handles the bit-pattern identity).
+//
+// ── Why is there no sys_exit_group wrapper? ────────────────────────────────
+// Linux has BOTH sys_exit (60) and sys_exit_group (94) on x86_64. sys_exit
+// exits only the calling thread; sys_exit_group exits the whole thread
+// group (the canonical "exit the process" path). This file's `exit` extern
+// resolves to sys_exit_group (231 in the runtime stub table — see the
+// syscall #231 entry in build_runtime_syscall_stubs). The handler name is
+// `sys_exit` (matching the asm-generic __NR_exit = 93 contract), but the
+// underlying call is exit_group semantics. K11 may add a separate
+// sys_exit_thread handler if real thread support lands; for now, sys_exit
+// = exit-the-whole-process is the only path.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// handlers take only scalar args (i64) and return scalars — no State<T>
+// buffers needed. No state_new, no array access, no field access.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3f contract's
+// "IMPORTANT" rule (none are used in this file's source — the syscall
+// numbers 172/93/94 are noted in the header comments but not used as
+// literals; the extern dispatch is by NAME, not by number, on the host
+// side. The asm-generic numbers are only used by K3e's dispatch.vuma to
+// index into SyscallTable — they live in kmain's
+// syscall_register(tbl, 172, &sys_getpid) call, K11's job to wire up).
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. The `extern "C" { fn exit, fn getpid }`
+// declarations are byte-identical to:
+//   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
+//   - womb/kernel/hosted/host.vuma (K1a — host_exit wraps exit)
+// Future files that want to call sys_getpid / sys_exit (e.g. K4's kmain
+// when it bootstraps the syscall table) must either re-declare these
+// handlers locally OR wait for VUMA to gain an import mechanism.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/handlers/proc.vuma \
+//         /tmp/proc.bin x86_64 --verify
+//     /tmp/proc.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (getpid > 0 — we're a running process).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations (byte-identical to K1a's trampoline.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted mode: exit = sys_exit_group (syscall #231 on x86_64), getpid =
+// sys_getpid (syscall #39 on x86_64). Both use the simple_stub form
+// ("mov eax,#num; syscall; ret") — no register shuffling needed (exit
+// takes 1 arg in RDI; getpid takes 0 args). exit never returns (the
+// syscall terminates the process); getpid returns the PID in RAX.
+
+extern "C" {
+    fn exit(code: i64);
+    fn getpid() -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_getpid — return the current process ID.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode, calls the host getpid. The returned PID is a positive
+// i64 (1..4194304 on x86_64 Linux). In bare-metal mode (K11), this will
+// read from a per-CPU current-task struct (K4's scheduler will maintain
+// it).
+
+fn sys_getpid() -> i64 {
+    return getpid();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_exit — terminate the current process with `code`.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode, calls the host exit (sys_exit_group on x86_64) — the
+// process terminates with exit code `code`. In bare-metal mode (K11),
+// this will become a halt-loop (`cli; hlt; jmp -2` on x86_64). The
+// `return;` after the exit call is unreachable but required by VUMA's
+// type checker (see "Why does sys_exit have a `return;` after exit(code)?"
+// in the file header).
+
+fn sys_exit(code: i64) {
+    exit(code);
+    return;  // unreachable, but VUMA needs a return
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Call sys_getpid and verify the returned PID is > 0 (we're a running
+// process — the host kernel assigned us a positive PID). Returns 0 on
+// success, 1 on PID-not-positive failure.
+//
+// sys_exit is NOT exercised in the self-test because calling it would
+// terminate the test process before the test framework could capture
+// the exit code. (A separate probe at /home/z/probes/probe_proc_exit.vuma
+// verifies sys_exit(0) actually exits with code 0.) sys_exit's compile-
+// time correctness is verified by the IVE Pass + the file's parse success.
+//
+// Per the K3f contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (none — the `0` comparison is the only constant,
+// and it's the natural zero) — decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see womb/kernel/
+// arch/x86_64/pt.vuma header for the same rationale).
+
+fn main() -> i32 {
+    let pid = sys_getpid();
+    // PID should be > 0 (we're a running process).
+    if pid <= 0 { return 1; }
+    return 0;
+}
