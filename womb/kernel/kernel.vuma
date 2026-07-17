@@ -1,0 +1,154 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/kernel.vuma
+// VWK kernel entry point — compileable aggregate.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This is the file compile_dump builds into the kernel ELF. Its `fn main()`
+// is the program entry — the _start stub (hosted mode) sets up argc/argv
+// then calls main(). main() calls kmain() and returns the result as the
+// process exit code.
+//
+// Build & run (hosted):
+//     ./target/release-fast/compile_dump womb/kernel/kernel.vuma \
+//         /tmp/kernel.bin x86_64 --verify
+//     /tmp/kernel.bin ; echo "exit=$?"
+// Expected stdout: "vuma kernel: hello\n"
+// Expected exit:    0
+//
+// ── Why is everything inlined here? ────────────────────────────────────────
+// VUMA has NO `import` statement yet (Open Work §7). Each kernel module
+// that wants to call into another module's functions MUST re-declare
+// them locally (same signatures, same layout fields, byte-identical).
+// For a two-call chain like main() → kmain() → console_*, that means
+// kernel.vuma has to inline the full text of kmain.vuma (which itself
+// already inlines console.vuma's Console layout + console_* functions).
+//
+// When VUMA gains `import` (Open Work §7), this file collapses to:
+//
+//     import kmain;
+//     fn main() -> i32 { return kmain(); }
+//
+// and the duplicated text below moves to the canonical kmain.vuma /
+// console.vuma sources. Until then, this file is the single source of
+// truth for the COMPILED kernel — keep its inlined bodies byte-identical
+// to the canonical files (womb/kernel/kmain.vuma, womb/kernel/console.vuma)
+// so a future `import` migration is a pure deletion.
+//
+// PMT discipline: NO `*ptr`, `&x`, `allocate`, `free` anywhere below.
+// The Console state is allocated via `state_new(Console)` and its
+// address is handed to `write` via the `c as Address` cast (docs §14.5).
+
+// ── Trampoline externs (mirror of trampoline.vuma) ─────────────────────────
+// Hosted mode: write(1, base, n) → sys_write (nr 1); exit(code) → sys_exit
+// (nr 60). Both are pre-registered stubs in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs. `write`
+// returns the byte count written; `exit` does not return (INT3 guard).
+// kmain returns 0 normally — we hand that back as the process exit code
+// from main(), so exit() is never actually called from this file.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+}
+
+// ── Console layout (mirror of console.vuma / kmain.vuma — byte-identical) ──
+// `buf` at offset 0 so `c as Address` yields the address of `c.buf[0]`
+// for `write(1, base, c.len)`. `len` at offset 256.
+
+layout Console = {
+    buf: [u8; 256],
+    len: u32,
+}
+
+// ── console_init ───────────────────────────────────────────────────────────
+// Allocate a fresh Console state, zero its length. Mirror of
+// womb/kernel/console.vuma::console_init.
+
+fn console_init() -> State<Console> {
+    let c = state_new(Console);
+    c.len = 0;
+    return c;
+}
+
+// ── console_putc ───────────────────────────────────────────────────────────
+// Append one byte; drop on overflow. Mirror of console.vuma::console_putc.
+
+fn console_putc(c: State<Console>, ch: u8) {
+    let idx = c.len;
+    if idx < 256 {
+        c.buf[idx] = ch;
+        c.len = idx + 1;
+    }
+}
+
+// ── console_flush ──────────────────────────────────────────────────────────
+// Drain the buffer to host fd 1. `c as Address` is the PMT pattern for
+// handing a State<T> to an FFI callee that takes a raw buffer pointer
+// (docs §14.5). The cast does not consume `c`; the subsequent `c.len = 0`
+// is well-defined. Mirror of console.vuma::console_flush.
+
+fn console_flush(c: State<Console>) {
+    if c.len > 0 {
+        let base = c as Address;
+        let _n = write(1, base, c.len as i64);
+        c.len = 0;
+    }
+}
+
+// ── kmain_print_banner ─────────────────────────────────────────────────────
+// Emit the boot banner "vuma kernel: hello\n" then flush. VUMA has no
+// string literals — each byte is pushed via console_putc with its decimal
+// ASCII value. 19 bytes total:
+//   v=118 u=117 m=109 a=97 sp=32 k=107 e=101 r=114 n=110 e=101 l=108
+//   :=58 sp=32 h=104 e=101 l=108 l=108 o=111 \n=10
+// Mirror of kmain.vuma::kmain_print_banner.
+
+fn kmain_print_banner(c: State<Console>) {
+    console_putc(c, 118);  // 'v'
+    console_putc(c, 117);  // 'u'
+    console_putc(c, 109);  // 'm'
+    console_putc(c, 97);   // 'a'
+    console_putc(c, 32);   // ' '
+    console_putc(c, 107);  // 'k'
+    console_putc(c, 101);  // 'e'
+    console_putc(c, 114);  // 'r'
+    console_putc(c, 110);  // 'n'
+    console_putc(c, 101);  // 'e'
+    console_putc(c, 108);  // 'l'
+    console_putc(c, 58);   // ':'
+    console_putc(c, 32);   // ' '
+    console_putc(c, 104);  // 'h'
+    console_putc(c, 101);  // 'e'
+    console_putc(c, 108);  // 'l'
+    console_putc(c, 108);  // 'l'
+    console_putc(c, 111);  // 'o'
+    console_putc(c, 10);   // '\n'
+    console_flush(c);
+}
+
+// ── kmain ──────────────────────────────────────────────────────────────────
+// The kernel main routine. Orchestrates boot:
+//   1. console_init()         — bring up logging
+//   2. kmain_print_banner(c)  — emit boot banner
+//   3. (Future waves) pmm_init / vmm_init / trap_init / sched_init / vfs_init
+//   4. return 0               — process exits 0 (hosted) / idle (bare-metal K11)
+// Mirror of kmain.vuma::kmain.
+
+fn kmain() -> i32 {
+    let c = console_init();
+    kmain_print_banner(c);
+    return 0;
+}
+
+// ── main ───────────────────────────────────────────────────────────────────
+// The ELF entry point (called by the hosted _start stub after it has
+// populated the argc/argv BSS slots read by __vuma_argc / __vuma_argv).
+// Calls kmain() and returns its result as the process exit code. In
+// hosted mode the process exits with this code via the libc `_exit` shim
+// wired into the _start stub; in bare-metal K11 the entry path is
+// different (boot.S → kmain directly) and this main() is unused.
+
+fn main() -> i32 {
+    let code = kmain();
+    return code;
+}

@@ -1,0 +1,142 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/console.vuma
+// VWK kernel console subsystem — PMT-pure line-buffered output.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The kernel console is a thin line-buffered output channel over State<T>.
+// In hosted mode (K1a) the buffer is flushed to host fd 1 via the
+// `write` extern from womb/kernel/arch/x86_64/trampoline.vuma (which in
+// turn resolves to the pre-registered sys_write stub in
+// `src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs`).
+//
+// In bare-metal mode (Wave K11) this module's API stays byte-identical;
+// only the `extern "C" { fn write(...) }` re-declaration below gets
+// swapped for an MMIO-based UART trampoline. Higher-level kernel code
+// (kmain.vuma, kernel.vuma) is unchanged between hosted and bare-metal.
+//
+// PMT discipline: NO `*ptr`, `&x`, `allocate`, or `free` syntax in this
+// file. The Console state is allocated via `state_new(Console)` (which
+// lowers to an Alloc into `___pmt_buffer`), and its address is passed to
+// `write` via the documented `c as Address` cast (see
+// docs/language-reference.md §14.5 — "Borrowed read (zero-copy I/O)").
+// The `buf` field is at offset 0 in the Console layout, so the Address
+// passed to `write(1, base, c.len)` points at the first buffered byte.
+//
+// Why a line buffer?
+//   - Avoids one syscall per byte (only one `write` per `console_flush`).
+//   - Lets later waves add `console_puti` / `console_putu` / `console_putx`
+//     without each having to know about the host write ABI.
+//   - The 256-byte buffer is large enough for boot banners and short
+//     panic/diagnostic messages; later waves can grow it via an arena.
+//
+// VUMA has NO `import` statement yet (Open Work §7). Each kernel module
+// that calls `write` MUST re-declare the extern locally. Keep the
+// declaration byte-identical to the canonical one in
+// womb/kernel/arch/x86_64/trampoline.vuma — same arg types, same order.
+// A mismatch would silently produce different ABI at the call site.
+
+// ── Trampoline extern (mirror of trampoline.vuma — write only) ──────────────
+// Hosted mode: `write(fd, buf, count)` is sys_write (nr 1 on x86_64).
+// SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three args already match
+// the syscall ABI, so the stub is "mov eax,#1; syscall; ret". Returns
+// the byte count written (or a negative errno on failure).
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ── Console layout ─────────────────────────────────────────────────────────
+// A 256-byte line buffer + current length. The `buf` field is at offset 0
+// so that `c as Address` (cast of the State<Console> base pointer) yields
+// the address of the first buffered byte — the natural argument for
+// `write(1, base, c.len)`.
+//
+// Field order matters: `buf` MUST precede `len` so the buffer is at
+// offset 0. (Mirror the layout in kmain.vuma and kernel.vuma exactly.)
+layout Console = {
+    buf: [u8; 256],
+    len: u32,
+}
+
+// ── String layout (for console_puts) ────────────────────────────────────────
+// VUMA has no string literals (no `"..."` lowering). Kernel code that
+// wants to print a fixed message either calls `console_putc` per byte
+// (as kmain_print_banner does) or builds a State<String> byte-by-byte
+// and calls `console_puts`. The String layout is also mirrored in
+// kmain.vuma / kernel.vuma where used.
+layout String = {
+    data: [u8; 256],
+    len: u32,
+}
+
+// ── console_init ───────────────────────────────────────────────────────────
+// Allocate a fresh Console state and zero its length. The buffer contents
+// are unspecified until console_putc writes them — callers must NOT read
+// `c.buf[i]` for `i >= c.len` (the bytes are stale `___pmt_buffer`
+// contents). Returns a State<Console> ready for putc/flush.
+
+fn console_init() -> State<Console> {
+    let c = state_new(Console);
+    c.len = 0;
+    return c;
+}
+
+// ── console_putc ───────────────────────────────────────────────────────────
+// Append one byte to the console buffer. If the buffer is full (len >= 256),
+// the byte is silently dropped — later waves may add an auto-flush on
+// overflow. PMT field access (`c.len`, `c.buf[idx]`) is typed and
+// endian-safe by construction; no `*(addr + i)` pointer arithmetic.
+
+fn console_putc(c: State<Console>, ch: u8) {
+    let idx = c.len;
+    if idx < 256 {
+        c.buf[idx] = ch;
+        c.len = idx + 1;
+    }
+}
+
+// ── console_flush ──────────────────────────────────────────────────────────
+// Drain the line buffer to the host: write(1, base, len) where base is the
+// address of `c.buf[0]` (offset 0 in the Console layout, so `c as Address`
+// is correct — no manual offset needed). After a successful flush the
+// buffer is reset to length 0 so subsequent putc calls start fresh.
+//
+// The `c as Address` cast is the documented PMT pattern for handing a
+// State<T> to an FFI callee that takes a raw buffer pointer (see
+// docs/language-reference.md §14.5, "Borrowed read"). The cast does NOT
+// consume `c` — the state remains live in `___pmt_buffer` and the
+// subsequent `c.len = 0` store is well-defined.
+//
+// Return value of `write` is currently ignored — a later wave may add
+// error reporting (e.g. retry on EINTR, panic on EBADF).
+
+fn console_flush(c: State<Console>) {
+    if c.len > 0 {
+        let base = c as Address;
+        let _n = write(1, base, c.len as i64);
+        c.len = 0;
+    }
+}
+
+// ── console_puts ───────────────────────────────────────────────────────────
+// Append every byte of a State<String> to the console buffer. The String's
+// `len` field gives the byte count; bytes `data[0..len]` are copied via
+// repeated console_putc. No bounds check on `s.len` beyond the implicit
+// Console-side drop-on-overflow in console_putc.
+
+fn console_puts(c: State<Console>, s: State<String>) {
+    let i = 0;
+    while i < s.len {
+        console_putc(c, s.data[i]);
+        i = i + 1;
+    }
+}
+
+// ── main entry stub ──────────────────────────────────────────────────────────
+// This file is a library module (no top-level execution). The compiler
+// requires a `fn main()` to compile as a standalone program; the real
+// kernel entry lives in womb/kernel/kernel.vuma, which inlines the full
+// console + kmain source (no `import` in VUMA yet) and calls kmain().
+
+fn main() -> i32 {
+    return 0;
+}
