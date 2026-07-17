@@ -3175,11 +3175,64 @@ impl<'src> Parser<'src> {
                 self.parse_closure_or_or()
             }
 
+            // If-expression: `if cond { then_expr } else { else_expr }`
+            // Produces a value (the taken branch's trailing expression).
+            // Used in `let x = if cond { a } else { b };`.
+            TokenKind::If => self.parse_if_expr(),
+
             _ => Err(ParseError::unexpected(
                 format!("expected expression, found {}", self.current.kind),
                 self.current.span,
             )),
         }
+    }
+
+    /// Parse an if-EXPRESSION: `if cond { then_block } else { else_block }`.
+    ///
+    /// Unlike `parse_if_stmt` (which produces a `Stmt::If` with no value),
+    /// this produces an `Expr::IfExpr` whose branch blocks' trailing
+    /// expressions are the value of the if-expression. This is used in
+    /// `let x = if cond { a } else { b };` and `x = if cond { a } else { b };`.
+    ///
+    /// The else-branch is mandatory for if-EXPRESSIONS (a missing else
+    /// would make the value undefined when cond is false).
+    fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::If)?;
+        // Suppress struct-literal parsing during the condition so that
+        // `if a < b { ... }` doesn't treat `b { ... }` as a struct literal.
+        // The `{` belongs to the then-block, not to a struct construction.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let condition = self.parse_expr()?;
+        self.no_struct_literal = prev;
+        // parse_block consumes its own `{` and `}`
+        let then_block = self.parse_block()?;
+        // Expect `else`
+        self.expect(TokenKind::Else)?;
+        let else_block = if self.at(TokenKind::If) {
+            // `else if` — wrap the inner if-expression in a single-statement
+            // block whose statement is an ExprStmt wrapping the inner if.
+            let inner_start = self.current.span.start;
+            let inner_if = self.parse_if_expr()?;
+            let inner_end = inner_if.span().end;
+            Block {
+                statements: vec![Stmt::Expr(ExprStmt {
+                    expr: inner_if,
+                    span: Span::new(inner_start, inner_end),
+                })],
+                span: Span::new(inner_start, inner_end),
+            }
+        } else {
+            self.parse_block()?
+        };
+        let end = self.current.span.end;
+        Ok(Expr::IfExpr {
+            condition: Box::new(condition),
+            then_block,
+            else_block,
+            span: Span::new(start, end),
+        })
     }
 
     // -- format string parsing -----------------------------------------------
@@ -4130,6 +4183,7 @@ impl Expr {
             Expr::ArenaAlloc { span, .. } => *span,
             Expr::ArenaGrow { span, .. } => *span,
             Expr::ArenaFree { span, .. } => *span,
+            Expr::IfExpr { span, .. } => *span,
         }
     }
 }

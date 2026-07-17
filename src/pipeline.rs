@@ -9211,6 +9211,59 @@ pub fn flatten_expr(
             ScgExpr::Int(0)
         }
 
+        // ── If-expression: `if cond { then } else { else }` ──
+        // Lowers to: if cond { result = <then_value> } else { result = <else_value> }
+        // then returns `result` as a ScgExpr::Var.
+        // The then/else blocks' trailing expression (last Stmt::Expr) is the
+        // branch value. bridge_block_to_scg_stmts stores the last ExprStmt's
+        // result in ctx.last_expr_result.
+        Expr::IfExpr { condition, then_block, else_block, .. } => {
+            // Evaluate the condition.
+            let cond_expr = flatten_expr(condition, stmts, ctx);
+            // Allocate a temp for the result.
+            let result_tmp = ctx.alloc_temp();
+            // Lower the then-block.
+            let mut then_body = {
+                ctx.last_expr_result = None;
+                let mut tb = bridge_block_to_scg_stmts(then_block, ctx);
+                let then_val = ctx.last_expr_result.take().unwrap_or(ScgExpr::Int(0));
+                tb.push(ScgStatement::Computation(ComputationNode {
+                    dst: result_tmp.clone(),
+                    op: BinOpKind::Add,
+                    lhs: then_val,
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }));
+                tb
+            };
+            // Lower the else-block.
+            let mut else_body = {
+                ctx.last_expr_result = None;
+                let mut eb = bridge_block_to_scg_stmts(else_block, ctx);
+                let else_val = ctx.last_expr_result.take().unwrap_or(ScgExpr::Int(0));
+                eb.push(ScgStatement::Computation(ComputationNode {
+                    dst: result_tmp.clone(),
+                    op: BinOpKind::Add,
+                    lhs: else_val,
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }));
+                eb
+            };
+            let _ = &mut then_body;
+            let _ = &mut else_body;
+            // Emit the if-statement with both branches.
+            stmts.push(ScgStatement::Control(ControlNode::If {
+                cond: cond_expr,
+                then_body,
+                else_body: Some(else_body),
+            }));
+            // Return the result temp.
+            ScgExpr::Var(result_tmp)
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
