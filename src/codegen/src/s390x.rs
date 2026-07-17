@@ -2449,7 +2449,10 @@ impl Backend for S390XBackend {
                 ("getdents64", 220), ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 172), ("uname", 122), ("sysinfo", 116),
-            ] {
+                            ("eventfd2", 323),
+                ("newfstatat", 293),
+                ("signalfd4", 324),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 

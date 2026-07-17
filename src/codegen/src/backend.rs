@@ -2869,7 +2869,10 @@ impl Backend for AArch64Backend {
                 ("getdents64", 61),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 167), ("uname", 160), ("sysinfo", 179),
-            ] {
+                            ("eventfd2", 19),
+                ("newfstatat", 79),
+                ("signalfd4", 74),
+] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));
                 code.extend_from_slice(&svc);

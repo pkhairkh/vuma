@@ -7304,7 +7304,10 @@ impl Backend for Arm32Backend {
                 ("getdents64", 217), ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("uname", 122), ("sysinfo", 116),
-            ] {
+                            ("eventfd2", 19),
+                ("newfstatat", 79),
+                ("signalfd4", 74),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 

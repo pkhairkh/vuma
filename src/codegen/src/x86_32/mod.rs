@@ -2973,7 +2973,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("getdents64", 220, 3), ("getdents", 141, 3), ("readdir", 89, 3),
         // Family 7: system (arch_prctl NOT on i386)
         ("prctl", 172, 5), ("uname", 122, 1), ("sysinfo", 116, 1),
-    ] {
+        ("eventfd2", 328, 2), ("newfstatat", 300, 4), ("signalfd4", 327, 4),
+] {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }
 

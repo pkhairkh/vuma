@@ -3469,7 +3469,10 @@ impl Backend for Mips64Backend {
                 ("getdents64", 5308), ("getdents", 5076),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 5153), ("uname", 5061), ("sysinfo", 5097),
-            ] {
+                            ("eventfd2", 5284),
+                ("newfstatat", 5252),
+                ("signalfd4", 5276),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 

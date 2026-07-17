@@ -6268,7 +6268,10 @@ impl Backend for RiscV32Backend {
                 ("getdents64", 61),
                 // Family 7: system (arch_prctl is x86_64-only)
                 ("prctl", 167), ("uname", 160), ("sysinfo", 179),
-            ] {
+                            ("eventfd2", 19),
+                ("newfstatat", 79),
+                ("signalfd4", 74),
+] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
