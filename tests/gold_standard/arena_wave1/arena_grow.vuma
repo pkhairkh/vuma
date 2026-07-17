@@ -1,0 +1,14 @@
+// arena_wave1/arena_grow — arena_new + arena_grow + arena_free
+// Expected exit code: 0
+//
+// Wave 6 test: verify arena_grow works. Start with a small arena, grow it
+// via mremap, then free it. The mremap syscall extends the mmap'd region.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+
+fn main() -> i32 {
+    let arena = arena_new(64);
+    let arena = arena_grow(arena, 65536);
+    arena_free(arena);
+    return 0;
+}

@@ -1,0 +1,29 @@
+// arena_wave2/mixed_static_arena — static + arena states coexist
+// Expected exit code: 0
+//
+// Wave 6 test: verify that static states (state_new) and arena states
+// (arena_alloc) can coexist in the same function. Static states use
+// ___pmt_buffer; arena states use mmap'd memory. Both use State<T>.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+layout Point = { x: u32, y: u32 }
+layout Widget = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    // Static state (in ___pmt_buffer)
+    let p = state_new(Point);
+    p.x = 1;
+    p.y = 2;
+    // Arena state (in mmap'd arena)
+    let arena = arena_new(4096);
+    let w = arena_alloc(arena, Widget);
+    w.x = 3;
+    w.y = 4;
+    // Verify both
+    if p.x != 1 { return 1; }
+    if p.y != 2 { return 2; }
+    if w.x != 3 { return 3; }
+    if w.y != 4 { return 4; }
+    arena_free(arena);
+    return 0;
+}

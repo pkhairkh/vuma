@@ -1,0 +1,20 @@
+// arena_wave1/arena_basic — arena_new + arena_alloc + field access + arena_free
+// Expected exit code: 42
+//
+// Wave 6 test: the fundamental arena lifecycle. Create an arena, allocate
+// a Widget, write to its field, read it back, free the arena. Returns
+// the field value (42) to verify the arena-allocated state is writable
+// and readable — same as static states.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+layout Widget = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let arena = arena_new(4096);
+    let w = arena_alloc(arena, Widget);
+    w.x = 42;
+    w.y = 100;
+    let val = w.x;
+    arena_free(arena);
+    return val;
+}
