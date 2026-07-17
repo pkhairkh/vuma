@@ -1062,6 +1062,495 @@ code.
 
 ---
 
+## 10. Programs as Memory Transformations (PMT)
+
+VUMA 2.0 introduces an alternative memory model called PMT — Programs as
+Memory Transformations. In the PMT model, memory states are first-class
+**types**, not resources managed by `allocate` / `free` calls. Pointers
+are eliminated from the source language: there is no `*T`, no `&expr`,
+no `*ptr = val`, and no `free`. What was previously a pointer dereference
+becomes a typed field access on a state value; what was previously a
+heap allocation becomes a layout-typed state.
+
+The defining property of PMT is that **memory safety is a type-checking
+property, not a proof obligation**. A PMT program is memory-safe by
+construction because every read and write goes through a typed offset
+computed from a declared layout; the type checker refuses any program
+whose accesses are not statically known to be in-bounds. The IVE then
+runs only the three state verifiers (`state_read`, `state_write`,
+`state_transform`) instead of the five pointer invariants, because
+there are no pointer invariants to check.
+
+PMT is opt-in: existing pointer-based VUMA code continues to compile
+and run unchanged (§6). The `--pmt-only` flag (§10.10) enforces that
+no pointer syntax appears in the source.
+
+### 10.1 Concept
+
+A PMT program is a sequence of state initialisations and field
+accesses. Conceptually:
+
+* A **layout** is a pure type-level description of a record — its
+  fields, their types, their offsets, and the layout's total size and
+  alignment. A layout does not allocate storage.
+* A **state** is a typed view over a region of the program's single
+  backing memory buffer. Constructing a state carves a slot of the
+  buffer with the layout's size and alignment; the slot's address is
+  not exposed to the program.
+* A **field access** `s.f` reads the byte range at offset
+  `offset_of(Layout, f)` of `s`'s slot, interpreted as the field's
+  type. A write `s.f = e` stores into that same range.
+* A **transformation** `transform t(s: State<T>) -> State<U> { ... }`
+  is a state-to-state function: it consumes its input state and
+  produces a fresh state typed by a (possibly different) layout.
+
+Because there are no addresses in the source, there is no way to form
+an out-of-bounds access, a dangling pointer, a double free, or a
+use-after-free. Each of these is a type error caught at compile time.
+
+### 10.2 Layout definitions
+
+```ebnf
+layout_def    ::= 'layout' name '=' '{' [ layout_field (',' layout_field)* [','] ] '}'
+layout_field  ::= name ':' type
+```
+
+A layout is a named, ordered record of typed fields. Field types may be
+any primitive type (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
+`i64`, `f32`, `f64`, `bool`), a fixed-size array `[T; N]`, or another
+layout by name (allowing nesting). Example:
+
+```vuma
+layout Point  = { x: u32, y: u32 }
+layout Triple = { a: u32, b: u32, c: u32 }
+layout Buf    = { data: [u8; 4] }
+layout Line   = { a: Point, b: Point }
+```
+
+**Field offsets** are computed by the layout resolver at parse time
+using the standard C-style algorithm:
+
+* Each field is placed at the smallest offset that is (a) greater than
+  or equal to the running sum of preceding field sizes and (b) a
+  multiple of the field's own alignment.
+* A layout's **size** is the running offset of the last field plus
+  that field's size, rounded up to the layout's overall alignment.
+* A layout's **alignment** is the maximum alignment of its fields.
+
+Primitive alignments are the natural width: `u8` / `i8` / `bool`
+align to 1, `u16` / `i16` to 2, `u32` / `i32` / `f32` to 4, `u64` /
+`i64` / `f64` to 8. Array alignment equals element alignment; array
+size equals element size times the count. A nested layout field
+contributes that layout's size and alignment.
+
+For `Point`, both fields are `u32` (size 4, align 4): `x` is at offset
+0, `y` at offset 4, total size 8, alignment 4. For `Line = { a: Point,
+b: Point }`, `a` is at offset 0, `b` at offset 8, total size 16,
+alignment 4.
+
+Layouts are pure type-level entities; declaring one does not allocate
+storage. Storage is allocated only when a state of that layout is
+constructed (§10.4).
+
+### 10.3 State types
+
+```ebnf
+state_type ::= 'State' '<' name '>'
+```
+
+`State<T>` is the type of a typed view over a memory slot whose layout
+is `T`. The parameter `T` must be the name of a previously declared
+`layout`. A `State<T>` value carries:
+
+* the offset of its slot within the program's backing buffer
+  (invisible to the program);
+* the layout `T`, which the type checker uses to resolve field
+  accesses.
+
+A `State<T>` may appear in any type position: `let` bindings, function
+parameters, function return types, struct fields, and array element
+types. Example:
+
+```vuma
+fn get_x(p: State<Point>) -> u32 {
+    return p.x;
+}
+```
+
+The state value is passed by value through the calling convention; at
+the ABI level it is a pointer-width word identifying the slot. Two
+distinct `state_new` calls produce two distinct states (no aliasing).
+
+### 10.4 State initialization
+
+```ebnf
+state_init_expr ::= 'state_new' '(' name ')'
+```
+
+`state_new(LayoutName)` constructs a fresh `State<LayoutName>`. The
+new state's slot is allocated from the program's single backing memory
+buffer; the program never observes the slot's address. The state's
+fields are initially zero. Example:
+
+```vuma
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 10;
+    p.y = 20;
+    return p.x;
+}
+```
+
+A state's slot lives until the end of the function that owns it (or
+until it is consumed by a transform, §10.6). There is no `free` — the
+slot is reclaimed automatically when the owning function returns. The
+underlying backing buffer is sized to the sum of all state sizes
+declared in the program; a future wave will introduce live-range
+analysis to permit slot reuse.
+
+### 10.5 Field access
+
+```ebnf
+field_read  ::= expr '.' name
+field_write ::= expr '.' name '=' expr ';'
+```
+
+A **field read** `s.f` loads the value of field `f` from state `s`.
+The load reads `sizeof(field_type)` bytes starting at
+`offset_of(Layout(s), f)` of `s`'s slot, interpreting them as the
+field's declared type. The type checker verifies that `f` is a field
+of `Layout(s)`; a read of an undeclared field is a compile-time error.
+
+A **field write** `s.f = e;` stores the value of `e` into field `f`.
+The store writes `sizeof(field_type)` bytes at
+`offset_of(Layout(s), f)` of `s`'s slot. The expression `e` must have
+a type assignable to the field's type.
+
+Field access is **typed offset access**, not pointer dereference.
+There is no null state, no out-of-bounds access, and no aliasing: each
+field access resolves to a fixed byte range that the type checker
+guarantees lies inside the state's slot.
+
+Field access may be chained when an outer field has layout type:
+
+```vuma
+layout Point = { x: u32, y: u32 }
+layout Line  = { a: Point, b: Point }
+
+fn main() -> i32 {
+    let l = state_new(Line);
+    l.a.x = 3;        // offset_of(Line,a) + offset_of(Point,x) = 0 + 0 = 0
+    l.b.y = 7;        // offset_of(Line,b) + offset_of(Point,y) = 8 + 4 = 12
+    return l.a.x;
+}
+```
+
+For array-typed fields, the field read yields the array (a pointer to
+its first element in the current lowering); an `expr[index]` then
+selects the element:
+
+```vuma
+layout Buf = { data: [u8; 4] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 65;     // store byte 65 at offset 0 of b's slot
+    return b.data[0];   // load byte at offset 0
+}
+```
+
+### 10.6 Transformations
+
+```ebnf
+transform_def ::= 'transform' name '(' param ')' '->' state_type block
+param         ::= name ':' state_type
+```
+
+A **transformation** is a state-to-state function: it consumes one
+state of layout `T` and produces one state of layout `U`. Example:
+
+```vuma
+layout Point = { x: u32, y: u32 }
+layout Vec2  = { a: u32, b: u32 }
+
+transform to_vec2(p: State<Point>) -> State<Vec2> {
+    let q = state_new(Vec2);
+    q.a = p.x;
+    q.b = p.y;
+    return q;
+}
+```
+
+A transformation is **linear**: the input state is *consumed* by the
+call. After the call returns, the input state variable is dead — any
+subsequent read or write to it is a linearity violation rejected by
+the `state_write` verifier (§10.8). This guarantees that exactly one
+owner exists for any state at any program point, eliminating aliasing
+and use-after-free by construction.
+
+Transformations may be identity (`State<T> -> State<T>`); the IVE's
+`state_transform_elision` rule rewrites an identity transform to its
+input, eliminating the no-op.
+
+### 10.7 Reference types
+
+```ebnf
+ref_type ::= 'Ref' '<' name ',' name '>'
+```
+
+`Ref<T, F>` is the type of a **typed field reference**: a handle that
+identifies field `F` of layout `T` without exposing the state itself.
+A `Ref<T, F>` is used to pass a single field of a state to a function
+that does not need access to the other fields:
+
+```vuma
+layout Counter = { value: u32, limit: u32 }
+
+fn increment(r: Ref<Counter, value>) {
+    r = r + 1;        // read-modify-write on the referenced field
+}
+
+fn main() -> i32 {
+    let c = state_new(Counter);
+    c.value = 0;
+    c.limit = 10;
+    increment(c.value);   // pass a typed ref to the `value` field
+    return c.value;
+}
+```
+
+A `Ref<T, F>` carries the offset of field `F` within layout `T` but
+not the state's identity; the call site is responsible for ensuring
+the referenced state outlives the ref. `Ref<T, F>` is the only form
+of "address-of" in PMT; the `&` and `@` operators are not used in PMT
+programs.
+
+### 10.8 Linearity
+
+PMT states are **linear**: at every program point, each live state has
+exactly one owner, and ownership is transferred (not aliased) when the
+state is passed to a function or transform.
+
+Concretely:
+
+* A `state_new(Layout)` produces a state owned by the binding that
+  receives it.
+* Passing a state as a function argument or transform input transfers
+  ownership to the callee. After the call, the caller's binding is
+  dead.
+* Returning a state from a function transfers ownership to the caller.
+* Reading or writing a state's fields does NOT consume it — the
+  binding remains live and may be read or written again.
+* A state's slot is reclaimed when the owning function returns (no
+  `free`).
+
+The `state_write` and `state_transform` verifiers (§10.9) track the
+set of vregs consumed by `StateTransform` nodes. Any `StateWrite` or
+`StateRead` whose `state_vreg` is in the consumed set is rejected with
+a `"linearity violation: state written after being consumed by a
+transform"` error.
+
+### 10.9 Verification
+
+PMT programs use a dedicated verification level,
+`VerificationLevel::Pmt`, that runs **only the three state verifiers**:
+
+| Verifier             | Checks                                                                                                                |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `state_read`         | Every `state.field` read references a field that exists in the state's layout.                                        |
+| `state_write`        | Every `state.field = e` write references a field that exists, has a compatible type, and is not a write to a consumed state (linearity). |
+| `state_transform`    | Every `transform` call references declared input and output layouts.                                                  |
+
+The five pointer invariants (liveness, exclusivity, interpretation,
+origin, cleanup) are **skipped** under `VerificationLevel::Pmt`,
+because there are no pointers in a PMT program. Memory safety is
+established by type-checking (the layout resolver and field-access
+type checker), not by pointer proofs. In other words: **memory safety
+is free** in PMT — it is a type check, not a proof obligation.
+
+The `--pmt --verify` flags run the pipeline at `VerificationLevel::Pmt`.
+
+### 10.10 The `--pmt-only` flag
+
+The `--pmt-only` flag enforces that no pointer syntax appears in the
+source: any `*T`, `&expr`, `@expr`, `allocate`, `free`, or
+`*ptr = val` site is a hard compile error. Use `--pmt-only` to
+guarantee a program is pure-PMT.
+
+A mixed program (one that uses both pointers and PMT) is compiled at
+`VerificationLevel::Normal`; the five pointer invariants run on the
+pointer-bearing code, and the state verifiers run on the PMT code.
+
+---
+
+## 11. Migrating from Pointer Syntax
+
+This section is a guide for porting existing pointer-based VUMA code
+(§6) to PMT (§10). Pointer syntax remains supported and is not removed;
+migration is opt-in and incremental — a single source file may mix
+pointer-based and PMT code during the transition.
+
+### 11.1 Translation table
+
+| Pointer syntax (VUMA 1.x)           | PMT equivalent (VUMA 2.0)                                  | Notes                                                                  |
+|-------------------------------------|------------------------------------------------------------|------------------------------------------------------------------------|
+| `let buf: Address = allocate(N);`   | `layout L = { ... };` then `let s = state_new(L);`         | Define a layout first; `state_new` allocates the slot.                 |
+| `*(ptr + off) = val;`               | `s.field = val;`                                           | The field's offset is computed from the layout.                        |
+| `*(ptr + off)` (read)               | `s.field`                                                  | Typed load; no manual byte assembly.                                   |
+| `free(ptr);`                        | (removed)                                                  | PMT auto-reclaims the slot at function return.                         |
+| `&x` / `@x` (address-of)            | (not needed)                                               | Pass the `State<T>` (or `Ref<T, F>`) directly.                         |
+| `let p: *T = ...;`                  | `let s: State<L> = state_new(L);`                          | Replace `*T` with `State<L>`; `L` declares the layout.                 |
+| `fn f(p: *T) -> R`                  | `fn f(s: State<L>) -> R`                                   | The state is passed by value (slot id, not pointer).                   |
+| `(*p).field`                        | `s.field`                                                  | No dereference; field access is direct.                                |
+| `p.field` (where `p: *Struct`)      | `s.field`                                                  | Same syntax; different semantics (typed offset).                       |
+| Multi-byte assembly by hand         | (automatic)                                                | A `u32` field is one read/write, not four bytes.                       |
+| `region R = allocate(N);`           | (not needed)                                               | Layouts replace region declarations.                                   |
+
+### 11.2 Step-by-step recipe
+
+1. **Identify the record shape.** Find the `allocate(N)` calls and
+   the byte offsets written to each. Group them by the logical record
+   they form (e.g., a 3-byte buffer holding `H`, `i`, `\n` is a
+   3-byte array; a struct with `x` at offset 0 and `y` at offset 4 is
+   a 2-field `u32` record).
+
+2. **Declare a layout.** Write a `layout L = { ... }` declaration that
+   names each field and gives it the correct type. Use `[u8; N]` for
+   raw byte buffers and a primitive type for typed fields.
+
+3. **Replace `allocate` with `state_new`.** Change
+   `buf: Address = allocate(N);` to `let s = state_new(L);`.
+
+4. **Replace offset arithmetic with field names.** Change
+   `*(buf + 0) = 72;` to `s.field = 72;`. The field's offset is
+   computed from the layout, so the byte offset is implicit.
+
+5. **Delete `free`.** Remove every `free(buf);` line — PMT reclaims
+   the slot at function return.
+
+6. **Update function signatures.** Change `fn f(p: *T)` to
+   `fn f(s: State<L>)` and update the body to use `s.field` instead
+   of `(*p).field`.
+
+7. **Delete `&` / `@`.** Pass the state directly; if a function only
+   needs one field, pass a `Ref<T, F>`.
+
+8. **Compile with `--pmt --verify`.** The pipeline runs the three
+   state verifiers and reports any remaining field-name or linearity
+   errors. Once clean, add `--pmt-only` to enforce that no pointer
+   syntax creeps back in.
+
+### 11.3 Before/after example: buffer swap
+
+**Pointer version (VUMA 1.x):**
+
+```vuma
+fn main() -> i32 {
+    a: Address = allocate(4);
+    b: Address = allocate(4);
+    *(a + 0) = 2;
+    *(b + 0) = 1;
+    // swap a and b
+    tmp: u32 = *(a + 0);
+    *(a + 0) = *(b + 0);
+    *(b + 0) = tmp;
+    let result: u32 = *(a + 0);
+    free(a);
+    free(b);
+    return result as i32;
+}
+```
+
+**PMT version (VUMA 2.0):**
+
+```vuma
+layout Pair = { a: u32, b: u32 }
+
+fn main() -> i32 {
+    let s = state_new(Pair);
+    s.a = 2;
+    s.b = 1;
+    // swap a and b
+    let tmp = s.a;
+    s.a = s.b;
+    s.b = tmp;
+    return s.a as i32;
+}
+```
+
+Differences:
+
+* The two `allocate(4)` calls collapse to a single `state_new(Pair)`,
+  because the two `u32` slots are now two fields of one layout.
+* The `*(a + 0) = ...` byte stores become `s.a = ...` field writes.
+* The two `free` calls disappear.
+* The swap logic (`tmp = ...; ... = ...; ... = tmp;`) is unchanged in
+  shape but operates on typed fields.
+
+### 11.4 Before/after example: field read/write in a function
+
+**Pointer version (VUMA 1.x):**
+
+```vuma
+// Logical record: { x: u32, y: u32 } at offsets 0 and 4.
+
+fn get_y(p: Address) -> u32 {
+    return *(p + 4);
+}
+
+fn set_x(p: Address, v: u32) {
+    *(p + 0) = v;
+    return;
+}
+
+fn main() -> i32 {
+    p: Address = allocate(8);
+    *(p + 0) = 5;
+    *(p + 4) = 42;
+    set_x(p, 99);
+    return get_y(p) as i32;
+}
+```
+
+**PMT version (VUMA 2.0):**
+
+```vuma
+layout Point = { x: u32, y: u32 }
+
+fn get_y(p: State<Point>) -> u32 {
+    return p.y;
+}
+
+fn set_x(p: State<Point>, v: u32) {
+    p.x = v;
+    return;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    p.y = 42;
+    set_x(p, 99);
+    return get_y(p) as i32;
+}
+```
+
+Differences:
+
+* The function parameter `Address` becomes `State<Point>`. The caller
+  no longer needs to remember the record's shape — the type carries
+  the layout.
+* The `*(p + 4)` byte load becomes a `p.y` field read. The magic
+  constant `4` (the offset of `y`) is replaced by the field name.
+* The `*(p + 0) = v;` byte store becomes `p.x = v;`.
+* The `allocate(8)` becomes `state_new(Point)`. No `free`.
+* A mutation made by the callee (`set_x`) is visible to the caller
+  through the shared slot, just as with the pointer version.
+
+---
+
 ## Appendix A. Grammar Summary
 
 The following EBNF summarises the top-level grammar. Terminals are quoted;
@@ -1190,3 +1679,127 @@ import "../crypto/hmac.vuma"      { hmac_sha256 };
 import "../crypto/hkdf.vuma"      { hkdf_extract_sha256, hkdf_expand_sha256 };
 import "../crypto/aes_modes.vuma" { aes256_gcm_encrypt, aes256_gcm_decrypt };
 ```
+
+---
+
+## Appendix C. PMT Migration Reference Examples
+
+This appendix collects longer PMT migration examples that illustrate
+the patterns introduced in §11. Each example shows a complete pointer
+program alongside its PMT equivalent.
+
+### C.1 Running-sum accumulator
+
+A common pointer idiom is a running sum held in a heap cell:
+
+```vuma
+// Pointer version
+fn main() -> i32 {
+    acc: Address = allocate(4);
+    *(acc + 0) = 0;
+    *(acc + 0) = *(acc + 0) + 10;
+    *(acc + 0) = *(acc + 0) + 20;
+    *(acc + 0) = *(acc + 0) + 30;
+    let total: u32 = *(acc + 0);
+    free(acc);
+    return total as i32;
+}
+```
+
+In PMT, the accumulator becomes a one-field state:
+
+```vuma
+// PMT version
+layout Acc = { sum: u32 }
+
+fn main() -> i32 {
+    let acc = state_new(Acc);
+    acc.sum = 0;
+    acc.sum = acc.sum + 10;
+    acc.sum = acc.sum + 20;
+    acc.sum = acc.sum + 30;
+    return acc.sum as i32;
+}
+```
+
+The `*(acc + 0)` byte reads and writes become `acc.sum` field
+accesses; the `allocate(4)` and `free(acc)` collapse into a single
+`state_new(Acc)` whose slot is reclaimed automatically at function
+return.
+
+### C.2 Field copy between two states
+
+The pointer idiom of allocating two buffers and copying bytes between
+them becomes a pair of states with field-by-field copies:
+
+```vuma
+// Pointer version
+fn main() -> i32 {
+    src: Address = allocate(16);
+    dst: Address = allocate(16);
+    *(src + 0)  = 10; *(src + 4)  = 20; *(src + 8)  = 30; *(src + 12) = 40;
+    // copy 16 bytes from src to dst
+    let i: u32 = 0;
+    while i < 16 {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+    let ok: u32 = *(dst + 0) + *(dst + 4) + *(dst + 8) + *(dst + 12);
+    free(src); free(dst);
+    return ok as i32;
+}
+```
+
+```vuma
+// PMT version
+layout Buf = { a: u32, b: u32, c: u32, d: u32 }
+
+fn main() -> i32 {
+    let src = state_new(Buf);
+    let dst = state_new(Buf);
+    src.a = 10; src.b = 20; src.c = 30; src.d = 40;
+    // copy each field by name — no loop, no manual byte indexing
+    dst.a = src.a;
+    dst.b = src.b;
+    dst.c = src.c;
+    dst.d = src.d;
+    return (dst.a + dst.b + dst.c + dst.d) as i32;
+}
+```
+
+The byte loop disappears entirely: each field is a single typed load
+and store, and the layout guarantees the offsets match. There is no
+opportunity for an off-by-one in the copy.
+
+### C.3 Linked nodes without pointers
+
+A classic pointer idiom is the linked node: `struct Node { val: u32,
+next: *Node }`. In PMT the "link" is captured as data, not as an
+address — the relationship between two nodes is stored in a field of
+one state, populated by reading a field of the other:
+
+```vuma
+// Pointer version (logical record only — VUMA 1.x stores addresses)
+//   struct Node { val: u32, next: *Node }
+//   head->next = tail;       // pointer assignment + aliasing
+//   ... use-after-free if tail is freed while head still references it
+
+// PMT version
+layout Node = { val: u32, next_val: u32 }
+
+fn main() -> i32 {
+    let head = state_new(Node);
+    let tail = state_new(Node);
+    head.val = 10;
+    tail.val = 50;
+    tail.next_val = 0;
+    // "Link" head to tail by storing tail.val into head.next_val
+    head.next_val = tail.val;
+    return (head.val + head.next_val) as i32;   // 10 + 50 = 60
+}
+```
+
+There is no pointer to dangle and no alias to track. The link is
+just data; the relationship between `head` and `tail` is established
+the moment `head.next_val = tail.val` executes, and persists as long
+as `head` is live.
