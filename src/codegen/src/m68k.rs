@@ -2058,6 +2058,47 @@ impl Backend for M68kBackend {
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
+
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap2 syscall (m68k sys_mmap2=192).
+            // m68k: syscall# in D0, args in D1-D5, pgoff on stack. D3-D5 callee-saved.
+            {
+                let mut code = Vec::new();
+                // MOVEM.L D3-D5, -(SP) — save callee-saved
+                code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x38]);
+                // D1 = 0 (NULL addr)
+                code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+                // D2 = 4096 (len)
+                code.extend(Instruction::MoveImm32 { dst: Gpr::D2, imm: 4096 }.encode());
+                // D3 = 3 (PROT)
+                code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 3 }.encode());
+                // D4 = 0x22 (MAP)
+                code.extend(Instruction::MoveImm32 { dst: Gpr::D4, imm: 0x22 }.encode());
+                // D5 = -1 (fd)
+                code.extend(Instruction::Moveq { dst: Gpr::D5, imm: -1 }.encode());
+                // Push pgoff=0 onto stack
+                code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+                code.extend_from_slice(&[0x2F, 0x00]); // MOVE.L D0, -(SP)
+                // D0 = 192 (mmap2)
+                code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
+                // TRAP #0
+                code.extend(Instruction::Trap0.encode());
+                // ADDQ.L #4, A7 — pop pgoff
+                code.extend_from_slice(&[0x58, 0x8F]);
+                // MOVEM.L (SP)+, D3-D5 — restore
+                code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
+                // RTS
+                code.extend(Instruction::Rts.encode());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (RTS). Real munmap when marshal_cstr wired.
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Rts.encode());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

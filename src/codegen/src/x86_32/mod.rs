@@ -2979,16 +2979,29 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────────────
     // ffi_scratch_push_frame: real mmap via int 0x80 (i386 sys_mmap2=192).
     // sys_mmap2(addr, len, prot, flags, fd, pgoffset) — args in EBX,ECX,EDX,ESI,EDI,EBP.
+    // CRITICAL: EBX, ESI, EDI, EBP are callee-saved on i386 SysV ABI. The mmap2
+    // syscall uses them as arg registers, so we MUST save/restore them.
     {
         let mut code = Vec::new();
-        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));        // addr = NULL
-        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 4096));          // len = 4096
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));             // prot = PROT_READ|PROT_WRITE
-        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22));          // flags = MAP_PRIVATE|MAP_ANONYMOUS
-        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32));         // fd = -1
-        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));        // pgoffset = 0
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));           // sys_mmap2
+        // Save callee-saved registers used by mmap2: EBX, ESI, EDI, EBP
+        code.extend(encode_push(Gpr::Rbx));
+        code.extend(encode_push(Gpr::Rsi));
+        code.extend(encode_push(Gpr::Rdi));
+        code.extend(encode_push(Gpr::Rbp));
+        // Set up mmap2 args: EBX=0(addr), ECX=4096(len), EDX=3(prot), ESI=0x22(flags), EDI=-1(fd), EBP=0(pgoff)
+        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));        // EBX = 0 (NULL)
+        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 4096));          // ECX = 4096
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));             // EDX = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22));          // ESI = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32));         // EDI = -1 (fd)
+        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));        // EBP = 0 (pgoffset)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));           // EAX = sys_mmap2
         code.extend(encode_syscall());
+        // Restore callee-saved registers
+        code.extend(encode_pop(Gpr::Rbp));
+        code.extend(encode_pop(Gpr::Rdi));
+        code.extend(encode_pop(Gpr::Rsi));
+        code.extend(encode_pop(Gpr::Rbx));
         code.extend(encode_ret());
         stubs.push(("ffi_scratch_push_frame".to_string(), code));
     }

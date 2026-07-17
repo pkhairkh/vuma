@@ -3998,6 +3998,38 @@ impl Backend for Sparc64Backend {
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
+
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (sparc64 sys_mmap=71).
+            // Args: O0=0(NULL), O1=4096, O2=3(PROT), O3=0x22(MAP), O4=-1(fd), O5=0(off).
+            // Syscall nr in G1=71. TA 0x6d. Return via JMPL %o7+8.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 0 }.encode());       // O0 = 0
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O1, rs1: Gpr::G0, imm: 4096 }.encode());    // O1 = 4096
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O2, rs1: Gpr::G0, imm: 3 }.encode());       // O2 = PROT
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O3, rs1: Gpr::G0, imm: 0x22 }.encode());    // O3 = MAP
+                // O4 = -1: use SETHI + OR for -1 (0xFFFFFFFF)
+                code.extend_from_slice(&Instruction::Sethi { rd: Gpr::O4, imm22: 0x3FF }.encode()); // sethi %hi(0xFFFFFC00), %o4
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::O4, imm: 0x3FF }.encode()); // or %o4, 0x3FF, %o4 → -1
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode());       // O5 = 0
+                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 71 }.encode());      // G1 = sys_mmap
+                code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+                code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (JMPL %o7+8; NOP). Real munmap when
+            // marshal_cstr is wired. For now the frame is leaked (acceptable
+            // since push_frame allocates fresh memory each call).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

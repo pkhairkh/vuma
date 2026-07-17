@@ -2451,6 +2451,31 @@ impl Backend for S390XBackend {
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
+
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (s390x sys_mmap=90).
+            // s390x args: R2=addr, R3=len, R4=prot, R5=flags, R6=fd, R7=offset.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&encode_lgfi(Gpr::R2, 0));       // addr = NULL
+                code.extend_from_slice(&encode_lgfi(Gpr::R3, 4096));    // len = 4096
+                code.extend_from_slice(&encode_lgfi(Gpr::R4, 3));       // prot = PROT_READ|PROT_WRITE
+                code.extend_from_slice(&encode_lgfi(Gpr::R5, 0x22));    // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                code.extend_from_slice(&encode_lgfi(Gpr::R6, -1));      // fd = -1
+                code.extend_from_slice(&encode_lgfi(Gpr::R7, 0));       // offset = 0
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));      // sys_mmap
+                code.extend_from_slice(&encode_svc(0));
+                code.extend_from_slice(&encode_br(LR));                  // BR R14 (return)
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (BR LR).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&encode_br(LR));
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

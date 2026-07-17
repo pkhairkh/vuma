@@ -3706,6 +3706,35 @@ impl Backend for Mips64Backend {
                 stubs.push(("strcmp".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (mips n64 sys_mmap=5009).
+            // MIPS n64 passes args 5-6 on the stack; for a 6-arg syscall we'd
+            // need stack setup. Since push_frame has no caller args, we clobber
+            // a4/a5 directly (they're caller-saved $t0/$t1).
+            {
+                let mut code = Vec::new();
+                // a0=0, a1=4096, a2=3, a3=0x22, a4(t0)=-1, a5(t1)=0
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A0, rs: Gpr::Zero, imm: 0 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A1, rs: Gpr::Zero, imm: 4096 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A2, rs: Gpr::Zero, imm: 3 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x22 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T0, rs: Gpr::Zero, imm: -1 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T1, rs: Gpr::Zero, imm: 0 }.encode());
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5009 }.encode()); // sys_mmap
+                code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (JR RA; NOP).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 

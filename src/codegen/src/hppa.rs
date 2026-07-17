@@ -2277,6 +2277,41 @@ impl Backend for HppaBackend {
             code
         }));
 
+        // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+        // ffi_scratch_push_frame: REAL mmap via brk() (same pattern as
+        // __vuma_alloc on hppa, which uses brk not mmap).
+        // hppa brk=45. Allocates 4096 bytes. R26=arg0(ignored, set to 4096),
+        // R28=return value, R2=return addr, GATE=syscall, BV %r0(%r2)=return.
+        syscall_stubs.push(("ffi_scratch_push_frame".to_string(), {
+            let mut code = Vec::new();
+            // Step 1: brk(0) → R28 = current_brk
+            code.extend(ss_load_imm(R26, 0));       // R26 = 0
+            code.extend(ss_load_imm(R20, 45));      // R20 = __NR_brk
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());  // GATE delay slot
+            // Save current_brk (R28) to R24
+            code.extend_from_slice(&encode_copy(R28, R24));
+            // Step 2: brk(current_brk + 4096)
+            code.extend(ss_load_imm(R25, 4096));    // R25 = 4096
+            code.extend_from_slice(&encode_add(R28, R25, R26));  // R26 = brk + 4096
+            code.extend(ss_load_imm(R20, 45));      // R20 = __NR_brk
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());  // GATE delay slot
+            // Return current_brk (R24) in R28
+            code.extend_from_slice(&encode_copy(R24, R28));
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
+        // ffi_scratch_pop_frame: no-op (BV %r0(%r2)). Real munmap when wired.
+        syscall_stubs.push(("ffi_scratch_pop_frame".to_string(), {
+            let mut code = Vec::new();
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
         // ── Build __vuma_alloc stub ──
         // __vuma_alloc(size in R26) → R28 = allocated pointer.
         // Uses brk() syscall to extend the heap:

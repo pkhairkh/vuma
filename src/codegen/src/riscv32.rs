@@ -6450,6 +6450,29 @@ impl Backend for RiscV32Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
+            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ffi_scratch_push_frame: REAL mmap syscall (riscv32 sys_mmap=222).
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 4096 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 3 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x22 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: -1 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A5, rs1: Gpr::Zero, imm: 0 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 222 }.encode());
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("ffi_scratch_push_frame".to_string(), code));
+            }
+
+            // ffi_scratch_pop_frame: no-op (ret).
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("ffi_scratch_pop_frame".to_string(), code));
+            }
+
             stubs
         };
 
