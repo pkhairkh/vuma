@@ -9034,15 +9034,15 @@ pub fn flatten_expr(
         // return value is the new State<T>.
         Expr::ArenaAlloc { arena, layout_name, .. } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
-            // Step 1: load arena.base (offset 0)
+            // Step 1: load arena.base (offset 0) — use U64 type for 64-bit pointer
             let base_val = ctx.alloc_temp();
             stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: base_val.clone(),
                 ptr: arena_ptr.clone(),
                 offset: None,
-                ty: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
-            // Step 1b: load arena.offset (offset 8)
+            // Step 1b: load arena.offset (offset 8) — use U64 type
             let off_addr = ctx.alloc_temp();
             stmts.push(ScgStatement::Computation(ComputationNode {
                 dst: off_addr.clone(),
@@ -9057,9 +9057,9 @@ pub fn flatten_expr(
                 dst: offset_val.clone(),
                 ptr: ScgExpr::Var(off_addr),
                 offset: None,
-                ty: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
-            // Step 1c: load arena.capacity (offset 16)
+            // Step 1c: load arena.capacity (offset 16) — use U64 type
             let cap_addr = ctx.alloc_temp();
             stmts.push(ScgStatement::Computation(ComputationNode {
                 dst: cap_addr.clone(),
@@ -9074,7 +9074,7 @@ pub fn flatten_expr(
                 dst: cap_val.clone(),
                 ptr: ScgExpr::Var(cap_addr),
                 offset: None,
-                ty: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Step 2: get layout_size from the layout registry
             let layout_size = ctx.layouts.get(layout_name)
