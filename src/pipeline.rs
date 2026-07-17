@@ -9037,6 +9037,10 @@ pub fn flatten_expr(
 
         // arena_grow(arena, min_capacity) → State<Arena>:
         //   Load arena.capacity, call mremap, store new capacity.
+        //   arena_ptr is the old mmap'd base. mremap may return a NEW base
+        //   (MREMAP_MAYMOVE). If it moves, we must use the new base for
+        //   all subsequent arena operations. The arena_ptr variable is
+        //   updated in-place (the caller's let rebinds it).
         Expr::ArenaGrow { arena, min_capacity, .. } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
             let min_cap_expr = flatten_expr(min_capacity, stmts, ctx);
@@ -9062,14 +9066,23 @@ pub fn flatten_expr(
                 is_extern: true,
                 reassigns: None,
             }));
-            // Store min_capacity at [arena_ptr+16] via StructAccessNode
+            // Store the new base at [arena_ptr+0] via StructAccessNode.
+            // This is needed because mremap with MREMAP_MAYMOVE may return
+            // a different address. arena_alloc uses arena_ptr directly as
+            // the base, so we need arena_ptr to point to the valid region.
+            // BUT: if mremap moved the region, arena_ptr is now STALE.
+            // The correct approach: return the new_base as the updated
+            // arena_ptr. The caller's `let arena = arena_grow(arena, ...)`
+            // rebinds arena to the new_base.
+            // Store min_capacity at [new_base+16] via StructAccessNode
             stmts.push(ScgStatement::StructAccess(StructAccessNode::Store {
-                ptr: arena_ptr.clone(),
+                ptr: ScgExpr::Var(new_base.clone()),
                 field_offset: 16,
                 value: min_cap_expr,
                 field_ty: ScgType::U64,
             }));
-            arena_ptr
+            // Return the new_base (the caller rebinds arena to this)
+            ScgExpr::Var(new_base)
         }
 
         // arena_free(arena) → void:
