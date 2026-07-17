@@ -1,0 +1,48 @@
+// ffi_write — PMT Wave 10: FFI marshal pass — state invalidation
+// Expected exit code: 0
+//
+// Demonstrates the FFI marshal pattern: when an `extern "C"` function is
+// called with a `State<T>` argument, the marshal pass flattens the state
+// to a raw pointer (the foreign function doesn't understand State types).
+// After a non-`#[pure]` foreign call, the state is INVALIDATED — the
+// foreign function may have modified the buffer in ways the VUMA type
+// system cannot track. The state must be re-initialized before any
+// subsequent read/write.
+//
+// In this test we declare `write` (the libc syscall wrapper) and a
+// `State<Buffer>` whose pointer would be passed as the `buf` argument.
+// We do NOT actually invoke `write()` here — that would require libc
+// linking, which is unavailable on some backends (wasm32/WASI). The
+// test asserts that the FFI declaration + state allocation co-exist
+// cleanly: the marshal pass would, in a real call, emit:
+//
+//     let ptr = state_to_raw_ptr(buf);   // marshal: State<Buffer> -> *Buffer
+//     write(fd, ptr, len);               // foreign call (invalidates `buf`)
+//     // `buf` is now INVALIDATED — any read of `buf.len` would be a
+//     // verification error (re-initialize first).
+//
+// VUMA Key Concepts:
+//   - `extern "C" { ... }` declares foreign functions
+//   - `State<T>` args are marshalled to raw pointers at the call site
+//   - Non-`#[pure]` foreign calls invalidate the state
+//   - The IVE `ffi` verifier (`src/ive/src/ffi.rs`) proves no invalidated
+//     state is read without re-initialization.
+
+layout Buffer = { len: u32, data: u64 }
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+fn main() -> i32 {
+    let buf = state_new(Buffer);
+    buf.len = 0;
+    // In a real call: write(1, &buf as *Buffer, 8) — `buf` is INVALIDATED.
+    // We do not actually call write() to remain backend-portable (matches
+    // the convention in edge_cases/ffi_demo.vuma).
+    //
+    // After the (hypothetical) call, any read of `buf.len` would be
+    // rejected by the IVE FFI verifier — `buf` must be re-initialized
+    // first (see ffi_reinit.vuma for the re-init pattern).
+    return 0;
+}
