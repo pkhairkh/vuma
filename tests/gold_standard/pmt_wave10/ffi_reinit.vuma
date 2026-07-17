@@ -1,0 +1,49 @@
+// ffi_reinit — PMT Wave 10: FFI marshal pass — re-init after invalidation
+// Expected exit code: 0
+//
+// After a non-`#[pure]` foreign call invalidates a state, the state MUST
+// be re-initialized before any subsequent read or write. This test
+// demonstrates the re-init pattern: call a foreign function (invalidating
+// the state), then re-initialize the state's fields before reading them.
+//
+// The IVE `ffi` verifier (`src/ive/src/ffi.rs`) checks that no invalidated
+// state is accessed without re-initialization. In this test, after the
+// (hypothetical) `do_thing(buf)` call we re-write `buf.x` and `buf.y`
+// before reading them — the verifier accepts this. If we read `buf.x`
+// before the re-init, the verifier would report:
+//
+//     state 'buf' accessed after invalidation by foreign call
+//     (re-initialize or mark the function #[pure])
+//
+// VUMA Key Concepts:
+//   - Foreign call invalidates the state (non-`#[pure]`)
+//   - Re-initialization (a `state.field = ...` write) restores validity
+//   - The IVE `ffi` verifier proves no read occurs before re-init
+//
+// We do NOT actually call `do_thing()` here — that would require libc
+// linking, which is unavailable on some backends (wasm32/WASI). The test
+// asserts that the state re-init pattern compiles cleanly and the final
+// read returns the re-initialized value (not the pre-call value).
+
+layout Buf = { x: u32, y: u32 }
+
+extern "C" {
+    fn do_thing(buf: Address) -> i64;
+}
+
+fn main() -> i32 {
+    let buf = state_new(Buf);
+    buf.x = 10;
+    buf.y = 20;
+    // In a real call: do_thing(&buf as *Buf) — `buf` is INVALIDATED.
+    // We do not actually call do_thing() to remain backend-portable.
+    //
+    // After the (hypothetical) call, `buf.x` and `buf.y` are invalid.
+    // Re-initialize the state before any subsequent read:
+    buf.x = 30;
+    buf.y = 40;
+    // Now `buf` is valid again — reads are safe.
+    if buf.x != 30 { return 1; }
+    if buf.y != 40 { return 2; }
+    return 0;
+}
