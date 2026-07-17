@@ -1,0 +1,156 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/hosted/host.vuma
+// Hosted-mode host abstraction layer for the VWK kernel.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This is the HOSTED-mode host abstraction. It exposes a small set of
+// `host_*` functions that the kernel logic calls into for host I/O and
+// memory management. In hosted mode the "host" is the Linux process the
+// kernel is running in, and the `host_*` functions are thin wrappers around
+// the externs declared in womb/kernel/arch/x86_64/trampoline.vuma (which in
+// turn call the pre-registered syscall stubs in
+// `src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs`).
+//
+// In bare-metal mode (Wave K11) the same `host_*` API will be provided by a
+// different implementation that talks to the UART/IRQ-controller/framebuffer
+// directly — so kernel modules that call `host_console_write` etc. do not
+// need to change between hosted and bare-metal builds.
+//
+// PMT discipline: there is NO `*ptr`, `&x`, `allocate`, or `free` syntax in
+// this file. All buffer arguments are `Address` values — either returned by
+// `host_alloc_pages` (a real Linux mmap) or by `arena_alloc` from
+// womb/alloc/arena.vuma. The kernel never dereferences these addresses via
+// pointer syntax; it hands them back to the host externs (write/read/munmap)
+// or to other arena helpers that operate on typed State<T> buffers.
+
+// ── BootInfo layout (mirror of womb/kernel/arch/x86_64/bootinfo.vuma) ───────
+// VUMA has no `import` statement (Open Work §7), so each kernel module that
+// needs BootInfo re-declares the layout. The layout MUST stay byte-identical
+// to the canonical declaration in womb/kernel/arch/x86_64/bootinfo.vuma —
+// same fields, same order, same types. (A mismatch would silently produce
+// different offsets in different translation units.)
+
+layout BootInfo = {
+    argc: u64,        // process argc, as captured by the _start stub
+    argv: u64,        // address of the argv[] array (NULL-terminated)
+    mem_size: u64,    // usable memory for arenas (start with 16 MB)
+    cmdline: u64,     // address of cmdline string (argv[0] for now)
+}
+
+// ── Trampoline externs (mirror of trampoline.vuma) ─────────────────────────
+// Same self-contained-declaration rationale: re-declare the externs this
+// module calls so it compiles standalone. The canonical declarations live
+// in womb/kernel/arch/x86_64/trampoline.vuma.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    fn munmap(addr: Address, length: u64) -> i64;
+    fn __vuma_argc() -> i64;
+    fn __vuma_argv() -> Address;
+}
+
+// ── Argument-flag constants (decimal — matches womb/syscalls.vuma) ─────────
+// These are the same values documented in womb/syscalls.vuma:
+//   PROT_READ=1, PROT_WRITE=2  → combined prot = 3
+//   MAP_PRIVATE=2, MAP_ANONYMOUS=32 → combined flags = 34
+// Declared as `const` here so the host_* wrappers read naturally; the
+// underlying externs see the literal integer values at the call site.
+
+const HOST_PROT_READ: i32 = 1;
+const HOST_PROT_WRITE: i32 = 2;
+const HOST_MAP_PRIVATE: i32 = 2;
+const HOST_MAP_ANONYMOUS: i32 = 32;
+
+// Page size: 4096 bytes on x86_64. Used to convert page counts to byte
+// lengths for mmap/munmap.
+const HOST_PAGE_SIZE: u64 = 4096;
+
+// ── host_init ───────────────────────────────────────────────────────────────
+// Initialize the host abstraction. Reads argc/argv via the runtime stubs
+// (populated by the _start stub) and returns a populated BootInfo state.
+// This is the kernel's entry to host resources — kmain() (K1d) will call
+// this first to obtain the boot environment before bringing up the console,
+// memory arenas, etc.
+
+fn host_init() -> State<BootInfo> {
+    let b = state_new(BootInfo);
+    let ac: i64 = __vuma_argc();
+    let av: Address = __vuma_argv();
+    b.argc = ac as u64;
+    b.argv = av as u64;
+    b.mem_size = 16777216u64;
+    // For now, treat argv[0] as the cmdline. argv points to the argv[]
+    // array; argv[0] is the address of the program-name string. We
+    // approximate by storing the array base address itself; a later wave
+    // will dereference argv[0] once the kernel has a safe deref helper.
+    b.cmdline = av as u64;
+    return b;
+}
+
+// ── host_console_write ─────────────────────────────────────────────────────
+// Write `len` bytes from `buf` to stdout (fd 1). Returns the byte count
+// written (or a negative errno on failure, propagated verbatim from
+// sys_write).
+
+fn host_console_write(buf: Address, len: u64) -> i64 {
+    let n: i64 = write(1, buf, len as i64);
+    return n;
+}
+
+// ── host_console_read ──────────────────────────────────────────────────────
+// Read up to `len` bytes from stdin (fd 0) into `buf`. Returns the byte
+// count read (0 on EOF, negative on error).
+
+fn host_console_read(buf: Address, len: u64) -> i64 {
+    let n: i64 = read(0, buf, len as i64);
+    return n;
+}
+
+// ── host_alloc_pages ───────────────────────────────────────────────────────
+// Allocate `count` pages (each HOST_PAGE_SIZE bytes) of anonymous private
+// read-write memory via mmap(NULL, count*4096, PROT_READ|PROT_WRITE,
+// MAP_PRIVATE|MAP_ANONYMOUS, -1, 0). Returns the base address of the
+// mapped region, or MAP_FAILED (-1 cast to Address) on error — callers
+// must check for that sentinel before using the returned address.
+
+fn host_alloc_pages(count: u64) -> Address {
+    let bytes: u64 = count * HOST_PAGE_SIZE;
+    let prot: i32 = HOST_PROT_READ | HOST_PROT_WRITE;
+    let flags: i32 = HOST_MAP_PRIVATE | HOST_MAP_ANONYMOUS;
+    let base: Address = mmap(0 as Address, bytes, prot, flags, -1, 0);
+    return base;
+}
+
+// ── host_free_pages ────────────────────────────────────────────────────────
+// Release a region previously allocated by host_alloc_pages. The return
+// value of munmap is ignored here (the kernel has no good way to recover
+// from a failed unmap on hosted mode; a later wave may add a panic hook).
+
+fn host_free_pages(addr: Address, count: u64) {
+    let bytes: u64 = count * HOST_PAGE_SIZE;
+    let _rc: i64 = munmap(addr, bytes);
+    return;
+}
+
+// ── host_exit ──────────────────────────────────────────────────────────────
+// Terminate the kernel process with the given exit code. The exit stub does
+// not return (it ends with INT3 as a safety guard).
+
+fn host_exit(code: i64) {
+    exit(code);
+    return;
+}
+
+// ── main entry stub ──────────────────────────────────────────────────────────
+// Pure declaration + helper module (no top-level execution). The compiler
+// requires a `fn main()` entry to compile as a standalone program; the real
+// kmain (K1d) lives in womb/kernel/kernel.vuma and will call host_init()
+// first, then host_console_write to print "vuma kernel: hello\n", then
+// host_exit(0).
+
+fn main() -> i32 {
+    return 0;
+}
