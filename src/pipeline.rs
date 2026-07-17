@@ -9047,6 +9047,47 @@ pub fn flatten_expr(
                 tail_call: false,
                 reassigns: None,
             }));
+            // ── Bounds check (K0e/K0f DoD): load arena.capacity at
+            // [arena_ptr+16], compute (new_offset > capacity) unsigned,
+            // and if true call __arena_overflow() which exits(1).
+            // This is the runtime guard the IVE arena_bounds verifier
+            // expects to be present at every arena_alloc site.
+            let cap_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: cap_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: arena_ptr.clone(),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let cap_val = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: cap_val.clone(),
+                ptr: ScgExpr::Var(cap_addr),
+                offset: None,
+                ty: Some(vuma_codegen::ir::IRType::U64),
+            }));
+            let overflow_cond = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: overflow_cond.clone(),
+                op: BinOpKind::UGt,
+                lhs: ScgExpr::Var(new_offset.clone()),
+                rhs: ScgExpr::Var(cap_val),
+                tail_call: false,
+                reassigns: None,
+            }));
+            stmts.push(ScgStatement::Control(ControlNode::If {
+                cond: ScgExpr::Var(overflow_cond),
+                then_body: vec![ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "__arena_overflow".to_string(),
+                    args: vec![],
+                    is_extern: true,
+                    reassigns: None,
+                })],
+                else_body: None,
+            }));
             // Compute state_ptr = arena_ptr + offset (arena_ptr IS the base)
             let state_ptr = ctx.alloc_temp();
             stmts.push(ScgStatement::Computation(ComputationNode {

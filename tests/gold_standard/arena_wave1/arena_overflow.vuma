@@ -1,0 +1,23 @@
+// arena_wave1/arena_overflow — arena_alloc past capacity must trap (exit 1)
+// Expected exit code: 1
+//
+// Wave 6 negative test: allocate an arena too small to hold the requested
+// layout, then arena_alloc must invoke the __arena_overflow stub (real
+// exit(1) syscall) rather than silently corrupt memory.
+//
+// The Widget layout is 8 bytes (x: u32 + y: u32). We create an arena with
+// capacity 1 — far too small — then attempt arena_alloc(arena, Widget).
+// The codegen-emitted bounds check (offset + layout_size > capacity) must
+// fire: 0 + 8 > 1, so __arena_overflow is called and the process exits 1.
+
+layout Arena = { base: u64, offset: u64, capacity: u64 }
+layout Widget = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let arena = arena_new(1);
+    let w = arena_alloc(arena, Widget);
+    // Unreachable: arena_alloc traps before we get here.
+    w.x = 42;
+    arena_free(arena);
+    return 0;
+}
