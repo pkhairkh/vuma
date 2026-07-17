@@ -1,0 +1,50 @@
+// write_after_consume — PMT Wave 3 negative: linearity violation
+// Expected: IVE rejects at verification (VerificationLevel::Pmt).
+//
+// Pattern:
+//   layout Point = { x: u32, y: u32 }
+//   layout Vec2 = { a: u32, b: u32 }
+//   ...
+//   let q = transform(p);   // p is CONSUMED — it's no longer usable
+//   p.x = 99;               // VIOLATION: writing to a consumed state
+//
+// PMT states are LINEAR: each state has exactly one owner, and that
+// ownership is transferred when the state is passed to a transform.
+// After the transform, the original state variable is dead — any
+// subsequent read or write to it is a linearity violation.
+//
+// The state_write verifier tracks the set of vregs consumed by
+// `StateTransform` nodes (`consumed_vars`).  Any `StateWrite` whose
+// `state_vreg` is in that set is rejected with:
+//   "linearity violation: state '_state_N' written after being consumed
+//    by a transform"
+//
+// IVE coverage:
+//   ✓ caught by `state_write::verify_state_writes` (linearity path)
+//   ✓ unit-tested in `wave3d_pmt_write_after_consume_fails`
+//
+// This file is NOT expected to compile or run — it documents a PMT
+// violation pattern.  The IVE catches it via the SCG-level state node
+// inspection (the StateTransform node marks its input vreg as consumed,
+// and the subsequent StateWrite to the same vreg is rejected).
+
+layout Point = { x: u32, y: u32 }
+layout Vec2 = { a: u32, b: u32 }
+
+// Wave 1a: the `transform` keyword is parsed but not yet lowered to a
+// callable form.  This file documents the intended violation pattern;
+// when Wave 4 lands transform lowering, the IVE will catch it.
+
+transform to_vec2(p: State<Point>) -> State<Vec2> {
+    return p;
+}
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    let q = to_vec2(p);   // p is consumed here
+    // VIOLATION: p was consumed by the transform; writing to it now is
+    // a linearity violation.
+    p.x = 99;
+    return q.a;
+}

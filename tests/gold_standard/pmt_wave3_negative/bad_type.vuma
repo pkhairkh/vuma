@@ -1,0 +1,40 @@
+// bad_type — PMT Wave 3 negative: read a field with the wrong type
+// Expected: IVE rejects at verification (VerificationLevel::Pmt).
+//
+// Pattern:
+//   layout Point = { x: u32, y: u32 }
+//   ...
+//   let v: u64 = p.x;   // p.x is u32, not u64 — type mismatch
+//
+// The state_read verifier compares the read's `expected_type` against
+// the field's declared `type_name`.  In the SCG, `StateReadNode` does
+// not currently carry an expected_type field (Wave 1b/1c left this for
+// a later wave), so the IVE's `verify_pmt` synthesizes expected_type
+// FROM the layout — which means the type-mismatch path is only
+// reachable when a future wave extends `StateReadNode` with an explicit
+// expected_type, OR when the AST-level type-checker compares the
+// read-site annotation against the layout field declaration.
+//
+// When that wiring lands, this program will fail with:
+//   "type mismatch: field 'x' is 'u32' but read as 'u64'"
+//
+// IVE coverage:
+//   ~ partial: the state_read verifier's type-mismatch branch is
+//     implemented and unit-tested (`state_read::tests::test_type_mismatch`),
+//     but the SCG→verifier bridge does not yet propagate the read-site
+//     expected_type.  See Wave 3d worklog note for the deferred wiring.
+//
+// This file is NOT expected to compile or run — it documents a PMT
+// violation pattern that the verifier API is designed to catch once
+// the SCG StateReadNode grows an `expected_type` field.
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    // VIOLATION: p.x is u32 (4 bytes), but the read context expects u64.
+    // The state_read verifier's type-mismatch check would reject this.
+    let v: u64 = p.x;
+    return v;
+}

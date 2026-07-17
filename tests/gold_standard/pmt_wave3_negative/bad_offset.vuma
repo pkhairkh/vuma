@@ -1,0 +1,33 @@
+// bad_offset — PMT Wave 3 negative: read a field that doesn't exist
+// Expected: IVE rejects at verification (VerificationLevel::Pmt).
+//
+// Pattern:
+//   layout Point = { x: u32, y: u32 }
+//   ...
+//   let v = p.z;   // 'z' is not a field of Point
+//
+// The state_read verifier walks the SCG's StateRead nodes and looks up
+// each (layout_name, field_name) pair against the layout registry.  For
+// a `p.z` read on a `State<Point>`, the SCG carries layout_name="Point"
+// and field_name="z"; the registry's `Point` layout has only {x, y}, so
+// the verifier reports:
+//   "field 'z' not found in layout 'Point'"
+// and `InvariantAggregator::verify_pmt` returns `OverallVerdict::Fail`.
+//
+// IVE coverage:
+//   ✓ caught by `state_read::verify_state_reads` (field-not-found path)
+//   ✓ unit-tested in `wave3d_pmt_unknown_field_fails`
+//
+// This file is NOT expected to compile or run — it documents a PMT
+// violation pattern.  The IVE catches it via the SCG-level state node
+// inspection (the program does not need to reach codegen).
+
+layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 5;
+    p.y = 7;
+    // VIOLATION: 'z' is not a field of Point.
+    return p.z;
+}
