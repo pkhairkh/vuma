@@ -1,14 +1,10 @@
-   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
 warning: unused import: `Condition`
-    --> src/codegen/src/backend.rs:2527:60
+    --> src/codegen/src/backend.rs:2553:60
      |
-2527 |         use crate::arm64::{Instruction, Register, Operand, Condition};
+2553 |         use crate::arm64::{Instruction, Register, Operand, Condition};
      |                                                            ^^^^^^^^^
      |
      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
-   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: `vuma-codegen` (lib) generated 1 warning (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 39.23s
+    Finished `release-fast` profile [optimized] target(s) in 0.01s
