@@ -1,0 +1,255 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/table.vuma
+// VWK Syscall Table — 512-entry handler registry (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64 syscall handler table. It maintains a 512-entry
+// handler table (one slot per asm-generic syscall number 0..511, each slot
+// holding a u64 handler-function address or 0 if unregistered) and
+// provides the register / lookup API the dispatch layer (sibling
+// dispatch.vuma) consumes.
+//
+// ── Why 512 entries? ────────────────────────────────────────────────────────
+// Linux asm-generic/unistd.h (the canonical modern Linux syscall ABI, used
+// by VUMA — see womb/syscalls.vuma) currently numbers syscalls 0..449+
+// (the highest number as of kernel 6.x is around 449 = clone3). The table
+// is sized to 512 to give comfortable headroom for future syscalls without
+// a resize — and 512 happens to be a power of 2 (cheap modulo for
+// bounds-checking if needed). K11 may shrink this to 256 if memory is
+// tight; the API is size-agnostic (every helper bounds-checks nr against
+// the caller's expectation, not against an internal constant — see
+// "Why does this file not bounds-check nr?" below).
+//
+// ── Why a flat [u8; 4096] array? ────────────────────────────────────────────
+// The handler table is stored as a flat [u8; 4096] array (512 × 8 bytes,
+// each u64 handler address packed little-endian) rather than [u64; 512].
+// This is the SAME codegen limitation that forces:
+//   - womb/kernel/mm/pmm.vuma (K2a) to store its FreeNode pool as three
+//     parallel [u8; N] arrays (bases, orders, nexts)
+//   - womb/kernel/mm/kmalloc.vuma (K2f) to store its slab freelist as a
+//     flat [u8; N] array
+//   - womb/kernel/trap/irq.vuma (K3d) to store its IrqTable as [u8; 2048]
+//     (256 × 8 bytes — same structure, just half the entries)
+// The codegen only lowers `state.array[idx]` correctly for [u8; N]
+// arrays (src/pipeline.rs::flatten_expr, Expr::Index arm — non-u8 element
+// types don't get the index-scaled-by-element-size treatment). See
+// pmm.vuma's "Why a flat byte-array pool?" header for the full rationale.
+//
+// The pack/unpack helpers (syscall_table_get / syscall_table_set) are
+// byte-identical in structure to pmm.vuma's pool_get_base / pool_set_base
+// (K2a), kmalloc.vuma's slab helpers (K2f), and irq.vuma's
+// irq_get_handler / irq_set_handler (K3d): 8-iteration while loop, shift
+// by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
+//
+// ── Syscall handler lifecycle ───────────────────────────────────────────────
+//   1. kmain allocates a SyscallTable via state_new(SyscallTable), zero-
+//      inits it (count = 0, all handler slots = 0). [K11 — early boot]
+//   2. Subsystems call syscall_register(tbl, nr, handler) to install a
+//      handler for their syscall(s). syscall_register:
+//        a. Packs the handler address into tbl.handlers[nr*8..nr*8+8]
+//           via syscall_table_set.
+//        b. Increments tbl.count.
+//      (No "unregister" in this wave; K11 may add one if needed for
+//      runtime syscall-table patching / seccomp-style filtering.)
+//   3. On a syscall (int 0x80 on x86_64), trap_entry saves the TrapFrame
+//      and calls trap_handler (sibling trap.vuma). The dispatcher routes
+//      vector 128 to trap_syscall, which (in K11) calls:
+//        a. syscall_args_from_frame(tf, args) — sibling abi.vuma
+//        b. syscall_dispatch(tbl, args)       — sibling dispatch.vuma
+//        c. syscall_write_ret(tf, ret)        — sibling abi.vuma
+//      syscall_dispatch looks up the handler via syscall_table_get,
+//      calls it (K11 — VUMA has no fn-pointer call today, so the
+//      dispatch's handler-call is a stub; K11 adds real dispatch), and
+//      returns the handler's return value.
+//
+// ── Why is syscall_register's count increment one-shot (no decrement)? ─────
+// The K3e contract specifies `syscall_register(tbl, nr, handler)` only —
+// no `syscall_unregister`. `tbl.count` is a "how many syscalls are
+// registered" counter for diagnostics (kmain can print it during boot
+// to confirm the syscall table was populated correctly); it's incremented
+// by syscall_register and never decremented. Same pattern as K3d's
+// irq.vuma register_irq (no unregister_irq). K11 may add unregister
+// helpers if runtime syscall-table patching becomes necessary.
+//
+// ── Why does this file not bounds-check nr? ────────────────────────────────
+// syscall_table_get / syscall_table_set do NOT check `nr < 512`. The
+// dispatch layer (sibling dispatch.vuma) is responsible for bounds-
+// checking nr (it returns -ENOSYS = 38 for nr >= 512 BEFORE calling
+// syscall_table_get). This avoids a redundant bounds check on every
+// lookup (the dispatch layer already did one) and keeps the table
+// helpers simple (just pack/unpack, no policy). K3d's irq.vuma follows
+// the same pattern (irq_get_handler / irq_set_handler don't bounds-check
+// `irq` either — the caller is responsible).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// SyscallTable is a 4100-byte struct (4096-byte handlers array + 4-byte
+// count) held in a `___pmt_buffer`-backed State<SyscallTable>; the
+// CALLER allocates it via `state_new(SyscallTable)` and passes it by
+// reference to syscall_register / syscall_table_get / syscall_table_set
+// (init-style API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for
+// the codegen rationale). The State<SyscallTable> params are regular
+// VUMA-fn borrows (NOT extern #[borrow] — VUMA fn calls don't need the
+// attribute, only extern "C" calls do). None of this file's functions
+// call any extern, so the codegen's conservative State-invalidation-on-
+// extern-call doesn't fire.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3e contract's
+// "IMPORTANT" rule (8192 not 0x2000, 4096 not 0x1000):
+//     4096 = 0x1000 = 512 entries × 8 bytes (handler-table array size)
+//     8192 = 0x2000 = the dummy handler address used in the self-test
+//                     (also confirms u64 round-trip through pack/unpack
+//                      for a value larger than 255, catching any
+//                      accidental u8 truncation in the codegen's [u8; N]
+//                      access lowering — same rationale as K3a's
+//                      rip=4096 check and K3d's irq handler=4096 check)
+//     8    = bytes per u64 handler entry (loop bound for pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     64   = asm-generic __NR_write (the syscall number used in the
+//            self-test — write is the canonical "hello world" syscall)
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares the SyscallTable layout for
+// the FIRST time (no prior VUMA file has it) and provides the table
+// helpers. Future files that want to call syscall_register / table_get /
+// table_set will re-declare the SyscallTable layout byte-identically to
+// this file (same pattern as K3d's irq.vuma declaring IrqTable and
+// future files re-declaring it). The sibling dispatch.vuma re-declares
+// SyscallTable byte-identically to this file.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/table.vuma \
+//         /tmp/table.bin x86_64 --verify
+//     /tmp/table.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (3 self-test checks all pass — handler
+// round-trip for write at nr=64, count increment to 1, unregistered
+// nr=0 reads back as 0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Syscall table: 512 entries (asm-generic syscall numbers 0..511).
+// Each entry is a handler function address (u64) or 0 if unregistered.
+// Uses flat [u8; 4096] (512 * 8 bytes) with pack/unpack helpers — see
+// file header "Why a flat [u8; 4096] array?" for the codegen rationale.
+// `count` tracks how many handlers are registered (incremented by
+// syscall_register, never decremented — see "Why is syscall_register's
+// count increment one-shot?" in the file header).
+layout SyscallTable = {
+    handlers: [u8; 4096],  // 512 * 8 bytes — u64 handler addr per syscall
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers for SyscallTable.handlers.
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical in structure to pmm.vuma's pool_get_base / pool_set_base
+// (K2a), kmalloc.vuma's slab helpers (K2f), and irq.vuma's
+// irq_get_handler / irq_set_handler (K3d): 8-iteration while loop,
+// shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads. The
+// only difference is the index type: this file takes u32 (syscall
+// numbers are u32 in syscall_register; the dispatch layer casts the u64
+// `args.nr` down to u32 after the nr >= 512 bounds check).
+
+// Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
+// Returns 0 if no handler is registered for that syscall (the slot is all
+// zero bytes — syscall_register hasn't been called for that syscall yet,
+// or the syscall was never registered in the first place). The caller
+// (dispatch layer) is responsible for bounds-checking nr BEFORE calling
+// this — see "Why does this file not bounds-check nr?" in the file header.
+fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+    let off = nr * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 handler address for syscall `nr` into SyscallTable.handlers.
+// Packs the 8 bytes little-endian (byte 0 = bits 7..0, byte 7 = bits
+// 63..56). The mask-255 truncates each shifted byte to its low 8 bits
+// (the (handler >> sh) >> 8 path would lose the high bits — same
+// pattern as pmm.vuma's pool_set_base).
+fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    let off = nr * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (handler >> sh) & 255;
+        tbl.handlers[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Syscall lifecycle: register.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Register a syscall handler.
+//   1. Pack the handler address into tbl.handlers[nr*8..nr*8+8] via
+//      syscall_table_set.
+//   2. Increment tbl.count.
+// Unlike K3d's register_irq, this function does NOT call any extern
+// (no PIC to unmask — syscalls are software traps, not hardware IRQs).
+// K11 may add a "syscall table commit" extern here if the bare-metal
+// kernel uses a copy-on-write syscall table for hot-patching.
+fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    syscall_table_set(tbl, nr, handler);
+    tbl.count = tbl.count + 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SyscallTable via state_new, zero-init count, then:
+//   (1) Register a handler for syscall 64 (__NR_write — the canonical
+//       "hello world" syscall) at address 8192. syscall_register should
+//       pack the address into the table and increment count.
+//   (2) Verify the handler round-trips: syscall_table_get(tbl, 64) returns
+//       8192. Catches any pack/unpack byte-order bug AND any u8-vs-u64
+//       truncation bug (8192 > 255, so a u8-truncating codegen path
+//       would return 0).
+//   (3) Verify count was incremented to 1.
+//   (4) Verify an unregistered syscall (nr=0, which is __NR_io_setup on
+//       asm-generic — typically not registered in early boot) reads back
+//       as 0.
+// Returns 0 on success, 1 on handler round-trip failure, 2 on count
+// failure, 3 on unregistered-slot failure (so a future CI failure
+// pinpoints the broken check).
+//
+// Per the K3e contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (64, 8192) — decimal avoids the parser's hex-
+// literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096).
+
+fn main() -> i32 {
+    let tbl = state_new(SyscallTable);
+    tbl.count = 0;
+
+    // Register a handler for syscall 64 (__NR_write).
+    syscall_register(tbl, 64, 8192);
+
+    // Check 1: handler round-trips (8192 > 255 — catches u8 truncation).
+    if syscall_table_get(tbl, 64) != 8192 { return 1; }
+
+    // Check 2: count was incremented.
+    if tbl.count != 1 { return 2; }
+
+    // Check 3: unregistered syscall → 0.
+    if syscall_table_get(tbl, 0) != 0 { return 3; }
+
+    return 0;
+}

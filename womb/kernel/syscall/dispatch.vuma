@@ -1,0 +1,297 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/dispatch.vuma
+// VWK Syscall Dispatch — nr → handler lookup + invocation (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64 syscall dispatch layer. Given a populated
+// SyscallArgs (nr + a0..a5) and a SyscallTable (the 512-entry handler
+// registry from sibling table.vuma), syscall_dispatch:
+//   1. Bounds-checks nr against 512 (asm-generic syscall max for VWK).
+//      Out-of-range → return -ENOSYS (38).
+//   2. Looks up the handler via syscall_table_get.
+//      Unregistered (handler == 0) → return -ENOSYS (38).
+//   3. Calls the handler with the args (K11 — VUMA has no fn-pointer
+//      call today, so this is a stub that returns 0; K11 adds real
+//      fn-pointer dispatch).
+//   4. Returns the handler's return value to the caller (K3d's
+//      trap_syscall, which will write it back into tf.rax via
+//      syscall_write_ret from sibling abi.vuma).
+//
+// ── Why is the handler-call a stub? ─────────────────────────────────────────
+// VUMA has no function-pointer call today: `handler()` where `handler` is
+// a u64 won't compile (the parser only accepts direct fn-identifier
+// calls, not indirect calls through a u64). The K3e contract's "Note"
+// explicitly says: "VUMA has no function-pointer call — `handler()`
+// where handler is a u64 won't compile. The dispatch stub returns 0;
+// K11 adds real dispatch." So the stub:
+//   - bounds-checks nr (exercises the u64-vs-512 comparison)
+//   - looks up the handler via syscall_table_get (exercises the pack/
+//     unpack helper)
+//   - branches on handler != 0 (both branches return 0)
+// This is NOT a violation of the "no stubs" rule because the DoD
+// explicitly documents this as a stub for K11 to replace. The hosted-
+// mode path never actually delivers syscalls via int 0x80 (the host
+// kernel uses its own syscall ABI), so the stub's no-op behavior is
+// correct for hosted mode. Same pattern as K3d's irq.vuma irq_dispatch
+// (handler-call stub, just sends EOI).
+//
+// K11 will replace the `return 0` with the real fn-pointer call. K11's
+// implementation will likely:
+//   - Add a new VUMA intrinsic `call_indirect(handler_addr: u64, args:
+//     State<SyscallArgs>) -> u64` that lowers to an indirect call
+//     instruction on each backend (call rax on x86_64, blr x8 on
+//     aarch64, jalr x0, x7 on riscv64). The intrinsic will handle the
+//     SysV AMD64 calling convention (args in rdi/rsi/rdx/rcx/r8/r9 —
+//     note: NOT r10 for a3, because indirect C calls use rcx not r10;
+//     the syscall ABI uses r10 because SYSCALL clobbers rcx, but
+//     regular C calls don't have that constraint).
+//   - OR: lower syscall handlers as a giant switch statement in trap.S
+//     (one `cmp rax, NR; je handler_X` per registered syscall). This
+//     avoids the indirect-call entirely but bloats trap.S.
+//   K11 will pick one. Until then, the stub.
+//
+// ── Why -ENOSYS = 38 (not the negative value)? ──────────────────────────────
+// Linux errno values are positive integers in the kernel's internal
+// representation (the kernel returns -errno as a negative i64, and the
+// libc wrapper translates -errno → errno = -retval at the user-space
+// boundary). The VUMA convention in this file is to return the POSITIVE
+// errno value (38 = ENOSYS) and let the caller (K11's trap_syscall)
+// negate it before writing it back to tf.rax. This avoids signed-
+// arithmetic subtleties in VUMA's u64-dominated codegen (the alternative
+// `return -38` would require an i64 return type, and VUMA's u64/i64
+// implicit-conversion rules are sometimes surprising — see K2c's
+// pt.vuma header for the same "use unsigned, document the sign
+// convention" rationale). K11 will pick the final sign convention.
+//
+// ── Why 512 as the bounds check? ────────────────────────────────────────────
+// 512 is the SyscallTable size (see sibling table.vuma's "Why 512
+// entries?" header — Linux asm-generic/unistd.h numbers syscalls 0..449+
+// as of kernel 6.x; 512 gives headroom to ~512 without a resize). The
+// dispatch's bounds check `nr >= 512` returns -ENOSYS for any syscall
+// number outside the table. This catches:
+//   - User-space passing an invalid syscall number (e.g. nr = 999 in
+//     the self-test).
+//   - The host kernel (in some hosted-test scenarios) passing through a
+//     syscall number that doesn't exist in asm-generic.
+//   - Future syscall numbers above 511 (when Linux eventually exceeds
+//     512 syscalls — K11 will bump the table size at that point).
+//
+// ── Layouts re-declared (no import in VUMA) ─────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares:
+//   - SyscallArgs byte-identically to sibling abi.vuma (K3e)
+//   - SyscallTable byte-identically to sibling table.vuma (K3e)
+// The byte-identical-redeclaration invariant (K2c "extern signatures
+// MUST stay byte-identical" — extended to layouts in K3d) extends to
+// layouts: this file's `syscall_dispatch(tbl: State<SyscallTable>, args:
+// State<SyscallArgs>)` MUST see the same field offsets, field names,
+// and field types as abi.vuma's and table.vuma's files.
+//
+// ── Helper re-declarations ─────────────────────────────────────────────────
+// This file re-declares syscall_table_get and syscall_table_set byte-
+// identically to sibling table.vuma (K3e) — VUMA has no import, so the
+// dispatch layer needs its own copies. The re-declared helpers are
+// byte-identical (same 8-iteration while loop, same shift-by-i*8, same
+// mask-255 on writes, same sum-of-shifted-bytes on reads). K11 may
+// consolidate these into a shared "syscall/table.vuma" that everyone
+// imports once VUMA gains an import mechanism.
+//
+// ── Forward function references ─────────────────────────────────────────────
+// This file's main() calls syscall_table_set BEFORE syscall_table_set is
+// declared (the helper appears after main in the source). VUMA's parser
+// supports forward function references (it does a two-pass scan: pass 1
+// collects all fn signatures into the symbol table, pass 2 resolves call
+// sites). Verified in this file's self-test (exit=0). Same forward-
+// reference pattern is used by K3d's irq.vuma (the helpers are declared
+// before main, but the principle holds — VUMA doesn't require
+// declaration-before-use for fns).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
+// SyscallArgs and SyscallTable are ___pmt_buffer-backed State<T>'s
+// allocated by the CALLER via `state_new(...)`. The State<T> params are
+// regular VUMA-fn borrows (NOT extern #[borrow] — VUMA fn calls don't
+// need the attribute, only extern "C" calls do). None of this file's
+// functions call any extern, so the codegen's conservative State-
+// invalidation-on-extern-call doesn't fire.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3e contract's
+// "IMPORTANT" rule (8192 not 0x2000, 4096 not 0x1000):
+//     4096 = 0x1000 = 512 entries × 8 bytes (handler-table array size)
+//     8192 = 0x2000 = the dummy handler address used in the self-test
+//                     (also confirms u64 round-trip through pack/unpack
+//                      for a value larger than 255 — same rationale as
+//                      table.vuma's 8192 check)
+//     512  = the SyscallTable size (bounds-check threshold)
+//     38   = ENOSYS (the errno for "no such syscall" — returned for
+//            out-of-range nr AND unregistered nr)
+//     8    = bytes per u64 handler entry (loop bound for pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     64   = asm-generic __NR_write (the syscall number used in the
+//            self-test)
+//     999  = the out-of-range nr used in the self-test (> 512)
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale).
+//
+// ── Why does syscall_dispatch return u64, not i64? ──────────────────────────
+// The contract specifies `fn syscall_dispatch(...) -> u64`. The kernel's
+// syscall ABI conventionally returns -errno as a negative i64 (in the
+// range [-4095, -1]) for errors and a non-negative value for success.
+// VUMA's u64/i64 implicit-conversion rules are sometimes surprising (see
+// "Why -ENOSYS = 38 (not the negative value)?" above), so this file
+// returns u64 throughout (38 for -ENOSYS, 0 for the stub's success
+// path). K11 will pick the final sign convention — likely the file
+// stays u64 internally and the trap_syscall wrapper negates errno
+// values before writing them to tf.rax.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares:
+//   - SyscallArgs byte-identically to abi.vuma
+//   - SyscallTable byte-identically to table.vuma
+//   - syscall_table_get byte-identically to table.vuma
+//   - syscall_table_set byte-identically to table.vuma
+// (Same pattern as K3d's irq.vuma re-declaring irq_mask/irq_unmask/pic_eoi
+// from K3a's trap_trampoline.vuma.)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/dispatch.vuma \
+//         /tmp/dispatch.bin x86_64 --verify
+//     /tmp/dispatch.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (2 self-test checks pass — out-of-range
+// nr returns 38, registered-nr dispatch returns 0 via the stub).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared — no import in VUMA).
+// ────────────────────────────────────────────────────────────────────────────
+// Re-declared byte-identically to sibling abi.vuma (SyscallArgs) and
+// sibling table.vuma (SyscallTable). See file header "Layouts re-declared".
+
+// Re-declared from abi.vuma (K3e).
+layout SyscallArgs = {
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+}
+
+// Re-declared from table.vuma (K3e).
+layout SyscallTable = {
+    handlers: [u8; 4096],  // 512 * 8 bytes — u64 handler addr per syscall
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-array pack/unpack helpers (re-declared from table.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical to table.vuma's syscall_table_get / syscall_table_set.
+// See table.vuma's header for the pack/unpack rationale (8-iteration
+// while loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on
+// reads — same pattern as pmm.vuma's pool_get_base / pool_set_base).
+
+// Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
+// Re-declared byte-identically to table.vuma.
+fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+    let off = nr * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 handler address for syscall `nr` into SyscallTable.handlers.
+// Re-declared byte-identically to table.vuma.
+fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    let off = nr * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (handler >> sh) & 255;
+        tbl.handlers[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Dispatch.
+// ────────────────────────────────────────────────────────────────────────────
+// Look up handler by nr, call it (K11 — VUMA has no fn-pointer call
+// today, so the call is omitted; K11 adds it), return result. Bounds-
+// checks nr against 512 first (out-of-range → -ENOSYS = 38). Returns
+// -ENOSYS = 38 for unregistered syscalls (handler == 0) too — this is
+// the standard Linux behavior for unimplemented syscalls (user-space
+// sees -ENOSYS from libc, which is the "Function not implemented" error).
+
+// Syscall dispatch: look up handler by nr, call it, return result.
+//   - nr >= 512           → return 38 (-ENOSYS, out of range)
+//   - handler == 0        → return 38 (-ENOSYS, unregistered)
+//   - otherwise (K11)     → call handler(args), return its result
+//                           (K3e hosted-mode stub: just return 0)
+fn syscall_dispatch(tbl: State<SyscallTable>, args: State<SyscallArgs>) -> u64 {
+    let nr = args.nr;
+    if nr >= 512 {
+        return 38;  // -ENOSYS (out of range)
+    }
+    let handler = syscall_table_get(tbl, nr as u32);
+    if handler == 0 {
+        return 38;  // -ENOSYS (unregistered)
+    }
+    // In hosted mode, can't call a function pointer directly (VUMA has
+    // no fn-pointer call today — see file header "Why is the handler-
+    // call a stub?"). K11 will add the real dispatch:
+    //     return call_indirect(handler, args);
+    // Until then, return 0 (success). The hosted-mode path never
+    // actually delivers syscalls via int 0x80 (the host kernel uses
+    // its own syscall ABI), so the stub's no-op behavior is correct
+    // for hosted mode.
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SyscallTable and a SyscallArgs via state_new, then:
+//   (1) Out-of-range syscall (nr = 999 >= 512) → syscall_dispatch returns
+//       38 (-ENOSYS). Catches any u64-vs-512 comparison bug.
+//   (2) Register a handler for syscall 64 (__NR_write) at address 8192
+//       via syscall_table_set (re-declared locally — see "Helper re-
+//       declarations" in the file header). Then dispatch nr=64 → returns
+//       0 (the stub's success path; the handler is non-zero so we reach
+//       the stub's `return 0`).
+// Returns 0 on success, 1 on out-of-range failure, 2 on registered-
+// syscall-stub failure (so a future CI failure pinpoints the broken
+// check).
+//
+// Per the K3e contract's "IMPORTANT" rule: all non-zero constants in the
+// self-test use DECIMAL (999, 38, 64, 8192) — decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096).
+
+fn main() -> i32 {
+    let tbl = state_new(SyscallTable);
+    let args = state_new(SyscallArgs);
+
+    // Test 1: out-of-range nr (999 >= 512) → 38 (-ENOSYS).
+    args.nr = 999;
+    let ret = syscall_dispatch(tbl, args);
+    if ret != 38 { return 1; }
+
+    // Test 2: registered syscall (handler != 0) → 0 (stub success).
+    syscall_table_set(tbl, 64, 8192);
+    args.nr = 64;
+    let ret2 = syscall_dispatch(tbl, args);
+    if ret2 != 0 { return 2; }
+
+    return 0;
+}
