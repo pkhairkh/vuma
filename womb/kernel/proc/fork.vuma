@@ -1,0 +1,549 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/proc/fork.vuma
+// VWK Process/Thread Subsystem — sys_fork (create child Task as a copy of
+// the parent) (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K4d-fork layer of the VWK kernel: the fork() syscall
+// primitive. K4a (task.vuma) built the Task control block + ProcessTable +
+// task_alloc / task_free; K4b (scheduler.vuma) built the CFS runqueue;
+// K4c (switch.vuma) built the context_switch extern. THIS file consumes
+// task_alloc + the pt_get_* / pt_set_* helpers (re-declared here byte-
+// identically to K4a) to spawn a new Task that is a copy of its parent's
+// mm_root / fs_root / fds — the Unix fork() semantics of "duplicate the
+// process's address space and file table".
+//
+// ── fork() semantics ────────────────────────────────────────────────────────
+// fork() is the Unix primitive that creates a new process (the "child") as
+// an exact copy of the calling process (the "parent"). The child gets its
+// own PID, its parent's PID recorded as its PPID, and copies of the
+// parent's address space (mm_root), filesystem root (fs_root), and file
+// descriptor table (fds). The child's register file (rip/rsp/etc.) is set
+// up so the child's first context_switch returns into the fork() syscall
+// return path with rax=0 (the "child returns 0" half of fork's dual
+// return). K4c's task_init_for_switch handles the rip/rsp setup; THIS
+// file handles the ProcessTable side (pid/ppid/mm_root/fs_root/fds +
+// state=READY).
+//
+// The K4d contract specifies the simplified semantics:
+//   * sys_fork(tbl, parent_idx) — alloc child, copy parent's mm_root/
+//     fs_root/fds, set child.ppid=parent.pid, set child.state=READY
+//     (state=READY is done by task_alloc itself — the contract says
+//     "set child.state=READY" but task_alloc already writes state=2 on
+//     the new slot, so sys_fork doesn't need to write it again), return
+//     child_idx (or 256 if the table is full).
+// * The child's saved-register file (rip/rsp/etc.) is NOT touched here
+//     — that's K4c's task_init_for_switch concern (the scheduler will
+//     call task_init_for_switch on the child before its first
+//     context_switch, so the child's first run returns into the fork
+//     syscall return path with rax=0). THIS file only touches the
+//     ProcessTable's parallel flat arrays (the top-level Task fields).
+// * The parent's PID is read via pt_get_pid(tbl, parent_idx) and
+//     written into child's PPID via pt_set_ppid(tbl, child_idx,
+//     parent_pid). This matches Linux's `task->parent->pid` →
+//     `child->real_parent = current->real_parent; child->parent =
+//     current; child->pid = alloc_pidmap()` sequence (simplified —
+//     Linux's fork is ~1500 lines of struct-task initialization; THIS
+//     file is the 30-line ProcessTable-only subset).
+//
+// ── ProcessTable re-declaration ─────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the
+// ProcessTable layout byte-identically to K4a's task.vuma. The byte-
+// identical-redeclaration invariant (K2c "extern signatures MUST stay
+// byte-identical" — extended to layouts in K3d) extends to ProcessTable:
+// this file's pt_get_* / pt_set_* MUST see the same field offsets, field
+// names, and field types as K4a's task.vuma. ProcessTable has 10 fields
+// (9 parallel flat [u8; N] arrays + count u32) totaling 14340 bytes —
+// same as K4a.
+//
+// This file re-declares the 12 ProcessTable helpers it needs:
+//   pt_get_state / pt_set_state     (u8 direct-index — needed by task_alloc)
+//   pt_get_pid  / pt_set_pid        (u32 4-byte LE pack/unpack — needed by
+//                                     task_alloc + fork's ppid setup)
+//   pt_get_ppid / pt_set_ppid       (u32 4-byte LE pack/unpack — fork
+//                                     sets child.ppid = parent.pid)
+//   pt_get_mm_root / pt_set_mm_root (u64 8-byte LE pack/unpack — fork
+//                                     copies parent's mm_root)
+//   pt_get_fs_root / pt_set_fs_root (u64 8-byte LE pack/unpack — fork
+//                                     copies parent's fs_root)
+//   pt_get_fds  / pt_set_fds        (u64 8-byte LE pack/unpack — fork
+//                                     copies parent's fds)
+// These 12 helpers are byte-identical to K4a's task.vuma (same signature,
+// same body — 8-iteration while loop for u64, 4-iteration while loop for
+// u32, direct array index for u8). The other 6 helpers (prio get/set,
+// vruntime get/set, next get/set) are NOT re-declared here because
+// sys_fork doesn't touch them — K4b's scheduler.vuma re-declares those
+// for its runqueue management; K4d's fork leaves prio/vruntime/next
+// alone (task_alloc already zero-initializes them via the state_new
+// zero-fill of the ProcessTable).
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K4d contract's main() allocates `tbl = state_new(ProcessTable)` and
+// passes it by reference to pt_init / task_alloc / sys_fork. This is the
+// canonical PMT pattern (K2a's pmm_init(pool, pmm, ...), K3d's
+// trap_frame_init(tf), K4a's pt_init(tbl) — see K2a's pmm.vuma header
+// "Why init-style?" for the codegen rationale: the current codegen does
+// NOT propagate State-typedness through function return values, so
+// `fn fork_new() -> State<ProcessTable>` would produce broken field-
+// access code in callers). All fork.vuma functions take
+// `tbl: State<ProcessTable>` by regular VUMA-fn borrow (NOT extern
+// #[borrow] — VUMA fn calls don't need the attribute; only extern "C"
+// calls do, and none of these functions call any extern).
+//
+// State<T> params: per the K4b contract's "Keep State<T> params to 1-2
+// per function" rule (continued here), sys_fork takes 1 State<ProcessTable>
+// param + 1 u32 (parent_idx). Same discipline as K4a's task_alloc(tbl)
+// (1 State param) and K4b's sched_tick(tbl, task_idx, delta) (1 State
+// param + u32 + u64).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// ProcessTable is a flat-byte-array struct held in a `___pmt_buffer`-
+// backed State<ProcessTable>; the CALLER allocates it via
+// `state_new(ProcessTable)` and passes it by reference to pt_init /
+// task_alloc / sys_fork / all pt_get_* / pt_set_* helpers (init-style
+// API — see "Why init-style?" above). No externs are declared in this
+// file (fork is pure-PM — K4c's context-switch externs are what make
+// the child actually start running; THIS file just creates the
+// ProcessTable-side state for the child).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K4d contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096). The constants:
+//     256  = number of Task slots in the ProcessTable (and the
+//            "table full" sentinel returned by task_alloc / sys_fork)
+//     4    = bytes per u32 field (loop bound for pid/ppid pack/unpack)
+//     8    = bytes per u64 field (loop bound for mm_root/fs_root/fds
+//            pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     2    = READY state value (set by task_alloc on the new slot —
+//            sys_fork relies on this; the contract's "set child.state=
+//            READY" is satisfied by task_alloc's state=2 write)
+//     0    = FREE state value (checked by task_alloc's free-slot scan)
+//     1    = PID offset (PID = slot + 1, so slot 0 → PID 1)
+//   Self-test constants: 1000, 2000, 3000, 2, 1 — all decimal (the
+//   parent's mm_root/fs_root/fds test values + the expected child
+//   PID/PPID after fork).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares ProcessTable + the 12
+// pt_get_* / pt_set_* helpers + pt_init + task_alloc byte-identically
+// to K4a's task.vuma (same pattern as K3d's irq.vuma re-declaring
+// irq_mask/irq_unmask/pic_eoi from K3a's trap_trampoline.vuma, and K3e's
+// dispatch.vuma re-declaring syscall_table_get / syscall_table_set from
+// table.vuma, and K4b's scheduler.vuma re-declaring ProcessTable +
+// pt_get_state/set_state/vruntime/next from K4a's task.vuma). K4d's
+// exec.vuma and exit.vuma will do the same subset for their own needs.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/proc/fork.vuma \
+//         /tmp/fork.bin x86_64 --verify
+//     /tmp/fork.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — parent
+// alloc returns slot 0 with PID 1, parent's mm_root/fs_root/fds set
+// to 1000/2000/3000, sys_fork returns slot 1 (child), child.state=2
+// (READY), child.pid=2 (slot 1 + 1), child.ppid=1 (parent's PID),
+// child.mm_root=1000 (copied), child.fs_root=2000 (copied),
+// child.fds=3000 (copied)).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ProcessTable: re-declared byte-identically to K4a's task.vuma. 10
+// fields (9 parallel flat [u8; N] arrays + count u32) totaling 14340
+// bytes. See K4a's task.vuma header "Why parallel flat byte arrays?"
+// for the rationale (VUMA has no struct-array support).
+layout ProcessTable = {
+    pids: [u8; 1024],
+    ppids: [u8; 1024],
+    states: [u8; 256],
+    prios: [u8; 256],
+    vruntimes: [u8; 2048],
+    mm_roots: [u8; 2048],
+    fs_roots: [u8; 2048],
+    fds: [u8; 2048],
+    nexts: [u8; 2048],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ProcessTable helpers (re-declared from K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// 12 of K4a's 18 helpers, byte-identical to task.vuma. fork needs:
+//   state (u8 direct-index) — for task_alloc's free-slot scan + READY write
+//   pid  (u32 4-byte LE)    — for task_alloc's PID = slot+1 + fork's
+//                              parent.pid → child.ppid copy
+//   ppid (u32 4-byte LE)    — for fork's child.ppid = parent.pid write
+//   mm_root (u64 8-byte LE) — for fork's child.mm_root = parent.mm_root copy
+//   fs_root (u64 8-byte LE) — for fork's child.fs_root = parent.fs_root copy
+//   fds     (u64 8-byte LE) — for fork's child.fds = parent.fds copy
+// The other 6 helpers (prio get/set, vruntime get/set, next get/set)
+// are NOT needed here — task_alloc doesn't touch prio/vruntime/next
+// (they're left at the state_new zero-fill), and sys_fork doesn't
+// either. K4b's scheduler.vuma re-declares those 6 for its runqueue.
+
+// Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
+// Re-declared byte-identically to K4a's task.vuma.
+fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.states[idx];
+}
+
+// Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
+// Re-declared byte-identically to K4a's task.vuma.
+fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.states[idx] = val;
+}
+
+// Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
+// Re-declared byte-identically to K4a's task.vuma (4-byte little-endian
+// unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
+// loop bound for u32).
+fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.pids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
+// Re-declared byte-identically to K4a's task.vuma.
+fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.pids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `ppid` field of Task slot `idx` from ProcessTable.ppids.
+// Re-declared byte-identically to K4a's task.vuma.
+fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.ppids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
+// Re-declared byte-identically to K4a's task.vuma. fork calls this to
+// set the child's PPID to the parent's PID.
+fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ppids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `mm_root` field of Task slot `idx` from
+// ProcessTable.mm_roots. Re-declared byte-identically to K4a's task.vuma
+// (8-byte little-endian unpack loop — same pattern as K2a's pool_get_base
+// and K3e's syscall_table_get).
+fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.mm_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `mm_root` field of Task slot `idx` into
+// ProcessTable.mm_roots. Re-declared byte-identically to K4a's task.vuma.
+// fork calls this to copy the parent's mm_root into the child (Unix
+// fork() duplicates the address space — in a real kernel this would
+// involve COW page-table duplication; the stub just copies the root
+// pointer).
+fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.mm_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fs_root` field of Task slot `idx` from
+// ProcessTable.fs_roots. Re-declared byte-identically to K4a's task.vuma.
+fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fs_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fs_root` field of Task slot `idx` into
+// ProcessTable.fs_roots. Re-declared byte-identically to K4a's task.vuma.
+// fork calls this to copy the parent's fs_root into the child (the child
+// inherits the parent's VFS root dentry — same chroot context).
+fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fs_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
+// Re-declared byte-identically to K4a's task.vuma.
+fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fds[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fds` field of Task slot `idx` into ProcessTable.fds.
+// Re-declared byte-identically to K4a's task.vuma. fork calls this to
+// copy the parent's fds into the child (Unix fork() duplicates the file
+// descriptor table — in a real kernel this involves refcounting the
+// underlying file objects; the stub just copies the table pointer).
+fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fds[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives (re-declared from K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// pt_init + task_alloc, byte-identical to K4a's task.vuma. fork needs
+// pt_init to zero the ProcessTable's states array (mark all slots FREE)
+// before the self-test's parent task_alloc; fork needs task_alloc to
+// spawn the child Task. task_free is NOT re-declared here — fork doesn't
+// free anything (the child stays alive until K4e's exit/wait reaps it).
+
+// pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
+// Idempotent. Re-declared byte-identically to K4a's task.vuma.
+fn pt_init(tbl: State<ProcessTable>) {
+    let i = 0;
+    while i < 256 {
+        pt_set_state(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// task_alloc: find the first FREE slot (state == 0), mark it READY
+// (state = 2), assign PID = slot + 1 (so PID 0 is never handed out),
+// bump count, return the slot index. Returns 256 if the table is full.
+// Re-declared byte-identically to K4a's task.vuma.
+//
+// fork relies on task_alloc's READY write — the contract's "set
+// child.state=READY" is satisfied by task_alloc's `pt_set_state(tbl, i,
+// 2)` line. sys_fork does NOT write state a second time (that would
+// be redundant and could mask a task_alloc bug — if task_alloc didn't
+// set READY, the child wouldn't be on the runqueue either, and the
+// scheduler would never pick it up; the sys_fork caller would catch
+// this via the child never running, not via a state check).
+fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+    let i = 0;
+    while i < 256 {
+        if pt_get_state(tbl, i) == 0 {
+            pt_set_state(tbl, i, 2);  // READY
+            pt_set_pid(tbl, i, i + 1);  // PID = slot + 1
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 256;  // table full
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_fork — the fork() syscall primitive.
+// ────────────────────────────────────────────────────────────────────────────
+// sys_fork(tbl, parent_idx) -> u32 — allocates a child Task (via
+// task_alloc, which marks it READY + assigns a fresh PID = child_slot+1),
+// then copies the parent's mm_root / fs_root / fds into the child and
+// sets the child's ppid to the parent's PID. Returns the child's slot
+// index, or 256 if the ProcessTable is full (the caller MUST check —
+// K4f's sys_fork syscall handler returns -EAGAIN in that case, matching
+// Linux's fork()/vfork()/clone() behavior when the pidmap is exhausted).
+//
+// The child's other fields are left at their task_alloc defaults:
+//   prio       — 0 (highest priority; K4b's CFS uses vruntime for
+//                 ordering, so prio=0 just means "default bucket")
+//   vruntime   — 0 (K4b's scheduler treats vruntime=0 as "youngest task,
+//                 highest CFS priority" — the child gets CPU time
+//                 immediately, matching Linux's sched_fork() which sets
+//                 child.vruntime = max(parent.vruntime, curr_rq.min_vruntime))
+//                 (TODO: K4f's sys_fork should bump child.vruntime to
+//                 the runqueue's min_vruntime to be fully CFS-correct;
+//                 for now, 0 is fine — the self-test doesn't enqueue
+//                 the child)
+//   next       — 0 (not on any runqueue yet; K4f's sys_fork will
+//                 sched_enqueue(rq, tbl, child_idx) before returning)
+//   regs       — not stored in ProcessTable (K4c's switch.vuma Task
+//                 layout holds the per-arch saved-register file; K4f's
+//                 sys_fork will call task_init_for_switch on the
+//                 child's per-arch Task before the scheduler picks it
+//                 up, so the child's first context_switch returns into
+//                 the fork syscall return path with rax=0)
+//
+// The "copy parent's mm_root / fs_root / fds" step is the Unix fork()
+// semantic core: the child shares the parent's address space (mm_root),
+// filesystem root (fs_root), and file descriptor table (fds) — in a
+// real kernel, mm_root is duplicated via copy-on-write page tables,
+// fs_root is refcounted, and fds is refcounted; the stub just copies
+// the pointers (refcounting is K5's VFS concern, not K4d's).
+//
+// The "set child.ppid = parent.pid" step is the Unix parent-child
+// relationship: the child's PPID records who forked it, so K4e's
+// waitpid() can scan for ZOMBIE children by PPID. Linux's struct
+// task_struct has both `real_parent` and `parent` (the latter can
+// differ if a tracer has ptrace'd the child); THIS file's ppid is the
+// simplified `real_parent` field.
+fn sys_fork(tbl: State<ProcessTable>, parent_idx: u32) -> u32 {
+    // Allocate a child slot. task_alloc marks it READY (state=2) and
+    // assigns PID = child_slot + 1.
+    let child_idx = task_alloc(tbl);
+    if child_idx == 256 {
+        return 256;  // table full — caller returns -EAGAIN
+    }
+    // Read the parent's PID — this becomes the child's PPID.
+    let parent_pid = pt_get_pid(tbl, parent_idx);
+    pt_set_ppid(tbl, child_idx, parent_pid);
+    // Copy the parent's mm_root / fs_root / fds into the child.
+    let mm = pt_get_mm_root(tbl, parent_idx);
+    pt_set_mm_root(tbl, child_idx, mm);
+    let fs = pt_get_fs_root(tbl, parent_idx);
+    pt_set_fs_root(tbl, child_idx, fs);
+    let fds = pt_get_fds(tbl, parent_idx);
+    pt_set_fds(tbl, child_idx, fds);
+    // task_alloc already set child.state = READY (2) — the contract's
+    // "set child.state=READY" is satisfied by task_alloc; no redundant
+    // state write here.
+    return child_idx;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K4d-fork DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ProcessTable via state_new, init it via pt_init, then:
+//   (1) task_alloc → returns 0 (parent slot).
+//   (2) pt_get_pid(0) == 1 (parent's PID = slot 0 + 1).
+//   (3) Set parent's mm_root = 1000, fs_root = 2000, fds = 3000.
+//       Verify pt_get_mm_root(0) == 1000 (parent setup round-trips).
+//   (4) sys_fork(tbl, 0) → returns 1 (child slot — different from
+//       parent's slot 0 because the parent is still alive).
+//   (5) pt_get_state(1) == 2 (child is READY — set by task_alloc inside
+//       sys_fork).
+//   (6) pt_get_pid(1) == 2 (child's PID = slot 1 + 1; different from
+//       parent's PID 1).
+//   (7) pt_get_ppid(1) == 1 (child's PPID = parent's PID).
+//   (8) pt_get_mm_root(1) == 1000 (child copied parent's mm_root).
+//   (9) pt_get_fs_root(1) == 2000 (child copied parent's fs_root).
+//  (10) pt_get_fds(1) == 3000 (child copied parent's fds).
+// Returns 0 on success, 1..10 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K4d contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (1000, 2000, 3000, 2, 1) —
+// decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096). The values 1000/2000/3000 are
+// arbitrary test values chosen to be distinct (so a copy bug that
+// writes parent's value to the wrong child field would be caught —
+// e.g. if sys_fork copied fs_root into child.mm_root, check 8 would
+// see 2000 instead of 1000 and return 8).
+
+fn main() -> i32 {
+    let tbl = state_new(ProcessTable);
+    pt_init(tbl);
+
+    // (1) Alloc the parent — should return slot 0.
+    let parent_idx = task_alloc(tbl);
+    if parent_idx != 0 { return 1; }
+
+    // (2) Parent's PID should be 1 (slot 0 + 1).
+    if pt_get_pid(tbl, 0) != 1 { return 2; }
+
+    // (3) Set parent's mm_root = 1000, fs_root = 2000, fds = 3000.
+    // Verify mm_root round-trips (the other two are verified via the
+    // child's copies in checks 8/9 — if the parent's set failed, the
+    // child's copy would also fail with the same wrong value, so a
+    // separate round-trip check for fs_root/fds would be redundant).
+    pt_set_mm_root(tbl, 0, 1000);
+    pt_set_fs_root(tbl, 0, 2000);
+    pt_set_fds(tbl, 0, 3000);
+    if pt_get_mm_root(tbl, 0) != 1000 { return 3; }
+
+    // (4) sys_fork should return slot 1 (the next free slot after
+    // the parent's slot 0).
+    let child_idx = sys_fork(tbl, parent_idx);
+    if child_idx != 1 { return 4; }
+
+    // (5) The child should be READY (state == 2, set by task_alloc
+    // inside sys_fork).
+    if pt_get_state(tbl, 1) != 2 { return 5; }
+
+    // (6) The child's PID should be 2 (slot 1 + 1; different from the
+    // parent's PID 1).
+    if pt_get_pid(tbl, 1) != 2 { return 6; }
+
+    // (7) The child's PPID should be 1 (the parent's PID).
+    if pt_get_ppid(tbl, 1) != 1 { return 7; }
+
+    // (8) The child should have copied the parent's mm_root = 1000.
+    if pt_get_mm_root(tbl, 1) != 1000 { return 8; }
+
+    // (9) The child should have copied the parent's fs_root = 2000.
+    if pt_get_fs_root(tbl, 1) != 2000 { return 9; }
+
+    // (10) The child should have copied the parent's fds = 3000.
+    if pt_get_fds(tbl, 1) != 3000 { return 10; }
+
+    return 0;
+}
