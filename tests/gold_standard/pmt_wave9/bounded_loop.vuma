@@ -1,0 +1,58 @@
+// bounded_loop — PMT Wave 9: loop fills state buffer up to a runtime count
+// Expected exit code: 45
+//
+// A `Buf` layout with `count` + `data: [u32; 8]`. A `while` loop fills
+// `data[0..N]` where N is a runtime count (passed as a parameter — here
+// `3`). The State Transform verifier proves each `data[i]` access within
+// the loop is within the data field's bounds (i < N ≤ 8 → i*4 + 4 ≤ 32).
+//
+// Under the Wave 9 dependent-state-types model, this loop body's safety
+// would be proved by linear arithmetic: `i < N` and `N ≤ 8` imply
+// `i*4 + 4 ≤ 32`, which is the proof obligation the new
+// `verify_dependent_transform(elem_size, count, offset, buffer_size)`
+// function checks. Because the only multiplication is `i * 4` (runtime *
+// constant) and the only addition is `offset + (count * elem_size)`, the
+// proof is decidable (Presburger arithmetic).
+//
+// Because full dependent types need parser support that's not yet added,
+// this test uses a fixed-size `[u32; 8]` array and a separate count field.
+// The State Transform verifier still proves the array accesses are within
+// the data field's bounds.
+//
+// fill(b, 3) writes data[0]=5, data[1]=15, data[2]=25; sum = 5+15+25 = 45.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via VerificationLevel::Pmt.
+//
+// VUMA Key Concepts:
+//   - while-loop bounded by a runtime parameter (N)
+//   - data[i] writes/reads inside the loop body
+//   - dependent-type proof obligation: i < N and N ≤ 8 imply i*4 + 4 ≤ 32
+//   - linear-arithmetic decidability (no non-linear term-to-term multiply)
+
+layout Buf = { count: u32, data: [u32; 8] }
+
+fn fill(s: State<Buf>, n: u32) {
+    s.count = n;
+    let i: u32 = 0;
+    while i < n {
+        s.data[i] = i * 10 + 5;  // 5, 15, 25, ...
+        i = i + 1;
+    }
+    return;
+}
+
+fn sum(s: State<Buf>) -> u32 {
+    let total: u32 = 0;
+    let i: u32 = 0;
+    while i < s.count {
+        total = total + s.data[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    fill(b, 3);  // writes 5, 15, 25 to data[0..3]
+    return sum(b);  // 5 + 15 + 25 = 45
+}

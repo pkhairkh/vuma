@@ -1,0 +1,42 @@
+// dynamic_array — PMT Wave 9: dynamic array pattern using State
+// Expected exit code: 60
+//
+// A `DynArr` layout with a `count` field (runtime count) and a fixed-size
+// `data: [u32; 8]` buffer (32 bytes). The "logical" array length is the
+// runtime `count` value (≤ 8). Under the Wave 9 dependent-state-types
+// model, this would be typed `State<List<N>>` where N is a runtime count;
+// the State Transform verifier proves `offset + (count * elem_size) ≤
+// buffer_size` using linear arithmetic (Presburger — decidable).
+//
+// Because full dependent types need parser support that's not yet added,
+// this test uses a fixed-size `[u32; 8]` array and tracks the count
+// separately in a sibling `count: u32` field. The State Transform verifier
+// still proves the array accesses are within the layout's bounds — the
+// proof obligation `offset + (count * 4) ≤ 32` holds for any count ≤ 8.
+//
+// Three elements are pushed (10, 20, 30) and summed: 10 + 20 + 30 = 60.
+//
+// `--pmt --verify` runs ONLY the 3 state verifiers via VerificationLevel::Pmt
+// — skipping the 5 pointer invariants that `Normal` would otherwise run.
+//
+// VUMA Key Concepts:
+//   - layout with array-typed field (`data: [u32; 8]`)
+//   - runtime count tracked in a sibling field (`count: u32`)
+//   - dependent-type proof obligation: count * 4 ≤ 32 (data field size)
+//   - all array writes/reads are within bounds
+
+layout DynArr = { count: u32, data: [u32; 8] }
+
+fn main() -> i32 {
+    let da = state_new(DynArr);
+    da.count = 0;
+    // "push" 3 elements (count tracked separately)
+    da.data[0] = 10;
+    da.count = 1;
+    da.data[1] = 20;
+    da.count = 2;
+    da.data[2] = 30;
+    da.count = 3;
+    // Sum of pushed elements: 10 + 20 + 30 = 60
+    return da.data[0] + da.data[1] + da.data[2];
+}

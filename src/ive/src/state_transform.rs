@@ -135,6 +135,71 @@ pub fn all_valid(results: &[StateTransformVerification]) -> bool {
     results.iter().all(|r| r.valid)
 }
 
+/// **Wave 9 — Dependent state types:** Verify that a dependent-array state
+/// transform is safe.
+///
+/// Checks the linear-arithmetic proof obligation:
+///   `offset + (count * elem_size) ≤ buffer_size`
+///
+/// This is decidable (Presburger arithmetic) because the only operations
+/// are addition and multiplication by a compile-time-known constant
+/// (`elem_size`). The count is a runtime value but it appears linearly
+/// (not multiplied by another runtime value), so the proof reduces to
+/// a simple bounds check on `count` against `buffer_size / elem_size`.
+///
+/// # Parameters
+///
+/// - `elem_size`: the static, compile-time-known size in bytes of each
+///   element (e.g., `4` for `State<List<u32>>`).
+/// - `count`: the runtime value of the count variable (e.g., the actual
+///   number of elements currently in the dynamic array).
+/// - `offset`: the byte offset of the array's start within the buffer.
+/// - `buffer_size`: the total size in bytes of the backing buffer.
+///
+/// # Returns
+///
+/// `true` if the access is within bounds (`offset + count*elem_size ≤
+/// buffer_size`); `false` otherwise.
+///
+/// # Decidability note
+///
+/// The proof is restricted to **linear** arithmetic — sizes, counts, and
+/// offsets are combined with `+` and `*` (where one operand is a constant).
+/// Non-linear dependencies (e.g., `count1 * count2`) are NOT supported and
+/// would make verification undecidable. The `RepD::DependentArray` variant
+/// enforces this by construction: it carries only `elem` (a static `RepD`)
+/// and `count_var` (a single runtime variable name).
+///
+/// # Example
+///
+/// ```
+/// use vuma_ive::state_transform::verify_dependent_transform;
+///
+/// // 10 u32 elements at offset 0 in a 40-byte buffer → safe.
+/// assert!(verify_dependent_transform(4, 10, 0, 40));
+/// // 11 u32 elements at offset 0 in a 40-byte buffer → out of bounds.
+/// assert!(!verify_dependent_transform(4, 11, 0, 40));
+/// // 5 u32 elements at offset 20 in a 40-byte buffer → exactly fits.
+/// assert!(verify_dependent_transform(4, 5, 20, 40));
+/// ```
+pub fn verify_dependent_transform(
+    elem_size: u64,
+    count: u64,
+    offset: u64,
+    buffer_size: u64,
+) -> bool {
+    // Linear arithmetic: prove the access is within bounds.
+    // This is decidable (Presburger arithmetic) because elem_size is a
+    // compile-time constant and count is a runtime variable — the only
+    // multiplication is `count * elem_size` (runtime * constant).
+    //
+    // We use saturating arithmetic to defend against overflow: if the
+    // computed size would overflow u64, the access is conservatively
+    // rejected (the saturating add will yield u64::MAX, which is > any
+    // realistic buffer_size).
+    offset.saturating_add(count.saturating_mul(elem_size)) <= buffer_size
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +282,87 @@ mod tests {
         assert_eq!(results[0].transform_kind, TransformKind::Reinterpret);
         assert_eq!(results[1].transform_kind, TransformKind::Copy);
         assert_eq!(results[2].transform_kind, TransformKind::Identity);
+    }
+
+    // =======================================================================
+    // Wave 9 — Dependent state types (verify_dependent_transform)
+    // =======================================================================
+
+    #[test]
+    fn wave9_dependent_transform_safe_in_bounds() {
+        // 10 u32 elements at offset 0 in a 40-byte buffer → safe.
+        assert!(verify_dependent_transform(4, 10, 0, 40));
+        // 1 element at offset 0 in a 4-byte buffer → safe.
+        assert!(verify_dependent_transform(4, 1, 0, 4));
+        // 5 elements at offset 20 in a 40-byte buffer → exactly fits.
+        assert!(verify_dependent_transform(4, 5, 20, 40));
+        // Zero elements (empty array) at any offset → safe.
+        assert!(verify_dependent_transform(4, 0, 0, 0));
+        assert!(verify_dependent_transform(4, 0, 100, 100));
+    }
+
+    #[test]
+    fn wave9_dependent_transform_unsafe_out_of_bounds() {
+        // 11 u32 elements at offset 0 in a 40-byte buffer → out of bounds.
+        assert!(!verify_dependent_transform(4, 11, 0, 40));
+        // 1 element at offset 4 in a 4-byte buffer → out of bounds.
+        assert!(!verify_dependent_transform(4, 1, 4, 4));
+        // 5 elements at offset 21 in a 40-byte buffer → 21 + 20 = 41 > 40.
+        assert!(!verify_dependent_transform(4, 5, 21, 40));
+        // 0 elements at offset past buffer end → out of bounds.
+        assert!(!verify_dependent_transform(4, 0, 41, 40));
+    }
+
+    #[test]
+    fn wave9_dependent_transform_exact_fit() {
+        // Exact fit: offset + count*elem_size == buffer_size.
+        assert!(verify_dependent_transform(1, 100, 0, 100));
+        assert!(verify_dependent_transform(8, 4, 0, 32));
+        assert!(verify_dependent_transform(8, 4, 16, 48)); // 16 + 32 = 48
+    }
+
+    #[test]
+    fn wave9_dependent_transform_overflow_safe() {
+        // Saturating arithmetic: a huge count would overflow u64 on
+        // multiplication. The verifier conservatively rejects the access
+        // (saturating to u64::MAX, which is > any realistic buffer_size).
+        let huge = u64::MAX;
+        // count = u64::MAX, elem_size = 8 → sat_mul gives u64::MAX
+        // offset + u64::MAX → sat_add gives u64::MAX
+        // u64::MAX > 40 → false.
+        assert!(!verify_dependent_transform(8, huge, 0, 40));
+        // count = u64::MAX / 8 + 1 (still overflows when * 8)
+        let big_count = u64::MAX / 8 + 1;
+        assert!(!verify_dependent_transform(8, big_count, 0, 100));
+        // Reasonable count with offset+size overflow: offset near u64::MAX.
+        assert!(!verify_dependent_transform(4, 10, u64::MAX - 10, 100));
+    }
+
+    #[test]
+    fn wave9_dependent_transform_zero_elem_size() {
+        // Zero-size element: any count is safe (size = 0).
+        assert!(verify_dependent_transform(0, 1000, 0, 0));
+        assert!(verify_dependent_transform(0, 1000, 0, 1));
+        // But offset must still be ≤ buffer_size.
+        assert!(!verify_dependent_transform(0, 0, 1, 0));
+    }
+
+    #[test]
+    fn wave9_dependent_transform_byte_elements() {
+        // Byte elements (elem_size = 1) — count == buffer_size.
+        assert!(verify_dependent_transform(1, 256, 0, 256));
+        assert!(!verify_dependent_transform(1, 257, 0, 256));
+        // Byte elements with offset.
+        assert!(verify_dependent_transform(1, 100, 100, 200));
+        assert!(!verify_dependent_transform(1, 101, 100, 200));
+    }
+
+    #[test]
+    fn wave9_dependent_transform_struct_elements() {
+        // Struct elements (elem_size = 8 for a 2x u32 struct).
+        // 4 structs at offset 0 in a 32-byte buffer → safe.
+        assert!(verify_dependent_transform(8, 4, 0, 32));
+        // 5 structs at offset 0 in a 32-byte buffer → 40 > 32.
+        assert!(!verify_dependent_transform(8, 5, 0, 32));
     }
 }
