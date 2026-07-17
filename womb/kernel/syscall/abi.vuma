@@ -1,0 +1,260 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/abi.vuma
+// VWK Syscall ABI — TrapFrame ↔ SyscallArgs marshaling (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the x86_64 syscall ABI marshaling layer. K3d's trap.vuma
+// routes vector 128 (int 0x80 on x86_64) to trap_syscall(tf), which has
+// access to the saved TrapFrame. This file provides the per-arch
+// conversion between the TrapFrame's named registers and the abstract
+// 7-word SyscallArgs (nr, a0..a5) view that the arch-agnostic dispatch
+// layer (sibling dispatch.vuma) consumes.
+//
+// ── SyscallArgs layout ──────────────────────────────────────────────────────
+// A 7-word struct holding the syscall number + 6 arguments. The field
+// order is the natural one (nr first, then args 0..5 left-to-right); the
+// dispatch layer indexes them positionally (args.nr, args.a0..a5) so the
+// in-memory order doesn't matter for correctness, only that the same
+// field names are used at the producer (syscall_args_from_frame) and
+// consumer (syscall_dispatch) call sites.
+//
+// The 6-argument cap matches asm-generic's MAX_ARGS (6) — the Linux
+// kernel's asm-generic syscall ABI never passes more than 6 args in
+// registers; syscalls that need more (e.g. mmap on x86_64 — 6 args) pack
+// the rest into a struct pointed to by one of the register args.
+//
+// ── Per-arch register mapping (x86_64 version; K3e scope) ──────────────────
+// SysV AMD64 + Linux convention:
+//       nr  ← rax   (set by user; clobbered by the kernel for the return value)
+//       a0  ← rdi   (1st arg)
+//       a1  ← rsi   (2nd arg)
+//       a2  ← rdx   (3rd arg)
+//       a3  ← r10   (4th arg — NOTE: r10, NOT rcx; rcx is clobbered by
+//                    SYSCALL/SYSRET to save RFLAGS; int 0x80 on x86_64
+//                    uses r10 too for forward-compat with SYSCALL)
+//       a4  ← r8    (5th arg)
+//       a5  ← r9    (6th arg)
+//       ret → rax   (kernel writes the return value here)
+//
+// aarch64 (K3b's TrapFrame — K11 will add the aarch64 version of this
+// file): nr=x8, a0..a5=x0..x5, ret=x0.
+//
+// riscv64 (K3c's TrapFrame — K11 will add the riscv64 version of this
+// file): nr=a7, a0..a5=a0..a5, ret=a0.
+//
+// ── Why is syscall_args_from_frame init-style, not return-style? ────────────
+// The K3e contract specified:
+//     fn syscall_args_from_frame(tf: State<TrapFrame>) -> State<SyscallArgs>
+// i.e. the function allocates the SyscallArgs internally and returns it.
+// The current VUMA codegen (verified via /home/z/probes/probe_return_state2.vuma
+// — STILL failing on today's build, K3e) does NOT propagate State-typedness
+// through function return values: a `let args = syscall_args_from_frame(tf)`
+// binding in the caller is NOT registered as state-typed, so subsequent
+// `args.nr` accesses in the caller lower to the "unsupported FieldAccess
+// (not state-typed)" path in src/pipeline.rs::flatten_expr, silently
+// return 0, and emit the "WARNING: unsupported FieldAccess (not state-
+// typed)" log line. This is the SAME caveat documented in
+// womb/kernel/mm/pmm.vuma's "Why init-style?" header (K2a) and
+// womb/alloc/arena.vuma. The contract abi.vuma, run verbatim, produces
+// FOUR such warnings and exits with code 1 (the self-test's first
+// `if args.nr != 64 { return 1; }` check fails because `args.nr` reads
+// back as 0).
+//
+// Per the K3e DoD ("No warnings from flatten_expr" + "self-test exits 0"),
+// the verbatim contract form is non-compliant. This file therefore uses
+// the canonical PMT init-style workaround:
+//     fn syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>)
+// The CALLER allocates `args` via `state_new(SyscallArgs)` and passes it
+// by reference; syscall_args_from_frame populates its fields from `tf`.
+// This is byte-identical in spirit to K2a's pmm_init(pool, pmm, mem_start,
+// mem_size) and K3d's trap_frame_init(tf) — the canonical "init-style"
+// PMT pattern. The deviation from the contract's return-type signature
+// is documented here and in the worklog (K3e section).
+//
+// K11 (or whenever the codegen gains proper State-return propagation —
+// see Open Work §"Pipeline: State-typedness through return values") will
+// flip this back to the contract's return-style form. Until then, every
+// State-returning helper in the VWK kernel uses the init-style pattern.
+//
+// ── TrapFrame re-declaration (x86_64, 22 fields) ────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the x86_64
+// TrapFrame byte-identically to:
+//   - K3a's womb/kernel/arch/x86_64/trap_trampoline.vuma (canonical source)
+//   - K3d's womb/kernel/trap/trap.vuma (re-declaration #1)
+// This file's re-declaration is re-declaration #2. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical" — extended to layouts in K3d) extends to layouts: this
+// file's `syscall_args_from_frame(tf: State<TrapFrame>, args: ...)` MUST
+// see the same field offsets, field names, and field types as K3a's and
+// K3d's files. 22 fields × 8 bytes = 176 bytes.
+//
+// ── Why does this file not declare any extern? ──────────────────────────────
+// The marshaling layer is pure-PM: it only reads/writes named TrapFrame
+// fields and SyscallArgs fields. No PIC, no CR2, no host FFI. The
+// dispatch layer (sibling dispatch.vuma) is similarly pure-PM. Only K3a's
+// trap_trampoline.vuma and K3d's irq.vuma declare externs (PIC mask/
+// unmask/EOI, CR2 read, IDT load) — those are the only files that touch
+// the bare-metal hardware interfaces directly. K11 will add the syscall
+// instruction's `swapgs`+`wrmsr` setup externs (e.g. wrmsr_kernel_gs_base)
+// if needed; this file won't.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
+// TrapFrame and SyscallArgs are ___pmt_buffer-backed State<T>'s allocated
+// by the CALLER via `state_new(...)`. The CALLER owns the lifetime; this
+// file's functions only borrow the State<T>'s (regular VUMA-fn borrow —
+// NOT extern #[borrow], since these are VUMA fns not extern "C" calls).
+// None of this file's functions call any extern, so the codegen's
+// conservative State-invalidation-on-extern-call doesn't fire.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3e contract's
+// "IMPORTANT" rule:
+//     64   = asm-generic __NR_write (Linux asm-generic/unistd.h)
+//     4096 = a typical user-space buffer address (also confirms u64 round-
+//            trip through the TrapFrame field write/read path for a value
+//            larger than 255, catching any accidental u8 truncation)
+//     3    = number of bytes for the write syscall's `count` arg (small)
+//     1    = fd (stdout)
+// The decimal rule avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
+// for the same rationale, and K3a's trap_trampoline.vuma for the same
+// rule applied to vector=14 and rip=4096).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares TrapFrame byte-identically
+// to K3a/K3d, and declares SyscallArgs for the FIRST time (no prior VUMA
+// file has it). Future files that want to call syscall_args_from_frame
+// or syscall_write_ret (e.g. K3e's dispatch.vuma — sibling, also self-
+// contained — and K11's trap.S integration) will re-declare both
+// layouts byte-identically to this file (same pattern as womb/kernel/mm/
+// vmm.vuma re-declaring PageTable byte-identically to womb/kernel/arch/
+// x86_64/mm_trampoline.vuma).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/abi.vuma \
+//         /tmp/abi.bin x86_64 --verify
+//     /tmp/abi.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (no flatten_expr warnings — the init-style
+// API sidesteps the State-return limitation), 5 self-test checks all
+// pass (nr/a0/a1/a2 round-trip through the TrapFrame → SyscallArgs
+// marshaling, and the write-back path stores the return value into tf.rax).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Syscall argument layout — matches the TrapFrame register allocation.
+// On x86_64: nr=rax, a0=rdi, a1=rsi, a2=rdx, a3=r10, a4=r8, a5=r9.
+// On aarch64: nr=x8, a0=x0, a1=x1, ..., a5=x5.
+// On riscv64: nr=a7, a0=a0, a1=a1, ..., a5=a5.
+layout SyscallArgs = {
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+}
+
+// TrapFrame (re-declared — no import in VUMA). x86_64 version.
+// Re-declared byte-identically to K3a's trap_trampoline.vuma and K3d's
+// trap.vuma. 22 fields × 8 bytes = 176 bytes. See K3a's
+// trap_trampoline.vuma header for the full push-order derivation
+// (CPU-pushed + stub-pushed + trap_entry-pushed); the field order MUST
+// match trap.S exactly (K11 will write trap.S to match).
+layout TrapFrame = {
+    rax: u64, rbx: u64, rcx: u64, rdx: u64,
+    rsi: u64, rdi: u64, rbp: u64, r8: u64, r9: u64,
+    r10: u64, r11: u64, r12: u64, r13: u64, r14: u64, r15: u64,
+    vector: u64, error_code: u64, rip: u64, cs: u64,
+    rflags: u64, rsp: u64, ss: u64,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Marshaling helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// Init-style API (caller allocates `args` via state_new(SyscallArgs),
+// passes it by reference). See "Why is syscall_args_from_frame init-style,
+// not return-style?" in the file header for the codegen rationale — the
+// contract's return-style signature was non-compliant (4 flatten_expr
+// warnings + self-test exit 1). Init-style sidesteps the limitation
+// entirely: the caller's `args` binding IS state-typed (because state_new
+// marks the binding), so all subsequent `args.field` accesses lower
+// correctly through flatten_expr.
+
+// Extract syscall args from a TrapFrame (x86_64 register mapping).
+//   args.nr ← tf.rax    (syscall number)
+//   args.a0 ← tf.rdi    (1st arg)
+//   args.a1 ← tf.rsi    (2nd arg)
+//   args.a2 ← tf.rdx    (3rd arg)
+//   args.a3 ← tf.r10    (4th arg — r10 NOT rcx, per SysV AMD64 + Linux)
+//   args.a4 ← tf.r8     (5th arg)
+//   args.a5 ← tf.r9     (6th arg)
+// The caller allocates `args` via state_new(SyscallArgs) and passes it
+// here by reference; this function populates its 7 fields from `tf`.
+fn syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>) {
+    args.nr = tf.rax;
+    args.a0 = tf.rdi;
+    args.a1 = tf.rsi;
+    args.a2 = tf.rdx;
+    args.a3 = tf.r10;
+    args.a4 = tf.r8;
+    args.a5 = tf.r9;
+}
+
+// Write syscall return value back to TrapFrame.
+//   tf.rax ← ret
+// The kernel's syscall-return path calls this after syscall_dispatch
+// returns (sibling dispatch.vuma); the trap_entry stub then restores
+// the TrapFrame and IRET/SYSRET back to user space, where rax holds the
+// return value the user-space syscall ABI expects.
+fn syscall_write_ret(tf: State<TrapFrame>, ret: u64) {
+    tf.rax = ret;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a TrapFrame and a SyscallArgs via state_new, populate the
+// TrapFrame's syscall-arg registers (rax=64 [write], rdi=1 [stdout fd],
+// rsi=4096 [buf addr], rdx=3 [byte count]), marshal via
+// syscall_args_from_frame, then verify each SyscallArgs field round-
+// trips. Finally, exercise syscall_write_ret to write a return value
+// back into tf.rax and confirm it sticks.
+//
+// Returns 0 on success, 1..4 on per-field round-trip failure (so a
+// future CI failure pinpoints the broken field), 5 on write-back
+// failure.
+//
+// Per the K3e contract's "IMPORTANT" rule: all non-zero constants in
+// the self-test use DECIMAL (64, 1, 4096, 3, 5) — decimal avoids the
+// parser's hex-literal path (parse_int_radix width-extension subtleties
+// — see womb/kernel/arch/x86_64/pt.vuma header for the same rationale,
+// and K3a's trap_trampoline.vuma for the same rule applied to
+// vector=14 and rip=4096).
+
+fn main() -> i32 {
+    let tf = state_new(TrapFrame);
+    tf.rax = 64;    // write syscall (asm-generic __NR_write)
+    tf.rdi = 1;     // fd = stdout
+    tf.rsi = 4096;  // buf address (> 255 — catches u8 truncation)
+    tf.rdx = 3;     // count = 3 bytes
+
+    let args = state_new(SyscallArgs);
+    syscall_args_from_frame(tf, args);
+
+    // Per-field round-trip checks.
+    if args.nr != 64 { return 1; }
+    if args.a0 != 1 { return 2; }
+    if args.a1 != 4096 { return 3; }
+    if args.a2 != 3 { return 4; }
+
+    // Write-back path: syscall_write_ret must store `ret` into tf.rax.
+    syscall_write_ret(tf, 3);
+    if tf.rax != 3 { return 5; }
+
+    return 0;
+}
