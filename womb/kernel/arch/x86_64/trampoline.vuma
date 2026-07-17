@@ -1,0 +1,101 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/x86_64/trampoline.vuma
+// x86_64 hosted-mode FFI trampoline.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This is the HOSTED trampoline: every `extern "C"` function declared here is
+// a Linux syscall stub pre-registered by the x86_64 backend in
+// `src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs`. Each stub
+// either:
+//   • is a 3-instruction "mov eax, #nr ; syscall ; ret" sequence (for
+//     syscalls taking ≤3 args, where the SysV-ABI arg registers
+//     RDI/RSI/RDX already match the syscall-ABI arg registers), or
+//   • shuffles the 4th arg from RCX (SysV) to R10 (syscall ABI) before
+//     executing `syscall` (mmap, mremap, clone, wait4, futex, ...).
+//
+// The kernel logic (womb/kernel/hosted/host.vuma and later kernel/*.vuma
+// modules) calls these externs via the `Address`/`i64`/`u64` argument types.
+// All pointer-typed arguments are `Address` (a u64-sized raw address) — there
+// is no `*T` / `&x` syntax anywhere in this file (PMT-only).
+//
+// ── Wave K11 (bare-metal parity) ───────────────────────────────────────────
+// Wave K11 will add a BARE-METAL trampoline alongside this one. The bare-metal
+// variant will declare externs for direct MMIO (UART write at fixed physical
+// addresses) and inline `syscall`-instruction stubs for trap-gated kernel
+// services. The two trampolines will share a common interface contract so
+// the rest of the kernel (host.vuma / console.vuma / ...) is identical
+// between hosted and bare-metal builds.
+//
+// ── Pre-registered stubs referenced below ─────────────────────────────────
+//   write       — sys_write   (nr 1)  simple 3-arg stub
+//   read        — sys_read    (nr 0)  simple 3-arg stub
+//   exit        — sys_exit    (nr 60) no-ret stub (ends with INT3 guard)
+//   getpid      — sys_getpid  (nr 39) simple no-arg stub
+//   fork        — sys_fork    (nr 57) simple no-arg stub
+//   waitpid     — sys_wait4   (nr 61) 3-arg + rusage=NULL stub
+//   mmap        — sys_mmap    (nr 9)  6-arg, RCX→R10 shuffle for arg4
+//   munmap      — sys_munmap  (nr 11) simple 2-arg stub
+//   mremap      — sys_mremap  (nr 25) 5-arg, RCX→R10 shuffle for arg4
+//   __vuma_argc — non-syscall; reads argc from BSS slot set up by _start
+//   __vuma_argv — non-syscall; reads argv from BSS slot set up by _start
+//
+// Any extern name NOT pre-registered resolves to `__ffi_fallback_stub`
+// (xor eax, eax; ret → returns 0) at link time on x86_64, with a runtime
+// warning emitted by encode_program. So missing externs do not hard-fail
+// compile+verify — they just return 0 at runtime.
+
+extern "C" {
+    // — Console I/O (hosted: writes to fd 1/2, reads from fd 0) —
+    // SysV AMD64: RDI=fd, RSI=buf, RDX=count. All three args already match
+    // the syscall ABI; the stub is "mov eax,#1; syscall; ret" (write) /
+    // "mov eax,#0; syscall; ret" (read). Returns the byte count
+    // transferred, or a negative errno on failure.
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+
+    // — Process —
+    // exit(code) does not return; the stub ends with INT3 as a safety guard.
+    // getpid/fork are no-arg simple stubs. waitpid(pid, status, options) is
+    // the 3-arg wait4 wrapper (rusage=NULL is set by the stub).
+    fn exit(code: i64);
+    fn getpid() -> i64;
+    fn fork() -> i64;
+    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+
+    // — Memory (hosted: real Linux mmap / munmap / mremap) —
+    // mmap(addr, length, prot, flags, fd, offset) — 6 args. SysV puts arg4
+    // (flags) in RCX; syscall ABI wants it in R10. Stub emits
+    // "mov r10, rcx ; mov eax,9 ; syscall ; ret". Args 1/2/3/5/6 are
+    // already in the correct registers (RDI/RSI/RDX/R8/R9).
+    // munmap(addr, length) — 2-arg simple stub ("mov eax,11; syscall; ret").
+    // mremap(old_addr, old_size, new_size, flags, new_addr) — 5 args. Arg4
+    // (flags) shuffled RCX→R10; arg5 (new_addr) already in R8.
+    // Argument-flag values (decimal, since VUMA accepts both 0x.. and
+    // decimal):
+    //   PROT_READ=1, PROT_WRITE=2 → prot = 3
+    //   MAP_PRIVATE=2, MAP_ANONYMOUS=32 → flags = 34
+    //   fd = -1, offset = 0  for anonymous mappings
+    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    fn munmap(addr: Address, length: u64) -> i64;
+    fn mremap(old_addr: Address, old_size: u64, new_size: u64, flags: i32, new_addr: Address) -> Address;
+
+    // — Argument access (pre-loaded by _start stub) —
+    // __vuma_argc / __vuma_argv are NOT syscalls — they read from a 16-byte
+    // BSS slot at the start of ___pmt_buffer (or BSS), populated by the
+    // _start stub at process entry. argc is stored as a u64 (sign-extended
+    // from i32 by the _start stub), argv as the raw argv[] pointer. Both
+    // stubs load the 8-byte slot into RAX and return.
+    fn __vuma_argc() -> i64;
+    fn __vuma_argv() -> Address;
+}
+
+// ── main entry stub ──────────────────────────────────────────────────────────
+// Pure declaration module (extern block only, no top-level execution). The
+// compiler requires a `fn main()` entry to compile as a standalone program;
+// the real kmain (K1d) lives in womb/kernel/kernel.vuma and will call the
+// externs declared here via the host abstraction layer in
+// womb/kernel/hosted/host.vuma.
+
+fn main() -> i32 {
+    return 0;
+}
