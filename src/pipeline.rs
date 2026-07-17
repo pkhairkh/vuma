@@ -2480,7 +2480,8 @@ fn convert_node_to_statement_with_externs(
         NodePayload::StateInit(_)
         | NodePayload::StateRead(_)
         | NodePayload::StateWrite(_)
-        | NodePayload::StateTransform(_) => Vec::new(),
+        | NodePayload::StateTransform(_)
+        | NodePayload::ForeignConsume(_) => Vec::new(),
     }
 }
 

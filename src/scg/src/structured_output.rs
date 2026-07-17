@@ -1039,6 +1039,9 @@ fn node_operation(node: &NodeData) -> String {
         NodePayload::StateTransform(s) => {
             format!("state_transform({} -> {})", s.input_layout, s.output_layout)
         }
+        NodePayload::ForeignConsume(s) => {
+            format!("foreign_consume({})", s.layout_name)
+        }
     }
 }
 

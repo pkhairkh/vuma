@@ -377,7 +377,8 @@ fn process_node(
         NodeType::StateInit
         | NodeType::StateRead
         | NodeType::StateWrite
-        | NodeType::StateTransform => {
+        | NodeType::StateTransform
+        | NodeType::ForeignConsume => {
             process_passthrough(scg, ctx, node)?;
         }
     }

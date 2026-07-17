@@ -32,6 +32,7 @@ use crate::node::{
     DeallocationNode, EffectNode, EnumDefNode, EnumVariantInfo, MatchArmInfo,
     MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
     ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
+    ForeignConsumeNode,
     StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
@@ -68,6 +69,7 @@ const NODE_TYPE_STATE_INIT: u32 = 15;
 const NODE_TYPE_STATE_READ: u32 = 16;
 const NODE_TYPE_STATE_WRITE: u32 = 17;
 const NODE_TYPE_STATE_TRANSFORM: u32 = 18;
+const NODE_TYPE_FOREIGN_CONSUME: u32 = 19;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -371,6 +373,7 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::StateRead => NODE_TYPE_STATE_READ,
         NodeType::StateWrite => NODE_TYPE_STATE_WRITE,
         NodeType::StateTransform => NODE_TYPE_STATE_TRANSFORM,
+        NodeType::ForeignConsume => NODE_TYPE_FOREIGN_CONSUME,
     }
 }
 
@@ -395,6 +398,7 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_STATE_READ => Ok(NodeType::StateRead),
         NODE_TYPE_STATE_WRITE => Ok(NodeType::StateWrite),
         NODE_TYPE_STATE_TRANSFORM => Ok(NodeType::StateTransform),
+        NODE_TYPE_FOREIGN_CONSUME => Ok(NodeType::ForeignConsume),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -1001,6 +1005,11 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
             w.write_string(&s.output_layout);
             w.write_u32_le(s.result_vreg);
         }
+        NodePayload::ForeignConsume(s) => {
+            w.write_u32_le(NODE_TYPE_FOREIGN_CONSUME);
+            w.write_u32_le(s.input_vreg);
+            w.write_string(&s.layout_name);
+        }
     }
 }
 
@@ -1325,6 +1334,14 @@ fn read_payload(
                 input_layout,
                 output_layout,
                 result_vreg,
+            }))
+        }
+        NodeType::ForeignConsume => {
+            let input_vreg = reader.read_u32_le(&format!("{}.input_vreg", context))?;
+            let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
+            Ok(NodePayload::ForeignConsume(ForeignConsumeNode {
+                input_vreg,
+                layout_name,
             }))
         }
         // Womb data model variants were removed; tags 14..=25 now fall
@@ -1656,6 +1673,9 @@ fn format_node_label(node: &NodeData) -> String {
         }
         NodePayload::StateTransform(s) => {
             format!("state_transform({} -> {})", s.input_layout, s.output_layout)
+        }
+        NodePayload::ForeignConsume(s) => {
+            format!("foreign_consume({})", s.layout_name)
         }
     };
 

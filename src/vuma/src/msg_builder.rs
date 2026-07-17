@@ -516,7 +516,8 @@ impl MsgBuilder {
             ScgNodeType::StateInit
             | ScgNodeType::StateRead
             | ScgNodeType::StateWrite
-            | ScgNodeType::StateTransform => ScgNodeMapping::None,
+            | ScgNodeType::StateTransform
+            | ScgNodeType::ForeignConsume => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);
