@@ -80,6 +80,11 @@ pub enum NodeType {
     /// A state transformation node (PMT — reinterprets a buffer from one
     /// layout to another, e.g. parsing raw bytes into a struct).
     StateTransform,
+    /// A foreign-consume node (FFI — marks a State as consumed by a foreign
+    /// close-call, e.g. `sqlite3_close`). The existing `state_write`
+    /// verifier treats this the same as a `StateTransform` consume: any
+    /// subsequent read/write to the consumed vreg is a linearity error.
+    ForeignConsume,
 }
 
 impl std::fmt::Display for NodeType {
@@ -104,6 +109,7 @@ impl std::fmt::Display for NodeType {
             NodeType::StateRead => write!(f, "StateRead"),
             NodeType::StateWrite => write!(f, "StateWrite"),
             NodeType::StateTransform => write!(f, "StateTransform"),
+            NodeType::ForeignConsume => write!(f, "ForeignConsume"),
         }
     }
 }
@@ -198,6 +204,8 @@ pub enum NodePayload {
     StateWrite(StateWriteNode),
     /// Payload for `NodeType::StateTransform`.
     StateTransform(StateTransformNode),
+    /// Payload for `NodeType::ForeignConsume`.
+    ForeignConsume(ForeignConsumeNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -752,6 +760,21 @@ pub struct StateTransformNode {
     pub output_layout: String,
     /// Virtual register receiving the transformed state.
     pub result_vreg: u32,
+}
+
+/// Data specific to a foreign-consume node (`NodeType::ForeignConsume`).
+///
+/// Marks a State as consumed by a foreign close-call (e.g. `sqlite3_close`).
+/// The existing `state_write` verifier treats this the same as a
+/// `StateTransform` consume — any subsequent read/write to `input_vreg`
+/// is a linearity error. This lets VUMA enforce linear ownership of opaque
+/// C handles (sqlite3*, SSL_CTX*, GLuint) without a new verifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForeignConsumeNode {
+    /// Virtual register holding the State being consumed (closed).
+    pub input_vreg: u32,
+    /// Name of the State's layout (for diagnostics).
+    pub layout_name: String,
 }
 
 #[cfg(test)]

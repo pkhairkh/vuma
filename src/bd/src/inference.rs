@@ -407,7 +407,8 @@ impl BDInferenceEngine {
             NodeType::StateInit
             | NodeType::StateRead
             | NodeType::StateWrite
-            | NodeType::StateTransform => self.compute_phantom_bd(scg, node_id, bd_map),
+            | NodeType::StateTransform
+            | NodeType::ForeignConsume => self.compute_phantom_bd(scg, node_id, bd_map),
         }
     }
 
@@ -881,7 +882,8 @@ impl BDInferenceEngine {
             NodeType::StateInit
             | NodeType::StateRead
             | NodeType::StateWrite
-            | NodeType::StateTransform => None,
+            | NodeType::StateTransform
+            | NodeType::ForeignConsume => None,
         }
     }
 

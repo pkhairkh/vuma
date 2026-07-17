@@ -1061,7 +1061,7 @@ impl InvariantAggregator {
             verify_all_transforms, LayoutInfo as TransformLayout, FieldInfo as TransformField,
         };
         use std::collections::{HashMap, HashSet};
-        use vuma_scg::node::{NodePayload, NodeType, StateReadNode, StateWriteNode, StateTransformNode};
+        use vuma_scg::node::{NodePayload, NodeType, StateReadNode, StateWriteNode, StateTransformNode, ForeignConsumeNode};
 
         let scg = &input.scg;
 
@@ -1170,6 +1170,21 @@ impl InvariantAggregator {
                         .or_insert_with(|| input_layout.clone());
                     consumed_vars.insert(in_var);
                     transforms.push((input_layout.clone(), output_layout.clone()));
+                }
+                NodePayload::ForeignConsume(fc) => {
+                    // A #[foreign_consume] call (e.g. sqlite3_close) linearly
+                    // consumes its State argument, exactly like a StateTransform.
+                    // The existing state_write linearity check then catches any
+                    // post-close read/write as a use-after-consume error.
+                    let ForeignConsumeNode {
+                        input_vreg,
+                        layout_name,
+                    } = fc;
+                    let in_var = format!("_state_{}", input_vreg);
+                    state_var_layouts
+                        .entry(in_var.clone())
+                        .or_insert_with(|| layout_name.clone());
+                    consumed_vars.insert(in_var);
                 }
                 NodePayload::StateRead(r) => {
                     let StateReadNode {
