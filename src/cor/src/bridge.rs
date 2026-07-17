@@ -93,7 +93,11 @@ fn map_node_type(
         | vuma_scg::NodeType::StateRead
         | vuma_scg::NodeType::StateWrite
         | vuma_scg::NodeType::StateTransform
-        | vuma_scg::NodeType::ForeignConsume => NodeKind::Memory,
+        | vuma_scg::NodeType::ForeignConsume
+        | vuma_scg::NodeType::ArenaNew
+        | vuma_scg::NodeType::ArenaAlloc
+        | vuma_scg::NodeType::ArenaGrow
+        | vuma_scg::NodeType::ArenaFree => NodeKind::Memory,
     }
 }
 
