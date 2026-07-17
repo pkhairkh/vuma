@@ -604,6 +604,7 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::StructAccess(_) => {}
                 ScgStatement::EnumAccess(_) => {}
                 ScgStatement::GetAddress(_) => {}
+                ScgStatement::ForeignConsume(_) => {}
             }
         }
     }

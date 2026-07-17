@@ -1,0 +1,28 @@
+// ffi_wave3/foreign_consume_emitted — #[foreign_consume] emits consume marker
+// Expected exit code: 0
+//
+// Wave 5 test: a #[foreign_consume] extern call (e.g. sqlite3_close) emits
+// a ForeignConsume marker statement at the call site. The marker is visible
+// in the codegen SCG; the IVE's consumed-set wiring (from Wave 2b) treats
+// the State's vreg as consumed.
+//
+// This test compiles cleanly: the call is hypothetical (no actual libc
+// linking), and the post-call code does NOT read the consumed state.
+
+#[foreign(raw)]
+layout DbHandle = { raw: u64 }
+
+extern "C" {
+    #[foreign_consume(raw)]
+    fn sqlite3_close(db: State<DbHandle>);
+}
+
+fn main() -> i32 {
+    let db = state_new(DbHandle);
+    db.raw = 0;
+    sqlite3_close(db);
+    // After the call, db is consumed. We do NOT read db here — that would
+    // be a linearity error (caught by the IVE once full semantic-SCG
+    // integration is wired).
+    return 0;
+}

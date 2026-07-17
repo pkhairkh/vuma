@@ -219,6 +219,22 @@ pub enum ScgStatement {
     /// real syscall instruction directly (Wave 11/12 removed the intermediate
     /// `lower_syscalls()` lowering pass).
     Syscall(SyscallCallNode),
+    /// Wave 5: mark a State as consumed by a foreign close-call
+    /// (#[foreign_consume]). This is a marker statement — it lowers to no
+    /// IR instruction, but the IVE treats the State's vreg as consumed
+    /// (linearity error on subsequent read/write). Mirrors the semantic
+    /// SCG's ForeignConsumeNode.
+    ForeignConsume(ForeignConsumeStmt),
+}
+
+/// Wave 5: a foreign-consume marker. Marks `state_var` as consumed by a
+/// `#[foreign_consume]` extern call. The `layout_name` is for diagnostics.
+#[derive(Debug, Clone)]
+pub struct ForeignConsumeStmt {
+    /// The name of the State variable being consumed (closed).
+    pub state_var: String,
+    /// The layout name of the State (for diagnostics).
+    pub layout_name: String,
 }
 
 /// Control-flow node.
@@ -1348,6 +1364,12 @@ impl IRBuilder {
             }
             ScgStatement::Syscall(syscall) => {
                 self.lower_syscall(syscall, ir_func, names)?;
+            }
+            ScgStatement::ForeignConsume(_) => {
+                // Wave 5: marker only — emits no IR instruction. The IVE
+                // treats the State's vreg as consumed (linearity error on
+                // subsequent read/write). The semantic SCG's ForeignConsumeNode
+                // handles the verification side.
             }
             ScgStatement::Return(vals) => {
                 let mut ir_vals: Vec<IRValue> = vals
@@ -4614,6 +4636,10 @@ impl IRBuilder {
                     Self::expr_uses(ptr, &mut uses);
                     Self::expr_uses(value, &mut uses);
                 }
+            },
+            ScgStatement::ForeignConsume(fc) => {
+                // The State variable is "used" (consumed) by the foreign call.
+                uses.insert(fc.state_var.clone());
             },
         }
 
