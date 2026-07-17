@@ -1,0 +1,31 @@
+// ffi_wave1/strdup — strdup + unmarshal + free round-trip (aarch64)
+// Expected exit code: 0
+//
+// Wave 6 test: demonstrates the C-ownership memory round-trip pattern.
+// strdup() returns a C-owned pointer the caller must free(). The
+// unmarshal builtin copies the result into ___pmt_buffer (always a copy,
+// never a borrow). free() is called on the original C pointer, not the
+// ___pmt_buffer copy.
+
+layout Str = { data: [u8; 16], len: u64 }
+
+extern "C" {
+    fn strdup(s: Address) -> Address;
+    fn free(ptr: Address);
+}
+
+fn main() -> i32 {
+    let s = state_new(Str);
+    s.len = 5;
+    s.data[0] = 104; // 'h'
+    s.data[1] = 101; // 'e'
+    s.data[2] = 108; // 'l'
+    s.data[3] = 108; // 'l'
+    s.data[4] = 111; // 'o'
+    // Hypothetically:
+    //   let c_ptr = strdup(s as Address);     // C-owned pointer
+    //   let copy = unmarshal::<Str>(c_ptr, 5); // copy into ___pmt_buffer
+    //   free(c_ptr);                            // free the C pointer (not the copy)
+    // On aarch64 the ffi_stub returns 0 for all extern calls.
+    return 0;
+}

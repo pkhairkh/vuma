@@ -1,0 +1,31 @@
+// ffi_wave1/write_real — real write() call via FFI (aarch64)
+// Expected exit code: 0
+//
+// Wave 6 test: declares write() as an extern "C" function and calls it.
+// On aarch64, the backend's ffi_stub resolves unresolved extern calls to
+// a no-op returning 0, so the program runs cleanly. On x86_64 (which lacks
+// the ffi_stub), this would require linking against libc.
+//
+// This test demonstrates the FFI declaration + call site compiles and runs.
+// The #[borrow] attribute declares that write() reads the buffer but does
+// not mutate it or hold the pointer — the state is preserved after.
+
+layout IoBuf = { len: u64, data: [u8; 16] }
+
+extern "C" {
+    #[borrow]
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+fn main() -> i32 {
+    let buf = state_new(IoBuf);
+    buf.len = 16;
+    buf.data[0] = 72;  // 'H'
+    buf.data[1] = 105; // 'i'
+    // Call write(1, buf, 16). On aarch64 the ffi_stub returns 0 (no real
+    // output); when linked against libc, this writes "Hi..." to stdout.
+    let n = write(1, buf as Address, 16);
+    // buf is #[borrow] — preserved after the call. buf.len is still valid.
+    if buf.len != 16 { return 1; }
+    return n as i32;  // 0 on aarch64 (ffi_stub)
+}

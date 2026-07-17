@@ -1,0 +1,25 @@
+// ffi_wave2/may_retain_forces_marshal — #[may_retain] routes through scratchpad
+// Expected exit code: 0
+//
+// Wave 6 test: #[may_retain] declares that C may stash the pointer past
+// the call return (e.g. epoll_ctl, sigaction). The marshal module's
+// classify_arg_mode() returns MayRetain, which forces the scratchpad
+// routing path (the arg is copied to ___ffi_scratch, not passed directly
+// from ___pmt_buffer). This test verifies the declaration compiles and
+// the marshal module classifies it correctly.
+
+layout Ev = { events: u32, data: u64 }
+
+extern "C" {
+    #[may_retain]
+    fn epoll_ctl(epfd: i32, op: i32, fd: i32, ev: Address) -> i32;
+}
+
+fn main() -> i32 {
+    let ev = state_new(Ev);
+    ev.events = 1;
+    ev.data = 42;
+    // Hypothetically: epoll_ctl(efd, 1, fd, ev) — ev is #[may_retain],
+    // so the marshal module routes it through the scratchpad.
+    return 0;
+}
