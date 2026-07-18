@@ -263,6 +263,7 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
     // G7: if the operand type is F32/F64, fold using f64 arithmetic.
     if let Some(IRType::F32) | Some(IRType::F64) = ty {
         let is_f64 = matches!(ty, Some(IRType::F64));
+<<<<<<< Updated upstream
         // All float literals in VUMA are f64 at the AST level, stored as
         // f64 bits in i64 immediates. For f32 operations, we must narrow
         // the f64 to f32 first (NOT reinterpret the low 32 bits as f32,
@@ -292,6 +293,10 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
                 f64::from_bits(rhs as u64) as f32 as f64
             }
         };
+=======
+        let lf = if is_f64 { f64::from_bits(lhs as u64) } else { f32::from_bits(lhs as u32) as f64 };
+        let rf = if is_f64 { f64::from_bits(rhs as u64) } else { f32::from_bits(rhs as u32) as f64 };
+>>>>>>> Stashed changes
         let result: f64 = match op {
             BinOpKind::Add => lf + rf,
             BinOpKind::Sub => lf - rf,

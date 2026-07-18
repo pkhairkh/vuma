@@ -139,7 +139,11 @@ impl Fpr {
 /// IR instruction's emission without spilling.
 const FA: Fpr = Fpr::F0; // FP accumulator / result
 const FB: Fpr = Fpr::F1; // FP second operand
+<<<<<<< Updated upstream
 const FC: Fpr = Fpr::F2; // FP comparison-result / scratch / negative-clamp
+=======
+const FC: Fpr = Fpr::F2; // FP third scratch (used by FloatToUInt negative-clamp)
+>>>>>>> Stashed changes
 
 // ===========================================================================
 // Instruction enum (mnemonic / Display / encode)
