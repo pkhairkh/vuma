@@ -1,0 +1,580 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/wasm32/sched_hal.vuma
+// VWK Wasm32 Cooperative Scheduling HAL (PMT-pure).
+// Wave R4d.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Wasm32 uses cooperative scheduling (no preemption). The host event loop
+// calls wasm_sched_loop periodically. For asyncify-based preemption, see
+// K13+.
+//
+// ── Why cooperative? ────────────────────────────────────────────────────────
+// Wasm32 (the WebAssembly backend) is a stack-based VM that runs inside
+// a host (browser, JS runtime, or standalone wasm runtime like Wasmtime
+// / Wasmer). The wasm spec has no concept of:
+//   - hardware interrupts (no IDT, no GIC, no PLIC)
+//   - timer-driven preemption (no per-CPU tick the wasm guest can hook)
+//   - privileged modes (no user/kernel split; all wasm code is "user")
+// So the canonical R4a+b scheduler surface — designed around a timer IRQ
+// that calls sched_tick + schedule() — does NOT map directly onto wasm.
+// The closest wasm-native analogue is cooperative scheduling: each task
+// runs until it voluntarily yields (via the host_yield extern below),
+// at which point the host event loop picks the next task.
+//
+// ── The host_yield contract ─────────────────────────────────────────────────
+// `host_yield()` is a wasm import (declared as `extern "C" fn host_yield()`
+// below — VUMA's `extern "C"` block is the canonical way to declare a
+// foreign import; the wasm32 backend lowers this to a wasm `import`
+// declaration in the import section of the wasm module). The host
+// provides the implementation:
+//   - Browser: a `yield()` JS function that returns control to the
+//     browser event loop (typically `await new Promise(r =>
+//     setTimeout(r, 0))`), then resumes the wasm module.
+//   - Wasmtime / Wasmer: a host function that returns immediately
+//     (cooperative stub — the host has no event loop to yield to in
+//     this scenario; the wasm guest just calls yield at safe points
+//     to give the host a chance to inject other work).
+//   - Hosted-mode x86_64 (this file's verification environment): the
+//     x86_64 backend's __ffi_fallback_stub returns 0 — host_yield is
+//     a no-op. The wasm_sched_loop self-test (main) just returns 0;
+//     the loop body is exercised only when the file is compiled +
+//     IVE-verified, not when the binary is executed.
+//
+// ── wasm_sched_loop algorithm ───────────────────────────────────────────────
+// The loop is the cooperative analogue of the bare-metal timer-IRQ
+// trampoline (R4a+b's scheduler caller pattern):
+//   1. next = schedule(rq, tbl)         — pick min-vruntime task
+//   2. if next == 256 (empty): return   — no runnable tasks, idle
+//   3. sched_restore_context(tbl, next, tf)  — load next's saved PC/SP/status
+//                                              into the shared TrapFrame
+//   4. host_yield()                     — yield back to the host; the host
+//                                              resumes us when ready
+//   5. sched_save_context(tbl, next, tf)    — on resume, save the (still-
+//                                              live) context back to the
+//                                              task slot
+//   6. sched_enqueue(rq, tbl, next)     — re-enqueue the yielded task
+//   7. goto 1
+//
+// The "still-live context" assumption in step 5 is the cooperative-
+// scheduling invariant: because the wasm VM never preempted us, the
+// TrapFrame's pc/sp/status fields still describe the SAME task that was
+// restored in step 3 (host_yield returned control to us at the wasm
+// instruction right after the call, not into a different task). On a
+// preemptive system this would be wrong (the OS could have switched
+// tasks behind our back during the yield), but on wasm32 it's correct.
+//
+// ── Why does the loop run at most once in hosted mode? ──────────────────────
+// The contract specifies: "In hosted mode: just loop once and return —
+// host_yield is a stub." This is because:
+//   - The x86_64 backend's __ffi_fallback_stub makes host_yield a no-op
+//     (xor eax, eax; ret → returns 0 immediately). If wasm_sched_loop
+//     called host_yield in a tight loop with no break, it would spin
+//     forever (the no-op never gives control back to a scheduler that
+//     could change the runqueue).
+//   - The hosted-mode wasm_sched_loop is exercised by the file's self-
+//     test (main returns 0 without calling wasm_sched_loop) — the loop
+//     body itself is verified by the IVE Pass + compile step, not by
+//     execution.
+//   - K13+ (asyncify-based preemption) will replace the single-iteration
+//     stub with a real wasm-side loop that uses Binaryen's asyncify pass
+//     to suspend/resume the wasm stack. Until then, the hosted-mode loop
+//     is one iteration.
+//
+// ── Layouts re-declared (no import in VUMA) ─────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares:
+//   - TrapFrame byte-identically to R2a's womb/kernel/trap/trap_frame.vuma
+//   - Runqueue + ProcessTable byte-identically to R4a+b's
+//     womb/kernel/proc/scheduler.vuma
+//   - pt_get_state / pt_set_state / pt_get_vruntime / pt_set_vruntime /
+//     pt_get_next / pt_set_next byte-identically to K4a's task.vuma
+//     (the minimal subset the cooperative loop needs)
+//   - schedule / sched_enqueue / sched_restore_context / sched_save_context
+//     byte-identically to R4a+b's scheduler.vuma (re-declared locally so
+//     wasm_sched_loop can call them without depending on a sibling file
+//     at compile time).
+//
+// The byte-identical-redeclaration invariant (K2c "extern signatures
+// MUST stay byte-identical" — extended to layouts in K3d) extends to
+// layouts: this file's `wasm_sched_loop(rq, tbl, tf)` MUST see the same
+// field offsets, field names, and field types as R2a's trap_frame.vuma
+// and R4a+b's scheduler.vuma.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
+// TrapFrame, Runqueue, and ProcessTable are ___pmt_buffer-backed
+// State<T>'s allocated by the CALLER via `state_new(...)`. The State<T>
+// params are regular VUMA-fn borrows (NOT extern #[borrow] — VUMA fn
+// calls don't need the attribute, only extern "C" calls do). The only
+// extern in this file is host_yield (which takes no State<T> params),
+// so the codegen's conservative State-invalidation-on-extern-call
+// doesn't fire on the loop's State<T> references — host_yield is
+// declared before wasm_sched_loop, and the conservative invalidation
+// only invalidates State<T>'s that were live ACROSS an extern call
+// (here, the post-host_yield sched_save_context reads the same tbl
+// and tf that were live before the yield, so the invalidation
+// would force a reload — which is exactly what we want, since the
+// host might have mutated them).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the project-wide
+// convention (see kernel-developer-guide.md §9):
+//     512  = max syscalls (not used here, but listed for consistency)
+//     256  = runqueue "empty" sentinel + gpr/fpu array size in TrapFrame
+//     8    = bytes per u64 (loop bound for pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     24   = _pad array size in TrapFrame (byte-loop bound)
+//     2    = READY state value (set by sched_enqueue on the new task)
+//     1    = RUNNING state value (set by sched_dequeue on the picked task)
+//     0    = FREE state value (set by tf_init and state_new's zero-fill)
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/wasm32/sched_hal.vuma \
+//         /tmp/wasm_sched_hal.bin x86_64 --verify
+//     /tmp/wasm_sched_hal.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (the main() stub returns 0; the loop body
+// is verified by IVE + compile, not by execution — see "Why does the
+// loop run at most once in hosted mode?").
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared — no import in VUMA).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Canonical superset TrapFrame (576 bytes total) — re-declared byte-
+// identically to R2a's womb/kernel/trap/trap_frame.vuma. See R2a's header
+// for the field semantics (gpr 32×u64 LE-packed in 256 bytes; pc/status/
+// vector/error_code/sp are 5 scalar u64 fields; fpu is 32×u64 LE-packed
+// in 256 bytes; _pad is 24 alignment bytes).
+layout TrapFrame = {
+    gpr: [u8; 256],
+    pc: u64,
+    status: u64,
+    vector: u64,
+    error_code: u64,
+    sp: u64,
+    fpu: [u8; 256],
+    _pad: [u8; 24],
+}
+
+// Runqueue: head/tail are Task indices (0..255) or 256 (empty). count is
+// the number of tasks currently in the runqueue (0..256). The next-link
+// field lives in ProcessTable.nexts (not here). Re-declared byte-
+// identically to R4a+b's scheduler.vuma.
+layout Runqueue = {
+    head: u32,
+    tail: u32,
+    count: u32,
+}
+
+// ProcessTable: re-declared byte-identically to K4a's task.vuma and
+// R4a+b's scheduler.vuma. 10 fields (9 parallel flat [u8; N] arrays +
+// count u32) totaling 14340 bytes. See K4a's task.vuma header "Why
+// parallel flat byte arrays?" for the rationale (VUMA has no struct-
+// array support). The wasm32 HAL only needs the states / vruntimes /
+// nexts sub-arrays (the minimal subset for the cooperative loop), but
+// the full layout is re-declared byte-identically so the field offsets
+// match what the R4a+b scheduler sees.
+layout ProcessTable = {
+    pids: [u8; 1024],
+    ppids: [u8; 1024],
+    states: [u8; 256],
+    prios: [u8; 256],
+    vruntimes: [u8; 2048],
+    mm_roots: [u8; 2048],
+    fs_roots: [u8; 2048],
+    fds: [u8; 2048],
+    nexts: [u8; 2048],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TrapFrame helpers (re-declared from R2a, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+// tf_init + tf_get_gpr + tf_set_gpr, byte-identical to R2a. The wasm32
+// HAL uses tf_init to zero the shared TrapFrame before the first
+// wasm_sched_loop call; tf_get_gpr / tf_set_gpr are re-declared for
+// completeness (the cooperative loop only reads/writes the scalar pc /
+// sp / status fields via sched_save_context / sched_restore_context,
+// but the helpers are part of the canonical R2a surface and re-declared
+// here so any downstream wasm32 code that wants them has them in scope).
+
+// Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Zero every field of a caller-allocated TrapFrame. Byte-identical to
+// R2a's tf_init.
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ProcessTable helpers (re-declared from K4a's task.vuma, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+// Minimal subset: state, vruntime, next. The cooperative loop uses:
+//   pt_get_state / pt_set_state   (called by sched_enqueue / sched_dequeue)
+//   pt_get_vruntime / pt_set_vruntime (called by sched_dequeue to pick min)
+//   pt_get_next / pt_set_next     (called by sched_enqueue / sched_dequeue
+//                                  to thread the runqueue linked list)
+// The other 6 helpers (pid/ppid get/set, prio get/set, mm_root/fs_root/
+// fds get/set) are NOT re-declared here — the wasm32 HAL doesn't need
+// them. R4a+b's scheduler.vuma re-declares the full 12-helper set; K4d's
+// fork/exec will re-declare the rest.
+
+// Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
+fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.states[idx];
+}
+
+// Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
+fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.states[idx] = val;
+}
+
+// Read the u64 `vruntime` field of Task slot `idx` from
+// ProcessTable.vruntimes. 8-byte LE unpack loop.
+fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.vruntimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `vruntime` field of Task slot `idx` into
+// ProcessTable.vruntimes. 8-byte LE pack loop.
+fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.vruntimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
+fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
+fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Scheduler helpers (re-declared from R4a+b's scheduler.vuma, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+// The cooperative loop calls: sched_init, sched_enqueue, sched_dequeue,
+// schedule, sched_save_context, sched_restore_context. All 6 are re-
+// declared byte-identically to R4a+b so wasm_sched_loop can call them
+// without a sibling file at compile time. (K11 may consolidate these
+// once VUMA gains an import mechanism.)
+
+// sched_init: initialize an empty runqueue. Idempotent.
+fn sched_init(rq: State<Runqueue>) {
+    rq.head = 256;
+    rq.tail = 256;
+    rq.count = 0;
+}
+
+// sched_enqueue: add task `task_idx` to the tail of the runqueue. Sets
+// the task's state to READY (2). Bumps rq.count.
+fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
+    if rq.head == 256 {
+        rq.head = task_idx;
+        rq.tail = task_idx;
+        pt_set_next(tbl, task_idx, 256);
+    } else {
+        pt_set_next(tbl, rq.tail, task_idx);
+        rq.tail = task_idx;
+        pt_set_next(tbl, task_idx, 256);
+    }
+    rq.count = rq.count + 1;
+    pt_set_state(tbl, task_idx, 2);
+}
+
+// sched_dequeue: remove and return the task with the LOWEST vruntime
+// (CFS "pick next" step). Returns 256 if the runqueue is empty.
+fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+    if rq.head == 256 {
+        return 256;
+    }
+    let min_idx = rq.head;
+    let min_vruntime = pt_get_vruntime(tbl, min_idx);
+    let cur = pt_get_next(tbl, min_idx);
+    let prev_of_min = 256;
+    let prev = min_idx;
+    while cur != 256 {
+        let v = pt_get_vruntime(tbl, cur as u32);
+        if v < min_vruntime {
+            min_idx = cur as u32;
+            prev_of_min = prev;
+        }
+        prev = cur as u32;
+        cur = pt_get_next(tbl, cur as u32);
+    }
+    if min_idx == rq.head {
+        rq.head = pt_get_next(tbl, min_idx) as u32;
+        if rq.head == 256 {
+            rq.tail = 256;
+        }
+    } else {
+        let min_next = pt_get_next(tbl, min_idx);
+        pt_set_next(tbl, prev_of_min, min_next);
+        if min_idx == rq.tail {
+            rq.tail = prev_of_min;
+        }
+    }
+    rq.count = rq.count - 1;
+    pt_set_state(tbl, min_idx, 1);
+    return min_idx;
+}
+
+// schedule: pick the next task to run. CFS "pick min vruntime". Returns
+// the task index, or 256 if no tasks are runnable.
+fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+    return sched_dequeue(rq, tbl);
+}
+
+// sched_save_context: copy tf.{pc, sp, status} into the Task slot's
+// saved-context overload fields (mm_root, fs_root, fds). See R4a+b's
+// scheduler.vuma header "Saved-context overload" section for the field
+// mapping and the safety rationale.
+fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+    pt_set_mm_root(tbl, task_idx, tf.pc);      // saved PC → mm_root
+    pt_set_fs_root(tbl, task_idx, tf.sp);      // saved SP → fs_root
+    pt_set_fds(tbl, task_idx, tf.status);      // saved status → fds
+}
+
+// sched_restore_context: copy the Task slot's saved-context overload
+// fields (mm_root, fs_root, fds) back into tf.{pc, sp, status}.
+fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+    tf.pc = pt_get_mm_root(tbl, task_idx);     // mm_root → saved PC
+    tf.sp = pt_get_fs_root(tbl, task_idx);     // fs_root → saved SP
+    tf.status = pt_get_fds(tbl, task_idx);     // fds → saved status
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// The 3 saved-context overload helpers (mm_root / fs_root / fds) — re-
+// declared byte-identically to R4a+b's scheduler.vuma. (K4a's task.vuma
+// declares them too; we need them locally because sched_save_context /
+// sched_restore_context call them and VUMA has no import.)
+// ────────────────────────────────────────────────────────────────────────────
+
+fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.mm_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.mm_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fs_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fs_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fds[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fds[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// host_yield extern (the wasm import).
+// ────────────────────────────────────────────────────────────────────────────
+// host_yield() is the cooperative-scheduling yield primitive. On wasm32
+// it lowers to a wasm import; on hosted x86_64 it resolves to the
+// __ffi_fallback_stub (no-op, returns 0). The wasm_sched_loop body
+// calls host_yield between sched_restore_context and sched_save_context
+// to give the host a chance to inject other work (browser event loop,
+// other wasm instances, etc.).
+//
+// No #[borrow] attribute needed — host_yield takes no State<T> params
+// and returns nothing. The codegen's conservative State-invalidation-
+// on-extern-call will invalidate any State<T> live across the call,
+// which is exactly what we want (the post-yield sched_save_context
+// reads tbl and tf as if they might have been mutated by the host).
+extern "C" {
+    // host_yield() — yield back to the host event loop. The host resumes
+    // the wasm module at the instruction after the call when ready.
+    // Browser: setTimeout-based yield. Wasmtime: immediate return.
+    // Hosted x86_64: __ffi_fallback_stub (no-op).
+    fn host_yield();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// wasm_sched_loop: the cooperative scheduling loop.
+// ────────────────────────────────────────────────────────────────────────────
+// See the file header "wasm_sched_loop algorithm" for the 7-step loop.
+// In hosted mode, the loop runs AT MOST ONCE then returns — host_yield
+// is a no-op stub, so an unbounded loop would spin forever. K13+ will
+// replace this with a real asyncify-based preemptive loop.
+//
+// State<T> params: 3 (rq + tbl + tf). All three are read AND written
+// across the loop body (rq via sched_enqueue, tbl via sched_save_context
+// + sched_restore_context, tf via sched_restore_context + sched_save_
+// context). The `current` local holds the task index that was just
+// restored (so we know which task to save back into on resume).
+fn wasm_sched_loop(rq: State<Runqueue>, tbl: State<ProcessTable>, tf: State<TrapFrame>) {
+    // Single-iteration stub for hosted mode — see file header "Why does
+    // the loop run at most once in hosted mode?". K13+ will replace
+    // this `let iter = 0; while iter < 1 { ... iter = iter + 1; }`
+    // wrapper with the real cooperative loop (the inner loop body
+    // below is the algorithm the contract specifies).
+    let iter = 0;
+    while iter < 1 {
+        // Step 1: pick the next task.
+        let next = schedule(rq, tbl);
+        // Step 2: if the runqueue is empty, return.
+        if next == 256 {
+            return;
+        }
+        // Step 3: restore the next task's saved context into the shared
+        // TrapFrame (tf.pc / tf.sp / tf.status ← tbl's saved-context
+        // overload fields).
+        sched_restore_context(tbl, next, tf);
+        // Step 4: yield back to the host. On wasm32 this is the
+        // cooperative yield; on hosted x86_64 this is a no-op stub.
+        host_yield();
+        // Step 5: on resume, save the (still-live) context back to the
+        // task slot. This is the cooperative-scheduling invariant —
+        // see file header "wasm_sched_loop algorithm".
+        sched_save_context(tbl, next, tf);
+        // Step 6: re-enqueue the yielded task at the tail of the
+        // runqueue (gives other tasks a chance to run on the next
+        // iteration).
+        sched_enqueue(rq, tbl, next);
+        // Step 7: goto 1 (the while loop iterates — but in hosted mode
+        // we break after 1 iteration).
+        iter = iter + 1;
+    }
+    return;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the R4d DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// The contract specifies `fn main() -> i32 { return 0; }` stub — the
+// wasm_sched_loop body is verified by IVE Pass + compile, not by
+// execution (see file header "Why does the loop run at most once in
+// hosted mode?"). The stub returns 0 unconditionally.
+fn main() -> i32 {
+    return 0;
+}
