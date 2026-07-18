@@ -4167,17 +4167,33 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
 fn ss_load_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        // Offset fits in 12-bit signed: LD dst, neg_off(S0)
+        // Offset fits in 12-bit signed: LW dst, neg_off(S0)
         Instruction::Lw { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }
             .encode()
             .to_vec()
     } else {
-        // Large offset: compute address into T3, then LD from T3
+        // Large offset: compute address into T3, then LW from T3
         let mut code = Vec::new();
-        // Materialize offset into T3, then SUB T3, S0, T3
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
         code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
         code.extend(Instruction::Lw { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code
+    }
+}
+
+/// Compute the address of a stack slot into dst_reg.
+/// Slot is at [S0 - offset_from_s0].
+fn ss_load_addr(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        // ADDI dst, S0, neg_off
+        Instruction::Addi { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: dst_reg, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
         code
     }
 }
@@ -4544,8 +4560,34 @@ impl Backend for RiscV32Backend {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
                             if is_f64 {
-                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(Instruction::FmvDX { rd: Fpr::F1, rs1: Gpr::T1 }.encode());
+                                // On RV32, fmv.d.x is invalid (GPRs are 32-bit).
+                                // Use fld to load 64-bit float directly from stack to FPR.
+                                // Compute slot address in T0, then fld F0, 0(T0).
+                                if let IRValue::Register(id) = lhs {
+                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                    code.extend(ss_load_addr(Gpr::T0, off));
+                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T0, imm: 0 }.encode());
+                                } else {
+                                    // Immediate: store to scratch slot, then fld
+                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots));
+                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
+                                    code.extend(ss_store_to_slot(Gpr::T1, -60));
+                                    code.extend(ss_load_addr(Gpr::T0, -64));
+                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T0, imm: 0 }.encode());
+                                }
+                                if let IRValue::Register(id) = rhs {
+                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                    code.extend(ss_load_addr(Gpr::T1, off));
+                                    code.extend(Instruction::Fld { rd: Fpr::F1, rs1: Gpr::T1, imm: 0 }.encode());
+                                } else {
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, rhs, &vreg_stack_slots));
+                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
+                                    code.extend(ss_store_to_slot(Gpr::T1, -60));
+                                    code.extend(ss_load_addr(Gpr::T1, -64));
+                                    code.extend(Instruction::Fld { rd: Fpr::F1, rs1: Gpr::T1, imm: 0 }.encode());
+                                }
                             } else {
                                 code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                 code.extend(Instruction::FmvWX { rd: Fpr::F1, rs1: Gpr::T1 }.encode());
@@ -4602,7 +4644,14 @@ impl Backend for RiscV32Backend {
                             }
                             // Move result back to GPR
                             if is_f64 {
-                                code.extend(Instruction::FmvXD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                // On RV32, fmv.x.d is invalid. Use fsd to store
+                                // F0 to scratch, then load two 32-bit halves.
+                                code.extend(ss_load_addr(Gpr::T0, -64));
+                                code.extend(Instruction::Fsd { rs1: Gpr::T0, rs2: Fpr::F0, imm: 0 }.encode());
+                                code.extend(ss_load_from_slot(Gpr::T0, 64));
+                                code.extend(ss_load_from_slot(Gpr::T1, 60));
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                code.extend(ss_store_to_slot(Gpr::T1, dst_offset - 4));
                             } else {
                                 code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                             }
