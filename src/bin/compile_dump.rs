@@ -76,10 +76,10 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
-    compile_for_backend_with_path(source, kind, None, false)
+    compile_for_backend_with_path(source, kind, None, false, OptLevel::O2)
 }
 
-fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool) -> Result<(Vec<u8>, Option<String>), String> {
+fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool, opt_level: OptLevel) -> Result<(Vec<u8>, Option<String>), String> {
     // Resolve imports if a file path is provided
     let ast = if let Some(path) = file_path {
         let mut resolver = ModuleResolver::new();
@@ -117,7 +117,7 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // uses one consistent config (matching the production compile path).
     let o2_config = CompileConfig {
         target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
-        opt_level: OptLevel::O2,
+        opt_level,
         verification_level: VerificationLevel::Normal,
         ..Default::default()
     };
@@ -326,12 +326,23 @@ fn main() {
     // `VerificationLevel::Pmt` and the PMT layout registry is always
     // built (cheap — empty map if no `layout` items).
     let mut verify = false;
+    let mut opt_level = OptLevel::O2;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
-        else { true }
+        else if a.starts_with("--opt-level=") {
+            let val = &a["--opt-level=".len()..];
+            opt_level = match val {
+                "O0" => OptLevel::O0,
+                "O1" => OptLevel::O1,
+                "O2" => OptLevel::O2,
+                "O3" => OptLevel::O3,
+                _ => { eprintln!("error: invalid opt-level '{}'; use O0|O1|O2|O3", val); std::process::exit(1); }
+            };
+            false
+        } else { true }
     }).cloned().collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--opt-level=O0|O1|O2|O3]");
         std::process::exit(1);
     }
     let path = &positional[0];
@@ -340,7 +351,7 @@ fn main() {
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
-    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify) {
+    let (binary, _ive_status) = match compile_for_backend_with_path(&source, kind, Some(file_path), verify, opt_level) {
         Ok(v) => v,
         Err(e) => {
             // Wave A (PMT-only): print a clean compile-error message to
