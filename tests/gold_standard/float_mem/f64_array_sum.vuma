@@ -1,0 +1,23 @@
+// f64_array_sum — sum a 5-element f64 array of 2.0 each = 10.0 -> 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    ptr = allocate(40);  // 5 * 8 bytes
+    i: i64 = 0;
+    while i < 5 {
+        slot = ptr + (i * 8);
+        *(slot) = 2.0;
+        i = i + 1;
+    }
+    total: f64 = 0.0;
+    j: i64 = 0;
+    while j < 5 {
+        slot = ptr + (j * 8);
+        val: f64 = *slot;
+        total = total + val;
+        j = j + 1;
+    }
+    free(ptr);
+    result: i64 = floattoint(total);
+    return result;
+}

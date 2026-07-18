@@ -1,0 +1,10 @@
+// neg_int_to_float — inttofloat(-7) = -7.0; -7.0 + 17.0 = 10.0 -> 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    a: f64 = inttofloat(-7);   // -7.0
+    b: f64 = 17.0;
+    sum: f64 = a + b;            // 10.0
+    result: i64 = floattoint(sum);
+    return result;
+}
