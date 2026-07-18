@@ -1,7 +1,7 @@
 // womb/kernel/kernel.vuma — VWK Integrated Interactive Kernel
 //
 // Imports all subsystems and wires them into a running interactive system.
-// Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc, free, ver, memstat
+// Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc, free, ver, memstat, cd, pwd
 //
 // Build: ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
 // Run:   printf 'help\nls\ntouch hello.txt\necho hi > hello.txt\ncat hello.txt\nls\nmemstat\nps\nexit\n' | /tmp/kernel.bin
@@ -139,13 +139,16 @@ fn kmain() -> i32 {
     let cbuf = state_new(KBuf);
     let pos: u32 = 0;
     let running: u8 = 1;
+    let cwd: u32 = 0;  // current working directory (dentry index, 0=root)
 
     while running == 1 {
         let n = read(0, rbuf as Address, 1);
         if n <= 0 { break; }
         let c = rbuf.data[0];
-        kprint(ec, c);
 
+        // NOTE: do NOT echo `c` here — the terminal's cooked-mode TTY
+        // already echoes keystrokes in interactive mode.  Echoing here
+        // would double-print every character.
         if c == 10 {
             let cmd = cbuf.data[0];
 
@@ -171,13 +174,31 @@ fn kmain() -> i32 {
                 kprint(ec, 101); kprint(ec, 44); kprint(ec, 32); kprint(ec, 118);
                 kprint(ec, 101); kprint(ec, 114); kprint(ec, 44); kprint(ec, 32);
                 kprint(ec, 109); kprint(ec, 101); kprint(ec, 109); kprint(ec, 115);
-                kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kputs_nl(ec);
+                kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kprint(ec, 44);
+                kprint(ec, 32); kprint(ec, 99); kprint(ec, 100); kprint(ec, 44);
+                kprint(ec, 32); kprint(ec, 112); kprint(ec, 119); kprint(ec, 100);
+                kputs_nl(ec);
             }
 
-            // pid (112='p'), check second byte 'i' (105) not 's' (115)
+            // pid (112='p') / ps (112='p', 115='s') / pwd (112='p', 119='w')
             if cmd == 112 {
                 if pos > 1 {
-                    if cbuf.data[1] == 115 {
+                    if cbuf.data[1] == 119 {
+                        // pwd — print working directory name
+                        if cwd == 0 {
+                            kprint(ec, 47); kputs_nl(ec);  // "/"
+                        } else {
+                            let j = 0;
+                            while j < 64 {
+                                let nc = dentry_get_name_byte(dentries, cwd, j);
+                                if nc == 0 { break; }
+                                kprint(ec, nc);
+                                j = j + 1;
+                            }
+                            kputs_nl(ec);
+                        }
+                    } else {
+                        if cbuf.data[1] == 115 {
                         // ps — list process table
                         kprint(ec, 80); kprint(ec, 73); kprint(ec, 68); kprint(ec, 32);
                         kprint(ec, 83); kprint(ec, 84); kprint(ec, 65); kprint(ec, 84);
@@ -201,6 +222,7 @@ fn kmain() -> i32 {
                         kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
                         kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
                     }
+                    }
                 } else {
                     kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
                     kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
@@ -209,26 +231,31 @@ fn kmain() -> i32 {
 
             // ls (108='l')
             if cmd == 108 {
-                // List root directory children
-                let child = dentry_get_child(dentries, 0) as u32;
-                let cur = child;
+                // List CWD directory children.
+                // dentry_get_child returns 0 for "no children" — but 0 is
+                // also root's index.  Since root is never a child of any
+                // directory, child==0 always means "empty".
+                let child = dentry_get_child(dentries, cwd) as u32;
                 let found = 0;
-                while cur < 64 {
-                    if dentry_get_used(dentries, cur) == 1 {
-                        // Print name
-                        let j = 0;
-                        while j < 64 {
-                            let nc = dentry_get_name_byte(dentries, cur, j);
-                            if nc == 0 { break; }
-                            kprint(ec, nc);
-                            j = j + 1;
+                if child != 0 {
+                    let cur = child;
+                    while cur < 64 {
+                        if dentry_get_used(dentries, cur) == 1 {
+                            // Print name
+                            let j = 0;
+                            while j < 64 {
+                                let nc = dentry_get_name_byte(dentries, cur, j);
+                                if nc == 0 { break; }
+                                kprint(ec, nc);
+                                j = j + 1;
+                            }
+                            kprint(ec, 32); kprint(ec, 32);
+                            found = 1;
                         }
-                        kprint(ec, 32); kprint(ec, 32);
-                        found = 1;
+                        let nxt = dentry_get_next(dentries, cur);
+                        if nxt == 0 { break; }
+                        cur = nxt as u32;
                     }
-                    let nxt = dentry_get_next(dentries, cur);
-                    if nxt == 0 { break; }
-                    cur = nxt as u32;
                 }
                 kputs_nl(ec);
                 if found == 0 {
@@ -237,66 +264,124 @@ fn kmain() -> i32 {
                 }
             }
 
-            // cat (99='c')
+            // cat (99='c', 97='a') / cd (99='c', 100='d')
             if cmd == 99 {
-                // Find file by name in root's children
-                // The filename starts at cbuf.data[4] (after "cat ")
-                // But there might be no space if user typed "cat<file>"
-                // So check: if cbuf.data[3] == 32 (space), filename starts at 4
-                // Otherwise filename starts at 3
-                let fname_start: u32 = 4;
-                if cbuf.data[3] != 32 { fname_start = 3; }
-                let child = dentry_get_child(dentries, 0) as u32;
-                let cur = child;
-                let found_idx = 64;
-                while cur < 64 {
-                    if dentry_get_used(dentries, cur) == 1 {
-                        // Compare name byte-by-byte
-                        let match_ok = 1;
-                        let j = 0;
-                        while j < 58 {
-                            let fn_c = dentry_get_name_byte(dentries, cur, j);
-                            let cmd_c = cbuf.data[fname_start + j];
-                            // End of dentry name → file name must also end
-                            if fn_c == 0 {
-                                if cmd_c == 0 { break; }
-                                match_ok = 0; break;
-                            }
-                            // End of cmd name → dentry name must also end
-                            if cmd_c == 0 { match_ok = 0; break; }
-                            if fn_c != cmd_c { match_ok = 0; break; }
-                            j = j + 1;
-                        }
-                        if match_ok == 1 {
-                            found_idx = cur;
-                            break;
-                        }
-                    }
-                    let nxt = dentry_get_next(dentries, cur);
-                    if nxt == 0 { break; }
-                    cur = nxt as u32;
-                }
-                if found_idx < 64 {
-                    // Read inode private data (stored as page index in tmpfs)
-                    let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
-                    let data_page = inode_get_private(inodes, ino_idx);
-                    let fsize = inode_get_size(inodes, ino_idx);
-                    // Print file contents from data_page (stub: print "hi\n")
-                    if fsize > 0 {
-                        kprint(ec, 104); kprint(ec, 105); kputs_nl(ec);
+                if pos > 1 && cbuf.data[1] == 100 {
+                    // ── cd ──────────────────────────────────────────────
+                    // cd <name>  → search CWD children, set cwd
+                    // cd ..      → go to parent
+                    // cd /       → go to root
+                    // cd         → go to root
+                    if pos == 2 {
+                        cwd = 0;
+                        kputs_ok(ec);
                     } else {
-                        kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
-                        kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
+                        let name_start: u32 = 3;
+                        if cbuf.data[2] != 32 { name_start = 2; }
+                        // cd ..
+                        if cbuf.data[name_start] == 46 && (name_start + 1) < pos && cbuf.data[name_start + 1] == 46 {
+                            let p = dentry_get_parent(dentries, cwd);
+                            if p < 64 { cwd = p as u32; }
+                            kputs_ok(ec);
+                        } else {
+                            // cd /
+                            if cbuf.data[name_start] == 47 {
+                                cwd = 0;
+                                kputs_ok(ec);
+                            } else {
+                                // cd <name> — search CWD children
+                                let child = dentry_get_child(dentries, cwd) as u32;
+                                let cur = child;
+                                let found_idx = 64;
+                                while cur < 64 {
+                                    if dentry_get_used(dentries, cur) == 1 {
+                                        let match_ok = 1;
+                                        let j = 0;
+                                        while j < 58 && (name_start + j) < pos {
+                                            let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                            let cmd_c = cbuf.data[name_start + j];
+                                            if fn_c == 0 { match_ok = 0; break; }
+                                            if fn_c != cmd_c { match_ok = 0; break; }
+                                            j = j + 1;
+                                        }
+                                        if match_ok == 1 {
+                                            // cmd ended; check dentry also ended
+                                            let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                            if fn_c == 0 { found_idx = cur; break; }
+                                        }
+                                    }
+                                    let nxt = dentry_get_next(dentries, cur);
+                                    if nxt == 0 { break; }
+                                    cur = nxt as u32;
+                                }
+                                if found_idx < 64 {
+                                    let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                                    let mode = inode_get_mode(inodes, ino_idx);
+                                    if mode == 16384 {
+                                        cwd = found_idx;
+                                        kputs_ok(ec);
+                                    } else {
+                                        // "NOT DIR"
+                                        kprint(ec, 78); kprint(ec, 79); kprint(ec, 84);
+                                        kprint(ec, 32); kprint(ec, 68); kprint(ec, 73);
+                                        kprint(ec, 82); kputs_nl(ec);
+                                    }
+                                } else {
+                                    // "no dir"
+                                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32);
+                                    kprint(ec, 100); kprint(ec, 105); kprint(ec, 114);
+                                    kputs_nl(ec);
+                                }
+                            }
+                        }
                     }
                 } else {
-                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102);
-                    kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
+                    // ── cat ──────────────────────────────────────────────
+                    // Find file by name in CWD's children.
+                    let fname_start: u32 = 4;
+                    if cbuf.data[3] != 32 { fname_start = 3; }
+                    let child = dentry_get_child(dentries, cwd) as u32;
+                    let cur = child;
+                    let found_idx = 64;
+                    while cur < 64 {
+                        if dentry_get_used(dentries, cur) == 1 {
+                            let match_ok = 1;
+                            let j = 0;
+                            while j < 58 && (fname_start + j) < pos {
+                                let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                let cmd_c = cbuf.data[fname_start + j];
+                                if fn_c == 0 { match_ok = 0; break; }
+                                if fn_c != cmd_c { match_ok = 0; break; }
+                                j = j + 1;
+                            }
+                            if match_ok == 1 {
+                                let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                if fn_c == 0 { found_idx = cur; break; }
+                            }
+                        }
+                        let nxt = dentry_get_next(dentries, cur);
+                        if nxt == 0 { break; }
+                        cur = nxt as u32;
+                    }
+                    if found_idx < 64 {
+                        let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                        let fsize = inode_get_size(inodes, ino_idx);
+                        if fsize > 0 {
+                            kprint(ec, 104); kprint(ec, 105); kputs_nl(ec);
+                        } else {
+                            kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
+                            kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
+                        }
+                    } else {
+                        kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102);
+                        kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
+                    }
                 }
             }
 
             // touch (116='t')
             if cmd == 116 {
-                // Create a new file under root
+                // Create a new file under CWD
                 let new_d = dentry_alloc(dentries);
                 if new_d < 64 {
                     // Zero the name area + 16 bytes past the name
@@ -305,9 +390,9 @@ fn kmain() -> i32 {
                         dentry_set_name_byte(dentries, new_d, k, 0);
                         k = k + 1;
                     }
-                    // Copy name from cbuf (skip "touch ")
+                    // Copy name from cbuf (skip "touch "), bounded by pos
                     let j = 0;
-                    while j < 50 {
+                    while j < 50 && (j + 6) < pos {
                         let nc = cbuf.data[j + 6];
                         if nc == 0 || nc == 32 { break; }
                         dentry_set_name_byte(dentries, new_d, j, nc);
@@ -319,15 +404,15 @@ fn kmain() -> i32 {
                     dentry_set_name_byte(dentries, new_d, j + 2, 0);
                     dentry_set_name_byte(dentries, new_d, j + 3, 0);
                     dentry_set_used(dentries, new_d, 1);
-                    dentry_set_parent(dentries, new_d, 0);
+                    dentry_set_parent(dentries, new_d, cwd as u64);
                     // Create inode
                     let new_ino = inode_alloc(inodes);
                     inode_set_mode(inodes, new_ino, 32768);  // S_IFREG
                     dentry_set_inode(dentries, new_d, new_ino as u64);
-                    // Link into root's child list
-                    let old_child = dentry_get_child(dentries, 0);
+                    // Link into CWD's child list
+                    let old_child = dentry_get_child(dentries, cwd);
                     dentry_set_next(dentries, new_d, old_child);
-                    dentry_set_child(dentries, 0, new_d as u64);
+                    dentry_set_child(dentries, cwd, new_d as u64);
                     // Write "hi" to the file (stub content)
                     inode_set_size(inodes, new_ino, 2);
                     inode_set_private(inodes, new_ino, 1);
@@ -352,7 +437,7 @@ fn kmain() -> i32 {
                                 k = k + 1;
                             }
                             let j = 0;
-                            while j < 58 {
+                            while j < 58 && (j + 6) < pos {
                                 let nc = cbuf.data[j + 6];
                                 if nc == 0 || nc == 32 { break; }
                                 dentry_set_name_byte(dentries, new_d, j, nc);
@@ -360,13 +445,13 @@ fn kmain() -> i32 {
                             }
                             dentry_set_name_byte(dentries, new_d, j, 0);
                             dentry_set_used(dentries, new_d, 1);
-                            dentry_set_parent(dentries, new_d, 0);
+                            dentry_set_parent(dentries, new_d, cwd as u64);
                             let new_ino = inode_alloc(inodes);
                             inode_set_mode(inodes, new_ino, 16384);  // S_IFDIR
                             dentry_set_inode(dentries, new_d, new_ino as u64);
-                            let old_child = dentry_get_child(dentries, 0);
+                            let old_child = dentry_get_child(dentries, cwd);
                             dentry_set_next(dentries, new_d, old_child);
-                            dentry_set_child(dentries, 0, new_d as u64);
+                            dentry_set_child(dentries, cwd, new_d as u64);
                             kputs_ok(ec);
                         } else {
                             kputs_err(ec);
