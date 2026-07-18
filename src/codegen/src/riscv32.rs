@@ -2533,7 +2533,7 @@ fn build_minimal_riscv32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff
-    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags (soft-float, no RVC)
+    elf.extend_from_slice(&0x4u32.to_le_bytes()); // e_flags = EF_RISCV_FLOAT_ABI_DOUBLE (enables FPU in QEMU)
     elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum
