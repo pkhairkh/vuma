@@ -3893,24 +3893,40 @@ impl IRBuilder {
                         (Some(IRType::F64), Some(IRType::I64))
                     }
                     CastKind::FloatToFloat => {
-                        // Determine source type from vreg_types if possible.
-                        // Default to F64→F64 (no-op) if source type is unknown.
+                        // Determine source and destination types.
+                        // Source: from vreg_types if available, else check fn_var_types.
+                        // Destination: from fn_var_types for the dst variable.
                         let src_f32 = if let IRValue::Register(vr) = &src_val {
                             self.vreg_types.get(vr) == Some(&IRType::F32)
                         } else {
                             false
                         };
-                        if src_f32 {
+                        // Check if dst is f32 (from fn_var_types or the call's dst name)
+                        let dst_f32 = match &call.dst {
+                            Some(name) => self.fn_var_types.get(name) == Some(&ScgType::F32),
+                            None => false,
+                        };
+                        if src_f32 && !dst_f32 {
                             (Some(IRType::F32), Some(IRType::F64))  // widen f32→f64
+                        } else if !src_f32 && dst_f32 {
+                            (Some(IRType::F64), Some(IRType::F32))  // narrow f64→f32
+                        } else if src_f32 && dst_f32 {
+                            (Some(IRType::F32), Some(IRType::F32))  // f32→f32 (no-op)
                         } else {
-                            (Some(IRType::F64), Some(IRType::F64))  // no-op
+                            (Some(IRType::F64), Some(IRType::F64))  // f64→f64 (no-op)
                         }
                     }
                     _ => unreachable!(),
                 };
                 let result_ty = match kind {
-                    CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat => IRType::F64,
+                    CastKind::IntToFloat | CastKind::UIntToFloat => IRType::F64,
                     CastKind::FloatToInt | CastKind::FloatToUInt => IRType::I64,
+                    CastKind::FloatToFloat => {
+                        match &to_ty {
+                            Some(t) => t.clone(),
+                            None => IRType::F64,
+                        }
+                    }
                     _ => unreachable!(),
                 };
                 let dst_vreg = if let IRValue::Register(vr) = dst { Some(vr) } else { None };
@@ -3919,7 +3935,7 @@ impl IRBuilder {
                     src: src_val,
                     kind,
                     from_ty,
-                    to_ty,
+                    to_ty: to_ty.clone(),
                 });
                 // Register the result vreg type so downstream BinOp/Cmp
                 // can dispatch to the FP path.

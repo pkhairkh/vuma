@@ -267,16 +267,30 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
         // f64 bits in i64 immediates. For f32 operations, we must narrow
         // the f64 to f32 first (NOT reinterpret the low 32 bits as f32,
         // which would give wrong values since f64 bits ≠ f32 bits).
+        //
+        // However, after a previous fold, an f32 immediate may already
+        // hold f32 bits (small value ≤ 0xFFFFFFFF). We detect this by
+        // checking if the value fits in 32 bits — if so, it's likely an
+        // already-folded f32 result. For f64, the value can be any 64-bit.
         let lf = if is_f64 {
             f64::from_bits(lhs as u64)
         } else {
-            // Narrow f64 to f32, then back to f64 for arithmetic.
-            f64::from_bits(lhs as u64) as f32 as f64
+            // For f32: if the value fits in 32 bits, it's already f32 bits.
+            // Otherwise, it's f64 bits that need narrowing.
+            if (0..=0xFFFFFFFF).contains(&(lhs as u64)) {
+                f32::from_bits(lhs as u32) as f64
+            } else {
+                f64::from_bits(lhs as u64) as f32 as f64
+            }
         };
         let rf = if is_f64 {
             f64::from_bits(rhs as u64)
         } else {
-            f64::from_bits(rhs as u64) as f32 as f64
+            if (0..=0xFFFFFFFF).contains(&(rhs as u64)) {
+                f32::from_bits(rhs as u32) as f64
+            } else {
+                f64::from_bits(rhs as u64) as f32 as f64
+            }
         };
         let result: f64 = match op {
             BinOpKind::Add => lf + rf,
@@ -656,8 +670,15 @@ fn find_natural_loops(func: &IRFunction) -> Vec<(String, HashSet<String>)> {
 /// hold a constant, subsequent uses of that register are replaced with the
 /// constant, potentially enabling further folds.
 pub fn constant_fold(mut func: IRFunction) -> IRFunction {
+    // Cross-block constant propagation: maintain a function-level subst map
+    // so constants folded in one block are propagated to uses in subsequent
+    // blocks. This is critical for float codegen where a let-binding like
+    // `a: f32 = 3.0` is in a different block than `a + b`.
+    let mut global_subst: HashMap<u32, IRValue> = HashMap::new();
+
     for block in &mut func.blocks {
-        let mut subst: HashMap<u32, IRValue> = HashMap::new();
+        // Start with the global subst, then add block-local folds.
+        let mut subst = global_subst.clone();
         let mut new_instrs = Vec::new();
 
         for instr in &block.instructions {
@@ -709,6 +730,9 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
 
         // Substitute in the terminator as well.
         block.terminator = substitute_terminator(&block.terminator, &subst);
+
+        // Merge block-local folds into the global subst for cross-block propagation.
+        global_subst.extend(subst);
     }
     func
 }
