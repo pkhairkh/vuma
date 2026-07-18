@@ -1,0 +1,901 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/ipc/futex.vuma
+// VWK IPC Subsystem — Futex (fast user-space mutex: WAIT + WAKE)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K7c layer of the VWK kernel: the futex primitive — a
+// fast user-space mutex built around a 64-entry kernel-side wait table.
+// K7 (IPC) is building pipe (K7a, done), signal (K7b, done), futex (this
+// file, K7c), and shm (K7d, not yet); K7e built the foundational
+// WaitQueue that pipe + signal rest on. K7c is the third concrete object
+// in the IPC subtree and the one that most directly mirrors Linux's
+// futex(2) design: a wait queue keyed by the *address* of a 32-bit
+// user-space word, with two operations (FUTEX_WAIT + FUTEX_WAKE) that
+// together implement uncontended lock-acquire in pure user space and
+// fall back to a kernel syscall only when there is actual contention.
+//
+// ── What K7c provides ──────────────────────────────────────────────────────
+//   futex_init(tbl)                              — zero all 64 futex entries
+//                                                 (uaddr=0, wait_count=0),
+//                                                 reset tbl.count to 0.
+//                                                 Called once during boot
+//                                                 (K8+ kmain) before any
+//                                                 sys_futex call.
+//   futex_get_uaddr(tbl, idx) -> u64             — read back the uaddr
+//                                                 stored in slot `idx`
+//                                                 (little-endian byte
+//                                                 assembly — 8 bytes).
+//   futex_set_uaddr(tbl, idx, val)               — store `val` (u64) into
+//                                                 slot `idx`'s uaddr field
+//                                                 (little-endian byte
+//                                                 disassembly — 8 bytes).
+//   futex_get_wait_count(tbl, idx) -> u32        — read back the wait_count
+//                                                 (4 bytes, little-endian).
+//   futex_set_wait_count(tbl, idx, val)          — store `val` (u32) into
+//                                                 slot `idx`'s wait_count
+//                                                 field (4 bytes).
+//   futex_find(tbl, uaddr) -> u32                — scan the 64 slots for one
+//                                                 whose uaddr == `uaddr` AND
+//                                                 wait_count > 0. Returns
+//                                                 the index, or 64 = "not
+//                                                 found" sentinel.
+//   futex_find_or_create(tbl, uaddr) -> u32      — like futex_find, but if
+//                                                 not found, claim a free
+//                                                 slot (wait_count == 0)
+//                                                 and store `uaddr` there.
+//                                                 Returns the index, or 64
+//                                                 if the table is full.
+//   sys_futex(tbl, uaddr, op, val) -> i64        — the syscall ABI. op=0 is
+//                                                 FUTEX_WAIT (record a
+//                                                 waiter, return -EAGAIN),
+//                                                 op=1 is FUTEX_WAKE (wake
+//                                                 up to `val` waiters,
+//                                                 return number woken),
+//                                                 anything else returns
+//                                                 -EINVAL.
+//
+// ── What is a futex? ────────────────────────────────────────────────────────
+//   "futex" = "fast user-space mutex". The core idea (Hubertus Franke,
+//   Rusty Russell, Matthew Kirkwood, Ulrich Drepper — OLS 2002) is that
+//   the VAST majority of mutex operations are uncontended: thread A
+//   acquires the lock, does its work, releases the lock, and no other
+//   thread ever tried to acquire it in the meantime. In that case there
+//   is no reason to enter the kernel at all — the lock word can be
+//   manipulated with a single atomic compare-and-swap in user space
+//   (cmpxchg on x86, cas on arm, lr/sc on riscv). The kernel only gets
+//   involved when there IS contention: thread B tried cmpxchg, saw that
+//   A still holds the lock, and now needs to SLEEP until A releases it.
+//   THAT is the FUTEX_WAIT syscall — "if *uaddr == val, sleep on the
+//   wait queue keyed by uaddr". When A releases the lock, it does a
+//   final atomic update and then calls FUTEX_WAKE — "wake up to N
+//   waiters sleeping on uaddr". The atomic ops are entirely in user
+//   space; the kernel only manages the wait queue.
+//
+//   The classic uncontended acquire / release sequence is then:
+//
+//     ; user-space acquire (pthread_mutex_lock — fast path)
+//     mov eax, 1
+//     xor edx, edx          ; expected = "unlocked" (0)
+//     lock cmpxchg [rdi], eax ; if *p == 0 then *p = 1, else eax = *p
+//     test eax, eax
+//     jnz .slow             ; somebody else held it — go to kernel
+//     ; got the lock — no syscall entered
+//     ...
+//     ; user-space release (pthread_mutex_unlock — fast path)
+//     mov dword [rdi], 0    ; atomic store, unlocked
+//     ; (only if there MIGHT be waiters — see FUTEX_WAKE_OP / private
+//     ;  futex fast-path optimizations — does the kernel get told)
+//     mov eax, 1            ; FUTEX_WAKE
+//     xor esi, esi          ; val = 1 (wake one waiter)
+//     syscall               ; sys_futex(p, 1, 1, 0)
+//
+//   K7c implements the kernel side of this contract — the wait table +
+//   sys_futex — without the user-space cmpxchg (which lives in libc, not
+//   in the kernel). K7c is the kernel's *bookkeeping* for futexes; the
+//   actual user-space atomic sequence is the caller's responsibility.
+//
+// ── The two operations ──────────────────────────────────────────────────────
+//   FUTEX_WAIT (op == 0):
+//     sys_futex(uaddr, FUTEX_WAIT, val, NULL)
+//       1. Atomically read *uaddr.
+//       2. If *uaddr != val, return -EAGAIN (the kernel's "the futex word
+//          changed under you, you didn't actually wait" signal — the
+//          caller should re-check the word and retry).
+//       3. If *uaddr == val, enqueue the current task on the wait queue
+//          keyed by uaddr and sleep (don't return until woken by a
+//          FUTEX_WAKE on the same uaddr, OR a signal arrives — in which
+//          case return -EINTR).
+//     The atomicity of steps 1+2 (the read and the comparison must
+//     happen as one atomic unit with respect to FUTEX_WAKE on the same
+//     uaddr — otherwise there's a lost-wakeup race: WAIT reads *uaddr,
+//     sees == val, is about to sleep, when WAKE comes in and wakes an
+//     empty queue, then WAIT sleeps forever) is the WHOLE POINT of the
+//     futex interface — the kernel holds the wait-queue lock across the
+//     read+enqueue, so no WAKE can sneak in between. Linux implements
+//     this with a per-hash-bucket spinlock (the futex hash table has
+//     256 buckets, each with its own spinlock, so contention is rare).
+//
+//     K7c's PMT-pure implementation CANNOT actually read *uaddr (that
+//     requires pointer syntax — forbidden by the K7c contract: "No
+//     pointer syntax"). Instead, K7c just records the waiter in the
+//     FutexTable and returns -EAGAIN to the caller. The "val" parameter
+//     is NOT compared against anything — K7c assumes the caller already
+//     did the user-space cmpxchg and the comparison is implied. This
+//     matches the K7c contract's reference text:
+//       "In a real kernel: AtomicLoad(uaddr), if == val, sleep.
+//        In hosted mode: just record the waiter."
+//     The K8+ kernel-mode-futex layer (womb/kernel/ipc/futex_real.vuma
+//     or similar) will add the actual AtomicLoad(uaddr) comparison
+//     using the AtomicLoad IR builtin (which IS available in VUMA —
+//     see src/parser/src/lexer.rs:365 TokenKind::AtomicLoad, and
+//     src/parser/src/to_scg.rs:3190 Expr::AtomicLoad — but using it
+//     requires taking a raw address as the `addr` operand, which means
+//     pointer syntax in the .vuma source. K7c's contract forbids
+//     pointer syntax, so K7c does NOT use atomic_load. K8+ may.
+//
+//   FUTEX_WAKE (op == 1):
+//     sys_futex(uaddr, FUTEX_WAKE, val, NULL)
+//       1. Look up the wait queue keyed by uaddr.
+//       2. Wake up to `val` waiters from that queue (val = 1 wakes one
+//          — the typical "I released the lock, wake one waiter" case;
+//          val = INT_MAX wakes all — the typical "I broadcasted a
+//          condition variable" case).
+//       3. Return the number of waiters actually woken (0 if there
+//          were no waiters, which is fine — the wake is a no-op).
+//     The wake operation is ALWAYS non-blocking: it dequeues waiters
+//     and marks them runnable, but does not yield the caller's CPU.
+//     The woken waiters will be scheduled by the CFS scheduler (K4b)
+//     on their next time-slice.
+//
+//     K7c's PMT-pure implementation does NOT actually wake any task —
+//     there are no tasks to wake in hosted mode (no scheduler running,
+//     no Task structs in flight). It just decrements the wait_count by
+//     min(val, wait_count) and returns that count. This matches the
+//     K7c contract's reference text. K8+ scheduler integration will
+//     add the actual waitq_wake_n() call (using K7e's WaitQueue).
+//
+// ── Why a 64-entry table? ──────────────────────────────────────────────────
+//   Linux's real futex implementation uses a 256-bucket hash table
+//   (futex_queues[] in kernel/futex/core.c), where each bucket holds a
+//   linked list of futex_waiter structs keyed by the (uaddr, mm) pair.
+//   The hash table is sized to keep bucket-chain lengths short under
+//   typical workloads (one bucket per ~16 CPUs, on a 4096-CPU machine
+//   that's 256 buckets). K7c is a PMT-pure simplification: a flat array
+//   of 64 entries (no hash, no chaining, no per-bucket spinlock — just
+//   a linear scan). 64 is small enough to fit comfortably in a single
+//   State<FutexTable> (772 bytes total — well under the arena page
+//   size of 4096), and large enough to handle the K7c self-test's 3
+//   futexes (uaddr 1000, 1000 again, 9999) without any eviction. K8+
+//   will likely bump this to 256 or 1024 and add the hash + chaining
+//   when the futex table needs to scale. The 64-entry choice matches
+//   the K7c contract's reference text.
+//
+// ── Layouts ────────────────────────────────────────────────────────────────
+//   FutexEntry (logical, NOT a VUMA layout — see "Why no FutexEntry
+//   layout?" below):
+//     uaddr:      u64   (8 bytes) — the futex word's user-space address.
+//                                  Identifies which wait queue this
+//                                  entry is for. 0 = "slot is free".
+//     wait_count: u32   (4 bytes) — number of waiters on this entry.
+//                                  0 = "slot is free" (even if uaddr
+//                                  is non-zero — see futex_find's
+//                                  "uaddr match AND wait_count > 0"
+//                                  guard).
+//
+//   FutexTable (the VUMA layout — 3 fields, 772 bytes total):
+//     uaddrs:      [u8; 512]  (64 * 8 bytes)  — packed array of 64 u64
+//                                                uaddr values, stored
+//                                                little-endian byte-
+//                                                by-byte (same pattern
+//                                                as K7b's SignalTable.
+//                                                handlers — see "NOTE
+//                                                on handler storage"
+//                                                in signal.vuma).
+//     wait_counts: [u8; 256]  (64 * 4 bytes)  — packed array of 64 u32
+//                                                wait_count values,
+//                                                same byte-by-byte
+//                                                pattern.
+//     count:       u32        (4 bytes)       — total number of entries
+//                                                currently in use (the
+//                                                K7c self-test doesn't
+//                                                actually read this —
+//                                                it's a hook for K8+
+//                                                /proc/diagnostics).
+//
+//   Total: 512 + 256 + 4 = 772 bytes (padded to 776 for 8-byte alignment
+//   of the trailing State<FutexTable> footprint — the codegen rounds
+//   State<T> sizes up to a multiple of the largest field's alignment,
+//   which is 1 here because all three fields are byte/u32-aligned; but
+//   State<T> footprints round to 8 regardless, same as K7b's
+//   SignalTable — see "SignalTable layout" in signal.vuma's header).
+//
+// ── Why no FutexEntry layout? ──────────────────────────────────────────────
+//   The K7c contract specifies FutexEntry as a logical concept (uaddr +
+//   wait_count) but stores the table as two PARALLEL byte arrays
+//   (uaddrs[512], wait_counts[256]) rather than an array of FutexEntry
+//   structs. This is the same byte-array pattern K7b uses for
+//   SignalTable.handlers ([u8; 256] rather than [u64; 32]) — see
+//   "NOTE on handler storage" in signal.vuma's header. VUMA's parser
+//   accepts `[FutexEntry; 64]` as a layout field, but indexing it
+//   (`tbl.entries[i]`) yields a single byte cell, not a FutexEntry
+//   sub-struct, and `tbl.entries[i].uaddr` would require nested-layout
+//   field access (which VUMA DOES support — see K7a's
+//   `p.read_waitq.count` — but the codegen has a known bug with
+//   nested-layout field offsets, see "Codegen bug: nested-layout field
+//   offsets" in pipe.vuma's header, which forces K7a to add _pad1 /
+//   _pad2 WORKAROUND fields). Using two parallel byte arrays avoids
+//   the nested-layout codegen bug entirely — every field access is a
+//   flat `tbl.uaddrs[off + i]` byte load/store, exactly the pattern
+//   K7b's signal_install / signal_get_handler use. This is the cleaner
+//   choice for K7c.
+//
+// ── The `FutexEntry` layout declaration IS in this file ────────────────────
+//   The K7c contract explicitly includes `layout FutexEntry = { ... }`
+//   (with uaddr: u64 + wait_count: u32) at the top of the file, even
+//   though the FutexTable doesn't actually use it (FutexTable uses two
+//   parallel byte arrays, per the rationale above). The declaration is
+//   there as documentation — it makes the logical structure visible to
+//   a reader without requiring them to read the comment block above.
+//   The K8+ real-futex layer will use FutexEntry directly (when the
+//   nested-layout codegen bug is fixed and `tbl.entries[i].uaddr`
+//   becomes safe to use). For K7c, FutexEntry is declared but never
+//   instantiated — the parser still parses it (no harm), the codegen
+//   still emits its size info (no harm), and the IVE verifier still
+//   type-checks it (no harm). It's a forward-declaration for K8+.
+//
+// ── Error codes (decimal, per the K7c contract) ─────────────────────────────
+//   All error codes use DECIMAL per the K7c contract's "Use decimal
+//   constants" rule. Decimal avoids the parser's hex-literal path
+//   (parse_int_radix width-extension subtleties — see K7b's signal.vuma
+//   header "Decimal-constants discipline" and K3a's trap_trampoline.vuma
+//   for the same rationale). The error codes:
+//     0  = FUTEX_WAIT op code (also: "success" — sys_futex returns
+//          woken-count on FUTEX_WAKE, which is 0 if there were no
+//          waiters; the CALLER distinguishes "0 woken" from "error"
+//          by checking the op: FUTEX_WAKE returning 0 is success).
+//     1  = FUTEX_WAKE op code.
+//     11 = -EAGAIN ("Resource temporarily unavailable"). FUTEX_WAIT's
+//          hosted-mode return: "would have blocked in a real kernel;
+//          in hosted mode we just record the waiter and tell the caller
+//          to retry". This matches the positive-error convention used
+//          by K7a (11 = EAGAIN on pipe_read of empty pipe) and K7b
+//          (22 = EINVAL on signal_send of sig=0). The K4f syscall
+//          layer will negate this to -11 before returning to user
+//          space (matching Linux's syscall ABI where errors are
+//          negative errno).
+//     12 = -ENOMEM ("Out of memory"). sys_futex returns this when the
+//          FutexTable is full (all 64 slots have non-zero wait_count)
+//          and a new FUTEX_WAIT comes in on a uaddr with no existing
+//          entry. In a real kernel this would be -ENOMEM because the
+//          allocation of a new futex_waiter struct failed; in K7c's
+//          PMT-pure model it's "the 64-slot table is full". The
+//          positive-error convention matches K7b (22 = EINVAL) and
+//          K7a (11 = EAGAIN, 32 = EPIPE).
+//     22 = -EINVAL ("Invalid argument"). sys_futex returns this when
+//          `op` is neither 0 (FUTEX_WAIT) nor 1 (FUTEX_WAKE). This
+//          matches K7b's signal_send EINVAL return for sig=0 or
+//          sig>32. The K4f syscall layer will negate to -22.
+//     64 = the "not found" / "table full" sentinel returned by
+//          futex_find and futex_find_or_create. NOT an error code —
+//          it's an index that's "one past the end" of the 0..63 valid
+//          range, the same idiom K7e uses for the empty-queue sentinel
+//          (head=256 = "one past the end" of 0..255 task indices).
+//          sys_futex checks for 64 and converts it to the appropriate
+//          error code (12 = -ENOMEM for WAIT, 0 = "no waiters" for
+//          WAKE).
+//
+// ── The `let woken = val;` reassignment pattern ────────────────────────────
+//   sys_futex's FUTEX_WAKE arm uses:
+//     let cur = futex_get_wait_count(tbl, idx);
+//     let woken = val;
+//     if woken > cur {
+//         woken = cur;        // clamp — can't wake more than are waiting
+//     }
+//     futex_set_wait_count(tbl, idx, cur - woken);
+//     return woken as i64;
+//   The `let woken = val; ... woken = cur;` pattern (declare-then-
+//   reassign) is the standard VUMA idiom for "compute a value that
+//   depends on a runtime condition" — same as K7b's `let v: u64 = 0;
+//   ... v = v + (b << sh);` byte-assembly loop, and K7a's `let n = ...;
+//   ... n = n - 1;` ring-buffer decrement. VUMA's `let` does NOT mean
+//   "immutable" (unlike Rust's `let`); it means "introduce a new
+//   local binding" and the binding is mutable by default (no `mut`
+//   keyword). This matches the K7c contract's reference text exactly.
+//
+// ── AtomicLoad / AtomicCas (mentioned but NOT used in K7c) ──────────────────
+//   The K7c contract header says "Uses AtomicLoad/AtomicCas (VUMA IR
+//   builtins) for the futex word." These ARE available in VUMA —
+//   `atomic_load`, `atomic_store`, `atomic_cas` are reserved keywords
+//   (src/parser/src/lexer.rs:365, 367, 369) and the parser builds
+//   Expr::AtomicLoad / AtomicStore / AtomicCas (src/parser/src/to_scg.rs:
+//   3190, 3193, 3197). They lower to atomic IR instructions and the
+//   x86_64 codegen emits `lock cmpxchg` for AtomicCas (see
+//   src/codegen/src/x86_64/). HOWEVER — these builtins take a raw
+//   ADDRESS as their `addr` operand, which means using them in a .vuma
+//   source file requires pointer syntax (`atomic_load(uaddr as *u32)`
+//   or similar). The K7c contract's DoD explicitly forbids pointer
+//   syntax ("No pointer syntax"), so K7c does NOT use atomic_load /
+//   atomic_cas. The "Uses AtomicLoad/AtomicCas" note in the contract
+//   header is a DESIGN statement (the futex MECHANISM uses atomics —
+//   in user space, where the caller's cmpxchg lives), not an
+//   IMPLEMENTATION statement (K7c itself doesn't call them). The
+//   K8+ real-futex layer (womb/kernel/ipc/futex_real.vuma or similar)
+//   MAY use atomic_load when it grows pointer-syntax support; K7c is
+//   PMT-pure and stays in the hosted-mode "just record the waiter"
+//   model from the contract's reference text.
+//
+// ── No wait-queue integration in K7c ────────────────────────────────────────
+//   K7e's WaitQueue is the foundation for futex_wait's "sleep until
+//   woken" path — in a real kernel, FUTEX_WAIT would call
+//   waitq_add(futex_wq, current_task_idx) and then yield; FUTEX_WAKE
+//   would call waitq_wake_n(futex_wq, val). K7c does NOT include a
+//   WaitQueue field in FutexTable (the contract's layout has only
+//   uaddrs + wait_counts + count), and sys_futex does NOT call
+//   waitq_add / waitq_wake_n. This is the same PMT-pure simplification
+//   K7b made for signal (no sigwaitq field — see "No wait-queue
+//   integration in K7b" in signal.vuma's header) and K7a made for
+//   pipe (waitq fields exist but the self-test never adds any waiters
+//   — see "Why no actual blocking?" in pipe.vuma's header). K7c goes
+//   one step further: NO waitq fields at all, just a flat wait_count
+//   counter per entry. K8+ scheduler integration will add a per-entry
+//   WaitQueue (re-declared byte-identically to K7e's, same as K7a's
+//   pipe.read_waitq / write_waitq) and wire sys_futex's WAIT + WAKE
+//   into waitq_add / waitq_wake_n. The K7c self-test only checks the
+//   synchronous bookkeeping paths (WAIT increments count, WAKE
+//   decrements count) — no actual task blocking is tested.
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+//   Every function in this file takes `tbl: State<FutexTable>` as a
+//   parameter, so the state-typedness is preserved across all the
+//   helper calls (futex_find_or_create calls futex_find + futex_set_
+//   uaddr; sys_futex calls futex_find_or_create + futex_get_wait_
+//   count + futex_set_wait_count). The direct field reads in the
+//   callers work correctly after each helper call (same pattern as
+//   K7b's signal_check calling signal_send / signal_install — see
+//   "State-typedness note" in signal.vuma's header). The `let idx =
+//   futex_find(...)` / `let cur = futex_get_wait_count(...)` locals
+//   are plain u32 / u64 values (function return values, not State<T>
+//   field reads) — no state-typedness concern. (Same pattern as K7e's
+//   waitq.vuma self-test header note and K7b's signal.vuma self-test
+//   header note.)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, `free`, or any pointer syntax
+//   anywhere in this file. The FutexTable is a flat struct held in a
+//   `___pmt_buffer`-backed State<FutexTable>; the CALLER allocates it
+//   via `state_new(FutexTable)` and passes it by reference to futex_
+//   init / futex_get_uaddr / futex_set_uaddr / futex_get_wait_count /
+//   futex_set_wait_count / futex_find / futex_find_or_create /
+//   sys_futex (init-style API — see "Why init-style?" in K4e's
+//   wait.vuma header for the codegen rationale: the current codegen
+//   does NOT propagate State-typedness through function return
+//   values, so `fn futex_new() -> State<FutexTable>` would produce
+//   broken field-access code in callers). No externs are declared in
+//   this file (futex is pure-PM on the FutexTable — no syscalls, no
+//   context switch, no memory allocation, no actual atomic ops).
+//
+//   State<T> params: 1 per function (tbl only), per the K4b contract's
+//   "1-2 per function" rule. The futex_* functions don't need a
+//   ProcessTable or a Task — they're manipulating only the kernel-
+//   global FutexTable. K8+ scheduler integration will add a
+//   State<Task> parameter to sys_futex's WAIT arm (to enqueue the
+//   current task on the futex wait queue — K7c's caller does this
+//   lookup itself and passes the resulting State<FutexTable> directly
+//   for now).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+//   All non-zero constants in this file use DECIMAL per the K7c
+//   contract's "Use decimal constants" rule. Decimal avoids the
+//   parser's hex-literal path (parse_int_radix width-extension
+//   subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the
+//   same rationale, and K3a's trap_trampoline.vuma for the same
+//   rule). The constants:
+//     512  = uaddrs array size (64 entries × 8 bytes per uaddr).
+//     256  = wait_counts array size (64 entries × 4 bytes per count).
+//     64   = maximum number of futex entries (table capacity).
+//     8    = bytes per uaddr (u64 address, stored as 8 u8 cells).
+//     4    = bytes per wait_count (u32 count, stored as 4 u8 cells).
+//     255  = single-byte mask for the low 8 bits (used in
+//            futex_set_uaddr / futex_set_wait_count's
+//            `(val >> sh) & 255` byte-extraction).
+//     0    = FUTEX_WAIT op code.
+//     1    = FUTEX_WAKE op code (also: the increment/decrement step
+//            in the wait_count helpers + the shift unit `i * 8`'s
+//            multiplier).
+//     11   = -EAGAIN (sys_futex WAIT's hosted-mode return).
+//     12   = -ENOMEM (sys_futex WAIT's table-full return).
+//     22   = -EINVAL (sys_futex's bad-op return).
+//     1000, 9999 = self-test futex-word addresses (arbitrary — they
+//                  just need to be distinct non-zero values so
+//                  futex_find can tell them apart; 1000 is the
+//                  "primary" futex under test, 9999 is the "non-
+//                  existent" futex used to verify WAKE-on-empty
+//                  returns 0).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the FutexEntry + FutexTable
+//   layouts (new to this file — no prior VWK file declares them). No
+//   externs, no helpers from other files — futex_* is a closed 8-
+//   function API (init + 4 byte-pack/unpack helpers + find + find_or_
+//   create + sys_futex). K8+ files that need to manipulate futexes
+//   (the scheduler's futex-wait blocker, the syscall layer's futex()
+//   / futex_timeo() / futex_requeue() wrappers) will re-declare
+//   FutexTable byte-identically and call these functions directly
+//   (VUMA's lack of `import` means each consumer file re-declares;
+//   see K1a-hosted's "no-import re-declaration rule" header note for
+//   the same pattern, and K7b's signal.vuma "VUMA has no import"
+//   header note).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/ipc/futex.vuma \
+//         /tmp/futex.bin x86_64 --verify
+//     /tmp/futex.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — WAIT
+// returns -EAGAIN (11) + wait_count becomes 1; futex_find finds the
+// entry; WAKE returns 1 woken + wait_count becomes 0; WAKE on
+// non-existent uaddr returns 0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// FutexEntry: one per active futex word (logical — see "Why no
+// FutexEntry layout?" in the file header for why this is declared but
+// NOT used by FutexTable's parallel-array storage). 2 fields × (8 + 4)
+// = 12 bytes (padded to 16 for 8-byte alignment of the uaddr field).
+// Declared here as a forward-declaration for K8+ (when the nested-
+// layout codegen bug is fixed and FutexTable can hold [FutexEntry; 64]
+// directly, this layout will be the element type). For K7c, the
+// FutexTable uses two parallel byte arrays (uaddrs + wait_counts) and
+// FutexEntry is documentation-only.
+layout FutexEntry = {
+    uaddr:      u64,  // address of the futex word (0 = slot is free)
+    wait_count: u32,  // number of waiters on this entry (0 = slot is free)
+}
+
+// FutexTable: 64 futex entries (kernel-global wait table). 3 fields ×
+// (512 + 256 + 4) = 772 bytes (padded to 776 for 8-byte alignment of
+// the trailing State<FutexTable> footprint — see "Layouts" in the file
+// header for the rationale).
+//
+// uaddrs is `[u8; 512]` rather than `[u64; 64]` because VUMA's array
+// indexing is byte-granular regardless of element type (see "NOTE on
+// handler storage" in signal.vuma's header and "Why no FutexEntry
+// layout?" in this file's header). Each 8-byte slot holds one u64
+// uaddr value, stored little-endian byte-by-byte via the futex_set_
+// uaddr byte-loop. Entry `idx` (0..63) lives at byte offset idx*8 in
+// uaddrs and byte offset idx*4 in wait_counts.
+//
+// wait_counts is `[u8; 256]` for the same reason — each 4-byte slot
+// holds one u32 wait_count, stored little-endian byte-by-byte.
+//
+// count is u32 (max 64 entries — fits comfortably). The K7c self-test
+// doesn't read this; it's a hook for K8+ /proc/diagnostics to report
+// futex-table pressure. futex_init sets it to 0; sys_futex does NOT
+// bump it on WAIT / WAKE (the "is this slot in use?" question is
+// answered by wait_count > 0, not by count). K8+ may wire count up to
+// track the high-water mark of slot usage for diagnostics.
+layout FutexTable = {
+    uaddrs:      [u8; 512],  // 64 * 8 bytes — u64 uaddr per entry
+    wait_counts: [u8; 256],  // 64 * 4 bytes — u32 wait_count per entry
+    count:       u32,        // total entries in use (diagnostics hook)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FutexTable operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// futex_init: zero the futex table. Sets all 64 entries' uaddr = 0 and
+// wait_count = 0 (the "slot is free" sentinel pair — see "Why no
+// FutexEntry layout?" in the file header), and resets tbl.count to 0.
+// Called once during boot (K8+ kmain) before any sys_futex call. The
+// CALLER allocates the FutexTable via `state_new(FutexTable)` and
+// passes it by reference (init-style API — see "Why init-style?" in
+// K4e's wait.vuma header for the codegen rationale).
+//
+// State<T> params: 1 (tbl). Pure write — no reads, no helper calls.
+// The 512-byte uaddrs + 256-byte wait_counts arrays are zeroed by two
+// separate while loops (one per array — VUMA doesn't support
+// multi-array loops, and unifying them into one loop with two array
+// accesses per iteration would make the indexing arithmetic harder
+// to read). The same per-array loop pattern is used by K7b's
+// signal_init (256-byte handlers loop) and K4a's pt_init (multi-array
+// init loops).
+fn futex_init(tbl: State<FutexTable>) {
+    // Zero all 64 entries: uaddr + wait_count per entry.
+    let i = 0;
+    while i < 64 {
+        futex_set_uaddr(tbl, i, 0);
+        futex_set_wait_count(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// futex_get_uaddr: read back the uaddr stored in entry `idx`.
+//
+//   idx: 0..63 (entry index). Out-of-range values are NOT checked — the
+//        caller is responsible for validating idx before calling (the
+//        K7c self-test only passes idx values that came from
+//        futex_find / futex_find_or_create, both of which return 0..63
+//        or the 64 sentinel — and sys_futex checks for 64 before
+//        calling futex_get_wait_count).
+//
+// Returns the u64 uaddr value (or 0 if the slot is free / never
+// written). The uaddr is reconstructed from the 8 little-endian bytes
+// at tbl.uaddrs[idx*8 .. idx*8 + 7] by shifting each byte left by
+// (i * 8) bits and OR-ing into the accumulator. The `v + (b << sh)`
+// form is the standard VUMA byte-assembly idiom (same as K7b's
+// signal_get_handler and bignum.vuma's bn_load_u64 — using `+`
+// instead of `|` because the bytes are guaranteed non-overlapping in
+// their bit positions, so `+` and `|` produce the same result; the
+// K7c contract's reference text uses `+`).
+//
+// State<T> params: 1 (tbl). Pure read — reads 8 bytes from
+// tbl.uaddrs[off..off+8]. No writes, no helper calls.
+fn futex_get_uaddr(tbl: State<FutexTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.uaddrs[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// futex_set_uaddr: store `val` (u64) into entry `idx`'s uaddr field.
+//
+//   idx: 0..63 (entry index). Out-of-range values are NOT checked
+//        (same convention as futex_get_uaddr).
+//   val: u64 uaddr value (0 = "slot is free").
+//
+// The uaddr is stored little-endian byte-by-byte at byte offset
+// idx*8 in tbl.uaddrs. Each byte is extracted from `val` by shifting
+// right by (i * 8) bits and masking with 255. The `(val >> sh) & 255`
+// pattern is the standard VUMA byte-extraction idiom (same as K7b's
+// signal_install and bignum.vuma's bn_store_u64 reverse).
+//
+// State<T> params: 1 (tbl). Pure write — writes 8 bytes into
+// tbl.uaddrs[off..off+8]. No reads, no helper calls.
+fn futex_set_uaddr(tbl: State<FutexTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.uaddrs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// futex_get_wait_count: read back the wait_count stored in entry `idx`.
+//
+//   idx: 0..63 (entry index). Out-of-range values are NOT checked
+//        (same convention as futex_get_uaddr).
+//
+// Returns the u32 wait_count value (0 = "slot is free" or "no
+// waiters"). The wait_count is reconstructed from the 4 little-endian
+// bytes at tbl.wait_counts[idx*4 .. idx*4 + 3] by shifting each byte
+// left by (i * 8) bits and OR-ing into the accumulator. Same `v + (b
+// << sh)` byte-assembly idiom as futex_get_uaddr (just 4 bytes
+// instead of 8).
+//
+// State<T> params: 1 (tbl). Pure read — reads 4 bytes from
+// tbl.wait_counts[off..off+4]. No writes, no helper calls.
+fn futex_get_wait_count(tbl: State<FutexTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.wait_counts[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// futex_set_wait_count: store `val` (u32) into entry `idx`'s
+// wait_count field.
+//
+//   idx: 0..63 (entry index). Out-of-range values are NOT checked
+//        (same convention as futex_set_uaddr).
+//   val: u32 wait_count value (0 = "slot is free" or "no waiters").
+//
+// The wait_count is stored little-endian byte-by-byte at byte offset
+// idx*4 in tbl.wait_counts. Each byte is extracted from `val` by
+// shifting right by (i * 8) bits and masking with 255. Same
+// `(val >> sh) & 255` byte-extraction idiom as futex_set_uaddr (just
+// 4 bytes instead of 8).
+//
+// State<T> params: 1 (tbl). Pure write — writes 4 bytes into
+// tbl.wait_counts[off..off+4]. No reads, no helper calls.
+fn futex_set_wait_count(tbl: State<FutexTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.wait_counts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// futex_find: scan the 64 entries for one whose uaddr == `uaddr` AND
+// wait_count > 0. Returns the index (0..63), or 64 = "not found".
+//
+// The "wait_count > 0" guard is what makes a slot "in use". A slot
+// can have uaddr != 0 but wait_count == 0 if a previous FUTEX_WAKE
+// drained all the waiters (sys_futex's WAKE arm decrements wait_count
+// but does NOT clear uaddr — see the comment in sys_futex). Such a
+// slot is logically free (it has no waiters), so futex_find skips it.
+// This means a FUTEX_WAKE on a uaddr whose waiters were all already
+// woken returns 0 (no waiters), even though there's still a stale
+// uaddr entry in the table. futex_find_or_create will then REUSE that
+// stale slot for a new FUTEX_WAIT (because its wait_count == 0 makes
+// it a "free slot" in the second loop).
+//
+// This matches Linux's behavior: a futex_waiter struct is freed when
+// the waiter is woken, and a subsequent FUTEX_WAIT on the same uaddr
+// allocates a NEW futex_waiter (the old one is gone).
+//
+// The 64 sentinel is "one past the end" of the 0..63 valid range —
+// same idiom as K7e's WaitQueue 256-empty-sentinel for 0..255 task
+// indices (see "WaitQueue layout" in waitq.vuma's header).
+//
+// State<T> params: 1 (tbl). Pure read — reads uaddr + wait_count for
+// each entry until match. No writes, no helper calls (other than the
+// futex_get_uaddr / futex_get_wait_count byte-pack helpers, which are
+// also pure reads).
+fn futex_find(tbl: State<FutexTable>, uaddr: u64) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if futex_get_uaddr(tbl, i) == uaddr {
+            if futex_get_wait_count(tbl, i) > 0 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// futex_find_or_create: like futex_find, but if not found, claim a
+// free slot (wait_count == 0) and store `uaddr` there. Returns the
+// index (0..63), or 64 if the table is full.
+//
+// Two phases:
+//   (1) futex_find — if there's an existing entry with this uaddr AND
+//       wait_count > 0, return it (the caller is joining an existing
+//       wait queue). This is the "FUTEX_WAIT on a contended futex"
+//       fast path.
+//   (2) Linear scan for a free slot — any entry whose wait_count == 0
+//       is reusable (its uaddr might be a stale non-zero value from a
+//       previous FUTEX_WAIT/WAKE cycle, but we overwrite it with the
+//       new uaddr via futex_set_uaddr). The first free slot found is
+//       claimed. If no slot is free (all 64 have wait_count > 0), the
+//       table is full — return 64 (sys_futex converts this to -ENOMEM).
+//
+// Note: this function does NOT bump wait_count — that's the caller's
+// (sys_futex's) job. futex_find_or_create just reserves the slot by
+// storing the uaddr. sys_futex then calls futex_set_wait_count(idx,
+// cur + 1) to record the actual waiter. This separation lets
+// futex_find_or_create be used by future K8+ operations
+// (FUTEX_REQUEUE, FUTEX_CMP_REQUEUE) that need to find an entry
+// without adding a waiter.
+//
+// State<T> params: 1 (tbl). Reads uaddr + wait_count for each entry
+// (via futex_find + the linear scan); writes uaddr into the claimed
+// slot (via futex_set_uaddr). No direct field writes — all access is
+// through the byte-pack/unpack helpers.
+fn futex_find_or_create(tbl: State<FutexTable>, uaddr: u64) -> u32 {
+    let found = futex_find(tbl, uaddr);
+    if found != 64 {
+        return found;
+    }
+    // Find a free slot (wait_count == 0 — slot is reusable even if
+    // uaddr is a stale non-zero value from a previous WAIT/WAKE cycle).
+    let i = 0;
+    while i < 64 {
+        if futex_get_wait_count(tbl, i) == 0 {
+            futex_set_uaddr(tbl, i, uaddr);
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // table full
+}
+
+// sys_futex: the syscall ABI.
+//
+//   tbl:   State<FutexTable> — the kernel-global futex wait table.
+//   uaddr: u64 — the futex word's user-space address (the wait-queue
+//          key). In a real kernel this would be a `*const u32`; K7c
+//          takes it as a u64 to avoid pointer syntax (per the K7c
+//          contract's "No pointer syntax" rule).
+//   op:    u32 — 0 = FUTEX_WAIT, 1 = FUTEX_WAKE, anything else =
+//          -EINVAL.
+//   val:   u32 — for FUTEX_WAIT, the expected value of *uaddr (the
+//          kernel compares *uaddr == val before sleeping; K7c's PMT-
+//          pure hosted mode does NOT do this comparison — see
+//          "FUTEX_WAIT (op == 0)" in the file header). For FUTEX_WAKE,
+//          the maximum number of waiters to wake.
+//
+// Returns (i64):
+//   FUTEX_WAIT (op == 0):
+//     11 = -EAGAIN. The hosted-mode return: "would have blocked in a
+//          real kernel; in hosted mode we just recorded the waiter
+//          and tell the caller to retry". The caller (pthread_mutex
+//          or whoever) sees -EAGAIN and re-checks the futex word in
+//          user space — if it now != val, the caller doesn't retry
+//          WAIT (the condition is gone); if it still == val, the
+//          caller retries WAIT (in a real kernel, this loop is
+//          unnecessary because the kernel holds the wait-queue lock
+//          across the read+enqueue; in K7c's hosted mode, the loop
+//          is the caller's responsibility — but K7c's self-test
+//          doesn't actually exercise the loop, it just checks the
+//          -EAGAIN return value).
+//     12 = -ENOMEM. The FutexTable is full (all 64 slots have non-
+//          zero wait_count) and a new FUTEX_WAIT came in on a uaddr
+//          with no existing entry. The caller should treat this as
+//          "the kernel is out of futex resources" and either spin
+//          or fail. K7c's self-test doesn't trigger this (it only
+//          uses 1 futex at a time).
+//   FUTEX_WAKE (op == 1):
+//     Returns the number of waiters woken (0 if there were no
+//     waiters — which is fine, a WAKE on an uncontended futex is a
+//     no-op; 1 if there was 1 waiter and val >= 1; val if there were
+//     >= val waiters and val > 0). The clamp `if woken > cur { woken
+//     = cur; }` ensures we don't claim to wake more waiters than
+//     actually exist. The decrement `cur - woken` reduces the
+//     wait_count by the number woken; if all waiters are woken
+//     (woken == cur), wait_count becomes 0 and the slot becomes
+//     "free" for futex_find_or_create to reuse.
+//   Otherwise:
+//     22 = -EINVAL. `op` is neither 0 nor 1.
+//
+// State<T> params: 1 (tbl). Reads + writes via the byte-pack/unpack
+// helpers + futex_find / futex_find_or_create. No direct field writes
+// — all access is through the helpers.
+fn sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
+    if op == 0 {
+        // FUTEX_WAIT.
+        // In a real kernel: AtomicLoad(uaddr), if == val, sleep on
+        // the wait queue keyed by uaddr (holding the wait-queue lock
+        // across the load+enqueue to avoid lost-wakeup races — see
+        // "FUTEX_WAIT (op == 0)" in the file header). In K7c's PMT-
+        // pure hosted mode: just record the waiter in the FutexTable
+        // (no AtomicLoad — pointer syntax is forbidden by the
+        // contract) and return -EAGAIN to tell the caller "would
+        // have blocked".
+        let idx = futex_find_or_create(tbl, uaddr);
+        if idx == 64 {
+            return 12;  // -ENOMEM (table full)
+        }
+        let cur = futex_get_wait_count(tbl, idx);
+        futex_set_wait_count(tbl, idx, cur + 1);
+        return 11;  // -EAGAIN (would block in real kernel)
+    }
+    if op == 1 {
+        // FUTEX_WAKE.
+        // Wake up to `val` waiters from the wait queue keyed by
+        // uaddr. In a real kernel: dequeue `min(val, wait_count)`
+        // tasks from the WaitQueue and mark them runnable (via
+        // waitq_wake_n — see K7e). In K7c's PMT-pure hosted mode:
+        // just decrement wait_count by `min(val, wait_count)` (no
+        // actual tasks to wake — no scheduler running).
+        let idx = futex_find(tbl, uaddr);
+        if idx == 64 {
+            return 0;  // no waiters (WAKE on uncontended futex is a no-op)
+        }
+        let cur = futex_get_wait_count(tbl, idx);
+        let woken = val;
+        if woken > cur {
+            woken = cur;  // clamp — can't wake more than are waiting
+        }
+        futex_set_wait_count(tbl, idx, cur - woken);
+        return woken as i64;
+    }
+    return 22;  // -EINVAL (bad op)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7c DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a FutexTable via state_new, init it via futex_init, then:
+//   (1) FUTEX_WAIT on uaddr=1000, val=0. Should return 11 (-EAGAIN).
+//   (2) futex_find(tbl, 1000) should return the slot index (not 64).
+//   (3) futex_get_wait_count(tbl, idx) should be 1 (one waiter recorded).
+//   (4) FUTEX_WAKE on uaddr=1000, wake 1. Should return 1 (one woken).
+//   (5) futex_get_wait_count(tbl, idx) should be 0 (waiter removed).
+//   (6) FUTEX_WAKE on uaddr=9999 (non-existent), wake 1. Should return
+//       0 (no waiters).
+//   (7) Return 0 (success).
+//
+// Returns 0 on success, 1..6 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+// Every function call (futex_init, sys_futex, futex_find,
+// futex_get_wait_count) takes tbl as a parameter — so the state-
+// typedness is preserved across the calls, and the direct field reads
+// work correctly after each call. The `let ret = sys_futex(...);` /
+// `let idx = futex_find(...);` / `let wc = futex_get_wait_count(...);`
+// locals are plain i64 / u32 / u32 values (function return values, not
+// State<T> field reads) — no state-typedness concern. (Same pattern as
+// K7e's waitq.vuma self-test header note and K7b's signal.vuma self-
+// test header note.)
+//
+// ── The `idx` local is reused across checks (2), (3), (5) ──────────────────
+//   futex_find(tbl, 1000) in check (2) returns the slot index where the
+//   WAIT recorded its waiter. Checks (3) and (5) both use that same
+//   `idx` to read the wait_count — they DON'T re-call futex_find. This
+//   is correct because the slot's uaddr doesn't change between checks
+//   (FUTEX_WAKE doesn't clear uaddr — it just decrements wait_count),
+//   so `idx` remains valid across the WAKE call. If FUTEX_WAKE cleared
+//   uaddr on a 0-resulting wait_count, then `idx` would point to a
+//   slot with uaddr=0 + wait_count=0, and futex_get_wait_count(tbl,
+//   idx) would still return 0 — which is exactly what check (5) wants.
+//   So the reuse is safe either way.
+//
+// Per the K7c contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (1000, 9999, 11, 1, 0) —
+// decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see K7b's signal.vuma header
+// "Decimal-constants discipline" and K3a's trap_trampoline.vuma for
+// the same rule).
+
+fn main() -> i32 {
+    let tbl = state_new(FutexTable);
+    futex_init(tbl);
+
+    // (1) FUTEX_WAIT on uaddr=1000, val=0. Should return 11 (-EAGAIN).
+    // In a real kernel this would AtomicLoad(uaddr), compare to val=0,
+    // and sleep if they match. In K7c's hosted mode it just records
+    // the waiter (incrementing the slot's wait_count to 1) and returns
+    // -EAGAIN to tell the caller "would have blocked, you should
+    // retry the user-space cmpxchg loop".
+    let ret = sys_futex(tbl, 1000, 0, 0);
+    if ret != 11 { return 1; }  // -EAGAIN
+
+    // (2) futex_find(tbl, 1000) should find the slot (not return 64).
+    // The slot has uaddr=1000 (just set by futex_find_or_create inside
+    // sys_futex's WAIT arm) AND wait_count=1 (just incremented by
+    // sys_futex's WAIT arm), so futex_find's "uaddr match AND
+    // wait_count > 0" guard matches.
+    let idx = futex_find(tbl, 1000);
+    if idx == 64 { return 2; }
+
+    // (3) The slot's wait_count should be 1 (one waiter recorded).
+    if futex_get_wait_count(tbl, idx) != 1 { return 3; }
+
+    // (4) FUTEX_WAKE on uaddr=1000, wake 1. Should return 1 (one
+    // waiter woken). sys_futex's WAKE arm: futex_find finds the slot
+    // (wait_count=1 > 0), cur=1, woken=min(val=1, cur=1)=1, decrement
+    // wait_count to 0, return woken=1 as i64.
+    let ret2 = sys_futex(tbl, 1000, 1, 1);
+    if ret2 != 1 { return 4; }  // 1 woken
+
+    // (5) The slot's wait_count should be 0 (waiter removed by WAKE).
+    // The slot's uaddr is STILL 1000 (WAKE doesn't clear it — see the
+    // sys_futex comment), but wait_count is now 0, so the slot is
+    // logically "free" for futex_find_or_create to reuse.
+    if futex_get_wait_count(tbl, idx) != 0 { return 5; }
+
+    // (6) FUTEX_WAKE on uaddr=9999 (non-existent), wake 1. Should
+    // return 0 (no waiters). futex_find(tbl, 9999) returns 64 because
+    // no slot has uaddr=9999 with wait_count > 0 (the slot at `idx`
+    // has uaddr=1000, not 9999; all other slots have wait_count=0).
+    // sys_futex's WAKE arm sees idx=64 and returns 0 (no-op wake).
+    let ret3 = sys_futex(tbl, 9999, 1, 1);
+    if ret3 != 0 { return 6; }
+
+    return 0;
+}
