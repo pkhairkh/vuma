@@ -4,19 +4,19 @@
 layout Array5 = { data: [f64; 5] }
 
 fn main() -> i32 {
-    a = state_new(Array5);
-    i: i64 = 0;
+    let a = state_new(Array5);
+    let i = 0;
     while i < 5 {
         a.data[i] = 2.0;
         i = i + 1;
     }
-    total: f64 = 0.0;
-    j: i64 = 0;
+    let total = 0.0;
+    let j = 0;
     while j < 5 {
-        val: f64 = a.data[j];
+        let val = a.data[j];
         total = total + val;
         j = j + 1;
     }
-    result: i64 = floattoint(total);
+    let result = floattoint(total);
     return result;
 }
