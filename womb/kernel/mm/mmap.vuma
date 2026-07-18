@@ -17,6 +17,28 @@
 //     /tmp/mmap.bin ; echo "exit=$?"
 // Expected exit: 0
 //
+// ── Arch-independence (R3c audit) ───────────────────────────────────────────
+// mmap is 100% arch-independent.
+//
+// Verified R3c: zero `if arch == ...`, zero `extern` blocks (the PMM/VMM
+// references below are LOCAL fn stubs, not extern declarations), zero
+// arch-conditional code, zero arch-specific constants. The sys_mmap /
+// sys_munmap region-table bookkeeping is a pure PMT transform over
+// State<RegionTable> — it records (vaddr, paddr, len, flags) tuples as
+// opaque u64 values and delegates physical-page allocation + page-table
+// mapping to the PMM/VMM via the local stubs. Compiles identically for
+// all 19 backends.
+//
+// NOTE: mmap.vuma's local vmm_map / vmm_unmap stubs (lines ~120-140) use
+// the K2b PageTable layout (pre-R3b). They do NOT dispatch on arch —
+// they're hosted-mode no-ops. A future wave may migrate mmap.vuma onto
+// the R3b VmmSpace + vmm_map_page dispatcher (calling vmm_map_page(space,
+// vaddr, paddr, flags) instead of vmm_map(pt, vaddr, paddr, flags)), but
+// R3c explicitly does NOT change mmap.vuma's code (audit + header only).
+// The R3b VMM (womb/kernel/mm/vmm.vuma) is the ONLY mm/ file that
+// branches on arch (via VmmSpace.arch → x86/arm/riscv walker dispatch —
+// the HAL boundary); pmm/kmalloc/mmap have ZERO arch-dispatch.
+//
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:

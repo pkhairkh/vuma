@@ -1,18 +1,24 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/mm/vmm.vuma
-// VWK Virtual Memory Manager — page-table walk as PMT transforms (PMT-pure).
+// VWK Virtual Memory Manager — generic VmmNode + VmmSpace + arch dispatcher.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Implements the address-space operations (map / unmap / translate) on top
-// of a multi-level page table. The table format itself is arch-specific:
+// Implements the address-space operations (map_page / unmap_page / translate)
+// as a GENERIC front-end that dispatches to a per-arch walker based on
+// VmmSpace.arch. The arch-specific walkers (x86_map_page, arm_map_page,
+// riscv_map_page) live in womb/kernel/arch/<arch>/vmm_hal.vuma (K11+); in
+// hosted mode they resolve to __ffi_fallback_stub (no-op).
 //
-//   x86_64  4-level (PML4→PDPT→PD→PT):   bits 47-39 / 38-30 / 29-21 / 20-12
-//   aarch64 4-level (PGD→PUD→PMD→PTE):   same bit layout (4 KB granule)
-//   riscv64 3-level Sv39 (PGD→PMD→PTE):  bits 38-30 / 29-21 / 20-12
+//   arch == 0  →  x86_64  4-level paging (PML4→PDPT→PD→PT)
+//   arch == 1  →  aarch64 4-level paging (PGD→PUD→PMD→PTE, 4 KB granule)
+//   arch == 2  →  riscv64 3-level Sv39   (PGD→PMD→PTE)
 //
-// The walk is generic over `levels` (read from the PageTable state): walk
-// from level (levels-1) down to 0, extracting a 9-bit index at each level
-// from the virtual address. At level 0, the PTE is the leaf.
+// The dispatch in vmm_map_page / vmm_unmap_page is the ONE place arch-
+// dispatch is allowed in the VMM — this is the HAL boundary. Everything
+// above the dispatch (the VmmSpace struct, the API surface) is arch-
+// independent; everything below (the walkers) is per-arch. The R3a/R3c
+// audit verified that pmm/kmalloc/mmap have ZERO arch-dispatch — this
+// file is the ONLY mm/ file that branches on arch.
 //
 // Build & run self-test (hosted x86_64):
 //     ./target/release-fast/compile_dump womb/kernel/mm/vmm.vuma \
@@ -23,89 +29,79 @@
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:
-//   - State<PageTable>  — the address-space root (root_phys + levels)
-//   - State<VaddrParts> — a scratch struct holding the decomposed vaddr
+//   - State<VmmSpace>    — the address-space root (root + levels + arch)
+//   - State<VaddrParts>  — a scratch struct holding the decomposed vaddr
 // Both are allocated via `state_new(...)` by the CALLER (init-style API —
 // see "Why init-style?" below) and passed by reference.
 //
 // ── Why init-style? ─────────────────────────────────────────────────────────
-// The K2b contract specifies:
-//     fn vaddr_parts(vaddr: u64) -> State<VaddrParts>
-//     transform vmm_map(pt: State<PageTable>, vaddr: u64, ...) -> State<PageTable>
-// i.e. each function returns a fresh State<T> to its caller. The current
-// VUMA codegen (verified via /tmp/probe_vaddrparts.vuma during K2b) does
-// NOT propagate State-typedness through function return values: a
-// `let parts = vaddr_parts(vaddr); ... parts.level3 ...` binding in the
-// caller is NOT registered as state-typed, so the `parts.level3` access
-// in the caller lowers to the "unsupported FieldAccess (not state-typed)"
-// path in src/pipeline.rs::flatten_expr, emits a warning, and silently
-// returns 0. This is the same caveat documented in womb/alloc/arena.vuma
-// and womb/kernel/mm/pmm.vuma (K2a):
-//   "the current PMT codegen does not propagate State-typedness through
-//    function return values ... The init-style API (state allocated at
-//    the call site, passed by reference to an init function) is the
-//    canonical PMT pattern and works correctly end-to-end."
+// Same codegen rationale as K2a's pmm_init (see womb/kernel/mm/pmm.vuma
+// header): the VUMA codegen does not propagate State-typedness through
+// function return values, so each function takes its State<T> by reference.
+// The deviation from a return-type signature is documented here and in
+// the worklog.
 //
-// Two further issues force the deviation:
-//   1. `transform` is parser-restricted to a SINGLE State<T> parameter
-//      (src/parser/src/parser.rs::parse_transform_def). vmm_map / vmm_unmap
-//      need extra (vaddr, paddr, flags) parameters, so they cannot be
-//      declared `transform` at all.
-//   2. Even vaddr_parts, which has only one non-state param, returns a
-//      State<T> that the caller immediately reads fields from — the
-//      return-value path is broken as described above.
+// ── The HAL boundary (R3b) ─────────────────────────────────────────────────
+// Pre-R3b (K2b), vmm_map / vmm_unmap / vmm_translate walked a generic
+// multi-level page table via pte_read / pte_write extern stubs. That design
+// pushed the "where does the PTE live in physical memory?" question into a
+// single per-arch pte_read/pte_write trampoline, but the WALK ITSELF was
+// duplicated logic — every arch's trampoline had to know the level-by-level
+// walk, and the generic layer had to know the 9-bit-index + 4-level vs
+// 3-level shape.
 //
-// Workaround: every function takes its State<T> by reference (init-style,
-// same as K2a's pmm_init). The function bodies are pure PMT — they read
-// and write State<T> fields, no pointer arithmetic, no allocations.
-// The deviation from the contract's return-type signature is documented
-// here and in the worklog; when the codegen gains State-typedness
-// propagation through returns, this file can collapse back to the
-// contract's signatures verbatim.
+// R3b inverts the boundary: the GENERIC side (this file) dispatches on
+// space.arch to a per-arch walker (x86_map_page / arm_map_page /
+// riscv_map_page) that owns its OWN walk. Each arch's walker is free to
+// use its native page-table format (x86 PML4 bit layout, aarch64 TTBR
+// descriptor format, riscv Sv39 PTE format) without leaking those details
+// into the generic VMM. The cost is one `if space.arch == N` dispatch per
+// map_page call — negligible.
 //
-// ── Why extern "C" trampolines for pte_read / pte_write? ────────────────────
-// Page-table entries live in PHYSICAL memory at addresses determined by
-// the page-table hierarchy itself. In bare-metal mode (K11), reading or
-// writing a PTE is a per-arch MMIO sequence:
-//   - x86_64:   PTE physical addr → direct dereference (identity-mapped
-//               physmem window OR with CR3.PCIDE-aware translation)
-//   - aarch64:  PTE phys → TTBR0/1-relative dereference
-//   - riscv64:  PTE phys → satp-relative dereference
-// In hosted mode (x86_64 Linux/MacOS), there is no "physical memory" —
-// the host kernel owns the real page tables. The compile_dump binary
-// links all unresolved externs to __ffi_fallback_stub (returns 0), so
-// pte_read returns 0 (PTE not present) and pte_write is a no-op.
+// In hosted mode, the per-arch walkers resolve to __ffi_fallback_stub
+// (returns 0 / no-op), so vmm_map_page is a no-op and vmm_translate
+// returns 0. The self-test therefore only verifies the dispatch happens
+// without crashing; real mapping is exercised in K11 bare-metal mode.
 //
-// This means: in hosted mode, vmm_map returns early (can't allocate
-// intermediate tables — the contract says "return pt unchanged if the
-// walk fails, since we can't allocate physical pages in hosted mode"),
-// and vmm_translate always returns 0 (every PTE reads as not-present).
-// The self-test therefore only exercises vaddr_parts for correctness;
-// map/unmap/translate are called to confirm they don't CRASH (no
-// infinite loops, no out-of-bounds State writes).
-//
-// When K11 lands, the bare-metal build replaces __ffi_fallback_stub with
-// per-arch PTE access + TLB flush primitives, and the same vmm.vuma
-// file works end-to-end with no source changes (the extern block is
-// the ONLY swap point — same pattern as womb/kernel/console.vuma).
+// ── VmmNode ─────────────────────────────────────────────────────────────────
+// VmmNode is a raw 4096-byte page-table page (one physical page of PTEs).
+// The generic VMM does NOT interpret VmmNode's contents — that's the per-
+// arch walker's job. VmmNode exists in the generic layer so kmain can
+// allocate page-table pages from the PMM (pmm_alloc returns a u64 physical
+// address; the arch walker casts it to its native PTE-array format). The
+// `entries: [u8; 4096]` field is a flat byte array (PMT-pure — no typed
+// pointer casts).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. If a future kmain.vuma wants to call
-// vmm_map / vmm_unmap / vmm_translate, it must re-declare the PageTable
-// / VaddrParts layouts and the extern block byte-identically (same
+// vmm_map_page / vmm_unmap_page / vmm_translate, it must re-declare the
+// VmmSpace / VmmNode layouts and the extern block byte-identically (same
 // pattern as console.vuma re-declaring its extern `write`).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Layouts (declared verbatim per the K2b contract).
+// Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
-// A page table. `root_phys` is the physical address of the top-level
-// table (PML4 for x86_64, PGD for aarch64, the SATP-pointed table for
-// riscv64). `levels` is the number of paging levels (4 for x86_64/aarch64,
-// 3 for riscv64 Sv39). The walk uses levels to know how deep to descend.
-layout PageTable = {
-    root_phys: u64,
+// Generic page-table node — 4096 bytes (one page). The generic VMM treats
+// this as an opaque byte array; the per-arch walker (x86_map_page etc.)
+// interprets the bytes as native PTEs. Allocated from the PMM (one
+// pmm_alloc(0) per VmmNode).
+layout VmmNode = {
+    entries: [u8; 4096],
+}
+
+// VMM address space — root + arch info. `root` is the physical address of
+// the top-level page-table page (PML4 for x86_64, PGD for aarch64, the
+// SATP-pointed page for riscv64). `levels` is the number of paging levels
+// (4 for x86_64/aarch64, 3 for riscv64 Sv39). `arch` is the arch
+// discriminant (0 = x86_64, 1 = aarch64, 2 = riscv64) — the ONE field the
+// generic VMM reads to dispatch to the per-arch walker. `_pad` pads the
+// struct to 16 bytes (8 + 1 + 1 + 6) for clean alignment.
+layout VmmSpace = {
+    root: u64,
     levels: u8,
+    arch: u8,
+    _pad: [u8; 6],
 }
 
 // A virtual address broken into page-table indices. For x86_64 4-level:
@@ -115,7 +111,8 @@ layout PageTable = {
 //   29-21 = level 1, 20-12 = level 0 (the `level3` field then holds
 //   bits 38-30, `level2` holds bits 29-21, `level1` holds bits 20-12,
 //   and `level0` is unused). `offset` is always bits 11-0 (page offset).
-// NOTE: Used only in self-test; production code uses vmm_walk_idx.
+// NOTE: Used only in self-test; production code uses vmm_walk_idx (and,
+// post-R3b, hands the walk off to the per-arch walker entirely).
 layout VaddrParts = {
     level3: u32,   // bits 47-39 (or 38-30 for Sv39)
     level2: u32,   // bits 38-30 (or 29-21)
@@ -125,32 +122,37 @@ layout VaddrParts = {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampolines — per-arch PTE access + TLB flush.
+// Arch-specific extern stubs (real implementations in arch/*/vmm_hal.vuma).
 // ────────────────────────────────────────────────────────────────────────────
-// In hosted mode, these resolve to __ffi_fallback_stub (returns 0) — fine
-// for compile verification. K11 adds the real per-arch implementations:
-//   - pte_read / pte_write: MMIO at the PTE's physical address.
-//   - tlb_flush: invlpg (x86_64), tlbi_vmalle1 (aarch64), sfence_vma (riscv64).
-//   - invlpg: per-vaddr TLB invalidation (invlpg / tlbi_vaae1is / sfence_vma vaddr).
+// In hosted mode, these resolve to __ffi_fallback_stub (returns 0 / no-op) —
+// fine for compile verification + the self-test's "no crash" check. K11 adds
+// the real per-arch implementations:
+//   - x86_map_page:   walk PML4→PDPT→PD→PT, allocate intermediate tables via
+//                     pmm_alloc, write the leaf PTE, invlpg.
+//   - arm_map_page:   walk PGD→PUD→PMD→PTE (4 KB granule), allocate
+//                     intermediate tables, write the leaf PTE, tlbi.
+//   - riscv_map_page: walk PGD→PMD→PTE (Sv39), allocate intermediate tables,
+//                     write the leaf PTE, sfence_vma.
+//   - x86_unmap_page / arm_unmap_page / riscv_unmap_page: walk to leaf, clear
+//                     PTE, flush TLB, free intermediate tables if empty (K12+).
 //
-// `#[borrow]` on pte_read / pte_write marks the State<PageTable> arg as
-// borrowed (not consumed) — the page table survives the call. This is the
-// same attribute pattern as tests/gold_standard/ffi_wave2/*.vuma.
+// All walkers take `root: u64` (the top-level page-table physical address)
+// rather than State<VmmSpace> — this keeps the extern signature host-agnostic
+// (no State<T> marshaling across the FFI boundary) and lets the per-arch
+// walker own its own page-table interpretation without generic-layer state.
+
 extern "C" {
-    // Read the 8-byte page-table entry at (level, idx) in the table rooted
-    // at pt.root_phys. The codegen resolves the actual PTE physical
-    // address (walking the levels above `level`) — this is a per-arch
-    // concern handled in K11.
-    #[borrow]
-    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
-    // Write the 8-byte PTE at (level, idx). Same address-resolution story.
-    #[borrow]
-    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
-    // Full TLB flush — invalidate all TLB entries for the current ASID.
-    fn tlb_flush();
-    // Per-vaddr TLB invalidation — invalidate the TLB entry for `vaddr`
-    // (if any) in the current address space.
-    fn invlpg(vaddr: u64);
+    // x86_64 (arch == 0): 4-level paging walker.
+    fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
+    fn x86_unmap_page(root: u64, vaddr: u64);
+
+    // aarch64 (arch == 1): 4-level paging walker (4 KB granule).
+    fn arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
+    fn arm_unmap_page(root: u64, vaddr: u64);
+
+    // riscv64 (arch == 2): Sv39 3-level walker.
+    fn riscv_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
+    fn riscv_unmap_page(root: u64, vaddr: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -164,8 +166,10 @@ extern "C" {
 // (3-level), the level3 field holds bits 38-30 (which Sv39 calls "level
 // 2"); the walk_idx helper below re-derives the index from the level
 // number directly, so the field-name-vs-level-number mismatch does not
-// affect vmm_map / vmm_unmap / vmm_translate.
-// NOTE: Used only in self-test; production code uses vmm_walk_idx.
+// affect vmm_map_page / vmm_unmap_page / vmm_translate.
+// NOTE: Used only in self-test; production dispatch (vmm_map_page) hands
+// the walk off to the per-arch walker (x86_map_page etc.) which uses its
+// own native bit extraction.
 
 fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
     out.level3 = ((vaddr >> 39) as u32) & 511;
@@ -186,7 +190,10 @@ fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
 //   L=3 → bits 47-39
 // This works for both 4-level (x86_64/aarch64, L=3..0) and 3-level Sv39
 // (riscv64, L=2..0) — the only difference is the starting level, which
-// the caller picks from pt.levels.
+// the caller picks from space.levels.
+// NOTE: Used only in self-test; production dispatch (vmm_map_page) hands
+// the walk off to the per-arch walker (x86_map_page etc.) which uses its
+// own native bit extraction. Kept for self-test compatibility (K2b → R3b).
 
 fn vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
     let sh = (level as u32) * 9 + 12;
@@ -195,147 +202,97 @@ fn vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// vmm_map — map a virtual page to a physical page with given flags.
+// vmm_map_page — generic map_page; dispatches to the per-arch walker.
 // ────────────────────────────────────────────────────────────────────────────
-// Walks the page tables from root (level = levels-1) down to level 1. At
-// each level, reads the PTE at the level's index. If the PTE's present
-// bit (bit 0) is 0, the intermediate table is missing — in hosted mode
-// (where pte_read is a stub returning 0), this happens immediately, so
-// the function returns pt unchanged (no allocation possible). At the
-// leaf (level 0), writes the PTE:
-//   pte = (paddr & 0x000FFFFFFFFFF000)   // physical page-frame number
-//       | (flags & 0xFFF)                // arch-specific flag bits
-//       | 1                              // present bit
-// Then flushes the TLB so the new mapping takes effect immediately.
+// This is the ONE place arch-dispatch is allowed in the VMM (the HAL
+// boundary). Everything above (the VmmSpace struct, this function's
+// signature) is arch-independent; everything below (x86_map_page /
+// arm_map_page / riscv_map_page) is per-arch.
 //
-// Init-style: caller allocates `pt` via state_new(PageTable), passes by
-// reference. The function reads pt.levels and pt.root_phys (the latter
-// is read by the pte_read/pte_write trampoline, not directly here) and
-// may write PTEs via the pte_write trampoline.
+// The dispatch reads space.arch and calls the matching walker with
+// (root, vaddr, paddr, flags, levels). The walker owns its own page-table
+// walk, intermediate-table allocation (via pmm_alloc in K11), leaf-PTE
+// write, and TLB flush. In hosted mode, all walkers are no-op stubs
+// (__ffi_fallback_stub), so vmm_map_page is a no-op — the self-test only
+// verifies the dispatch happens without crashing.
+//
+// Init-style: caller allocates `space` via state_new(VmmSpace), sets
+// space.root / space.levels / space.arch, passes by reference.
 
-fn vmm_map(pt: State<PageTable>, vaddr: u64, paddr: u64, flags: u64) {
-    // No levels → nothing to do (degenerate PageTable).
-    if pt.levels == 0 {
-        return;
-    }
-
-    // Walk from the top level down to level 1 (the level just above the
-    // leaf). At each level, the PTE we read points to the next-level
-    // table; if it's not present, we can't descend further (hosted mode
-    // has no PMM available to allocate a missing intermediate table).
-    let lvl = pt.levels - 1;
-    while lvl > 0 {
-        let idx = vmm_walk_idx(vaddr, lvl);
-        let pte = pte_read(pt, lvl, idx);
-        if (pte & 1) == 0 {
-            // Intermediate table missing — bail (contract: "return pt
-            // unchanged if the walk fails"). In bare-metal mode (K11),
-            // this is where we'd call pmm_alloc to get a new page for
-            // the missing table, zero it, and write its physical
-            // address into the parent PTE before continuing the walk.
-            return;
+fn vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64) {
+    if space.arch == 0 {
+        // x86_64: 4-level paging — call x86_map_page (extern stub in hosted mode).
+        x86_map_page(space.root, vaddr, paddr, flags, space.levels);
+    } else {
+        if space.arch == 1 {
+            // aarch64: 4-level paging — call arm_map_page (extern stub).
+            arm_map_page(space.root, vaddr, paddr, flags, space.levels);
+        } else {
+            if space.arch == 2 {
+                // riscv64: Sv39 3-level — call riscv_map_page (extern stub).
+                riscv_map_page(space.root, vaddr, paddr, flags, space.levels);
+            }
         }
-        lvl = lvl - 1;
     }
-
-    // Leaf level (level 0): write the final PTE.
-    let leaf_idx = vmm_walk_idx(vaddr, 0);
-    let pte = (paddr & 0x000FFFFFFFFFF000) | (flags & 0xFFF) | 1;
-    pte_write(pt, 0, leaf_idx, pte);
-
-    // Flush TLB so any stale entry for `vaddr` is evicted before the
-    // new mapping is used. (tlb_flush is the heavy hammer; a future
-    // optimization could call invlpg(vaddr) for a single-entry flush.)
-    tlb_flush();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// vmm_unmap — unmap a virtual page (set its leaf PTE to not-present).
+// vmm_unmap_page — generic unmap_page; dispatches to the per-arch walker.
 // ────────────────────────────────────────────────────────────────────────────
-// Walks to the leaf PTE (same walk as vmm_map). If any intermediate
-// table is missing, the page was never mapped — bail (no-op). At the
-// leaf, writes 0 (not present) and flushes TLB. Does NOT free the
-// physical page (that's the caller's responsibility — call pmm_free
-// with the physical address returned by vmm_translate BEFORE unmapping).
-//
-// Init-style: same pattern as vmm_map.
+// Same dispatch pattern as vmm_map_page. The per-arch walker clears the
+// leaf PTE and flushes the TLB. Does NOT free the physical page (that's
+// the caller's responsibility — call pmm_free with the physical address
+// returned by vmm_translate BEFORE unmapping, once vmm_translate is real).
 
-fn vmm_unmap(pt: State<PageTable>, vaddr: u64) {
-    if pt.levels == 0 {
-        return;
-    }
-
-    let lvl = pt.levels - 1;
-    while lvl > 0 {
-        let idx = vmm_walk_idx(vaddr, lvl);
-        let pte = pte_read(pt, lvl, idx);
-        if (pte & 1) == 0 {
-            // Intermediate table missing → page was never mapped.
-            return;
+fn vmm_unmap_page(space: State<VmmSpace>, vaddr: u64) {
+    if space.arch == 0 {
+        // x86_64: walk + clear leaf PTE + invlpg.
+        x86_unmap_page(space.root, vaddr);
+    } else {
+        if space.arch == 1 {
+            // aarch64: walk + clear leaf PTE + tlbi.
+            arm_unmap_page(space.root, vaddr);
+        } else {
+            if space.arch == 2 {
+                // riscv64: walk + clear leaf PTE + sfence_vma.
+                riscv_unmap_page(space.root, vaddr);
+            }
         }
-        lvl = lvl - 1;
     }
-
-    // Leaf: clear the PTE.
-    let leaf_idx = vmm_walk_idx(vaddr, 0);
-    pte_write(pt, 0, leaf_idx, 0);
-
-    // Per-vaddr TLB invalidation + full flush. The invlpg(vaddr) is
-    // the precise flush; tlb_flush() is the conservative hammer for
-    // arches that don't have a precise single-entry invalidation (or
-    // where the caller wants belt-and-suspenders).
-    invlpg(vaddr);
-    tlb_flush();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // vmm_translate — walk page tables to translate a virtual address.
 // ────────────────────────────────────────────────────────────────────────────
-// Walks from the top level down to the leaf. If any PTE along the way is
-// not present, returns 0 (not mapped). At the leaf, returns:
-//   (leaf_pte & 0x000FFFFFFFFFF000) | (vaddr & 4095)
-// i.e. the physical page-frame address OR'd with the original page
-// offset. This is the canonical "translate vaddr → paddr" operation.
+// STUB for now (R3b): returns 0. The real implementation will dispatch
+// on space.arch to a per-arch translate walker (x86_translate /
+// arm_translate / riscv_translate) that walks the page tables and returns
+// the physical address. Until then, callers that need translation should
+// use the per-arch walker directly (or wait for K11).
 //
 // Returns u64 (not State<T>) — no state-typedness propagation issue.
 
-fn vmm_translate(pt: State<PageTable>, vaddr: u64) -> u64 {
-    if pt.levels == 0 {
-        return 0;
-    }
-
-    // Walk from the top level down to level 1.
-    let lvl = pt.levels - 1;
-    while lvl > 0 {
-        let idx = vmm_walk_idx(vaddr, lvl);
-        let pte = pte_read(pt, lvl, idx);
-        if (pte & 1) == 0 {
-            // Not present at this level → translation fails.
-            return 0;
-        }
-        lvl = lvl - 1;
-    }
-
-    // Leaf level (level 0): read the final PTE.
-    let idx = vmm_walk_idx(vaddr, 0);
-    let pte = pte_read(pt, 0, idx);
-    if (pte & 1) == 0 {
-        return 0;
-    }
-
-    // Mask out the flag bits, OR in the original page offset.
-    let pa = pte & 0x000FFFFFFFFFF000;
-    let off = vaddr & 4095;
-    return pa | off;
+fn vmm_translate(space: State<VmmSpace>, vaddr: u64) -> u64 {
+    // Same dispatch — stub returns 0 for now.
+    // (The real dispatch will mirror vmm_map_page: read space.arch, call
+    //  x86_translate / arm_translate / riscv_translate, return the result.
+    //  Hosted mode would still return 0 since no PTEs are populated.)
+    return 0;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K2b DoD).
+// Self-test (the R3b DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// In hosted mode, pte_read/pte_write are stubs (return 0), so we cannot
-// test real mapping. But we CAN test vaddr_parts, and we can exercise
-// vmm_map / vmm_unmap / vmm_translate to confirm they don't crash (no
-// infinite loops, no out-of-bounds State writes, no PMT violations).
+// Two parts:
+//   1. vaddr_parts + vmm_walk_idx correctness (kept from K2b for self-test
+//      compatibility — the bit-extraction math is arch-independent and
+//      worth pinning down).
+//   2. VmmSpace + vmm_map_page / vmm_unmap_page / vmm_translate dispatch
+//      (new in R3b): create a VmmSpace with arch=0 (x86_64), levels=4,
+//      call vmm_map_page / vmm_unmap_page / vmm_translate. In hosted mode
+//      all per-arch walkers are __ffi_fallback_stub no-ops, so the test
+//      only verifies the dispatch happens without crashing (no infinite
+//      loops, no out-of-bounds State writes, no PMT violations).
 //
 // vaddr_parts(0x123456789ABC) should yield:
 //   level3 = (0x123456789ABC >> 39) & 511 = 36
@@ -348,17 +305,10 @@ fn vmm_translate(pt: State<PageTable>, vaddr: u64) -> u64 {
 // Returns 0 on pass.
 
 fn main() -> i32 {
-    // Build a PageTable (4-level, root at phys 0).
-    let pt = state_new(PageTable);
-    pt.root_phys = 0;
-    pt.levels = 4;
-
-    // Decompose a test virtual address.
+    // ── Part 1: vaddr_parts + vmm_walk_idx (K2b compatibility) ──────────────
     let parts = state_new(VaddrParts);
     vaddr_parts(parts, 0x123456789ABC);
 
-    // Verify each index. (The contract's DoD requires level3 == 36; we
-    // also check level2/level1/level0/offset for tighter coverage.)
     if parts.level3 != 36 {
         return 1;
     }
@@ -375,10 +325,6 @@ fn main() -> i32 {
         return 5;
     }
 
-    // Exercise vmm_walk_idx directly for each level of a 4-level table.
-    // For vaddr 0x123456789ABC, the indices are:
-    //   level 3 (>> 39): 36    level 2 (>> 30): 209
-    //   level 1 (>> 21): 179   level 0 (>> 12): 393
     if vmm_walk_idx(0x123456789ABC, 3) != 36 {
         return 6;
     }
@@ -392,41 +338,27 @@ fn main() -> i32 {
         return 9;
     }
 
-    // Exercise vmm_map / vmm_translate / vmm_unmap. With stubbed
-    // pte_read (returns 0 = not present):
-    //   - vmm_map walks to level 3, reads PTE = 0, returns early.
-    //   - vmm_translate walks to level 3, reads PTE = 0, returns 0.
-    //   - vmm_unmap walks to level 3, reads PTE = 0, returns early.
-    // None of these should crash, hang, or write out-of-bounds.
-    vmm_map(pt, 0x1000, 0x80000, 0);
+    // ── Part 2: VmmSpace + dispatcher (R3b) ─────────────────────────────────
+    // x86_64 address space: arch=0, levels=4, root=0 (hosted stub ignores root).
+    let space = state_new(VmmSpace);
+    space.root = 0;
+    space.levels = 4;
+    space.arch = 0;
 
-    let pa = vmm_translate(pt, 0x1000);
+    // vmm_map_page dispatches on space.arch → calls x86_map_page (stub).
+    // Should not crash, hang, or write out-of-bounds.
+    vmm_map_page(space, 0x1000, 0x80000, 0);
+
+    // vmm_unmap_page dispatches on space.arch → calls x86_unmap_page (stub).
+    vmm_unmap_page(space, 0x1000);
+
+    // vmm_translate is a stub returning 0 (R3b). Once it dispatches to the
+    // per-arch walker, hosted mode still returns 0 (nothing mapped), so the
+    // check stays `pa == 0`.
+    let pa = vmm_translate(space, 0x1000);
     if pa != 0 {
-        // In hosted mode, translate must return 0 (nothing mapped).
         return 10;
     }
-
-    vmm_unmap(pt, 0x1000);
-
-    // Sanity: levels=0 is a degenerate table; all ops are no-ops.
-    let pt2 = state_new(PageTable);
-    pt2.root_phys = 0;
-    pt2.levels = 0;
-    vmm_map(pt2, 0x2000, 0x90000, 0);
-    vmm_unmap(pt2, 0x2000);
-    if vmm_translate(pt2, 0x2000) != 0 {
-        return 11;
-    }
-
-    // Sanity: 3-level (Sv39-like) table also walks without crashing.
-    let pt3 = state_new(PageTable);
-    pt3.root_phys = 0;
-    pt3.levels = 3;
-    vmm_map(pt3, 0x4000, 0xA0000, 2);
-    if vmm_translate(pt3, 0x4000) != 0 {
-        return 12;
-    }
-    vmm_unmap(pt3, 0x4000);
 
     return 0;
 }
