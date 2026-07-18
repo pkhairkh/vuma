@@ -72,6 +72,226 @@ use crate::CodegenError;
 use crate::Result;
 
 // ---------------------------------------------------------------------------
+// IR typecheck (pre-emit pass)
+// ---------------------------------------------------------------------------
+
+/// Pre-emit IR typecheck: verify operand/result type coherence for every
+/// `BinOp` and `Cast` instruction in the program.
+///
+/// Collects ALL errors (does not bail on the first) so users see every
+/// problem in one pass.  Key checks:
+///
+///   - `BinOp` result `ty` must be `Some` (not `None`).  When per-value
+///     types become available (see `value_type_of`), the operand/result
+///     coherence check additionally rejects mixed-width `F32` op `F64`
+///     with a "needs explicit `floattofloat` cast" error.
+///   - `Cast` `from_ty` and `to_ty` must both be `Some`.
+///   - `Cast` kind/type coherence: e.g. `FloatToFloat` requires both
+///     `from_ty` and `to_ty` to be float types; `IntToFloat`/`UIntToFloat`
+///     require `to_ty` to be a float and `from_ty` to be an integer;
+///     `FloatToInt`/`FloatToUInt` require `from_ty` to be a float and
+///     `to_ty` to be an integer; `ZExt`/`SExt`/`Trunc`/`BitCast` require
+///     both to be integers.
+///
+/// Returns `Ok(())` if no errors, `Err(Vec<String>)` with one message per
+/// offending instruction.
+///
+/// # Limitations (TODO F2b)
+///
+/// The IR does not currently carry per-value type information
+/// (`VirtualRegister` has only `id` + `name`; `IRValue` is untyped).
+/// The `BinOp` mixed-width float check is therefore inert until the IR
+/// grows a `value_types` side-table — see `value_type_of`.
+///
+/// This pass takes `&[IRFunction]` (not `&Module`) because the emit
+/// pipeline's entry point (`emit_binary`) takes a slice of functions;
+/// there is no `Module` struct in `crate::ir` (only `IRProgram`).
+pub fn typecheck_ir(functions: &[IRFunction]) -> std::result::Result<(), Vec<String>> {
+    let mut errors: Vec<String> = Vec::new();
+
+    for func in functions {
+        for block in &func.blocks {
+            for (idx, instr) in block.instructions.iter().enumerate() {
+                match instr {
+                    IRInstr::BinOp {
+                        op,
+                        dst: _,
+                        lhs,
+                        rhs,
+                        ty,
+                    } => {
+                        // Check 1: result type must be present.
+                        let result_ty = match ty {
+                            Some(t) => t,
+                            None => {
+                                errors.push(format!(
+                                    "typecheck: BinOp {:?} at {}:{}:{} has no result type (ty is None)",
+                                    op, func.name, block.label, idx
+                                ));
+                                continue;
+                            }
+                        };
+
+                        // Check 2 (gated on per-value type info): operand
+                        // types must be compatible with the result type.
+                        // Mixed-width `F32` op `F64` is rejected with a
+                        // "needs explicit `floattofloat` cast" error.  This
+                        // branch is currently inert because the IR does not
+                        // carry per-value types — see `value_type_of`.
+                        if let Some(lt) = value_type_of(func, lhs) {
+                            if !types_compatible(&lt, result_ty) {
+                                errors.push(format!(
+                                    "typecheck: BinOp {:?} at {}:{}:{} — lhs type {:?} != result type {:?} (mixed-width float ops need an explicit `floattofloat` cast)",
+                                    op, func.name, block.label, idx, lt, result_ty
+                                ));
+                            }
+                        }
+                        if let Some(rt) = value_type_of(func, rhs) {
+                            if !types_compatible(&rt, result_ty) {
+                                errors.push(format!(
+                                    "typecheck: BinOp {:?} at {}:{}:{} — rhs type {:?} != result type {:?} (mixed-width float ops need an explicit `floattofloat` cast)",
+                                    op, func.name, block.label, idx, rt, result_ty
+                                ));
+                            }
+                        }
+                    }
+
+                    IRInstr::Cast {
+                        kind,
+                        dst: _,
+                        src: _,
+                        from_ty,
+                        to_ty,
+                    } => {
+                        // Check 1: from_ty and to_ty must both be present.
+                        if from_ty.is_none() {
+                            errors.push(format!(
+                                "typecheck: Cast {:?} at {}:{}:{} has no from_ty",
+                                kind, func.name, block.label, idx
+                            ));
+                        }
+                        if to_ty.is_none() {
+                            errors.push(format!(
+                                "typecheck: Cast {:?} at {}:{}:{} has no to_ty",
+                                kind, func.name, block.label, idx
+                            ));
+                        }
+
+                        // Check 2: kind/type coherence (only when both
+                        // types are present, since we need both to compare).
+                        if let (Some(f), Some(t)) = (from_ty, to_ty) {
+                            match kind {
+                                CastKind::FloatToFloat => {
+                                    if !f.is_float() || !t.is_float() {
+                                        errors.push(format!(
+                                            "typecheck: Cast FloatToFloat at {}:{}:{} — from_ty {:?} / to_ty {:?} must both be floats (F32/F64); use IntToFloat/FloatToInt for cross-class conversions (mixed-width float ops need an explicit `floattofloat` cast)",
+                                            func.name, block.label, idx, f, t
+                                        ));
+                                    } else if f == t {
+                                        // Same-type FloatToFloat is a no-op —
+                                        // legal but suspicious.  Warn only;
+                                        // do NOT push to `errors`.
+                                    }
+                                }
+                                CastKind::IntToFloat | CastKind::UIntToFloat => {
+                                    if !t.is_float() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — to_ty {:?} must be a float (F32/F64)",
+                                            kind, func.name, block.label, idx, t
+                                        ));
+                                    }
+                                    if !f.is_integer() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — from_ty {:?} must be an integer",
+                                            kind, func.name, block.label, idx, f
+                                        ));
+                                    }
+                                }
+                                CastKind::FloatToInt | CastKind::FloatToUInt => {
+                                    if !f.is_float() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — from_ty {:?} must be a float (F32/F64)",
+                                            kind, func.name, block.label, idx, f
+                                        ));
+                                    }
+                                    if !t.is_integer() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — to_ty {:?} must be an integer",
+                                            kind, func.name, block.label, idx, t
+                                        ));
+                                    }
+                                }
+                                CastKind::ZExt
+                                | CastKind::SExt
+                                | CastKind::Trunc
+                                | CastKind::BitCast => {
+                                    // Integer-only casts — verify both types
+                                    // are integers.  BitCast is allowed on
+                                    // same-size types (no width check here).
+                                    if !f.is_integer() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — from_ty {:?} must be an integer",
+                                            kind, func.name, block.label, idx, f
+                                        ));
+                                    }
+                                    if !t.is_integer() {
+                                        errors.push(format!(
+                                            "typecheck: Cast {:?} at {}:{}:{} — to_ty {:?} must be an integer",
+                                            kind, func.name, block.label, idx, t
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Other instructions are out of scope for F2b (their
+                    // `ty: Option<IRType>` fields are checked by F2a /
+                    // future passes).
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Two types are "compatible" for a `BinOp` if they're identical, OR both
+/// are integer types (integer widening/narrowing is handled by `ZExt`/
+/// `SExt`/`Trunc` casts elsewhere).  `F32` and `F64` are NOT compatible —
+/// they require an explicit `FloatToFloat` cast.
+fn types_compatible(a: &IRType, b: &IRType) -> bool {
+    if a == b {
+        return true;
+    }
+    // All integer types are mutually compatible (widening/narrowing is
+    // explicit via Cast).  Floats are NOT mutually compatible with each
+    // other (F32 vs F64 needs FloatToFloat) nor with non-integer types.
+    a.is_integer() && b.is_integer()
+}
+
+/// Look up the `IRType` of an `IRValue` in a function, if available.
+///
+/// The current IR does NOT carry per-value type information:
+/// `IRValue::Register(u32)` only stores a numeric ID, and `VirtualRegister`
+/// (looked up via `IRFunction::vregs`) only carries `id` + `name` — no
+/// type field.  Immediates and labels are similarly untyped.
+///
+/// This helper therefore always returns `None` for now.  It exists as a
+/// single hook so that when the IR gains a per-value type table (e.g.
+/// `IRFunction::value_types: HashMap<u32, IRType>`), the `BinOp` mixed-
+/// width check in `typecheck_ir` becomes active without further code
+/// changes — just update this function to consult the new table.
+fn value_type_of(_func: &IRFunction, _value: &IRValue) -> Option<IRType> {
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Branch fixup format
 // ---------------------------------------------------------------------------
 
@@ -5489,6 +5709,21 @@ pub fn emit_binary(
     config: &EmitConfig,
     regalloc: &[AllocationResult],
 ) -> Result<Vec<u8>> {
+    // Pre-emit IR typecheck (F2b): verify BinOp/Cast type coherence
+    // before any backend is selected or lowering runs.  Catches missing
+    // result types, Cast kind/type mismatches, and (once the IR gains a
+    // per-value type table) mixed-width `F32` op `F64` ops that would
+    // otherwise produce undefined behavior in the backends (which assume
+    // operand types match the declared result type).  Aggregates ALL
+    // errors so users see every problem in one pass.
+    if let Err(errs) = typecheck_ir(functions) {
+        return Err(CodegenError::TranslationError(format!(
+            "IR typecheck failed ({} error(s)):\n{}",
+            errs.len(),
+            errs.join("\n")
+        )));
+    }
+
     // The IR has already been optimized by the pipeline (Stage 8b) before
     // being passed to emit_binary. Previously emit_binary re-ran
     // run_optimizations here (a double-optimization that used default_ooo()
