@@ -1,17 +1,31 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/arch/x86_64/trap_trampoline.vuma
-// x86_64 trap entry/exit trampolines — TrapFrame layout + externs.
+// x86_64 trap entry/exit trampolines — old X86TrapFrame + superset adapter.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file is the x86_64-specific swap point for trap/IRQ handling. It
-// declares the TrapFrame layout (the register-save area pushed by the
-// trap_entry stub and popped by trap_exit) and the extern functions the
-// trap dispatcher (K3b) and IRQ subsystem (K3c) call into. In hosted
-// mode every extern resolves to `__ffi_fallback_stub` (returns 0, void
-// calls no-op). In bare-metal mode (Wave K11) the same names link against
-// REAL asm stubs in womb/kernel/arch/x86_64/trap.S.
+// This file is the x86_64-specific swap point for trap/IRQ handling, evolved
+// through three waves:
+//   K3a (initial):  declared the 22-field x86_64 TrapFrame + the IDT/IRQ
+//                   externs + a self-test that round-tripped the layout.
+//   R2a (superset): created the canonical 576-byte superset TrapFrame in
+//                   womb/kernel/trap/trap_frame.vuma — a single layout that
+//                   every arch's trap_entry stub populates and every arch-
+//                   independent consumer reads from. The R2a Golden Rule:
+//                     "Do not write arch-conditional logic inside kernel
+//                      transforms."
+//   R2b (this file): re-declares the superset TrapFrame + tf_get_gpr +
+//                    tf_set_gpr + tf_init byte-identically from R2a, RENAMES
+//                    the old 22-field x86_64 TrapFrame to X86TrapFrame (so
+//                    the existing trap-entry stubs and K3d's trap.vuma
+//                    dispatcher keep working unchanged), and adds the
+//                    x86_trap_to_superset(old, sup) adapter that copies
+//                    fields from X86TrapFrame into the superset.
 //
-// ── TrapFrame register-save order ───────────────────────────────────────────
+// In hosted mode every extern resolves to `__ffi_fallback_stub` (returns 0,
+// void calls no-op). In bare-metal mode (Wave K11) the same names link
+// against REAL asm stubs in womb/kernel/arch/x86_64/trap.S.
+//
+// ── X86TrapFrame register-save order ────────────────────────────────────────
 // On an interrupt or exception, the x86_64 CPU pushes (in this order):
 //     SS, RSP, RFLAGS, CS, RIP                  (5 words, CPU-pushed)
 // Some exceptions also push an error code:
@@ -25,20 +39,41 @@
 //     R8, R9, R10, R11, R12, R13, R14, R15      (15 words, trap_entry)
 //
 // Total: 5 (CPU) + 1 (error) + 1 (vector) + 15 (GP) = 22 words = 176 bytes.
+// (See the X86TrapFrame layout below for the 22 named fields.)
 //
-// IMPORTANT (contract-count discrepancy): the K3a contract's header
-// comment says "24 registers × 8 bytes = 192 bytes" and its tail
-// "IMPORTANT" note says "21 u64 fields = 168 bytes". NEITHER matches
-// the layout it actually specifies — the layout block below has 22
-// fields (count: 7 named GPs rax..rbp + 8 GPs r8..r15 + vector +
-// error_code + rip + cs + rflags + rsp + ss = 22), giving 22 × 8 = 176
-// bytes. The order of the fields MUST match trap.S exactly (K11 will
-// write trap.S to match this layout), so this file keeps the 22-field
-// layout verbatim from the contract and just corrects the byte count
-// in the prose here. The trap dispatcher in K3b will index into this
-// layout by field name (State<TrapFrame> accessors), NOT by raw
-// offset, so the exact count matters for symbol layout but not for
-// dispatcher correctness — every field is named.
+// ── Canonical GPR slot mapping for x86_64 (R2b contract) ───────────────────
+// The R2b contract pins the x86_64→superset GPR mapping to the natural
+// ascending push order (matching the existing trap_entry stub's push order
+// AND matching the R2a file header's documented "r8-r15 at slots 7-15"
+// option — R2b picks the contiguous 0..14 mapping):
+//     slot  0 = rax        slot  8 = r8
+//     slot  1 = rbx        slot  9 = r9
+//     slot  2 = rcx        slot 10 = r10
+//     slot  3 = rdx        slot 11 = r11
+//     slot  4 = rsi        slot 12 = r12
+//     slot  5 = rdi        slot 13 = r13
+//     slot  6 = rbp        slot 14 = r14
+//     slot  7 = r8         slot 14 = r15  ← wait: this comment was checked
+//                                            twice and the bottom half is
+//                                            "slot 7 = r8 .. slot 14 = r15"
+//                                            i.e. 15 registers at slots
+//                                            0..14 (rax=0, rbx=1, rcx=2,
+//                                            rdx=3, rsi=4, rdi=5, rbp=6,
+//                                            r8=7, r9=8, r10=9, r11=10,
+//                                            r12=11, r13=12, r14=13, r15=14).
+//                                            Slots 15..31 stay 0 (zeroed by
+//                                            tf_init, never written by the
+//                                            x86_64 adapter).
+//   Scalar fields:
+//     sup.pc         ← old.rip          (CPU-pushed RIP)
+//     sup.status     ← old.rflags       (CPU-pushed RFLAGS)
+//     sup.vector     ← old.vector       (stub-pushed vector number 0..255)
+//     sup.error_code ← old.error_code   (CPU-pushed error code, 0 if none)
+//     sup.sp         ← old.rsp          (CPU-pushed inner-level RSP)
+//   NOT migrated (left 0 by tf_init):
+//     sup.fpu[0..255]   — x86_64 saves XMM state separately (not in the
+//                         X86TrapFrame); a future wave may extend the
+//                         save area and copy xmm0..xmm15 here.
 //
 // ── Extern "C" trampolines (IDT + IRQ + CR2) ────────────────────────────────
 // Hosted: __ffi_fallback_stub (xor eax, eax; ret — returns 0, no-op for
@@ -50,70 +85,166 @@
 //         src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
 //     idt_load(idt_ptr)
 //         — `lidt [rdi]; ret` (RDI = pointer to a 10-byte IDT descriptor
-//           struct: 16-bit limit + 64-bit base. Loads the IDT register,
-//           arming all 256 interrupt vectors).
+//           struct: 16-bit limit + 64-bit base).
 //     irq_mask(irq) / irq_unmask(irq)
-//         — Program the 8259 PIC's mask register. K11 stub:
-//           `mov al, 0xFF; out 0x21, al` (mask all) / `mov al, 0xFE;
-//           out 0x21, al` (unmask IRQ 0 only — the timer). The `irq`
-//           argument selects a finer-grained bit (K11 will refine the
-//           stub to compute `mov al, ~(1 << irq); out 0x21, al`). In
-//           hosted mode the stub is a no-op.
+//         — Program the 8259 PIC's mask register (K11 refines to per-IRQ
+//           bit-masking). Hosted: no-op.
 //     pic_eoi(irq)
-//         — `mov al, 0x20; out 0x20, al; ret` (send End-Of-Interrupt to
-//           the PIC's command port — required after every hardware IRQ
-//           so the PIC will deliver the next one. Non-specific EOI; K11
-//           may add a specific-EOI path for the cascaded slave PIC).
+//         — `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to the PIC).
 //     cr2_read() -> u64
-//         — `mov rax, cr2; ret` (read the CR2 register — the page-fault
-//           linear address. The trap dispatcher reads CR2 in the #PF
-//           handler so it can pass the faulting vaddr to the page-fault
-//           handler in K3b).
+//         — `mov rax, cr2; ret` (read the page-fault linear address).
 //
-// ── Why re-declare nothing here? ─────────────────────────────────────────────
+// ── Why re-declare the superset here? ────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so every kernel module re-declares
-// the layouts it uses byte-identically. THIS file declares TrapFrame for
-// the FIRST time (no prior VUMA file has it); the K3b dispatcher, K3c IRQ
-// subsystem, and K3d syscall layer will each re-declare this same layout
-// from this file's contract. The byte-identical-redeclaration invariant
-// (K2c "extern signatures MUST stay byte-identical") extends to layouts
-// too — K3b's `dispatch_trap(tf: State<TrapFrame>)` MUST see the same
-// field offsets, field names, and field types as this file.
+// the layouts it uses byte-identically. THIS file re-declares the canonical
+// superset TrapFrame + tf_get_gpr + tf_set_gpr + tf_init byte-identically
+// from womb/kernel/trap/trap_frame.vuma (R2a) so that the
+// x86_trap_to_superset adapter can call tf_set_gpr / write to sup.pc etc.
+// against the same field offsets R2a defined. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-identical")
+// extends to layouts too: a mismatch in field order or type would silently
+// produce different field offsets at the call site.
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
-// TrapFrame is a 22-word struct held in a `___pmt_buffer`-backed
-// State<TrapFrame>; the CALLER allocates it via `state_new(TrapFrame)`
-// and passes it by reference to `trap_frame_init` / `trap_page_fault_addr`
-// (init-style API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for
-// the codegen rationale). The externs' `idt_ptr: Address` parameter is a
-// plain Address (SysV AMD64 RDI), NOT a State<T> — no #[borrow] needed
-// because there is no State<T> to invalidate. None of the externs take a
-// State<T> argument, so there is no use-after-invalidate risk from any
-// of them.
+// TrapFrame and X86TrapFrame are flat typed-memory records held in
+// `___pmt_buffer`-backed State<T> values; the caller allocates them via
+// `state_new(T)` and passes them by reference to tf_init / trap_frame_init
+// / x86_trap_to_superset (init-style API — same convention as R1a's
+// bootinfo_init, K2a's pmm_init, K4a's pt_init, K8a's spinlock_init, and
+// R2a's tf_init). The externs' `idt_ptr: Address` parameter is a plain
+// Address (SysV AMD64 RDI), NOT a State<T> — no #[borrow] needed because
+// there is no State<T> to invalidate. None of the externs take a State<T>
+// argument, so there is no use-after-invalidate risk from any of them.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. If a future dispatcher (K3b) wants to
-// read `tf.vector`, it must re-declare the TrapFrame layout byte-identically
-// to the one here (same pattern as womb/kernel/arch/x86_64/mm_trampoline.vuma
-// re-declaring PageTable byte-identically to womb/kernel/mm/vmm.vuma).
+// This file is self-contained. If a future dispatcher (K3b) wants to read
+// `sup.vector`, it must re-declare the superset TrapFrame layout byte-
+// identically to the one here (and to R2a's trap_frame.vuma — same pattern
+// as womb/kernel/arch/x86_64/mm_trampoline.vuma re-declaring PageTable
+// byte-identically to womb/kernel/mm/vmm.vuma).
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+// All numeric literals in CODE are decimal (per the project-wide convention
+// — see kernel-developer-guide.md §9). Hex values appear in comments only.
+// The literals used in the self-test:
+//     42      = 0x2a            (arbitrary rax value to round-trip via slot 0)
+//     4096    = 0x1000          (arbitrary rip value to round-trip via sup.pc)
+//     14      = 0xe             (also used by R2a's trap_frame.vuma self-test)
+//     256     = 0x100           (gpr/fpu array size — byte-loop bound)
+//     8       = 0x8             (u64 pack/unpack byte count)
+//     24      = 0x18            (_pad array size — byte-loop bound)
+//     255     = 0xff            (u8 mask, applied after the >> shift)
+//     0..2    = self-test return codes (1..2 = individual check failures)
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
 //     ./target/release-fast/compile_dump \
 //         womb/kernel/arch/x86_64/trap_trampoline.vuma \
 //         /tmp/trap_trampoline.bin x86_64 --verify
 //     /tmp/trap_trampoline.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (the 4 self-test checks all pass).
+// Expected: IVE Pass, exit=0 (the 2 adapter self-test checks both pass).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Layouts.
+// Superset TrapFrame layout (re-declared byte-identically from R2a).
 // ────────────────────────────────────────────────────────────────────────────
-
-// The x86_64 TrapFrame. The field order MUST match trap.S exactly (K11
-// will write trap.S to match). 22 fields × 8 bytes = 176 bytes. See the
-// header comment for the push-order derivation (CPU-pushed + stub-pushed
-// + trap_entry-pushed).
+// 576 bytes total: 256 (gpr) + 8×5 (pc/status/vector/error_code/sp) + 256
+// (fpu) + 24 (_pad). See womb/kernel/trap/trap_frame.vuma (R2a) for the
+// canonical definition and full field-semantics documentation. The
+// re-declaration here MUST be byte-identical (same field names, types,
+// order, _pad size) so the field offsets the adapter writes match the
+// offsets the arch-independent consumers (trap.vuma dispatcher,
+// panic.vuma formatter) read.
 layout TrapFrame = {
+    gpr: [u8; 256],
+    pc: u64,
+    status: u64,
+    vector: u64,
+    error_code: u64,
+    sp: u64,
+    fpu: [u8; 256],
+    _pad: [u8; 24],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_get_gpr: read the u64 GPR at canonical slot `idx` from sup.gpr.
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian unpack at byte offset `idx * 8`. Same loop pattern
+// as task.vuma's pt_get_pid but with a u64 accumulator and an 8-byte loop
+// bound. The cast `b as u64` widens the u8 array element before the
+// left-shift; VUMA's left-shift result type follows the left operand, so
+// the addition stays in u64.
+//
+// Byte-identical to R2a's tf_get_gpr (same param name, same body).
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_set_gpr: write the u64 `val` to canonical slot `idx` in sup.gpr.
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack at byte offset `idx * 8`. Same loop pattern as
+// task.vuma's pt_set_pid but with an 8-byte loop bound. The mask `& 255`
+// extracts the low byte after the right-shift; the cast `b as u8` narrows
+// the masked u64 back to u8 for the array store.
+//
+// Byte-identical to R2a's tf_set_gpr (same param name, same body).
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_init: zero every field of a caller-allocated superset TrapFrame.
+// ────────────────────────────────────────────────────────────────────────────
+// Called once per TrapFrame before x86_trap_to_superset (or any other arch's
+// adapter) populates the arch-specific fields. The adapter overwrites the
+// fields it knows about; fields the arch doesn't populate (e.g. fpu on
+// x86_64 — see the slot-mapping comment above) stay 0 (the "zeroed by that
+// arch's trap_entry stub" contract from R2a, identical to R1a's BootInfo
+// contract).
+//
+// Byte-identical to R2a's tf_init (same param name, same body).
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// X86TrapFrame layout (the old K3a TrapFrame, renamed for R2b).
+// ────────────────────────────────────────────────────────────────────────────
+// 22 fields × 8 bytes = 176 bytes. The field order MUST match trap.S exactly
+// (K11 will write trap.S to match). This is the layout the existing
+// trap_entry stubs and K3d's trap.vuma dispatcher read/write — R2b keeps
+// it byte-identical to the K3a TrapFrame (only the name changes), so
+// nothing else in the kernel needs to change. The x86_trap_to_superset
+// adapter below bridges the old layout to the new superset.
+layout X86TrapFrame = {
     rax: u64,
     rbx: u64,
     rcx: u64,
@@ -143,50 +274,41 @@ layout TrapFrame = {
 // ────────────────────────────────────────────────────────────────────────────
 // Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
 // these for real asm stubs registered in
-// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs.
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs. Kept verbatim
+// from K3a — R2b does NOT touch the extern block.
 extern "C" {
     // Load the Interrupt Descriptor Table. `idt_ptr` is a SysV AMD64
     // RDI pointing at a 10-byte IDT descriptor struct (16-bit limit +
-    // 64-bit base). K11 stub: `lidt [rdi]; ret`. Called once during
-    // early boot to arm all 256 interrupt vectors.
+    // 64-bit base). K11 stub: `lidt [rdi]; ret`.
     fn idt_load(idt_ptr: Address);
     // Mask an IRQ line at the 8259 PIC. `irq` is the IRQ number 0..15.
-    // K11 stub: `mov al, 0xFF; out 0x21, al` (mask all — refined in K11
-    // to per-IRQ bit-masking via `mov al, ~(1 << irq); out 0x21, al`).
     fn irq_mask(irq: u8);
-    // Unmask an IRQ line at the PIC. K11 stub:
-    // `mov al, 0xFE; out 0x21, al` (unmask IRQ 0 — refined in K11 to
-    // per-IRQ bit-clearing). Pairs with irq_mask.
+    // Unmask an IRQ line at the PIC. Pairs with irq_mask.
     fn irq_unmask(irq: u8);
-    // Send End-Of-Interrupt to the PIC. Must be called at the end of
-    // every hardware-IRQ handler so the PIC will deliver the next one.
-    // K11 stub: `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to
-    // the master PIC's command port).
+    // Send End-Of-Interrupt to the PIC. K11 stub: `mov al, 0x20;
+    // out 0x20, al; ret` (non-specific EOI to the master PIC).
     fn pic_eoi(irq: u8);
     // Read the CR2 register — the page-fault linear address. K11 stub:
-    // `mov rax, cr2; ret`. Used by trap_page_fault_addr below so the
-    // trap dispatcher (K3b) can pass the faulting vaddr to the
-    // page-fault handler.
+    // `mov rax, cr2; ret`.
     fn cr2_read() -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers.
 // ────────────────────────────────────────────────────────────────────────────
-// Init-style API (caller allocates `tf` via state_new(TrapFrame), passes
-// by reference). The State<TrapFrame> param here is a regular VUMA-fn
-// borrow (NOT an extern #[borrow] — VUMA fn calls don't need the
-// attribute, only extern "C" calls do, because the codegen tracks the
-// State's lifetime through regular fn calls but conservatively
-// invalidates on extern calls). See womb/kernel/mm/vmm.vuma::vaddr_parts
-// for the same pattern (regular fn writing through a State<T> param).
+// Init-style API (caller allocates `tf` via state_new, passes by reference).
+// The State<T> params here are regular VUMA-fn borrows (NOT extern
+// #[borrow] — VUMA fn calls don't need the attribute, only extern "C"
+// calls do, because the codegen tracks the State's lifetime through
+// regular fn calls but conservatively invalidates on extern calls).
 
-// Initialize a TrapFrame to zeros. Useful both for the self-test and
-// for the early-boot allocator (the trap dispatcher can call this on a
-// scratch TrapFrame before populating it from the live save area, so
-// stale stack garbage in the unused-error-code case can't leak into the
-// handler). Writes all 22 fields to 0.
-fn trap_frame_init(tf: State<TrapFrame>) {
+// Initialize an X86TrapFrame to zeros. Writes all 22 fields to 0. Useful
+// both for the self-test and for the early-boot allocator (the trap
+// dispatcher can call this on a scratch X86TrapFrame before populating it
+// from the live save area, so stale stack garbage in the unused-error-
+// code case can't leak into the handler). Kept verbatim from K3a — only
+// the param type name changes (TrapFrame → X86TrapFrame).
+fn trap_frame_init(tf: State<X86TrapFrame>) {
     tf.rax = 0;
     tf.rbx = 0;
     tf.rcx = 0;
@@ -213,50 +335,106 @@ fn trap_frame_init(tf: State<TrapFrame>) {
 
 // Get the faulting address for a page fault (vector 14). Reads CR2 via
 // the cr2_read extern. `tf` is passed for API symmetry with the other
-// trap helpers (K3b's dispatch_trap will have a State<TrapFrame> in
-// hand and call this without juggling locals); the function does not
-// read any field of `tf` directly — the faulting address lives in the
-// CR2 register, not in the saved frame.
-//
-// In hosted mode cr2_read resolves to __ffi_fallback_stub (returns 0),
-// so this returns 0. K3b's page-fault handler will need to special-case
-// the hosted path (hosted mode never delivers real page faults — the
-// host kernel does); in bare-metal mode (K11) cr2_read returns the
-// actual CR2 value.
-fn trap_page_fault_addr(tf: State<TrapFrame>) -> u64 {
+// trap helpers; the function does not read any field of `tf` directly —
+// the faulting address lives in the CR2 register, not in the saved frame.
+// Kept verbatim from K3a — only the param type name changes (TrapFrame →
+// X86TrapFrame).
+fn trap_page_fault_addr(tf: State<X86TrapFrame>) -> u64 {
     return cr2_read();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test.
+// x86_trap_to_superset: copy an old X86TrapFrame into a superset TrapFrame.
 // ────────────────────────────────────────────────────────────────────────────
-// Allocate a TrapFrame via state_new, zero it via trap_frame_init, then
-// verify:
-//   (1) trap_frame_init cleared rax (representative GP register).
-//   (2) trap_frame_init cleared vector.
-//   (3) Writing 14 to vector (the page-fault vector) round-trips.
-//   (4) Writing 4096 to rip round-trips — also confirms field-write +
-//       field-read through State<TrapFrame> works for a non-zero value
-//       larger than 255 (catches any accidental u8 truncation in the
-//       codegen's State-access lowering).
+// The arch-specific adapter required by R2a's contract (R2b is the x86_64
+// instance; R2c is aarch64; R2d is riscv64). The CALLER allocates `old`
+// (typically populated by the trap_entry stub from the live save area)
+// and `sup` (typically a scratch TrapFrame on the exception stack), calls
+// tf_init(sup) first to get a clean slate, then calls this adapter to
+// copy fields. After this returns, `sup` is ready to be passed to any
+// arch-independent consumer that takes State<TrapFrame>.
 //
-// Per the K3a contract's "IMPORTANT" rule: all non-zero constants in
-// the self-test use DECIMAL (4096, not 0x1000) — decimal avoids the
-// parser's hex-literal path (parse_int_radix width-extension subtleties
-// — see womb/kernel/arch/x86_64/pt.vuma header for the same rationale).
+// Mapping (per the R2b contract — see the file header's slot table):
+//   GPR slots 0..14 ← old.rax, old.rbx, old.rcx, old.rdx, old.rsi,
+//                       old.rdi, old.rbp, old.r8..old.r15
+//     (15 registers, one per slot; slots 15..31 stay 0 from tf_init.)
+//   sup.pc         ← old.rip
+//   sup.status     ← old.rflags
+//   sup.vector     ← old.vector
+//   sup.error_code ← old.error_code
+//   sup.sp         ← old.rsp
+//   NOT migrated: cs, ss (no superset equivalent — segment selectors are
+//                  x86-specific; the dispatcher can read old.cs/old.ss
+//                  directly from X86TrapFrame if it needs them), and fpu
+//                  (the X86TrapFrame doesn't save XMM state — a future
+//                  wave may extend the save area).
 //
-// Returns 0 on success, 1..4 on the corresponding failure (so a future
-// CI failure pinpoints the broken check).
+// State<T> params: 2 (old: State<X86TrapFrame>, sup: State<TrapFrame>).
+// Pure reads of `old.*` + pure writes to `sup.*` via tf_set_gpr +
+// direct field writes. The 15 tf_set_gpr calls each do an 8-byte LE pack
+// loop; the 5 scalar field assignments are single stores. No `*ptr` /
+// `&x` / `allocate` anywhere.
+//
+// The two State<T> params pattern is precedent-set by
+// womb/kernel/syscall/abi.vuma::syscall_args_from_frame
+// (tf: State<TrapFrame>, args: State<SyscallArgs>) — VUMA's codegen
+// tracks both States' lifetimes through regular fn calls.
+fn x86_trap_to_superset(old: State<X86TrapFrame>, sup: State<TrapFrame>) {
+    // 15 GP registers → slots 0..14 (ascending push order).
+    tf_set_gpr(sup, 0, old.rax);
+    tf_set_gpr(sup, 1, old.rbx);
+    tf_set_gpr(sup, 2, old.rcx);
+    tf_set_gpr(sup, 3, old.rdx);
+    tf_set_gpr(sup, 4, old.rsi);
+    tf_set_gpr(sup, 5, old.rdi);
+    tf_set_gpr(sup, 6, old.rbp);
+    tf_set_gpr(sup, 7, old.r8);
+    tf_set_gpr(sup, 8, old.r9);
+    tf_set_gpr(sup, 9, old.r10);
+    tf_set_gpr(sup, 10, old.r11);
+    tf_set_gpr(sup, 11, old.r12);
+    tf_set_gpr(sup, 12, old.r13);
+    tf_set_gpr(sup, 13, old.r14);
+    tf_set_gpr(sup, 14, old.r15);
+    // Scalar fields — direct u64 stores.
+    sup.pc = old.rip;
+    sup.status = old.rflags;
+    sup.vector = old.vector;
+    sup.error_code = old.error_code;
+    sup.sp = old.rsp;
+}
 
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the x86_trap_to_superset adapter end-to-end:
+//   1. Allocate an X86TrapFrame `old`, zero it via trap_frame_init.
+//   2. Allocate a TrapFrame `sup`, zero it via tf_init.
+//   3. Set old.rax = 42, old.rip = 4096 (representative GPR + scalar values
+//      — same decimal constants R2a's trap_frame.vuma self-test uses, so a
+//      future cross-file consistency check can compare).
+//   4. Call x86_trap_to_superset(old, sup).
+//   5. Verify tf_get_gpr(sup, 0) == 42 — confirms the rax → slot 0
+//      mapping + the 8-byte LE pack/unpack round-trip through the adapter.
+//   6. Verify sup.pc == 4096 — confirms the old.rip → sup.pc scalar field
+//      copy.
+//
+// Returns 0 on success, 1..2 on the corresponding failure (so a future CI
+// failure pinpoints the broken check):
+//   1: tf_get_gpr(sup, 0) != 42 after x86_trap_to_superset
+//   2: sup.pc != 4096 after x86_trap_to_superset
+//
+// Per the R2b contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (42, 4096 — not 0x2a, 0x1000).
 fn main() -> i32 {
-    // Self-test: init a TrapFrame, verify fields, check vector.
-    let tf = state_new(TrapFrame);
-    trap_frame_init(tf);
-    if tf.rax != 0 { return 1; }
-    if tf.vector != 0 { return 2; }
-    tf.vector = 14;  // page fault
-    if tf.vector != 14 { return 3; }
-    tf.rip = 4096;
-    if tf.rip != 4096 { return 4; }
+    let old = state_new(X86TrapFrame);
+    trap_frame_init(old);
+    let sup = state_new(TrapFrame);
+    tf_init(sup);
+    old.rax = 42;
+    old.rip = 4096;
+    x86_trap_to_superset(old, sup);
+    if tf_get_gpr(sup, 0) != 42 { return 1; }
+    if sup.pc != 4096 { return 2; }
     return 0;
 }
