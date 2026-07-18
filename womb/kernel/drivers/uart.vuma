@@ -1,0 +1,465 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/drivers/uart.vuma
+// VWK UART driver — 8250 (x86_64) + PL011 (aarch64) register layouts + PMT
+// driver functions (init / putc / getc / puts). — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6a layer of the VWK kernel: the UART driver. The kernel
+// console (K6 next: womb/kernel/console.vuma already exists from K1a) needs
+// a byte-level serial driver underneath it; this file provides that driver
+// for the two UARTs the VWK target hardware exposes:
+//   - 8250 (PC COM1 @ 0x3F8) — used by QEMU's `pc`/`q35` x86_64 machines.
+//   - PL011 (@ 0x09000000) — used by QEMU's `virt` aarch64 machine.
+//
+// ── What K6a provides ──────────────────────────────────────────────────────
+//   uart_init_8250(base)        — initialize the 8250 (hosted: no-op).
+//   uart_putc_8250(base, c)     — send one byte (hosted: write(1, &c, 1)).
+//   uart_getc_8250(base) -> u8  — receive one byte (hosted: returns 0).
+//   uart_puts_8250(base, s)     — send a null-terminated State<String>.
+//   uart_init_pl011(base)       — initialize the PL011 (hosted: no-op).
+//   uart_putc_pl011(base, c)    — send one byte (hosted: same as 8250).
+//
+// In bare-metal mode (Wave K11), the uart_putc_8250 / uart_putc_pl011
+// bodies will be replaced with the MMIO-trampoline path that's now only
+// in the comments: `while (mmio_read8(base + 5) & 32) == 0 { }` spin-wait
+// on LSR.TX-empty, then `mmio_write8(base + 0, c)` to the THR. The hosted
+// path stays available for unit testing and the hosted kernel build.
+//
+// ── Why stubs for MMIO in hosted mode? ──────────────────────────────────────
+// The mmio_read8 / mmio_write8 / mmio_read32 / mmio_write32 externs are
+// declared in this file (mirror of how womb/kernel/arch/x86_64/mm_trampoline.vuma
+// declares pte_read / pte_write / tlb_flush / invlpg for vmm.vuma). In
+// hosted mode, these resolve to `__ffi_fallback_stub` (xor eax, eax; ret —
+// returns 0, no-op for void) at link time, so any actual call would spin
+// forever (the `while (mmio_read8(base + 5) & 32) == 0 { }` would never
+// see bit 5 set) and then write to a bogus MMIO address (kernel panic).
+// Therefore the hosted path uses the pre-registered `write` extern (which
+// resolves to the real sys_write stub in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs) and avoids
+// the MMIO path entirely. The MMIO trampolines are declared here so the
+// symbol table is complete when this file is linked into the bare-metal
+// kernel image in K11 — K11 will swap the body of uart_putc_8250 /
+// uart_putc_pl011 to use them, but the extern declarations stay byte-
+// identical (same pattern as mm_trampoline.vuma).
+//
+// ── Layouts (Uart8250Regs + Pl011Regs) ─────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares every
+// layout it uses. The Uart8250Regs and Pl011Regs layouts are NEW (K6a
+// introduces them — they don't exist in any prior wave). They're declared
+// here for documentation + future use (K11's bare-metal uart_putc_8250
+// will pass `base as Address` cast to a Uart8250Regs pointer for direct
+// field access via `(*regs).lsr` style — but VUMA's PMT discipline forbids
+// pointer dereference, so K11 will use the mmio_read8 / mmio_write8
+// trampolines with explicit byte offsets instead, e.g. `mmio_read8(base
+// + 5)` for LSR). The layouts are still useful as the canonical register
+// map for the driver and for K6's console layer (which may eventually
+// pass State<Uart8250Regs> for typed access if we add MMIO state-struct
+// wrappers in a later wave).
+//
+//   Uart8250Regs (8 bytes total, all u8):
+//     data  @ 0  TX/RX buffer (DLAB=0) or divisor latch low (DLAB=1)
+//     ier   @ 1  interrupt enable
+//     iir   @ 2  interrupt identification (read) / FCR (write)
+//     lcr   @ 3  line control (DLAB bit 7)
+//     mcr   @ 4  modem control
+//     lsr   @ 5  line status (bit 5 = TX empty, bit 0 = RX ready)
+//     msr   @ 6  modem status
+//     scr   @ 7  scratch
+//
+//   Pl011Regs (24 bytes total, all u32, 4-byte aligned):
+//     dr    @ 0   data register
+//     (reserved @ 4)
+//     (reserved @ 8)
+//     fr    @ 24  flag register (bit 5 = TX FIFO full, bit 4 = RX FIFO empty)
+//                  NOTE: fr is at byte offset 24 (slot 6 in u32 terms), not
+//                  6 — the contract template's comment "offset 6" refers to
+//                  the u32 slot index, not the byte offset. The bare-metal
+//                  body comment below uses `mmio_read32(base + 24)` for the
+//                  TX-full flag, matching the actual PL011 spec.
+//     ibrd  @ 36  integer baud rate divisor (slot 9)
+//     fbrd  @ 40  fractional baud rate divisor (slot 10)
+//     lcr_h @ 44  line control (slot 11)
+//     cr    @ 48  control register (slot 12)
+// The VUMA layout only lists the registers we touch (dr + fr + the four
+// config registers); the reserved slots are implicit in the offset
+// arithmetic the bare-metal MMIO path uses.
+//
+// ── ByteBuf + String layouts ────────────────────────────────────────────────
+// ByteBuf is a 16-byte buffer used by uart_putc_8250 / uart_putc_pl011 to
+// hand a single byte to `write(1, addr, 1)`. The `data` field is at offset
+// 0 so `buf as Address` (cast of the State<ByteBuf> base pointer) yields
+// the address of `buf.data[0]` — the natural argument for write(1, base,
+// 1). This mirrors the Console-buf-at-offset-0 trick in console.vuma /
+// kmain.vuma. 16 bytes is the minimum the FFI marshal wants to round up
+// to (the IoBuf in tests/gold_standard/ffi_wave1/write_real.vuma also uses
+// [u8; 16]).
+//
+// String is a 256-byte buffer used by uart_puts_8250 for null-terminated
+// strings. 256 bytes matches the String layout in console.vuma /
+// kmain.vuma (modulo the extra `len: u32` field — K6a's String is just
+// `data: [u8; 256]` with no separate length, since uart_puts_8250 walks
+// until it sees a NUL byte). The K5f ByteBuf used 256 bytes; K6a's
+// ByteBuf is the SMALLER 16-byte variant because uart_putc only ever
+// writes one byte at a time and we don't want a 256-byte allocation per
+// character.
+//
+// ── The `buf as Address` cast (zero-copy FFI borrow) ────────────────────────
+// `state_new(ByteBuf)` lowers to an Alloc into `___pmt_buffer` and yields
+// a State<ByteBuf> handle. The `buf as Address` cast extracts the buffer's
+// base Address (a raw u64 pointer) WITHOUT consuming the State — the
+// state remains live in `___pmt_buffer` and we could still touch
+// `buf.data[i]` after the call (we don't, but we could). The Address is
+// then handed to `write(1, addr, 1)` (an extern "C" declared below) which
+// in hosted mode resolves to the real sys_write stub. This is the
+// documented PMT pattern (docs/language-reference.md §14.5 "Borrowed
+// read (zero-copy I/O)") and is the same pattern used in console.vuma
+// (`c as Address` for the Console buffer), kmain.vuma, and the
+// ffi_wave1/write_real test.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f). Decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see K5a's file.vuma header for the same
+// rationale). The constants:
+//   1016       = 0x3F8 — QEMU 8250 COM1 base address (x86_64 default).
+//   150994944  = 0x09000000 — QEMU PL011 base address (aarch64 virt default).
+//   72         = ASCII 'H' (self-test first byte).
+//   105        = ASCII 'i' (self-test second byte).
+//   80         = ASCII 'P' (self-test PL011 byte).
+//   10         = ASCII '\n' (self-test newline).
+//   256        = String buffer size (uart_puts_8250 loop bound).
+//   1          = byte count for write(1, addr, 1) in uart_putc_*.
+//   0          = NUL terminator / "no data" sentinel from uart_getc_8250.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// ByteBuf + String are flat-byte-array structs held in `___pmt_buffer`-
+// backed State<T> slots; the CALLER allocates them via `state_new(ByteBuf)`
+// / `state_new(String)` (in the case of uart_putc_8250 / uart_putc_pl011
+// the allocation is INSIDE the function — a 16-byte ByteBuf per call,
+// which the FFI marshal frees via the standard drop-frame hook on
+// function return). The Address passed to `write` is the State<T>'s base
+// pointer; we never write `&buf` or `*buf` in VUMA source.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares ByteBuf (16 bytes — different
+// from K5f's 256-byte ByteBuf, see above), String (256 bytes — different
+// from console.vuma's String with `len`, see above), Uart8250Regs (new),
+// Pl011Regs (new). K6's tty + console layers will re-declare these byte-
+// identically when they wire uart_putc_8250 into the kernel console's
+// putc path.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/drivers/uart.vuma \
+//         /tmp/uart.bin x86_64 --verify
+//     /tmp/uart.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, stdout = "Hi\nP\n" (the 8250 emits "Hi\n" and
+// the PL011 emits "P\n"). The getc check at the end asserts uart_getc_8250
+// returns 0 in hosted mode (no real UART input).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ByteBuf: a 16-byte buffer used by uart_putc_8250 / uart_putc_pl011 to
+// hand a single byte to `write(1, addr, 1)`. The `data` field is at offset
+// 0 so `buf as Address` yields the address of `buf.data[0]`. 16 bytes is
+// the minimum the FFI marshal wants to round up to (matches the IoBuf in
+// tests/gold_standard/ffi_wave1/write_real.vuma).
+layout ByteBuf = { data: [u8; 16] }
+
+// String: a 256-byte null-terminated string buffer used by uart_puts_8250.
+// 256 bytes matches the String layouts in console.vuma / kmain.vuma
+// (modulo the extra `len: u32` field those files have — K6a's String is
+// just `data: [u8; 256]` since uart_puts_8250 walks until NUL).
+layout String = { data: [u8; 256] }
+
+// 8250 UART register layout (offsets from base address). The 8250 has 8
+// registers, selected by the DLAB bit (bit 7) in the LCR. All u8, total
+// 8 bytes. The bare-metal uart_putc_8250 / uart_init_8250 will touch:
+//   data  (offset 0) — TX/RX (write = send byte, read = receive byte).
+//   lcr   (offset 3) — set DLAB to access divisor latch, then 8N1 config.
+//   lsr   (offset 5) — bit 5 = TX empty (spin until set before sending).
+// See the per-function comments for the exact MMIO sequences K11 will use.
+layout Uart8250Regs = {
+    data: u8,    // offset 0: TX/RX buffer (DLAB=0) or divisor latch low (DLAB=1)
+    ier: u8,     // offset 1: interrupt enable
+    iir: u8,     // offset 2: interrupt identification (read) / FCR (write)
+    lcr: u8,     // offset 3: line control (DLAB bit 7)
+    mcr: u8,     // offset 4: modem control
+    lsr: u8,     // offset 5: line status (bit 5 = TX empty, bit 0 = RX ready)
+    msr: u8,     // offset 6: modem status
+    scr: u8,     // offset 7: scratch
+}
+
+// PL011 UART register layout (aarch64). All u32, total 24 bytes (we only
+// list the registers we touch; the reserved slots are implicit). The bare-
+// metal uart_putc_pl011 will touch:
+//   dr  (byte offset 0)  — write = send byte, read = receive byte.
+//   fr  (byte offset 24) — bit 5 = TX FIFO full (spin until clear before
+//                          sending); bit 4 = RX FIFO empty.
+// See the per-function comments for the exact MMIO sequences K11 will use.
+layout Pl011Regs = {
+    dr: u32,     // offset 0: data register
+    fr: u32,     // offset 6: flag register (bit 5 = TX full, bit 4 = RX empty)
+    ibrd: u32,   // offset 9: integer baud rate divisor
+    fbrd: u32,   // offset 10: fractional baud rate divisor
+    lcr_h: u32,  // offset 11: line control
+    cr: u32,     // offset 12: control register
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines.
+// ────────────────────────────────────────────────────────────────────────────
+// Two extern blocks: one for the MMIO trampolines (bare-metal only; hosted
+// resolves them to __ffi_fallback_stub which returns 0 — they're never
+// called from the hosted path), one for the hosted I/O `write` extern
+// (which resolves to the real sys_write stub on x86_64 — nr 1; on aarch64
+// it's nr 64). The split mirrors how womb/kernel/arch/x86_64/mm_trampoline.vuma
+// declares pte_read/pte_write/tlb_flush/invlpg separately from the host
+// I/O externs in console.vuma / kmain.vuma.
+
+// MMIO trampolines (bare-metal mode uses these; hosted mode = stubs that
+// return 0 — they're never called from the hosted path, which uses `write`
+// instead). In K11's bare-metal build, the per-arch backend will swap
+// these for real asm stubs:
+//   mmio_read8(addr)   — `mov rax, [rdi]; movzx rax, al; ret` (RDI = addr
+//                        under SysV AMD64; 1-byte load, zero-extend to u64).
+//   mmio_write8(a, v)  — `mov [rdi], sil; ret` (RDI = addr, RSI = val; the
+//                        `sil` register is the low 8 bits of RSI).
+//   mmio_read32(addr)  — `mov eax, [rdi]; ret` (4-byte load, zero-extend).
+//   mmio_write32(a, v) — `mov [rdi], esi; ret`.
+// On aarch64 the stubs use LDRB / STRB / LDR / STR with X0 = addr, X1 = val.
+extern "C" {
+    fn mmio_read8(addr: u64) -> u8;
+    fn mmio_write8(addr: u64, val: u8);
+    fn mmio_read32(addr: u64) -> u32;
+    fn mmio_write32(addr: u64, val: u32);
+}
+
+// Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
+// sys_write on x86_64 / aarch64 hosted backends). Same declaration as
+// womb/kernel/console.vuma / kmain.vuma / arch/x86_64/trampoline.vuma.
+// `buf: Address` (NOT State<T>) means the marshal does NOT invalidate any
+// state on the call — the Address is just a raw u64 pointer handed to
+// the syscall. This is the documented PMT "Borrowed read" pattern.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// UART port base addresses (QEMU defaults).
+// ────────────────────────────────────────────────────────────────────────────
+// 8250: 0x3F8 (COM1) — but use decimal: 1016.
+// PL011: 0x09000000 — but use decimal: 150994944.
+// These are the QEMU defaults; real hardware may differ (e.g. 0x2F8 for
+// COM2 on PC, or 0x09000000 vs 0xFE000000 for different PL011 SoC layouts).
+// K11's bootinfo will supply the actual base addresses from the device
+// tree / ACPI table; for hosted mode and K6a self-test, the QEMU defaults
+// are hard-coded as decimal literals in main().
+
+// ────────────────────────────────────────────────────────────────────────────
+// 8250 UART driver functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the 8250 UART at the given base address.
+// In hosted mode, this is a no-op (no real UART to configure).
+//
+// In bare-metal mode (K11), this will run the standard 8250 init sequence
+// (115200 baud, 8N1, FIFO enabled, DTR + RTS):
+//     mmio_write8(base + 3, 128);  // LCR: set DLAB (128 = 1 << 7)
+//     mmio_write8(base + 0, 1);    // divisor low (115200 baud = divisor 1)
+//     mmio_write8(base + 1, 0);    // divisor high
+//     mmio_write8(base + 3, 3);    // LCR: 8N1 (3 = 8 bits + 1 stop), clear DLAB
+//     mmio_write8(base + 2, 193);  // FCR: enable FIFO, 14-byte trigger
+//                                   //       (193 = 0xC1 = 0x80 | 0x40 | 0x01)
+//     mmio_write8(base + 4, 3);    // MCR: DTR + RTS (3 = 0x03)
+// The constants 128 / 1 / 0 / 3 / 193 / 3 are the 8250 register values;
+// the offsets 0 / 1 / 2 / 3 / 4 match the Uart8250Regs layout above. K11
+// will replace `return;` with the six mmio_write8 calls.
+fn uart_init_8250(base: u64) {
+    // In bare-metal mode:
+    // mmio_write8(base + 3, 128);  // LCR: set DLAB
+    // mmio_write8(base + 0, 1);    // divisor low (115200 baud)
+    // mmio_write8(base + 1, 0);    // divisor high
+    // mmio_write8(base + 3, 3);    // LCR: 8N1, clear DLAB
+    // mmio_write8(base + 2, 193);  // FCR: enable FIFO, 14-byte trigger
+    // mmio_write8(base + 4, 3);    // MCR: DTR + RTS
+    // In hosted mode: no-op.
+    return;
+}
+
+// Send one byte via the 8250 UART.
+// In hosted mode, write to fd 1 (stdout) via the `write` extern.
+//
+// In bare-metal mode (K11), this will spin-wait on LSR.TX-empty (bit 5
+// of the LSR register at base + 5) and then write the byte to the THR
+// (base + 0):
+//     while (mmio_read8(base + 5) & 32) == 0 { }
+//     mmio_write8(base + 0, c);
+// (32 = 0x20 = bit 5 = TX-empty flag.) The spin is bounded by the baud
+// rate — at 115200 baud, one byte takes ~87 µs, so the spin is at most
+// a few hundred CPU cycles. K11 will replace the `write` call with the
+// two-line MMIO sequence.
+//
+// Hosted path: allocate a 16-byte ByteBuf, store the byte at data[0],
+// cast the State<ByteBuf> to Address (yields the base address of the
+// buffer = address of data[0] since data is at offset 0), and call
+// write(1, addr, 1) to send exactly one byte to stdout. The ByteBuf is
+// freed automatically when the function returns (the FFI marshal's
+// drop-frame hook handles the ___pmt_buffer cleanup).
+fn uart_putc_8250(base: u64, c: u8) {
+    // In bare-metal mode:
+    // Wait for TX empty (LSR bit 5).
+    // while (mmio_read8(base + 5) & 32) == 0 { }
+    // mmio_write8(base + 0, c);
+    // In hosted mode: write to stdout.
+    let buf = state_new(ByteBuf);
+    buf.data[0] = c;
+    let addr = buf as Address;
+    write(1, addr, 1);
+}
+
+// Receive one byte from the 8250 UART. Returns the byte, or 0 if no data.
+//
+// In hosted mode, there's no real UART to read from, so we always return
+// 0. (The hosted kernel uses the regular sys_read syscall for keyboard
+// input via stdin, not this UART driver — the UART driver is for the
+// serial console, which in hosted mode is just stdout.)
+//
+// In bare-metal mode (K11), this will check LSR.RX-ready (bit 0 of the
+// LSR register at base + 5) and, if set, read the byte from the RBR
+// (base + 0):
+//     if (mmio_read8(base + 5) & 1) != 0 {
+//         return mmio_read8(base + 0);
+//     }
+//     return 0;
+// (1 = 0x01 = bit 0 = RX-ready flag.) K11 will replace `return 0;` with
+// the LSR-check + RBR-read sequence.
+fn uart_getc_8250(base: u64) -> u8 {
+    // In bare-metal mode:
+    // if (mmio_read8(base + 5) & 1) != 0 {
+    //     return mmio_read8(base + 0);
+    // }
+    // return 0;
+    // In hosted mode: return 0 (no real UART).
+    return 0;
+}
+
+// Send a null-terminated string via the 8250 UART.
+//
+// Walks `s.data[0..256]` byte-by-byte, calling uart_putc_8250 for each
+// byte until a NUL (0) is encountered or 256 bytes have been sent (the
+// String buffer is 256 bytes, so this is the natural upper bound — any
+// string longer than 256 bytes is truncated, which matches the String
+// layout's contract). The NUL terminator itself is NOT sent (the `if c
+// == 0 { return; }` happens BEFORE the uart_putc_8250 call).
+//
+// In bare-metal mode (K11), each uart_putc_8250 call will spin on LSR
+// + write to THR — the loop here stays byte-identical, only the per-byte
+// driver changes.
+fn uart_puts_8250(base: u64, s: State<String>) {
+    let i = 0;
+    while i < 256 {
+        let c = s.data[i];
+        if c == 0 { return; }
+        uart_putc_8250(base, c);
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PL011 UART driver functions (aarch64).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the PL011 UART (aarch64).
+// In hosted mode, this is a no-op (no real UART to configure).
+//
+// In bare-metal mode (K11), this will run the standard PL011 init
+// sequence (115200 baud, 8N1, FIFO enabled):
+//     mmio_write32(base + 48, 0);      // CR: disable UART (48 = 0x30 = slot 12)
+//     mmio_write32(base + 36, 27);     // IBRD: 27 (115200 baud @ 48 MHz refclk)
+//     mmio_write32(base + 40, 0);      // FBRD: 0 (integer divisor only)
+//     mmio_write32(base + 44, 112);    // LCR_H: 8N1, FIFO enable
+//                                       //        (112 = 0x70 = WLEN_8 | FEN)
+//     mmio_write32(base + 48, 301);    // CR: UARTEN + TXE + RXE
+//                                       //     (301 = 0x12D = bit 0 + bit 8 + bit 9)
+// The offsets 36 / 40 / 44 / 48 are byte offsets (= slot * 4) for the
+// PL011's IBRD / FBRD / LCR_H / CR registers per the layout above. K11
+// will replace `return;` with the five mmio_write32 calls.
+fn uart_init_pl011(base: u64) {
+    // In bare-metal mode: set baud rate, enable UART.
+    // In hosted mode: no-op.
+    return;
+}
+
+// Send one byte via the PL011 UART.
+// In hosted mode, same as 8250 (write to stdout via `write` extern).
+//
+// In bare-metal mode (K11), this will spin-wait on FR.TX-FIFO-full
+// (bit 5 of the FR register at byte offset 24) and then write the byte
+// to the DR (base + 0):
+//     while (mmio_read32(base + 24) & 32) != 0 { }  // wait for TX FIFO not full
+//     mmio_write32(base + 0, c as u32);
+// (24 = 6 * 4 = byte offset of FR per the PL011 spec; 32 = 0x20 = bit 5
+// = TX-FIFO-full flag.) Note the PL011 inverts the polarity vs. the 8250:
+// FR.TX-FIFO-full (bit 5) is SET when the FIFO is full, so we spin while
+// it's set (vs. 8250's LSR.TX-empty bit 5 which is SET when the FIFO is
+// empty, so we spin while it's clear). K11 will replace the `write` call
+// with the two-line MMIO sequence.
+//
+// The `c as u32` cast is needed because the DR register is 32-bit (the
+// low 8 bits are the data, the high 24 bits are reserved / flag bits on
+// writes). K11's bare-metal version will do this cast; the hosted version
+// doesn't need it (write takes a u8 buffer pointer, not a u32 value).
+fn uart_putc_pl011(base: u64, c: u8) {
+    // In bare-metal mode:
+    // while (mmio_read32(base + 24) & 32) != 0 { }  // wait for TX FIFO not full
+    // mmio_write32(base + 0, c as u32);
+    // In hosted mode: same as 8250 (write to stdout).
+    let buf = state_new(ByteBuf);
+    buf.data[0] = c;
+    let addr = buf as Address;
+    write(1, addr, 1);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+//   (1) uart_init_8250(1016)         — no-op in hosted mode (must not trap).
+//   (2) uart_putc_8250(1016, 72)     — 'H' to stdout.
+//   (3) uart_putc_8250(1016, 105)    — 'i' to stdout.
+//   (4) uart_putc_8250(1016, 10)     — '\n' to stdout.
+//   (5) uart_init_pl011(150994944)   — no-op in hosted mode (must not trap).
+//   (6) uart_putc_pl011(150994944, 80) — 'P' to stdout (same path as 8250).
+//   (7) uart_putc_pl011(150994944, 10)  — '\n' to stdout.
+//   (8) uart_getc_8250(1016)         — returns 0 in hosted mode (no UART).
+// Returns 0 on success, 1 if uart_getc_8250 returns non-zero (which would
+// indicate a hosted backend that unexpectedly wires MMIO reads to
+// something nonzero — a regression).
+//
+// Expected stdout: "Hi\nP\n" (4 bytes from the 8250 + 2 bytes from the
+// PL011 = 6 bytes total). The 8250 + PL011 paths share the same hosted
+// `write` extern, so both halves of the test exercise the same code path
+// — but verifying that BOTH arch-specific driver entry points route
+// through the hosted write is the K6a DoD.
+
+fn main() -> i32 {
+    // Self-test: init + putc + puts (hosted mode = write to stdout).
+    uart_init_8250(1016);  // 0x3F8 = COM1
+    uart_putc_8250(1016, 72);  // 'H'
+    uart_putc_8250(1016, 105);  // 'i'
+    uart_putc_8250(1016, 10);  // '\n'
+    // Test PL011 init (no-op in hosted mode).
+    uart_init_pl011(150994944);  // 0x09000000
+    uart_putc_pl011(150994944, 80);  // 'P'
+    uart_putc_pl011(150994944, 10);  // '\n'
+    // Test getc (returns 0 in hosted mode).
+    let c = uart_getc_8250(1016);
+    if c != 0 { return 1; }
+    return 0;
+}
