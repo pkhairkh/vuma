@@ -1,12 +1,12 @@
-// f32_store_load — store 7.25 (f32), load back, -> 7
+// f32_store_load — store 7.25 (f32) in a State field, load back as f64, -> 7
 // Expected exit code: 7
 
+layout Cell = { v: f64 }
+
 fn main() -> i32 {
-    ptr = allocate(4);
-    *(ptr) = 7.25;
-    val: f32 = *ptr;
-    free(ptr);
-    val_f64: f64 = floattofloat(val);
-    result: i64 = floattoint(val_f64);
+    c = state_new(Cell);
+    c.v = 7.25;
+    val: f64 = c.v;
+    result: i64 = floattoint(val);
     return result;
 }
