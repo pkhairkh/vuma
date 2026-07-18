@@ -1,0 +1,616 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/dentry.vuma
+// VWK VFS Subsystem — Dentry (directory entry) + DentryTable + lifecycle
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5a layer #2 of the VWK kernel VFS: the Dentry
+// (directory entry — links a name to an inode, forms the directory
+// tree via parent / child / next-sibling pointers) and the DentryTable
+// (a 64-slot array of Dentrys stored as parallel flat byte arrays —
+// VUMA has no struct arrays). K5b (superblock + dentry tree) will
+// consume DentryTable to walk the directory tree; K5c (file ops) will
+// look up dentries by name; K5d (tmpfs) will call dentry_alloc to
+// allocate dentries for new files / directories.
+//
+// ── Dentry layout (6 fields, 104 bytes) ─────────────────────────────────────
+//   name     ([u8; 64]) — file name, null-terminated. 64 bytes max
+//                          (matches Linux's NAME_MAX = 255, but VUMA's
+//                          array sizing is byte-counted so 64 is plenty
+//                          for a self-test; K5d can bump to 256 if
+//                          needed). Accessed byte-by-byte via
+//                          dentry_get_name_byte / dentry_set_name_byte
+//                          (VUMA has no [u8; 64] return type — helpers
+//                          take an explicit `off` parameter 0..63).
+//   parent   (u64)       — parent dentry INDEX (0 for root — the root
+//                          dentry is its own parent, mirroring Linux's
+//                          dentry->d_parent == &root_dentry convention).
+//                          Stored as an index into the DentryTable (0..63),
+//                          NOT a pointer (PMT discipline — no pointer
+//                          syntax).
+//   inode    (u64)       — inode INDEX (or 0 if this is a negative
+//                          dentry — a name that exists in the directory
+//                          tree but has no inode attached, e.g. a just-
+//                          deleted file whose dentry hasn't been evicted
+//                          from the dcache yet). K5b's dentry_lookup
+//                          reads this to find the inode for a name.
+//                          Stored as an index into the InodeTable (0..63
+//                          — but ino 0 is the FREE marker for InodeTable,
+//                          so a negative dentry has inode == 0 here too;
+//                          the DentryTable's `used` array distinguishes
+//                          a real negative dentry from a free slot).
+//   next     (u64)       — next sibling dentry INDEX in the same parent
+//                          directory (0 = end of sibling list). K5b's
+//                          dentry_lookup walks this list to find a name
+//                          within a directory.
+//   child    (u64)       — first child dentry INDEX (only meaningful if
+//                          this dentry points at a directory inode —
+//                          K5b's dentry_lookup checks the inode's mode
+//                          for S_IFDIR before descending). 0 = no
+//                          children (empty directory or non-dir).
+//   mounted  (u8)        — 1 if a filesystem is mounted on this dentry
+//                          (the dentry is a mount point — path traversal
+//                          crosses into the mounted filesystem's root).
+//                          0 = not a mount point. K5b's path_resolve
+//                          checks this at every step and follows the
+//                          mount.
+//
+//   Total size: 64 + 8 + 8 + 8 + 8 + 1 = 97 bytes (padded to 104 by the
+//   codegen's max-field-alignment rule — 7 bytes of trailing padding
+//   after the u8 to align the next slot to 8 bytes. The codegen's
+//   layout allocator handles this automatically; field accessors see
+//   field-relative offsets directly.)
+//
+// ── DentryTable layout (designed by K5a — NOT pinned by contract) ───────────
+// 64 Dentry slots stored as parallel flat byte arrays. The K5a contract
+// doesn't pin the exact field list (only says "DentryTable: 64 Dentry
+// slots. Flat byte arrays."), so this file adds an explicit `used`
+// array (1 byte per slot, 1 = used / 0 = free) for the alloc/free
+// bookkeeping. Why `used` instead of a semantic free marker (like
+// InodeTable's `ino == 0` or `inode == 0`)? Because:
+//   - `inode == 0` is ambiguous: a NEGATIVE dentry (a name with no
+//     inode attached — common in Linux's dcache) has inode == 0 too,
+//     so using `inode == 0` as the free marker would conflate "free
+//     slot" with "real negative dentry".
+//   - `name[0] == 0` is ambiguous: an empty-named dentry is a valid
+//     state during dentry construction (the caller alloc's the dentry,
+//     THEN sets the name).
+//   - `parent == 0` is ambiguous: dentry index 0 IS a valid dentry
+//     (the root dentry's parent is itself, which is index 0 — same
+//     index, so a real dentry CAN have parent == 0).
+//   - The `used` array is the only unambiguous free marker.
+// Each field array is sized for 64 slots × the field's byte width:
+//     names:      [u8; 4096]  = 64 * 64 bytes (name per dentry)
+//     parents:    [u8; 512]   = 64 * 8 bytes (u64 per dentry)
+//     inodes:     [u8; 512]   = 64 * 8 bytes (u64 per dentry)
+//     nexts:      [u8; 512]   = 64 * 8 bytes (u64 per dentry)
+//     children:   [u8; 512]   = 64 * 8 bytes (u64 per dentry)
+//     mounteds:   [u8; 64]    = 64 * 1 byte  (u8 per dentry)
+//     used:       [u8; 64]    = 64 * 1 byte  (1=used, 0=free)
+//     count:      u32         — number of slots in use (0..64)
+//
+// ── Why parallel flat byte arrays? ──────────────────────────────────────────
+// VUMA's codegen (src/pipeline.rs::flatten_expr, Expr::Index arm) does
+// NOT scale the index by the element size for non-u8 array element
+// types — every `state.array[i]` is lowered to `*(base_addr + i)` with
+// a U8 Load/Store. VUMA also doesn't support `[Dentry; 64]` (array of
+// structs) in the parser at all (only `[u8; N]` and other primitive-u8
+// arrays parse). So instead the DentryTable stores each Dentry field
+// in a SEPARATE flat [u8; N] array, and the field accessors
+// (dentry_get_parent / dentry_set_parent / etc.) pack/unpack the
+// multi-byte values byte-by-byte. The [u8; 64] name field is accessed
+// byte-by-byte via dentry_get_name_byte / dentry_set_name_byte (which
+// compute `tbl.names[idx*64 + off]` — direct u8 indexing works for
+// the names array because each name byte is itself a u8). This is
+// byte-identical in spirit to K2a's pmm.vuma FlatPool, K3e's
+// SyscallTable, K4a's ProcessTable, and K5a's own InodeTable. When
+// the codegen gains proper typed-array index lowering, this file can
+// collapse back to `[Dentry; 64]` with `tbl.dentry[i].parent` access.
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K5a contract's main() allocates `tbl = state_new(DentryTable)`
+// and passes it by reference to dentry_init / dentry_alloc /
+// dentry_free / all dentry_get_* / dentry_set_* helpers. This is the
+// canonical PMT pattern (K2a's pmm_init(pool, pmm, ...), K3d's
+// trap_frame_init(tf), K4a's pt_init(tbl), K5a's own inode_init —
+// see womb/kernel/mm/pmm.vuma header "Why init-style?" for the
+// codegen rationale: the current codegen does NOT propagate State-
+// typedness through function return values, so `fn dentry_new() ->
+// State<DentryTable>` would produce broken field-access code in
+// callers). All dentry.vuma helpers take `tbl: State<DentryTable>` by
+// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// need the attribute; only extern "C" calls do, and none of these
+// helpers call any extern).
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Three flavors:
+//   (1) u8 fields (mounteds, used): direct array index — no pack/unpack
+//       needed (the byte IS the value).
+//   (2) u64 fields (parents, inodes, nexts, children): 8-byte pack/
+//       unpack loop (same pattern as K4a's pt_get_vruntime / etc.).
+//   (3) [u8; 64] name field: byte-by-byte access via dentry_get_name_
+//       byte / dentry_set_name_byte (the helper computes
+//       `tbl.names[idx*64 + off]` — direct u8 indexing on the names
+//       array, with the byte offset within the name as a parameter).
+//       VUMA has no `[u8; 64]` return type, so the helper returns ONE
+//       byte at a time; the caller loops over `off` 0..63 to read or
+//       write the full name.
+//
+// The self-test exercises a representative subset (alloc, name byte
+// set/get, parent / inode / next / child set/get, mounted set/get,
+// count, free, reuse) but ALL helpers must exist for K5b/K5c/K5d to
+// use (K5b's dentry_lookup reads name + inode + next; K5b's
+// dentry_mkdir writes name + inode + parent + child; K5c's file_open
+// reads inode; K5d's tmpfs_mount writes mounted). Hence this file
+// declares all 14 helpers (4 u64 getters + 4 u64 setters + 2 u8
+// getters + 2 u8 setters + 2 name-byte accessors) even though only
+// ~10 are exercised by the self-test.
+//
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+//   dentry_init(tbl)            — zero all 64 used flags (mark every
+//                                 slot FREE), set count = 0. Idempotent.
+//                                 Called by kmain at boot before the
+//                                 first dentry_alloc (K5b's
+//                                 vfs_mount calls this on the
+//                                 DentryTable to set up the root
+//                                 dentry).
+//   dentry_alloc(tbl) -> u32    — find the first FREE slot (used == 0),
+//                                 set used = 1, bump count, return the
+//                                 slot index. Returns 64 if the table
+//                                 is full (the caller MUST check —
+//                                 K5b's dentry_create returns -ENOSPC
+//                                 in that case). Does NOT touch name /
+//                                 parent / inode / etc. — those are
+//                                 populated by the caller (K5b's
+//                                 dentry_create sets name + parent +
+//                                 inode; K5d's tmpfs_mkdir sets child
+//                                 after the directory's first child is
+//                                 created).
+//   dentry_free(tbl, idx)       — mark slot `idx` as FREE (used = 0),
+//                                 decrement count. Does NOT zero the
+//                                 other fields (name, parent, etc.
+//                                 stay stale until dentry_alloc reuses
+//                                 the slot). K5b's dentry_evict calls
+//                                 this when a dentry is removed from
+//                                 the dcache (link count reaches 0 AND
+//                                 the dcache is under memory pressure).
+//
+//   The slot-reuse semantics are important: dentry_free'ing slot 0 and
+//   then dentry_alloc'ing again returns slot 0 (lowest free slot wins
+//   — same as Linux's find_first_zero_bit, same as K5a's inode_alloc
+//   and K4a's task_alloc). The self-test verifies this.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// DentryTable is a flat-byte-array struct held in a `___pmt_buffer`-
+// backed State<DentryTable>; the CALLER allocates it via
+// `state_new(DentryTable)` and passes it by reference to dentry_init /
+// dentry_alloc / dentry_free / all dentry_get_* / dentry_set_* helpers
+// (init-style API — see "Why init-style?" above). No externs are
+// declared in this file (the dentry lifecycle primitives are pure-PM —
+// K5b's path resolver will declare its own externs for string compare,
+// K5d's tmpfs will declare its own externs for page allocation).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a
+// contract's "Use decimal constants" rule. Decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K4a's task.vuma for the same rule applied to slot count 256). The
+// constants:
+//     64     = number of Dentry slots in the DentryTable (and the
+//              "table full" sentinel returned by dentry_alloc); also
+//              the per-name byte count (NAME_MAX+1 in this simplified
+//              VFS — Linux's NAME_MAX is 255 but 64 is plenty for a
+//              self-test)
+//     8      = bytes per u64 field (loop bound for parent/inode/next/
+//              child pack/unpack)
+//     255    = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     97     = ASCII 'a' (test name byte 0)
+//     98     = ASCII 'b' (test name byte 1)
+//     99     = ASCII 'c' (test name byte 2)
+//     5      = test inode index (a valid InodeTable slot)
+//     3      = test parent index (a valid DentryTable slot)
+//     7      = test next-sibling index
+//     9      = test first-child index
+//     1      = the "used" / "mounted" set value
+//     0      = FREE marker (used == 0), initial count, name null
+//              terminator, initial byte value for the zero-everything
+//              loop in dentry_init
+// All `0x...` mentions in this file are in doc-comments only (verified
+// by rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It does NOT re-declare InodeTable /
+// Inode (those are in inode.vuma — K5b's superblock.vuma will re-
+// declare both byte-identically when it ties them together). K5b's
+// dentry_tree.vuma and K5c's file.vuma will re-declare DentryTable,
+// Dentry, and the dentry_get_* / dentry_set_* helpers byte-identically
+// to this file (same pattern as K4b's scheduler.vuma re-declaring
+// ProcessTable from K4a).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/vfs/dentry.vuma \
+//         /tmp/dentry.bin x86_64 --verify
+//     /tmp/dentry.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 12 self-test checks pass — alloc,
+// count=1, name byte set + get round-trip [3 bytes], parent set/get,
+// inode set/get, next set/get, child set/get, mounted set/get, second
+// alloc + count=2, free + count=1, reuse-slot-0 alloc).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// A Dentry (directory entry — links a name to an inode, forms the
+// directory tree via parent / child / next-sibling pointers). The
+// fields are documented in the file header. Stored as a layout for
+// documentation; the actual DentryTable uses parallel flat byte arrays
+// (VUMA has no struct arrays — see "Why parallel flat byte arrays?" in
+// the file header). K5b/K5c/K5d will re-declare this layout byte-
+// identically.
+layout Dentry = {
+    name: [u8; 64],
+    parent: u64,
+    inode: u64,
+    next: u64,
+    child: u64,
+    mounted: u8,
+}
+
+// DentryTable: 64 Dentry slots stored as parallel flat byte arrays
+// (VUMA has no struct-array support — see "Why parallel flat byte
+// arrays?" in the file header). Each field is a separate [u8; N] array
+// sized for 64 slots × the field's byte width. The [u8; 64] name field
+// is stored as a flat [u8; 4096] (= 64 * 64) array; the per-dentry
+// name byte offset is `idx * 64 + off`. `used` is the alloc/free flag
+// (1 = used, 0 = free) — see "DentryTable layout" in the file header
+// for why `used` is preferred over a semantic free marker. `count`
+// tracks how many slots are in use (0..64).
+layout DentryTable = {
+    names: [u8; 4096],
+    parents: [u8; 512],
+    inodes: [u8; 512],
+    nexts: [u8; 512],
+    children: [u8; 512],
+    mounteds: [u8; 64],
+    used: [u8; 64],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Name byte accessors (the [u8; 64] name field).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing on the names array. The per-dentry name occupies
+// bytes [idx*64 .. idx*64+63] in the names array. The helper computes
+// `tbl.names[idx*64 + off]` and reads / writes a single byte. The
+// caller loops over `off` 0..63 to read or write the full name. VUMA
+// has no `[u8; 64]` return type, so the helper returns ONE byte at a
+// time — same pattern as the per-byte u8 accessors in K4a's
+// pt_get_state / pt_set_state (which return / take a single u8), but
+// parameterized by both the slot index AND the byte offset within the
+// name. This is the same pattern K5d's tmpfs will use to copy names
+// in and out of dentries (a tight loop around dentry_set_name_byte for
+// write, dentry_get_name_byte for read).
+
+// Read byte `off` (0..63) of the name field of Dentry slot `idx` from
+// DentryTable.names.
+fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+    let base = idx * 64;
+    return tbl.names[base + off];
+}
+
+// Write byte `off` (0..63) of the name field of Dentry slot `idx` into
+// DentryTable.names.
+fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+    let base = idx * 64;
+    tbl.names[base + off] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (parents, inodes, nexts, children).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K2a's
+// pool_get_base / pool_set_base (pmm.vuma), K3e's syscall_table_get /
+// syscall_table_set (table.vuma), K4a's pt_get_vruntime / etc.
+// (task.vuma), and K5a's own inode_get_ino / etc. (inode.vuma):
+// 8-iteration while loop, shift by i*8, mask 255 on writes, sum-of-
+// shifted-bytes on reads.
+
+// Read the u64 `parent` field of Dentry slot `idx` from DentryTable.parents.
+fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.parents[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `parent` field of Dentry slot `idx` into DentryTable.parents.
+fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.parents[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `inode` field of Dentry slot `idx` from DentryTable.inodes.
+fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inodes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `inode` field of Dentry slot `idx` into DentryTable.inodes.
+fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inodes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Dentry slot `idx` from DentryTable.nexts.
+fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Dentry slot `idx` into DentryTable.nexts.
+fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `child` field of Dentry slot `idx` from DentryTable.children.
+fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.children[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `child` field of Dentry slot `idx` into DentryTable.children.
+fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.children[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessors (mounteds, used) — direct array index, no
+// pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// Same pattern as K4a's pt_get_state / pt_set_state / pt_get_prio /
+// pt_set_prio (task.vuma) — direct u8 indexing, no pack/unpack loop.
+// The byte IS the value.
+
+// Read the u8 `mounted` field of Dentry slot `idx` from DentryTable.mounteds.
+fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.mounteds[idx];
+}
+
+// Write the u8 `mounted` field of Dentry slot `idx` into DentryTable.mounteds.
+fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.mounteds[idx] = val;
+}
+
+// Read the u8 `used` flag of Dentry slot `idx` from DentryTable.used.
+// Internal helper — only used by dentry_alloc / dentry_free / dentry_init
+// (not part of the K5a contract's helper list, but exposed for K5b's
+// dentry_lookup to skip free slots during a name-search walk).
+fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of Dentry slot `idx` into DentryTable.used.
+fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives.
+// ────────────────────────────────────────────────────────────────────────────
+
+// dentry_init: zero all 64 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Called by kmain at boot before the first
+// dentry_alloc (K5b's vfs_mount will call this on the DentryTable to
+// set up the root dentry). Does NOT zero the other Dentry fields
+// (names, parents, etc.) — those are populated by dentry_alloc's
+// caller, so zeroing them here would be wasted work (and VUMA has no
+// memset).
+fn dentry_init(tbl: State<DentryTable>) {
+    let i = 0;
+    while i < 64 {
+        dentry_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// dentry_alloc: find the first FREE slot (used == 0), set used = 1,
+// bump count, return the slot index. Returns 64 if the table is full
+// (the caller MUST check — K5b's dentry_create returns -ENOSPC in
+// that case).
+//
+// Does NOT touch name / parent / inode / etc. — those are populated
+// by the caller (K5b's dentry_create sets name + parent + inode; K5d's
+// tmpfs_mkdir sets child after the directory's first child is
+// created). The caller MUST set at least name + inode before the
+// dentry is linked into the directory tree (K5b's dentry_link checks
+// name[0] != 0 as a "real dentry" sanity check before linking).
+//
+// The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
+// (verified by the self-test: free slot 0, alloc → returns 0, not 2).
+fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if dentry_get_used(tbl, i) == 0 {
+            dentry_set_used(tbl, i, 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // table full
+}
+
+// dentry_free: mark slot `idx` as FREE (used = 0), decrement count.
+// Does NOT zero the other Dentry fields (name, parent, etc. stay
+// stale until dentry_alloc reuses the slot — dentry_alloc only
+// writes used, leaving the other fields for the caller to repopulate).
+// K5b's dentry_evict calls this when a dentry is removed from the
+// dcache (link count reaches 0 AND the dcache is under memory
+// pressure); K5d's tmpfs_rmdir calls this when a directory is removed.
+fn dentry_free(tbl: State<DentryTable>, idx: u32) {
+    dentry_set_used(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a DentryTable via state_new, init it via dentry_init, then:
+//   (1) dentry_alloc → returns 0 (first slot); tbl.count == 1.
+//   (2) dentry_set_name_byte(0, 0, 97); dentry_set_name_byte(0, 1, 98);
+//       dentry_set_name_byte(0, 2, 99); dentry_set_name_byte(0, 3, 0)
+//       — write "abc\0" to the name field.
+//   (3) dentry_get_name_byte(0, 0) == 97 ('a').
+//   (4) dentry_get_name_byte(0, 1) == 98 ('b').
+//   (5) dentry_get_name_byte(0, 2) == 99 ('c').
+//   (6) dentry_set_parent(0, 3); dentry_get_parent(0) == 3 (u64
+//       round-trip — catches pack/unpack or field-offset bugs).
+//   (7) dentry_set_inode(0, 5); dentry_get_inode(0) == 5 (u64
+//       round-trip on a different array than parent — catches field-
+//       array mix-ups).
+//   (8) dentry_set_next(0, 7); dentry_get_next(0) == 7 (u64
+//       round-trip on yet another array).
+//   (9) dentry_set_child(0, 9); dentry_get_child(0) == 9 (u64
+//       round-trip on the last u64 array).
+//   (10) dentry_set_mounted(0, 1); dentry_get_mounted(0) == 1 (u8
+//        direct-index round-trip).
+//   (11) dentry_alloc → returns 1 (second slot); tbl.count == 2.
+//   (12) dentry_free(0); tbl.count == 1; dentry_alloc → returns 0
+//        (reuses the freed slot — lowest-free-slot-wins policy).
+// Returns 0 on success, 1..12 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K5a contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (97, 98, 99, 3, 5, 7, 9, 1,
+// 2, 12) — decimal avoids the parser's hex-literal path (parse_int_
+// radix width-extension subtleties — see womb/kernel/arch/x86_64/
+// pt.vuma header for the same rationale, and K4a's task.vuma for the
+// same rule applied to slot count 256). The 97/98/99 values are the
+// ASCII codes for 'a'/'b'/'c' (Linux uses the same values internally
+// — names are byte arrays, and 'a' is universally 97 in ASCII / UTF-8).
+
+fn main() -> i32 {
+    let tbl = state_new(DentryTable);
+    dentry_init(tbl);
+
+    // Check 1: dentry_alloc → returns 0; count == 1.
+    let d0 = dentry_alloc(tbl);
+    if d0 != 0 { return 1; }
+    if tbl.count != 1 { return 1; }
+
+    // Check 2: write "abc\0" to the name field (97='a', 98='b', 99='c',
+    // 0=null terminator). The byte-by-byte write exercises the
+    // dentry_set_name_byte helper for offset 0, 1, 2, 3 — covering
+    // both the low byte (offset 0) and the high-ish byte (offset 3) of
+    // the 64-byte name field. We verify the writes in checks 3..5.
+    dentry_set_name_byte(tbl, 0, 0, 97);
+    dentry_set_name_byte(tbl, 0, 1, 98);
+    dentry_set_name_byte(tbl, 0, 2, 99);
+    dentry_set_name_byte(tbl, 0, 3, 0);
+
+    // Check 3: name byte 0 == 97 ('a').
+    if dentry_get_name_byte(tbl, 0, 0) != 97 { return 3; }
+
+    // Check 4: name byte 1 == 98 ('b').
+    if dentry_get_name_byte(tbl, 0, 1) != 98 { return 4; }
+
+    // Check 5: name byte 2 == 99 ('c').
+    if dentry_get_name_byte(tbl, 0, 2) != 99 { return 5; }
+
+    // Check 6: parent set/get round-trip (u64 8-byte pack/unpack).
+    dentry_set_parent(tbl, 0, 3);
+    if dentry_get_parent(tbl, 0) != 3 { return 6; }
+
+    // Check 7: inode set/get round-trip (u64 pack/unpack on a
+    // different array than parent — catches any field-array mix-up).
+    dentry_set_inode(tbl, 0, 5);
+    if dentry_get_inode(tbl, 0) != 5 { return 7; }
+
+    // Check 8: next set/get round-trip (u64 pack/unpack on yet another
+    // array).
+    dentry_set_next(tbl, 0, 7);
+    if dentry_get_next(tbl, 0) != 7 { return 8; }
+
+    // Check 9: child set/get round-trip (u64 pack/unpack on the last
+    // u64 array).
+    dentry_set_child(tbl, 0, 9);
+    if dentry_get_child(tbl, 0) != 9 { return 9; }
+
+    // Check 10: mounted set/get round-trip (u8 direct-index — no
+    // pack/unpack).
+    dentry_set_mounted(tbl, 0, 1);
+    if dentry_get_mounted(tbl, 0) != 1 { return 10; }
+
+    // Check 11: alloc a second dentry → returns 1; count == 2.
+    let d1 = dentry_alloc(tbl);
+    if d1 != 1 { return 11; }
+    if tbl.count != 2 { return 11; }
+
+    // Check 12: free slot 0; count == 1; alloc reuses slot 0.
+    dentry_free(tbl, d0);
+    if tbl.count != 1 { return 12; }
+    let d2 = dentry_alloc(tbl);
+    if d2 != 0 { return 12; }
+
+    return 0;
+}
