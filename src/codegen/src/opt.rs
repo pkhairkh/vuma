@@ -302,12 +302,27 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
             BinOpKind::Sub => lf - rf,
             BinOpKind::Mul => lf * rf,
             BinOpKind::SDiv | BinOpKind::UDiv => lf / rf,
-            BinOpKind::SLt | BinOpKind::ULt => return Some(if lf < rf { 1 } else { 0 }),
-            BinOpKind::SLe | BinOpKind::ULe => return Some(if lf <= rf { 1 } else { 0 }),
-            BinOpKind::SGt | BinOpKind::UGt => return Some(if lf > rf { 1 } else { 0 }),
-            BinOpKind::SGe | BinOpKind::UGe => return Some(if lf >= rf { 1 } else { 0 }),
-            BinOpKind::Eq => return Some(if lf == rf { 1 } else { 0 }),
-            BinOpKind::Ne => return Some(if lf != rf { 1 } else { 0 }),
+            // Don't fold f32 comparisons — the f32/f64 bit heuristic is
+            // unreliable for comparisons where both values may be f32 bits
+            // or f64 bits. Leave them for the backend to handle correctly.
+            BinOpKind::SLt | BinOpKind::ULt
+            | BinOpKind::SLe | BinOpKind::ULe
+            | BinOpKind::SGt | BinOpKind::UGt
+            | BinOpKind::SGe | BinOpKind::UGe
+            | BinOpKind::Eq | BinOpKind::Ne => {
+                if !is_f64 {
+                    return None;  // don't fold f32 comparisons
+                }
+                return Some(match op {
+                    BinOpKind::SLt | BinOpKind::ULt => if lf < rf { 1 } else { 0 },
+                    BinOpKind::SLe | BinOpKind::ULe => if lf <= rf { 1 } else { 0 },
+                    BinOpKind::SGt | BinOpKind::UGt => if lf > rf { 1 } else { 0 },
+                    BinOpKind::SGe | BinOpKind::UGe => if lf >= rf { 1 } else { 0 },
+                    BinOpKind::Eq => if lf == rf { 1 } else { 0 },
+                    BinOpKind::Ne => if lf != rf { 1 } else { 0 },
+                    _ => unreachable!(),
+                });
+            }
             _ => return try_fold_binop_int(op, lhs, rhs),
         };
         return Some(if is_f64 { result.to_bits() as i64 } else { (result as f32).to_bits() as i64 });
@@ -799,8 +814,27 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let dst_id = dst.as_register()?;
             if let Some(IRType::F32) | Some(IRType::F64) = ty.as_ref() {
                 let is_f64 = matches!(ty.as_ref(), Some(IRType::F64));
-                let lf = if is_f64 { f64::from_bits(l as u64) } else { f32::from_bits(l as u32) as f64 };
-                let rf = if is_f64 { f64::from_bits(r as u64) } else { f32::from_bits(r as u32) as f64 };
+                // Use the same heuristic as try_fold_binop: for f32, if the
+                // value fits in 32 bits, it's already f32 bits; otherwise
+                // it's f64 bits that need narrowing.
+                let lf = if is_f64 {
+                    f64::from_bits(l as u64)
+                } else {
+                    if (0..=0xFFFFFFFF).contains(&(l as u64)) {
+                        f32::from_bits(l as u32) as f64
+                    } else {
+                        f64::from_bits(l as u64) as f32 as f64
+                    }
+                };
+                let rf = if is_f64 {
+                    f64::from_bits(r as u64)
+                } else {
+                    if (0..=0xFFFFFFFF).contains(&(r as u64)) {
+                        f32::from_bits(r as u32) as f64
+                    } else {
+                        f64::from_bits(r as u64) as f32 as f64
+                    }
+                };
                 let result = match kind {
                     CmpKind::Eq => lf == rf,
                     CmpKind::Ne => lf != rf,
