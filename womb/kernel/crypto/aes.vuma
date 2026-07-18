@@ -1,0 +1,190 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/crypto/aes.vuma
+// AES — simplified PMT-native implementation.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NOT a full KAT-verified AES. This is a structural skeleton with the
+// S-box, key schedule, and round function as stubs. K11+ adds real AES.
+//
+// ── What K10b provides ──────────────────────────────────────────────────────
+//   aes_init_sbox(sbox)        — fill the 256-byte S-box with the identity
+//                                 permutation (placeholder — K11 will swap
+//                                 in the real FIPS-197 S-box).
+//   aes_key_expansion(ctx,key) — copy the 16-byte AES-128 key into all 11
+//                                 round keys (placeholder — K11 will run
+//                                 the real Rijndael key schedule with
+//                                 SubWord + RotWord + Rcon).
+//   aes_encrypt_block(ctx,in,out) — XOR each plaintext byte with the
+//                                 first round key (placeholder — K11 will
+//                                 run the 10 rounds of SubBytes +
+//                                 ShiftRows + MixColumns + AddRoundKey).
+//   aes_decrypt_block(ctx,in,out) — delegates to encrypt_block (placeholder
+//                                 — K11 will invert the round-key schedule
+//                                 and use InvSubBytes + InvShiftRows +
+//                                 InvMixColumns + AddRoundKey).
+//
+// ── VUMA Key Concepts ──────────────────────────────────────────────────────
+//   - PMT layouts with [u8; N] fixed-size array fields
+//   - `state_new(Layout)` arena allocation of crypto contexts
+//   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
+//   - Byte-granular array indexing (sbox.data[i] reads byte i)
+//   - `as u8` truncating cast from the default integer type to u8
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The AES-128 self-test uses:
+//     key.data[0]      = 42
+//     input.data[0]    = 99
+//     round_keys[0]    = 42   (copied from key)
+//     output.data[0]   = 73   (99 XOR 42 = 73 — the stub round function)
+
+// AES S-box (first 16 entries — full 256-entry table would be too large
+// for a single VUMA layout). K11 will replace the identity fill with the
+// real FIPS-197 S-box constants.
+layout AesSbox = { data: [u8; 256] }
+
+// AES round key (expanded key schedule). 11 * 16 = 176 bytes for AES-128.
+layout AesRoundKey = { data: [u8; 176] }
+
+// AES context: the expanded key schedule + the round count (10 for
+// AES-128, 14 for AES-256, 12 for AES-192 — K11 will dispatch on ctx.nr).
+layout AesCtx = {
+    round_keys: [u8; 176],  // expanded key schedule
+    nr: u32,                // number of rounds (10 for AES-128)
+}
+
+// AES-128 key wrapper (16 bytes — K11 will add AesKey256 with 32 bytes).
+layout AesKey = { data: [u8; 16] }
+
+// AES block (always 16 bytes for AES-128/192/256 — the Rijndael block size).
+layout AesBlock = { data: [u8; 16] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// AES API functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// aes_init_sbox: fill the S-box with the identity permutation.
+//
+//   sbox: caller-allocated State<AesSbox> (output — modified in place).
+//
+// K10b STUB: writes `i` to `sbox.data[i]` for i in 0..256 — an identity
+// permutation that's a no-op for SubBytes (each byte maps to itself).
+// K11 will replace this with the real FIPS-197 S-box (a non-linear,
+// non-identity permutation carefully chosen for its resistance to
+// differential + linear cryptanalysis — see FIPS-197 §5.1.1 Fig. 7).
+fn aes_init_sbox(sbox: State<AesSbox>) {
+    let i = 0;
+    while i < 256 {
+        sbox.data[i] = i as u8;
+        i = i + 1;
+    }
+}
+
+// aes_key_expansion: copy the 16-byte key into all 11 round keys.
+//
+//   ctx: caller-allocated State<AesCtx> (output — modified in place).
+//   key: caller-allocated State<AesKey> holding the raw 16-byte key.
+//
+// K10b STUB: writes `key.data[j]` to `ctx.round_keys[round*16 + j]` for
+// round in 0..11 and j in 0..16 — i.e. all 11 round keys are identical
+// copies of the original key. K11 will replace this with the real
+// Rijndael key expansion (RotWord + SubWord + Rcon XOR — see FIPS-197
+// §5.2 Key Expansion for the 4-word → 44-word expansion schedule).
+fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
+    // Round 0: copy the key verbatim.
+    let i = 0;
+    while i < 16 {
+        ctx.round_keys[i] = key.data[i];
+        i = i + 1;
+    }
+    // Rounds 1..10: copy the first 16 bytes to all 11 round keys (stub).
+    let round = 1;
+    while round < 11 {
+        let j = 0;
+        while j < 16 {
+            ctx.round_keys[round * 16 + j] = key.data[j];
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+    ctx.nr = 10;
+}
+
+// aes_encrypt_block: encrypt one 16-byte block.
+//
+//   ctx:    caller-allocated State<AesCtx> (carries the round keys).
+//   input:  caller-allocated State<AesBlock> holding the plaintext.
+//   output: caller-allocated State<AesBlock> (ciphertext output).
+//
+// K10b STUB: XORs each input byte with the corresponding byte of
+// round_keys[0..15] — i.e. just AddRoundKey with round 0, skipping the
+// 10 rounds of SubBytes + ShiftRows + MixColumns + AddRoundKey that
+// real AES performs. K11 will replace this with the real 10-round
+// encryption loop (FIPS-197 §5.1 Pseudocode for the Cipher).
+fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+    let i = 0;
+    while i < 16 {
+        output.data[i] = input.data[i] ^ ctx.round_keys[i];
+        i = i + 1;
+    }
+    // Stub: skip the real rounds (SubBytes, ShiftRows, MixColumns, AddRoundKey).
+}
+
+// aes_decrypt_block: decrypt one 16-byte block.
+//
+//   ctx:    caller-allocated State<AesCtx> (carries the round keys).
+//   input:  caller-allocated State<AesBlock> holding the ciphertext.
+//   output: caller-allocated State<AesBlock> (plaintext output).
+//
+// K10b STUB: delegates to aes_encrypt_block. For the XOR-stub this is
+// correct (XOR is symmetric). K11 will replace this with the real
+// inverse cipher (InvSubBytes + InvShiftRows + InvMixColumns +
+// AddRoundKey, with the round-key schedule iterated in reverse — see
+// FIPS-197 §5.3 Pseudocode for the Inverse Cipher).
+fn aes_decrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+    aes_encrypt_block(ctx, input, output);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K10b AES API surface end-to-end:
+//   1. aes_init_sbox(sbox)         → identity fill (sbox[0]=0, sbox[255]=255).
+//   2. aes_key_expansion(ctx,key)  → 11 round-key copies (round_keys[0]=key[0]).
+//   3. aes_encrypt_block(ctx,in,out) → XOR-stub (out[0] = in[0] XOR key[0]).
+//
+// Returns 0 on success, 1..5 on the 5 individual check failures.
+//
+// ── Why 99 XOR 42 == 73? ────────────────────────────────────────────────────
+//   99 = 0x63 (0b01100011), 42 = 0x2A (0b00101010).
+//   0x63 XOR 0x2A = 0x49 (0b01001001) = 73 decimal.
+//   The stub round function is just AddRoundKey-with-round-0; K11's real
+//   AES will produce a fully diffused 16-byte ciphertext (no byte equal
+//   to the simple XOR).
+fn main() -> i32 {
+    // ── S-box path ──
+    let sbox = state_new(AesSbox);
+    aes_init_sbox(sbox);
+    // Identity fill: sbox[0] = 0, sbox[255] = 255.
+    if sbox.data[0] != 0 { return 1; }
+    if sbox.data[255] != 255 { return 2; }
+
+    // ── Key expansion path ──
+    let ctx = state_new(AesCtx);
+    let key = state_new(AesKey);
+    key.data[0] = 42;
+    aes_key_expansion(ctx, key);
+    // Round 0: round_keys[0] = key.data[0] = 42.
+    if ctx.round_keys[0] != 42 { return 3; }
+    // Round count: 10 for AES-128.
+    if ctx.nr != 10 { return 4; }
+
+    // ── Encrypt-block path (XOR stub) ──
+    let input = state_new(AesBlock);
+    input.data[0] = 99;
+    let output = state_new(AesBlock);
+    aes_encrypt_block(ctx, input, output);
+    // Stub: XOR with round_keys[0]. 99 ^ 42 = 73.
+    if output.data[0] != 73 { return 5; }
+
+    return 0;
+}
