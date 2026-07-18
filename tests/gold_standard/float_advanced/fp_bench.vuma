@@ -1,0 +1,24 @@
+// fp_bench — Floating-point performance microbenchmark
+// Expected exit code: 0
+//
+// Sums 1M f64 additions in a loop.  Used by F4a (FP-aware register
+// allocation) to measure instruction-count reduction when operands
+// stay in XMM/FPR registers instead of round-tripping through GPRs.
+//
+// VUMA Key Concepts:
+//   - f64 arithmetic in a tight loop
+//   - inttofloat for loop-counter -> float conversion
+//   - Backend FP register pressure
+
+fn main() -> i32 {
+    total: f64 = 0.0;
+    i: i64 = 0;
+    while i < 1000000 {
+        fi: f64 = inttofloat(i);
+        total = total + fi;
+        i = i + 1;
+    }
+    // The sum of 0..999999 = 999999*1000000/2 = 499999500000.0
+    // We don't check the exact value (too large for i32); just exit 0.
+    return 0;
+}

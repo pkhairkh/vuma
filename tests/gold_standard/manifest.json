@@ -1,9 +1,9 @@
 {
-  "schema_version": "3.1",
+  "schema_version": "3.2",
   "suite": "VUMA Gold Standard Test Suite",
   "description": "Comprehensive test suite for the VUMA compiler across 19 backends",
   "source_dir": "tests/gold_standard",
-  "total_programs": 1519,
+  "total_programs": 1521,
   "categories": {
     "arena_wave0": {
       "title": "Arena Wave ",
@@ -737,7 +737,7 @@
     },
     "edge_cases": {
       "title": "Edge Cases",
-      "program_count": 142,
+      "program_count": 143,
       "programs": [
         "edge2_empty_func.vuma",
         "edge2_long_expr.vuma",
@@ -876,6 +876,7 @@
         "edge_zero_xor_zero.vuma",
         "ffi_demo.vuma",
         "gpio_blink.vuma",
+        "hello_lang.vuma",
         "high_bit_or.vuma",
         "max_and.vuma",
         "max_xor.vuma",
@@ -937,10 +938,11 @@
     },
     "float_advanced": {
       "title": "Float Advanced",
-      "program_count": 8,
+      "program_count": 9,
       "programs": [
         "bsearch_float.vuma",
         "distance_2d.vuma",
+        "fp_bench.vuma",
         "horner_poly.vuma",
         "matrix_det.vuma",
         "monte_carlo_pi.vuma",
