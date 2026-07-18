@@ -1,0 +1,80 @@
+// womb/kernel/net/sk_buff.vuma
+// VWK socket buffer (sk_buff) — network packet buffer pool.
+// Pool of 16 packets, each 1514 bytes (Ethernet MTU 1500 + 14B header).
+
+layout SkBuff = {
+    data: [u8; 1514],
+    len: u16,
+    head: u16,
+    tail: u16,
+    next: u8,
+}
+
+// SkBuffPool: 16 skbs. Flat byte arrays.
+layout SkBuffPool = {
+    data: [u8; 24224],  // 16 * 1514 bytes
+    nexts: [u8; 16],    // 16 * 1 byte — next index in free list
+    free_list: u8,      // head of free list (or 255 = empty)
+    count: u32,
+}
+
+fn skb_pool_init(pool: State<SkBuffPool>) {
+    let i = 0;
+    while i < 16 {
+        pool.nexts[i] = (i + 1) as u8;
+        i = i + 1;
+    }
+    pool.nexts[15] = 255;
+    pool.free_list = 0;
+    pool.count = 0;
+}
+
+fn skb_alloc(pool: State<SkBuffPool>) -> u8 {
+    if pool.free_list == 255 {
+        return 255;
+    }
+    let idx = pool.free_list;
+    pool.free_list = pool.nexts[idx as u32];
+    pool.nexts[idx as u32] = 255;
+    pool.count = pool.count + 1;
+    return idx;
+}
+
+fn skb_free(pool: State<SkBuffPool>, idx: u8) {
+    pool.nexts[idx as u32] = pool.free_list;
+    pool.free_list = idx;
+    pool.count = pool.count - 1;
+}
+
+fn skb_get_byte(pool: State<SkBuffPool>, idx: u8, offset: u32) -> u8 {
+    return pool.data[(idx as u32) * 1514 + offset];
+}
+
+fn skb_set_byte(pool: State<SkBuffPool>, idx: u8, offset: u32, val: u8) {
+    pool.data[(idx as u32) * 1514 + offset] = val;
+}
+
+fn skb_put(pool: State<SkBuffPool>, idx: u8, len: u16) -> u32 {
+    let off = (idx as u32) * 1514;
+    return off;
+}
+
+fn main() -> i32 {
+    let pool = state_new(SkBuffPool);
+    skb_pool_init(pool);
+    let s0 = skb_alloc(pool);
+    if s0 != 0 { return 1; }
+    let s1 = skb_alloc(pool);
+    if s1 != 1 { return 2; }
+    let s2 = skb_alloc(pool);
+    if s2 != 2 { return 3; }
+    if pool.count != 3 { return 4; }
+    skb_free(pool, s1);
+    if pool.count != 2 { return 5; }
+    let s3 = skb_alloc(pool);
+    if s3 != 1 { return 6; }
+    if pool.count != 3 { return 7; }
+    skb_set_byte(pool, s0, 0, 255);
+    if skb_get_byte(pool, s0, 0) != 255 { return 8; }
+    return 0;
+}
