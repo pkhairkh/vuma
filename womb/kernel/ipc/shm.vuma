@@ -1,0 +1,1062 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/ipc/shm.vuma
+// VWK IPC Subsystem — Shared memory (sys_shmget / sys_shmat / sys_shmdt)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K7d layer of the VWK kernel: the shared-memory primitive
+// — a 64-entry kernel-side segment table, plus the three syscalls
+// (sys_shmget / sys_shmat / sys_shmdt) that together let two or more
+// processes map the SAME physical pages into their respective virtual
+// address spaces and communicate by simply reading and writing memory.
+// K7 (IPC) is building pipe (K7a, done), signal (K7b, done), futex
+// (K7c, done), and shm (this file, K7d); K7e built the foundational
+// WaitQueue that pipe + signal rest on. K7d is the fourth and final
+// concrete object in the IPC subtree.
+//
+// ── What K7d provides ──────────────────────────────────────────────────────
+//   shm_init(tbl)                              — zero all 64 ShmRegion slots
+//                                                 (used=0 for every slot),
+//                                                 reset tbl.count to 0.
+//                                                 Called once during boot
+//                                                 (K8+ kmain) before any
+//                                                 sys_shmget call.
+//   shm_get_key(tbl, idx) -> u32               — read the IPC key stored in
+//                                                 slot `idx` (4 bytes LE).
+//   shm_set_key(tbl, idx, val)                 — store `val` (u32) into
+//                                                 slot `idx`'s key field.
+//   shm_get_addr(tbl, idx) -> u64              — read the kernel virtual
+//                                                 address stored in slot
+//                                                 `idx` (8 bytes LE).
+//   shm_set_addr(tbl, idx, val)                — store `val` (u64) into
+//                                                 slot `idx`'s addr field.
+//   shm_get_size(tbl, idx) -> u64              — read the size (bytes)
+//                                                 stored in slot `idx`.
+//   shm_set_size(tbl, idx, val)                — store `val` (u64) into
+//                                                 slot `idx`'s size field.
+//   shm_get_creator(tbl, idx) -> u32           — read the creator PID
+//                                                 stored in slot `idx`.
+//   shm_set_creator(tbl, idx, val)             — store `val` (u32) into
+//                                                 slot `idx`'s creator
+//                                                 field.
+//   shm_get_attached(tbl, idx) -> u32          — read the attach count
+//                                                 stored in slot `idx`.
+//   shm_set_attached(tbl, idx, val)            — store `val` (u32) into
+//                                                 slot `idx`'s
+//                                                 attached_count field.
+//   shm_get_used(tbl, idx) -> u8               — read the used flag (1 byte
+//                                                 — direct array access, no
+//                                                 byte-packing needed).
+//   shm_set_used(tbl, idx, val)                — store `val` (u8) into
+//                                                 slot `idx`'s used byte.
+//   shm_find_free(tbl) -> u32                  — linear scan for the first
+//                                                 slot with used==0. Returns
+//                                                 0..63, or 64 = "table full".
+//   sys_shmget(tbl, key, size, flags) -> i64   — allocate a new ShmRegion
+//                                                 of `size` bytes, return
+//                                                 shmid (slot index), or -1
+//                                                 if the table is full.
+//   sys_shmat(tbl, shmid, addr, flags) -> u64  — map the shared region at
+//                                                 `addr` (or kernel-chosen),
+//                                                 return vaddr (or 0 on
+//                                                 invalid shmid).
+//   sys_shmdt(tbl, addr) -> i64                — unmap the shared region
+//                                                 identified by `addr`,
+//                                                 return 0 on success, -1
+//                                                 if not found.
+//
+// ── What is shared memory? ──────────────────────────────────────────────────
+//   Shared memory is the SINGLE fastest IPC mechanism on Unix — two
+//   processes agree on a chunk of physical memory, both map it into their
+//   virtual address spaces, and then simply read and write it with normal
+//   load/store instructions. No syscall per byte transferred (as pipe
+//   requires), no copy between kernel and user buffers (as read/write
+//   require), no marshalling (as sockets require). The CPU's cache
+//   coherence protocol keeps both processes' views consistent (modulo
+//   explicit synchronization — see below).
+//
+//   The System V shared memory API (shmget / shmat / shmdt / shmctl) was
+//   introduced in SVR3 (1986) and standardized in POSIX.1-2001 (XSI
+//   option). Linux exposes it via syscalls 29 (shmget), 30 (shmat), 31
+//   (shmctl), 67 (shmdt). The BSD equivalent is mmap(MAP_SHARED|MAP_ANON)
+//   + fork. The POSIX.1-2001 real-time equivalent is shm_open + mmap.
+//   K7d implements the System V flavor because its key/shmid model maps
+//   cleanly to a kernel-side segment table (one entry per active
+//   segment), which is what this file is for.
+//
+//   The three syscalls:
+//
+//     shmid = shmget(key, size, flags)
+//       Allocate a new shared memory segment of `size` bytes (rounded up
+//       to PAGE_SIZE in a real kernel). `key` is either IPC_PRIVATE (0)
+//       — always create a new segment with a fresh shmid — or a non-zero
+//       ftok() value (in which case flags & IPC_CREAT + IPC_EXCL govern
+//       whether to create-or-open vs. create-only-fail-if-exists). K7d's
+//       PMT-pure hosted-mode implementation ALWAYS creates a new segment
+//       (key is stored for diagnostics but never used for lookup — there
+//       is no "find by key" path; the K7d self-test only ever passes
+//       key=0, the IPC_PRIVATE case). Returns the shmid (a small
+//       integer — K7d uses the slot index 0..63), or -1 on failure.
+//
+//     vaddr = shmat(shmid, addr, flags)
+//       Map the shared segment identified by `shmid` into the calling
+//       process's virtual address space. If `addr` is 0, the kernel
+//       chooses the mapping address (the typical case). Otherwise the
+//       kernel tries to map at exactly `addr` (subject to flags &
+//       SHM_RND for alignment — K7d does not implement SHM_RND). Returns
+//       the virtual address where the segment was mapped, or -1 on
+//       failure. K7d's hosted-mode implementation chooses the address as
+//       1 MB + shmid * 4 KB (the "1 MB + shmid * 4 KB" stub-address
+//       scheme specified by the K7d contract — it's a deterministic
+//       placeholder that the self-test checks for; K8+ will replace it
+//       with a real mmap into a process-specific page table).
+//
+//     ret = shmdt(addr)
+//       Unmap the shared segment at virtual address `addr` (the address
+//       returned by a previous shmat). Decrements the segment's
+//       attach_count; the segment itself is NOT destroyed (a separate
+//       shmctl(IPC_RMID) is required for that — K7d does NOT implement
+//       shmctl). Returns 0 on success, -1 if no segment is currently
+//       mapped at `addr`.
+//
+//   ── Synchronization ──────────────────────────────────────────────────────
+//   Shared memory provides no built-in synchronization — if process A
+//   writes a struct and process B reads it concurrently, the result is
+//   undefined (torn reads, stale cached values, etc.). Real programs
+//   pair shared memory with a synchronization primitive: semaphores
+//   (semget/semop — K7 does NOT implement these), futexes (K7c — the
+//   "fast user-space mutex" wait/wake primitive, ideal for shared-memory
+//   synchronization since the futex word itself lives IN the shared
+//   segment), or pthread primitives built on futexes. The classic
+//   producer/consumer pattern on shared memory is: shared buffer +
+//   shared futex word per slot; producer waits on the slot's futex,
+//   writes the slot, wakes the consumer's futex; consumer waits on its
+//   futex, reads the slot, wakes the producer's futex. K7d provides the
+//   shared memory; K7c provides the synchronization; together they
+//   implement the producer/consumer pattern at user-space speed (no
+//   syscall per byte).
+//
+// ── The three syscalls (K7d specifics) ─────────────────────────────────────
+//   sys_shmget(tbl, key, size, flags):
+//     Phase 1: shm_find_free(tbl) — linear scan for the first slot with
+//       used==0. Returns 64 if all 64 slots are used (table full →
+//       return -1, the K7d contract's "table full" sentinel).
+//     Phase 2: initialize the slot: key (from the arg), size (from the
+//       arg), addr=0 (not yet attached), creator=1 (PID 1 / init — K7d
+//       is hosted-mode and has no real process table; K8+ will pass the
+//       caller's actual PID via task_current()->pid), attached_count=0
+//       (no one's attached yet), used=1 (slot is now in use).
+//     Phase 3: bump tbl.count and return the slot index as i64.
+//
+//     K7d's PMT-pure hosted-mode implementation does NOT actually
+//     allocate `size` bytes of physical memory — there's no allocator
+//     in hosted mode (no mmap, no brk, no page_alloc — see "PMT
+//     discipline" below). It just records the size in the slot's size
+//     field. The K7d self-test checks that shmget returns 0 (slot 0)
+//     and that tbl.count is 1 after the call — it does NOT verify the
+//     physical allocation (there is none). K8+ will wire shmget up to
+//     page_alloc(size) to allocate the physical backing store.
+//
+//   sys_shmat(tbl, shmid, addr, flags):
+//     Validate shmid (0..63) and that the slot is in use (used==1). If
+//     invalid, return 0 (the K7d contract's "invalid shmid" sentinel;
+//     0 is NOT a valid vaddr because shmat always returns 1 MB +
+//     shmid * 4 KB, which is >= 1 MB — never 0).
+//     Compute the vaddr as 1048576 + (shmid as u64) * 4096 (1 MB +
+//     shmid * 4 KB — the K7d contract's deterministic stub-address
+//     scheme). Store it in the slot's addr field. Increment the slot's
+//     attached_count. Return the vaddr.
+//
+//     K7d's PMT-pure hosted-mode implementation does NOT actually map
+//     any pages into any process's page table — there's no process
+//     table, no page table, no MMU in hosted mode. It just records the
+//     vaddr in the slot's addr field and bumps the attach count. The
+//     K7d self-test checks that shmat returns 1048576 (1 MB) for
+//     shmid=0 and that the slot's attached_count is 1 after the call —
+//     it does NOT verify the actual mapping (there is none). K8+ will
+//     wire shmat up to mmap(MAP_SHARED|MAP_FIXED, vaddr, size) into the
+//     caller's page table.
+//
+//   sys_shmdt(tbl, addr):
+//     Linear scan over all 64 slots for one with used==1 AND addr ==
+//     `addr` (the address passed in by the caller — must match a
+//     previous shmat's return value). If found: decrement the slot's
+//     attached_count (clamped at 0 — never go negative), return 0.
+//     If no slot matches: return -1 ("not found" — the caller passed
+//     an address that no segment is currently mapped at).
+//
+//     K7d's PMT-pure hosted-mode implementation does NOT actually
+//     unmap any pages from any process's page table. It just
+//     decrements the slot's attach count. The K7d self-test checks
+//     that shmdt(vaddr) returns 0 after a successful shmat, and that
+//     the slot's attached_count is 0 after the call. K8+ will wire
+//     shmdt up to munmap(vaddr, size) in the caller's page table.
+//
+// ── Why a 64-entry table? ──────────────────────────────────────────────────
+//   Linux's real SysV shared memory uses a global array `shm_ids` of
+//   IPCMNI (32 768 on x86_64 as of 5.x — was 128 in early 2.4) entries.
+//   Each entry is a `struct shmid_kernel` (about 200 bytes), including
+//   the file struct, the inode, the permissions, the creator/owner
+//   UIDs, the attach count, the segment size, etc. K7d is a PMT-pure
+//   simplification: a flat array of 64 entries (no inode, no file
+//   struct, no permissions — just key + addr + size + creator +
+//   attached_count + used flag). 64 is small enough to fit comfortably
+//   in a single State<ShmTable> (1860 bytes total — well under the
+//   arena page size of 4096), and large enough to handle the K7d
+//   self-test's 1 segment (shmid 0) without any eviction. K8+ will
+//   likely bump this to 256 or higher and add the inode/file/perm
+//   fields when the segment table needs to scale. The 64-entry choice
+//   matches the K7d contract's reference text.
+//
+// ── Layouts ────────────────────────────────────────────────────────────────
+//   ShmRegion (logical — declared as a layout for forward-declaration
+//   purposes for K8+, but NOT used by ShmTable's parallel-array
+//   storage — see "Why no ShmRegion layout in ShmTable?" below):
+//     key:             u32   (4 bytes)  — IPC key (0 = IPC_PRIVATE).
+//     addr:            u64   (8 bytes)  — kernel virtual address of the
+//                                          shared pages (0 = not yet
+//                                          attached).
+//     size:            u64   (8 bytes)  — size in bytes (always a
+//                                          multiple of PAGE_SIZE = 4096
+//                                          in a real kernel; K7d stores
+//                                          the raw size as-passed).
+//     creator:         u32   (4 bytes)  — creator process PID (K7d hard-
+//                                          codes 1 = init in hosted
+//                                          mode).
+//     attached_count:  u32   (4 bytes)  — number of processes currently
+//                                          attached (mapped) to this
+//                                          segment. 0 = "no one's
+//                                          attached, but the segment
+//                                          still exists" (a separate
+//                                          shmctl(IPC_RMID) is needed
+//                                          to actually destroy the
+//                                          segment — K7d does NOT
+//                                          implement shmctl).
+//
+//   ShmTable (the VUMA layout — 7 fields, 1860 bytes total, padded to
+//   1864 for 8-byte alignment of the trailing State<ShmTable> footprint):
+//     keys:             [u8; 256]   (64 * 4 bytes)  — packed array of
+//                                                     64 u32 key values,
+//                                                     stored little-endian
+//                                                     byte-by-byte (same
+//                                                     pattern as K7c's
+//                                                     FutexTable.wait_
+//                                                     counts and K7b's
+//                                                     SignalTable.handlers).
+//     addrs:            [u8; 512]   (64 * 8 bytes)  — packed array of
+//                                                     64 u64 addr values,
+//                                                     stored little-endian
+//                                                     byte-by-byte (same
+//                                                     pattern as K7c's
+//                                                     FutexTable.uaddrs).
+//     sizes:            [u8; 512]   (64 * 8 bytes)  — packed array of
+//                                                     64 u64 size values,
+//                                                     stored little-endian
+//                                                     byte-by-byte.
+//     creators:         [u8; 256]   (64 * 4 bytes)  — packed array of
+//                                                     64 u32 creator PID
+//                                                     values, stored little-
+//                                                     endian byte-by-byte.
+//     attached_counts:  [u8; 256]   (64 * 4 bytes)  — packed array of
+//                                                     64 u32 attached_count
+//                                                     values, stored little-
+//                                                     endian byte-by-byte.
+//     used:             [u8; 64]    (64 * 1 byte)   — packed array of
+//                                                     64 u8 used-flag values
+//                                                     (1 byte each — no
+//                                                     byte-packing needed,
+//                                                     direct array access
+//                                                     via tbl.used[idx]).
+//     count:            u32         (4 bytes)       — total number of
+//                                                     entries currently in
+//                                                     use (bumped by
+//                                                     sys_shmget when it
+//                                                     claims a slot).
+//
+//   Total: 256 + 512 + 512 + 256 + 256 + 64 + 4 = 1860 bytes (padded to
+//   1864 for 8-byte alignment — see "Layouts" in K7c's futex.vuma header
+//   for the same rationale).
+//
+// ── Why no ShmRegion layout in ShmTable? ──────────────────────────────────
+//   Same reason K7c's FutexTable doesn't embed [FutexEntry; 64]: the
+//   codegen bug in bridge_type_size / bridge_type_align /
+//   bridge_type_to_ir_type (src/pipeline.rs lines 8154-8207) — user-
+//   defined layouts used as field types are treated as size 8 / align 8 /
+//   IRType U64 instead of their actual computed size. This is the bug
+//   that forced K7a to add _pad1/_pad2 WORKAROUND fields to Pipe (see
+//   "Codegen bug: nested-layout field offsets" in pipe.vuma's header).
+//   K7d avoids the bug entirely by using parallel byte arrays (keys,
+//   addrs, sizes, creators, attached_counts, used) — every field access
+//   is a flat `tbl.keys[off + i]` byte load/store, exactly the pattern
+//   K7c's futex_set_uaddr / futex_set_wait_count and K7b's
+//   signal_install / signal_get_handler use. ShmRegion is declared but
+//   NOT instantiated — it's a forward-declaration for K8+ (when the
+//   nested-layout codegen bug is fixed and ShmTable can hold
+//   [ShmRegion; 64] directly).
+//
+// ── Error codes ────────────────────────────────────────────────────────────
+//   Decimal per the K7d contract:
+//     0          — success (sys_shmdt return), or "table empty" sentinel
+//                  (shm_find_free returns 64 = "table full", not 0 — 0 is
+//                  a valid slot index for sys_shmget to return).
+//     0 - 1 (-1) — failure (sys_shmget return when table is full,
+//                  sys_shmdt return when no segment is found at `addr`).
+//                  Written as `0 - 1` (VUMA's `0 - 1` idiom for -1, same
+//                  as K7a's pipe_open / K7c's sys_futex sentinel — see
+//                  "Decimal-constants discipline" in K7b's signal.vuma
+//                  header).
+//   The K7d contract specifies these exact return values; K8+ may
+//   replace them with the Linux errno values (-ENOMEM = 12 for table
+//   full, -EINVAL = 22 for bad shmid, -ENOENT = 2 for shmdt not found).
+//
+// ── Decimal-constants discipline ──────────────────────────────────────────
+//   Per the K7d contract: all non-zero constants use DECIMAL — 64 (table
+//   capacity + sentinel), 4 (bytes per u32 field), 8 (bytes per u64
+//   field), 256 (keys/creators/attached_counts array size = 64*4),
+//   512 (addrs/sizes array size = 64*8), 255 (byte mask), 4096 (PAGE_SIZE
+//   — the stub-address stride), 1048576 (1 MB — the stub-address base),
+//   1 (PID 1 / init — the creator; also the increment step + shift unit),
+//   0 (IPC_PRIVATE key, "not yet attached" addr, "no one attached"
+//   attached_count). For -1, use `0 - 1` (NOT -1 — VUMA's `0 - 1` idiom
+//   for negative-one returns, same as K7a/K7c). Decimal avoids the
+//   parser's hex-literal path (parse_int_radix width-extension
+//   subtleties — see K3a's trap_trampoline.vuma and K7b's signal.vuma
+//   for the same rule).
+//
+// ── State-typedness note ───────────────────────────────────────────────────
+//   Every function in this file takes `tbl: State<ShmTable>` as its
+//   first parameter — so state-typedness is preserved across all calls,
+//   and the direct field reads (tbl.keys[off + i], tbl.addrs[off + i],
+//   etc.) work correctly after each helper call. The `let shmid =
+//   sys_shmget(...)` / `let vaddr = sys_shmat(...)` / `let ret =
+//   sys_shmdt(...)` locals are plain i64 / u64 / i64 values (function
+//   return values, not State<T> field reads) — no state-typedness
+//   concern. (Same pattern as K7c's futex.vuma self-test header note
+//   and K7b's signal.vuma self-test header note.)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   PMT-pure: NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this
+//   file (the only `*` in code lines are multiplication — `idx * 8`,
+//   `i * 8`, `idx * 4`, `shmid * 4096`, `i * 4` — and the only `&` are
+//   bitwise-AND — `(val >> sh) & 255`). ShmTable is a flat struct in a
+//   `___pmt_buffer`-backed State<ShmTable>; the caller allocates via
+//   `state_new(ShmTable)` and passes by reference (init-style API — see
+//   "Why init-style?" in K4e's wait.vuma header for the codegen
+//   rationale). State<T> params: 1 per function (tbl only), per the
+//   K4b contract's "1-2 per function" rule. No externs declared.
+//
+//   In particular: K7d does NOT call any allocator (no page_alloc, no
+//   mmap, no brk, no malloc) — hosted mode has no allocator, and the
+//   K7d contract's "In hosted mode: return a stub address" note
+//   explicitly allows this. The sys_shmget / sys_shmat / sys_shmdt
+//   functions only manipulate the ShmTable's byte arrays — they don't
+//   touch real memory. The K8+ kernel-mode-shm layer will wire these
+//   syscalls up to page_alloc (in shmget) and mmap_into_pagetable
+//   (in shmat) — but that requires a process table + page table, which
+//   K7d's hosted-mode PMT-pure self-test does not have.
+//
+// ── VUMA has no import ─────────────────────────────────────────────────────
+//   VUMA does not have an `import` or `use` keyword — each .vuma file is
+//   a self-contained module that declares its own layouts and functions.
+//   K8+ files that need ShmTable (e.g. womb/kernel/ipc/shm_real.vuma, or
+//   womb/kernel/kmain.vuma) will re-declare ShmTable byte-identically
+//   (same fields, same sizes, same alignment) and call into K7d's
+//   functions via the linker (VUMA's flat symbol namespace — see K7c's
+//   futex.vuma header for the same convention). This is the same
+//   pattern K7a/K7b/K7c use; K7d follows it.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/ipc/shm.vuma \
+//         /tmp/shm.bin x86_64 --verify
+//     /tmp/shm.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — shmget
+// returns 0 (slot 0) + tbl.count==1; shmat returns 1048576 (1 MB) +
+// attached_count==1; shmdt returns 0 + attached_count==0; shmdt on
+// non-existent addr returns -1).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ShmRegion: one per shared memory segment (logical — see "Why no
+// ShmRegion layout in ShmTable?" in the file header for why this is
+// declared but NOT used by ShmTable's parallel-array storage). 5 fields
+// × (4 + 8 + 8 + 4 + 4) = 28 bytes (padded to 32 for 8-byte alignment
+// of the addr + size fields). Declared here as a forward-declaration
+// for K8+ (when the nested-layout codegen bug is fixed and ShmTable
+// can hold [ShmRegion; 64] directly, this layout will be the element
+// type). For K7d, the ShmTable uses six parallel byte arrays (keys,
+// addrs, sizes, creators, attached_counts, used) and ShmRegion is
+// documentation-only.
+layout ShmRegion = {
+    key:            u32,  // IPC key (0 = IPC_PRIVATE)
+    addr:           u64,  // kernel vaddr of the shared pages (0 = not attached)
+    size:           u64,  // size in bytes
+    creator:        u32,  // creator process PID
+    attached_count: u32,  // number of processes attached
+}
+
+// ShmTable: 64 ShmRegion slots. 7 fields × (256 + 512 + 512 + 256 +
+// 256 + 64 + 4) = 1860 bytes (padded to 1864 for 8-byte alignment of
+// the trailing State<ShmTable> footprint — see "Layouts" in the file
+// header for the rationale).
+//
+// keys is `[u8; 256]` rather than `[u32; 64]` because VUMA's array
+// indexing is byte-granular regardless of element type (see "NOTE on
+// handler storage" in signal.vuma's header and "Why no ShmRegion
+// layout in ShmTable?" in this file's header). Each 4-byte slot holds
+// one u32 key value, stored little-endian byte-by-byte via the
+// shm_set_key byte-loop. Entry `idx` (0..63) lives at byte offset
+// idx*4 in keys, idx*8 in addrs, idx*8 in sizes, idx*4 in creators,
+// idx*4 in attached_counts, idx in used.
+//
+// addrs and sizes are `[u8; 512]` for the same reason — each 8-byte
+// slot holds one u64 value, stored little-endian byte-by-byte.
+//
+// creators and attached_counts are `[u8; 256]` for the same reason —
+// each 4-byte slot holds one u32 value.
+//
+// used is `[u8; 64]` — each 1-byte slot holds the u8 used flag. No
+// byte-packing is needed (it's already 1 byte), so shm_get_used and
+// shm_set_used access `tbl.used[idx]` directly (no offset calculation,
+// no byte loop).
+//
+// count is u32 (max 64 entries — fits comfortably). shm_init sets it
+// to 0; sys_shmget bumps it on each successful allocation. The K7d
+// self-test reads it to verify the table state after a shmget.
+layout ShmTable = {
+    keys:            [u8; 256],  // 64 * 4 bytes — u32 key per slot
+    addrs:           [u8; 512],  // 64 * 8 bytes — u64 addr per slot
+    sizes:           [u8; 512],  // 64 * 8 bytes — u64 size per slot
+    creators:        [u8; 256],  // 64 * 4 bytes — u32 creator PID per slot
+    attached_counts: [u8; 256],  // 64 * 4 bytes — u32 attached_count per slot
+    used:            [u8; 64],   // 64 * 1 byte  — u8 used flag per slot
+    count:           u32,        // total slots in use (bumped by sys_shmget)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ShmTable operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// shm_init: zero the shm table. Sets all 64 slots' used flag to 0
+// (the "slot is free" sentinel — see "Why no ShmRegion layout in
+// ShmTable?" in the file header), and resets tbl.count to 0. Called
+// once during boot (K8+ kmain) before any sys_shmget call. The
+// CALLER allocates the ShmTable via `state_new(ShmTable)` and passes
+// it by reference (init-style API — see "Why init-style?" in K4e's
+// wait.vuma header for the codegen rationale).
+//
+// Note: shm_init only zeros the `used` flag per slot — it does NOT
+// also zero the keys / addrs / sizes / creators / attached_counts
+// arrays. This is intentional: a slot is "free" iff used==0, and
+// sys_shmget always re-initializes ALL fields (key, addr, size,
+// creator, attached_count, used) when it claims a free slot — see
+// sys_shmget's body. So zeroing the other arrays in shm_init would
+// be redundant. (Same convention as K7c's futex_init, which DOES
+// zero both uaddrs and wait_counts per slot — that's because
+// futex_find's "uaddr match AND wait_count > 0" guard needs a clean
+// uaddr to avoid spurious matches on stale data. K7d's
+// shm_find_free's "used == 0" guard doesn't have that issue, so
+// zeroing used alone is sufficient.)
+//
+// State<T> params: 1 (tbl). Pure write — 64 byte writes to tbl.used
+// + one u32 write to tbl.count. No reads, no helper calls.
+fn shm_init(tbl: State<ShmTable>) {
+    let i = 0;
+    while i < 64 {
+        shm_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// shm_get_key: read the IPC key stored in slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked —
+//        the caller is responsible for validating idx before calling
+//        (the K7d self-test only passes idx values that came from
+//        sys_shmget's return value, which is 0..63 or -1).
+//
+// Returns the u32 key value (or 0 if the slot is free / never
+// written — IPC_PRIVATE = 0 is the "anonymous segment" key). The
+// key is reconstructed from the 4 little-endian bytes at
+// tbl.keys[idx*4 .. idx*4 + 3] by shifting each byte left by
+// (i * 8) bits and OR-ing into the accumulator. The `v + (b << sh)`
+// form is the standard VUMA byte-assembly idiom (same as K7c's
+// futex_get_uaddr / futex_get_wait_count and K7b's
+// signal_get_handler — using `+` instead of `|` because the bytes
+// are guaranteed non-overlapping in their bit positions, so `+`
+// and `|` produce the same result; the K7d contract's reference
+// text uses `+`).
+//
+// State<T> params: 1 (tbl). Pure read — reads 4 bytes from
+// tbl.keys[off..off+4]. No writes, no helper calls.
+fn shm_get_key(tbl: State<ShmTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.keys[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_key: store `val` (u32) into slot `idx`'s key field.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//   val: u32 key value (0 = IPC_PRIVATE).
+//
+// The key is stored little-endian byte-by-byte at byte offset idx*4
+// in tbl.keys. Each byte is extracted from `val` by shifting right
+// by (i * 8) bits and masking with 255. The `(val >> sh) & 255`
+// pattern is the standard VUMA byte-extraction idiom (same as K7c's
+// futex_set_uaddr / futex_set_wait_count and K7b's signal_install).
+//
+// State<T> params: 1 (tbl). Pure write — writes 4 bytes into
+// tbl.keys[off..off+4]. No reads, no helper calls.
+fn shm_set_key(tbl: State<ShmTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.keys[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_addr: read the kernel virtual address stored in slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//
+// Returns the u64 vaddr value (0 = "not yet attached" — sys_shmat
+// sets this to the stub vaddr 1048576 + shmid * 4096 when the slot
+// is attached). The addr is reconstructed from the 8 little-endian
+// bytes at tbl.addrs[idx*8 .. idx*8 + 7] by shifting each byte left
+// by (i * 8) bits and OR-ing into the accumulator. Same byte-
+// assembly idiom as shm_get_key (just 8 bytes instead of 4).
+//
+// State<T> params: 1 (tbl). Pure read — reads 8 bytes from
+// tbl.addrs[off..off+8]. No writes, no helper calls.
+fn shm_get_addr(tbl: State<ShmTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.addrs[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_addr: store `val` (u64) into slot `idx`'s addr field.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_set_key).
+//   val: u64 vaddr value (0 = "not yet attached").
+//
+// The addr is stored little-endian byte-by-byte at byte offset idx*8
+// in tbl.addrs. Each byte is extracted from `val` by shifting right
+// by (i * 8) bits and masking with 255. Same byte-extraction idiom
+// as shm_set_key (just 8 bytes instead of 4).
+//
+// State<T> params: 1 (tbl). Pure write — writes 8 bytes into
+// tbl.addrs[off..off+8]. No reads, no helper calls.
+fn shm_set_addr(tbl: State<ShmTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.addrs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_size: read the segment size (bytes) stored in slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//
+// Returns the u64 size value (always a multiple of 4096 in a real
+// kernel; K7d stores the raw size as-passed by sys_shmget). The size
+// is reconstructed from the 8 little-endian bytes at
+// tbl.sizes[idx*8 .. idx*8 + 7] by shifting each byte left by
+// (i * 8) bits and OR-ing into the accumulator. Same byte-assembly
+// idiom as shm_get_addr.
+//
+// State<T> params: 1 (tbl). Pure read — reads 8 bytes from
+// tbl.sizes[off..off+8]. No writes, no helper calls.
+fn shm_get_size(tbl: State<ShmTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.sizes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_size: store `val` (u64) into slot `idx`'s size field.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_set_key).
+//   val: u64 size value in bytes (always a multiple of 4096 in a
+//        real kernel; K7d stores the raw value as-passed).
+//
+// The size is stored little-endian byte-by-byte at byte offset idx*8
+// in tbl.sizes. Each byte is extracted from `val` by shifting right
+// by (i * 8) bits and masking with 255. Same byte-extraction idiom
+// as shm_set_addr.
+//
+// State<T> params: 1 (tbl). Pure write — writes 8 bytes into
+// tbl.sizes[off..off+8]. No reads, no helper calls.
+fn shm_set_size(tbl: State<ShmTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.sizes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_creator: read the creator PID stored in slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//
+// Returns the u32 creator PID value (1 = init in K7d's hosted mode
+// — sys_shmget hard-codes this; K8+ will use the caller's actual
+// PID via task_current()->pid). The creator is reconstructed from
+// the 4 little-endian bytes at tbl.creators[idx*4 .. idx*4 + 3] by
+// shifting each byte left by (i * 8) bits and OR-ing into the
+// accumulator. Same byte-assembly idiom as shm_get_key.
+//
+// State<T> params: 1 (tbl). Pure read — reads 4 bytes from
+// tbl.creators[off..off+4]. No writes, no helper calls.
+fn shm_get_creator(tbl: State<ShmTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.creators[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_creator: store `val` (u32) into slot `idx`'s creator field.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_set_key).
+//   val: u32 creator PID value (1 = init in K7d's hosted mode).
+//
+// The creator is stored little-endian byte-by-byte at byte offset
+// idx*4 in tbl.creators. Each byte is extracted from `val` by
+// shifting right by (i * 8) bits and masking with 255. Same byte-
+// extraction idiom as shm_set_key.
+//
+// State<T> params: 1 (tbl). Pure write — writes 4 bytes into
+// tbl.creators[off..off+4]. No reads, no helper calls.
+fn shm_set_creator(tbl: State<ShmTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.creators[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_attached: read the attach count stored in slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//
+// Returns the u32 attached_count value (0 = "no one's attached,
+// but the segment still exists"). The attached_count is reconstructed
+// from the 4 little-endian bytes at
+// tbl.attached_counts[idx*4 .. idx*4 + 3] by shifting each byte left
+// by (i * 8) bits and OR-ing into the accumulator. Same byte-assembly
+// idiom as shm_get_key.
+//
+// State<T> params: 1 (tbl). Pure read — reads 4 bytes from
+// tbl.attached_counts[off..off+4]. No writes, no helper calls.
+fn shm_get_attached(tbl: State<ShmTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.attached_counts[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_attached: store `val` (u32) into slot `idx`'s
+// attached_count field.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_set_key).
+//   val: u32 attached_count value (0 = "no one's attached").
+//
+// The attached_count is stored little-endian byte-by-byte at byte
+// offset idx*4 in tbl.attached_counts. Each byte is extracted from
+// `val` by shifting right by (i * 8) bits and masking with 255.
+// Same byte-extraction idiom as shm_set_key.
+//
+// State<T> params: 1 (tbl). Pure write — writes 4 bytes into
+// tbl.attached_counts[off..off+4]. No reads, no helper calls.
+fn shm_set_attached(tbl: State<ShmTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.attached_counts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_used: read the used flag for slot `idx`.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_get_key).
+//
+// Returns the u8 used flag (1 = "slot is in use", 0 = "slot is
+// free"). Because the used flag is a single byte, no byte-packing
+// is needed — direct array access via `tbl.used[idx]` (the K7d
+// contract specifies this exact implementation).
+//
+// State<T> params: 1 (tbl). Pure read — reads 1 byte from
+// tbl.used[idx]. No writes, no helper calls.
+fn shm_get_used(tbl: State<ShmTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// shm_set_used: store `val` (u8) into slot `idx`'s used flag.
+//
+//   idx: 0..63 (slot index). Out-of-range values are NOT checked
+//        (same convention as shm_set_key).
+//   val: u8 used flag value (1 = "in use", 0 = "free").
+//
+// Because the used flag is a single byte, no byte-extraction loop
+// is needed — direct array access via `tbl.used[idx] = val` (the
+// K7d contract specifies this exact implementation).
+//
+// State<T> params: 1 (tbl). Pure write — writes 1 byte to
+// tbl.used[idx]. No reads, no helper calls.
+fn shm_set_used(tbl: State<ShmTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// shm_find_free: linear scan over the 64 slots for the first one with
+// used==0. Returns the index (0..63), or 64 = "table full" sentinel.
+//
+// The "used == 0" guard is what makes a slot "free". A slot with
+// used==1 is in use (someone called sys_shmget on it and got that
+// slot index back as the shmid — and no sys_shmdt-on-zero-attach-
+// count + shmctl(IPC_RMID) has freed it yet — K7d does NOT implement
+// shmctl, so used==1 is permanent once set by sys_shmget; only a
+// future K8+ shmctl(IPC_RMID) would clear it).
+//
+// The 64 sentinel is "one past the end" of the 0..63 valid range —
+// same idiom as K7c's futex_find / futex_find_or_create 64-empty-
+// sentinel, and K7e's WaitQueue 256-empty-sentinel for 0..255 task
+// indices (see "WaitQueue layout" in waitq.vuma's header).
+//
+// State<T> params: 1 (tbl). Pure read — reads used for each slot
+// until a free one is found. No writes, no helper calls (other than
+// shm_get_used, which is also a pure read).
+fn shm_find_free(tbl: State<ShmTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if shm_get_used(tbl, i) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// sys_shmget: allocate a new shared memory segment of `size` bytes,
+// return the shmid (slot index), or -1 if the table is full.
+//
+//   tbl:   State<ShmTable> — the kernel-global shm segment table.
+//   key:   u32 — IPC key (0 = IPC_PRIVATE — always create a new
+//          segment; non-zero — would normally look up an existing
+//          segment by key, but K7d's PMT-pure hosted-mode
+//          implementation ALWAYS creates a new segment regardless
+//          of key, matching the K7d contract's "key=0 means
+//          IPC_PRIVATE (always create new)" reference text — K7d
+//          doesn't implement the key-lookup path; K8+ may).
+//   size:  u64 — size of the segment in bytes. In a real kernel
+//          this is rounded up to PAGE_SIZE (4096); K7d stores the
+//          raw value as-passed (no rounding — the K7d self-test
+//          passes 4096, which is already a multiple of PAGE_SIZE).
+//   flags: u32 — IPC_CREAT / IPC_EXCL / mode bits. K7d's PMT-pure
+//          implementation ignores flags entirely (matches the K7d
+//          contract's reference text — there's no permission check
+//          to perform in hosted mode).
+//
+// Returns (i64):
+//   0..63 — the shmid (slot index of the newly-allocated segment).
+//   0 - 1 (-1) — the table is full (all 64 slots have used==1).
+//   The K7d contract specifies these exact return values.
+//
+// Implementation:
+//   Phase 1: shm_find_free(tbl) — linear scan for a free slot.
+//     Returns 64 if the table is full → return -1 (the K7d contract's
+//     "table full" sentinel).
+//   Phase 2: initialize the slot:
+//     - key (from the arg)
+//     - size (from the arg)
+//     - addr=0 (not yet attached — sys_shmat will set this to the
+//       stub vaddr)
+//     - creator=1 (PID 1 / init — K7d is hosted-mode and has no real
+//       process table; K8+ will pass the caller's actual PID via
+//       task_current()->pid)
+//     - attached_count=0 (no one's attached yet)
+//     - used=1 (slot is now in use)
+//   Phase 3: bump tbl.count and return the slot index as i64.
+//
+// State<T> params: 1 (tbl). Reads used for each slot (via
+// shm_find_free); writes key, size, addr, creator, attached_count,
+// used (via the byte-pack helpers); writes count (direct field
+// write). All field access is through the helpers (except tbl.count,
+// which is a direct u32 field — no byte-packing needed).
+fn sys_shmget(tbl: State<ShmTable>, key: u32, size: u64, flags: u32) -> i64 {
+    // For IPC_PRIVATE, just allocate a new segment. K7d does NOT
+    // implement the "look up existing segment by key" path — every
+    // call to sys_shmget creates a new segment (matching the K7d
+    // contract's "key=0 means IPC_PRIVATE (always create new)"
+    // reference text). The `flags` arg is ignored (no permission
+    // check in hosted mode).
+    let slot = shm_find_free(tbl);
+    if slot == 64 {
+        return 0 - 1;  // -1 (table full)
+    }
+    shm_set_key(tbl, slot, key);
+    shm_set_size(tbl, slot, size);
+    shm_set_addr(tbl, slot, 0);     // not yet attached
+    shm_set_creator(tbl, slot, 1);  // PID 1 (init) — hosted-mode stub
+    shm_set_attached(tbl, slot, 0);
+    shm_set_used(tbl, slot, 1);
+    tbl.count = tbl.count + 1;
+    return slot as i64;
+}
+
+// sys_shmat: map the shared segment identified by `shmid` into the
+// calling process's virtual address space.
+//
+//   tbl:   State<ShmTable> — the kernel-global shm segment table.
+//   shmid: u32 — slot index returned by a previous sys_shmget.
+//   addr:  u64 — requested mapping address (0 = "kernel chooses" —
+//          the typical case; K7d always chooses the stub vaddr
+//          1048576 + shmid * 4096 regardless of addr, matching the
+//          K7d contract's "kernel-chosen" reference text — K7d
+//          does NOT implement SHM_RND or fixed-address mapping).
+//   flags: u32 — SHM_RDONLY / SHM_RND / SHM_REMAP mode bits. K7d's
+//          PMT-pure implementation ignores flags entirely.
+//
+// Returns (u64):
+//   The virtual address where the segment was mapped (always
+//   1048576 + shmid * 4096 — the K7d contract's deterministic stub-
+//   address scheme: 1 MB base + shmid * 4 KB stride. 1 MB is
+//   chosen because it's well above the typical NULL page and below
+//   the typical heap — K8+ will replace this with a real mmap into
+//   a process-specific page table).
+//   0 — invalid shmid (shmid >= 64, or the slot's used flag is 0 —
+//   no segment exists at that shmid). 0 is NOT a valid vaddr
+//   because shmat always returns 1 MB + shmid * 4 KB, which is
+//   >= 1 MB — never 0.
+//
+// Implementation:
+//   Phase 1: validate shmid (0..63) — return 0 if out of range.
+//   Phase 2: validate the slot is in use (used==1) — return 0 if
+//     not (no segment exists at that shmid).
+//   Phase 3: compute the vaddr as 1048576 + (shmid as u64) * 4096
+//     (1 MB + shmid * 4 KB). The `shmid as u64` cast widens the u32
+//     shmid to u64 so the multiplication is u64 * u64 → u64 (avoids
+//     overflow on large shmids — though with only 64 slots, the
+//     maximum vaddr is 1048576 + 63 * 4096 = 1307648, well within
+//     u32 range; the cast is a defensive idiom).
+//   Phase 4: store the vaddr in the slot's addr field (via
+//     shm_set_addr).
+//   Phase 5: increment the slot's attached_count (read via
+//     shm_get_attached, increment, write back via shm_set_attached).
+//   Phase 6: return the vaddr.
+//
+// State<T> params: 1 (tbl). Reads used + attached_count; writes addr
+// + attached_count. All field access is through the helpers.
+fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
+    if shmid >= 64 {
+        return 0;  // invalid shmid
+    }
+    if shm_get_used(tbl, shmid) == 0 {
+        return 0;  // not allocated (no segment at this shmid)
+    }
+    // In a real kernel: map the shared pages into the process's
+    // address space (mmap(MAP_SHARED|MAP_FIXED, addr, size) into
+    // the caller's page table — see "What is shared memory?" in
+    // the file header). In K7d's PMT-pure hosted mode: return a
+    // stub address (the K7d contract's deterministic stub-address
+    // scheme — 1 MB base + shmid * 4 KB stride). The `addr` arg
+    // is ignored (K7d does NOT implement fixed-address mapping).
+    let vaddr = 1048576 + (shmid as u64) * 4096;  // 1 MB + shmid * 4 KB
+    shm_set_addr(tbl, shmid, vaddr);
+    let cur = shm_get_attached(tbl, shmid);
+    shm_set_attached(tbl, shmid, cur + 1);
+    return vaddr;
+}
+
+// sys_shmdt: unmap the shared segment identified by `addr`.
+//
+//   tbl:  State<ShmTable> — the kernel-global shm segment table.
+//   addr: u64 — the virtual address returned by a previous sys_shmat
+//         call (the address of the mapping to remove). K7d does NOT
+//         use the shmid — it looks up the segment by addr (linear
+//         scan over all 64 slots for one with used==1 AND addr ==
+//         `addr`). This matches the System V shmdt(2) interface,
+//         which takes the addr (not the shmid).
+//
+// Returns (i64):
+//   0 — success. The slot's attached_count is decremented (clamped
+//   at 0 — never go negative, even if multiple shmdt calls hit the
+//   same addr by mistake). The slot is NOT freed (used remains 1 —
+//   only a future K8+ shmctl(IPC_RMID) would clear it).
+//   0 - 1 (-1) — no segment is currently mapped at `addr` (the
+//   caller passed an address that no slot's addr field matches).
+//
+// Implementation:
+//   Linear scan over all 64 slots. For each slot with used==1, check
+//   if its addr field == `addr` (the address passed in). If so:
+//     - read the current attached_count
+//     - if it's > 0, decrement it (the `if cur > 0` guard prevents
+//       underflow — never go negative even on a double-shmdt)
+//     - return 0 (success)
+//   If no slot matches, return -1 ("not found").
+//
+// State<T> params: 1 (tbl). Reads used + addr + attached_count;
+// writes attached_count. All field access is through the helpers.
+fn sys_shmdt(tbl: State<ShmTable>, addr: u64) -> i64 {
+    let i = 0;
+    while i < 64 {
+        if shm_get_used(tbl, i) == 1 {
+            if shm_get_addr(tbl, i) == addr {
+                let cur = shm_get_attached(tbl, i);
+                if cur > 0 {
+                    shm_set_attached(tbl, i, cur - 1);
+                }
+                return 0;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;  // -1 (not found)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7d DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ShmTable via state_new, init it via shm_init, then:
+//   (1) sys_shmget(tbl, 0, 4096, 0) should return 0 (slot 0, the first
+//       free slot after shm_init zeroed all used flags).
+//   (2) tbl.count should be 1 (one segment allocated).
+//   (3) sys_shmat(tbl, 0, 0, 0) should return 1048576 (1 MB — the stub
+//       vaddr 1048576 + shmid 0 * 4096).
+//   (4) shm_get_attached(tbl, 0) should be 1 (one process attached).
+//   (5) sys_shmdt(tbl, vaddr) should return 0 (success).
+//   (6) shm_get_attached(tbl, 0) should be 0 (the one attacher detached).
+//   (7) sys_shmdt(tbl, 999999) should NOT return 0 (no segment is
+//       mapped at addr 999999 — should return -1).
+//   (8) Return 0 (success).
+//
+// Returns 0 on success, 1..7 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K7d contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (4096, 1048576, 999999, 1, 0)
+// — decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see K7b's signal.vuma header
+// "Decimal-constants discipline" and K3a's trap_trampoline.vuma for
+// the same rule). For -1 comparisons, use `ret2 == 0` (the K7d
+// contract specifies that check 7 returns "non-zero" — but to make
+// the check explicit, we use `if ret2 == 0 { return 7; }` meaning
+// "if shmdt on a non-existent addr returned 0 (success), that's a
+// failure" — matching the K7d contract's `if ret2 == 0 { return 7; }`
+// reference text exactly).
+
+fn main() -> i32 {
+    let tbl = state_new(ShmTable);
+    shm_init(tbl);
+
+    // (1) sys_shmget(tbl, 0, 4096, 0) — allocate a 4096-byte segment
+    // with IPC_PRIVATE (key=0). Should return 0 (slot 0, the first
+    // free slot after shm_init zeroed all 64 used flags).
+    // In a real kernel this would page_alloc(4096) to allocate the
+    // physical backing store; in K7d's hosted mode it just records
+    // the size + bumps tbl.count.
+    let shmid = sys_shmget(tbl, 0, 4096, 0);
+    if shmid != 0 { return 1; }  // shmid should be 0 (first free slot)
+
+    // (2) tbl.count should be 1 (one segment allocated).
+    if tbl.count != 1 { return 2; }
+
+    // (3) sys_shmat(tbl, 0, 0, 0) — map the segment at shmid 0 into
+    // the calling process's address space. Should return 1048576
+    // (1 MB — the stub vaddr 1048576 + shmid 0 * 4096). In a real
+    // kernel this would mmap(MAP_SHARED|MAP_FIXED, vaddr, size) into
+    // the caller's page table; in K7d's hosted mode it just records
+    // the vaddr in the slot's addr field + bumps attached_count.
+    let vaddr = sys_shmat(tbl, 0, 0, 0);
+    if vaddr != 1048576 { return 3; }  // 1 MB
+
+    // (4) The slot's attached_count should be 1 (one process attached).
+    if shm_get_attached(tbl, 0) != 1 { return 4; }
+
+    // (5) sys_shmdt(tbl, vaddr) — unmap the segment at vaddr. Should
+    // return 0 (success). In a real kernel this would munmap(vaddr,
+    // size) in the caller's page table; in K7d's hosted mode it just
+    // decrements the slot's attached_count.
+    let ret = sys_shmdt(tbl, vaddr);
+    if ret != 0 { return 5; }
+
+    // (6) The slot's attached_count should be 0 (the one attacher
+    // detached). The slot's used flag is STILL 1 (K7d does NOT
+    // implement shmctl(IPC_RMID) — only that would clear used and
+    // free the slot for reuse).
+    if shm_get_attached(tbl, 0) != 0 { return 6; }
+
+    // (7) sys_shmdt(tbl, 999999) — shmdt on a non-existent addr.
+    // Should NOT return 0 (no segment is currently mapped at addr
+    // 999999 — sys_shmdt's linear scan finds no slot with used==1
+    // AND addr==999999, so it returns -1). The K7d contract's
+    // reference text uses `if ret2 == 0 { return 7; }` — meaning
+    // "if shmdt on a non-existent addr returned 0 (success), that's
+    // a failure". We use the exact same check.
+    let ret2 = sys_shmdt(tbl, 999999);
+    if ret2 == 0 { return 7; }
+
+    return 0;
+}
