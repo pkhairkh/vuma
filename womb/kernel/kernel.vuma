@@ -91,14 +91,16 @@ fn kputs_str(ec: State<EarlyConsole>, s: State<KBuf>) {
     }
 }
 
-fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 10); }
+// In raw mode, \n (10) only moves the cursor down — it does NOT return
+// to column 0.  We must explicitly emit \r (13) before \n (10).
+fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 13); kprint(ec, 10); }
 
 fn kputs_banner(ec: State<EarlyConsole>) {
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 107); kprint(ec, 101); kprint(ec, 114); kprint(ec, 110);
     kprint(ec, 101); kprint(ec, 108); kprint(ec, 32);
     kprint(ec, 98); kprint(ec, 111); kprint(ec, 111); kprint(ec, 116);
-    kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
+    kprint(ec, 101); kprint(ec, 100); kprint(ec, 13); kprint(ec, 10);
 }
 
 fn kputs_prompt(ec: State<EarlyConsole>) {
@@ -110,15 +112,15 @@ fn kputs_shutdown(ec: State<EarlyConsole>) {
     kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
     kprint(ec, 116); kprint(ec, 105); kprint(ec, 110); kprint(ec, 103);
     kprint(ec, 32); kprint(ec, 100); kprint(ec, 111); kprint(ec, 119);
-    kprint(ec, 110); kprint(ec, 10);
+    kprint(ec, 110); kprint(ec, 13); kprint(ec, 10);
 }
 
 fn kputs_ok(ec: State<EarlyConsole>) {
-    kprint(ec, 79); kprint(ec, 75); kprint(ec, 10);
+    kprint(ec, 79); kprint(ec, 75); kprint(ec, 13); kprint(ec, 10);
 }
 
 fn kputs_err(ec: State<EarlyConsole>) {
-    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kprint(ec, 10);
+    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kprint(ec, 13); kprint(ec, 10);
 }
 
 fn kputs_num(ec: State<EarlyConsole>, n: u64) {
@@ -152,8 +154,11 @@ fn termios_raw(t: State<Termios>) {
     ioctl(0, 0x5401, t as Address);
     // Clear ICANON(0x2) | ECHO(0x8) | ISIG(0x1) | IEXTEN(0x8000) from c_lflag
     t.c_lflag = t.c_lflag & 0xFFFF7FF4;  // ~0x800A
-    // Also clear ICRNL (0x100) from c_iflag so Ctrl-C etc. come through raw
+    // Clear ICRNL (0x100) from c_iflag so Ctrl-C etc. come through raw
     t.c_iflag = t.c_iflag & 0xFFFFFEFF;
+    // Clear OPOST (0x1) from c_oflag — we emit \r\n ourselves, so the
+    // terminal must NOT translate \n→\r\n (otherwise we get \r\r\n).
+    t.c_oflag = t.c_oflag & 0xFFFFFFFE;
     // TCSETS = 0x5402 — apply new settings
     ioctl(0, 0x5402, t as Address);
 }
@@ -222,6 +227,60 @@ fn history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
 fn kmain() -> i32 {
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
+
+    // ── Switch terminal to raw mode FIRST ────────────────────────────
+    // Do this before any output so all messages use consistent \r\n.
+    let saved_termios = state_new(Termios);
+    let raw_termios = state_new(Termios);
+    ioctl(0, 0x5401, saved_termios as Address);
+    raw_termios.c_iflag = saved_termios.c_iflag;
+    raw_termios.c_oflag = saved_termios.c_oflag;
+    raw_termios.c_cflag = saved_termios.c_cflag;
+    raw_termios.c_lflag = saved_termios.c_lflag;
+    raw_termios.c_line = saved_termios.c_line;
+    raw_termios.c_ispeed = saved_termios.c_ispeed;
+    raw_termios.c_ospeed = saved_termios.c_ospeed;
+    let cci = 0;
+    while cci < 32 {
+        if cci == 0 { raw_termios.c_cc0 = saved_termios.c_cc0; }
+        if cci == 1 { raw_termios.c_cc1 = saved_termios.c_cc1; }
+        if cci == 2 { raw_termios.c_cc2 = saved_termios.c_cc2; }
+        if cci == 3 { raw_termios.c_cc3 = saved_termios.c_cc3; }
+        if cci == 4 { raw_termios.c_cc4 = saved_termios.c_cc4; }
+        if cci == 5 { raw_termios.c_cc5 = saved_termios.c_cc5; }
+        if cci == 6 { raw_termios.c_cc6 = saved_termios.c_cc6; }
+        if cci == 7 { raw_termios.c_cc7 = saved_termios.c_cc7; }
+        if cci == 8 { raw_termios.c_cc8 = saved_termios.c_cc8; }
+        if cci == 9 { raw_termios.c_cc9 = saved_termios.c_cc9; }
+        if cci == 10 { raw_termios.c_cc10 = saved_termios.c_cc10; }
+        if cci == 11 { raw_termios.c_cc11 = saved_termios.c_cc11; }
+        if cci == 12 { raw_termios.c_cc12 = saved_termios.c_cc12; }
+        if cci == 13 { raw_termios.c_cc13 = saved_termios.c_cc13; }
+        if cci == 14 { raw_termios.c_cc14 = saved_termios.c_cc14; }
+        if cci == 15 { raw_termios.c_cc15 = saved_termios.c_cc15; }
+        if cci == 16 { raw_termios.c_cc16 = saved_termios.c_cc16; }
+        if cci == 17 { raw_termios.c_cc17 = saved_termios.c_cc17; }
+        if cci == 18 { raw_termios.c_cc18 = saved_termios.c_cc18; }
+        if cci == 19 { raw_termios.c_cc19 = saved_termios.c_cc19; }
+        if cci == 20 { raw_termios.c_cc20 = saved_termios.c_cc20; }
+        if cci == 21 { raw_termios.c_cc21 = saved_termios.c_cc21; }
+        if cci == 22 { raw_termios.c_cc22 = saved_termios.c_cc22; }
+        if cci == 23 { raw_termios.c_cc23 = saved_termios.c_cc23; }
+        if cci == 24 { raw_termios.c_cc24 = saved_termios.c_cc24; }
+        if cci == 25 { raw_termios.c_cc25 = saved_termios.c_cc25; }
+        if cci == 26 { raw_termios.c_cc26 = saved_termios.c_cc26; }
+        if cci == 27 { raw_termios.c_cc27 = saved_termios.c_cc27; }
+        if cci == 28 { raw_termios.c_cc28 = saved_termios.c_cc28; }
+        if cci == 29 { raw_termios.c_cc29 = saved_termios.c_cc29; }
+        if cci == 30 { raw_termios.c_cc30 = saved_termios.c_cc30; }
+        if cci == 31 { raw_termios.c_cc31 = saved_termios.c_cc31; }
+        cci = cci + 1;
+    }
+    raw_termios.c_lflag = raw_termios.c_lflag & 0xFFFF7FF4;
+    raw_termios.c_iflag = raw_termios.c_iflag & 0xFFFFFEFF;
+    raw_termios.c_oflag = raw_termios.c_oflag & 0xFFFFFFFE;
+    ioctl(0, 0x5402, raw_termios as Address);
+
     kputs_banner(ec);
 
     // Init PMM
@@ -262,20 +321,13 @@ fn kmain() -> i32 {
     kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
     kprint(ec, 100); kputs_nl(ec);
 
-    // ── Switch terminal to raw mode ─────────────────────────────────────
-    // We need raw mode to receive arrow-key escape sequences and handle
-    // line editing ourselves (backspace, cursor movement, history).
-    let saved_termios = state_new(Termios);
-    let raw_termios = state_new(Termios);
-    termios_raw(saved_termios);  // saves original into saved_termios, then sets raw
-    // Copy saved to raw_termios for our reference (both now hold the raw settings)
-
     let rbuf = state_new(KBuf);
     let cbuf = state_new(KBuf);
     let hist = state_new(History);
     history_init(hist);
 
-    let pos: u32 = 0;
+    let pos: u32 = 0;       // length of text in cbuf
+    let cursor: u32 = 0;    // cursor position within cbuf (0..pos)
     let running: u8 = 1;
     let cwd: u32 = 0;  // current working directory (dentry index, 0=root)
     let hist_idx: u32 = 0;  // history navigation index (0=newest, count=oldest)
@@ -299,6 +351,11 @@ fn kmain() -> i32 {
         // Backspace (8 or 127) → delete last char, erase from screen
         // ESC (27) → start of escape sequence (arrow keys: ESC [ A/B/C/D)
 
+        // ── Line editing (raw mode, inline cursor) ─────────────────────
+        // We track both `pos` (text length) and `cursor` (cursor position).
+        // cursor == pos means cursor is at end of line (append mode).
+        // cursor < pos means we're inserting in the middle.
+
         if c == 3 {
             // Ctrl-C — restore terminal and exit
             termios_restore(saved_termios);
@@ -307,92 +364,151 @@ fn kmain() -> i32 {
         }
 
         if c == 4 {
-            // Ctrl-D — EOF
+            // Ctrl-D — EOF (only when line empty)
             if pos == 0 {
                 termios_restore(saved_termios);
                 kputs_shutdown(ec);
                 return 0;
             }
-            // If line not empty, ignore (like bash)
         } else {
             if c == 10 {
-                // Enter — echo newline, execute command
-                kprint(ec, 10);
-                // Save to history (before executing)
+                // Enter — echo CR+LF, execute command
+                kprint(ec, 13); kprint(ec, 10);
                 history_push(hist, cbuf, pos);
                 hist_idx = 0;
             } else {
                 if c == 8 || c == 127 {
-                    // Backspace / Delete
-                    if pos > 0 {
+                    // Backspace — delete char BEFORE cursor
+                    if cursor > 0 {
+                        // Shift chars left from cursor-1
+                        let i = cursor - 1;
+                        while i < pos - 1 {
+                            cbuf.data[i] = cbuf.data[i + 1];
+                            i = i + 1;
+                        }
                         pos = pos - 1;
-                        // Erase: BS, space, BS
-                        kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
+                        cursor = cursor - 1;
+                        // Redraw: move cursor back, reprint rest, clear trailing, reposition
+                        kprint(ec, 8);  // move back
+                        let j = cursor;
+                        while j < pos { kprint(ec, cbuf.data[j]); j = j + 1; }
+                        kprint(ec, 32);  // erase last char
+                        // Move cursor back to where it should be
+                        let back = pos - cursor + 1;
+                        let b = 0;
+                        while b < back { kprint(ec, 8); b = b + 1; }
                     }
                 } else {
                     if c == 27 {
-                        // Escape sequence — read '[' then the final byte
+                        // Escape sequence — ESC [ <final>
                         let n2 = read(0, rbuf as Address, 1);
                         if n2 > 0 {
                             let c2 = rbuf.data[0];
                             if c2 == 91 {
-                                // '['
                                 let n3 = read(0, rbuf as Address, 1);
                                 if n3 > 0 {
                                     let c3 = rbuf.data[0];
                                     if c3 == 65 {
-                                        // Up arrow — previous command (older)
+                                        // Up arrow — older command
                                         if hist.count > 0 {
                                             if hist_idx < hist.count {
                                                 hist_idx = hist_idx + 1;
                                             }
-                                            // Clear current line
-                                            while pos > 0 {
-                                                pos = pos - 1;
-                                                kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
-                                            }
-                                            // Load command: index from newest
-                                            // hist_idx=1 → newest (count-1), hist_idx=2 → count-2, etc.
+                                            // Erase current line
+                                            while cursor > 0 { kprint(ec, 8); cursor = cursor - 1; }
+                                            while pos > 0 { kprint(ec, 32); pos = pos - 1; }
+                                            while pos < 255 && pos > 0 { kprint(ec, 8); pos = pos - 1; }
+                                            pos = 0;
                                             let target = hist.count - hist_idx;
                                             pos = history_load(hist, cbuf, target);
-                                            // Echo it
+                                            cursor = pos;
                                             let i = 0;
                                             while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
                                         }
                                     } else {
                                         if c3 == 66 {
-                                            // Down arrow — next command (newer)
+                                            // Down arrow — newer command
                                             if hist_idx > 0 {
                                                 hist_idx = hist_idx - 1;
                                             }
-                                            // Clear current line
-                                            while pos > 0 {
-                                                pos = pos - 1;
-                                                kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
-                                            }
-                                            if hist_idx == 0 {
-                                                // Back to blank line
-                                                pos = 0;
-                                            } else {
+                                            // Erase current line
+                                            while cursor > 0 { kprint(ec, 8); cursor = cursor - 1; }
+                                            while pos > 0 { kprint(ec, 32); pos = pos - 1; }
+                                            while pos < 255 && pos > 0 { kprint(ec, 8); pos = pos - 1; }
+                                            pos = 0;
+                                            if hist_idx > 0 {
                                                 let target = hist.count - hist_idx;
                                                 pos = history_load(hist, cbuf, target);
                                                 let i = 0;
                                                 while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
                                             }
+                                            cursor = pos;
                                         } else {
-                                            // Left (67=D) / Right (68=C) — ignore for now
-                                            // (no inline cursor editing yet)
+                                            if c3 == 68 {
+                                                // Left arrow — move cursor left
+                                                if cursor > 0 {
+                                                    cursor = cursor - 1;
+                                                    kprint(ec, 8);
+                                                }
+                                            } else {
+                                                if c3 == 67 {
+                                                    // Right arrow — move cursor right
+                                                    if cursor < pos {
+                                                        // Emit cursor-forward: ESC [ C
+                                                        kprint(ec, 27); kprint(ec, 91); kprint(ec, 67);
+                                                        cursor = cursor + 1;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     } else {
-                        // Regular printable character — echo and store
-                        if pos < 255 && c >= 32 {
-                            cbuf.data[pos] = c;
-                            pos = pos + 1;
-                            kprint(ec, c);
+                        if c == 1 {
+                            // Ctrl-A — move to beginning of line
+                            while cursor > 0 { kprint(ec, 8); cursor = cursor - 1; }
+                        } else {
+                            if c == 5 {
+                                // Ctrl-E — move to end of line
+                                while cursor < pos {
+                                    kprint(ec, 27); kprint(ec, 91); kprint(ec, 67);
+                                    cursor = cursor + 1;
+                                }
+                            } else {
+                                if c == 11 {
+                                    // Ctrl-K — kill from cursor to end of line
+                                    while pos > cursor {
+                                        kprint(ec, 32);
+                                        pos = pos - 1;
+                                    }
+                                    let back = pos - cursor;
+                                    let b = 0;
+                                    while b < back { kprint(ec, 8); b = b + 1; }
+                                    // (cursor stays the same)
+                                } else {
+                                    // Regular printable character — insert at cursor
+                                    if pos < 255 && c >= 32 {
+                                        // Shift chars right from cursor
+                                        let i = pos;
+                                        while i > cursor {
+                                            cbuf.data[i] = cbuf.data[i - 1];
+                                            i = i - 1;
+                                        }
+                                        cbuf.data[cursor] = c;
+                                        pos = pos + 1;
+                                        // Redraw from cursor to end
+                                        let j = cursor;
+                                        while j < pos { kprint(ec, cbuf.data[j]); j = j + 1; }
+                                        cursor = cursor + 1;
+                                        // Move cursor back to correct position
+                                        let back = pos - cursor;
+                                        let b = 0;
+                                        while b < back { kprint(ec, 8); b = b + 1; }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -401,6 +517,7 @@ fn kmain() -> i32 {
 
         // Only execute on Enter (c == 10)
         if c != 10 { continue; }
+        cursor = 0;  // reset cursor for next command
         let cmd = cbuf.data[0];
 
             // help (104='h')
