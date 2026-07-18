@@ -263,7 +263,6 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
     // G7: if the operand type is F32/F64, fold using f64 arithmetic.
     if let Some(IRType::F32) | Some(IRType::F64) = ty {
         let is_f64 = matches!(ty, Some(IRType::F64));
-<<<<<<< Updated upstream
         // All float literals in VUMA are f64 at the AST level, stored as
         // f64 bits in i64 immediates. For f32 operations, we must narrow
         // the f64 to f32 first (NOT reinterpret the low 32 bits as f32,
@@ -293,36 +292,17 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
                 f64::from_bits(rhs as u64) as f32 as f64
             }
         };
-=======
-        let lf = if is_f64 { f64::from_bits(lhs as u64) } else { f32::from_bits(lhs as u32) as f64 };
-        let rf = if is_f64 { f64::from_bits(rhs as u64) } else { f32::from_bits(rhs as u32) as f64 };
->>>>>>> Stashed changes
         let result: f64 = match op {
             BinOpKind::Add => lf + rf,
             BinOpKind::Sub => lf - rf,
             BinOpKind::Mul => lf * rf,
             BinOpKind::SDiv | BinOpKind::UDiv => lf / rf,
-            // Don't fold f32 comparisons — the f32/f64 bit heuristic is
-            // unreliable for comparisons where both values may be f32 bits
-            // or f64 bits. Leave them for the backend to handle correctly.
-            BinOpKind::SLt | BinOpKind::ULt
-            | BinOpKind::SLe | BinOpKind::ULe
-            | BinOpKind::SGt | BinOpKind::UGt
-            | BinOpKind::SGe | BinOpKind::UGe
-            | BinOpKind::Eq | BinOpKind::Ne => {
-                if !is_f64 {
-                    return None;  // don't fold f32 comparisons
-                }
-                return Some(match op {
-                    BinOpKind::SLt | BinOpKind::ULt => if lf < rf { 1 } else { 0 },
-                    BinOpKind::SLe | BinOpKind::ULe => if lf <= rf { 1 } else { 0 },
-                    BinOpKind::SGt | BinOpKind::UGt => if lf > rf { 1 } else { 0 },
-                    BinOpKind::SGe | BinOpKind::UGe => if lf >= rf { 1 } else { 0 },
-                    BinOpKind::Eq => if lf == rf { 1 } else { 0 },
-                    BinOpKind::Ne => if lf != rf { 1 } else { 0 },
-                    _ => unreachable!(),
-                });
-            }
+            BinOpKind::SLt | BinOpKind::ULt => return Some(if lf < rf { 1 } else { 0 }),
+            BinOpKind::SLe | BinOpKind::ULe => return Some(if lf <= rf { 1 } else { 0 }),
+            BinOpKind::SGt | BinOpKind::UGt => return Some(if lf > rf { 1 } else { 0 }),
+            BinOpKind::SGe | BinOpKind::UGe => return Some(if lf >= rf { 1 } else { 0 }),
+            BinOpKind::Eq => return Some(if lf == rf { 1 } else { 0 }),
+            BinOpKind::Ne => return Some(if lf != rf { 1 } else { 0 }),
             _ => return try_fold_binop_int(op, lhs, rhs),
         };
         return Some(if is_f64 { result.to_bits() as i64 } else { (result as f32).to_bits() as i64 });
