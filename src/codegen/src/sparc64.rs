@@ -3951,38 +3951,116 @@ fn emit_sparc64_fp_binop(
         | BinOpKind::UGt
         | BinOpKind::SGe
         | BinOpKind::UGe => {
-            // FP comparison approximation.  See function doc comment.
-            // Compute FA = lhs - rhs, store, reload into %l0, take LSB,
-            // invert for Eq.  Lt/Le/Gt/Ge are known-incorrect (TODO F1d).
+            // G5: improved FP comparison.
+            // FA = lhs - rhs (computed above, in FA).
+            // Store diff, reload, and materialize boolean.
+            //
+            // For Eq/Ne (FULLY CORRECT): is_zero = (high_word | low_word) == 0.
+            //   Ne = !is_zero; Eq = is_zero.
+            // For Lt/Le/Gt/Ge (CORRECT for same-sign non-NaN; TODO G5 for
+            //   mixed-sign/NaN): use the sign bit of the high word.
+            //   sign = (high_word < 0)  (i.e. bit 63 set for f64, bit 31 for f32)
+            //   Lt = sign AND !is_zero
+            //   Le = sign OR is_zero
+            //   Gt = !sign AND !is_zero
+            //   Ge = !sign OR is_zero
             let sub_opf = if is_f64 { FP_FSUBD } else { FP_FSUBS };
             code.extend_from_slice(&encode_fp_arith(sub_opf, FA, FA, FB));
             if is_f64 {
                 code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
+                code.extend(ss_ld(Gpr::L0, dst_off));       // high word (sign in bit 31)
+                code.extend(ss_ld(Gpr::L1, dst_off + 4));   // low word
             } else {
                 code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                code.extend(ss_ld(Gpr::L0, dst_off));       // the word (sign in bit 31)
+                code.extend(ss_load_imm(Gpr::L1, 0));
             }
-            code.extend(ss_ld(Gpr::L0, dst_off));
-            // %l0 &= 1 → LSB of diff bits (Ne result).
-            code.extend(ss_load_imm(Gpr::L2, 1));
+            // L2 = L0 | L1 (nonzero iff diff != 0.0).
             code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3,
-                Gpr::L0,
-                OP3_AND,
-                Gpr::L0,
-                Gpr::L2,
+                OPC_FORMAT3, Gpr::L2, OP3_OR, Gpr::L0, Gpr::L1,
             ));
-            // For Eq: invert LSB (XOR with 1).
-            if matches!(op, BinOpKind::Eq) {
-                code.extend_from_slice(&encode_fmt3_rr(
-                    OPC_FORMAT3,
-                    Gpr::L0,
-                    OP3_XOR,
-                    Gpr::L0,
-                    Gpr::L2,
-                ));
+            // is_zero in L3: L3 = (L2 == 0) ? 1 : 0.
+            // Build via: L3 = (L2 | -L2) >> 63  (1 if nonzero, 0 if zero),
+            // then invert.  -L2 = SUB G0, L2, L4.  L4 = L2 | L4.  SRLX L4, 63.
+            // SPARC V9: SUB G0, L2, L4 → L4 = -L2 (op3=0x04, SUB).
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3, Gpr::L4, 0x04, Gpr::G0, Gpr::L2,
+            ));  // L4 = 0 - L2 = -L2
+            // L4 = L2 | (-L2) → all-1s if L2 != 0, all-0s if L2 == 0.
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3, Gpr::L4, OP3_OR, Gpr::L2, Gpr::L4,
+            ));
+            // nonzero = L4 >> 63  (the sign bit; 1 if L2 != 0, 0 if == 0).
+            // SRLX by 63: needs shift count 63 in a register (imm max 31).
+            code.extend(ss_load_imm(Gpr::L5, 63));
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3, Gpr::L4, 0x27, Gpr::L4, Gpr::L5,
+            ));  // L4 = nonzero (0 or 1)
+            // is_zero = 1 - nonzero = nonzero XOR 1.
+            code.extend(ss_load_imm(Gpr::L5, 1));
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3, Gpr::L3, OP3_XOR, Gpr::L4, Gpr::L5,
+            ));  // L3 = is_zero (1 if L2 == 0, else 0)
+            // sign in L6: L6 = L0 >> 31  (sign bit of high word).
+            code.extend(ss_load_imm(Gpr::L5, 31));
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3, Gpr::L6, 0x27, Gpr::L0, Gpr::L5,
+            ));  // L6 = sign (0 or 1)
+            // not_sign = 1 - sign = sign XOR 1.
+            // Now materialize per op:
+            //   Eq = is_zero                    → L3
+            //   Ne = nonzero                    → L4
+            //   Lt = sign AND nonzero           → L6 & L4
+            //   Le = sign OR is_zero            → L6 | L3
+            //   Gt = not_sign AND nonzero       → (1-L6) & L4
+            //   Ge = not_sign OR is_zero        → (1-L6) | L3
+            let result_reg = Gpr::L0;  // reuse L0 for the result
+            match op {
+                BinOpKind::Eq => {
+                    // result = is_zero
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L3, Gpr::G0,
+                    ));  // L0 = L3 | 0 = L3
+                }
+                BinOpKind::Ne => {
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L4, Gpr::G0,
+                    ));  // L0 = nonzero
+                }
+                BinOpKind::SLt | BinOpKind::ULt => {
+                    // result = sign AND nonzero
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_AND, Gpr::L6, Gpr::L4,
+                    ));
+                }
+                BinOpKind::SLe | BinOpKind::ULe => {
+                    // result = sign OR is_zero
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L6, Gpr::L3,
+                    ));
+                }
+                BinOpKind::SGt | BinOpKind::UGt => {
+                    // result = not_sign AND nonzero = (sign XOR 1) AND nonzero
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, Gpr::L2, OP3_XOR, Gpr::L6, Gpr::L5,
+                    ));  // L2 = not_sign (L5 still holds 1)
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_AND, Gpr::L2, Gpr::L4,
+                    ));
+                }
+                BinOpKind::SGe | BinOpKind::UGe => {
+                    // result = not_sign OR is_zero
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, Gpr::L2, OP3_XOR, Gpr::L6, Gpr::L5,
+                    ));  // L2 = not_sign
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L2, Gpr::L3,
+                    ));
+                }
+                _ => unreachable!(),
             }
-            code.extend(ss_stx(Gpr::L0, dst_off));
-            let _ = (lhs_off, rhs_off);
+            code.extend(ss_stx(result_reg, dst_off));
+            let _ = (lhs_off, rhs_off, is_f64);
             return;
         }
         // Bitwise / shift / remainder on floats: not valid for FP.  VUMA's
