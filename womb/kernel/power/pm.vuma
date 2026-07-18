@@ -1,0 +1,354 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/power/pm.vuma
+// VWK Power Management — CPU idle + suspend (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K12c layer of the VWK kernel: power management — the
+// subsystem that puts the CPU into low-power states when idle and (in
+// real kernels) suspends the whole system to RAM or disk.
+//
+// K12 (the final wave) rounds out the kernel with three modules:
+//   K12a — panic handler (womb/kernel/panic/panic.vuma)
+//   K12b — kmsg ring buffer (womb/kernel/panic/kmsg.vuma)
+//   K12c — power management (this file)
+//
+// ── What K12c provides ──────────────────────────────────────────────────────
+//   pm_init(pm)                — zero cpu_state (running), suspend_lvl,
+//                                wake_count. Called once per PmState
+//                                before any pm_cpu_idle / pm_suspend.
+//   pm_cpu_idle(pm)            — put the CPU into idle (wait for
+//                                interrupt). Sets cpu_state=1 (idle),
+//                                invokes the `wfi` extern (the
+//                                architecture's "wait for interrupt"
+//                                instruction — `hlt` on x86_64, `wfi`
+//                                on aarch64/riscv64), then on wake
+//                                sets cpu_state=0 (running) and bumps
+//                                wake_count.
+//   pm_suspend(pm, level) -> i64
+//                              — suspend the system to the given level
+//                                (1 = CPU idle, 2 = system suspend to
+//                                RAM). In hosted mode: just records the
+//                                level + sets cpu_state=2 (suspended)
+//                                and returns 0. On bare metal (K13+):
+//                                drives the ACPI/PSCI suspend sequence
+//                                (S1/S3/S5 on x86_64, PSCI SYSTEM_SUSPEND
+//                                on aarch64, SBI SUSPEND on riscv64).
+//
+// ── Why power management? ───────────────────────────────────────────────────
+//   A kernel that never idles the CPU burns power continuously — fine
+//   for a server plugged into wall power, fatal for a laptop or phone.
+//   Power management is the kernel's "when there's nothing to do, stop
+//   doing anything" subsystem, and it has three tiers:
+//     (1) CPU idle — when the runqueue is empty, execute the `hlt`/`wfi`
+//         instruction. The CPU halts until the next interrupt, drawing
+//         ~10× less power than the busy-loop alternative. This is the
+//         most-frequently-invoked PM path — Linux's idle task does this
+//         on every scheduler tick with nothing to run.
+//     (2) System suspend — when the user closes a laptop lid or the
+//         battery is low, the kernel can suspend the whole system to
+//         RAM (S3 on x86_64): all CPUs halt, most devices power down,
+//         RAM stays self-refreshed. Wake is via a hardware interrupt
+//         (lid open, keyboard, RTC alarm). ~100× less power than idle.
+//     (3) Hibernate — suspend to disk (S4 on x86_64): write RAM to
+//         swap, power off entirely. Wake requires a fresh boot +
+//         swap-in. ~1000× less power than suspend. K12c does NOT
+//         implement hibernate — K13+ may add it.
+//
+//   K12c implements (1) and (2) at the API-contract level; the actual
+//   hardware-driving asm trampolines (`wfi`, `halt`) are externs that
+//   resolve to __ffi_fallback_stub in hosted mode (returns 0, no-op).
+//   K13+ bare-metal trampolines will swap those for real `hlt` (x86_64)
+//   / `wfi` (aarch64/riscv64) instructions + ACPI/PSCI suspend drivers.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   PmState is a flat-byte layout held in a `___pmt_buffer`-backed
+//   State<PmState>; the CALLER allocates it via `state_new(PmState)`
+//   and passes it by reference to pm_init / pm_cpu_idle / pm_suspend
+//   (init-style API — same convention as K2a's pmm_init, K4a's pt_init,
+//   K8a's spinlock_init, K10b's aes_key_expansion, K12a's panic, etc.).
+//
+// ── Extern ABI ──────────────────────────────────────────────────────────────
+//   exit(code) — sys_exit (nr 60). Pre-registered on x86_64 (see
+//     build_runtime_syscall_stubs). Used by no function in this file
+//     in the K12c self-test path (it's declared because the K12c
+//     contract specified it — future waves may use it for a pm_panic
+//     helper that exits the kernel when suspend fails irrecoverably).
+//   halt() — NOT pre-registered on hosted x86_64. Resolves to
+//     __ffi_fallback_stub ("xor eax, eax; ret" — returns 0, no-op).
+//     K13+ bare-metal x86_64 trampoline will register real asm:
+//     "hlt; ret" (the `hlt` instruction halts the CPU until the next
+//     interrupt — see Intel SDM Vol 2B, HLT instruction).
+//   wfi() — NOT pre-registered on hosted x86_64. Resolves to
+//     __ffi_fallback_stub (no-op). K13+ bare-metal trampolines will
+//     register real asm:
+//       x86_64: "hlt; ret" (same as halt — x86_64 collapses CPU-idle
+//               and wait-for-interrupt into the single `hlt` opcode).
+//       aarch64: "wfi; ret" (Wait For Interrupt — ARMv8 ARM §C6.2.4).
+//       riscv64: "wfi; ret" (Wait For Interrupt — RISC-V Privileged
+//                ISA §3.3.1).
+//
+//   The two unregistered externs (halt, wfi) will cause
+//   encode_program to emit runtime warnings — this is EXPECTED
+//   behavior on hosted x86_64 (the real asm stubs land in K13+'s
+//   bare-metal trampoline). See womb/kernel/crypto/hw_trampoline.vuma
+//   header for the analogous pattern (4 unregistered AES-NI/ARMv8
+//   externs → __ffi_fallback_stub on hosted, real asm on bare metal).
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The PmState.cpu_state field uses:
+//     0 = RUNNING    (CPU executing kernel/user code)
+//     1 = IDLE       (CPU halted in pm_cpu_idle, waiting for interrupt)
+//     2 = SUSPENDED  (system suspended to RAM via pm_suspend)
+//   The PmState.suspend_lvl field uses:
+//     0 = none       (no suspend in progress)
+//     1 = CPU idle   (just halt — equivalent to pm_cpu_idle but
+//                     driven through the suspend path)
+//     2 = system suspend (S3-style full-system suspend to RAM)
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). The `exit` extern
+//   is re-declared locally here, byte-identical to the canonical
+//   declaration in womb/kernel/arch/x86_64/trampoline.vuma:60 — same
+//   arg types, same order. The `halt` / `wfi` externs are NOT in
+//   trampoline.vuma (they're K12c-new); K13+ will add them to the
+//   bare-metal trampoline alongside the existing irq_disable /
+//   irq_restore pair (K8a).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/power/pm.vuma \
+//         /tmp/pm.bin x86_64 --verify
+//     /tmp/pm.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — pm_init
+// zeroes the state, pm_cpu_idle's wfi() is a no-op stub so cpu_state
+// returns to RUNNING and wake_count bumps to 1, pm_suspend(level=2)
+// sets suspend_lvl=2 and cpu_state=2). NOTE: encode_program will emit
+// a runtime warning that `halt` and `wfi` are not pre-registered and
+// will resolve to __ffi_fallback_stub — this is EXPECTED behavior on
+// hosted x86_64 (the real asm stubs land in K13+'s bare-metal
+// trampoline).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations — process control.
+// ────────────────────────────────────────────────────────────────────────────
+// Mirror of womb/kernel/arch/x86_64/trampoline.vuma:60 (exit). Pre-
+// registered on x86_64 — no __ffi_fallback_stub warning emitted.
+
+extern "C" {
+    // sys_exit (nr 60): terminate the process with exit code `code`.
+    // Does NOT return — the stub ends with INT3 as a safety guard. K12c
+    // does not call exit() in the self-test path (it's declared because
+    // the K12c contract specified it — future waves may add a pm_panic
+    // helper that exits the kernel when suspend fails irrecoverably).
+    fn exit(code: i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PmState: 6-byte power-management state (cpu_state + suspend_lvl +
+// wake_count). Three u8/u32 fields packed into 8 bytes (with 2 bytes of
+// natural padding after the two u8s to align the u32 — VUMA's layout
+// pass handles this automatically, see K7b's signal.vuma layout note
+// about implicit alignment).
+//
+// Field semantics:
+//   cpu_state   — current CPU power state:
+//                   0 = RUNNING   (CPU executing kernel/user code)
+//                   1 = IDLE      (CPU halted in pm_cpu_idle, waiting
+//                                  for an interrupt)
+//                   2 = SUSPENDED (system suspended to RAM via pm_suspend)
+//                 Modified by pm_cpu_idle (0 → 1 → 0 on wake) and
+//                 pm_suspend (→ 2). Read by the scheduler (K4c) to
+//                 decide whether to wake the CPU before scheduling a
+//                 task.
+//   suspend_lvl — current suspend level (0 = none, 1 = CPU idle, 2 =
+//                 system suspend to RAM). Set by pm_suspend. Read by
+//                 the resume path (K13+) to decide how deep to resume
+//                 from (level 2 requires device re-init, level 1 does
+//                 not).
+//   wake_count  — number of times the CPU has woken from idle (via
+//                 pm_cpu_idle). Monotonic — never reset. Used as a
+//                 "how busy is this CPU?" health metric (a CPU with
+//                 wake_count == 0 over a 1-second window is either
+//                 fully utilized or stuck — K13+ may add the latter
+//                 detection).
+layout PmState = {
+    cpu_state:   u8,    // 0=running, 1=idle, 2=suspended
+    suspend_lvl: u8,    // suspend level (0=none, 1=CPU idle, 2=system suspend)
+    wake_count:  u32,   // number of wakeups (monotonic)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations — arch-specific low-power primitives.
+// ────────────────────────────────────────────────────────────────────────────
+// NOT pre-registered on hosted x86_64 — both resolve to
+// __ffi_fallback_stub (xor eax, eax; ret → returns 0, no-op). The
+// runtime warning from encode_program is EXPECTED. K13+ bare-metal
+// trampolines will register real asm stubs:
+//   x86_64:   "hlt; ret"           (HLT — Intel SDM Vol 2B)
+//   aarch64:  "wfi; ret"           (WFI — ARMv8 ARM §C6.2.4)
+//   riscv64:  "wfi; ret"           (WFI — RISC-V Privileged ISA §3.3.1)
+
+extern "C" {
+    // halt: halt the CPU until the next interrupt. On x86_64 this is the
+    // `hlt` instruction (HLT — Intel SDM Vol 2B). On aarch64/riscv64 it
+    // is the `wfi` instruction (same opcode name as the wfi extern below
+    // — x86_64 collapses CPU-idle and wait-for-interrupt into the single
+    // `hlt` opcode, so halt and wfi are aliases on x86_64 but distinct
+    // concepts on aarch64/riscv64 where `wfi` is the canonical name).
+    //
+    // Hosted stub: __ffi_fallback_stub (no-op — returns 0). The K12c
+    // self-test does NOT call halt() directly (pm_cpu_idle calls wfi()
+    // instead); halt() is declared for K13+ bare-metal drivers that
+    // want a "halt the CPU now" primitive without going through the
+    // full pm_cpu_idle state-machine dance.
+    fn halt();
+
+    // wfi: wait for interrupt. On aarch64/riscv64 this is the `wfi`
+    // instruction (ARMv8 ARM §C6.2.4 / RISC-V Privileged ISA §3.3.1).
+    // On x86_64 it is the `hlt` instruction (the same opcode as halt()
+    // — x86_64 has no separate "wfi" opcode, so the wfi extern and the
+    // halt extern dispatch to the same asm on x86_64).
+    //
+    // Hosted stub: __ffi_fallback_stub (no-op — returns 0). The K12c
+    // self-test calls wfi() via pm_cpu_idle — the stub's no-op return
+    // means cpu_state goes 0 → 1 → 0 in a single function call, and
+    // wake_count bumps to 1.
+    fn wfi();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Power-management operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// pm_init: zero the power-management state. Sets cpu_state=0 (running),
+// suspend_lvl=0, wake_count=0. Called once per PmState before any
+// pm_cpu_idle / pm_suspend. The CALLER allocates the PmState via
+// `state_new(PmState)` and passes it by reference (init-style API).
+//
+// State<T> params: 1 (pm). Pure write — no reads, no helper calls.
+// The 3 field assignments are direct (no byte-packing needed).
+fn pm_init(pm: State<PmState>) {
+    pm.cpu_state = 0;    // running
+    pm.suspend_lvl = 0;
+    pm.wake_count = 0;
+}
+
+// pm_cpu_idle: put the CPU into idle (wait for interrupt).
+//
+//   pm: caller-allocated State<PmState> (modified in place).
+//
+// Behavior:
+//   1. Set cpu_state = 1 (idle).
+//   2. Invoke the `wfi` extern — the architecture's "wait for
+//      interrupt" instruction. On bare metal: the CPU halts until the
+//      next interrupt, drawing ~10× less power than the busy-loop
+//      alternative. In hosted mode: __ffi_fallback_stub (no-op —
+//      returns immediately).
+//   3. On wake (after wfi returns): set cpu_state = 0 (running) and
+//      bump wake_count.
+//
+// State<T> params: 1 (pm). State<T> locals: 0. One extern call (wfi).
+//
+// The wfi() call is the only point where this function yields control
+// to the host/arch — everything else is pure state manipulation. On
+// bare metal, the interrupt that wakes the CPU fires AFTER wfi enters
+// the halt state (the CPU is literally not executing instructions),
+// so the cpu_state = 0 write happens on the instruction immediately
+// after wfi returns, which is post-wake. In hosted mode (stub wfi),
+// the wake is synchronous — the stub returns immediately, and the
+// cpu_state = 0 write happens on the next instruction.
+fn pm_cpu_idle(pm: State<PmState>) {
+    pm.cpu_state = 1;  // idle
+    wfi();             // wait for interrupt (stub in hosted mode)
+    pm.cpu_state = 0;  // running again
+    pm.wake_count = pm.wake_count + 1;
+}
+
+// pm_suspend: suspend the system to the given level.
+//
+//   pm:    caller-allocated State<PmState> (modified in place).
+//   level: suspend level (1 = CPU idle, 2 = system suspend to RAM).
+//
+// Behavior:
+//   1. Record the suspend level in pm.suspend_lvl.
+//   2. Set cpu_state = 2 (suspended).
+//   3. (K13+ bare metal) Drive the ACPI/PSCI suspend sequence:
+//        x86_64:   ACPI S1 (level=1) / S3 (level=2) — see ACPI §3.9
+//                  "System \_Sx States" + the PM1a_CNT register.
+//        aarch64:  PSCI SYSTEM_SUSPEND — see ARM DEN 0022D §5.3.6.
+//        riscv64:  SBI SUSPEND — see RISC-V SBI §9.
+//      In hosted mode: just return 0 (the state was already recorded
+//      in steps 1+2; no real suspend happens).
+//   4. Return 0 (success). K13+ may return negative errno on failure.
+//
+// State<T> params: 1 (pm). Pure state write — no extern calls.
+//
+// Note: pm_suspend does NOT call wfi() (unlike pm_cpu_idle). The
+// suspend path on real hardware involves a much deeper state than
+// wfi's "halt until next interrupt" — it powers down most devices,
+// reconfigures the memory controller for self-refresh, and only wakes
+// via specific hardware events (lid open, RTC alarm, power button).
+// The wfi instruction alone is NOT sufficient for suspend. K13+ will
+// add the real suspend driver.
+fn pm_suspend(pm: State<PmState>, level: u8) -> i64 {
+    pm.suspend_lvl = level;
+    pm.cpu_state = 2;  // suspended
+    // In real kernel: enter suspend state (ACPI/PSCI).
+    // In hosted mode: just return.
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K12c power-management API surface end-to-end:
+//   1. pm_init(pm)            → cpu_state=0, suspend_lvl=0, wake_count=0.
+//   2. pm_cpu_idle(pm)        → wfi stub returns immediately;
+//                               cpu_state goes 0 → 1 → 0;
+//                               wake_count goes 0 → 1.
+//   3. pm_suspend(pm, 2)      → suspend_lvl=2, cpu_state=2; returns 0.
+//
+// Returns 0 on success, 1..6 on the 6 individual check failures:
+//   1: cpu_state != 0 after pm_init
+//   2: cpu_state != 0 after pm_cpu_idle (should be back to RUNNING)
+//   3: wake_count != 1 after pm_cpu_idle
+//   4: pm_suspend returned non-zero
+//   5: cpu_state != 2 after pm_suspend
+//   6: suspend_lvl != 2 after pm_suspend
+//
+// ── Why does the wfi stub matter for the self-test? ─────────────────────────
+//   On hosted x86_64, wfi() is __ffi_fallback_stub — it returns 0 and
+//   does NOT halt the CPU. So pm_cpu_idle's cpu_state transitions are:
+//     pm.cpu_state = 1;   // idle (set)
+//     wfi();              // stub returns immediately (no halt)
+//     pm.cpu_state = 0;   // running (set on "wake")
+//     pm.wake_count++;    // 0 → 1
+//   The self-test verifies cpu_state == 0 and wake_count == 1 after
+//   pm_cpu_idle returns. On bare metal (K13+), wfi() would actually
+//   halt until an interrupt, and the self-test would need a way to
+//   synthesize a wake interrupt — out of scope for K12c's hosted test.
+fn main() -> i32 {
+    // ── Init ──
+    let pm = state_new(PmState);
+    pm_init(pm);
+    if pm.cpu_state != 0 { return 1; }
+
+    // ── CPU idle (stub — wfi is no-op in hosted mode) ──
+    pm_cpu_idle(pm);
+    if pm.cpu_state != 0 { return 2; }  // back to running
+    if pm.wake_count != 1 { return 3; }
+
+    // ── Suspend ──
+    let ret = pm_suspend(pm, 2);
+    if ret != 0 { return 4; }
+    if pm.cpu_state != 2 { return 5; }  // suspended
+    if pm.suspend_lvl != 2 { return 6; }
+
+    return 0;
+}
