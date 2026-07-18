@@ -1,0 +1,323 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/net/http.vuma
+// VWK Network Subsystem — HTTP client (PMT-pure, simplified).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K9f layer of the VWK kernel: a simplified PMT-native
+// HTTP/1.0 client. K9 (Network) built socket (K9a — BSD API surface),
+// sk_buff + virtio-net (K9b+c — packet buffer pool + NIC driver), TCP
+// state machine (K9d — handshake + send/recv + close), and DNS resolver
+// (K9e — query builder + response parser stub). K9f sits ABOVE the TCP
+// transport (which rides on K9d's state machine + K9b's sk_buff pool +
+// K9c's NIC driver): it builds HTTP/1.0 GET requests and (in hosted
+// mode) stubs the actual TCP send/recv — there is no real TCP
+// connection reachable from the hosted compile_dump runtime. The K9f
+// contract scope is "build a GET request correctly + return a stub
+// response"; the real HTTP round-trip path is K9g+ (when the IP layer
+// lands + DNS resolves + TCP connects to a real HTTP server).
+//
+// ── Scope of K9f ───────────────────────────────────────────────────────────
+//   http_build_get(req, path, host)               — encode an HTTP/1.0
+//                                                   GET request into
+//                                                   HttpRequest.data
+//                                                   [0..len]. Format:
+//                                                   "GET <path>
+//                                                   HTTP/1.0\r\n
+//                                                   Host: <host>\r\n\r\n".
+//   http_get(host, port, path, resp) -> i64       — top-level client:
+//                                                   build a GET request,
+//                                                   open a TCP connection,
+//                                                   send the request,
+//                                                   receive the response.
+//                                                   K9f STUB: returns 0
+//                                                   (no real TCP
+//                                                   connection — resp.len
+//                                                   is set to 0).
+//
+// ── HTTP/1.0 request format (RFC 1945, §5) ──────────────────────────────────
+//   Request-line:    "GET <request-uri> HTTP/1.0\r\n"
+//   Headers:         "Host: <host>\r\n"
+//   Blank line:      "\r\n"
+//
+//   For path="/" + host="10.0.2.2" the wire bytes are (decimal):
+//     71 69 84 32     // "GET "  (G=71, E=69, T=84, space=32)
+//     47              // "/"     (path)
+//     32 72 84 84 80 47 49 46 48 13 10   // " HTTP/1.0\r\n"
+//     72 111 115 116 58 32               // "Host: "
+//     49 48 46 48 46 50 46 50            // "10.0.2.2"
+//     13 10 13 10                          // "\r\n\r\n"
+//   Total: 31 bytes. The K9f self-test verifies the GET prefix + the
+//   trailing \r\n\r\n.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants use DECIMAL per the K9f contract's "Use decimal
+// ASCII values throughout. VUMA doesn't support string literals in code"
+// rule. The byte values used (decimal):
+//     71  = 'G'  (GET method)
+//     69  = 'E'
+//     84  = 'T'
+//     32  = ' ' (space — between GET + path, after path, after "Host:")
+//     47  = '/' (path)
+//     72  = 'H'  (HTTP + Host header name)
+//     111 = 'o'
+//     115 = 's'
+//     116 = 't'
+//     58  = ':' (after Host)
+//     80  = 'P'  (HTTP protocol)
+//     49  = '1'  (HTTP/1.0)
+//     46  = '.'  (HTTP/1.0)
+//     48  = '0'  (HTTP/1.0)
+//     13  = '\r' (CR)
+//     10  = '\n' (LF)
+//     256 = HttpRequest buffer size (path + headers + body line)
+//     512 = HttpResponse buffer size (response-line + headers + body)
+//     64  = HttpPath + HttpHost buffer size
+//     80  = self-test HTTP port
+//
+// ── Why no string literals? ─────────────────────────────────────────────────
+// VUMA's parser does not accept string literals in expression position
+// (only as comments + layout-name identifiers). The K9f contract's
+// "use decimal byte values" rule replaces `let s = "GET ";` with
+// `req.data[0] = 71; req.data[1] = 69; req.data[2] = 84; req.data[3] =
+// 32;`. Same convention as K6f's shell.vuma (which uses an extern
+// `write` + a `ShellOut` layout filled byte-by-byte) + K9e's dns.vuma
+// (byte-wise DNS header + name encoding).
+//
+// ── Why is the request-line built byte-by-byte rather than via a helper? ────
+// HTTP requests are short (a few hundred bytes) + the wire format is
+// rigid (exact byte sequence, no length-prefixing). A byte-by-byte emit
+// loop is the simplest correct implementation — same approach as K6f's
+// shell_prompt (5-byte "vwk: " prefix written byte-by-byte into
+// ShellOut.data) + K6e's console subsystem. K9g+ may add a
+// http_emit_string helper (a (req, str_addr, len) → () function that
+// memcpy's a fixed byte buffer) when more headers land (User-Agent,
+// Accept, Connection: close). For K9f's GET-only scope, the explicit
+// byte emits are clearer than a helper.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// HttpRequest + HttpResponse + HttpPath + HttpHost buffers are
+// flat-byte-array structs held in `___pmt_buffer`-backed State<T>
+// values; the CALLER allocates them via `state_new(HttpRequest)` etc.
+// and passes them by reference to http_build_get / http_get (init-style
+// API — see "Why init-style?" in K4e's wait.vuma header for the codegen
+// rationale: the current codegen does NOT propagate State-typedness
+// through function return values).
+//
+// State<T> params: 2-4 per function (req+path+host or
+// host+path+resp), per the K4b contract's "1-2 per function" rule
+// (relaxed to "1-4" for net-stack functions that necessarily take both
+// request + response buffers — same convention as K9a's sys_send
+// (tbl+fd+buf+len)). The caller owns all buffers.
+//
+// Extern (write): declared per the K9f contract for parity with K6f's
+// shell.vuma + K9e's dns.vuma. In hosted mode it is a
+// __ffi_fallback_stub (no-op). The real TCP-socket send path (replacing
+// this extern with K9a's sys_send on a TCP socket that went through
+// K9d's tcp_connect → tcp_ack handshake) is K9g+.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares HttpRequest + HttpResponse +
+// HttpPath + HttpHost + the 2 client functions + main. K9g+ (IP layer +
+// TCP transport) will re-declare HttpRequest byte-identically when it
+// needs to read the request bytes for real HTTP round-trips. The
+// byte-identical-redeclaration invariant (K2c "extern signatures MUST
+// stay byte-identical" — extended to layouts in K3d, re-applied in
+// K4a/K7a/K8a/K8e/K8f/K9a/K9d/K9e) extends to K9f's HttpRequest +
+// HttpResponse + HttpPath + HttpHost.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/net/http.vuma \
+//         /tmp/http.bin x86_64 --verify
+//     /tmp/http.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 10 self-test checks pass — GET prefix
+// correct + path '/' present + trailing \r\n\r\n correct + http_get
+// stub returns 0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode this is a __ffi_fallback_stub (no-op). The real TCP
+// send path (sys_send on a K9d-connected socket) is K9g+. Same extern
+// declaration style as K6f's shell.vuma (write + exit) + K9e's dns.vuma
+// (write + read).
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// HttpRequest: a 256-byte buffer holding the raw HTTP/1.0 GET request
+// (request-line + Host header + blank line). 256 bytes is enough for
+// the typical GET request (path up to ~200 chars + short host + the
+// ~25-byte request-line/header overhead). `len` records the actual
+// request size (0..256).
+layout HttpRequest = {
+    data: [u8; 256],  // raw HTTP request
+    len: u32,         // request length in bytes (0..256)
+}
+
+// HttpResponse: a 512-byte buffer holding the raw HTTP/1.0 response
+// (status-line + headers + body). 512 bytes is the simplified PMT-native
+// scope cap; K9g+ may bump to 4096 (a typical Linux page) when real
+// responses land. `len` records the actual response size (0..512).
+layout HttpResponse = {
+    data: [u8; 512],  // raw HTTP response
+    len: u32,         // response length in bytes (0..512)
+}
+
+// HttpPath: a 64-byte buffer holding the null-terminated ASCII request
+// URI (e.g. "/\0" for the root, "/index.html\0" for a sub-path). 64
+// bytes is the simplified scope cap; K9g+ may bump to 256 (typical URL
+// length limit) when real requests land.
+layout HttpPath = {
+    data: [u8; 64],
+}
+
+// HttpHost: a 64-byte buffer holding the null-terminated ASCII Host
+// header value (e.g. "10.0.2.2\0" or "example.com\0"). 64 bytes is
+// enough for any hostname or IPv4 dotted-quad.
+layout HttpHost = {
+    data: [u8; 64],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// HTTP client functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// http_build_get: encode an HTTP/1.0 GET request into `req`.
+//
+//   req:  caller-allocated State<HttpRequest> (output buffer).
+//   path: caller-allocated State<HttpPath> holding the null-terminated
+//         request URI (e.g. "/\0").
+//   host: caller-allocated State<HttpHost> holding the null-terminated
+//         Host header value (e.g. "10.0.2.2\0").
+//
+// Wire format produced:
+//   "GET <path> HTTP/1.0\r\nHost: <host>\r\n\r\n"
+//
+// All bytes are emitted decimal-ASCII-byte-by-byte (VUMA has no string
+// literals — see "Why no string literals?" in the file header). Sets
+// req.len to the total request length.
+fn http_build_get(req: State<HttpRequest>, path: State<HttpPath>, host: State<HttpHost>) {
+    let pos = 0;
+    // "GET " — G=71, E=69, T=84, space=32.
+    req.data[0] = 71; req.data[1] = 69; req.data[2] = 84; req.data[3] = 32;
+    pos = 4;
+    // Path (null-terminated ASCII, copied verbatim).
+    let i = 0;
+    while i < 64 {
+        let c = path.data[i];
+        if c == 0 { break; }
+        req.data[pos] = c;
+        pos = pos + 1;
+        i = i + 1;
+    }
+    // " HTTP/1.0\r\nHost: " — emit byte-by-byte (no string literals in
+    // VUMA). The leading space (32) terminates the path; the rest is
+    // the protocol version + CRLF + the "Host: " header name.
+    req.data[pos] = 32; pos = pos + 1;   // ' '
+    req.data[pos] = 72; pos = pos + 1;   // 'H'
+    req.data[pos] = 84; pos = pos + 1;   // 'T'
+    req.data[pos] = 84; pos = pos + 1;   // 'T'
+    req.data[pos] = 80; pos = pos + 1;   // 'P'
+    req.data[pos] = 47; pos = pos + 1;   // '/'
+    req.data[pos] = 49; pos = pos + 1;   // '1'
+    req.data[pos] = 46; pos = pos + 1;   // '.'
+    req.data[pos] = 48; pos = pos + 1;   // '0'
+    req.data[pos] = 13; pos = pos + 1;   // '\r'
+    req.data[pos] = 10; pos = pos + 1;   // '\n'
+    req.data[pos] = 72; pos = pos + 1;   // 'H'
+    req.data[pos] = 111; pos = pos + 1;  // 'o'
+    req.data[pos] = 115; pos = pos + 1;  // 's'
+    req.data[pos] = 116; pos = pos + 1;  // 't'
+    req.data[pos] = 58; pos = pos + 1;   // ':'
+    req.data[pos] = 32; pos = pos + 1;   // ' '
+    // Host (null-terminated ASCII, copied verbatim).
+    let j = 0;
+    while j < 64 {
+        let c = host.data[j];
+        if c == 0 { break; }
+        req.data[pos] = c;
+        pos = pos + 1;
+        j = j + 1;
+    }
+    // "\r\n\r\n" — terminates the Host header (CRLF) + the request
+    // headers (blank-line CRLF). The server treats this as "end of
+    // request, send response".
+    req.data[pos] = 13; pos = pos + 1;
+    req.data[pos] = 10; pos = pos + 1;
+    req.data[pos] = 13; pos = pos + 1;
+    req.data[pos] = 10; pos = pos + 1;
+    req.len = pos;
+}
+
+// http_get: send an HTTP GET request and receive the response.
+//
+//   host: caller-allocated State<HttpHost> (e.g. "10.0.2.2\0").
+//   port: TCP port to connect to (host-order u16 — 80 in the self-test).
+//   path: caller-allocated State<HttpPath> (e.g. "/\0").
+//   resp: caller-allocated State<HttpResponse> (output buffer).
+//
+// Returns 0 on success (K9f stub: always 0 — resp.len is set to 0), or
+// a negative errno on failure. The real client path (DNS resolve →
+// TCP connect via K9d → send GET via K9a's sys_send → recv response
+// via sys_recv → close via tcp_close) is K9g+. The `port` arg is
+// accepted per the K9f contract signature but not yet used — K9g+
+// will pass it to the TCP connect path.
+fn http_get(host: State<HttpHost>, port: u16, path: State<HttpPath>, resp: State<HttpResponse>) -> i64 {
+    let req = state_new(HttpRequest);
+    http_build_get(req, path, host);
+    // In hosted mode: can't actually send/receive.
+    resp.len = 0;
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the GET-builder path: build an HTTP/1.0 GET request for
+// path="/" + host="10.0.2.2", then verify the GET prefix + path byte +
+// the trailing \r\n\r\n. Also exercises the http_get stub (returns 0
+// with resp.len=0). Returns 0 on success, 1..10 on the 10 individual
+// check failures.
+fn main() -> i32 {
+    // Self-test: build a GET request.
+    let path = state_new(HttpPath);
+    path.data[0] = 47;  // '/'
+    path.data[1] = 0;
+    let host = state_new(HttpHost);
+    host.data[0] = 49;  // '1'
+    host.data[1] = 48;  // '0'
+    host.data[2] = 46;  // '.'
+    host.data[3] = 48;  // '0'
+    host.data[4] = 46;  // '.'
+    host.data[5] = 50;  // '2'
+    host.data[6] = 46;  // '.'
+    host.data[7] = 50;  // '2'
+    host.data[8] = 0;
+    let req = state_new(HttpRequest);
+    http_build_get(req, path, host);
+    // Verify: starts with "GET "
+    if req.data[0] != 71 { return 1; }  // 'G'
+    if req.data[1] != 69 { return 2; }  // 'E'
+    if req.data[2] != 84 { return 3; }  // 'T'
+    if req.data[3] != 32 { return 4; }  // ' '
+    if req.data[4] != 47 { return 5; }  // '/'
+    // Verify: ends with \r\n\r\n
+    let last = req.len;
+    if req.data[last - 1] != 10 { return 6; }  // '\n'
+    if req.data[last - 2] != 13 { return 7; }  // '\r'
+    if req.data[last - 3] != 10 { return 8; }  // '\n'
+    if req.data[last - 4] != 13 { return 9; }  // '\r'
+    // http_get stub.
+    let resp = state_new(HttpResponse);
+    let ret = http_get(host, 80, path, resp);
+    if ret != 0 { return 10; }
+    return 0;
+}
