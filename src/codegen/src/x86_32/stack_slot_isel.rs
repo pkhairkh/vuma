@@ -544,6 +544,25 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
     };
 
+    // Load the HIGH 32 bits of a 64-bit value into a scratch register.
+    // For immediates: extract bits 32-63. For registers: load from slot+4.
+    let load_value_hi = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+        match val {
+            IRValue::Register(id) => {
+                let off = slot_offset(*id) + 4;
+                encode_mov_reg_mem(scratch, Gpr::Rbp, off)
+            }
+            IRValue::Immediate(imm) => {
+                let hi = ((*imm as u64) >> 32) as u32 as i32;
+                encode_mov_reg_imm32(scratch, hi)
+            }
+            IRValue::Address(addr) => {
+                encode_mov_reg_imm32(scratch, ((*addr as u64) >> 32) as u32 as i32)
+            }
+            IRValue::Label(_) => encode_mov_reg_imm32(scratch, 0),
+        }
+    };
+
     // ── FP load/store helpers (x86_32-specific) ──
     //
     // On x86_32, GPRs are only 32 bits wide, so the x86_64 pattern of
@@ -2002,31 +2021,38 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Load { dst, addr, offset, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load address from stack into R10
+                    // Load address from stack into RAX
                     code.extend(load_value(addr, Gpr::Rax));
                     let off = *offset;
                     match ty {
                         IRType::I8 | IRType::U8 => {
                             code.extend(encode_movzx_reg8_mem(Gpr::Rax, Gpr::Rax, off));
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         IRType::I16 | IRType::U16 => {
                             code.extend(encode_movzx_reg16_mem(Gpr::Rax, Gpr::Rax, off));
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         IRType::I32 | IRType::U32 => {
                             code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rax, off));
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         _ => {
+                            // 64-bit load: load low and high 32-bit halves separately
                             code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, off));
+                            code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                            code.extend(load_value(addr, Gpr::Rax));
+                            code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, off + 4));
+                            code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                         }
                     }
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
                     code
                 }
 
                 // ── Memory: Store ──
                 IRInstr::Store { value, addr, offset, ty } => {
                     let mut code = Vec::new();
-                    // Load value into R10, address into R11
+                    // Load value into RAX, address into RDX
                     code.extend(load_value(value, Gpr::Rax));
                     code.extend(load_value(addr, Gpr::Rdx));
                     let off = *offset;
@@ -2041,7 +2067,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_mov_mem32_reg32(Gpr::Rdx, off, Gpr::Rax));
                         }
                         _ => {
+                            // 64-bit store: store low and high 32-bit halves separately
                             code.extend(encode_mov_mem_reg(Gpr::Rdx, off, Gpr::Rax));
+                            // Load high word of value
+                            code.extend(load_value_hi(value, Gpr::Rax));
+                            code.extend(load_value(addr, Gpr::Rdx));
+                            code.extend(encode_mov_mem_reg(Gpr::Rdx, off + 4, Gpr::Rax));
                         }
                     }
                     code
