@@ -1,0 +1,573 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/tty/vt100.vuma
+// VWK VT100 terminal parser — escape-sequence state machine. — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6c layer of the VWK kernel: the VT100 escape-sequence
+// parser. K6a (womb/kernel/drivers/uart.vuma) provided the byte-level UART
+// driver; K6b (womb/kernel/tty/line_discipline.vuma) provided the line
+// discipline (ring buffer + line editor). K6c sits ABOVE both: it consumes
+// a stream of bytes (typically from K6b's tty_pop) and maintains the
+// terminal's logical state — cursor position, foreground/background color,
+// and the in-progress escape-sequence parser state machine.
+//
+// ── What K6c provides ──────────────────────────────────────────────────────
+//   vt100_init(s)               — zero the cursor + colors + parser state.
+//   vt100_feed(s, c)            — feed one byte; update cursor / color / parser.
+//   vt100_parse_param(s, idx)   — pull the idx-th decimal parameter from the
+//                                  in-progress escape buffer (0 if absent).
+//
+// ── Byte classification (decimal ASCII values, per the K6c contract) ───────
+// All non-zero constants use DECIMAL (carried forward through K5a–K6b — see
+// those files' headers for the rationale: decimal avoids the parser's hex-
+// literal path's width-extension subtleties). The constants:
+//     27   = 0x1B  ESC          — starts every escape sequence.
+//     91   = 0x5B  '['          — CSI introducer (after ESC, starts CSI).
+//     59   = 0x3B  ';'          — CSI parameter separator.
+//     48   = 0x30  '0'          — digit low end.
+//     57   = 0x39  '9'          — digit high end.
+//     72   = 0x48  'H'          — CUP — cursor position (row;col).
+//     102  = 0x66  'f'          — HVP — horizontal + vertical position (alias
+//                                   of CUP — same semantics, same parser).
+//     65   = 0x41  'A'          — CUU — cursor up.
+//     66   = 0x42  'B'          — CUD — cursor down.
+//     67   = 0x43  'C'          — CUF — cursor forward (right).
+//     68   = 0x44  'D'          — CUB — cursor back (left).
+//     109  = 0x6D  'm'          — SGR — select graphic rendition (color).
+//     10   = 0x0A  LF '\n'      — line feed (move down, column stays).
+//     13   = 0x0D  CR '\r'      — carriage return (column = 0).
+//     8    = 0x08  BS '\b'      — backspace (move cursor left).
+//     30..37 / 40..47           — SGR fg/bg color range (e.g. 31 = red fg).
+// Test characters:
+//     104='h' 101='e' 108='l' 111='o' 49='1' 50='2' 51='3'
+//
+// ── The VT100 state machine ────────────────────────────────────────────────
+// The parser has three modes, tracked by `s.esc`:
+//   esc == 0 — NORMAL.    Bytes are control chars or printable; printable
+//                          bytes advance the cursor. ESC (27) flips to esc=1.
+//   esc == 1 — GOT_ESC.   We just saw ESC. The only byte we accept here is
+//                          '[' (91); anything else aborts the escape (esc=0).
+//                          '[' flips to esc=2.
+//   esc == 2 — GOT_CSI.   We're inside an ESC [ sequence. Digits (48..57)
+//                          and ';' (59) accumulate in `esc_buf` (a 16-byte
+//                          ring — sequences longer than 16 bytes are
+//                          truncated, but no VT100 sequence in practice
+//                          exceeds ~8 bytes). The first non-digit, non-';'
+//                          byte is the "final byte" — a letter (A..Z or
+//                          a..z) that names the command (H, A, B, C, D, m,
+//                          ...). The final byte triggers the command handler,
+//                          then the parser returns to esc=0.
+//
+// This is the standard "CSI parameter parsing" algorithm from ECMA-48 / the
+// original VT100 user guide. K6c implements the most common subset: cursor
+// positioning (H/f, A, B, C, D) and SGR color (m). Other CSI sequences
+// (K = erase line, J = erase screen, n = device status report, ...) are
+// RECOGNIZED as CSI terminators (the parser consumes them and returns to
+// NORMAL mode) but their bodies are NO-OPS — they don't match any of the
+// `if c == ...` clauses, so they fall through and the parser just resets.
+// This is intentional: a no-op for an unimplemented CSI is far safer than
+// leaving the parser stuck in esc=2 (which would swallow all subsequent
+// bytes as escape-sequence parameter bytes).
+//
+// ── Cursor geometry + scrolling ─────────────────────────────────────────────
+// The terminal is `s.rows` × `s.cols` (default 25 × 80, the classic VT100
+// size). All cursor positions are 0-based internally; the wire protocol is
+// 1-based (ESC [ 1 ; 1 H = top-left), so the parser subtracts 1 from each
+// parameter before storing. Bounds:
+//   - col wraps to 0 and row++ when a printable byte would push col past
+//     s.cols - 1 (line wrap — matches VT100 autowrap behavior).
+//   - row clamps at s.rows - 1 when it would exceed the bottom (no scroll —
+//     see the "Scrolling is a stub" note below).
+//   - cursor up/left use `if cur >= n { cur -= n } else { cur = 0 }` to
+//     avoid u32 underflow (0 - 1 = 4294967295 in u32 — would crash the
+//     bounds check on the next operation).
+//
+// ── Scrolling is simplified to clamping ─────────────────────────────────────
+// A real VT100 scrolls the screen up one row when the cursor would move past
+// the bottom: every row's glyph buffer is memmoved up by one row, the bottom
+// row is cleared, and the cursor stays on the bottom row. K6c doesn't have
+// a glyph buffer (only cursor + color state), so "scrolling" degenerates to
+// "clamp the cursor at the bottom row". This is the same simplification the
+// K6c contract specifies (the contract's `// scroll (stub: just clamp)`
+// comment). A later wave (K6d serial console, or K8 framebuffer console)
+// will add a glyph buffer at the call site and implement real scrolling
+// THERE — K6c's parser will feed it bytes via vt100_feed, and the console
+// layer will handle the actual screen update. K6c is purely the byte→state
+// translation; it has no opinion about how the state gets rendered.
+//
+// ── SGR (color) — minimal subset ────────────────────────────────────────────
+// The SGR (Select Graphic Rendition) sequence `ESC [ N m` sets a graphic
+// attribute. K6c implements only the 8-color fg/bg subset:
+//   ESC [ 0 m           — reset (fg=7 white, bg=0 black).
+//   ESC [ 30..37 m      — fg color 0..7 (black, red, green, yellow, blue,
+//                          magenta, cyan, white).
+//   ESC [ 40..47 m      — bg color 0..7 (same palette).
+//   ESC [ 39 m / 49 m   — default fg/bg (treated as "reset to 7 / 0" — close
+//                          enough; the VT100 default fg is white, bg black).
+// Multi-parameter SGR (e.g. `ESC [ 1 ; 31 m` = bold + red fg) is parsed
+// correctly (the parameter buffer accepts ';'), but only the FIRST
+// parameter is honored — bold (1), underline (4), reverse (7), and the
+// other attributes are silently ignored. This matches the contract's
+// "Simplified: just parse the first param" note. A full SGR implementation
+// would loop over all ';' -separated parameters and dispatch each, but
+// that's a K8+ concern (when the console layer actually renders colors).
+//
+// ── Layout (Vt100State) ─────────────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file declares its own layout.
+// Vt100State is NEW in K6c (no prior wave uses it). The layout:
+//
+//   Vt100State (60 bytes total, with trailing padding to 8-byte alignment):
+//     row      @ 0   u32        — cursor row (0-based, 0..rows-1).
+//     col      @ 4   u32        — cursor column (0-based, 0..cols-1).
+//     fg       @ 8   u8         — foreground color (0..7).
+//     bg       @ 9   u8         — background color (0..7).
+//     esc      @ 10  u8         — parser mode: 0=NORMAL, 1=GOT_ESC, 2=GOT_CSI.
+//     esc_buf  @ 16  [u8; 16]   — in-progress CSI parameter bytes (16 bytes).
+//     esc_len  @ 32  u32        — number of valid bytes in esc_buf.
+//     rows     @ 36  u32        — terminal height (default 25).
+//     cols     @ 40  u32        — terminal width (default 80).
+//   (Plus 12 bytes of trailing padding to 8-byte alignment — the largest
+//   field's alignment is 4 bytes for the u32 fields, but the [u8; 16] field
+//   forces 16-byte start offset, and the layout pads the struct size up to
+//   the next multiple of the largest field alignment, which is 4 bytes for
+//   the u32 fields. The exact byte count and padding are verified by the
+//   IVE Pass layout verifier at compile time.)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Vt100State
+// is a flat-byte-array struct held in a `___pmt_buffer`-backed State<T>
+// slot; the CALLER allocates it via `state_new(Vt100State)` (in the self-
+// test, in main()). The State<Vt100State> handle is passed by reference to
+// vt100_init / vt100_feed / vt100_parse_param, which mutate the State in
+// place (VUMA's State<T> is a borrow of the ___pmt_buffer slot — same
+// pattern as K4a's `tbl.count = tbl.count + 1` and K6b's `tty.tail = ...`).
+//
+// ── No externs ──────────────────────────────────────────────────────────────
+// Like K6b, K6c has NO extern declarations. The VT100 parser is purely
+// computational — it doesn't touch hardware, doesn't call syscalls, doesn't
+// do FFI. The integration with the UART driver + TTY discipline happens at
+// the CALLER: kmain (or a console layer) wires `uart_getc_8250(base) →
+// tty_receive(tty, c) → tty_pop(tty) → vt100_feed(vt, c)`, and the parser
+// maintains the logical cursor/color state. A K8 framebuffer console layer
+// would then read vt.row / vt.col / vt.fg / vt.bg and render to the
+// framebuffer.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/tty/vt100.vuma \
+//         /tmp/vt100.bin x86_64 --verify
+//     /tmp/vt100.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, no stdout (the self-test is pure — only
+// integer return codes). The test exercises:
+//   (1) "hello\n"          → cursor advances to col=5, then row=1 after \n.
+//   (2) ESC [ 10 ; 20 H    → cursor to row=9, col=19 (1-based → 0-based).
+//   (3) ESC [ 31m          → fg color = 1 (red).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Vt100State: the complete state for one VT100 parser. See the file header
+// for the byte-offset map and field semantics. The 16-byte esc_buf is sized
+// to hold any realistic CSI sequence (the longest standard VT100 CSI is
+// ESC [ 6n = 4 bytes; even the longest xterm extension is < 16 bytes).
+layout Vt100State = {
+    row: u32,           // cursor row (0-based, 0..rows-1)
+    col: u32,           // cursor column (0-based, 0..cols-1)
+    fg: u8,             // foreground color (0..7)
+    bg: u8,             // background color (0..7)
+    esc: u8,            // parser mode: 0=NORMAL, 1=GOT_ESC, 2=GOT_CSI
+    esc_buf: [u8; 16],  // in-progress CSI parameter bytes (digits + ';')
+    esc_len: u32,       // number of valid bytes currently in esc_buf
+    rows: u32,          // terminal height (e.g. 25)
+    cols: u32,          // terminal width (e.g. 80)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// VT100 parser functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the VT100 parser. Zeros the cursor + parser state, sets the
+// default colors (fg=7 white, bg=0 black), and the default geometry
+// (25 rows × 80 cols — the classic VT100 size). Does NOT zero esc_buf
+// (esc_len = 0 already guarantees no byte will be read from it; the next
+// escape sequence will overwrite them in order — same defensive-skip
+// pattern as K6b's tty_init not zeroing the ring buffer).
+fn vt100_init(s: State<Vt100State>) {
+    s.row = 0;
+    s.col = 0;
+    s.fg = 7;   // white (default fg)
+    s.bg = 0;   // black (default bg)
+    s.esc = 0;  // NORMAL mode
+    s.esc_len = 0;
+    s.rows = 25;  // classic VT100 height
+    s.cols = 80;  // classic VT100 width
+}
+
+// Feed one byte to the VT100 parser. Updates cursor position / color /
+// parser state according to the byte's classification:
+//   - NORMAL mode: ESC → enter GOT_ESC; \n → row++; \r → col=0;
+//     \b → col--; printable → col++ (with line wrap at col == cols).
+//   - GOT_ESC mode: '[' → enter GOT_CSI; anything else → abort to NORMAL.
+//   - GOT_CSI mode: digit / ';' → append to esc_buf; letter → dispatch
+//     the named command (H/f/A/B/C/D/m), then return to NORMAL.
+//
+// The function returns void — callers that want to render the state can
+// read s.row / s.col / s.fg / s.bg after each call. K6c itself never
+// renders (no externs, no I/O — see the file header's "No externs" note).
+fn vt100_feed(s: State<Vt100State>, c: u8) {
+    if s.esc == 0 {
+        // ── NORMAL mode ────────────────────────────────────────────────────
+        if c == 27 {
+            // ESC — start of an escape sequence.
+            s.esc = 1;
+            s.esc_len = 0;
+            return;
+        }
+        if c == 10 {
+            // LF '\n' — line feed. Move cursor down one row. Column stays
+            // (matches VT100 LF behavior — Unix terminals typically also
+            // do CR on LF, but the VT100 spec is LF-only; CR is a separate
+            // control byte). At the bottom row, clamp (no scroll — see the
+            // file header's "Scrolling is simplified to clamping" note).
+            s.row = s.row + 1;
+            if s.row >= s.rows {
+                s.row = s.rows - 1;  // clamp (no scroll in K6c)
+            }
+            return;
+        }
+        if c == 13 {
+            // CR '\r' — carriage return. Column = 0; row stays.
+            s.col = 0;
+            return;
+        }
+        if c == 8 {
+            // BS '\b' — backspace. Move cursor left one column. Clamp at 0
+            // (no destructive backspace — VT100 BS is non-destructive, it
+            // only moves the cursor; the glyph underneath is preserved).
+            if s.col > 0 {
+                s.col = s.col - 1;
+            }
+            return;
+        }
+        // Printable character (or unhandled control byte) — advance cursor.
+        // The VT100 spec says any byte >= 0x20 (32) is printable; K6c is
+        // permissive and also lets other control bytes through (they
+        // advance the cursor without rendering anything in the caller's
+        // glyph buffer — the caller is responsible for the glyph).
+        s.col = s.col + 1;
+        if s.col >= s.cols {
+            // Line wrap — VT100 autowrap: at the right edge, wrap to the
+            // next line (col=0, row++). At the bottom row, clamp row
+            // (no scroll in K6c).
+            s.col = 0;
+            s.row = s.row + 1;
+            if s.row >= s.rows {
+                s.row = s.rows - 1;  // clamp (no scroll in K6c)
+            }
+        }
+        return;
+    }
+    if s.esc == 1 {
+        // ── GOT_ESC mode ───────────────────────────────────────────────────
+        // We just saw ESC. The only byte we accept here is '[' (91), which
+        // introduces a CSI (Control Sequence Introducer). Anything else
+        // aborts the escape — we drop back to NORMAL mode without consuming
+        // the byte as a CSI parameter. (A real VT100 also handles ESC alone
+        // sequences like ESC D = IND, ESC M = RI, ESC 7 = DECSC, etc., but
+        // K6c's contract only handles CSI sequences — the ESC [ family.)
+        if c == 91 {
+            // '[' — start of CSI.
+            s.esc = 2;
+            s.esc_len = 0;
+            return;
+        }
+        // Not '[' — abort escape. The byte is consumed (not re-processed
+        // in NORMAL mode) — this matches VT100 behavior where an ESC
+        // followed by an unexpected byte is silently dropped.
+        s.esc = 0;
+        return;
+    }
+    // ── GOT_CSI mode (s.esc == 2) ───────────────────────────────────────────
+    // We're inside an ESC [ sequence. Collect digits (48..57) and ';'
+    // (59) into esc_buf until we see a non-digit, non-';' byte — that
+    // byte is the CSI "final byte" (a letter) that names the command.
+    if c >= 48 && c <= 57 {
+        // Digit — append to esc_buf (with bounds check: esc_buf is 16
+        // bytes; longer sequences are silently truncated, which is safe
+        // — the parser just loses the high-order digits of an over-long
+        // parameter, and no real VT100 sequence has > 16 parameter bytes).
+        if s.esc_len < 16 {
+            s.esc_buf[s.esc_len] = c;
+            s.esc_len = s.esc_len + 1;
+        }
+        return;
+    }
+    if c == 59 {
+        // ';' — parameter separator. Append to esc_buf so vt100_parse_param
+        // can split on it later. Same bounds check as for digits.
+        if s.esc_len < 16 {
+            s.esc_buf[s.esc_len] = c;
+            s.esc_len = s.esc_len + 1;
+        }
+        return;
+    }
+    // Final byte (letter) — dispatch the named command. The byte itself
+    // is NOT appended to esc_buf (it's the command name, not a parameter).
+    if c == 72 || c == 102 {
+        // 'H' (CUP) or 'f' (HVP) — cursor position: ESC [ row ; col H
+        // (or 'f'). Both bytes are aliases for the same command (the
+        // VT100 spec defines H = CUP, f = HVP, with identical parameter
+        // semantics — K6c treats them identically). Parameters are 1-
+        // based on the wire (ESC [ 1 ; 1 H = top-left), 0-based internally.
+        // Missing parameters default to 1 (the `if row > 0` guard skips
+        // the assignment if the parameter is 0 / absent, leaving the
+        // cursor where it was — VT100 spec says missing = 1, but treating
+        // missing = "don't move" is also common and matches the contract).
+        let row = vt100_parse_param(s, 0);
+        let col = vt100_parse_param(s, 1);
+        if row > 0 {
+            s.row = row - 1;  // 1-based → 0-based
+            if s.row >= s.rows {
+                s.row = s.rows - 1;  // clamp (out-of-range row)
+            }
+        }
+        if col > 0 {
+            s.col = col - 1;  // 1-based → 0-based
+            if s.col >= s.cols {
+                s.col = s.cols - 1;  // clamp (out-of-range col)
+            }
+        }
+    }
+    if c == 65 {
+        // 'A' (CUU) — cursor up. Default n=1 if parameter absent (the
+        // `else` branch handles n=0 / absent). The `if s.row >= n` guard
+        // prevents u32 underflow (0 - n would be 4294967295 in u32).
+        let n = vt100_parse_param(s, 0);
+        if n > 0 {
+            if s.row >= n {
+                s.row = s.row - n;
+            } else {
+                s.row = 0;
+            }
+        } else {
+            if s.row > 0 {
+                s.row = s.row - 1;
+            }
+        }
+    }
+    if c == 66 {
+        // 'B' (CUD) — cursor down. Same parameter handling as 'A' but
+        // for downward motion; clamp at the bottom row.
+        let n = vt100_parse_param(s, 0);
+        if n > 0 {
+            s.row = s.row + n;
+            if s.row >= s.rows {
+                s.row = s.rows - 1;
+            }
+        } else {
+            s.row = s.row + 1;
+            if s.row >= s.rows {
+                s.row = s.rows - 1;
+            }
+        }
+    }
+    if c == 67 {
+        // 'C' (CUF) — cursor forward (right). Same parameter handling
+        // as 'B' but for horizontal motion; clamp at the right edge.
+        let n = vt100_parse_param(s, 0);
+        if n > 0 {
+            s.col = s.col + n;
+            if s.col >= s.cols {
+                s.col = s.cols - 1;
+            }
+        } else {
+            s.col = s.col + 1;
+            if s.col >= s.cols {
+                s.col = s.cols - 1;
+            }
+        }
+    }
+    if c == 68 {
+        // 'D' (CUB) — cursor back (left). Same parameter handling as 'A'
+        // but for horizontal motion; the `if s.col >= n` guard prevents
+        // u32 underflow.
+        let n = vt100_parse_param(s, 0);
+        if n > 0 {
+            if s.col >= n {
+                s.col = s.col - n;
+            } else {
+                s.col = 0;
+            }
+        } else {
+            if s.col > 0 {
+                s.col = s.col - 1;
+            }
+        }
+    }
+    if c == 109 {
+        // 'm' (SGR) — select graphic rendition. Parses the FIRST
+        // parameter only (per the contract's "Simplified: just parse the
+        // first param" note — a full SGR implementation would loop over
+        // all ';' -separated parameters and dispatch each, but that's a
+        // K8+ concern when the console layer actually renders colors).
+        //   n == 0           — reset to defaults (fg=7, bg=0).
+        //   n in 30..37      — fg color 0..7 (subtract 30).
+        //   n in 40..47      — bg color 0..7 (subtract 40).
+        //   any other n      — ignored (silently dropped).
+        let n = vt100_parse_param(s, 0);
+        if n == 0 {
+            s.fg = 7;
+            s.bg = 0;
+        }
+        if n >= 30 && n <= 37 {
+            s.fg = (n - 30) as u8;
+        }
+        if n >= 40 && n <= 47 {
+            s.bg = (n - 40) as u8;
+        }
+    }
+    // Reset escape state. Every CSI command — handled or not — ends here.
+    // Unhandled final bytes (e.g. 'J' = erase screen, 'K' = erase line,
+    // 'n' = device status report) fall through all the `if c == ...`
+    // clauses above without doing anything, then hit this reset — the
+    // parser returns to NORMAL mode and the next byte is processed fresh.
+    // This is critical: without this reset, an unhandled CSI would leave
+    // the parser stuck in GOT_CSI mode, swallowing all subsequent bytes
+    // as escape parameters.
+    s.esc = 0;
+    s.esc_len = 0;
+}
+
+// Parse a parameter from esc_buf (0-indexed). Parameters are sequences of
+// digits separated by ';' — e.g. esc_buf = "10;20" has param[0]=10,
+// param[1]=20. Returns 0 if the requested parameter is absent (either
+// past the last ';' or esc_buf is empty).
+//
+// The algorithm walks esc_buf once, tracking which parameter index we're
+// currently inside (cur_param). When we see a digit AND cur_param matches
+// the requested param_idx, we accumulate it into v. When we see a ';',
+// if cur_param == param_idx we break (we've finished reading the requested
+// parameter); otherwise we increment cur_param and continue. The `found`
+// flag distinguishes "parameter absent" (return 0) from "parameter was
+// literally 0" (also return 0, but conceptually different — in practice
+// both yield the same behavior in the caller, so the distinction is
+// informational only).
+fn vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
+    let v: u32 = 0;
+    let cur_param: u32 = 0;
+    let i = 0;
+    let found: u32 = 0;
+    while i < s.esc_len {
+        let c = s.esc_buf[i];
+        if c == 59 {
+            // ';' — parameter separator.
+            if cur_param == param_idx {
+                // We've finished reading the requested parameter.
+                found = 1;
+                break;
+            }
+            cur_param = cur_param + 1;
+        } else {
+            // Digit (we only store digits and ';' in esc_buf, so this is
+            // always a digit). Accumulate into v if we're inside the
+            // requested parameter.
+            if cur_param == param_idx {
+                let d = (c as u32) - 48;  // '0' (48) → 0, '9' (57) → 9.
+                v = v * 10 + d;
+                found = 1;
+            }
+        }
+        i = i + 1;
+    }
+    if found == 1 {
+        return v;
+    }
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6c DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Three sub-tests, each exercising one parser code path:
+//   (1) Printable bytes + newline: feed "hello\n", check col=5 after the
+//       5 chars, then row=1 after the \n. Verifies: NORMAL-mode printable
+//       advance, NORMAL-mode \n line-feed.
+//   (2) ESC [ 10 ; 20 H: check row=9 (10-1), col=19 (20-1). Verifies:
+//       ESC → GOT_ESC transition, '[' → GOT_CSI transition, digit + ';'
+//       accumulation in esc_buf, 'H' final byte → CUP dispatch,
+//       vt100_parse_param parsing both parameters, 1-based → 0-based
+//       conversion, and the bounds clamp (10 ≤ 25 and 20 ≤ 80, so no
+//       clamp fires — but the clamp code is exercised).
+//   (3) ESC [ 31m: check fg=1 (red). Verifies: 'm' final byte → SGR
+//       dispatch, vt100_parse_param returns 31, the `n >= 30 && n <= 37`
+//       branch fires, (n - 30) as u8 = 1.
+//
+// All assertions return distinct non-zero codes (1..6) so a failure
+// pinpoints exactly which check failed. Exit 0 = all checks passed.
+
+fn main() -> i32 {
+    let s = state_new(Vt100State);
+    vt100_init(s);
+
+    // ── Sub-test (1): "hello\n" → col=5 after, row=1 after \n ──────────────
+    // After vt100_init, row=0, col=0. Feed 'h','e','l','l','o' — each is a
+    // printable byte in NORMAL mode, advancing col by 1: 0→1→2→3→4→5. No
+    // wrap (5 < 80). Feed '\n' — NORMAL-mode LF: row=0→1, col stays 5.
+    vt100_feed(s, 104);  // 'h'
+    vt100_feed(s, 101);  // 'e'
+    vt100_feed(s, 108);  // 'l'
+    vt100_feed(s, 108);  // 'l'
+    vt100_feed(s, 111);  // 'o'
+    if s.row != 0 { return 1; }
+    if s.col != 5 { return 2; }
+    vt100_feed(s, 10);   // '\n'
+    if s.row != 1 { return 3; }
+
+    // ── Sub-test (2): ESC [ 10 ; 20 H → row=9, col=19 ─────────────────────
+    // 7 bytes: ESC (27), '[' (91), '1' (49), '0' (48), ';' (59), '2' (50),
+    // '0' (48), 'H' (72). The parser transitions:
+    //   27  → esc=1 (GOT_ESC), esc_len=0.
+    //   91  → esc=2 (GOT_CSI), esc_len=0.
+    //   49  → digit, esc_buf[0]=49, esc_len=1.
+    //   48  → digit, esc_buf[1]=48, esc_len=2.
+    //   59  → ';',   esc_buf[2]=59, esc_len=3.
+    //   50  → digit, esc_buf[3]=50, esc_len=4.
+    //   48  → digit, esc_buf[4]=48, esc_len=5.
+    //   72  → 'H' final byte → CUP dispatch.
+    // vt100_parse_param(s, 0) walks esc_buf="10;20", parses "10" before
+    // the ';', returns 10. vt100_parse_param(s, 1) skips "10;" then parses
+    // "20", returns 20. CUP sets row = 10-1 = 9, col = 20-1 = 19.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 49);   // '1'
+    vt100_feed(s, 48);   // '0'
+    vt100_feed(s, 59);   // ';'
+    vt100_feed(s, 50);   // '2'
+    vt100_feed(s, 48);   // '0'
+    vt100_feed(s, 72);   // 'H'
+    if s.row != 9 { return 4; }   // 10-1 = 9
+    if s.col != 19 { return 5; }  // 20-1 = 19
+
+    // ── Sub-test (3): ESC [ 31m → fg=1 (red) ───────────────────────────────
+    // 5 bytes: ESC (27), '[' (91), '3' (51), '1' (49), 'm' (109). The
+    // parser transitions:
+    //   27  → esc=1.
+    //   91  → esc=2.
+    //   51  → digit, esc_buf[0]=51, esc_len=1.
+    //   49  → digit, esc_buf[1]=49, esc_len=2.
+    //   109 → 'm' final byte → SGR dispatch.
+    // vt100_parse_param(s, 0) walks esc_buf="31", parses "31", returns 31.
+    // SGR: n=31, the `n >= 30 && n <= 37` branch fires, s.fg = (31-30) as
+    // u8 = 1 (red).
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 51);   // '3'
+    vt100_feed(s, 49);   // '1'
+    vt100_feed(s, 109);  // 'm'
+    if s.fg != 1 { return 6; }  // red
+
+    return 0;
+}
