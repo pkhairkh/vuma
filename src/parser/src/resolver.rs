@@ -433,11 +433,16 @@ impl ModuleResolver {
                         // Only report if the sources differ.
                         let (existing_source, _) = e.get();
                         if *existing_source != import.path {
-                            // Keep the first one but report the conflict.
-                            errors.push(ResolveError::NameConflict {
-                                name: name.clone(),
-                                sources: seen_names[&name].clone(),
-                            });
+                            // Allow duplicate names across modules — the
+                            // first definition wins (same policy as
+                            // merge_module_asts). This is essential for the
+                            // kernel's import pattern where many modules
+                            // re-declare the same layouts (ByteBuf,
+                            // ConsoleStr, TrapFrame, etc.) and the same
+                            // helper functions (pt_get_pid, etc.).
+                            // The merge_module_asts pass in pipeline.rs
+                            // handles the actual dedup with structural
+                            // equivalence checking.
                         }
                     }
                 }
