@@ -271,3 +271,13 @@ done
   (5,832+ programs).
 - [`womb/kernel/README.md`](../womb/kernel/README.md) — the VWK kernel
   source tree (75 PMT-pure `.vuma` files).
+
+### Floating-point (3 files)
+
+| File | Description |
+|------|-------------|
+| `float_math.vuma` | FP type conversions (`inttofloat`/`uinttofloat`/`floattoint`/`floattouint`/`floattofloat`) and arithmetic on `f32`/`f64`; expected exit 100. Demonstrates all 5 `CastKind` variants and the IVE invariants (Liveness, Interpretation, Origin, Cleanup). |
+| `fp_bench.vuma` | Performance microbenchmark: 1M `f64` additions in a loop. Used by F4a (FP-aware regalloc) to measure instruction-count reduction. Expected exit 0. |
+| `fp_vec_sum.vuma` | Vectorization demo: sum a 1024-element `f32` array. Used by F4c (FP loop vectorization) to verify SSE `ADDPS` / AArch64 `FADD` vector emission. Expected exit 0. |
+
+See `docs/fp_backends.md` for the per-backend FP capability matrix (which of the 19 backends emit native FPU instructions for each operation).

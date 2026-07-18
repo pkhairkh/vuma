@@ -1126,7 +1126,17 @@ impl LspServer {
         for (name, range, ty) in &info.variables {
             if name == &word {
                 let type_str = ty.as_deref().unwrap_or("unknown");
-                let markdown = format!("```vuma\nlet {}: {}\n```", name, type_str);
+                // F5a: append an IEEE 754 width note for f32/f64 vars
+                // so the hover tooltip surfaces the FP-ness of the
+                // binding (mirrors how u32/i64 hover but adds the
+                // precision tooltip added by F1's FP codegen rollout).
+                let markdown = match float_type_note(type_str) {
+                    Some(note) => format!(
+                        "```vuma\nlet {}: {}\n```\n\n{}",
+                        name, type_str, note,
+                    ),
+                    None => format!("```vuma\nlet {}: {}\n```", name, type_str),
+                };
                 return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
@@ -1135,7 +1145,14 @@ impl LspServer {
         for (name, range, ty) in &info.constants {
             if name == &word {
                 let type_str = ty.as_deref().unwrap_or("unknown");
-                let markdown = format!("```vuma\nconst {}: {}\n```", name, type_str);
+                // F5a: IEEE 754 width note for f32/f64 consts.
+                let markdown = match float_type_note(type_str) {
+                    Some(note) => format!(
+                        "```vuma\nconst {}: {}\n```\n\n{}",
+                        name, type_str, note,
+                    ),
+                    None => format!("```vuma\nconst {}: {}\n```", name, type_str),
+                };
                 return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
         }
@@ -1170,6 +1187,22 @@ impl LspServer {
                 let markdown = format!("```vuma\ntrait {}\n```", name);
                 return Ok(build_hover(markdown, range.clone()).to_json_value());
             }
+        }
+
+        // F5a: FP-conversion builtins (inttofloat, uinttofloat,
+        // floattoint, floattouint, floattofloat) are not user-defined
+        // and so won't appear in any DocumentInfo vec.  Surface their
+        // hover directly so IDEs can offer signature help on the 5
+        // FP-cast builtins added by F1's FP codegen rollout.  This is
+        // the LSP-side equivalent of `signatureHelp` — the LSP doesn't
+        // implement a separate signatureHelp handler yet, so we fold
+        // the signature into the hover markdown.
+        if let Some(markdown) = float_builtin_hover(&word) {
+            // Zero-width range at the requested position; the LSP
+            // client already knows the word extent from the hover
+            // request and will highlight it independently.
+            let range = Range::at(line as u32, character as u32);
+            return Ok(build_hover(markdown, range).to_json_value());
         }
 
         Ok(JsonValue::Null)
@@ -1445,7 +1478,106 @@ impl LspServer {
             });
         }
 
+        // F5a: lightweight float-op-reject heuristic (Scenario B).
+        //
+        // The LSP doesn't currently invoke the compiler's verify pass,
+        // so we approximate F2a's `verify_float_op` (see
+        // `src/codegen/src/backend.rs`) by scanning the token stream
+        // for float-typed operands adjacent to bitwise/shift/remainder
+        // operators (`&`, `|`, `^`, `<<`, `>>`, `%`).  This catches
+        // the common literal case `3.0 & 1.0` and also flags
+        // `f32`/`f64` let-bindings participating in bad ops, but
+        // won't catch temporaries produced by sub-expressions.
+        //
+        // TODO F5a: surface verify_float_op errors (from backend.rs,
+        //   see F2a) as diagnostics.  Requires wiring the LSP to
+        //   invoke the compiler's verify pass on each
+        //   text-document-did-change notification, then forwarding
+        //   the resulting `float-op-reject` errors here instead of
+        //   (or in addition to) the token-level heuristic.
+        diagnostics.extend(self.check_float_op_reject(doc));
+
         diagnostics
+    }
+
+    /// Lightweight `float-op-reject` diagnostic heuristic (F5a).
+    ///
+    /// Scans the token stream for a `TokenKind::Float` literal, or an
+    /// `TokenKind::Ident` whose name resolves to a known `f32`/`f64`
+    /// let-binding, that is immediately adjacent to a bitwise, shift,
+    /// or remainder operator (`&`, `|`, `^`, `<<`, `>>`, `%`).
+    ///
+    /// Matches F2a's `verify_float_op` in `src/codegen/src/backend.rs`
+    /// for the common literal-literal case (e.g. `3.0 & 1.0`); does
+    /// NOT track expression-temporary types, so float-typed
+    /// temporaries produced by sub-expressions won't be flagged
+    /// here — that requires the compiler's verify pass, see the TODO
+    /// in [`Self::compute_diagnostics`].
+    fn check_float_op_reject(&self, doc: &VumaDocument) -> Vec<Diagnostic> {
+        let mut lexer = Lexer::new(&doc.text);
+        let tokens = lexer.collect_tokens();
+
+        // Collect names of variables known (from the parsed AST) to
+        // be `f32` or `f64`.  Only user-visible let bindings are
+        // tracked; temporaries produced by expressions are invisible
+        // to the LSP, which is fine for a heuristic.  If the parse
+        // failed entirely `info_cache` may be empty for this URI —
+        // `unwrap_or_default()` yields an empty set and we degrade
+        // to literal-only detection.
+        let float_var_names: std::collections::HashSet<String> = self
+            .info_cache
+            .get(&doc.uri)
+            .map(|info| {
+                info.variables
+                    .iter()
+                    .filter_map(|(name, _, ty)| {
+                        ty.as_deref()
+                            .filter(|t| *t == "f32" || *t == "f64")
+                            .map(|_| name.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let is_bad_op = |k: TokenKind| -> bool {
+            matches!(
+                k,
+                TokenKind::Ampersand
+                    | TokenKind::Pipe
+                    | TokenKind::Caret
+                    | TokenKind::Shl
+                    | TokenKind::Shr
+                    | TokenKind::Percent
+            )
+        };
+
+        let mut out = Vec::new();
+        for i in 0..tokens.len() {
+            let tok = &tokens[i];
+            let is_float_operand = tok.kind == TokenKind::Float
+                || (tok.kind == TokenKind::Ident
+                    && float_var_names.contains(&tok.lexeme));
+            if !is_float_operand {
+                continue;
+            }
+            let left_bad = i > 0 && is_bad_op(tokens[i - 1].kind);
+            let right_bad = i + 1 < tokens.len() && is_bad_op(tokens[i + 1].kind);
+            if !left_bad && !right_bad {
+                continue;
+            }
+            let range = self.span_to_range(&doc.text, tokens[i].span);
+            out.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::Error),
+                code: Some(json_str("float-op-reject")),
+                source: Some("vuma-lsp".to_string()),
+                message: "float-op-reject: bitwise/shift/remainder ops are \
+                          not valid on f32/f64 (see verify_float_op in \
+                          backend.rs)"
+                    .to_string(),
+            });
+        }
+        out
     }
 
     /// Convert a byte-offset Span to an LSP Range.
@@ -1777,9 +1909,90 @@ fn is_ident_char(c: char) -> bool {
 
 /// Format a VUMA type as a string for display.
 ///
-/// Delegates to the `Display` impl on `Type` which handles all variants.
+/// Delegates to the `Display` impl on `Type` for most variants, but
+/// special-cases the FP primitive types so downstream hover/signature
+/// builders can recognize them by string identity.  `f32` (32-bit IEEE
+/// 754 single-precision) and `f64` (64-bit IEEE 754 double-precision)
+/// became first-class as of F1's FP codegen rollout on the alpha/hppa/
+/// s390x/sparc64 backends; see [`float_type_note`] for the matching
+/// hover note.
 fn format_type(ty: &Type) -> String {
-    ty.to_string()
+    match ty {
+        // f32 — 32-bit IEEE 754 single-precision float (FP codegen F1)
+        // f64 — 64-bit IEEE 754 double-precision float (FP codegen F1)
+        Type::BDBase(name) => match name.as_str() {
+            "f32" => "f32".to_string(), // 32-bit IEEE 754 single-precision
+            "f64" => "f64".to_string(), // 64-bit IEEE 754 double-precision
+            _ => name.clone(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// Return an optional hover note describing the IEEE 754 width of a VUMA
+/// primitive type.  Returns `None` for non-FP types so callers can
+/// `if let Some(note) = ...` skip the extra markdown line.
+///
+/// Used by [`LspServer::handle_text_document_hover`] to enrich variable
+/// and constant hovers when their declared type is `f32` or `f64`.
+fn float_type_note(ty_str: &str) -> Option<&'static str> {
+    match ty_str {
+        "f32" => Some("32-bit IEEE 754 single-precision float"),
+        "f64" => Some("64-bit IEEE 754 double-precision float"),
+        _ => None,
+    }
+}
+
+/// Return the hover markdown for one of the five FP-conversion builtins
+/// (`inttofloat`, `uinttofloat`, `floattoint`, `floattouint`,
+/// `floattofloat`), or `None` if `name` is not a recognized FP builtin.
+///
+/// Each builtin maps to a `CastKind` variant in the VUMA IR (see
+/// `src/codegen/src/ir.rs::CastKind`); the IR opcode names (which the
+/// codegen prints in `CastKind::fmt`, lines ~1221-1225) are surfaced in
+/// the hover so users can grep for the lowering.  These builtins are
+/// invoked as ordinary function calls in VUMA source but are not
+/// user-defined, so the hover handler checks them explicitly before
+/// falling through to `DocumentInfo` lookups.
+fn float_builtin_hover(name: &str) -> Option<String> {
+    let (sig, doc) = match name {
+        // inttofloat — signed i64 -> f64, maps to CastKind::IntToFloat
+        "inttofloat" => (
+            "fn inttofloat(x: i64) -> f64",
+            "Convert a signed integer to `f64` (IEEE 754 double). \
+             Maps to `CastKind::IntToFloat` in the IR.",
+        ),
+        // uinttofloat — unsigned u64 -> f64, maps to CastKind::UIntToFloat
+        "uinttofloat" => (
+            "fn uinttofloat(x: u64) -> f64",
+            "Convert an unsigned integer to `f64` (IEEE 754 double). \
+             Maps to `CastKind::UIntToFloat` in the IR.",
+        ),
+        // floattoint — f64 -> signed i64 (trunc), maps to CastKind::FloatToInt
+        "floattoint" => (
+            "fn floattoint(x: f64) -> i64",
+            "Convert `f64` to signed `i64` by truncation (round toward zero). \
+             Maps to `CastKind::FloatToInt` in the IR.",
+        ),
+        // floattouint — f64 -> unsigned u64 (trunc), maps to CastKind::FloatToUInt
+        "floattouint" => (
+            "fn floattouint(x: f64) -> u64",
+            "Convert `f64` to unsigned `u64` by truncation (round toward zero). \
+             Maps to `CastKind::FloatToUInt` in the IR.",
+        ),
+        // floattofloat — f32 <-> f64 widen/narrow, maps to CastKind::FloatToFloat
+        "floattofloat" => (
+            "fn floattofloat(x: f32) -> f64  // widen\n\
+             fn floattofloat(x: f64) -> f32  // narrow",
+            "Widen `f32` -> `f64` or narrow `f64` -> `f32`. \
+             Maps to `CastKind::FloatToFloat` in the IR.",
+        ),
+        _ => return None,
+    };
+    Some(format!(
+        "```vuma\n{}\n```\n\n{}\n\nFloat-conversion builtin (FP codegen F1).",
+        sig, doc,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2120,5 +2333,214 @@ mod tests {
         let legend = SemanticTokensLegend::default();
         assert!(legend.token_types.len() >= 18);
         assert!(legend.token_modifiers.len() >= 10);
+    }
+
+    // ----- F5a: FP hover / signature / diagnostic tests ----------------
+
+    #[test]
+    fn test_format_type_fp() {
+        // f32 — 32-bit IEEE 754 single-precision
+        assert_eq!(format_type(&Type::BDBase("f32".to_string())), "f32");
+        // f64 — 64-bit IEEE 754 double-precision
+        assert_eq!(format_type(&Type::BDBase("f64".to_string())), "f64");
+        // Regression: existing primitives still render canonically.
+        assert_eq!(format_type(&Type::BDBase("u32".to_string())), "u32");
+        assert_eq!(format_type(&Type::BDBase("i64".to_string())), "i64");
+    }
+
+    #[test]
+    fn test_float_type_note() {
+        assert_eq!(
+            float_type_note("f32"),
+            Some("32-bit IEEE 754 single-precision float")
+        );
+        assert_eq!(
+            float_type_note("f64"),
+            Some("64-bit IEEE 754 double-precision float")
+        );
+        // Non-FP primitives get no note.
+        assert_eq!(float_type_note("u32"), None);
+        assert_eq!(float_type_note("i64"), None);
+        assert_eq!(float_type_note("bool"), None);
+        assert_eq!(float_type_note(""), None);
+    }
+
+    #[test]
+    fn test_float_builtin_hover_all_five() {
+        let md = float_builtin_hover("inttofloat").expect("inttofloat should resolve");
+        assert!(md.contains("inttofloat"));
+        assert!(md.contains("CastKind::IntToFloat"));
+        assert!(md.contains("i64"));
+        assert!(md.contains("f64"));
+
+        let md = float_builtin_hover("uinttofloat").expect("uinttofloat should resolve");
+        assert!(md.contains("CastKind::UIntToFloat"));
+
+        let md = float_builtin_hover("floattoint").expect("floattoint should resolve");
+        assert!(md.contains("CastKind::FloatToInt"));
+
+        let md = float_builtin_hover("floattouint").expect("floattouint should resolve");
+        assert!(md.contains("CastKind::FloatToUInt"));
+
+        let md = float_builtin_hover("floattofloat").expect("floattofloat should resolve");
+        assert!(md.contains("CastKind::FloatToFloat"));
+        assert!(md.contains("widen"));
+        assert!(md.contains("narrow"));
+
+        // Non-builtin identifiers resolve to None.
+        assert!(float_builtin_hover("not_a_builtin").is_none());
+        assert!(float_builtin_hover("").is_none());
+    }
+
+    #[test]
+    fn test_hover_fp_builtin_inttofloat() {
+        let mut server = LspServer::new();
+        server.initialized = true;
+
+        //        fn main() { let x = inttofloat(3); }
+        // column 0123456789012345678901234567890123456
+        //                 1111111111222222222233333333
+        // `inttofloat` occupies columns 20..30 on line 0.
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn main() { let x = inttofloat(3); }",
+        );
+        server.handle_text_document_did_open(open_params);
+
+        let hover_params = make_position_params("file:///test.vuma", 0, 20);
+        let result = server.handle_text_document_hover(hover_params);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(
+            value != JsonValue::Null,
+            "expected hover for `inttofloat`, got Null"
+        );
+        let markdown = value
+            .get("contents")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            markdown.contains("inttofloat"),
+            "markdown should mention inttofloat: {}",
+            markdown
+        );
+        assert!(
+            markdown.contains("CastKind::IntToFloat"),
+            "markdown should document CastKind::IntToFloat: {}",
+            markdown
+        );
+    }
+
+    #[test]
+    fn test_hover_fp_variable_ieee_note() {
+        let mut server = LspServer::new();
+        server.initialized = true;
+
+        // `x` is at column 16 on line 0.
+        //        fn main() { let x: f32 = 3.0; }
+        // column 0123456789012345678901234567890123
+        //                 1111111111222222222233333
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn main() { let x: f32 = 3.0; }",
+        );
+        server.handle_text_document_did_open(open_params);
+
+        let hover_params = make_position_params("file:///test.vuma", 0, 16);
+        let result = server.handle_text_document_hover(hover_params);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(
+            value != JsonValue::Null,
+            "expected hover for f32 variable, got Null"
+        );
+        let markdown = value
+            .get("contents")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(
+            markdown.contains("f32"),
+            "markdown should mention f32: {}",
+            markdown
+        );
+        assert!(
+            markdown.contains("IEEE 754"),
+            "markdown should note IEEE 754 precision: {}",
+            markdown
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_float_op_reject_literal() {
+        let server = LspServer::new();
+        // `3.0 & 1.0` — both operands are float literals adjacent to
+        // the bitwise `&`.  F2a's `verify_float_op` rejects this at
+        // compile time; the LSP mirrors with a token-level heuristic.
+        let text = "fn main() { let x = 3.0 & 1.0; }";
+        let doc = VumaDocument {
+            uri: "file:///test.vuma".to_string(),
+            text: text.to_string(),
+            version: 1,
+        };
+
+        let diagnostics = server.compute_diagnostics(&doc);
+        let float_op_diags: Vec<&Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| {
+                d.code
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.contains("float-op-reject"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !float_op_diags.is_empty(),
+            "expected at least one float-op-reject diagnostic, got: {:?}",
+            diagnostics
+        );
+        // Each float-op-reject diagnostic should be an Error.
+        for d in &float_op_diags {
+            assert_eq!(d.severity, Some(DiagnosticSeverity::Error));
+        }
+    }
+
+    #[test]
+    fn test_diagnostic_float_op_reject_variable() {
+        let mut server = LspServer::new();
+        server.initialized = true;
+
+        // Open a document where a known f64 variable participates in
+        // a bad shift op.  `reparse_document` populates `info_cache`,
+        // so `check_float_op_reject` can resolve `pi` to `f64`.
+        let open_params = make_text_document_params(
+            "file:///test.vuma",
+            "fn main() { let pi: f64 = 3.14; let y = pi << 1; }",
+        );
+        server.handle_text_document_did_open(open_params);
+
+        // Pull the document back out and recompute diagnostics on it
+        // (the open handler already published them; we recompute to
+        // inspect without intercepting stdout).
+        let doc = server.documents.get("file:///test.vuma").unwrap();
+        let diagnostics = server.compute_diagnostics(doc);
+        let flagged = diagnostics.iter().any(|d| {
+            d.code
+                .as_ref()
+                .and_then(|c| c.as_str())
+                .map(|s| s.contains("float-op-reject"))
+                .unwrap_or(false)
+        });
+        assert!(
+            flagged,
+            "expected float-op-reject for `pi << 1` where pi: f64, got: {:?}",
+            diagnostics
+        );
     }
 }
