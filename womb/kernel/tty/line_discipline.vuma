@@ -1,0 +1,441 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/tty/line_discipline.vuma
+// VWK TTY line discipline — ring buffer + line editor. — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6b layer of the VWK kernel: the TTY line discipline.
+// K6a (womb/kernel/drivers/uart.vuma) provided the byte-level UART driver
+// (uart_putc_8250 / uart_getc_8250 / uart_putc_pl011). The UART driver is
+// a dumb byte pipe: bytes in, bytes out. A real terminal needs more —
+// users want backspace to actually delete a character, Ctrl-C to abort the
+// current input line, Ctrl-D to signal end-of-input, and a `readline()`-style
+// API that returns one complete line at a time. That's the line discipline.
+//
+// ── What K6b provides ──────────────────────────────────────────────────────
+//   tty_init(tty)              — zero the ring buffer, default cooked+echo.
+//   tty_receive(tty, c)        — push one byte from the UART through the
+//                                discipline (handles Ctrl-C / Ctrl-D /
+//                                backspace / CR / raw-vs-cooked).
+//   tty_push(tty, c)           — append one byte to the ring buffer.
+//   tty_pop(tty) -> u32        — consume one byte (or 256 if empty).
+//   tty_readline(tty, out, max) -> i64
+//                              — pop bytes into `out` until newline / EOF /
+//                                max, returning the byte count.
+//
+// ── Ring buffer geometry ──────────────────────────────────────────────────
+// The ring is a flat [u8; 256] array with three cursors:
+//   head  (u32) — read position (next byte tty_pop will return).
+//   tail  (u32) — write position (next byte tty_push will store).
+//   count (u32) — bytes currently in the buffer (head..tail modulo 256).
+// Because the buffer is exactly 256 bytes and the cursors are u32, every
+// cursor advance uses `& 255` to wrap (instead of `% 256`): for power-of-2
+// sizes, AND and modulo are equivalent, but AND lowers to a single AND
+// instruction (no DIV). The wrap expressions:
+//   forward:   (cur + 1)   & 255      // push / pop advance
+//   backward:  (cur + 255) & 255      // backspace retreat (= cur - 1 mod 256)
+// `cur + 255` is used instead of `cur - 1` because u32 is unsigned and
+// `0 - 1` would underflow to 4294967295 (well outside the [0, 255] range).
+// `0 + 255 = 255`, then `& 255 = 255` — which is the correct "wrap from 0
+// back to 255" for a 256-byte ring. (No backspace from an empty buffer
+// ever happens: tty_receive checks `tty.count > 0` first.)
+//
+// ── Cooked vs. raw mode ────────────────────────────────────────────────────
+// Cooked (line) mode (default, `tty.raw == 0`):
+//   - Bytes are buffered until a newline is seen.
+//   - Ctrl-C (byte 3)   → SIGINT — flush the entire buffer (head=tail=count=0).
+//   - Ctrl-D (byte 4)   → EOF   — push a single 0 byte to signal end-of-input.
+//   - Backspace (8 or 127) → delete the last byte in the buffer (retreat tail).
+//   - CR (byte 13)     → translate to LF (byte 10).
+//   - Any other byte   → push as-is.
+// Raw mode (`tty.raw == 1`):
+//   - Bytes are pushed directly to the buffer with no editing / translation.
+//   - Used for raw binary I/O (e.g. terminal apps that want every keystroke
+//     immediately, like vim / less / ncurses-based TUIs).
+//
+// The cooked-mode translation table (decimal ASCII values, per the K6b
+// contract's IMPORTANT note):
+//     3   = Ctrl-C  (0x03) — SIGINT, flush buffer.
+//     4   = Ctrl-D  (0x04) — EOF, push 0 byte.
+//     8   = BS      (0x08) — backspace (PC-style).
+//     10  = LF      (0x0A) — newline, end-of-line.
+//     13  = CR      (0x0D) — carriage return → translated to LF.
+//     127 = DEL     (0x7F) — backspace (Unix/Mac-style).
+// All other byte values pass through unchanged.
+//
+// ── EOF sentinel ───────────────────────────────────────────────────────────
+// Ctrl-D pushes a literal 0 byte into the ring buffer. tty_readline sees the
+// 0 byte and breaks out of its loop, returning whatever bytes were already
+// accumulated (could be 0 bytes if Ctrl-D was the first input — that's the
+// "EOF on empty line" case, e.g. `cat` with no input → reads 0 bytes →
+// exits). The 0 byte is consumed (popped) but NOT copied to `out` — same
+// as the LF byte (also consumed, not copied). This matches POSIX read(2)
+// semantics: the LF/EOF terminates the line but is not included in the
+// returned buffer (the caller can re-add it if it wants).
+//
+// ── Empty-buffer sentinel ──────────────────────────────────────────────────
+// tty_pop returns 256 (a u32 value that's OUTSIDE the [0, 255] byte range)
+// to signal "buffer empty". 256 is the natural sentinel because:
+//   (a) it fits in u32 (the function's return type) without overflow,
+//   (b) it's distinct from every valid byte value [0, 255],
+//   (c) the comparison `c == 256` lowers to a single CMP + JE — no
+//       separate "is_empty" flag needs to be threaded through callers.
+// tty_readline checks `tty.count == 0` BEFORE calling tty_pop (an
+// optimization — avoids the call when definitely empty), and also checks
+// `c == 256` AFTER the call (defensive — handles the race where count
+// changed between the check and the pop, which can't happen in this
+// single-threaded code but is good defensive style).
+//
+// ── Why no SIGINT signal is actually sent ──────────────────────────────────
+// The contract says "Ctrl-C sends SIGINT" but the K6b implementation just
+// flushes the buffer (head=tail=count=0). The actual signal delivery to the
+// foreground process group requires K4's task layer + K3's syscall layer +
+// a TTY foreground-process-group pointer (which doesn't exist yet). K6b's
+// stub is the line-discipline half of SIGINT: the byte 3 is consumed and
+// the in-progress line is discarded. A later wave (K7? K8?) will hook the
+// actual signal_raise() call after the flush. Same for Ctrl-D: K6b pushes
+// the 0 byte; a later wave will close the TTY's read side when readline
+// returns 0 from an empty buffer (true POSIX EOF semantics).
+//
+// ── Layouts (TtyLine + LineBuf) ─────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares every
+// layout it uses. The two layouts are NEW (K6b introduces them — they
+// don't exist in any prior wave):
+//
+//   TtyLine (268 bytes total):
+//     buf   @ 0    [u8; 256]  — the ring buffer (256 bytes).
+//     head  @ 256  u32        — read cursor (4 bytes).
+//     tail  @ 260  u32        — write cursor (4 bytes).
+//     count @ 264  u32        — bytes currently buffered (4 bytes).
+//     raw   @ 268  u8         — 1 = raw mode, 0 = cooked (line) mode.
+//     echo  @ 269  u8         — 1 = echo input to output, 0 = silent.
+//   (Plus 6 bytes of trailing padding to align the struct to 8 bytes — the
+//   VUMA layout pads to the largest field's alignment, which is 4 bytes
+//   for the u32 fields. The u8 fields pack tight at the end.)
+//
+//   LineBuf (256 bytes total):
+//     data  @ 0    [u8; 256]  — output buffer for tty_readline.
+//   LineBuf is intentionally separate from TtyLine.buf — readline COPIES
+//   bytes from the ring into the caller's LineBuf (the caller owns the
+//   LineBuf and can read it after readline returns). The ring is then
+//   free to receive more bytes immediately. This is the standard POSIX
+//   read(2) contract: read() copies into the caller's buffer, doesn't
+//   hand out pointers into the kernel's internal buffer.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. TtyLine
+// and LineBuf are flat-byte-array structs held in `___pmt_buffer`-backed
+// State<T> slots; the CALLER allocates them via `state_new(TtyLine)` /
+// `state_new(LineBuf)` (in the case of the self-test, in main()). The
+// State<T> handles are passed by reference to tty_init / tty_receive /
+// tty_push / tty_pop / tty_readline, which mutate the State in place
+// (no copy-out, no move semantics — VUMA's State<T> is a borrow of the
+// ___pmt_buffer slot). The `tty.tail = (tty.tail + 1) & 255` syntax is
+// State-field self-update (lowered to a load-modify-store through the
+// State pointer — the K4a task.vuma `tbl.count = tbl.count + 1` pattern).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f/K6a). Decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see K5a's file.vuma header for the same
+// rationale). The constants:
+//   3    = Ctrl-C (SIGINT — flush buffer).
+//   4    = Ctrl-D (EOF — push 0 byte).
+//   8    = BS (PC-style backspace).
+//   10   = LF (newline — end-of-line in readline).
+//   13   = CR (carriage return → translate to LF).
+//   127  = DEL (Unix/Mac-style backspace).
+//   255  = ring-wrap mask (= 256 - 1).
+//   256  = ring-buffer size + empty-buffer sentinel.
+//   0    = EOF byte / empty-buffer / "raw mode off" / "no echo" sentinel.
+//   1    = "raw mode on" / "echo on".
+// ASCII test characters:
+//   104  = 'h'    101  = 'e'    108  = 'l'    111  = 'o'
+//   97   = 'a'    98   = 'b'    99   = 'c'
+//   120  = 'x'    121  = 'y'
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares only TtyLine + LineBuf (both
+// new in K6b — no prior wave's layouts need re-declaring here, since
+// K6b's only I/O is via State<TtyLine> and State<LineBuf>, not via
+// external layouts). K6c (char device framework) will re-declare TtyLine
+// byte-identically when it wraps the TTY as /dev/ttyS0; K6d (serial
+// console) will re-declare LineBuf when it adds a printf-style formatter.
+//
+// ── No externs ──────────────────────────────────────────────────────────────
+// Unlike K6a (which declares `write` + 4 MMIO trampolines), K6b has NO
+// extern declarations. The line discipline is purely computational — it
+// doesn't touch hardware, doesn't call syscalls, doesn't do FFI. It's
+// the cleanest possible PMT-pure module: layouts + functions + self-test.
+// (A future wave that adds `tty_set_raw(tty, 1)` style ioctls would still
+// not need externs — the discipline is a pure state machine. The
+// integration with the UART driver happens at the CALLER: kmain wires
+// `uart_getc_8250(base) → tty_receive(tty, c)`, and the discipline
+// handles the rest.)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/tty/line_discipline.vuma \
+//         /tmp/tty.bin x86_64 --verify
+//     /tmp/tty.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, no stdout (the self-test is pure — no
+// console output, just integer return codes). The test exercises:
+//   (1) "hello\n" → tty_readline returns 5, out = "hello".
+//   (2) "abc\b\n" → tty_readline returns 2, out = "ab" (backspace deletes 'c').
+//   (3) "xy" + Ctrl-C → tty.count == 0 (Ctrl-C flushes the buffer).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// TtyLine: the line-discipline state for one TTY device. 268 bytes total
+// (256-byte ring + 3×u32 cursors + 2×u8 mode flags, with trailing padding
+// to 4-byte alignment). See the file header for the byte-offset map.
+layout TtyLine = {
+    buf: [u8; 256],   // ring buffer (256 bytes)
+    head: u32,        // read position (next byte tty_pop returns)
+    tail: u32,        // write position (next byte tty_push stores)
+    count: u32,       // bytes currently in buffer (head..tail mod 256)
+    raw: u8,          // 1 = raw mode (passthrough), 0 = cooked (line) mode
+    echo: u8,         // 1 = echo input to output, 0 = silent (unused in K6b)
+}
+
+// LineBuf: a 256-byte output buffer for tty_readline. The caller allocates
+// one (state_new(LineBuf)) and passes it by reference; tty_readline copies
+// bytes from the TTY ring into LineBuf.data[0..n]. Separate from TtyLine.buf
+// so the ring is free to receive more bytes immediately after readline
+// returns (POSIX read(2) semantics — read copies, doesn't lend pointers).
+layout LineBuf = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Line-discipline functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the TTY. Zeros the ring-buffer cursors and sets the default
+// mode (cooked + echo on). Does NOT zero the ring buffer itself —
+// `tty.count == 0` already guarantees no byte will be read from it, so
+// the stale contents are unreachable (the next tty_push will overwrite
+// them in order). A defensive zeroing pass would be 256 byte-stores for
+// no observable benefit; skipped.
+fn tty_init(tty: State<TtyLine>) {
+    tty.head = 0;
+    tty.tail = 0;
+    tty.count = 0;
+    tty.raw = 0;   // cooked mode (line editing on)
+    tty.echo = 1;  // echo on (unused in K6b — no UART output path here)
+}
+
+// Receive a byte from the UART. Process it according to the line discipline:
+//   - Raw mode:     push directly, no translation.
+//   - Cooked mode:  handle Ctrl-C (flush), Ctrl-D (EOF byte), BS / DEL
+//                   (backspace), CR (→ LF), then push.
+// The byte is consumed exactly once — either by being pushed to the ring
+// (raw / regular / LF / Ctrl-D) or by triggering a side-effect-only action
+// (Ctrl-C flush, BS retreat). The function returns void; callers that want
+// echo can call uart_putc_8250(base, c) themselves if tty.echo == 1 (K6b
+// doesn't wire this — it's a K6d concern, see the file header's "No
+// externs" note).
+fn tty_receive(tty: State<TtyLine>, c: u8) {
+    if tty.raw == 1 {
+        // Raw mode: push directly to buffer, no editing / translation.
+        tty_push(tty, c);
+        return;
+    }
+    // Cooked (line) mode — handle control characters first.
+    if c == 3 {
+        // Ctrl-C (0x03): SIGINT — flush the entire buffer.
+        // K6b stub: just clear head/tail/count. A later wave will hook
+        // the actual signal_raise() to deliver SIGINT to the foreground
+        // process group (requires K4's task layer + a TTY fg-pgrp pointer).
+        tty.head = 0;
+        tty.tail = 0;
+        tty.count = 0;
+        return;
+    }
+    if c == 4 {
+        // Ctrl-D (0x04): EOF — push a 0 byte to signal end-of-input.
+        // tty_readline sees the 0 and breaks out of its loop, returning
+        // whatever bytes were already accumulated (0 bytes = empty-line
+        // EOF, the "cat with no input" case).
+        tty_push(tty, 0);
+        return;
+    }
+    if c == 8 || c == 127 {
+        // Backspace (0x08, PC-style BS) or DEL (0x7F, Unix/Mac-style):
+        // retreat the write cursor by one, dropping the last byte. The
+        // `tty.count > 0` guard prevents retreating on an empty buffer
+        // (which would set tail = 255 with count = 0 — a corrupt state).
+        // The retreat expression `(tty.tail + 255) & 255` is `tty.tail - 1`
+        // in modular arithmetic, avoiding u32 underflow (0 - 1 would be
+        // 4294967295; 0 + 255 = 255, then & 255 = 255 — the correct
+        // "wrap from 0 to 255" for a 256-byte ring).
+        if tty.count > 0 {
+            tty.tail = (tty.tail + 255) & 255;  // = (tail - 1) mod 256
+            tty.count = tty.count - 1;
+        }
+        return;
+    }
+    if c == 13 {
+        // Carriage return (0x0D): translate to LF (0x0A). Unix kernels
+        // do this so userspace only ever sees LF as the line terminator,
+        // regardless of whether the terminal sends CR (raw hardware
+        // terminals), CR+LF (DOS / Windows terminals), or LF (Unix
+        // terminals). The K6b self-test only sends LF directly, but a
+        // real terminal hitting Enter typically sends CR (or CR+LF), so
+        // this translation is required for POSIX correctness.
+        tty_push(tty, 10);
+        return;
+    }
+    // Regular character (printable or other control): push as-is.
+    tty_push(tty, c);
+}
+
+// Push a byte into the ring buffer. Stores at buf[tail], advances tail
+// (mod 256), bumps count. Silently drops the byte if the buffer is full
+// (count == 256) — overflow protection. A real kernel would also raise
+// a "bell" / SIGQUIT here, but K6b's silent-drop matches the contract.
+fn tty_push(tty: State<TtyLine>, c: u8) {
+    if tty.count < 256 {
+        tty.buf[tty.tail] = c;
+        tty.tail = (tty.tail + 1) & 255;  // mod 256
+        tty.count = tty.count + 1;
+    }
+}
+
+// Pop a byte from the ring buffer. Returns the byte (0..255), or 256 if
+// the buffer is empty (the sentinel value — see the file header's
+// "Empty-buffer sentinel" note for why 256, not -1 or a separate flag).
+fn tty_pop(tty: State<TtyLine>) -> u32 {
+    if tty.count == 0 {
+        return 256;  // empty
+    }
+    let c = tty.buf[tty.head] as u32;
+    tty.head = (tty.head + 1) & 255;  // mod 256
+    tty.count = tty.count - 1;
+    return c;
+}
+
+// Read a line from the TTY (cooked mode). Pops bytes from the ring into
+// `out.data[0..n]` until one of:
+//   - newline (LF, byte 10) — terminator consumed but NOT copied.
+//   - EOF (byte 0)          — terminator consumed but NOT copied.
+//   - `max` bytes copied    — terminator NOT consumed (caller can read more).
+//   - ring empty            — terminator N/A; returns what we have (in a
+//                             real kernel this would block; in hosted mode
+//                             we just return what's available so far).
+// Returns the number of bytes copied (0..max). The terminator (LF / EOF)
+// is always consumed from the ring (popped) when encountered, even though
+// it's not copied to `out` — this matches POSIX read(2) on a terminal:
+// the LF is "used up" by the read, not left for the next read.
+//
+// `max: u64` (not u32) so callers can pass large buffer sizes without
+// overflow; the `max as i64` cast in the loop bound is safe for any
+// realistic max (< 2^63). The `n as u32` cast for indexing `out.data`
+// is safe because `n < max` and `max <= 256` for the LineBuf layout
+// (a larger max would just stop at the 256-byte LineBuf boundary, which
+// is fine — the function never writes out-of-bounds).
+fn tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
+    let n: i64 = 0;
+    while n < max as i64 {
+        // Fast-path: if the ring is empty, return what we have. In a
+        // real kernel this would block waiting for more input; in hosted
+        // mode (and in the self-test) we just return the partial line.
+        if tty.count == 0 {
+            break;
+        }
+        let c = tty_pop(tty);
+        // Defensive: tty_pop returns 256 if empty. We already checked
+        // count above, but re-checking after the pop is good style (the
+        // count check + pop isn't atomic in the abstract; here it is,
+        // but the pattern is defensive against future concurrency).
+        if c == 256 {
+            break;  // empty
+        }
+        if c == 10 {
+            // LF (newline) — end of line. The LF is consumed (popped)
+            // but NOT copied to out, matching POSIX read(2) on a TTY.
+            break;
+        }
+        if c == 0 {
+            // EOF byte (pushed by Ctrl-D) — end of input. The 0 is
+            // consumed (popped) but NOT copied to out, matching POSIX
+            // read(2) EOF semantics (read returns 0 = EOF, not a buffer
+            // containing a 0 byte).
+            break;
+        }
+        // Regular byte — copy to out and advance.
+        out.data[n as u32] = c as u8;
+        n = n + 1;
+    }
+    return n;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6b DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Three sub-tests, each exercising one cooked-mode code path:
+//   (1) Plain line: receive "hello\n", readline → returns 5, out = "hello".
+//       Verifies: regular byte push, LF termination, byte-for-byte copy.
+//   (2) Backspace: receive "abc\b\n", readline → returns 2, out = "ab".
+//       Verifies: BS retreat removes 'c' from the ring before the LF
+//       is pushed; readline then pops 'a', 'b', LF (break) → 2 bytes.
+//   (3) Ctrl-C flush: receive "xy" + Ctrl-C, check tty.count == 0.
+//       Verifies: Ctrl-C resets head/tail/count to 0, discarding "xy".
+//
+// All assertions return distinct non-zero codes (1, 2, 3, 4, 5, 6, 7) so
+// a failure pinpoints exactly which check failed (e.g. return 4 = the
+// backspace test's byte-count check failed, return 5 = the backspace
+// test's first-byte check failed, etc.). Exit 0 = all checks passed.
+
+fn main() -> i32 {
+    let tty = state_new(TtyLine);
+    let line = state_new(LineBuf);
+    tty_init(tty);
+
+    // ── Sub-test (1): plain line "hello\n" ──────────────────────────────────
+    // Receive "hello\n" in cooked mode (default). The 6 bytes (h, e, l, l,
+    // o, LF) push into the ring at positions 0..5, tail=6, count=6.
+    // readline pops h, e, l, l, o (5 bytes copied to out), then sees LF
+    // and breaks — returns 5. out.data[0..5] = "hello".
+    tty_receive(tty, 104);  // 'h'
+    tty_receive(tty, 101);  // 'e'
+    tty_receive(tty, 108);  // 'l'
+    tty_receive(tty, 108);  // 'l'
+    tty_receive(tty, 111);  // 'o'
+    tty_receive(tty, 10);   // '\n'
+    let n = tty_readline(tty, line, 256);
+    if n != 5 { return 1; }
+    if line.data[0] != 104 { return 2; }  // 'h'
+    if line.data[4] != 111 { return 3; }  // 'o'
+
+    // ── Sub-test (2): backspace "abc\b\n" → "ab" ────────────────────────────
+    // After sub-test (1), head=6, tail=6, count=0 (the 6 bytes were popped).
+    // Receive 'a' at buf[6], 'b' at buf[7], 'c' at buf[8], tail=9, count=3.
+    // BS retreats tail to 8, count=2 — 'c' is overwritten by the next push.
+    // Receive LF at buf[8], tail=9, count=3. readline pops 'a', 'b', LF
+    // (break) → returns 2. out.data[0..2] = "ab".
+    tty_receive(tty, 97);   // 'a'
+    tty_receive(tty, 98);   // 'b'
+    tty_receive(tty, 99);   // 'c'
+    tty_receive(tty, 8);    // BS → removes 'c'
+    tty_receive(tty, 10);   // '\n'
+    let n2 = tty_readline(tty, line, 256);
+    if n2 != 2 { return 4; }  // expected "ab" = 2 bytes
+    if line.data[0] != 97 { return 5; }  // 'a'
+    if line.data[1] != 98 { return 6; }  // 'b'
+
+    // ── Sub-test (3): Ctrl-C flushes the buffer ─────────────────────────────
+    // After sub-test (2), head=9, tail=9, count=0. Receive 'x' at buf[9],
+    // 'y' at buf[10], tail=11, count=2. Ctrl-C resets head=tail=count=0
+    // (the "xy" is discarded — head and tail no longer point at it, and
+    // count=0 means no byte will be read from those slots). Verify the
+    // flush by checking tty.count == 0.
+    tty_receive(tty, 120);  // 'x'
+    tty_receive(tty, 121);  // 'y'
+    tty_receive(tty, 3);    // Ctrl-C → flush
+    if tty.count != 0 { return 7; }
+
+    return 0;
+}
