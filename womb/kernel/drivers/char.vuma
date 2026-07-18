@@ -1,0 +1,728 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/drivers/char.vuma
+// VWK char device registry — CharDevice + CharDevTable + register / lookup.
+// PMT-pure (hosted mode: function pointers are u64 stubs; K11 adds dispatch).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6d layer of the VWK kernel: the character device
+// registry. K6a (drivers/uart.vuma) provided a UART driver. K6b
+// (tty/line_discipline.vuma) provided a TTY line discipline. K6c
+// (tty/vt100.vuma) provided a VT100 escape-sequence parser. Those are
+// three concrete character devices — but the kernel has no general way
+// to enumerate them, look them up by name or major number, or hand them
+// out to userspace via open(2). This file fills that gap: a registry of
+// up to 32 CharDevices, each identified by a (major, minor) pair and a
+// 16-byte name, each carrying 5 function pointers
+// (open / read / write / ioctl / close).
+//
+// ── What K6d provides ──────────────────────────────────────────────────────
+//   cdev_table_init(tbl)                                  — zero all slots.
+//   chardev_register(tbl, name, major, minor,
+//                    open_fn, read_fn, write_fn,
+//                    ioctl_fn, close_fn) -> u32           — register a cdev.
+//       Returns the slot index (0..31), or 32 if the table is full.
+//   chardev_lookup(tbl, major) -> u32                     — lookup by major.
+//       Returns the slot index, or 32 if not found.
+//   chardev_lookup_name(tbl, name) -> u32                 — lookup by name.
+//       Returns the slot index, or 32 if not found.
+//
+//   Plus the 16 pack/unpack/accessor helpers used by register/lookup and
+//   exposed for future waves (K7+ will add cdev_open / cdev_read /
+//   cdev_write / cdev_ioctl / cdev_close dispatch wrappers that look up a
+//   slot, fetch the corresponding fn pointer, and call it).
+//
+// ── Why a registry, not a flat array of CharDevice structs? ─────────────────
+// VUMA has no struct arrays — there is no `[CharDevice; 32]` syntax. The
+// canonical VWK pattern (established in K4a's ProcessTable, K5a's
+// FileTable / InodeTable / DentryTable, K5b's SuperBlock) is to store
+// each FIELD of the struct in its own parallel flat byte array, indexed
+// by slot. CharDevTable follows that pattern byte-for-byte:
+//     names:     [u8; 512]    — 32 slots × 16 bytes  (the device name)
+//     majors:    [u8; 128]    — 32 slots × 4 bytes   (u32, LE-packed)
+//     minors:    [u8; 128]    — 32 slots × 4 bytes   (u32, LE-packed)
+//     open_fns:  [u8; 256]    — 32 slots × 8 bytes   (u64, LE-packed)
+//     read_fns:  [u8; 256]    — 32 slots × 8 bytes   (u64, LE-packed)
+//     write_fns: [u8; 256]    — 32 slots × 8 bytes   (u64, LE-packed)
+//     ioctl_fns: [u8; 256]    — 32 slots × 8 bytes   (u64, LE-packed)
+//     close_fns: [u8; 256]    — 32 slots × 8 bytes   (u64, LE-packed)
+//     used:      [u8; 32]     — 32 slots × 1 byte    (1 = in use, 0 = free)
+//     count:     u32          — live slot count (0..32)
+//
+// The `CharDevice` layout (declared below for documentation + future K11
+// use) mirrors the field set; K11's bare-metal dispatch may pass
+// `base as Address` cast to a CharDevice pointer for typed field access,
+// but VUMA's PMT discipline forbids pointer dereference, so K11 will use
+// the cdev_get_* / cdev_set_* helpers with explicit byte offsets instead.
+// This is the same K6a split: Uart8250Regs layout declared for the
+// canonical register map, but the driver functions use mmio_read8 /
+// mmio_write8 with explicit offsets.
+//
+// ── Function pointers as u64 ────────────────────────────────────────────────
+// VUMA has no first-class function-pointer call (no `(*fn)(arg)` syntax).
+// Each cdev slot stores its 5 ops as u64 values — in hosted mode these
+// are typically 0 (no dispatch; the registry is a name→index table only).
+// K11 will swap them for real function-pointer values (resolved at link
+// time) AND add the dispatch wrappers:
+//     fn cdev_open(tbl, slot, ...) -> i64 {
+//         let fn_ptr = cdev_get_open_fn(tbl, slot);
+//         // K11: dispatch via the new `extern_call` builtin:
+//         //   return extern_call(fn_ptr, ...);
+//         // For now (K6d): no dispatch — return 0.
+//         return 0;
+//     }
+// The K6d registry stores the fn pointers verbatim (LE-packed u64 into
+// the *_fns arrays) so K11 can read them back out without re-parsing.
+//
+// ── Pack/unpack pattern ─────────────────────────────────────────────────────
+// Identical to K5a's file.vuma (FileTable) — 8-iteration LE loop for u64
+// fields, 4-iteration LE loop for u32 fields, direct u8 index for `used`
+// and per-byte `names` access. The 8-iteration pattern:
+//     fn cdev_get_open_fn(tbl, idx) -> u64 {
+//         let off = idx * 8;
+//         let v: u64 = 0;
+//         let i = 0;
+//         while i < 8 {
+//             let sh = i * 8;
+//             let b = tbl.open_fns[off + i] as u64;
+//             v = v + (b << sh);
+//             i = i + 1;
+//         }
+//         return v;
+//     }
+// And the 4-iteration u32 variant (e.g. major):
+//     fn cdev_get_major(tbl, idx) -> u32 {
+//         let off = idx * 4;
+//         let v: u32 = 0;
+//         let i = 0;
+//         while i < 4 {
+//             let sh = i * 8;
+//             let b = tbl.majors[off + i] as u32;
+//             v = v + (b << sh);
+//             i = i + 1;
+//         }
+//         return v;
+//     }
+// The names array uses per-byte accessors (cdev_get_name_byte /
+// cdev_set_name_byte) with a 2D index `idx * 16 + off` because each slot
+// has 16 bytes and we copy / compare byte-by-byte (no u128 type in VUMA).
+//
+// ── The 32 sentinel ─────────────────────────────────────────────────────────
+// chardev_register returns 32 (one past the last valid slot index 0..31)
+// when the table is full. chardev_lookup / chardev_lookup_name return 32
+// when no slot matches. 32 is the natural sentinel because:
+//   (a) it fits in u32 (the function's return type) without overflow,
+//   (b) it's distinct from every valid slot index [0, 31],
+//   (c) the comparison `slot == 32` lowers to a single CMP + JE.
+// This mirrors K5a's file_alloc returning 64 (the slot count) as the
+// "table full" sentinel, and K4a's task_alloc returning 256.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// CharDevTable and DevName are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> slots; the CALLER allocates them via
+// `state_new(CharDevTable)` / `state_new(DevName)` (in main()'s self-
+// test). The State<T> handles are passed by reference to all helpers
+// and to register/lookup, which mutate the State in place (no copy-out,
+// no move semantics — VUMA's State<T> is a borrow of the ___pmt_buffer
+// slot). The `tbl.count = tbl.count + 1` syntax is State-field self-
+// update (lowered to a load-modify-store through the State pointer —
+// the K4a task.vuma `tbl.count = tbl.count + 1` pattern). No `extern`
+// declarations: K6d is purely computational, like K6b (line_discipline)
+// and K6c (vt100). The actual fn-pointer dispatch is a K11 concern.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f/K6a/K6b/K6c). Decimal avoids the parser's hex-literal path
+// (parse_int_radix width-extension subtleties — see K5a's file.vuma
+// header for the same rationale). The constants:
+//     32     = number of CharDevice slots in CharDevTable (and the
+//              "table full" / "not found" sentinel returned by
+//              chardev_register / chardev_lookup / chardev_lookup_name).
+//     16     = bytes per CharDevice name (also the per-slot stride in
+//              the names array, and the loop bound for name copy/compare
+//              in chardev_register / chardev_lookup_name).
+//     8      = bytes per u64 field (loop bound for fn-pointer
+//              pack/unpack — open_fn / read_fn / write_fn / ioctl_fn /
+//              close_fn).
+//     4      = bytes per u32 field (loop bound for major / minor
+//              pack/unpack).
+//     255    = 0xFF byte mask for the unpack-shift-and-truncate path.
+//     1      = the "used" set value (slot in use).
+//     0      = FREE marker (used == 0), initial count, NUL terminator.
+//     110    = ASCII 'n' (self-test "null" device, byte 0).
+//     117    = ASCII 'u' (self-test "null" device, byte 1).
+//     108    = ASCII 'l' (self-test "null" device, bytes 2 + 3).
+//     1, 3   = self-test major=1 / minor=3 (the historical Linux
+//              /dev/null major/minor).
+//     99     = self-test "lookup non-existent major" probe value.
+// All `0x...` mentions in this file are in doc-comments only.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares only CharDevice + CharDevTable
+// + DevName (all new in K6d — no prior wave's layouts need re-declaring
+// here, since K6d's only I/O is via State<CharDevTable> and State<DevName>).
+// K7+ (syscall layer) will re-declare CharDevTable byte-identically when
+// it wires sys_open → chardev_lookup_name → cdev_open dispatch.
+//
+// ── No externs ──────────────────────────────────────────────────────────────
+// Like K6b (line_discipline) and K6c (vt100), K6d has NO extern
+// declarations. The registry is purely computational — it doesn't touch
+// hardware, doesn't call syscalls, doesn't do FFI. The fn-pointer
+// dispatch is a K11 concern (and even then, K11 will dispatch via a new
+// `extern_call` builtin, not via an `extern "C"` declaration in this
+// file). The integration with the syscall layer happens at the CALLER:
+// K7's sys_open calls chardev_lookup_name to find the slot, then K11's
+// cdev_open calls the slot's open_fn.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/drivers/char.vuma \
+//         /tmp/char.bin x86_64 --verify
+//     /tmp/char.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, no stdout (the self-test is pure — no
+// console output, just integer return codes). The self-test exercises:
+//   (1) Register /dev/null (major=1, minor=3) → returns slot 0.
+//   (2) tbl.count == 1 after the register.
+//   (3) chardev_lookup(tbl, 1) → returns slot 0 (lookup by major).
+//   (4) chardev_lookup_name(tbl, name) → returns slot 0 (lookup by name).
+//   (5) chardev_lookup(tbl, 99) → returns 32 (no such major).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// CharDevice: the documentation layout for a single character device.
+// Stored as a layout for documentation + future K11 use (the bare-metal
+// dispatch may pass `base as Address` cast to a CharDevice pointer for
+// typed field access). K6d's CharDevTable does NOT use this layout
+// directly — it uses parallel flat byte arrays (see "Why a registry,
+// not a flat array of CharDevice structs?" in the file header). K7+ will
+// re-declare this layout byte-identically when it adds cdev_open /
+// cdev_read / etc. dispatch wrappers.
+//
+// Field byte offsets within a CharDevice (40 bytes total):
+//   name      @  0   [u8; 16]  — device name (e.g. "tty", "null", "zero")
+//   major     @ 16   u32       — major device number
+//   minor     @ 20   u32       — minor device number
+//   open_fn   @ 24   u64       — open function pointer (or 0)
+//   read_fn   @ 32   u64       — read function pointer
+//   write_fn  @ 40   u64       — write function pointer
+//   ioctl_fn  @ 48   u64       — ioctl function pointer
+//   close_fn  @ 56   u64       — close function pointer
+layout CharDevice = {
+    name: [u8; 16],   // device name (e.g. "tty", "null", "zero")
+    major: u32,       // major device number
+    minor: u32,       // minor device number
+    open_fn: u64,     // function pointer (or 0)
+    read_fn: u64,
+    write_fn: u64,
+    ioctl_fn: u64,
+    close_fn: u64,
+}
+
+// CharDevTable: 32 CharDevice slots stored as parallel flat byte arrays
+// (VUMA has no struct-array support — see "Why a registry, not a flat
+// array of CharDevice structs?" in the file header). Each field is a
+// separate [u8; N] array sized for 32 slots × the field's byte width.
+// `used` is the in-use flag (1 = registered, 0 = free). `count` tracks
+// how many slots are in use (0..32).
+//
+// Total size: 512 + 128 + 128 + 256 + 256 + 256 + 256 + 256 + 32 + 4
+//            = 2084 bytes (plus padding to align `count: u32` to 4 bytes,
+//              which is already satisfied since 2080 is divisible by 4).
+layout CharDevTable = {
+    names: [u8; 512],      // 32 * 16 bytes
+    majors: [u8; 128],     // 32 * 4 bytes
+    minors: [u8; 128],     // 32 * 4 bytes
+    open_fns: [u8; 256],   // 32 * 8 bytes
+    read_fns: [u8; 256],
+    write_fns: [u8; 256],
+    ioctl_fns: [u8; 256],
+    close_fns: [u8; 256],
+    used: [u8; 32],        // 32 * 1 byte
+    count: u32,
+}
+
+// DevName: a 16-byte device name buffer, matching CharDevice.name's
+// width. Callers allocate one via state_new(DevName), fill in
+// name.data[0..n] with the NUL-terminated name, then pass it to
+// chardev_register / chardev_lookup_name. The 16-byte width matches
+// CharDevice.name exactly so the byte-by-byte copy in chardev_register
+// and the byte-by-byte compare in chardev_lookup_name can iterate up to
+// 16 without bounds-checking (a name longer than 15 chars + NUL would
+// silently truncate — same behavior as Linux's kernel name buffers,
+// which are also fixed-width 16 / 32 / 64 bytes).
+layout DevName = { data: [u8; 16] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 name-byte accessors (names array — 2D index).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing with a 2D index `idx * 16 + off`. Each CharDevice
+// slot occupies 16 contiguous bytes in the names array (slot 0 at bytes
+// 0..15, slot 1 at bytes 16..31, ..., slot 31 at bytes 496..511). The
+// accessor computes the byte offset inline; the alternative (precompute
+// `let base = idx * 16;` then `tbl.names[base + off]`) is equivalent —
+// both lower to a single LEA + MOV. Inline is used here to match the
+// K6d contract template exactly.
+
+// Read byte `off` (0..15) of slot `idx`'s name from CharDevTable.names.
+fn cdev_get_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32) -> u8 {
+    return tbl.names[idx * 16 + off];
+}
+
+// Write byte `off` (0..15) of slot `idx`'s name into CharDevTable.names.
+fn cdev_set_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32, val: u8) {
+    tbl.names[idx * 16 + off] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u32 pack/unpack helpers (major, minor).
+// ────────────────────────────────────────────────────────────────────────────
+// 4-byte little-endian pack/unpack. Same pattern as K4a's pt_get_pid /
+// pt_set_pid (task.vuma) and K5a's file_get_flags / file_set_flags
+// (file.vuma): 4-iteration while loop, shift by i*8, mask 255 on writes,
+// sum-of-shifted-bytes on reads.
+
+// Read the u32 `major` field of CharDevice slot `idx` from
+// CharDevTable.majors.
+fn cdev_get_major(tbl: State<CharDevTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.majors[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `major` field of CharDevice slot `idx` into
+// CharDevTable.majors.
+fn cdev_set_major(tbl: State<CharDevTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.majors[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `minor` field of CharDevice slot `idx` from
+// CharDevTable.minors.
+fn cdev_get_minor(tbl: State<CharDevTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.minors[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `minor` field of CharDevice slot `idx` into
+// CharDevTable.minors.
+fn cdev_set_minor(tbl: State<CharDevTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.minors[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (open_fn, read_fn, write_fn, ioctl_fn, close_fn).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Same pattern as K5a's file_get_dentry
+// / file_set_dentry / file_get_pos / file_set_pos / file_get_ops /
+// file_set_ops / file_get_private / file_set_private (file.vuma) and K2a's
+// pool_get_base / pool_set_base (pmm.vuma): 8-iteration while loop, shift
+// by i*8, mask 255 on writes, sum-of-shifted-bytes on reads. Five pairs
+// (one per fn-pointer field) — byte-identical except for the field array.
+
+// Read the u64 `open_fn` field of CharDevice slot `idx` from
+// CharDevTable.open_fns.
+fn cdev_get_open_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.open_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `open_fn` field of CharDevice slot `idx` into
+// CharDevTable.open_fns.
+fn cdev_set_open_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.open_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `read_fn` field of CharDevice slot `idx` from
+// CharDevTable.read_fns.
+fn cdev_get_read_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.read_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `read_fn` field of CharDevice slot `idx` into
+// CharDevTable.read_fns.
+fn cdev_set_read_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.read_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `write_fn` field of CharDevice slot `idx` from
+// CharDevTable.write_fns.
+fn cdev_get_write_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.write_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `write_fn` field of CharDevice slot `idx` into
+// CharDevTable.write_fns.
+fn cdev_set_write_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.write_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `ioctl_fn` field of CharDevice slot `idx` from
+// CharDevTable.ioctl_fns.
+fn cdev_get_ioctl_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.ioctl_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ioctl_fn` field of CharDevice slot `idx` into
+// CharDevTable.ioctl_fns.
+fn cdev_set_ioctl_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ioctl_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `close_fn` field of CharDevice slot `idx` from
+// CharDevTable.close_fns.
+fn cdev_get_close_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.close_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `close_fn` field of CharDevice slot `idx` into
+// CharDevTable.close_fns.
+fn cdev_set_close_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.close_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessor (used) — direct array index, no pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// Same pattern as K4a's pt_get_state / pt_set_state (task.vuma), K5a's
+// file_get_used / file_set_used (file.vuma), and K5a's dentry_get_used /
+// dentry_set_used (dentry.vuma) — direct u8 indexing, no pack/unpack
+// loop. The byte IS the value.
+
+// Read the u8 `used` flag of CharDevice slot `idx` from CharDevTable.used.
+fn cdev_get_used(tbl: State<CharDevTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of CharDevice slot `idx` into CharDevTable.used.
+fn cdev_set_used(tbl: State<CharDevTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Registry functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// cdev_table_init: zero all 32 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Called by kmain at boot before the first
+// chardev_register. Does NOT zero the other CharDevice fields (names,
+// majors, etc.) — those are populated by chardev_register's caller, so
+// zeroing them here would be wasted work (and VUMA has no memset). The
+// stale contents are unreachable (cdev_get_used == 0 guarantees no slot
+// will be read until chardev_register populates it).
+fn cdev_table_init(tbl: State<CharDevTable>) {
+    let i = 0;
+    while i < 32 {
+        cdev_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// chardev_register: register a character device. Finds the first FREE
+// slot (used == 0), copies the name byte-by-byte (stopping at NUL),
+// packs the major / minor / fn pointers, marks the slot used, bumps
+// count, and returns the slot index. Returns 32 if the table is full
+// (the caller MUST check — K7's sys_mknod returns -ENOSPC in that
+// case, or whatever errno the syscall layer picks).
+//
+// The name copy loop walks j = 0..15 and reads name.data[j]. When it
+// sees a NUL byte (c == 0), it breaks — but the NUL byte IS written to
+// the slot's name (so the slot's name is NUL-terminated, matching
+// Linux's kdev_t name buffers). If the source name is exactly 16 bytes
+// with no NUL, the loop copies all 16 bytes and the slot's name is NOT
+// NUL-terminated — chardev_lookup_name's compare loop handles this
+// (both buffers would be 16 bytes with no NUL, and the loop would
+// iterate j = 0..15, comparing each byte; if all 16 match, match_ok
+// stays 1 and the slot is returned).
+//
+// The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
+// and K5a's file_alloc / inode_alloc / dentry_alloc.
+fn chardev_register(tbl: State<CharDevTable>, name: State<DevName>, major: u32, minor: u32, open_fn: u64, read_fn: u64, write_fn: u64, ioctl_fn: u64, close_fn: u64) -> u32 {
+    // Find a free slot.
+    let slot = 32;
+    let i = 0;
+    while i < 32 {
+        if cdev_get_used(tbl, i) == 0 {
+            slot = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if slot == 32 {
+        return 32;  // full
+    }
+    // Copy name. Walk j = 0..15, copy byte, break on NUL. The NUL byte
+    // is written to the slot's name (NUL-terminated storage).
+    let j = 0;
+    while j < 16 {
+        let c = name.data[j];
+        cdev_set_name_byte(tbl, slot, j, c);
+        if c == 0 { break; }
+        j = j + 1;
+    }
+    cdev_set_major(tbl, slot, major);
+    cdev_set_minor(tbl, slot, minor);
+    cdev_set_open_fn(tbl, slot, open_fn);
+    cdev_set_read_fn(tbl, slot, read_fn);
+    cdev_set_write_fn(tbl, slot, write_fn);
+    cdev_set_ioctl_fn(tbl, slot, ioctl_fn);
+    cdev_set_close_fn(tbl, slot, close_fn);
+    cdev_set_used(tbl, slot, 1);
+    tbl.count = tbl.count + 1;
+    return slot;
+}
+
+// chardev_lookup: look up a char device by major number. Returns the
+// slot index of the first USED slot whose major matches, or 32 if no
+// match. The "first match wins" policy is correct because each major
+// should be registered at most once (chardev_register does NOT enforce
+// uniqueness — a duplicate register would silently succeed and the
+// second registration would be unreachable via lookup; this matches
+// Linux's register_chrdev, which also doesn't dedup at register time).
+//
+// The minor is NOT considered by this lookup — there is exactly one
+// char device per major in the K6d registry (Linux allows multiple
+// minors per major, but the dispatch is per-major — the major's open
+// function receives the minor and decides what to do). K7+ may add a
+// chardev_lookup_full(tbl, major, minor) variant if multi-minor support
+// is needed.
+fn chardev_lookup(tbl: State<CharDevTable>, major: u32) -> u32 {
+    let i = 0;
+    while i < 32 {
+        if cdev_get_used(tbl, i) == 1 {
+            if cdev_get_major(tbl, i) == major {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 32;
+}
+
+// chardev_lookup_name: look up a char device by name. Returns the slot
+// index of the first USED slot whose name matches the query, or 32 if
+// no match. The name compare is byte-by-byte (no strcmp builtin):
+//   - Walk j = 0..15.
+//   - If slot's name byte a == 0:
+//       * If query's name byte b == 0 → match (both ended at the same
+//         position) → break with match_ok = 1.
+//       * Else → query is longer than slot → match_ok = 0, break.
+//   - Else if b == 0:
+//       * Slot's name is longer than query → match_ok = 0, break.
+//   - Else if a != b:
+//       * Byte mismatch → match_ok = 0, break.
+//   - Else (a != 0 && b != 0 && a == b): continue.
+//   - If the loop completes all 16 iterations without breaking, all 16
+//     bytes matched — match_ok stays 1 (the no-NUL-terminator case for
+//     16-byte names). This is the "both buffers full" edge case.
+//
+// The match logic is symmetric in a and b for the equal-length path
+// (a == 0 && b == 0 → match), and asymmetric only for the length-
+// mismatch path (a == 0 && b != 0 → query longer; b == 0 && a != 0 →
+// slot longer — both are "no match"). This matches POSIX strcmp
+// semantics: two NUL-terminated strings are equal iff they have the
+// same length and the same bytes.
+fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
+    let i = 0;
+    while i < 32 {
+        if cdev_get_used(tbl, i) == 1 {
+            // Compare name byte-by-byte.
+            let match_ok = 1;
+            let j = 0;
+            while j < 16 {
+                let a = cdev_get_name_byte(tbl, i, j);
+                let b = name.data[j];
+                if a == 0 {
+                    if b == 0 {
+                        break;  // match
+                    }
+                    match_ok = 0;
+                    break;
+                }
+                if b == 0 {
+                    match_ok = 0;
+                    break;
+                }
+                if a != b {
+                    match_ok = 0;
+                    break;
+                }
+                j = j + 1;
+            }
+            if match_ok == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 32;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6d DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a CharDevTable via state_new, init it via cdev_table_init,
+// then register /dev/null (major=1, minor=3 — the historical Linux
+// /dev/null major/minor) and verify:
+//   (1) chardev_register returns slot 0 (the first free slot).
+//   (2) tbl.count == 1 after the register.
+//   (3) chardev_lookup(tbl, 1) returns slot 0 (lookup by major).
+//   (4) chardev_lookup_name(tbl, name) returns slot 0 (lookup by name).
+//   (5) chardev_lookup(tbl, 99) returns 32 (no such major — the
+//       "not found" sentinel).
+//
+// The fn pointers are all 0 in this self-test (hosted mode — no
+// dispatch). K7+ will register real cdevs with non-zero fn pointers
+// and exercise the dispatch.
+//
+// Per the K6d contract's "Use decimal ASCII values" rule: the name
+// "null" is built from decimal ASCII values (110='n', 117='u',
+// 108='l', 108='l'), NOT from char literals — VUMA's parser does
+// support `'n'` syntax, but the decimal form is unambiguous and
+// matches the K6d contract template byte-for-byte.
+
+fn main() -> i32 {
+    let tbl = state_new(CharDevTable);
+    cdev_table_init(tbl);
+
+    // Register /dev/null (major=1, minor=3) — the historical Linux
+    // /dev/null major/minor. The fn pointers are all 0 in hosted mode
+    // (no dispatch — K11 will swap them for real function pointers).
+    let name = state_new(DevName);
+    name.data[0] = 110;  // 'n'
+    name.data[1] = 117;  // 'u'
+    name.data[2] = 108;  // 'l'
+    name.data[3] = 108;  // 'l'
+    name.data[4] = 0;    // NUL terminator
+
+    let slot = chardev_register(tbl, name, 1, 3, 0, 0, 0, 0, 0);
+    if slot != 0 { return 1; }
+
+    if tbl.count != 1 { return 2; }
+
+    // Lookup by major — should return slot 0.
+    let found = chardev_lookup(tbl, 1);
+    if found != 0 { return 3; }
+
+    // Lookup by name — should return slot 0.
+    let found2 = chardev_lookup_name(tbl, name);
+    if found2 != 0 { return 4; }
+
+    // Lookup non-existent major — should return 32 (sentinel).
+    let not_found = chardev_lookup(tbl, 99);
+    if not_found != 32 { return 5; }
+
+    return 0;
+}
