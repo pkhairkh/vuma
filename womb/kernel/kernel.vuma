@@ -22,9 +22,60 @@ extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn read(fd: i64, buf: Address, count: i64) -> i64;
     fn exit(code: i64);
+    fn ioctl(fd: i64, request: i64, arg: Address) -> i64;
 }
 
 layout KBuf = { data: [u8; 256] }
+
+// termios structure for raw-mode switching (Linux, 36 bytes on aarch64/x86_64)
+layout Termios = {
+    c_iflag: u32,   // input flags
+    c_oflag: u32,   // output flags
+    c_cflag: u32,   // control flags
+    c_lflag: u32,   // local flags (ICANON|ECHO live here)
+    c_line: u8,     // line discipline
+    c_cc0: u8,      // cc[0]
+    c_cc1: u8,
+    c_cc2: u8,
+    c_cc3: u8,
+    c_cc4: u8,
+    c_cc5: u8,
+    c_cc6: u8,
+    c_cc7: u8,
+    c_cc8: u8,
+    c_cc9: u8,
+    c_cc10: u8,
+    c_cc11: u8,
+    c_cc12: u8,
+    c_cc13: u8,
+    c_cc14: u8,
+    c_cc15: u8,
+    c_cc16: u8,
+    c_cc17: u8,
+    c_cc18: u8,
+    c_cc19: u8,
+    c_cc20: u8,
+    c_cc21: u8,
+    c_cc22: u8,
+    c_cc23: u8,
+    c_cc24: u8,
+    c_cc25: u8,
+    c_cc26: u8,
+    c_cc27: u8,
+    c_cc28: u8,
+    c_cc29: u8,
+    c_cc30: u8,
+    c_cc31: u8,
+    c_ispeed: u32,
+    c_ospeed: u32,
+}
+
+// History buffer: 8 commands of up to 255 bytes each
+layout History = {
+    cmds: [u8; 2048],  // 8 * 256
+    lens: [u32; 8],
+    count: u32,        // number of commands stored
+}
 
 fn kprint(ec: State<EarlyConsole>, c: u8) {
     early_console_write_byte(ec, c);
@@ -88,6 +139,86 @@ fn kputs_num(ec: State<EarlyConsole>, n: u64) {
     }
 }
 
+// ── Terminal raw mode ──────────────────────────────────────────────────
+// Put stdin (fd 0) in raw mode so we get keystrokes immediately (including
+// arrow-key escape sequences) and can echo them ourselves.  We save the
+// original termios so we can restore it on exit.
+//
+// TCGETS = 0x5401, TCSETS = 0x5402 (Linux, same on all arches).
+// ICANON = 0x2, ECHO = 0x8, ISIG = 0x1, IEXTEN = 0x8000.
+// We clear ICANON|ECHO|ISIG from c_lflag to get raw mode.
+fn termios_raw(t: State<Termios>) {
+    // TCGETS = 0x5401 — read current settings
+    ioctl(0, 0x5401, t as Address);
+    // Clear ICANON(0x2) | ECHO(0x8) | ISIG(0x1) | IEXTEN(0x8000) from c_lflag
+    t.c_lflag = t.c_lflag & 0xFFFF7FF4;  // ~0x800A
+    // Also clear ICRNL (0x100) from c_iflag so Ctrl-C etc. come through raw
+    t.c_iflag = t.c_iflag & 0xFFFFFEFF;
+    // TCSETS = 0x5402 — apply new settings
+    ioctl(0, 0x5402, t as Address);
+}
+
+fn termios_restore(t: State<Termios>) {
+    // Restore original settings (saved before raw mode was enabled)
+    ioctl(0, 0x5402, t as Address);
+}
+
+// ── History helpers ────────────────────────────────────────────────────
+// 8-slot circular command history.  Each slot is 256 bytes in cmds[].
+fn history_init(h: State<History>) {
+    h.count = 0;
+    let i = 0;
+    while i < 8 { h.lens[i] = 0; i = i + 1; }
+}
+
+fn history_push(h: State<History>, cbuf: State<KBuf>, len: u32) {
+    if len == 0 { return; }
+    // Don't store if identical to the last command
+    if h.count > 0 {
+        let last = h.count - 1;
+        if last >= 8 { last = 7; }
+        let llen = h.lens[last];
+        if llen == len {
+            let same = 1;
+            let j = 0;
+            while j < len {
+                if h.cmds[last * 256 + j] != cbuf.data[j] { same = 0; break; }
+                j = j + 1;
+            }
+            if same == 1 { return; }
+        }
+    }
+    // Shift: new command goes into the next slot, count grows up to 8
+    let slot = h.count;
+    if slot >= 8 {
+        // Shift everything down by 1 (drop oldest)
+        let s = 0;
+        while s < 7 {
+            let k = 0;
+            while k < 256 { h.cmds[s * 256 + k] = h.cmds[(s + 1) * 256 + k]; k = k + 1; }
+            h.lens[s] = h.lens[s + 1];
+            s = s + 1;
+        }
+        h.count = 7;
+    }
+    let slot2 = h.count;
+    if slot2 < 8 {
+        let k = 0;
+        while k < len { h.cmds[slot2 * 256 + k] = cbuf.data[k]; k = k + 1; }
+        h.lens[slot2] = len;
+        h.count = h.count + 1;
+    }
+}
+
+// Load history slot `idx` into cbuf, return its length
+fn history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
+    if idx >= h.count { return 0; }
+    let len = h.lens[idx];
+    let k = 0;
+    while k < len { cbuf.data[k] = h.cmds[idx * 256 + k]; k = k + 1; }
+    return len;
+}
+
 fn kmain() -> i32 {
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
@@ -131,26 +262,146 @@ fn kmain() -> i32 {
     kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
     kprint(ec, 100); kputs_nl(ec);
 
-    // Shell loop
-    kputs_nl(ec);
-    kputs_prompt(ec);
+    // ── Switch terminal to raw mode ─────────────────────────────────────
+    // We need raw mode to receive arrow-key escape sequences and handle
+    // line editing ourselves (backspace, cursor movement, history).
+    let saved_termios = state_new(Termios);
+    let raw_termios = state_new(Termios);
+    termios_raw(saved_termios);  // saves original into saved_termios, then sets raw
+    // Copy saved to raw_termios for our reference (both now hold the raw settings)
 
     let rbuf = state_new(KBuf);
     let cbuf = state_new(KBuf);
+    let hist = state_new(History);
+    history_init(hist);
+
     let pos: u32 = 0;
     let running: u8 = 1;
     let cwd: u32 = 0;  // current working directory (dentry index, 0=root)
+    let hist_idx: u32 = 0;  // history navigation index (0=newest, count=oldest)
+
+    // Shell loop
+    kputs_nl(ec);
+    kputs_prompt(ec);
 
     while running == 1 {
         let n = read(0, rbuf as Address, 1);
         if n <= 0 { break; }
         let c = rbuf.data[0];
 
-        // NOTE: do NOT echo `c` here — the terminal's cooked-mode TTY
-        // already echoes keystrokes in interactive mode.  Echoing here
-        // would double-print every character.
-        if c == 10 {
-            let cmd = cbuf.data[0];
+        // ── Line editing (raw mode) ────────────────────────────────────
+        // We are in raw mode, so we must echo printable chars ourselves,
+        // and handle control characters / escape sequences manually.
+        //
+        // Ctrl-C (3) → exit immediately (restore terminal first)
+        // Ctrl-D (4) → EOF (exit if line is empty)
+        // Enter (10) → execute command
+        // Backspace (8 or 127) → delete last char, erase from screen
+        // ESC (27) → start of escape sequence (arrow keys: ESC [ A/B/C/D)
+
+        if c == 3 {
+            // Ctrl-C — restore terminal and exit
+            termios_restore(saved_termios);
+            kputs_shutdown(ec);
+            return 0;
+        }
+
+        if c == 4 {
+            // Ctrl-D — EOF
+            if pos == 0 {
+                termios_restore(saved_termios);
+                kputs_shutdown(ec);
+                return 0;
+            }
+            // If line not empty, ignore (like bash)
+        } else {
+            if c == 10 {
+                // Enter — echo newline, execute command
+                kprint(ec, 10);
+                // Save to history (before executing)
+                history_push(hist, cbuf, pos);
+                hist_idx = 0;
+            } else {
+                if c == 8 || c == 127 {
+                    // Backspace / Delete
+                    if pos > 0 {
+                        pos = pos - 1;
+                        // Erase: BS, space, BS
+                        kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
+                    }
+                } else {
+                    if c == 27 {
+                        // Escape sequence — read '[' then the final byte
+                        let n2 = read(0, rbuf as Address, 1);
+                        if n2 > 0 {
+                            let c2 = rbuf.data[0];
+                            if c2 == 91 {
+                                // '['
+                                let n3 = read(0, rbuf as Address, 1);
+                                if n3 > 0 {
+                                    let c3 = rbuf.data[0];
+                                    if c3 == 65 {
+                                        // Up arrow — previous command (older)
+                                        if hist.count > 0 {
+                                            if hist_idx < hist.count {
+                                                hist_idx = hist_idx + 1;
+                                            }
+                                            // Clear current line
+                                            while pos > 0 {
+                                                pos = pos - 1;
+                                                kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
+                                            }
+                                            // Load command: index from newest
+                                            // hist_idx=1 → newest (count-1), hist_idx=2 → count-2, etc.
+                                            let target = hist.count - hist_idx;
+                                            pos = history_load(hist, cbuf, target);
+                                            // Echo it
+                                            let i = 0;
+                                            while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
+                                        }
+                                    } else {
+                                        if c3 == 66 {
+                                            // Down arrow — next command (newer)
+                                            if hist_idx > 0 {
+                                                hist_idx = hist_idx - 1;
+                                            }
+                                            // Clear current line
+                                            while pos > 0 {
+                                                pos = pos - 1;
+                                                kprint(ec, 8); kprint(ec, 32); kprint(ec, 8);
+                                            }
+                                            if hist_idx == 0 {
+                                                // Back to blank line
+                                                pos = 0;
+                                            } else {
+                                                let target = hist.count - hist_idx;
+                                                pos = history_load(hist, cbuf, target);
+                                                let i = 0;
+                                                while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
+                                            }
+                                        } else {
+                                            // Left (67=D) / Right (68=C) — ignore for now
+                                            // (no inline cursor editing yet)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Regular printable character — echo and store
+                        if pos < 255 && c >= 32 {
+                            cbuf.data[pos] = c;
+                            pos = pos + 1;
+                            kprint(ec, c);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only execute on Enter (c == 10)
+        if c != 10 { continue; }
+        let cmd = cbuf.data[0];
 
             // help (104='h')
             if cmd == 104 {
@@ -530,14 +781,10 @@ fn kmain() -> i32 {
             // Reset for next command
             pos = 0;
             if running == 1 { kputs_prompt(ec); }
-        } else {
-            if pos < 255 {
-                cbuf.data[pos] = c;
-                pos = pos + 1;
-            }
-        }
     }
 
+    // Restore terminal before exiting
+    termios_restore(saved_termios);
     kputs_shutdown(ec);
     return 0;
 }
