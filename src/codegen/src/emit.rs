@@ -3553,6 +3553,51 @@ impl Emitter {
 
             // ── Call ──
             IRInstr::Call { dst, func: target_name, args, is_extern: _ } => {
+                // ── Float-conversion builtins (G7) ──
+                if args.len() == 1 && dst.is_some() {
+                    let builtin = target_name.as_str();
+                    if matches!(builtin, "inttofloat" | "uinttofloat" | "floattoint" | "floattouint" | "floattofloat") {
+                        let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_load_value_with_width(&args[0], Register::X9, slots, RegWidth::X64)?;
+                        match builtin {
+                            "inttofloat" => {
+                                // SCVTF D0, X9; then STUR D0 + LDR X9 (FMOV_XD not supported)
+                                self.emit_instruction(Instruction::SCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
+                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
+                            }
+                            "uinttofloat" => {
+                                self.emit_instruction(Instruction::UCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
+                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
+                            }
+                            "floattoint" => {
+                                self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                                self.emit_instruction(Instruction::FCVTZS { rd: Register::X9, rn: Register::X0, dst_64: true, src_double: true })?;
+                            }
+                            "floattouint" => {
+                                self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                                self.emit_instruction(Instruction::FCVTZU { rd: Register::X9, rn: Register::X0, dst_64: true, src_double: true })?;
+                            }
+                            "floattofloat" => {
+                                self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
+                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                        return Ok(());
+                    }
+                }
+
                 let arg_regs = [
                     Register::X0, Register::X1, Register::X2, Register::X3,
                     Register::X4, Register::X5, Register::X6, Register::X7,
@@ -4243,8 +4288,21 @@ impl Emitter {
                         };
                         self.emit_instruction(fp_instr)?;
 
-                        // FP → GPR: FMOV X9, D0
-                        self.emit_instruction(Instruction::FMOV_XD { rd: Register::X9, vn: 0 })?;
+                        // FP → GPR: store D0 to scratch via STUR, then LDR into X9.
+                        // (FMOV_XD encoding not supported in QEMU 7.2.)
+                        // STUR D0, [X29, #-8]: 0xFC1F83A0
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD {
+                            rd: Register::X16,
+                            rn: Register::X29,
+                            rm: Operand::Reg { reg: Register::X16, shift: None },
+                        })?;
+                        self.emit_instruction(Instruction::LDR {
+                            rt: Register::X9,
+                            rn: Register::X16,
+                            offset: 0,
+                        })?;
                     }
                     BinOpKind::Eq | BinOpKind::Ne
                     | BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
