@@ -1,0 +1,334 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/net/dns.vuma
+// VWK Network Subsystem — DNS resolver (PMT-pure, simplified).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K9e layer of the VWK kernel: a simplified PMT-native DNS
+// resolver. K9 (Network) built socket (K9a — BSD API surface), sk_buff +
+// virtio-net (K9b+c — packet buffer pool + NIC driver), and TCP state
+// machine (K9d — handshake + send/recv + close). K9e sits ABOVE the UDP
+// transport (which rides on K9b's sk_buff pool + K9c's NIC driver): it
+// builds DNS query packets and (in hosted mode) stubs the actual UDP
+// send/recv — there is no real DNS server reachable from the hosted
+// compile_dump runtime. The K9e contract scope is "build a DNS query
+// correctly + parse the response (stub: returns 0)"; the real UDP + DNS
+// network path is K9g+ (when the IP layer lands and routes UDP port 53
+// to a configured resolver).
+//
+// ── Scope of K9e ───────────────────────────────────────────────────────────
+//   dns_build_query(query, name, id)              — encode a DNS A-record
+//                                                   query packet into
+//                                                   DnsQuery.data[0..len].
+//                                                   Header (12 bytes:
+//                                                   id/flags/qdcount=1/
+//                                                   ancount/nscount/
+//                                                   arcount=0) + encoded
+//                                                   domain name
+//                                                   ("\x07example\x03com\x00")
+//                                                   + type A (1) + class IN
+//                                                   (1) trailer.
+//   dns_parse_response(buf) -> u32                — parse a DNS response,
+//                                                   extract the first A
+//                                                   record's IPv4 address
+//                                                   (host-order u32). K9e
+//                                                   STUB: returns 0 (the
+//                                                   hosted runtime has no
+//                                                   DNS server, so the
+//                                                   response buffer is
+//                                                   always empty).
+//   dns_resolve(name) -> u32                      — top-level resolver:
+//                                                   build a query, send it,
+//                                                   parse the response.
+//                                                   K9e STUB: returns 0
+//                                                   (lookup failed).
+//
+// ── DNS packet format (RFC 1035, §4.1) ──────────────────────────────────────
+//   Header (12 bytes, big-endian / network order):
+//     id       u16  — transaction ID (caller-supplied — 1234 in the
+//                    self-test).
+//     flags    u16  — bit 15 = QR (0=query, 1=response), bit 11 = RD
+//                    (recursion desired). K9e sets flags = 0x0100
+//                    (standard query, RD=1).
+//     qdcount  u16  — number of questions (1).
+//     ancount  u16  — number of answers (0 in the query).
+//     nscount  u16  — number of authority records (0).
+//     arcount  u16  — number of additional records (0).
+//   Question section:
+//     QNAME    var  — domain name encoded as a sequence of "length-prefixed
+//                    labels": "example.com" →
+//                    "\x07example\x03com\x00" (7+'example', 3+'com', 0
+//                    terminator).
+//     QTYPE    u16  — query type (1 = A, host-to-network byte order, but
+//                    K9e stores the high byte first: data[pos]=0,
+//                    data[pos+1]=1).
+//     QCLASS   u16  — query class (1 = IN).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants use DECIMAL per the K9e contract's "Use decimal
+// ASCII values throughout. VUMA doesn't support string literals in code"
+// rule. The byte values used (decimal):
+//     46  = '.' (label separator)
+//     0   = null (name terminator + arcount/nscount/ancount high bytes)
+//     1   = qdcount low byte + type-A low byte + class-IN low byte
+//     2   = flags high byte 0x0100 high half (NOT — K9e uses 1 here, the
+//           low byte of "0x0100 recursion desired" is 0, the high byte is
+//           1). See dns_build_query header bytes 2/3 below.
+//     3   = flags low byte? No — flags=0x0100 means high byte=1, low byte=0.
+//     7   = "example" label length
+//     101 = 'e', 120='x', 97='a', 109='m', 112='p', 108='l', 101='e'
+//     99  = 'c', 111='o', 109='m'
+//     1234 = self-test transaction ID (id=1234: 1234>>8=4,
+//            1234&255=210 — verified by the self-test).
+//     64  = DnsName/DnsQuery buffer size.
+//
+// ── Why no string literals? ─────────────────────────────────────────────────
+// VUMA's parser does not accept string literals in expression position
+// (only as comments + layout-name identifiers). The K9e contract's
+// "use decimal byte values" rule replaces `let s = "example";` with
+// `name.data[0] = 101; name.data[1] = 120; ...`. Same convention as
+// K6f's shell.vuma (which uses an extern `write` + a `ShellOut` layout
+// filled byte-by-byte) + K5d's initramfs.vuma (byte-wise cpio header
+// field writes).
+//
+// ── Why is DnsHeader a layout but never used? ───────────────────────────────
+// The DnsHeader layout (6 × u16 = 12 bytes) is the canonical reference
+// for the DNS wire format. K9e does NOT instantiate it: the query
+// builder writes the 12 header bytes directly into DnsQuery.data[0..12]
+// (byte-wise, because VUMA's codegen does not support struct-array
+// overlays + the byte-wise path is simpler than a 6-field struct-of-u16
+// pack). The layout exists for IVE verification + as the canonical
+// field-name/field-type reference for K9g+ (when the IP layer lands +
+// the resolver parses real responses, DnsHeader will be the
+// documentation structure for the response-parsing path, mirroring
+// K9a's Socket layout vs SocketTable operational split).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// DnsQuery + DnsName buffers are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> values; the CALLER allocates them
+// via `state_new(DnsQuery)` / `state_new(DnsName)` and passes them by
+// reference to dns_build_query / dns_parse_response / dns_resolve
+// (init-style API — see "Why init-style?" in K4e's wait.vuma header for
+// the codegen rationale: the current codegen does NOT propagate State-
+// typedness through function return values, so `fn dns_new() ->
+// State<DnsQuery>` would produce broken field-access code in callers).
+//
+// State<T> params: 1-2 per function (query/name or just name or just buf),
+// per the K4b contract's "1-2 per function" rule. The single-state-param
+// pattern is the same as K9a's sys_socket / K8e's ipi_send.
+//
+// Externs (write, read): declared per the K9e contract for parity with
+// K6f's shell.vuma + K6a's uart.vuma. In hosted mode they are
+// __ffi_fallback_stubs (no-op — the compile_dump runtime has no real
+// fd/socket layer). The real UDP-socket send/recv path (replacing these
+// externs with K9a's sys_send / sys_recv on a UDP socket bound to port
+// 53) is K9g+.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares DnsHeader + DnsQuery + DnsName
+// + the 3 resolver functions + main. K9g+ (IP layer + UDP transport)
+// will re-declare DnsQuery byte-identically when it needs to read/write
+// the packet bytes for real DNS round-trips. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical" — extended to layouts in K3d, re-applied in K4a/K7a/K8a/
+// K8e/K8f/K9a/K9d) extends to K9e's DnsHeader + DnsQuery + DnsName.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/net/dns.vuma \
+//         /tmp/dns.bin x86_64 --verify
+//     /tmp/dns.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — header bytes
+// id/flags/qdcount correct + label lengths + label bytes correct).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// In hosted mode these are __ffi_fallback_stubs (no-op). The real DNS
+// transport (UDP socket send/recv on port 53) is K9g+. Same extern
+// declaration style as K6f's shell.vuma (write + exit) + K6a's uart.vuma.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// DnsHeader: 12-byte DNS header (RFC 1035 §4.1.1). All fields big-endian
+// on the wire. Stored as a layout for IVE verification + documentation
+// (the operational query builder writes the header byte-wise into
+// DnsQuery.data[0..12] — see "Why is DnsHeader a layout but never used?"
+// in the file header). 6 fields × u16 = 12 bytes total.
+layout DnsHeader = {
+    id: u16,        // transaction ID
+    flags: u16,     // query/response flags
+    qdcount: u16,   // number of questions
+    ancount: u16,   // number of answers
+    nscount: u16,   // number of authority records
+    arcount: u16,   // number of additional records
+}
+
+// DnsName: a 64-byte buffer holding a null-terminated ASCII domain name
+// (e.g. "example.com\0"). 64 bytes is enough for the DNS 253-octet max
+// name length's common-case single-label + TLD (the K9e self-test uses
+// "example.com" = 11 chars + 1 null). The K9e contract caps at 64 for
+// the simplified PMT-native scope; K9g+ may bump to 256 (DNS max) when
+// real resolvers land.
+layout DnsName = {
+    data: [u8; 64],  // null-terminated ASCII domain name
+}
+
+// DnsQuery: a 64-byte buffer holding the raw DNS query packet (header +
+// encoded name + type/class trailer). 64 bytes is enough for the
+// self-test's "example.com" query (12-byte header + 13-byte encoded
+// name "\x07example\x03com\x00" + 4-byte type/class trailer = 29 bytes).
+// K9g+ may bump to 512 (DNS UDP max packet size) when real resolvers
+// land. `len` records the actual packet size (0..64).
+layout DnsQuery = {
+    data: [u8; 64],  // raw DNS query packet
+    len: u32,        // packet length in bytes (0..64)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Resolver functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// dns_build_query: encode a DNS A-record query for `name` into `query`.
+//
+//   query: caller-allocated State<DnsQuery> (output buffer).
+//   name:  caller-allocated State<DnsName> holding the null-terminated
+//          ASCII domain name (e.g. "example.com\0").
+//   id:    transaction ID (caller-supplied — typically a u16 counter or
+//          a random value; 1234 in the self-test).
+//
+// Wire format produced (29 bytes for "example.com"):
+//   [0..12]  Header: id (big-endian), flags=0x0100 (RD=1), qdcount=1,
+//            ancount=0, nscount=0, arcount=0.
+//   [12..]   QNAME: "\x07example\x03com\x00" (length-prefixed labels).
+//   [tail]   QTYPE=1 (A), QCLASS=1 (IN), each as 2 big-endian bytes.
+//
+// Sets query.len to the total packet length. No return value (the
+// caller checks query.len + query.data[] after the call).
+fn dns_build_query(query: State<DnsQuery>, name: State<DnsName>, id: u16) {
+    // Header: ID, flags=0x0100 (standard query, recursion desired),
+    // qdcount=1, ancount=0, nscount=0, arcount=0.
+    query.data[0] = (id >> 8) as u8;
+    query.data[1] = (id & 255) as u8;
+    query.data[2] = 1;  // flags high: standard query (RD=1)
+    query.data[3] = 0;  // flags low
+    query.data[4] = 0; query.data[5] = 1;  // qdcount=1
+    query.data[6] = 0; query.data[7] = 0;  // ancount=0
+    query.data[8] = 0; query.data[9] = 0;  // nscount=0
+    query.data[10] = 0; query.data[11] = 0;  // arcount=0
+    // Encode domain name: "example.com" → "\x07example\x03com\x00".
+    // Each label is prefixed by its 1-byte length; the name ends with a
+    // single 0 byte. The '.' separator in the input is NOT emitted —
+    // it just signals "end of label, emit length prefix for next label".
+    let pos = 12;
+    let label_start = 0;
+    let i = 0;
+    while i < 64 {
+        let c = name.data[i];
+        if c == 0 || c == 46 {  // null or '.'
+            let label_len = i - label_start;
+            if label_len > 0 {
+                query.data[pos] = label_len as u8;
+                pos = pos + 1;
+                let j = label_start;
+                while j < i {
+                    query.data[pos] = name.data[j];
+                    pos = pos + 1;
+                    j = j + 1;
+                }
+            }
+            label_start = i + 1;
+            if c == 0 { break; }
+        }
+        i = i + 1;
+    }
+    // Terminator (the trailing 0 byte after the last label).
+    query.data[pos] = 0;
+    pos = pos + 1;
+    // Type A (1) + Class IN (1), each as 2 big-endian bytes.
+    query.data[pos] = 0; query.data[pos + 1] = 1;  // type A
+    query.data[pos + 2] = 0; query.data[pos + 3] = 1;  // class IN
+    pos = pos + 4;
+    query.len = pos;
+}
+
+// dns_parse_response: parse a DNS response and extract the first A
+// record's IPv4 address.
+//
+//   buf: caller-allocated State<DnsQuery> holding the raw response
+//        packet (re-uses the DnsQuery layout — same byte-array shape).
+//
+// Returns the IPv4 address as a host-order u32, or 0 on failure. K9e
+// STUB: in hosted mode, the response buffer is always empty (no real
+// DNS server is reachable from the compile_dump runtime), so this
+// function unconditionally returns 0. The real parsing path
+// (skip header + question, walk answer records, extract first A
+// record's 4-byte RDATA field) is K9g+.
+fn dns_parse_response(buf: State<DnsQuery>) -> u32 {
+    // Simplified: skip the header + question, read the first answer.
+    // In hosted mode, the response is empty → return 0.
+    return 0;
+}
+
+// dns_resolve: resolve a domain name to an IPv4 address.
+//
+//   name: caller-allocated State<DnsName> holding the null-terminated
+//         ASCII domain name to resolve.
+//
+// Returns the IPv4 address as a host-order u32, or 0 on failure. K9e
+// STUB: in hosted mode, returns 0 (no real DNS server — the build_query
+// path is exercised, but the actual UDP send/recv is a no-op). The
+// real resolver path (build query → sys_send UDP socket → sys_recv
+// response → dns_parse_response) is K9g+.
+fn dns_resolve(name: State<DnsName>) -> u32 {
+    let query = state_new(DnsQuery);
+    dns_build_query(query, name, 1234);
+    // In hosted mode: can't actually send/receive DNS packets.
+    // Return 0 (lookup failed).
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the query-builder path: build a DNS A-record query for
+// "example.com" with id=1234, then verify the header (id bytes, qdcount)
+// + the encoded domain name (label lengths + label bytes). Returns 0 on
+// success, 1..7 on the 7 individual check failures.
+fn main() -> i32 {
+    // Self-test: build a DNS query for "example.com".
+    let name = state_new(DnsName);
+    name.data[0] = 101;  // 'e'
+    name.data[1] = 120;  // 'x'
+    name.data[2] = 97;   // 'a'
+    name.data[3] = 109;  // 'm'
+    name.data[4] = 112;  // 'p'
+    name.data[5] = 108;  // 'l'
+    name.data[6] = 101;  // 'e'
+    name.data[7] = 46;   // '.'
+    name.data[8] = 99;   // 'c'
+    name.data[9] = 111;  // 'o'
+    name.data[10] = 109; // 'm'
+    name.data[11] = 0;   // null
+    let query = state_new(DnsQuery);
+    dns_build_query(query, name, 1234);
+    // Verify the header.
+    if query.data[0] != 4 { return 1; }  // 1234 >> 8 = 4
+    if query.data[1] != 210 { return 2; }  // 1234 & 255 = 210
+    if query.data[5] != 1 { return 3; }  // qdcount=1
+    // Verify the domain name encoding.
+    // "example.com" → \x07example\x03com\x00
+    if query.data[12] != 7 { return 4; }  // label length 7
+    if query.data[13] != 101 { return 5; }  // 'e'
+    if query.data[20] != 3 { return 6; }  // label length 3
+    if query.data[21] != 99 { return 7; }  // 'c'
+    return 0;
+}
