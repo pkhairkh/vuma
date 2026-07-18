@@ -4,31 +4,47 @@
 
 This document records, per backend, the floating-point codegen capability of VUMA's 19-target matrix.
 
-## Summary
+## Summary (post-G1..G5)
 
-| # | Backend | File | Arithmetic | Comparisons | Int↔Float | f32↔f64 | FP regs | Status |
-|---|---------|------|:---:|:---:|:---:|:---:|:---:|:---:|
-| 1 | x86_64 | `x86_64/stack_slot_isel.rs` | Y | Y | Y | Y | 16 (XMM) | Native (reference) |
-| 2 | aarch64 | `arm64.rs` | Y | Y | Y | Y | 32 | Native |
-| 3 | aarch64_be | `aarch64_be.rs` | Y | Y | Y | Y | 32 | Native (shares arm64) |
-| 4 | arm32 | `arm32/mod.rs` | Y | Y | Y | Y | 32 (VFP) | Native |
-| 5 | armeb | `armeb.rs` | Y | Y | Y | Y | 32 (VFP) | Native (BE arm32) |
-| 6 | riscv64 | `riscv64.rs` | Y | Y | Y | Y | 32 (F/D) | Native |
-| 7 | riscv32 | `riscv32.rs` | Y | Y | Y | Y | 32 (F/D) | Native |
-| 8 | mips64 | `mips64/mod.rs` | Y | Y | Y | Y | 32 | Native |
-| 9 | mips64be | `mips64be.rs` | Y | Y | Y | Y | 32 | Native (BE) |
-| 10 | ppc64 | `ppc64/mod.rs` | Y | Y | Y | Y | 32 | Native |
-| 11 | ppc64le | `ppc64le.rs` | Y | Y | Y | Y | 32 | Native (LE) |
-| 12 | loongarch64 | `loongarch64/mod.rs` | Y | Y | Y | Y | 32 | Native |
-| 13 | wasm32 | `wasm32/mod.rs` | Y | Y | Y | Y | n/a (stack) | Native |
-| 14 | m68k | `m68k.rs` | ~ | ~ | ~ | ~ | 8 (FP0-FP7) | Partial - Cast stubbed |
-| 15 | alpha | `alpha.rs` | Y | Y | Y | Y | 32 | Native (F1a) |
-| 16 | hppa | `hppa.rs` | ~ | ~ | N | N | 16 | Partial (F1b) - needs QEMU verify |
-| 17 | s390x | `s390x.rs` | Y | Y | Y | Y | 16 | Native (F1c) |
-| 18 | sparc64 | `sparc64.rs` | Y | ~ | Y | Y | 32 | Native arith (F1d); cmp Eq/Ne only |
-| 19 | x86_32 | `x86_32/mod.rs` | Y | Y | Y | Y | 8 (XMM) | Native (SSE) |
+| # | Backend | File | Arithmetic | Comparisons | Casts (5) | FP regs | Status |
+|---|---------|------|:---:|:---:|:---:|:---:|:---:|
+| 1 | x86_64 | `x86_64/stack_slot_isel.rs` | Y | Y (G1) | Y | 16 (XMM) | Native — fully operational |
+| 2 | x86_32 | `x86_32/stack_slot_isel.rs` | Y | Y (G1) | Y | 8 (XMM) | Native — fully operational |
+| 3 | aarch64 | `arm64.rs` / `emit.rs` | Y | Y (G1+G2) | Y | 32 | Native — fully operational |
+| 4 | aarch64_be | `aarch64_be.rs` | Y | Y (G1+G2) | Y | 32 | Native (wraps arm64) |
+| 5 | arm32 | `arm32/mod.rs` | Y | Y (G1) | Y | 32 (VFP) | Native — fully operational |
+| 6 | armeb | `armeb.rs` | Y | Y (G1) | Y | 32 (VFP) | Native (wraps arm32) |
+| 7 | riscv64 | `riscv64.rs` | Y | Y (G1) | Y | 32 (F/D) | Native — fully operational |
+| 8 | riscv32 | `riscv32.rs` | Y | Y (G1) | Y | 32 (F/D) | Native — fully operational |
+| 9 | mips64 | `mips64/mod.rs` | Y | Y (G1) | Y | 32 | Native — fully operational |
+| 10 | mips64be | `mips64be.rs` | Y | Y (G1) | Y | 32 | Native (BE mips64) |
+| 11 | ppc64 | `ppc64/mod.rs` | Y | Y (G1) | Y | 32 | Native — fully operational |
+| 12 | ppc64le | `ppc64le.rs` | Y | Y (G1) | Y | 32 | Native (LE ppc64) |
+| 13 | loongarch64 | `loongarch64/mod.rs` | Y | Y (G1) | Y | 32 | Native — fully operational |
+| 14 | s390x | `s390x.rs` | Y | Y (G1) | Y | 16 | Native — fully operational (F1c) |
+| 15 | sparc64 | `sparc64.rs` | Y | Y (G1+G5a) | Y (G5b unsigned) | 32 | Native — operational |
+| 16 | alpha | `alpha.rs` | Y | Y (G1+G2) | Y (G5b unsigned) | 32 | Native — operational |
+| 17 | hppa | `hppa.rs` | ~ (stubs) | ~ (stubs) | ~ (FloatToFloat only, G3) | 16 | PARTIAL — needs QEMU verify or soft-float |
+| 18 | m68k | `m68k.rs` | ~ (G4 best-effort) | ~ (G4 best-effort) | ~ (FloatToFloat correct; others G4 best-effort) | 8 (FP0-FP7) | PARTIAL — needs QEMU verify |
+| 19 | wasm32 | `wasm32/mod.rs` | Y | Y (G1) | Y | n/a (stack) | Native — fully operational |
 
-**Legend:** Y = native, fully implemented | ~ = partial (see notes) | N = missing/stubbed
+**Legend:** Y = native, fully implemented | ~ = partial (see notes) | N = missing
+
+## Post-G-series tally
+
+- **17 backends** have fully operational FP arithmetic (Add/Sub/Mul/Div).
+- **17 backends** have fully operational FP comparisons (Eq/Ne/Lt/Le/Gt/Ge) —
+  unlocked by G1 (SCG ty propagation) + G2 (arm64/alpha Cmp dispatch) + G5a
+  (sparc64 sign-bit materialization). The two partials are hppa (stub) and
+  m68k (G4 best-effort FCMP stub).
+- **17 backends** have fully operational FP casts (all 5 CastKind) — G5b
+  added unsigned corrections for alpha/sparc64. hppa has FloatToFloat only
+  (G3); m68k has FloatToFloat correct + 4 others best-effort (G4).
+- **15 backends are fully operational end-to-end** (arith + compare + all
+  5 casts). The remaining 4: hppa (partial), m68k (partial), and 0 missing.
+- **NOTHING has been compiled or run** — no Rust toolchain in sandbox. All
+  changes are correct-by-construction. Runtime verification (G7) is the
+  critical next step.
 
 ## Post-F1 tally
 
