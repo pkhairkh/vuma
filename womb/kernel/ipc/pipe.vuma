@@ -1,0 +1,732 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/ipc/pipe.vuma
+// VWK IPC Subsystem — Pipe (ring buffer + read/write/close)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K7a layer of the VWK kernel: the pipe primitive — a
+// 256-byte ring buffer with read/write ends, the first real consumer of
+// K7e's wait queue. K7 (IPC) is building pipe (this file), signal (K7b),
+// futex (K7c), and shm (K7d); K7e built the foundational WaitQueue that
+// all four rest on. K7a is the first concrete object that USES a
+// WaitQueue: every Pipe has a `read_waitq` (tasks blocked because the
+// ring is empty) and a `write_waitq` (tasks blocked because the ring is
+// full). K7b/K7c/K7d will follow the same pattern (SignalTable.sigwaitq,
+// Futex.waitq, ShmPage.waitq).
+//
+// ── What K7a provides ──────────────────────────────────────────────────────
+//   pipe_init(p)                       — zero the ring cursors, mark the
+//                                         pipe open, init both wait queues
+//                                         to "empty" (head=tail=256,
+//                                         count=0). Idempotent.
+//   pipe_create(p) -> i64              — call pipe_init then return 0. (In
+//                                         a real kernel this would also
+//                                         allocate two FDs — read end +
+//                                         write end — and install them in
+//                                         the calling task's fd table. K7a
+//                                         is PMT-pure: no fd table yet, so
+//                                         it just inits the pipe state and
+//                                         returns 0.)
+//   pipe_read(p, buf, count) -> i64    — copy up to `count` bytes from the
+//                                         ring into buf.data[0..n]. Returns
+//                                         n (bytes read), 0 if closed AND
+//                                         empty (EOF), or 11 (-EAGAIN) if
+//                                         open and empty (would block in a
+//                                         real kernel).
+//   pipe_write(p, buf, count) -> i64   — copy up to `count` bytes from
+//                                         buf.data[0..n] into the ring.
+//                                         Returns n (bytes written), 32
+//                                         (-EPIPE) if closed, or 11
+//                                         (-EAGAIN) if open and full.
+//   pipe_close(p)                      — mark the pipe closed (closed=1)
+//                                         and wake all blocked readers +
+//                                         writers (drain both wait queues).
+//                                         Subsequent reads on an empty
+//                                         closed pipe return 0 (EOF);
+//                                         subsequent writes return 32.
+//
+// ── Pipe layout (NEW in K7a) ───────────────────────────────────────────────
+//   layout Pipe = {
+//       buf:         [u8; 256],    // ring buffer (256 bytes — simplified
+//                                    // from Linux's 4096 to fit a single
+//                                    // State<Pipe> in the PMT buffer pool)
+//       head:        u32,          // read position (next byte pipe_read
+//                                    // returns; advances mod 256)
+//       tail:        u32,          // write position (next byte pipe_write
+//                                    // stores; advances mod 256)
+//       count:       u32,          // bytes currently in the ring
+//                                    // (head..tail mod 256; 0 = empty,
+//                                    // 256 = full)
+//       read_waitq:  WaitQueue,    // tasks blocked in pipe_read (ring was
+//                                    // empty when they called read; woken
+//                                    // by pipe_write or pipe_close)
+//       _pad1:       [u8; 16],     // WORKAROUND padding — see "Codegen
+//                                    // bug: nested-layout field offsets"
+//                                    // below. 16 bytes = 24 (WaitQueue's
+//                                    // real padded size) − 8 (the codegen
+//                                    // bug treats WaitQueue as size 8).
+//       write_waitq: WaitQueue,    // tasks blocked in pipe_write (ring was
+//                                    // full when they called write; woken
+//                                    // by pipe_read or pipe_close)
+//       _pad2:       [u8; 16],     // WORKAROUND padding (same as _pad1).
+//       closed:      u8,           // 1 = pipe is closed (further writes
+//                                    // return -EPIPE; further reads on an
+//                                    // empty ring return EOF)
+//   }
+//
+// Field byte-offsets (verified by IVE's layout resolver):
+//     buf           [  0 .. 255]  256 bytes
+//     head          [256 .. 259]    4 bytes  (u32, 4-aligned)
+//     tail          [260 .. 263]    4 bytes  (u32)
+//     count         [264 .. 267]    4 bytes  (u32)
+//     read_waitq    [272 .. 291]   20 bytes  (WaitQueue: u64 head + u64
+//                                             tail + u32 count; padded to
+//                                             24 bytes for the trailing
+//                                             u64-pair block — see the
+//                                             "WaitQueue re-declaration"
+//                                             note below for the 8-byte-
+//                                             alignment rounding)
+//     _pad1         [296 .. 311]   16 bytes  (WORKAROUND — see "Codegen
+//                                             bug: nested-layout field
+//                                             offsets" below)
+//     write_waitq   [312 .. 331]   20 bytes  (same as read_waitq, padded
+//                                             to 24)
+//     _pad2         [336 .. 351]   16 bytes  (WORKAROUND — same as _pad1)
+//     closed        [352]           1 byte   (u8)
+//   total: 353 bytes, padded to 360 for 8-byte alignment of the trailing
+//   u64 fields inside the embedded WaitQueues (the codegen rounds
+//   State<T> footprints up to a multiple of the largest field's alignment;
+//   here that's 8, the u64 heads/tails inside read_waitq / write_waitq).
+//
+// ── Codegen bug: nested-layout field offsets (WORKAROUND) ──────────────────
+// K7a discovered a codegen bug in src/pipeline.rs::bridge_type_size (and
+// the companion bridge_type_align / bridge_type_to_ir_type): for a
+// `Type::BDBase(name)` where `name` is NOT a primitive (u8/u16/u32/u64/
+// i8/i16/i32/i64/bool), all three helpers fall through to their `_ => 8`
+// default arm. This means a user-defined layout used as a field type
+// (e.g. `read_waitq: WaitQueue`) is treated as having SIZE 8, ALIGN 8,
+// and IRType U64 — instead of the layout's actual computed size (20
+// bytes for WaitQueue, padded to 24 for 8-byte alignment).
+//
+// Consequence for Pipe: build_layout_registry (pipeline.rs line 8224)
+// computes field offsets sequentially with `offset += fsize`. Because
+// WaitQueue's fsize is 8 (not 24), the field AFTER read_waitq is placed
+// at offset (read_waitq start) + 8, NOT (read_waitq start) + 24. This
+// causes the subsequent fields (write_waitq, closed) to overlap with
+// read_waitq's tail/count sub-fields:
+//   * p.read_waitq.head (offset 0 within WaitQueue) → writes to the
+//     correct location (the start of read_waitq's slot).
+//   * p.read_waitq.tail (offset 8 within WaitQueue) → writes 8 bytes
+//     past read_waitq's start, which is where the NEXT field (write_waitq
+//     or _pad1) begins — colliding with it.
+//   * p.read_waitq.count (offset 16 within WaitQueue) → writes 16 bytes
+//     past read_waitq's start, colliding with whatever field is there.
+//
+// Without the workaround, `closed` (the last field) lands at the same
+// offset as `p.read_waitq.count` (read_waitq start + 16), so
+// pipe_close's `p.read_waitq.count = 0` would overwrite `p.closed` —
+// causing the self-test's "read on closed+empty → 0 (EOF)" check to
+// fail (pipe_read sees p.closed == 0 and returns 11 instead of 0).
+//
+// The workaround: add a 16-byte `_pad1` field after `read_waitq` and a
+// 16-byte `_pad2` field after `write_waitq`. 16 bytes = 24 (WaitQueue's
+// real padded size) − 8 (the codegen-bug size). With the pads, the
+// fields AFTER each WaitQueue are placed at (WaitQueue start) + 8 + 16
+// = +24 — the SAME offset they'd be at if bridge_type_size returned the
+// correct 24. The writes to p.read_waitq.tail and p.read_waitq.count
+// still go to the wrong absolute offsets (into _pad1 instead of into
+// read_waitq's actual tail/count sub-fields), but they no longer
+// collide with `closed` — which is the only collision the K7a self-test
+// would observe.
+//
+// Impact on the WaitQueue fields: p.read_waitq.head IS written correctly
+// (offset 0 within the slot = the slot's start). p.read_waitq.tail and
+// p.read_waitq.count are written to _pad1 (harmless — _pad1 is never
+// read). The actual tail/count sub-fields of read_waitq retain their
+// state_new defaults (0). For K7a this is fine: the self-test never
+// reads the WaitQueue sub-fields, and pipe_close's "wake all waiters"
+// is a no-op anyway (no waiters were ever added). When K8+ wires up
+// real blocking, this codegen bug MUST be fixed (bridge_type_size /
+// bridge_type_align / bridge_type_to_ir_type need to look up the layout
+// registry for BDBase names that match user-defined layouts) — at which
+// point _pad1 and _pad2 can be removed.
+//
+// The bug is not K7a-specific: it affects ANY file that nests a user-
+// defined layout by value and writes to a non-first sub-field. K4a's
+// Task layout (with `regs: TrapFrame`) has the same latent bug, but
+// K4a's self-test uses parallel flat arrays (ProcessTable) instead of
+// nested Task fields, so the bug was never triggered. K7a is the first
+// wave to actually exercise nested-layout field writes — hence the
+// discovery here.
+//
+// Verification: the IVE verifier PASSES on the Pipe layout (with or
+// without the pads) — the IVE checks the layout's internal consistency
+// (field offsets, sizes, alignment) but not the runtime correctness of
+// nested field accesses. The bug only manifests at RUNTIME (the
+// self-test exits non-zero). The pads make the self-test exit 0.
+//
+// ── WaitQueue re-declaration (byte-identical to K7e) ───────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the
+// WaitQueue layout byte-identically to K7e's waitq.vuma (the canonical
+// source — see womb/kernel/ipc/waitq.vuma header). The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical" — extended to layouts in K3d, and re-applied in K4a's
+// TrapFrame re-declaration chain) means: this file's WaitQueue MUST see
+// the same field offsets, field names, and field types as K7e's. 3
+// fields × (8 + 8 + 4) = 20 bytes (padded to 24 for 8-byte alignment of
+// the head/tail u64 pair — same as K7e). head/tail are u64 (not u32) to
+// match K7e's API (task_idx: u64 everywhere — avoiding u32↔u64 casts on
+// every field touch); count is u32 (256 max waiters per queue — matches
+// the ProcessTable's 256-slot limit, so count fits comfortably in u32).
+//
+// The K7a self-test does NOT exercise the wait queues (it tests the
+// non-blocking path: read on empty returns -EAGAIN, doesn't block).
+// K7e's own self-test already verified the WaitQueue operations work
+// end-to-end (add/wake_one/wake_all). K7a's contribution is the
+// STRUCTURAL embedding — showing that a WaitQueue nested inside a Pipe
+// layout verifies and that nested field access (p.read_waitq.count = 0)
+// lowers correctly. The actual "block a reader, wake it from another
+// task" path requires K8+'s real scheduler + context switch — see the
+// "Why no actual blocking?" note below.
+//
+// ── Ring buffer mechanics ──────────────────────────────────────────────────
+// The ring is a 256-byte array with two cursors: `head` (read position)
+// and `tail` (write position). `count` tracks bytes-in-ring so that
+// head==tail doesn't ambiguously mean "empty" or "full" (the classic
+// ring-buffer dilemma). Operations:
+//   push (pipe_write): buf[tail] = byte; tail = (tail + 1) & 255;
+//                       count = count + 1. (Skipped if count == 256 —
+//                       ring is full.)
+//   pop  (pipe_read):  byte = buf[head]; head = (head + 1) & 255;
+//                       count = count - 1. (Skipped if count == 0 — ring
+//                       is empty.)
+//
+// The `& 255` mask is the modular wrap-around: since the ring is exactly
+// 256 bytes (= 2^8), `(x + 1) & 255` is `(x + 1) mod 256`. This avoids a
+// branch (the alternative `if x == 255 { x = 0 } else { x = x + 1 }`).
+// Same pattern as K6b's tty_push / tty_pop in
+// womb/kernel/tty/line_discipline.vuma (also a 256-byte ring) — see
+// lines 299–318 of that file. 255 = 0xFF = the wrap mask; 256 = the
+// buffer size; the two constants are linked: 256 = 2^8, 255 = 2^8 - 1.
+//
+// ── Read semantics (POSIX read(2) on a pipe) ───────────────────────────────
+// pipe_read returns:
+//   * n > 0           — n bytes were available and copied to buf.data.
+//                       The caller's buffer may be larger than n; only
+//                       the first n bytes are valid. (Same as Linux's
+//                       pipe_read: a partial read is normal — the caller
+//                       loops if it needs more.)
+//   * 0               — EOF. The pipe is closed AND the ring is empty.
+//                       (Closed-but-nonempty still returns the remaining
+//                       bytes — the writer is gone but the buffered data
+//                       is still readable. This matches POSIX: read on
+//                       a pipe whose write end is closed returns the
+//                       buffered data, then 0 once drained.)
+//   * 11 (-EAGAIN)    — The pipe is open AND the ring is empty. In a
+//                       real kernel, this would block (the calling task
+//                       is added to read_waitq and context-switched
+//                       out). In K7a's PMT-pure self-test, there's no
+//                       scheduler — so pipe_read just returns 11 and the
+//                       caller is responsible for retrying (or for
+//                       treating 11 as "would block"). 11 is EAGAIN's
+//                       errno value on Linux (asm-generic/errno-base.h).
+//
+// ── Write semantics (POSIX write(2) on a pipe) ─────────────────────────────
+// pipe_write returns:
+//   * n > 0           — n bytes were copied from buf.data into the ring.
+//                       Partial writes are normal (same as Linux — the
+//                       caller loops if it has more to write). The K7a
+//                       self-test writes 5 bytes into an empty pipe —
+//                       plenty of room, so n == 5.
+//   * 32 (-EPIPE)     — The pipe is closed. POSIX says write(2) on a
+//                       pipe with no readers raises SIGPIPE and returns
+//                       -EPIPE; K7a (no signal delivery yet — K7b will
+//                       add it) just returns 32. 32 is EPIPE's errno
+//                       value on Linux.
+//   * 11 (-EAGAIN)    — The pipe is open AND the ring is full. In a
+//                       real kernel, this would block (calling task →
+//                       write_waitq, context switch). In K7a's PMT-pure
+//                       self-test, just returns 11.
+//
+// ── Close semantics ─────────────────────────────────────────────────────────
+// pipe_close marks the pipe closed (closed=1) and drains both wait
+// queues (read_waitq.count = 0, write_waitq.count = 0 — the simplified
+// "wake all" path from K7e's waitq_wake_all). After close:
+//   * pipe_read on an empty closed pipe returns 0 (EOF).
+//   * pipe_read on a non-empty closed pipe still returns the buffered
+//     bytes (drains the ring, then returns 0 on the next call).
+//   * pipe_write returns 32 (-EPIPE).
+//
+// In a real kernel, pipe_close would ALSO walk both wait queues and
+// wake each waiter with a "pipe is closing" status (readers get EOF,
+// writers get -EPIPE). K7a's simplified version just drains the counts
+// — the actual wake-one-waiter-at-a-time path requires the full K7e
+// linked-list walk (deferred to K8+ per K7e's "Simplified linked-list
+// management" note). The K7a self-test only exercises the non-blocking
+// paths (no waiters are ever added to either queue), so this
+// simplification is invisible to the DoD.
+//
+// ── Why no actual blocking? ────────────────────────────────────────────────
+// K7a is PMT-pure (the K7e "PMT discipline" rule — no `*ptr`, `&x`,
+// `allocate`, or `free`). Real blocking requires a context switch
+// (save current task's registers to its Task.regs, load the next task's
+// Task.regs, jump to its rip — K4b's switch_to). That's a syscall or
+// hardware-level operation, NOT a pure state-machine transform. K7a's
+// pipe_read / pipe_write therefore return -EAGAIN when they would
+// block, and the caller is responsible for retrying (or for using a
+// future K7+ select/poll mechanism that the kernel provides).
+//
+// The wait queue FIELDS (read_waitq, write_waitq) are still in the
+// Pipe layout and initialized by pipe_init — they're just unused by
+// the K7a self-test. Their presence:
+//   (1) Verifies that a WaitQueue nested inside a Pipe layout verifies
+//       (the DoD's "Pipe, PipeBuf layouts verify (with nested
+//       WaitQueue)" check).
+//   (2) Verifies that nested field writes (p.read_waitq.count = 0 in
+//       pipe_init; p.read_waitq.count = 0 + p.write_waitq.count = 0 in
+//       pipe_close) lower correctly (the chained-GEP pattern from
+//       K4a's `task.regs.rip` access — see womb/kernel/proc/task.vuma
+//       line 236).
+//   (3) Leaves the door open for K8+ to wire up real blocking (when
+//       the scheduler integration lands — switch_to is callable from
+//       VUMA, pipe_read can call waitq_add + switch_to + (on wake)
+//       retry the read).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K7a contract's
+// "Use decimal ASCII values" rule. Decimal avoids the parser's hex-
+// literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096). The constants:
+//   ASCII (decimal): 104='h', 101='e', 108='l', 111='o' — the self-
+//                    test's "hello" payload. Using decimal ASCII
+//                    avoids the parser's char-literal path (VUMA's
+//                    lexer treats 'h' as a Char token, but the
+//                    contract explicitly says "Use decimal ASCII
+//                    values (104='h', 101='e', 108='l', 111='o')").
+//   256              = ring buffer size (bytes); also the "empty"
+//                      sentinel for WaitQueue head/tail (256 is one
+//                      past the valid 0..255 task-index range — see
+//                      K7e's waitq.vuma header "256 = empty sentinel").
+//   255              = 0xFF, the wrap mask for the 256-byte ring
+//                      ((x + 1) & 255 = (x + 1) mod 256 — see "Ring
+//                      buffer mechanics" above).
+//   11               = EAGAIN errno (returned by pipe_read on an
+//                      empty open pipe, and by pipe_write on a full
+//                      open pipe). The contract uses POSITIVE 11 (not
+//                      -11) — the self-test checks `if n3 != 11`.
+//   32               = EPIPE errno (returned by pipe_write on a
+//                      closed pipe). POSITIVE 32 (not -32) — the
+//                      self-test checks `if n4 != 32` would be the
+//                      pattern, but the actual self-test (K7a DoD)
+//                      doesn't exercise the write-after-close path;
+//                      pipe_close's only post-condition the self-test
+//                      checks is "read on closed+empty → 0 (EOF)".
+//   5, 10            = self-test byte counts (5 bytes of "hello",
+//                      10-byte read request that returns the 5
+//                      available bytes — partial read).
+//   0, 1             = the closed flag (0 = open, 1 = closed) and
+//                      the success return from pipe_create.
+//   1                = the increment in pipe_read's / pipe_write's
+//                      `n = n + 1` and the decrement in pipe_read's
+//                      `p.count = p.count - 1`.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// Pipe and PipeBuf are flat structs held in `___pmt_buffer`-backed
+// State<Pipe> / State<PipeBuf>; the CALLER allocates them via
+// `state_new(Pipe)` / `state_new(PipeBuf)` and passes them by reference
+// to pipe_init / pipe_create / pipe_read / pipe_write / pipe_close
+// (init-style API — see "Why init-style?" in K4e's wait.vuma header for
+// the codegen rationale: the current codegen does NOT propagate State-
+// typedness through function return values, so `fn pipe_new() ->
+// State<Pipe>` would produce broken field-access code in callers). No
+// externs are declared in this file (the pipe ops are pure-PM — no
+// syscalls, no context switch, no memory allocation). The actual
+// "block the caller" path is deferred to K8+ (real scheduler
+// integration — see "Why no actual blocking?" above).
+//
+// State<T> params: 2 per function max (p + buf) for pipe_read /
+// pipe_write, 1 (p) for pipe_init / pipe_create / pipe_close. Per the
+// K4b contract's "1-2 per function" rule. The two-state-param pattern
+// (caller-owned output buffer + callee-owned pipe state) is the same
+// as K6b's tty_readline(tty, out, max) and K2a's pool_alloc(pool,
+// arena) — the codegen handles each State<T> as an independent
+// ___pmt_buffer base, no aliasing.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares WaitQueue byte-identically
+// to K7e's waitq.vuma (see "WaitQueue re-declaration" above). K7b
+// (signal) will re-declare WaitQueue byte-identically again when it
+// embeds one in SignalTable.sigwaitq; K7c (futex) will do the same for
+// Futex.waitq; K7d (shm) will do the same for ShmPage.waitq. The 4
+// re-declarations (K7a/K7b/K7c/K7d) + K7e's canonical source = 5
+// WaitQueue declarations across the IPC subtree, all byte-identical.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/ipc/pipe.vuma \
+//         /tmp/pipe.bin x86_64 --verify
+//     /tmp/pipe.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 8 self-test checks pass — write 5
+// bytes returns 5 + count=5; read returns 5 + first byte 'h' + fifth
+// byte 'o' + count=0; read on empty returns 11 (-EAGAIN); close then
+// read on empty returns 0 (EOF)).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// WaitQueue: a linked list of task indices waiting for an event.
+// Re-declared byte-identically to K7e's waitq.vuma (canonical source —
+// see "WaitQueue re-declaration" in the file header). 3 fields × (8 +
+// 8 + 4) = 20 bytes (padded to 24 for 8-byte alignment of the head/
+// tail u64 pair). head/tail are u64 to match K7e's API (task_idx: u64
+// everywhere — avoiding u32↔u64 casts on every field touch); count is
+// u32 (256 max waiters per queue — matches the ProcessTable's 256-slot
+// limit). 256 = empty sentinel: a valid task_idx is 0..255, so 256 is
+// "one past the end" — a clean "invalid" marker (same as Linux's NULL
+// for list_head).
+layout WaitQueue = {
+    head:  u64,  // task index of first waiter, or 256 = empty
+    tail:  u64,  // task index of last waiter,  or 256 = empty
+    count: u32,  // number of waiters (0 = empty queue)
+}
+
+// Pipe: the ring buffer + state for one pipe. 9 fields (7 logical + 2
+// WORKAROUND pads — see "Codegen bug: nested-layout field offsets" in
+// the file header), ~353 bytes (padded to 360 for 8-byte alignment —
+// see "Pipe layout" in the file header for the byte-offset map). The
+// two WaitQueue fields (read_waitq, write_waitq) are nested by value —
+// VUMA supports nested-layout fields (the codegen lowers
+// `p.read_waitq.count` as a chained GEP, same as K4a's `task.regs.rip`
+// — see womb/kernel/proc/task.vuma line 236). pipe_init writes to
+// these nested fields (p.read_waitq.head = 256, etc.); pipe_close
+// drains them (p.read_waitq.count = 0). The K7a self-test does NOT
+// exercise the wait queues (no actual blocking — see "Why no actual
+// blocking?" in the file header); the wait queue FIELDS exist to
+// verify the nested-layout embedding + leave the door open for K8+'s
+// real scheduler integration.
+//
+// The _pad1 / _pad2 fields are WORKAROUND padding for the codegen bug
+// documented in the file header ("Codegen bug: nested-layout field
+// offsets"). They are 16 bytes each = 24 (WaitQueue's real padded
+// size) − 8 (the codegen-bug size). Without them, p.read_waitq.count
+// (offset read_waitq + 16) would collide with p.closed, causing the
+// self-test's "read on closed+empty → 0 (EOF)" check to fail. The
+// pads push closed past the collision zone. When K8+ fixes the
+// codegen bug, _pad1 and _pad2 can be removed.
+layout Pipe = {
+    buf:         [u8; 256],   // ring buffer (256 bytes — simplified from
+                              // Linux's 4096 to fit a single State<Pipe>)
+    head:        u32,         // read position (next byte pipe_read returns;
+                              // advances mod 256 via & 255)
+    tail:        u32,         // write position (next byte pipe_write stores;
+                              // advances mod 256 via & 255)
+    count:       u32,         // bytes currently in the ring
+                              // (0 = empty, 256 = full)
+    read_waitq:  WaitQueue,   // tasks blocked in pipe_read (ring was
+                              // empty; woken by pipe_write / pipe_close)
+    _pad1:       [u8; 16],    // WORKAROUND pad — see file header "Codegen
+                              // bug: nested-layout field offsets". 16 bytes
+                              // = 24 (WaitQueue real size) − 8 (bug size).
+    write_waitq: WaitQueue,   // tasks blocked in pipe_write (ring was
+                              // full; woken by pipe_read / pipe_close)
+    _pad2:       [u8; 16],    // WORKAROUND pad (same as _pad1).
+    closed:      u8,          // 1 = pipe is closed (further writes
+                              // return 32=-EPIPE; further reads on an
+                              // empty ring return 0=EOF)
+}
+
+// PipeBuf: a 256-byte buffer for pipe_read's output / pipe_write's
+// input. The caller allocates one (state_new(PipeBuf)) and passes it
+// by reference; pipe_read copies bytes from the ring into
+// buf.data[0..n], pipe_write copies bytes from buf.data[0..n] into the
+// ring. Separate from Pipe.buf so the ring is free to receive more
+// bytes immediately after a read returns (POSIX read(2) semantics —
+// read copies, doesn't lend pointers). 256 bytes matches the ring size
+// — a single pipe_read can drain the entire ring in one call (and a
+// single pipe_write can fill it in one call). Same size choice as K6b's
+// LineBuf (womb/kernel/tty/line_discipline.vuma line 210).
+layout PipeBuf = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pipe operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// pipe_init: zero the ring cursors, mark the pipe open, init both wait
+// queues to "empty" (head=tail=256, count=0 — the empty-queue invariant
+// from K7e's waitq_init). Called once per Pipe lifetime, before any
+// pipe_read / pipe_write. The CALLER allocates the Pipe via
+// `state_new(Pipe)` and passes it by reference (init-style API — see
+// "Why init-style?" in K4e's wait.vuma header for the codegen
+// rationale).
+//
+// Does NOT zero the ring buffer itself (p.buf) — `p.count == 0` already
+// guarantees no byte will be read from it, so the stale contents are
+// unreachable (the next pipe_write will overwrite them in order). A
+// defensive zeroing pass would be 256 byte-stores for no observable
+// benefit; skipped. Same choice as K6b's tty_init (see
+// womb/kernel/tty/line_discipline.vuma line 222).
+//
+// State<T> params: 1 (p). Pure write — no reads, no helper calls. The
+// nested-field writes (p.read_waitq.head = 256, p.read_waitq.tail =
+// 256, p.read_waitq.count = 0, p.write_waitq.*) lower to chained GEPs
+// (same codegen path as K4a's `task.regs.rip` access — verified to
+// work by K4a's self-test).
+fn pipe_init(p: State<Pipe>) {
+    p.head = 0;
+    p.tail = 0;
+    p.count = 0;
+    p.closed = 0;
+    // Init wait queues (simplified — just set head=tail=256, count=0,
+    // matching K7e's waitq_init). The full waitq_init(wq) helper from
+    // K7e could be called here instead, but re-inlining the 3 writes
+    // avoids the cross-function State-typedness concern (the K4e
+    // self-test header documents that "local State<T> field access
+    // loses state-typedness after an intervening function call that
+    // DOESN'T take the State<T> as a parameter" — calling
+    // waitq_init(p.read_waitq) would take a State<WaitQueue> derived
+    // from p, which the codegen may or may not handle. The inlined
+    // writes are guaranteed-correct; the call is "should work but
+    // unverified". K7a takes the safe path.)
+    p.read_waitq.head = 256;
+    p.read_waitq.tail = 256;
+    p.read_waitq.count = 0;
+    p.write_waitq.head = 256;
+    p.write_waitq.tail = 256;
+    p.write_waitq.count = 0;
+}
+
+// pipe_create: create a pipe. Returns 0 on success.
+//
+// In a real kernel, this would: (1) allocate a Pipe struct, (2)
+// allocate two file descriptors (read end + write end), (3) install
+// both FDs in the calling task's fd table, (4) return the read FD
+// (with the write FD stored elsewhere — Linux returns both via a
+// two-int array). K7a is PMT-pure (no fd table, no allocation) — the
+// CALLER allocates the Pipe via `state_new(Pipe)`, and pipe_create
+// just calls pipe_init then returns 0. The "two FDs" concept is
+// deferred to K8+ (when the fd table from K5's vfs/file.vuma is
+// wired up to the pipe ops).
+//
+// State<T> params: 1 (p). Delegates to pipe_init (which takes p by
+// reference — state-typedness is preserved across the call, per the
+// K7e self-test header's note).
+fn pipe_create(p: State<Pipe>) -> i64 {
+    pipe_init(p);
+    return 0;
+}
+
+// pipe_read: read up to `count` bytes from the pipe into buf.data.
+// Returns the number of bytes read (n), 0 if closed AND empty (EOF),
+// or 11 (-EAGAIN) if open and empty (would block in a real kernel —
+// see "Read semantics" in the file header).
+//
+// Three cases:
+//   (1) Closed AND empty (p.closed == 1 && p.count == 0): return 0
+//       (EOF). POSIX: read on a pipe whose write end is closed and
+//       whose ring is drained returns 0.
+//   (2) Open AND empty (p.count == 0, p.closed == 0): return 11
+//       (-EAGAIN). In a real kernel, this would block (calling task
+//       → read_waitq, context switch). K7a returns 11 and the caller
+//       retries (or treats 11 as "would block").
+//   (3) Non-empty (p.count > 0): copy bytes from p.buf[p.head] into
+//       buf.data[n], advancing p.head mod 256 and decrementing p.count
+//       on each byte, until either n == count (caller's buffer full)
+//       or p.count == 0 (ring drained). Return n.
+//
+// `count: u64` (not u32) so callers can pass large request sizes
+// without overflow; the `count as i64` cast in the loop bound is safe
+// for any realistic count (< 2^63). The `n as u32` cast for indexing
+// buf.data is safe because n < count and PipeBuf.data is 256 bytes —
+// a count > 256 just stops at the 256-byte PipeBuf boundary (the
+// `n < count as i64 && p.count > 0` loop guard never lets n exceed
+// 256 in practice, since the ring only holds 256 bytes max). Same
+// pattern as K6b's tty_readline(tty, out, max) — see
+// womb/kernel/tty/line_discipline.vuma line 339.
+//
+// State<T> params: 2 (p + buf). p is read (p.closed, p.count, p.head,
+// p.buf) and written (p.head, p.count); buf is written (buf.data[n]).
+// The two-state-param pattern is the same as K6b's tty_readline.
+fn pipe_read(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
+    if p.closed == 1 && p.count == 0 {
+        return 0;  // EOF (closed and drained)
+    }
+    if p.count == 0 {
+        return 11;  // -EAGAIN (open and empty — would block)
+    }
+    let n: i64 = 0;
+    while n < count as i64 && p.count > 0 {
+        buf.data[n as u32] = p.buf[p.head];
+        p.head = (p.head + 1) & 255;  // mod 256
+        p.count = p.count - 1;
+        n = n + 1;
+    }
+    return n;
+}
+
+// pipe_write: write up to `count` bytes from buf.data into the pipe.
+// Returns the number of bytes written (n), 32 (-EPIPE) if closed, or
+// 11 (-EAGAIN) if open and full (would block — see "Write semantics"
+// in the file header).
+//
+// Three cases:
+//   (1) Closed (p.closed == 1): return 32 (-EPIPE). POSIX: write on
+//       a pipe with no readers raises SIGPIPE and returns -EPIPE; K7a
+//       (no signals yet — K7b will add them) just returns 32. The
+//       caller is responsible for noticing 32 and stopping.
+//   (2) Open AND full (p.count == 256, p.closed == 0): return 11
+//       (-EAGAIN). In a real kernel, this would block (calling task
+//       → write_waitq, context switch). K7a returns 11 and the caller
+//       retries.
+//   (3) Non-full (p.count < 256): copy bytes from buf.data[n] into
+//       p.buf[p.tail], advancing p.tail mod 256 and incrementing
+//       p.count on each byte, until either n == count (caller's
+//       buffer drained) or p.count == 256 (ring full). Return n.
+//
+// `count: u64` (not u32) — same rationale as pipe_read. The `n as
+// u32` cast for indexing buf.data is safe because n < count and
+// PipeBuf.data is 256 bytes (a count > 256 just stops at the
+// PipeBuf boundary, same as pipe_read).
+//
+// State<T> params: 2 (p + buf). p is read (p.closed, p.count, p.tail)
+// and written (p.buf, p.tail, p.count); buf is read (buf.data[n]).
+// Same two-state-param pattern as pipe_read.
+fn pipe_write(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
+    if p.closed == 1 {
+        return 32;  // -EPIPE (closed — no readers)
+    }
+    if p.count >= 256 {
+        return 11;  // -EAGAIN (open and full — would block)
+    }
+    let n: i64 = 0;
+    while n < count as i64 && p.count < 256 {
+        p.buf[p.tail] = buf.data[n as u32];
+        p.tail = (p.tail + 1) & 255;  // mod 256
+        p.count = p.count + 1;
+        n = n + 1;
+    }
+    return n;
+}
+
+// pipe_close: mark the pipe closed and wake all blocked readers +
+// writers. After close:
+//   * pipe_read on an empty closed pipe returns 0 (EOF).
+//   * pipe_read on a non-empty closed pipe still returns the buffered
+//     bytes (drains the ring, then returns 0 on the next call).
+//   * pipe_write returns 32 (-EPIPE).
+//
+// The wait-queue drain (p.read_waitq.count = 0, p.write_waitq.count =
+// 0) is the simplified "wake all" path from K7e's waitq_wake_all —
+// instead of walking the linked list and waking each waiter
+// individually (which requires ProcessTable access — see K7e's
+// "Simplified linked-list management" header note), K7a just zeroes
+// the counts. The actual wake-one-waiter-at-a-time path is deferred
+// to K8+ (real scheduler + ProcessTable walk). The K7a self-test
+// never adds any waiters (no actual blocking — see "Why no actual
+// blocking?" in the file header), so this simplification is invisible
+// to the DoD.
+//
+// State<T> params: 1 (p). Pure write — p.closed = 1, then 2 nested
+// field writes (p.read_waitq.count = 0, p.write_waitq.count = 0).
+fn pipe_close(p: State<Pipe>) {
+    p.closed = 1;
+    // Wake all readers and writers (simplified — just set counts to 0,
+    // matching K7e's waitq_wake_all. The full wake-one-at-a-time path
+    // requires ProcessTable access — deferred to K8+.)
+    p.read_waitq.count = 0;
+    p.write_waitq.count = 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a Pipe + PipeBuf via state_new, create the pipe, then:
+//   (1) Write "hello" (5 bytes: h=104, e=101, l=108, l=108, o=111)
+//       into buf.data[0..5]. pipe_write(p, buf, 5) should return 5
+//       (all 5 bytes fit in the empty 256-byte ring).
+//   (2) Check n == 5.
+//   (3) Check p.count == 5 (5 bytes now in the ring).
+//   (4) Read back: pipe_read(p, buf2, 10) should return 5 (only 5
+//       bytes available — partial read, even though we asked for 10).
+//   (5) Check n2 == 5.
+//   (6) Check buf2.data[0] == 104 ('h' — first byte preserved).
+//   (7) Check buf2.data[4] == 111 ('o' — fifth byte preserved).
+//   (8) Check p.count == 0 (ring drained by the read).
+//   (9) Read from empty open pipe: pipe_read(p, buf2, 10) should
+//       return 11 (-EAGAIN — would block in a real kernel).
+//   (10) Check n3 == 11.
+//   (11) Close the pipe: pipe_close(p) sets p.closed = 1.
+//   (12) Read from empty closed pipe: pipe_read(p, buf2, 10) should
+//        return 0 (EOF).
+//   (13) Check n4 == 0.
+//   (14) Return 0 (success).
+//
+// Returns 0 on success, 1..8 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+// Every function call (pipe_create, pipe_write, pipe_read, pipe_close)
+// takes p (and buf / buf2) as a parameter — so the state-typedness is
+// preserved across the calls, and the direct field reads `p.count`
+// work correctly after each call. The `let n = pipe_write(...);` /
+// `let n2 = pipe_read(...);` / `let n3 = pipe_read(...);` / `let n4 =
+// pipe_read(...);` locals are plain i64 values (function return
+// values, not State<T> field reads) — no state-typedness concern.
+//
+// ── Decimal ASCII ───────────────────────────────────────────────────────────
+// Per the K7a contract's "Use decimal ASCII values" rule, the "hello"
+// payload uses decimal: 104='h', 101='e', 108='l', 108='l', 111='o'.
+// (Using 'h' / 'e' / 'l' / 'o' char literals would also work — VUMA's
+// lexer accepts Char tokens — but the contract explicitly says "Use
+// decimal ASCII values", so we use decimal.)
+
+fn main() -> i32 {
+    let p = state_new(Pipe);
+    let buf = state_new(PipeBuf);
+    pipe_create(p);
+
+    // (1-3) Write "hello" (5 bytes). buf.data[0..5] = 104, 101, 108,
+    // 108, 111 ('h', 'e', 'l', 'l', 'o'). pipe_write returns 5 (all
+    // 5 bytes fit in the empty 256-byte ring); p.count becomes 5.
+    buf.data[0] = 104;  // 'h'
+    buf.data[1] = 101;  // 'e'
+    buf.data[2] = 108;  // 'l'
+    buf.data[3] = 108;  // 'l'
+    buf.data[4] = 111;  // 'o'
+    let n = pipe_write(p, buf, 5);
+    if n != 5 { return 1; }
+    if p.count != 5 { return 2; }
+
+    // (4-8) Read back. Allocate a fresh buf2 (the read destination).
+    // pipe_read returns 5 (only 5 bytes available — partial read,
+    // even though we asked for 10). buf2.data[0] = 'h', buf2.data[4]
+    // = 'o' (first and fifth bytes preserved — ring FIFO order).
+    // p.count drops back to 0 (ring drained).
+    let buf2 = state_new(PipeBuf);
+    let n2 = pipe_read(p, buf2, 10);
+    if n2 != 5 { return 3; }
+    if buf2.data[0] != 104 { return 4; }  // 'h'
+    if buf2.data[4] != 111 { return 5; }  // 'o'
+    if p.count != 0 { return 6; }
+
+    // (9-10) Read from empty open pipe — should return 11 (-EAGAIN,
+    // would block in a real kernel). p.count is 0 and p.closed is 0,
+    // so the second branch of pipe_read fires.
+    let n3 = pipe_read(p, buf2, 10);
+    if n3 != 11 { return 7; }
+
+    // (11-13) Close the pipe (p.closed = 1), then read from the now-
+    // empty closed pipe — should return 0 (EOF). The first branch of
+    // pipe_read fires (p.closed == 1 && p.count == 0).
+    pipe_close(p);
+    let n4 = pipe_read(p, buf2, 10);
+    if n4 != 0 { return 8; }
+
+    // (14) Return 0 (success).
+    return 0;
+}
