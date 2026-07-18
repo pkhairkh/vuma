@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path("/home/z/my-project/vuma")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPILE_DUMP = REPO_ROOT / "target/release/compile_dump"
 GOLD_DIR = REPO_ROOT / "tests/gold_standard"
 EXPECTED_RE = re.compile(r"^//\s*[Ee]xpected\s+exit\s+code\s*:\s*(-?\d+)", re.MULTILINE)

@@ -59,9 +59,9 @@ echo "  ✓ Rust: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
 
 # Check/install QEMU
 # First, look for the bundled QEMU user-mode binaries extracted at
-# /tmp/my-project/bin/ (this is the standard location in the dev image).
-# If found, prepend that directory to PATH so all 19 QEMU binaries
-# (aarch64, x86_64, hppa, alpha, m68k, s390x, sparc64, etc.) are
+# $REPO_DIR/bin/ or $REPO_DIR/qemu-user-extract/usr/bin/ (dev image
+# locations). If found, prepend that directory to PATH so all 19 QEMU
+# binaries (aarch64, x86_64, hppa, alpha, m68k, s390x, sparc64, etc.) are
 # discoverable. Otherwise fall back to system QEMU.
 #
 # CRITICAL: Always ensure /usr/bin and /bin are in PATH (prepend if needed).
@@ -72,7 +72,7 @@ echo "  ✓ Rust: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 QEMU_DIR=""
-for d in /tmp/my-project/bin /tmp/my-project/qemu-user-extract/usr/bin; do
+for d in "$REPO_DIR/bin" "$REPO_DIR/qemu-user-extract/usr/bin" /tmp/qemu_bins; do
     if [ -x "$d/qemu-aarch64" ]; then QEMU_DIR="$d"; break; fi
 done
 if [ -n "$QEMU_DIR" ]; then
@@ -848,9 +848,12 @@ if [ $NO_PUSH -eq 0 ]; then
             echo "WARNING: $f does not exist — cannot stage it."
         fi
     done
-    # Stage any other test_results/ changes and the runner script itself.
+    # Stage any other test_results/ changes.
+    # IMPORTANT: the Pi MUST ONLY commit files under test_results/ — never
+    # scripts/, src/, docs/, or any other agent-owned path. This isolation
+    # guarantees the Pi can always `git pull && git push` without merge
+    # conflicts on agent-maintained files.
     git add test_results/ 2>/dev/null || echo "WARNING: 'git add test_results/' reported an error."
-    git add scripts/pi5_test_suite.sh 2>/dev/null || echo "WARNING: 'git add scripts/pi5_test_suite.sh' reported an error."
 
     TIMESTAMP=$(date -u '+%Y-%m-%d_%H%M-UTC')
 

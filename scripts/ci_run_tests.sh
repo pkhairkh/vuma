@@ -12,14 +12,33 @@
 # ============================================================================
 set -e
 export PATH="$HOME/.cargo/bin:$PATH"
-cd /tmp/my-project
+
+# Resolve repo root from this script's location so the entrypoint works
+# regardless of where the caller invoked it from (CI checks out the repo
+# to a runner-local path, never assuming a fixed checkout location).
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# Locate QEMU user-mode emulators. CI stages symlinks under
+# /tmp/qemu_bins/ via .github/workflows/vuma-tests.yml; on developer
+# machines the emulators are typically on PATH (qemu-user package).
+# We prefer /tmp/qemu_bins/ when present (matches the path the Rust
+# differential_test binary hard-codes) and fall back to `command -v`.
+qemu_bin_for() {
+    local arch="$1"
+    if [ -x "/tmp/qemu_bins/qemu-$arch" ]; then
+        printf '%s\n' "/tmp/qemu_bins/qemu-$arch"
+    else
+        command -v "qemu-$arch" 2>/dev/null || true
+    fi
+}
 
 echo "=== Building VUMA tools ==="
 RUSTUP_TOOLCHAIN=stable cargo build --release --bin compile_dump --bin differential_test --bin opt_level_test --bin fuzz_driver 2>&1 | tail -5
 
 echo "=== Running original 47 examples on all backends ==="
 mkdir -p test_results
-for be_qemu in "x86_64:" "arm32:/tmp/qemu_bins/qemu-arm" "mips64:/tmp/qemu_extracted/usr/bin/qemu-mips64el" "aarch64:/tmp/qemu_bins/qemu-aarch64" "riscv64:/tmp/qemu_bins/qemu-riscv64" "ppc64:/tmp/qemu_bins/qemu-ppc64" "loongarch64:/tmp/qemu_bins/qemu-loongarch64"; do
+for be_qemu in "x86_64:" "arm32:$(qemu_bin_for arm)" "mips64:$(qemu_bin_for mips64el)" "aarch64:$(qemu_bin_for aarch64)" "riscv64:$(qemu_bin_for riscv64)" "ppc64:$(qemu_bin_for ppc64)" "loongarch64:$(qemu_bin_for loongarch64)"; do
     be="${be_qemu%%:*}"
     qemu="${be_qemu#*:}"
     echo "--- $be ---"

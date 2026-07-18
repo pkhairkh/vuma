@@ -1,14 +1,18 @@
 #!/bin/bash
 # VUMA Womb Test Harness
 # Compiles every womb/*.vuma file and runs smoke tests on key modules.
-# Outputs a markdown report to /home/z/my-project/download/womb_test_report.md
+# Outputs a markdown report to $REPO_ROOT/test_results/womb_test_report.md
 
 set -u
 
-VUMA_BIN="${VUMA_BIN:-/home/z/vuma_real/target/release/vuma}"
-WOMB_DIR="${WOMB_DIR:-/home/z/vuma_real/womb}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# `vuma` is the CLI binary (src/main.rs); it accepts `build --verification
+# none <file> --output <out>`. `compile_dump` is the test driver (different
+# CLI) used by run_all_gold.sh / kernel_smoke.sh / ci_run_tests.sh.
+VUMA_BIN="${VUMA_BIN:-$REPO_ROOT/target/release-fast/vuma}"
+WOMB_DIR="${WOMB_DIR:-$REPO_ROOT/womb}"
 OUT_DIR="${OUT_DIR:-/tmp/womb_smoke}"
-REPORT="${REPORT:-/home/z/my-project/download/womb_test_report.md}"
+REPORT="${REPORT:-$REPO_ROOT/test_results/womb_test_report.md}"
 
 mkdir -p "$OUT_DIR"
 mkdir -p "$(dirname "$REPORT")"

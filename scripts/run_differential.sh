@@ -27,7 +27,8 @@
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
-VUMA_ROOT="${VUMA_ROOT:-/tmp/my-project}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VUMA_ROOT="${VUMA_ROOT:-$REPO_ROOT}"
 TEST_OUT="${TEST_RESULTS_DIR:-$VUMA_ROOT/test_results}"
 GOLD_DIR="${GOLD_DIR:-$VUMA_ROOT/tests/gold_standard}"
 EXAMPLES_DIR="${EXAMPLES_DIR:-$VUMA_ROOT/examples}"
@@ -85,12 +86,13 @@ log "Staged $count programs"
 
 # -----------------------------------------------------------------------------
 # Ensure /tmp/qemu_bins/qemu-<arch> symlinks exist (differential_test.rs
-# hard-codes those paths).
+# hard-codes those paths). CI stages these via .github/workflows/vuma-tests.yml;
+# on dev machines we create them from /usr/bin or `command -v`.
 # -----------------------------------------------------------------------------
 mkdir -p /tmp/qemu_bins
 for suffix in aarch64 riscv64 arm mips64el ppc64 loongarch64; do
     if [[ ! -e "/tmp/qemu_bins/qemu-$suffix" ]]; then
-        for cand in "/tmp/qemu_extracted/usr/bin/qemu-$suffix" "/usr/bin/qemu-$suffix" "/usr/local/bin/qemu-$suffix"; do
+        for cand in "/usr/bin/qemu-$suffix" "/usr/local/bin/qemu-$suffix"; do
             if [[ -x "$cand" ]]; then ln -sf "$cand" "/tmp/qemu_bins/qemu-$suffix"; break; fi
         done
         if [[ ! -e "/tmp/qemu_bins/qemu-$suffix" ]] && command -v "qemu-$suffix" >/dev/null 2>&1; then

@@ -38,13 +38,15 @@ set -euo pipefail
 # invoked from.  This makes the script safe to call as
 #   ./scripts/kernel_smoke.sh
 # or
-#   bash /home/z/vuma/scripts/kernel_smoke.sh
-cd /home/z/vuma
+#   bash /path/to/vuma/scripts/kernel_smoke.sh
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
 
 # Put cargo + the nightly toolchain on PATH (needed for the rebuild
-# step below; harmless if compile_dump is already up to date).
+# step below; harmless if compile_dump is already up to date). Skip
+# if absent (e.g., minimal CI runners that pre-install cargo on PATH).
 # shellcheck disable=SC1091
-source /home/z/.cargo/env
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 
 BIN=./target/release-fast/compile_dump
 KERNEL_SRC=womb/kernel/kernel.vuma

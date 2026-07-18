@@ -21,7 +21,8 @@
 # ============================================================================
 set -uo pipefail
 
-VUMA_ROOT="${VUMA_ROOT:-/tmp/my-project}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VUMA_ROOT="${VUMA_ROOT:-$REPO_ROOT}"
 TEST_OUT="${TEST_RESULTS_DIR:-$VUMA_ROOT/test_results}"
 REPORT="$TEST_OUT/REPORT.md"
 

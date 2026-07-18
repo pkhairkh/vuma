@@ -13,9 +13,10 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/z/my-project/vuma")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 GOLD_DIR = REPO_ROOT / "tests/gold_standard"
-OUT_DIR = Path("/home/z/my-project/download/gold_standard_results")
+OUT_DIR = Path(os.environ.get("VUMA_RESULTS_DIR", REPO_ROOT / "test_results" / "gold_standard_results"))
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = Path("/tmp/vuma_logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
