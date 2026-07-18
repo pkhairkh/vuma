@@ -215,16 +215,21 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             if let Some(id) = dst.as_register() {
                                 if fp.insert(id) { changed = true; }
                             }
-                            // Backward propagation: when the instruction's
-                            // `ty` is explicitly FP, the operand vregs MUST
-                            // hold FP values (the IR builder emits `ty: F64`
-                            // only for genuine FP arithmetic).  Mark them FP
-                            // so the producing instructions (which may have
-                            // `ty: None`, e.g. constant-materialising Adds)
-                            // use the FP path on the next fixed-point pass.
-                            // This is critical on x86_32, where the integer
-                            // path truncates 64-bit f64 values to 32 bits.
-                            if ty_fp {
+                            // Backward propagation: when ANY operand is FP
+                            // (or `ty` is explicitly FP), ALL register
+                            // operands MUST hold FP values -- VUMA types
+                            // are static, so a vreg used in an FP context is
+                            // FP everywhere.  This is critical on x86_32,
+                            // where the integer path truncates 64-bit f64
+                            // values to 32 bits (e.g. `let target = 7.0;`
+                            // materialised as `Add(Immediate(7.0_bits),
+                            // Immediate(0))` with `ty=None` would lose the
+                            // high word if treated as integer).  Previously
+                            // this only fired when `ty_fp` was true, missing
+                            // the common case where `ty` is None but one
+                            // operand is a known-FP vreg (e.g. loaded from
+                            // an f64 array).
+                            if op_fp {
                                 if let IRValue::Register(id) = lhs {
                                     if fp.insert(*id) { changed = true; }
                                 }
@@ -263,7 +268,16 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                                 }
                             }
                             // Backward propagation (see Add/Sub/Mul/Div above).
-                            if ty_fp {
+                            // Fires on `op_fp` (not just `ty_fp`) so that
+                            // FP comparisons like `midval == target` (where
+                            // `ty` is None but midval is a known-FP vreg)
+                            // propagate FP-ness to target's producing
+                            // instruction.  Without this, `let target = 7.0;`
+                            // (materialised as `Add(Immediate(7.0_bits),
+                            // Immediate(0))` with `ty=None`) takes the
+                            // integer path and truncates the 64-bit immediate
+                            // to 32 bits, corrupting the f64 value.
+                            if op_fp {
                                 if let IRValue::Register(id) = lhs {
                                     if fp.insert(*id) { changed = true; }
                                 }
@@ -285,6 +299,30 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                                 if let Some(id) = dst.as_register() {
                                     if zero.insert(id) { changed = true; }
                                 }
+                            }
+                        }
+                    }
+                    IRInstr::Cmp { lhs, rhs, ty, .. } => {
+                        // Cmp produces an integer 0/1 result, so the DST is
+                        // NOT marked FP.  But we DO backward-propagate FP-ness
+                        // to the operands: if the comparison is FP (ty is
+                        // F32/F64, or one operand is already a known-FP
+                        // vreg), then BOTH operands must hold FP values.
+                        // This is critical on x86_32, where the integer path
+                        // truncates 64-bit f64 values to 32 bits.  Without
+                        // this, `let target = 7.0;` (materialised as
+                        // `Add(Immediate(7.0_bits), Immediate(0))` with
+                        // `ty=None`) would not be marked FP even when target
+                        // is later used in an FP Cmp like
+                        // `midval == target` (Cmp with ty=F64).
+                        let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        if op_fp {
+                            if let IRValue::Register(id) = lhs {
+                                if fp.insert(*id) { changed = true; }
+                            }
+                            if let IRValue::Register(id) = rhs {
+                                if fp.insert(*id) { changed = true; }
                             }
                         }
                     }
