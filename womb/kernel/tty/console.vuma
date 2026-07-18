@@ -1,0 +1,502 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/tty/console.vuma
+// VWK kernel console subsystem — aggregates UART + TTY + VT100. — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6e layer of the VWK kernel: the console subsystem. K6a
+// (womb/kernel/drivers/uart.vuma) provided the byte-level UART driver
+// (uart_putc_8250 / uart_getc_8250 / uart_putc_pl011). K6b (womb/kernel/
+// tty/line_discipline.vuma) provided the TTY line discipline (tty_init /
+// tty_receive / tty_readline — the cooked-mode line editor with Ctrl-C /
+// Ctrl-D / backspace / CR-to-LF translation). K6c (womb/kernel/tty/vt100.vuma)
+// provided the VT100 escape-sequence parser (vt100_init / vt100_feed — the
+// cursor-movement + color state machine). K6d (womb/kernel/drivers/char.vuma)
+// provided the char device registry (chardev_register / chardev_lookup /
+// chardev_lookup_name — the parallel-flat-byte-array table of [name, major,
+// minor, 5 fn pointers] slots). K6e is the layer that aggregates them into
+// a single console interface: a 256-byte line buffer that flushes to the
+// UART (hosted: stdout via `write`; bare-metal K11: MMIO via uart_putc_*),
+// with a matching `read` path that pulls bytes from the UART (hosted: stdin
+// via `read`; bare-metal K11: uart_getc_8250 / uart_getc_pl011).
+//
+// This file REPLACES the K1a stub at womb/kernel/console.vuma (which has a
+// simpler Console layout — `buf: [u8; 256]` at offset 0 + `len: u32` at
+// offset 256 — and no read path). K6e introduces the full Console layout
+// (uart_base + buf + len + rows + cols) so K7+ can wire the TTY discipline
+// and VT100 parser as fields of the Console state (K6e's layout leaves
+// room for that future extension — the rows/cols fields are the
+// VT100-derived terminal dimensions; K7+ adds `tty: State<TtyLine>` and
+// `vt: State<Vt100State>` fields between cols and the end of the layout).
+// The K1 stub at womb/kernel/console.vuma stays in place for now (kernel.vuma
+// / kmain.vuma still call its simpler console_init/console_putc/console_flush
+// API); K7+ will rewire kernel.vuma / kmain.vuma to import (well, re-declare
+// — VUMA has no `import` yet) the K6e API byte-identically and delete the
+// K1 stub.
+//
+// ── What K6e provides ──────────────────────────────────────────────────────
+//   console_init(c)              — initialize the Console state (default
+//                                  COM1 base, empty buffer, 80×25 size).
+//   console_putc(c, ch)          — append one byte; auto-flush on newline
+//                                  or when the buffer is nearly full.
+//   console_puts(c, s)           — append a null-terminated State<ConsoleStr>.
+//   console_flush(c)             — drain the line buffer to the UART
+//                                  (hosted: write(1, addr, len)).
+//   console_read(c, buf, max)    — read up to `max` bytes from the UART
+//                                  into buf (hosted: read(0, addr, max)).
+//
+// ── Console layout & the offset-8 buf issue ────────────────────────────────
+// The K1 stub's Console layout put `buf: [u8; 256]` at offset 0 so that
+// `c as Address` (the State<T> → Address cast) yielded the address of
+// buf[0] — the natural argument for `write(1, addr, len)`. K6e's Console
+// layout puts `uart_base: u64` at offset 0 first (the K6e contract
+// specifies this field order verbatim), so `c as Address` yields the
+// address of uart_base — NOT buf. Handing that address to `write` would
+// emit the 8 bytes of uart_base (little-endian 1016 = 0xF8 0x03 0x00 ...
+// = the bytes 248, 3, 0, 0, 0, 0, 0, 0) followed by the first (len - 8)
+// bytes of buf, which is garbage.
+//
+// The K6e contract documents two ways to fix this:
+//   (1) Hand-compute the offset: `let addr = (c as Address) + 8;` — but
+//       VUMA's PMT discipline discourages raw pointer arithmetic (and
+//       the K5a+ codebase doesn't have an established pattern for
+//       "Address + constant offset" cast-and-arithmetic). The K6a uart.vuma
+//       pattern is "the data field is at offset 0, so `buf as Address`
+//       works" — keep that pattern.
+//   (2) Copy the buffered bytes into a SEPARATE State<ConsoleStr> (whose
+//       `data: [u8; 256]` IS at offset 0) and pass `out as Address` to
+//       `write`. This is the K6e contract's revised console_flush, adopted
+//       here verbatim. The cost is a 256-byte alloc + a byte-by-byte copy
+//       per flush — negligible (flush happens once per line, not once
+//       per byte), and the alternative (raw Address arithmetic) breaks
+//       PMT discipline.
+//
+// The `out as Address` cast is the SAME pattern as K6a's uart_putc_8250
+// (`buf as Address` for State<ByteBuf> where data is at offset 0) and K1's
+// console_flush (`c as Address` for State<Console> where buf is at offset
+// 0). The Address is borrowed (the State<T> stays live in ___pmt_buffer
+// for the duration of the call), handed to `write` (a syscall that
+// completes synchronously), then the ConsoleStr is freed by the
+// drop-frame hook when console_flush returns. The PMT discipline is
+// preserved: no `*ptr`, no `&x`, no `allocate` / `free` syntax in source.
+//
+// ── Layouts (Console + ConsoleStr) ─────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares every
+// layout it uses. The two layouts are NEW (K6e introduces them — the K1
+// stub's Console / String layouts at womb/kernel/console.vuma have
+// different field orders / names, so K6e can't reuse them):
+//
+//   Console (276 bytes total, padded to 280 for u64 alignment):
+//     uart_base @ 0    u64        — UART MMIO base (0x3F8 = 1016 for 8250
+//                                    COM1, 0x09000000 = 150994944 for PL011).
+//                                    K6e stores it but the hosted path
+//                                    doesn't use it (hosted I/O goes via
+//                                    write/read syscalls, not MMIO). K11's
+//                                    bare-metal path will pass it to
+//                                    uart_putc_8250 / uart_getc_8250.
+//     buf       @ 8    [u8; 256]  — the line buffer (256 bytes).
+//     len       @ 264  u32        — bytes currently in buf (0..256).
+//     rows      @ 268  u32        — terminal height (default 25).
+//     cols      @ 272  u32        — terminal width (default 80).
+//   (Plus 4 bytes of trailing padding to align the struct to 8 bytes — the
+//   VUMA layout pads to the largest field's alignment, which is 8 bytes
+//   for the u64 uart_base field. The u32 fields pack tight at offsets
+//   264 / 268 / 272; the trailing pad brings 276 → 280.)
+//
+//   ConsoleStr (256 bytes total):
+//     data      @ 0    [u8; 256]  — null-terminated string buffer for
+//                                    console_puts's `s` parameter AND for
+//                                    console_flush's scratch buffer AND for
+//                                    console_read's `buf` parameter. The
+//                                    triple-use is intentional: all three
+//                                    need a 256-byte buffer with data at
+//                                    offset 0 (so the `as Address` cast
+//                                    yields the address of data[0]), and
+//                                    VUMA layouts are just byte-size
+//                                    contracts — same layout, same size,
+//                                    same alignment, so one layout name
+//                                    covers all three uses. The K1 stub
+//                                    used a separate `String` layout with
+//                                    `data: [u8; 256]` + `len: u32`; K6e
+//                                    drops the `len` field (console_puts
+//                                    walks until NUL, doesn't need a
+//                                    separate length).
+//
+// ── Auto-flush policy ──────────────────────────────────────────────────────
+// console_putc flushes in two cases:
+//   (1) The byte just appended was a newline (LF, byte 10) — line-mode
+//       flush, matches POSIX line-buffered stdout semantics. The newline
+//       IS stored in buf BEFORE the flush (so the buffer at flush time
+//       contains the trailing LF), then flushed out — the LF is emitted
+//       to the UART / stdout.
+//   (2) The buffer is nearly full (len >= 255 after the append) — overflow
+//       protection, matches the K1 stub's "drop on overflow" intent but
+//       upgrades "drop" to "flush first, then drop the next byte". With
+//       the 255-threshold flush, the buffer can hold at most 255 bytes
+//       between flushes (the 256th byte would overflow before the flush
+//       check, so we flush at 255 to leave headroom for the next putc to
+//       store at buf[255] safely — actually the contract's check is
+//       `c.len >= 255`, which fires after len reaches 255; the next putc
+//       after a flush starts at len=0 again, so the buffer is never
+//       actually full when a putc stores. Defensive.)
+//
+// The K6e self-test exercises path (1) explicitly (putc 10 → flush). It
+// does NOT exercise path (2) — the self-test only puts 6 bytes max per
+// flush cycle, well below the 255 threshold. A future wave that adds a
+// printf-style formatter (K6f? K7?) would naturally exercise path (2) by
+// formatting a >255-byte string.
+//
+// ── console_read semantics ─────────────────────────────────────────────────
+// console_read is a thin wrapper around the `read` extern: read up to `max`
+// bytes from fd 0 (stdin) into `buf.data[0..max]`. Returns the byte count
+// (or a negative errno on failure — passed through verbatim from the
+// syscall). The `c: State<Console>` parameter is accepted for symmetry
+// with console_putc / console_puts / console_flush but unused in the
+// hosted path (K11's bare-metal path will use `c.uart_base` to call
+// uart_getc_8250 in a loop, writing each byte to buf.data[i] — K6e's
+// hosted path is a single syscall). The ConsoleStr layout's 256-byte
+// `data` field is the natural upper bound on `max` (a caller passing
+// max > 256 would overflow the buffer — K6e doesn't bounds-check `max`,
+// matching the K6b tty_readline contract which also trusts the caller).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Console +
+// ConsoleStr are flat-byte-array structs held in `___pmt_buffer`-backed
+// State<T> slots; the CALLER allocates them via `state_new(Console)` /
+// `state_new(ConsoleStr)` (in the self-test, in main(); in the real
+// kernel, in kmain). The State<T> handles are passed by reference to
+// console_init / console_putc / console_puts / console_flush / console_read,
+// which mutate the State in place (no copy-out, no move semantics —
+// VUMA's State<T> is a borrow of the ___pmt_buffer slot). The
+// `c.buf[c.len] = ch; c.len = c.len + 1;` syntax is State-field
+// self-update (lowered to a load-modify-store through the State pointer —
+// the K4a task.vuma `tbl.count = tbl.count + 1` pattern, also seen in
+// K6b's tty_push). The `out as Address` cast in console_flush is the
+// documented PMT "Borrowed read (zero-copy I/O)" pattern (see
+// docs/language-reference.md §14.5) — same as K6a's `buf as Address` in
+// uart_putc_8250 and K1's `c as Address` in console_flush.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f/K6a/K6b/K6c/K6d). Decimal avoids the parser's hex-literal path
+// (parse_int_radix width-extension subtleties — see K5a's file.vuma
+// header for the same rationale). The constants:
+//   1016  = 0x3F8 — QEMU 8250 COM1 base address (x86_64 default).
+//                   Stored in c.uart_base but unused in hosted mode.
+//   256   = Console.buf / ConsoleStr.data size (array bound).
+//   255   = auto-flush threshold (len >= 255 → flush).
+//   25    = default terminal height (rows).
+//   80    = default terminal width (cols).
+//   10    = ASCII LF (newline) — auto-flush trigger.
+//   1     = stdout fd (write) / stdin fd (read) / byte count for putc.
+//   0     = stdin fd (read) / NUL terminator / empty-buffer sentinel.
+// ASCII test characters (K6e contract's IMPORTANT note — decimal values,
+// NOT char literals — VUMA has no 'h' / 'e' / 'l' / 'o' / 'i' char
+// literals; use the decimal ASCII values):
+//   104   = 'h'    101   = 'e'    108   = 'l'    111   = 'o'
+//   105   = 'i'
+//   10    = '\n' (LF — newline, also the auto-flush trigger above).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares Console (new — different
+// field order from the K1 stub) + ConsoleStr (new — replaces K1's String
+// layout, drops the `len` field). K6e's only I/O is via State<Console> /
+// State<ConsoleStr> + the `write` / `read` externs; no prior wave's
+// layouts need re-declaring here. K7+ (which wires tty + vt100 into the
+// Console layout as `tty: State<TtyLine>` / `vt: State<Vt100State>`
+// fields) will re-declare those layouts byte-identically when it extends
+// Console — but K6e's Console layout leaves room for that extension (the
+// trailing 4 bytes of padding become 8 bytes of padding after the new
+// fields are added; no existing field moves).
+//
+// ── Externs (write + read) ──────────────────────────────────────────────────
+// Two extern declarations, both in one `extern "C"` block. Same declaration
+// as K6a's uart.vuma (for `write`) and womb/kernel/hosted/host.vuma /
+// womb/kernel/arch/x86_64/trampoline.vuma (for `read` + `write`). The
+// `buf: Address` (NOT State<T>) on both means the FFI marshal does NOT
+// invalidate any state on the call — the Address is just a raw u64
+// pointer handed to the syscall. This is the documented PMT "Borrowed
+// read" pattern.
+//
+// Hosted mode: `write` resolves to sys_write (nr 1 on x86_64, nr 64 on
+// aarch64); `read` resolves to sys_read (nr 0 on x86_64, nr 63 on
+// aarch64). SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three args
+// already match the syscall ABI, so the stubs are "mov eax,#1; syscall;
+// ret" / "xor eax,eax; syscall; ret".
+//
+// Bare-metal mode (K11): the externs stay byte-identical (same signature,
+// same arg types, same order) but the linker resolves them to MMIO
+// trampolines that call uart_putc_8250 / uart_getc_8250 (or the PL011
+// equivalents) under the hood. K6e's source doesn't change between
+// hosted and bare-metal — only the linker resolution does.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/tty/console.vuma \
+//         /tmp/console.bin x86_64 --verify
+//     /tmp/console.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, stdout = "hello\nhi\n" (the self-test
+// prints "hello\n" via 5 console_putc calls + 1 newline-triggered flush,
+// then "hi\n" via console_puts on a 4-byte ConsoleStr). The self-test
+// also asserts:
+//   (1) After 5 putc (no newline), con.len == 5 (no premature flush).
+//   (2) After putc(10) (newline), con.len == 0 (flush happened).
+//   (3) After console_puts("hi\n"), con.len == 0 (flush on the \n).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted-mode I/O (uses the pre-registered `write` + `read` externs —
+// resolve to sys_write / sys_read on x86_64 / aarch64 hosted backends).
+// Same declarations as womb/kernel/console.vuma (K1 stub, for `write`),
+// womb/kernel/drivers/uart.vuma (K6a, for `write`), womb/kernel/hosted/
+// host.vuma, and womb/kernel/arch/x86_64/trampoline.vuma. `buf: Address`
+// (NOT State<T>) means the marshal does NOT invalidate any state on the
+// call — the Address is just a raw u64 pointer handed to the syscall.
+// This is the documented PMT "Borrowed read" pattern.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Console: the per-device console state. 276 bytes of fields + 4 bytes of
+// trailing padding = 280 bytes total (padded to 8-byte alignment for the
+// uart_base u64 field). See the file header for the byte-offset map and
+// the rationale for the field order (uart_base first — required by the
+// K6e contract — which means `c as Address` yields uart_base, not buf;
+// console_flush works around this by copying to a ConsoleStr whose data
+// IS at offset 0).
+layout Console = {
+    uart_base: u64,    // offset 0:   UART MMIO base (0x3F8 = 1016 for 8250 COM1)
+    buf: [u8; 256],    // offset 8:   line buffer (256 bytes)
+    len: u32,          // offset 264: bytes currently in buf (0..256)
+    rows: u32,         // offset 268: terminal height (default 25)
+    cols: u32,         // offset 272: terminal width (default 80)
+}
+
+// ConsoleStr: a 256-byte buffer used by console_puts (input — null-
+// terminated string), console_flush (scratch — copy of buf's bytes for
+// the write call), and console_read (output — bytes read from stdin).
+// The triple-use is intentional: all three need a 256-byte buffer with
+// `data` at offset 0 (so the `as Address` cast yields the address of
+// data[0] for the FFI call). VUMA layouts are byte-size contracts —
+// same layout, same size, same alignment, so one layout name covers
+// all three uses. The K1 stub used a separate `String` layout with
+// `data: [u8; 256]` + `len: u32`; K6e drops the `len` field (console_puts
+// walks until NUL, doesn't need a separate length).
+layout ConsoleStr = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Console subsystem functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the Console state. Sets the UART base to 1016 (0x3F8, the
+// QEMU 8250 COM1 default — same value K6a's self-test uses), zeros the
+// line-buffer length, and sets the terminal dimensions to 80×25 (the
+// canonical VT100 / VT220 size, also the QEMU default). Does NOT zero
+// the buffer itself — `c.len == 0` already guarantees no byte will be
+// read from it, so the stale contents are unreachable (the next
+// console_putc will overwrite them in order). A defensive zeroing pass
+// would be 256 byte-stores for no observable benefit; skipped (same
+// rationale as K6b's tty_init, K5a's file_init, K4a's pt_init).
+fn console_init(c: State<Console>) {
+    c.uart_base = 1016;  // 0x3F8 (COM1) — QEMU 8250 default.
+    c.len = 0;
+    c.rows = 25;
+    c.cols = 80;
+}
+
+// Put one character to the console buffer. Stores at buf[len], bumps len.
+// Auto-flushes when:
+//   (1) The byte just appended was a newline (LF, byte 10) — line-mode
+//       flush. The newline IS stored in buf BEFORE the flush, so the
+//       buffer at flush time contains the trailing LF.
+//   (2) The buffer is nearly full (len >= 255 after the append) — overflow
+//       protection. With this threshold, the next putc after a flush
+//       starts at len=0 again, so the buffer is never actually full when
+//       a putc stores (defensive against off-by-one in the bounds check).
+//
+// The bounds check `c.len < 256` guards the store: if len is already 256
+// (shouldn't happen because we flush at 255, but defensive), the byte is
+// silently dropped — same K1 stub behavior.
+fn console_putc(c: State<Console>, ch: u8) {
+    if c.len < 256 {
+        c.buf[c.len] = ch;
+        c.len = c.len + 1;
+    }
+    // Flush on newline or when buffer is nearly full.
+    if ch == 10 || c.len >= 255 {
+        console_flush(c);
+    }
+}
+
+// Put a null-terminated string to the console. Walks `s.data[0..256]`
+// byte-by-byte, calling console_putc for each byte until a NUL (0) is
+// encountered or 256 bytes have been sent (the ConsoleStr buffer is 256
+// bytes, so this is the natural upper bound — any string longer than 256
+// bytes is truncated, which matches the ConsoleStr layout's contract).
+// The NUL terminator itself is NOT pushed (the `if ch == 0 { return; }`
+// happens BEFORE the console_putc call) — same pattern as K6a's
+// uart_puts_8250.
+//
+// Auto-flush happens inside console_putc on any embedded newline or when
+// the buffer fills up — console_puts itself doesn't flush. A caller that
+// wants the trailing bytes flushed (when the string doesn't end in a
+// newline) must call console_flush(c) explicitly after console_puts.
+fn console_puts(c: State<Console>, s: State<ConsoleStr>) {
+    let i = 0;
+    while i < 256 {
+        let ch = s.data[i];
+        if ch == 0 { return; }
+        console_putc(c, ch);
+        i = i + 1;
+    }
+}
+
+// Flush the output buffer to the UART (hosted: write to fd 1).
+//
+// The K6e Console layout puts `uart_base: u64` at offset 0, so `c as
+// Address` yields the address of uart_base — NOT buf (which is at offset
+// 8). Handing that address to `write` would emit the 8 bytes of uart_base
+// (little-endian 1016) followed by the first (len - 8) bytes of buf —
+// garbage. To preserve the K6a "data field at offset 0 so `buf as
+// Address` works" pattern, console_flush copies the buffered bytes into
+// a SEPARATE State<ConsoleStr> (whose `data: [u8; 256]` IS at offset 0)
+// and passes `out as Address` to `write`. The cost is a 256-byte alloc
+// + a byte-by-byte copy per flush — negligible (flush happens once per
+// line, not once per byte), and the alternative (raw Address arithmetic
+// like `(c as Address) + 8`) breaks PMT discipline.
+//
+// The `out as Address` cast is the documented PMT "Borrowed read" pattern
+// (see docs/language-reference.md §14.5) — same as K6a's `buf as Address`
+// in uart_putc_8250 (State<ByteBuf> where data is at offset 0) and K1's
+// `c as Address` in console_flush (State<Console> where buf is at offset
+// 0). The Address is borrowed (the State<T> stays live in ___pmt_buffer
+// for the duration of the call), handed to `write` (a syscall that
+// completes synchronously), then the ConsoleStr is freed by the
+// drop-frame hook when console_flush returns.
+//
+// The `c.len as i64` cast on the write count is safe because c.len is
+// u32 (max 256), well within i64's positive range. After a successful
+// flush the buffer is reset to length 0 so subsequent putc calls start
+// fresh — same K1 stub behavior.
+//
+// Return value of `write` is currently ignored — a later wave may add
+// error reporting (e.g. retry on EINTR, panic on EBADF).
+fn console_flush(c: State<Console>) {
+    if c.len > 0 {
+        // Copy to a separate buffer for the write call. `out as Address`
+        // gives the address of out.data (at offset 0 of ConsoleStr) — the
+        // natural argument for write(1, addr, len). The separate-buffer
+        // approach avoids the offset-8 issue (c as Address would give the
+        // address of c.uart_base at offset 0 of Console, not c.buf at
+        // offset 8 — see the file header's "offset-8 buf issue" note).
+        let out = state_new(ConsoleStr);
+        let i = 0;
+        while i < c.len {
+            out.data[i] = c.buf[i];
+            i = i + 1;
+        }
+        let addr = out as Address;
+        write(1, addr, c.len as i64);
+        c.len = 0;
+    }
+}
+
+// Read a line from the console (hosted: read from fd 0). Returns the
+// number of bytes read (or a negative errno on failure — passed through
+// verbatim from the syscall).
+//
+// Thin wrapper around the `read` extern: read up to `max` bytes from
+// fd 0 (stdin) into `buf.data[0..max]`. The `c: State<Console>` parameter
+// is accepted for symmetry with console_putc / console_puts / console_flush
+// but unused in the hosted path (K11's bare-metal path will use
+// `c.uart_base` to call uart_getc_8250 in a loop, writing each byte to
+// buf.data[i] — K6e's hosted path is a single syscall).
+//
+// The `buf as Address` cast gives the address of buf.data (at offset 0 of
+// ConsoleStr) — the natural argument for read(0, addr, max). The
+// `max as i64` cast is safe for any realistic max (< 2^63); the ConsoleStr
+// layout's 256-byte `data` field is the natural upper bound (a caller
+// passing max > 256 would overflow the buffer — K6e doesn't bounds-check
+// `max`, matching the K6b tty_readline contract which also trusts the
+// caller).
+fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
+    let n = read(0, buf as Address, max);
+    return n;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6e DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Three sub-tests, each exercising one console code path:
+//   (1) console_putc without newline — buffer accumulates, no flush.
+//       Put "hello" (5 bytes, no newline), check con.len == 5.
+//       Verifies: putc store + len bump + no-flush-when-no-newline.
+//   (2) console_putc with newline — auto-flush.
+//       Put '\n' (byte 10), check con.len == 0 (flushed).
+//       Verifies: putc newline-triggered flush + len reset.
+//   (3) console_puts with embedded newline — auto-flush on the newline.
+//       Build ConsoleStr "hi\n\0", call console_puts, check con.len == 0
+//       (flushed by the embedded newline).
+//       Verifies: puts walks until NUL + puts delegates per-byte flushing
+//       to putc (no separate puts-level flush needed).
+//
+// All assertions return distinct non-zero codes (1, 2, 3) so a failure
+// pinpoints exactly which check failed. Exit 0 = all checks passed.
+//
+// Visible stdout side-effect: the test emits "hello\nhi\n" (5 bytes from
+// sub-test 1+2, 3 bytes from sub-test 3) — visible if the test is run
+// interactively, but doesn't affect the exit code.
+
+fn main() -> i32 {
+    let con = state_new(Console);
+    console_init(con);
+
+    // ── Sub-test (1): console_putc without newline — buffer accumulates ─────
+    // After init: len=0. Put 'h', 'e', 'l', 'l', 'o' (5 bytes, no newline).
+    // Each putc: len<256 → store at buf[len], len++. ch != 10, len < 255,
+    // no flush. After 5 putc: buf[0..5] = "hello", len=5.
+    console_putc(con, 104);  // 'h'
+    console_putc(con, 101);  // 'e'
+    console_putc(con, 108);  // 'l'
+    console_putc(con, 108);  // 'l'
+    console_putc(con, 111);  // 'o'
+    // Buffer should have been flushed by the newline... but we haven't
+    // sent a newline yet. Let's check the buffer.
+    if con.len != 5 { return 1; }
+
+    // ── Sub-test (2): console_putc with newline — auto-flush ────────────────
+    // Send newline — should flush. putc(10): len<256 → store at buf[5]=10,
+    // len=6. ch == 10 → console_flush. Flush: copy buf[0..6] to a fresh
+    // ConsoleStr, write(1, addr, 6) → stdout gets "hello\n", then c.len=0.
+    console_putc(con, 10);  // '\n'
+    if con.len != 0 { return 2; }  // flushed
+
+    // ── Sub-test (3): console_puts with embedded newline ────────────────────
+    // Build ConsoleStr s = "hi\n\0" (4 bytes including the NUL terminator).
+    // Call console_puts(con, s). The puts loop:
+    //   i=0: ch='h' (104), !=0, putc(con, 104). buf[0]=104, len=1, no flush.
+    //   i=1: ch='i' (105), !=0, putc(con, 105). buf[1]=105, len=2, no flush.
+    //   i=2: ch='\n' (10),  !=0, putc(con, 10).  buf[2]=10,  len=3, ch==10
+    //        → console_flush. Flush: copy buf[0..3]="hi\n" to a fresh
+    //        ConsoleStr, write(1, addr, 3) → stdout gets "hi\n", then
+    //        c.len=0.
+    //   i=3: ch=0 (NUL), return.
+    // After puts: con.len == 0 (flushed by the embedded newline).
+    let s = state_new(ConsoleStr);
+    s.data[0] = 104;  // 'h'
+    s.data[1] = 105;  // 'i'
+    s.data[2] = 10;   // '\n'
+    s.data[3] = 0;    // NUL terminator
+    console_puts(con, s);
+    if con.len != 0 { return 3; }  // flushed by newline
+
+    return 0;
+}
