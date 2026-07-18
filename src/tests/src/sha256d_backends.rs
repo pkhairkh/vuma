@@ -492,6 +492,7 @@ fn make_add_scg() -> Scg {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     }
 }

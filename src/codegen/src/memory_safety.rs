@@ -1193,6 +1193,7 @@ mod tests {
                         reassigns: None,
                     }),
                 ],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 
@@ -1217,6 +1218,7 @@ mod tests {
                     size_expr: ScgExpr::Int(256),
                     ty: ScgType::Ptr,
                 })],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 
@@ -1257,6 +1259,7 @@ mod tests {
                         ty: None,
                     }),
                 ],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 
@@ -1297,6 +1300,7 @@ mod tests {
                         reassigns: None,
                     }),
                 ],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 
@@ -1327,6 +1331,7 @@ mod tests {
                         ty: None,
                     }),
                 ],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 

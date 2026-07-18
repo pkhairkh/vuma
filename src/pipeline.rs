@@ -4570,6 +4570,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 params,
                 results: vec![],
                 body,
+                var_types: Default::default(),
             }));
         }
     } else {
@@ -4605,6 +4606,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             params: vec![],
             results: vec![],
             body,
+            var_types: Default::default(),
         }));
     }
 
@@ -4617,6 +4619,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             params: vec![],
             results: vec![],
             body: vec![ScgStatement::Return(vec![])],
+            var_types: Default::default(),
         }));
     }
 
@@ -7306,6 +7309,7 @@ mod tests {
                 }],
                 results: vec![],
                 body: ir_body,
+                var_types: Default::default(),
             })],
         };
         let mut builder = IRBuilder::new();
@@ -7407,6 +7411,7 @@ mod tests {
                 }],
                 results: vec![],
                 body: ir_body,
+                var_types: Default::default(),
             })],
         };
         let mut builder = IRBuilder::new();
@@ -7997,6 +8002,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
                 params,
                 results,
                 body,
+                var_types: ctx.var_types.clone(),
             }));
         }
     }
@@ -8027,6 +8033,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
                     params: vec![],
                     results: vec![ScgType::I64],
                     body: top_level_stmts,
+                    var_types: Default::default(),
                 }));
             }
         }
@@ -8220,6 +8227,8 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
             "u16" => ScgType::U16,
             "u32" => ScgType::U32,
             "u64" => ScgType::U64,
+            "f32" => ScgType::F32,
+            "f64" => ScgType::F64,
             _ => ScgType::I64,
         },
         Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
@@ -8719,14 +8728,36 @@ pub fn flatten_expr(
                     }));
                 }
                 UnOp::Neg => {
-                    stmts.push(ScgStatement::Computation(ComputationNode {
-                        dst: dst.clone(),
-                        op: BinOpKind::Sub,
-                        lhs: ScgExpr::Int(0),
-                        rhs: operand_expr,
-                        tail_call: false,
-                        reassigns: None,
-                    }));
+                    // G7: for float operands, multiply by -1.0 (correct f64
+                    // negation).  Integer Sub(0, bits) would produce wrong
+                    // results (0 - 0x4007... = 0xBFF8... ≠ -2.9).
+                    let is_float = match &operand_expr {
+                        ScgExpr::Float(_) => true,
+                        ScgExpr::Var(name) => matches!(
+                            ctx.var_types.get(name),
+                            Some(ScgType::F32) | Some(ScgType::F64)
+                        ),
+                        _ => false,
+                    };
+                    if is_float {
+                        stmts.push(ScgStatement::Computation(ComputationNode {
+                            dst: dst.clone(),
+                            op: BinOpKind::Mul,
+                            lhs: ScgExpr::Float(-1.0),
+                            rhs: operand_expr,
+                            tail_call: false,
+                            reassigns: None,
+                        }));
+                    } else {
+                        stmts.push(ScgStatement::Computation(ComputationNode {
+                            dst: dst.clone(),
+                            op: BinOpKind::Sub,
+                            lhs: ScgExpr::Int(0),
+                            rhs: operand_expr,
+                            tail_call: false,
+                            reassigns: None,
+                        }));
+                    }
                 }
                 UnOp::Not => {
                     stmts.push(ScgStatement::Computation(ComputationNode {

@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue, UnaryOpKind,
+    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRType, IRTerminator, IRValue, UnaryOpKind,
 };
 
 // ===========================================================================
@@ -259,33 +259,49 @@ fn substitute_terminator(terminator: &IRTerminator, map: &HashMap<u32, IRValue>)
 }
 
 /// Try to evaluate a binary operation on two immediate values.
-fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64) -> Option<i64> {
+fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Option<i64> {
+    // G7: if the operand type is F32/F64, fold using f64 arithmetic.
+    if let Some(IRType::F32) | Some(IRType::F64) = ty {
+        let is_f64 = matches!(ty, Some(IRType::F64));
+        let lf = if is_f64 { f64::from_bits(lhs as u64) } else { f32::from_bits(lhs as u32) as f64 };
+        let rf = if is_f64 { f64::from_bits(rhs as u64) } else { f32::from_bits(rhs as u32) as f64 };
+        let result: f64 = match op {
+            BinOpKind::Add => lf + rf,
+            BinOpKind::Sub => lf - rf,
+            BinOpKind::Mul => lf * rf,
+            BinOpKind::SDiv | BinOpKind::UDiv => lf / rf,
+            BinOpKind::SLt | BinOpKind::ULt => return Some(if lf < rf { 1 } else { 0 }),
+            BinOpKind::SLe | BinOpKind::ULe => return Some(if lf <= rf { 1 } else { 0 }),
+            BinOpKind::SGt | BinOpKind::UGt => return Some(if lf > rf { 1 } else { 0 }),
+            BinOpKind::SGe | BinOpKind::UGe => return Some(if lf >= rf { 1 } else { 0 }),
+            BinOpKind::Eq => return Some(if lf == rf { 1 } else { 0 }),
+            BinOpKind::Ne => return Some(if lf != rf { 1 } else { 0 }),
+            _ => return try_fold_binop_int(op, lhs, rhs),
+        };
+        return Some(if is_f64 { result.to_bits() as i64 } else { (result as f32).to_bits() as i64 });
+    }
+    try_fold_binop_int(op, lhs, rhs)
+}
+
+fn try_fold_binop_int(op: BinOpKind, lhs: i64, rhs: i64) -> Option<i64> {
     match op {
         BinOpKind::Add => Some(lhs.wrapping_add(rhs)),
         BinOpKind::Sub => Some(lhs.wrapping_sub(rhs)),
         BinOpKind::Mul => Some(lhs.wrapping_mul(rhs)),
         BinOpKind::SDiv => {
-            if rhs == 0 {
-                return None;
-            }
+            if rhs == 0 { return None; }
             lhs.checked_div(rhs)
         }
         BinOpKind::UDiv => {
-            if rhs == 0 {
-                return None;
-            }
+            if rhs == 0 { return None; }
             Some((lhs as u64 / rhs as u64) as i64)
         }
         BinOpKind::SRem => {
-            if rhs == 0 {
-                return None;
-            }
+            if rhs == 0 { return None; }
             lhs.checked_rem(rhs)
         }
         BinOpKind::URem => {
-            if rhs == 0 {
-                return None;
-            }
+            if rhs == 0 { return None; }
             Some((lhs as u64 % rhs as u64) as i64)
         }
         BinOpKind::And => Some(lhs & rhs),
@@ -669,11 +685,11 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
 /// eliminated, or `None` if it cannot be folded.
 fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
-            let result = try_fold_binop(*op, l, r)?;
+            let result = try_fold_binop(*op, l, r, ty.as_ref())?;
             Some((dst_id, result))
         }
         IRInstr::UnaryOp { op, dst, operand, .. } => {
@@ -713,11 +729,26 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             kind,
             dst,
             lhs,
-            rhs, ty: _,
+            rhs,
+            ty,
         } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
+            if let Some(IRType::F32) | Some(IRType::F64) = ty.as_ref() {
+                let is_f64 = matches!(ty.as_ref(), Some(IRType::F64));
+                let lf = if is_f64 { f64::from_bits(l as u64) } else { f32::from_bits(l as u32) as f64 };
+                let rf = if is_f64 { f64::from_bits(r as u64) } else { f32::from_bits(r as u32) as f64 };
+                let result = match kind {
+                    CmpKind::Eq => lf == rf,
+                    CmpKind::Ne => lf != rf,
+                    CmpKind::SLt | CmpKind::ULt => lf < rf,
+                    CmpKind::SLe | CmpKind::ULe => lf <= rf,
+                    CmpKind::SGt | CmpKind::UGt => lf > rf,
+                    CmpKind::SGe | CmpKind::UGe => lf >= rf,
+                };
+                return Some((dst_id, if result { 1 } else { 0 }));
+            }
             let result = try_fold_cmp(*kind, l, r)?;
             Some((dst_id, result))
         }

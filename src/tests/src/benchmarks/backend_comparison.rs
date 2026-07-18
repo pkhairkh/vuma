@@ -162,6 +162,7 @@ fn build_reference_program() -> Scg {
             params: vec![],
             results: vec![ScgType::U32],
             body,
+            var_types: std::collections::HashMap::new(),
         })],
     }
 }

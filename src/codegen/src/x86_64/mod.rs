@@ -1266,12 +1266,12 @@ pub fn encode_movq_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0x66);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0x66);
     code.push(0x0F);
     code.push(0x6E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1283,12 +1283,12 @@ pub fn encode_movq_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = src.needs_rex();
     let b = dst.needs_rex();
+    code.push(0x66);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0x66);
     code.push(0x0F);
     code.push(0x7E);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1317,12 +1317,12 @@ pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF2);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1351,12 +1351,12 @@ pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF3);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1385,12 +1385,12 @@ pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF2);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1419,12 +1419,12 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF3);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1457,12 +1457,12 @@ pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF2);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1493,12 +1493,12 @@ pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
     let r = dst.needs_rex();
     let b = src.needs_rex();
+    code.push(0xF3);
     if let Some(rex) = rex_prefix(true, r, false, b) {
         code.push(rex);
     } else {
         code.push(0x48);
     }
-    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
