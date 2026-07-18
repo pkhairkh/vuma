@@ -1577,50 +1577,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
 
                             if dst_is_64 {
-                                // Single-path subtract-2^63 + ftintrz.l.d + XOR technique
-                                // (re-applied W1c fix).  A rebase had replaced this with a
-                                // broken "dual-path + select" scheme that computed BOTH a
-                                // direct `ftintrz` (S2) and the corrected subtract-2^63+XOR
-                                // (S0), then picked between them with `S3 = (S2 < 0)`.
-                                // That overflow-detection heuristic assumed ftintrz.l.d
-                                // saturates out-of-range inputs to 0x8000_0000_0000_0000
-                                // (i64::MIN, negative as i64) per the LoongArch spec.
-                                // QEMU's ftintrz.l.d instead CLAMPS positive overflow to
-                                // 0x7FFF_FFFF_FFFF_FFFF (i64::MAX, *non-negative*), so the
-                                // `S2 < 0` sentinel was never set for inputs >= 2^63 and the
-                                // select always picked the wrong (direct) path, producing
-                                // exit=2 for the uint63_to_float test.  The single-path
-                                // approach below matches the proven W1c-era code (and the
-                                // W3a ppc64 fix) and is correct for all inputs >= 2^63.
-                                //
-                                // Known limitation (pre-existing, documented in W1b/W3a):
-                                // for small inputs the subtract-2^63 loses precision in f64
-                                // (e.g. 2.9 - 2^63 rounds to -2^63 exactly).  This is the
-                                // same known issue as on ppc64; the proper fix would be a
-                                // dedicated unsigned-conversion instruction, which is out of
-                                // scope here.
-                                //
-                                // Promote f32 to f64 for consistent handling.
+                                // Conditional approach: compute both direct and corrected paths.
+                                // Direct: FTINTRZ gives correct result for values < 2^63.
+                                // Corrected: subtract-2^63 + FTINTRZ + XOR for values >= 2^63.
+                                // QEMU's ftintrz.l.d clamps positive overflow to 0x7FFF_FFFF_FFFF_FFFF
+                                // (i64::MAX), so we check S2 == i64::MAX to detect saturation.
+
+                                // Promote f32 to f64
                                 if src_is_f32 {
                                     code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
                                 }
 
-                                // Load 2^63 as f64 (bit pattern 0x43E0_0000_0000_0000) into FS1.
+                                // Direct: FTINTRZ FS2, FS0
+                                code.extend_from_slice(&Instruction::FtintLD { fd: FS2, fj: FS0 }.encode());
+                                code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S2, fj: FS2 }.encode());
+
+                                // Corrected: subtract 2^63, FTINTRZ, XOR
                                 code.extend(encode_load_imm(S1, 0x43E0_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
-
-                                // FS0 = FS0 - 2^63   (value now in [-2^63, 2^63); fits in signed i64)
                                 code.extend_from_slice(&Instruction::FsubD { fd: FS0, fj: FS0, fk: FS1 }.encode());
-
-                                // FS0 = (i64)FS0 via signed ftintrz.l.d (round toward zero; never saturates)
                                 code.extend_from_slice(&Instruction::FtintLD { fd: FS0, fj: FS0 }.encode());
-
-                                // Move FPR → GPR
                                 code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode());
-
-                                // XOR with 0x8000_0000_0000_0000 (flip bit 63 = add 2^63 back as unsigned)
                                 code.extend(encode_load_imm(S1, 0x8000_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S1 }.encode());
+
+                                // Select: if S2 == 0x7FFF_FFFF_FFFF_FFFF (saturated), use S0; else S2
+                                code.extend(encode_load_imm(S3, 0x7FFF_FFFF_FFFF_FFFFu64 as i64));
+                                code.extend_from_slice(&Instruction::Xor { rd: S3, rj: S2, rk: S3 }.encode());
+                                // S3 = 0 if saturated, nonzero otherwise
+                                // Use SLTU to check S3 == 0: sltu S3, zero, S3 → S3 = (S3 != 0) ? 1 : 0
+                                code.extend_from_slice(&Instruction::Sltu { rd: S3, rj: Gpr::R0, rk: S3 }.encode());
+                                // S3 = 1 if NOT saturated (use S2), 0 if saturated (use S0)
+                                // mask = S3 ? -1 : 0; S0 = (S0 & ~mask) | (S2 & mask)
+                                code.extend_from_slice(&Instruction::Masknez { rd: S4, rj: S0, rk: S3 }.encode());
+                                code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S2, rk: S3 }.encode());
+                                code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S4 }.encode());
                             } else {
                                 // f32/f64 → u32: use signed ftint, then zero-extend
                                 if src_is_f32 {
