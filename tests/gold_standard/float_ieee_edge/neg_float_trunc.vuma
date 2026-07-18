@@ -1,0 +1,17 @@
+// neg_float_trunc — floattoint(-2.9) must truncate to -2 (toward zero).
+// Expected exit code: 254
+//
+// IEEE 754 "truncation" rounds toward zero: -2.9 -> -2 (not -3).
+// As an i32 exit code, -2 = 254 (unsigned).
+// Exercises:
+//   - Negative f64 literal
+//   - floattoint (truncation toward zero, NOT floor)
+//
+// CRITICAL: distinguishes truncation (toward zero) from floor (toward
+// -Inf).  floor(-2.9) = -3 (= 253 as u8).  trunc(-2.9) = -2 (= 254).
+
+fn main() -> i32 {
+    x: f64 = -2.9;
+    result: i64 = floattoint(x);   // -2
+    return result;
+}

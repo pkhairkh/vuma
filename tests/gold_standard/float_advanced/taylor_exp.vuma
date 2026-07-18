@@ -1,0 +1,25 @@
+// taylor_exp — Taylor series for e^1 = sum(1/k!) for k=0..12.
+// Expected exit code: 2
+//
+// e^1 = 2.718281828...  floattoint truncates to 2.
+// Exercises:
+//   - f64 division (1.0 / factorial)
+//   - f64 addition (accumulation)
+//   - inttofloat (loop counter -> f64)
+//   - floattoint (final truncation)
+//   - f64 multiplication (factorial accumulation)
+
+fn main() -> i32 {
+    e: f64 = 1.0;          // k=0 term: 1/0! = 1
+    factorial: f64 = 1.0;
+    k: i64 = 1;
+    while k <= 12 {
+        kf: f64 = inttofloat(k);
+        factorial = factorial * kf;   // k!
+        term: f64 = 1.0 / factorial;  // 1/k!
+        e = e + term;
+        k = k + 1;
+    }
+    // e = 2.71828... -> floattoint = 2
+    return floattoint(e);
+}

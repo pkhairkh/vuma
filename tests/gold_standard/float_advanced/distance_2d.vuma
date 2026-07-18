@@ -1,0 +1,28 @@
+// distance_2d — Euclidean distance between (0,0) and (3,4), via Newton sqrt.
+// Expected exit code: 5
+//
+// dist = sqrt(3^2 + 4^2) = sqrt(25) = 5.0.  floattoint = 5.
+// Exercises:
+//   - f64 multiplication (squares)
+//   - f64 addition (sum of squares)
+//   - Newton's method for sqrt (division + averaging)
+//   - f64 < comparison (convergence check)
+//   - floattoint (final truncation)
+
+fn main() -> i32 {
+    x: f64 = 3.0;
+    y: f64 = 4.0;
+    x2: f64 = x * x;   // 9.0
+    y2: f64 = y * y;   // 16.0
+    sum: f64 = x2 + y2; // 25.0
+    // Newton's sqrt: start with sum, iterate x = (x + sum/x) / 2.
+    s: f64 = sum;
+    i: i64 = 0;
+    while i < 6 {
+        ratio: f64 = sum / s;
+        avg: f64 = (s + ratio) / 2.0;
+        s = avg;
+        i = i + 1;
+    }
+    return floattoint(s);
+}

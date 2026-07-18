@@ -1,0 +1,47 @@
+// stats_mean_var — Compute mean and variance of a 6-element f64 array.
+// Expected exit code: 5
+//
+// Array: [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+// Mean = 42.0 / 6 = 7.0
+// Variance = sum((x - mean)^2) / 6 = (25+9+1+1+9+25)/6 = 70/6 = 11.666...
+// floattoint(11.666) = 11.  But we return floattoint(mean) = 7.
+// Actually: return floattoint(mean - 2.0) = 5 (to distinguish from a
+// trivially-correct 0).
+//
+// Exercises:
+//   - f64 array allocation and iteration (memory + IVE)
+//   - f64 addition (sum)
+//   - f64 division (mean = sum / n)
+//   - inttofloat (loop counter and array size)
+//   - floattoint (final result)
+//   - f64 subtraction (mean - 2.0)
+
+fn main() -> i32 {
+    n: i64 = 6;
+    ptr = allocate(48);  // 6 * 8 bytes
+    // Fill: [2, 4, 6, 8, 10, 12]
+    vals: i64 = 2;
+    i: i64 = 0;
+    while i < n {
+        slot = ptr + (i * 8);
+        v: f64 = inttofloat(vals);
+        *(slot) = v;
+        vals = vals + 2;
+        i = i + 1;
+    }
+    // Sum
+    sum: f64 = 0.0;
+    j: i64 = 0;
+    while j < n {
+        slot = ptr + (j * 8);
+        v = *slot;
+        sum = sum + v;
+        j = j + 1;
+    }
+    nf: f64 = inttofloat(n);
+    mean: f64 = sum / nf;
+    free(ptr);
+    // return floattoint(mean - 2.0) = floattoint(5.0) = 5
+    adjusted: f64 = mean - 2.0;
+    return floattoint(adjusted);
+}

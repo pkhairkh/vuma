@@ -1,0 +1,37 @@
+// uint63_to_float — Convert 2^63 (as unsigned) to f64 and back.
+// Expected exit code: 0
+//
+// 2^63 = 9223372036854775808, which is > i64::MAX (2^63 - 1).  As bits
+// it's 0x8000000000000000 — the high bit is set, so a signed CVTQT would
+// treat it as -2^63 and produce -9.22e18.  uinttofloat must produce
+// +9.22e18.  floattouint(9.22e18) must give back 0x8000000000000000.
+//
+// We can't easily check the exact value (too big for i32 exit code), so
+// we verify the SIGN: uinttofloat(2^63) > 0.0, and the round-trip
+// floattouint(uinttofloat(2^63)) has its high bit set (is "negative" as
+// a signed i64).  Return 0 if both hold.
+//
+// CRITICAL for G5b: this tests the alpha/sparc64 unsigned cast correction.
+// A backend using the signed approximation would produce -9.22e18 (a
+// negative float), failing the > 0.0 check.
+//
+// Note: requires the high-bit-set value.  We construct it as
+// (1 << 63) which in VUMA's i64 is -9223372036854775808 (the most
+// negative i64).  uinttofloat reinterprets it as unsigned 2^63.
+
+fn main() -> i32 {
+    // 2^63 as i64 bits = -9223372036854775808 (the most negative i64).
+    // uinttofloat must treat it as unsigned 2^63 -> +9.22e18.
+    big: f64 = uinttofloat(-9223372036854775808);
+    zero: f64 = 0.0;
+    if big > zero {
+        // Round-trip: floattouint(big) should have the high bit set,
+        // i.e. be negative as a signed i64 (< 0).
+        back: i64 = floattouint(big);
+        if back < 0 {
+            return 0;  // both checks passed
+        }
+        return 2;  // round-trip failed (high bit not set)
+    }
+    return 1;  // sign check failed (uinttofloat produced negative)
+}

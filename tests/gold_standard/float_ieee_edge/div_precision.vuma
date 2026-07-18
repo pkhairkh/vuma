@@ -1,0 +1,26 @@
+// div_precision — 1.0 / 3.0 = 0.333... must be in (0, 1).
+// Expected exit code: 1
+//
+// floattoint(0.333) = 0, so we can't check the exact value via exit code.
+// Instead: verify (1.0/3.0) > 0.0 AND (1.0/3.0) < 1.0.  Return 1 if both.
+// Exercises:
+//   - f64 division
+//   - f64 > and < comparisons with a fractional result
+//   - inttofloat (for 0.0 and 1.0 — actually use literals)
+//
+// CRITICAL: catches backends that produce 0 or 1 for 1/3 (e.g. integer
+// division fallback would give 0, failing the > 0 check... actually 0 >
+// 0 is false, so it'd return 0.  Good.)
+
+fn main() -> i32 {
+    one: f64 = 1.0;
+    three: f64 = 3.0;
+    third: f64 = one / three;   // 0.333...
+    zero: f64 = 0.0;
+    if third > zero {
+        if third < one {
+            return 1;
+        }
+    }
+    return 0;
+}
