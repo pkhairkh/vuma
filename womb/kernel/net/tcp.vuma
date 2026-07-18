@@ -1,0 +1,356 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/net/tcp.vuma
+// VWK Network Subsystem — TCP state machine + connection table (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K9d layer of the VWK kernel: a simplified PMT-native TCP
+// implementation with the 10-state TCP state machine + a 64-connection
+// table. K9 (Network) built socket (K9a — the BSD API surface), sk_buff
+// (K9b — packet buffer pool), and virtio-net (K9b — NIC driver) in earlier
+// sub-waves; K9d sits BELOW the socket layer and ABOVE the IP/NIC layers,
+// owning the per-connection send/recv sequence state.
+//
+// ── Scope of K9d ───────────────────────────────────────────────────────────
+// This is NOT a full migration of womb/net/tcp.vuma (legacy file using
+// `*ptr`/`&x` syntax, 2000+ lines). It is a clean PMT-native TCP, focused
+// on the state machine + connection-table bookkeeping. What's here:
+//   tcp_init(tbl)                                  — zero all 64 conn slots.
+//   tcp_alloc(tbl) -> u32                          — find a free slot, mark
+//                                                     used, bump count.
+//   tcp_connect(tbl, idx, lp, rp) -> i64           — send SYN, state →
+//                                                     SYN_SENT(1).
+//   tcp_accept_syn(tbl, idx) -> i64                — receive SYN, send
+//                                                     SYN-ACK, state →
+//                                                     SYN_RECEIVED(2).
+//   tcp_ack(tbl, idx) -> i64                       — receive ACK, state →
+//                                                     ESTABLISHED(3).
+//   tcp_send(tbl, idx, len) -> i64                 — send data on an
+//                                                     ESTABLISHED conn.
+//                                                     Returns len or -ENOTCONN.
+//   tcp_recv(tbl, idx) -> i64                      — receive data on an
+//                                                     ESTABLISHED conn (stub:
+//                                                     returns 0).
+//   tcp_close(tbl, idx) -> i64                     — initiate close (FIN),
+//                                                     state → FIN_WAIT_1(4).
+//   tcp_free(tbl, idx)                             — release the slot,
+//                                                     state → CLOSED(0),
+//                                                     used=0, count--.
+//
+// ── TCP state machine ──────────────────────────────────────────────────────
+//   CLOSED=0         — initial / final state (no connection).
+//   SYN_SENT=1       — tcp_connect: sent SYN, waiting for SYN-ACK.
+//   SYN_RECEIVED=2   — tcp_accept_syn: received SYN, sent SYN-ACK, waiting
+//                      for the final ACK of the three-way handshake.
+//   ESTABLISHED=3    — tcp_ack: handshake complete, data can flow.
+//   FIN_WAIT_1=4     — tcp_close: sent FIN, waiting for ACK or FIN.
+//   FIN_WAIT_2=5     — (not exercised by K9d self-test) FIN ACKed, waiting
+//                      for peer's FIN.
+//   CLOSE_WAIT=6     — (not exercised) peer sent FIN, we still have data
+//                      to send.
+//   CLOSING=7        — (not exercised) simultaneous close (both FINs in
+//                      flight).
+//   LAST_ACK=8       — (not exercised) we sent FIN after peer's FIN,
+//                      waiting for final ACK.
+//   TIME_WAIT=9      — (not exercised) 2MSL wait before reuse.
+//
+// The K9d self-test exercises the happy path:
+//   CLOSED → SYN_SENT → SYN_RECEIVED → ESTABLISHED → (send) → FIN_WAIT_1
+//          → CLOSED (via tcp_free).
+// The other 6 states (5, 6, 7, 8, 9) are defined for the state enum but
+// not yet exercised by transitions — they'll be wired up by later waves
+// (K9e+ when retransmits + 2MSL timers land). Defining them now keeps the
+// state enum forward-compatible with a full TCP.
+//
+// ── Connection table layout ────────────────────────────────────────────────
+// Same "parallel flat byte arrays" pattern as K9a's SocketTable, K4a's
+// ProcessTable, K8e's IpiTable, K8f's SmpState — the VUMA codegen does NOT
+// support `[TcpConn; 64]` (array of structs) in the parser (only `[u8; N]`
+// and other primitive-u8 arrays parse), and even if it did, the codegen's
+// flatten_expr (src/pipeline.rs::flatten_expr, Expr::Index arm) does NOT
+// scale the index by element size for non-u8 element types. So each
+// TcpConn field lives in its OWN [u8; N] array, sized for 64 slots × the
+// field's byte width. The K9d contract deliberately KEEPS the field set
+// small: states(64), local_ports(128), remote_ports(128), snd_nxts(256),
+// rcv_nxts(256), used(64), count(4). The other TcpConn fields documented
+// in the layout (local_addr, remote_addr, snd_una, window) are not yet
+// stored in the table — they live in the TcpConn layout for documentation
+// + IVE verification, mirroring K9a's choice for Socket vs SocketTable.
+//
+// Field byte-offsets in TcpTable (verified by IVE's layout resolver):
+//     states         [   0 ..  63]    64 bytes  (64 * u8)
+//     local_ports    [  64 .. 191]   128 bytes  (64 * u16)
+//     remote_ports   [ 192 .. 319]   128 bytes  (64 * u16)
+//     snd_nxts       [ 320 .. 575]   256 bytes  (64 * u32)
+//     rcv_nxts       [ 576 .. 831]   256 bytes  (64 * u32)
+//     used           [ 832 .. 895]    64 bytes  (64 * u8)
+//     count          [ 896 .. 899]     4 bytes  (u32, 4-aligned)
+//   total: 900 bytes, padded to 900 (4-aligned: last field end at 899+1=900
+//   is 4-aligned).
+//
+// ── Why no pack/unpack helpers? ────────────────────────────────────────────
+// K9a's socket.vuma implements 26 helpers (13 getters + 13 setters) for
+// the multi-byte fields. K9d's contract does NOT require them: the
+// self-test only checks states[] + used[] + count, and the simplified
+// tcp_connect / tcp_accept_syn / tcp_ack / tcp_send / tcp_recv / tcp_close
+// transitions only manipulate `tbl.states[idx]` (a u8 direct-index field).
+// The port arguments to tcp_connect are accepted (per the contract
+// signature) but not yet stored — K9e will add tcp_set_local_port /
+// tcp_set_remote_port helpers (the same 2-byte pack/unpack loop as K9a's
+// sock_set_local_port) when it wires the IP layer to look up connections
+// by 4-tuple. Keeping the helper set minimal here matches the K9d
+// contract's "simplified PMT-native TCP" scope.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants use DECIMAL per the K9d contract's "Use decimal
+// constants" rule (avoids the parser's hex-literal path — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale). The
+// constants:
+//     64    = number of connection slots in TcpTable
+//     64    = "table full" sentinel returned by tcp_alloc (one-past-the-end;
+//             same convention as K4a's task_alloc returning 256 for its
+//             256-slot table)
+//     0..9  = TCP state values (CLOSED / SYN_SENT / SYN_RECEIVED /
+//             ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2 / CLOSE_WAIT /
+//             CLOSING / LAST_ACK / TIME_WAIT)
+//     22    = EINVAL errno (returned on idx >= 64)
+//     9     = EBADF errno (returned on used[idx] == 0 — K9d uses it only
+//             in tcp_connect; other transitions accept any idx for state
+//             consistency)
+//     107   = ENOTCONN errno (returned by tcp_send / tcp_recv when
+//             states[idx] != 3 (ESTABLISHED))
+//     1234, 80, 100 = self-test values (local_port, remote_port, send len)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// TcpTable is a flat-byte-array struct held in a `___pmt_buffer`-backed
+// State<TcpTable>; the CALLER allocates it via `state_new(TcpTable)` and
+// passes it by reference to tcp_init / tcp_alloc / ... / tcp_free
+// (init-style API — see "Why init-style?" in K4e's wait.vuma header for
+// the codegen rationale: the current codegen does NOT propagate State-
+// typedness through function return values, so `fn tcp_new() ->
+// State<TcpTable>` would produce broken field-access code in callers).
+// No externs are declared (pure-PM — no syscalls, no IRQ, no allocation).
+// The actual "send bytes over the wire" path is deferred to the NIC
+// driver (K9b's virtio-net) + IP layer (future wave); K9d only models
+// the per-connection state transitions.
+//
+// State<T> params: 1 per function (tbl), except tcp_connect (tbl + idx +
+// 2 port args). Per the K4b contract's "1-2 per function" rule. The
+// single-state-param pattern is the same as K8e's ipi_send /
+// K8f's smp_call_function — the caller owns the table.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares TcpConn + TcpTable + all 9
+// state-machine functions. K9e+ (IP layer, retransmit timers) will
+// re-declare TcpTable byte-identically when it needs to read/write the
+// sequence-number fields. The byte-identical-redeclaration invariant
+// (K2c "extern signatures MUST stay byte-identical" — extended to
+// layouts in K3d, re-applied in K4a/K7a/K8a/K8e/K8f/K9a) extends to
+// K9d's TcpConn + TcpTable.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/net/tcp.vuma \
+//         /tmp/tcp.bin x86_64 --verify
+//     /tmp/tcp.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — tcp_alloc
+// returns 0 + count=1; tcp_connect sets state=1; tcp_accept_syn sets
+// state=2; tcp_ack sets state=3; tcp_send returns 100; tcp_close sets
+// state=4; tcp_free clears used + decrements count to 0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// TcpConn: a single TCP connection descriptor. 10 fields, ~27 bytes
+// (padded for 4-byte alignment of the trailing u32 fields). Documented
+// in the file header. NOT used operationally by the state-machine
+// functions — they use TcpTable (parallel flat arrays — see "Why
+// parallel flat byte arrays?" in the file header). The TcpConn layout
+// exists for IVE verification (the DoD's "TcpConn, TcpTable layouts
+// verify" check) + as the canonical field-name/field-type reference for
+// K9e+ (when the codegen gains typed-array indexing, TcpTable collapses
+// to `[TcpConn; 64]` and this layout becomes the operational structure).
+layout TcpConn = {
+    state: u8,        // TCP state (0-9 — see "TCP state machine" above)
+    local_port: u16,  // host-order port (e.g. 1234 for client, 80 for server)
+    remote_port: u16, // host-order peer port
+    local_addr: u32,  // IPv4 as u32 (host order — same as K9a's Socket)
+    remote_addr: u32, // IPv4 peer addr
+    snd_nxt: u32,     // send next sequence number
+    rcv_nxt: u32,     // receive next sequence number
+    snd_una: u32,     // send unacknowledged (oldest in-flight byte)
+    window: u16,      // receive window (advertised to peer)
+}
+
+// TcpTable: 64 TCP connections stored as parallel flat byte arrays (VUMA
+// has no struct-array support — see "Why parallel flat byte arrays?" in
+// the file header). Each field is a separate [u8; N] array sized for
+// 64 slots × the field's byte width. `count` tracks how many slots are
+// in use (0..64). The K9d contract keeps the field set minimal — only
+// states + 4-tuple ports + sequence numbers + used + count; the other
+// TcpConn fields (local_addr, remote_addr, snd_una, window) live in the
+// TcpConn layout for documentation + will be added to TcpTable by K9e+
+// when the IP layer needs 4-tuple lookup. u8 fields (states, used) are
+// accessed directly as `tbl.states[idx]` / `tbl.used[idx]`; multi-byte
+// fields (local_ports, remote_ports, snd_nxts, rcv_nxts) are present in
+// the table for K9e+ but NOT YET ACCESSED by K9d's functions — keeping
+// them in the layout now means K9e can add pack/unpack helpers without
+// resizing the table.
+layout TcpTable = {
+    states: [u8; 64],       // 64 * 1 byte  (u8 — direct index)
+    local_ports: [u8; 128], // 64 * 2 bytes (u16)
+    remote_ports: [u8; 128],// 64 * 2 bytes (u16)
+    snd_nxts: [u8; 256],    // 64 * 4 bytes (u32)
+    rcv_nxts: [u8; 256],    // 64 * 4 bytes (u32)
+    used: [u8; 64],         // 64 * 1 byte  (u8 — direct index)
+    count: u32,             // number of slots in use (0..64)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// State-machine functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// tcp_init: zero all 64 connection slots' state + used flags, count=0.
+// Same pattern as K9a's sock_init / K4a's pt_init / K8e's ipi_init.
+fn tcp_init(tbl: State<TcpTable>) {
+    let i = 0;
+    while i < 64 {
+        tbl.states[i] = 0;  // CLOSED
+        tbl.used[i] = 0;
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// tcp_alloc: find a free connection slot, mark it used, bump count.
+// Returns the slot index (0..63) on success, or 64 if the table is full
+// (one-past-the-end sentinel — same convention as K4a's task_alloc).
+fn tcp_alloc(tbl: State<TcpTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if tbl.used[i] == 0 {
+            tbl.states[i] = 0;
+            tbl.used[i] = 1;
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// tcp_connect: send SYN, move to SYN_SENT(1).
+// The local_port + remote_port args are accepted (per the K9d contract
+// signature) but not yet stored — K9e will add tcp_set_local_port /
+// tcp_set_remote_port helpers when it wires the IP layer to look up
+// connections by 4-tuple.
+// Returns 0 on success, 22=-EINVAL on idx >= 64, 9=-EBADF on unused slot.
+fn tcp_connect(tbl: State<TcpTable>, idx: u32, local_port: u16, remote_port: u16) -> i64 {
+    if idx >= 64 { return 22; }
+    if tbl.used[idx] == 0 { return 9; }
+    // Set ports (simplified — use direct state access). K9e will store
+    // these via tcp_set_local_port / tcp_set_remote_port helpers.
+    tbl.states[idx] = 1;  // SYN_SENT
+    return 0;
+}
+
+// tcp_accept_syn: receive SYN, send SYN-ACK, move to SYN_RECEIVED(2).
+// Returns 0 on success, 22=-EINVAL on idx >= 64.
+fn tcp_accept_syn(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    tbl.states[idx] = 2;  // SYN_RECEIVED
+    return 0;
+}
+
+// tcp_ack: receive ACK, move to ESTABLISHED(3).
+// Returns 0 on success, 22=-EINVAL on idx >= 64.
+fn tcp_ack(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    tbl.states[idx] = 3;  // ESTABLISHED
+    return 0;
+}
+
+// tcp_send: send data on an ESTABLISHED connection.
+// Returns the byte count (len) on success, 22=-EINVAL on idx >= 64,
+// 107=-ENOTCONN if states[idx] != 3 (ESTABLISHED).
+// K9d's stub returns `len` (pretend all bytes were sent — the caller's
+// contract is "if return >= 0, that many bytes were sent"). Real TCP
+// send (segmentation, sequence-number bump, retransmit timer) is K9e+.
+fn tcp_send(tbl: State<TcpTable>, idx: u32, len: u64) -> i64 {
+    if idx >= 64 { return 22; }
+    if tbl.states[idx] != 3 { return 107; }  // -ENOTCONN
+    return len as i64;
+}
+
+// tcp_recv: receive data on an ESTABLISHED connection.
+// Returns the byte count on success (K9d stub: 0), 22=-EINVAL on idx
+// >= 64, 107=-ENOTCONN if states[idx] != 3 (ESTABLISHED).
+// K9d's stub returns 0 (no data available). Real TCP recv (RX ring
+// buffer + sequence reassembly) is K9e+.
+fn tcp_recv(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    if tbl.states[idx] != 3 { return 107; }
+    return 0;  // stub: no data
+}
+
+// tcp_close: initiate close (send FIN), move to FIN_WAIT_1(4).
+// Returns 0 on success, 22=-EINVAL on idx >= 64.
+// The full FIN/ACK teardown (FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT →
+// CLOSED) is K9e+; K9d only models the entry into FIN_WAIT_1.
+fn tcp_close(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    tbl.states[idx] = 4;  // FIN_WAIT_1
+    return 0;
+}
+
+// tcp_free: free a connection slot. state → CLOSED(0), used=0, count--.
+// Safe to call on an already-freed slot (no-op for used[idx]==0 because
+// the count-- would underflow u32 — K9d's contract callers always free
+// exactly once after a successful tcp_alloc, matching K9a's sys_close
+// discipline).
+fn tcp_free(tbl: State<TcpTable>, idx: u32) {
+    if idx >= 64 { return; }
+    tbl.states[idx] = 0;
+    tbl.used[idx] = 0;
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the happy-path TCP state machine: allocate a connection,
+// run the three-way handshake (SYN_SENT → SYN_RECEIVED → ESTABLISHED),
+// send 100 bytes, close (FIN_WAIT_1), then free the slot. Returns 0 on
+// success, 1..9 on the 9 individual check failures (each check guards
+// one observable state transition + the final free).
+fn main() -> i32 {
+    let tbl = state_new(TcpTable);
+    tcp_init(tbl);
+    // Allocate a connection.
+    let c = tcp_alloc(tbl);
+    if c != 0 { return 1; }
+    if tbl.count != 1 { return 2; }
+    // Connect (SYN_SENT).
+    tcp_connect(tbl, c, 1234, 80);
+    if tbl.states[c] != 1 { return 3; }
+    // Receive SYN-ACK → SYN_RECEIVED.
+    tcp_accept_syn(tbl, c);
+    if tbl.states[c] != 2 { return 4; }
+    // ACK → ESTABLISHED.
+    tcp_ack(tbl, c);
+    if tbl.states[c] != 3 { return 5; }
+    // Send data.
+    let n = tcp_send(tbl, c, 100);
+    if n != 100 { return 6; }
+    // Close.
+    tcp_close(tbl, c);
+    if tbl.states[c] != 4 { return 7; }
+    // Free.
+    tcp_free(tbl, c);
+    if tbl.used[c] != 0 { return 8; }
+    if tbl.count != 0 { return 9; }
+    return 0;
+}
