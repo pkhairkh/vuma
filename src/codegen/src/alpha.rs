@@ -135,6 +135,7 @@ impl Fpr {
 /// IR instruction's emission without spilling.
 const FA: Fpr = Fpr::F0; // FP accumulator / result
 const FB: Fpr = Fpr::F1; // FP second operand
+const FC: Fpr = Fpr::F2; // FP third operand // FP second operand
 
 // ===========================================================================
 // Instruction enum (mnemonic / Display / encode)

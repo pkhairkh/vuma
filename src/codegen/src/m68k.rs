@@ -1071,8 +1071,8 @@ fn emit_instr(
             // see the function doc comment for encoding-uncertainty
             // caveats). Otherwise fall through to the integer `emit_binop`
             // path.
-            if ty.is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
-                emit_fp_binop(op, ty, dst, lhs, rhs, vreg_stack_slots, code);
+            if ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+                emit_fp_binop(op, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code);
             } else {
                 emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
             }
@@ -1099,8 +1099,8 @@ fn emit_instr(
             // FP dispatch (G4): if the operand type is F32 or F64, route
             // through `emit_fp_binop` (best-effort 68881 FCMP encoding).
             // Otherwise fall through to integer `emit_binop`.
-            if ty.is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
-                emit_fp_binop(&binop_kind, ty, dst, lhs, rhs, vreg_stack_slots, code);
+            if ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+                emit_fp_binop(&binop_kind, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code);
             } else {
                 emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
             }
@@ -1300,20 +1300,20 @@ fn emit_instr(
                     // versa). It is the safest correct-by-construction
                     // behaviour in the absence of a verified FPU encoding.
                     emit_cast_float_to_float(
-                        from_ty, to_ty, dst_off, src, vreg_stack_slots, code,
+                        from_ty.clone(), to_ty.clone(), dst_off, src, vreg_stack_slots, code,
                     );
                 }
                 CastKind::IntToFloat | CastKind::UIntToFloat => {
                     // G4: best-effort 68881 FMOVE.L + FMOVE.S/D sequence.
                     // TODO G4: needs QEMU-m68k verification — encoding
                     // uncertain; see `emit_cast_int_to_float` doc.
-                    emit_cast_int_to_float(to_ty, dst_off, src, vreg_stack_slots, code);
+                    emit_cast_int_to_float(to_ty.clone(), dst_off, src, vreg_stack_slots, code);
                 }
                 CastKind::FloatToInt | CastKind::FloatToUInt => {
                     // G4: best-effort 68881 FMOVE.S/D + FINTRZ + FMOVE.L
                     // sequence. TODO G4: needs QEMU-m68k verification —
                     // encoding uncertain; see `emit_cast_float_to_int` doc.
-                    emit_cast_float_to_int(from_ty, to_ty, dst_off, src, vreg_stack_slots, code);
+                    emit_cast_float_to_int(from_ty.clone(), to_ty.clone(), dst_off, src, vreg_stack_slots, code);
                 }
             }
         }
