@@ -1940,11 +1940,11 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // Base: sf=0, type=00 → 0x1E220000
-                Ok(0x1E220000u32
+                // G7: Base 0x1E020000 (rmode=00, opcode=010), Rn at [9:5]
+                Ok(0x1E020000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
@@ -1961,11 +1961,11 @@ impl Instruction {
                 dst_64,
                 src_double,
             } => {
-                // Base: sf=0, type=00 → 0x1E380000
+                // G7: Base 0x1E380000 (rmode=11, opcode=1000), Rn at [9:5]
                 Ok(0x1E380000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
@@ -1982,11 +1982,11 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // Base: sf=0, type=00 → 0x1E230000
-                Ok(0x1E230000u32
+                // G7: Base 0x1E030000 (rmode=00, opcode=011), Rn at [9:5]
+                Ok(0x1E030000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
@@ -2003,11 +2003,11 @@ impl Instruction {
                 dst_64,
                 src_double,
             } => {
-                // Base: sf=0, type=00 → 0x1E390000
+                // G7: Base 0x1E390000 (rmode=11, opcode=1001), Rn at [9:5]
                 Ok(0x1E390000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
@@ -2032,24 +2032,24 @@ impl Instruction {
             //      flag is informational for these encoders, which always
             //      emit the double-precision form). ----
             // FADD: 0x1E282800
-            Instruction::Fadd { rd, rn, rm, double: _ } => {
-                Ok(0x1E282800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            Instruction::Fadd { rd, rn, rm, double } => {
+                Ok(0x1E202800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())  // G7: cleared Rm field from base
             }
             // FSUB: 0x1E283800
-            Instruction::Fsub { rd, rn, rm, double: _ } => {
-                Ok(0x1E283800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            Instruction::Fsub { rd, rn, rm, double } => {
+                Ok(0x1E203800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())  // G7: cleared Rm field from base
             }
             // FMUL: 0x1E200800
-            Instruction::Fmul { rd, rn, rm, double: _ } => {
-                Ok(0x1E200800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            Instruction::Fmul { rd, rn, rm, double } => {
+                Ok(0x1E200800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
             }
             // FDIV: 0x1E201800
-            Instruction::Fdiv { rd, rn, rm, double: _ } => {
-                Ok(0x1E201800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            Instruction::Fdiv { rd, rn, rm, double } => {
+                Ok(0x1E201800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
             }
             // FCMP: 0x1E202000 (double-precision)
-            Instruction::Fcmp { rn, rm, double: _ } => {
-                Ok(0x1E202000u32 | (rm.encoding() << 16) | (rn.encoding() << 5))
+            Instruction::Fcmp { rn, rm, double } => {
+                Ok(0x1E202000u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5))
             }
 
             // ---- DMB ----
@@ -2125,7 +2125,7 @@ impl Instruction {
             // Encoding format (Floating-point conversion from integer):
             //   sf=1, type=01, rmode=10, opcode=0111 → 0x9E670000
             //   Rn at [14:10], Rd at [4:0]
-            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 10) | (*vd as u32)),
+            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32)),
 
             // ---- FMOV Xd, Dn (FP double → GPR) ----
             // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
@@ -2134,7 +2134,7 @@ impl Instruction {
             // Encoding format (Floating-point conversion from integer):
             //   sf=1, type=01, rmode=11, opcode=0111 → 0x9E6F0000
             //   Rn at [14:10], Rd at [4:0]
-            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 10) | rd.encoding()),
+            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding()),
 
             // ---- CNT Vd.8B, Vn.8B ----
             // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
