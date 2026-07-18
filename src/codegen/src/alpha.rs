@@ -44,7 +44,7 @@ use crate::backend::{
     BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, SectionHeader,
     TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
 use crate::ir::VirtualRegister;
 use std::collections::HashMap;
@@ -107,6 +107,34 @@ impl fmt::Display for Gpr {
         f.write_str(self.asm_name())
     }
 }
+
+// ===========================================================================
+// Floating-Point Registers
+// ===========================================================================
+
+/// Alpha floating-point register (F0-F31).  Alpha has 32 FP registers,
+/// separate from the integer register file.  R31 is hardwired zero in the
+/// integer file; F31 is a normal FP register (NOT zero -- Alpha has no
+/// hardwired-zero FPR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Fpr {
+    F0 = 0,  F1,  F2,  F3,  F4,  F5,  F6,  F7,
+    F8,  F9,  F10, F11, F12, F13, F14, F15,
+    F16, F17, F18, F19, F20, F21, F22, F23,
+    F24, F25, F26, F27, F28, F29, F30, F31,
+}
+
+impl Fpr {
+    /// 5-bit register encoding (0-31).
+    pub fn encoding(&self) -> u8 { *self as u8 }
+}
+
+/// FP scratch / accumulator registers.  F0 and F1 are caller-saved
+/// temporaries in the Alpha ABI and are safe to clobber within a single
+/// IR instruction's emission without spilling.
+const FA: Fpr = Fpr::F0; // FP accumulator / result
+const FB: Fpr = Fpr::F1; // FP second operand
 
 // ===========================================================================
 // Instruction enum (mnemonic / Display / encode)
@@ -955,8 +983,16 @@ fn emit_instr(
             code.extend(Instruction::Or { ra: S3, rb: ZERO, rc: S0 }.encode()); // S0 = quotient
             code.extend(ss_st(S0, dst_off));
         }
-        IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
-            emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+            // FP dispatch: when the result type is F32 or F64, emit native
+            // Alpha FP arithmetic (ADDT/SUBT/MULT/DIVT) instead of the
+            // integer path.  Mirrors the x86_64 stack-slot pattern
+            // (stack_slot_isel.rs:427-549).
+            if let Some(IRType::F32) | Some(IRType::F64) = ty {
+                emit_fp_binop(op, dst, lhs, rhs, ty, vreg_stack_slots, code);
+            } else {
+                emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+            }
         }
         IRInstr::Cmp { kind, dst, lhs, rhs, ty: _ } => {
             let binop_kind = match kind {
@@ -1093,14 +1129,112 @@ fn emit_instr(
             }
         }
         IRInstr::Free { ptr: _ } => { /* no-op; lowered to Call */ }
-        IRInstr::Cast { kind, dst, src, from_ty: _, to_ty: _ } => {
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-            code.extend(ss_load_value(src, vreg_stack_slots, S0));
-            // For 64-bit Alpha, all integer types are sign/zero-extended to 64 bits.
-            // We just store the value as-is.
-            let _ = kind;
-            code.extend(ss_st(S0, dst_off));
+
+            // Resolve src's stack offset.  If src is a register, its value
+            // already lives at its own slot.  If src is an immediate /
+            // address / label, we ferry it through S0 and spill to dst_off
+            // (safe -- we overwrite dst with the result before returning,
+            // and all reads of src happen before any write-back).
+            let src_off: i32 = match src.as_register() {
+                Some(id) => vreg_stack_slots.get(&id).copied().unwrap_or(0),
+                None => {
+                    code.extend(ss_load_value(src, vreg_stack_slots, S0));
+                    code.extend(ss_st(S0, dst_off));
+                    dst_off
+                }
+            };
+
+            match kind {
+                CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
+                    // Integer-only casts on 64-bit Alpha are no-ops in
+                    // registers: all integer values are already sign /
+                    // zero-extended to 64 bits.  If src was a register, move
+                    // it to dst; if src was an immediate, it's already at
+                    // dst_off from the spill above.
+                    if src.as_register().is_some() {
+                        code.extend(ss_load_value(src, vreg_stack_slots, S0));
+                        code.extend(ss_st(S0, dst_off));
+                    }
+                }
+                CastKind::IntToFloat => {
+                    // Signed int -> float.  Load the integer bits into FA via
+                    // LDT (memory already holds the int as 64 bits), then
+                    // CVTQT (int64 -> f64).  Narrow to f32 if needed.
+                    code.extend(fp_ldt(FA, FP, src_off as i16));
+                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));
+                    if matches!(to_ty, Some(IRType::F64)) {
+                        code.extend(fp_stt(FA, FP, dst_off as i16));
+                    } else {
+                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_sts(FA, FP, dst_off as i16));
+                    }
+                }
+                CastKind::UIntToFloat => {
+                    // Unsigned int -> float.  Alpha CVTQT treats the source
+                    // as SIGNED; values > i64::MAX would need a 2^64
+                    // correction (load 2^64 as f64 and add).  We emit CVTQT
+                    // and document the limitation -- the IR verifier (F2a)
+                    // should guard against out-of-i64-range unsigned inputs.
+                    // TODO F1a: full unsigned correction for values > i64::MAX.
+                    code.extend(fp_ldt(FA, FP, src_off as i16));
+                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));
+                    if matches!(to_ty, Some(IRType::F64)) {
+                        code.extend(fp_stt(FA, FP, dst_off as i16));
+                    } else {
+                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_sts(FA, FP, dst_off as i16));
+                    }
+                }
+                CastKind::FloatToInt => {
+                    // f64/f32 -> signed int (truncating).  CVTTQ truncates
+                    // f64 -> i64.  For f32 source, widen to f64 first.
+                    if matches!(from_ty, Some(IRType::F64)) {
+                        code.extend(fp_ldt(FA, FP, src_off as i16));
+                    } else {
+                        code.extend(fp_lds(FA, FP, src_off as i16));
+                        code.extend(fp_op(FP_CVTST, FA, FA, FA)); // widen f32 -> f64
+                    }
+                    code.extend(fp_op(FP_CVTTQ, FA, FA, FA)); // f64 -> i64 (bits in FPR)
+                    code.extend(fp_stt(FA, FP, dst_off as i16)); // store 64-bit int bits
+                    code.extend(ss_ld(S0, dst_off)); // reload as int
+                    code.extend(ss_st(S0, dst_off));
+                }
+                CastKind::FloatToUInt => {
+                    // f64 -> unsigned int.  Approximation: CVTTQ (signed
+                    // truncation) then store as-is.  Negative float inputs
+                    // would produce negative int bits which, reinterpreted
+                    // as unsigned, are wrong -- needs the subtract-2^N trick.
+                    // TODO F1a: unsigned correction for negative float inputs.
+                    if matches!(from_ty, Some(IRType::F64)) {
+                        code.extend(fp_ldt(FA, FP, src_off as i16));
+                    } else {
+                        code.extend(fp_lds(FA, FP, src_off as i16));
+                        code.extend(fp_op(FP_CVTST, FA, FA, FA));
+                    }
+                    code.extend(fp_op(FP_CVTTQ, FA, FA, FA));
+                    code.extend(fp_stt(FA, FP, dst_off as i16));
+                    code.extend(ss_ld(S0, dst_off));
+                    code.extend(ss_st(S0, dst_off));
+                }
+                CastKind::FloatToFloat => {
+                    // f32 <-> f64.  Widen (f32 -> f64) or narrow (f64 -> f32).
+                    if matches!(from_ty, Some(IRType::F64)) {
+                        // f64 -> f32
+                        code.extend(fp_ldt(FA, FP, src_off as i16));
+                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_sts(FA, FP, dst_off as i16));
+                    } else {
+                        // f32 -> f64
+                        code.extend(fp_lds(FA, FP, src_off as i16));
+                        code.extend(fp_op(FP_CVTST, FA, FA, FA));
+                        code.extend(fp_stt(FA, FP, dst_off as i16));
+                    }
+                }
+            }
+            let _ = (from_ty, to_ty);
         }
         IRInstr::Phi { .. } => { /* no code emitted */ }
         IRInstr::GetAddress { dst, name } => {
@@ -1278,6 +1412,92 @@ fn emit_instr(
         IRInstr::VectorOp { .. } => {}
     }
 }
+
+// ===========================================================================
+// Alpha FP instruction encoders (opcode 0x16, FP operate)
+// ===========================================================================
+//
+// Alpha FP operate format (per Alpha Architecture Manual, section C.2):
+//   bits 31-26: opcode (0x16 for FP operate)
+//   bits 25-21: fa
+//   bits 20-16: fb
+//   bits 15-5 : function (11 bits -- wider than integer's 7-bit field)
+//   bits 4-0  : fc
+// All instructions are 32-bit little-endian.
+//
+// FP load/store use the standard memory format with an FPR in the ra field:
+//   LDS (0x22), LDT (0x23), STS (0x26), STT (0x27).
+//
+// NOTE: Alpha has no direct FPR<->GPR move instruction -- values transit
+// through memory (STT -> LDQ, or STQ -> LDT).  The helpers below address
+// memory via FP (the frame pointer), matching the convention used by
+// `ss_ld`/`ss_st`.  After the prologue, FP == SP, so this is consistent.
+
+/// Encode an FP operate instruction (arithmetic / compare / convert).
+/// `fn_code` is the 11-bit FP function field.
+fn fp_op(fn_code: u32, fa: Fpr, fb: Fpr, fc: Fpr) -> Vec<u8> {
+    let word: u32 = (0x16u32 << 26)
+        | ((fa.encoding() as u32) << 21)
+        | ((fb.encoding() as u32) << 16)
+        | ((fn_code & 0x7FF) << 5)
+        | (fc.encoding() as u32);
+    word.to_le_bytes().to_vec()
+}
+
+/// Load double (LDT, opcode 0x23): FPR `fa` <- mem[rb + disp].
+fn fp_ldt(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
+    let word: u32 = (0x23u32 << 26)
+        | ((fa.encoding() as u32) << 21)
+        | ((rb.encoding() as u32) << 16)
+        | (disp as u16 as u32);
+    word.to_le_bytes().to_vec()
+}
+
+/// Store double (STT, opcode 0x27): mem[rb + disp] <- FPR `fa`.
+fn fp_stt(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
+    let word: u32 = (0x27u32 << 26)
+        | ((fa.encoding() as u32) << 21)
+        | ((rb.encoding() as u32) << 16)
+        | (disp as u16 as u32);
+    word.to_le_bytes().to_vec()
+}
+
+/// Load single (LDS, opcode 0x22).  Loads 32 bits and zero-extends to 64.
+fn fp_lds(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
+    let word: u32 = (0x22u32 << 26)
+        | ((fa.encoding() as u32) << 21)
+        | ((rb.encoding() as u32) << 16)
+        | (disp as u16 as u32);
+    word.to_le_bytes().to_vec()
+}
+
+/// Store single (STS, opcode 0x26).  Stores the low 32 bits of FPR `fa`.
+fn fp_sts(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
+    let word: u32 = (0x26u32 << 26)
+        | ((fa.encoding() as u32) << 21)
+        | ((rb.encoding() as u32) << 16)
+        | (disp as u16 as u32);
+    word.to_le_bytes().to_vec()
+}
+
+// Alpha FP function codes (IEEE).  T = double (64-bit), S = single (32-bit).
+// Arithmetic is performed in T; S operands are widened via CVTST and
+// narrowed via CVTTS.  On Alpha, CVTST and CVTTS share the same function
+// code 0x2AC -- the distinction is which precision the source register is
+// tagged with.  We emit 0x2AC for both and rely on the surrounding
+// load/store width (LDS/STS vs LDT/STT) to carry the precision intent.
+const FP_ADDT: u32   = 0x525; // f64 add
+const FP_SUBT: u32   = 0x521; // f64 sub
+const FP_MULT: u32   = 0x532; // f64 mul
+const FP_DIVT: u32   = 0x563; // f64 div
+const FP_CVTQT: u32  = 0x2BE; // int64 -> f64
+const FP_CVTTQ: u32  = 0x52F; // f64 -> int64 (truncating)
+const FP_CVTST: u32  = 0x2AC; // f32 -> f64 (widen)
+const FP_CVTTS: u32  = 0x2AC; // f64 -> f32 (narrow; same fc as CVTST)
+const FP_CMPTUN: u32 = 0x5A4; // compare unordered
+const FP_CMPTEQ: u32 = 0x5A5; // compare equal
+const FP_CMPTLT: u32 = 0x5A6; // compare less-than
+const FP_CMPTLE: u32 = 0x5A7; // compare less-or-equal
 
 /// Emit a binary op (BinOpKind) result into dst's stack slot.
 fn emit_binop(
@@ -1519,6 +1739,139 @@ fn emit_binop(
             code.extend(ss_st(S0, dst_off));
         }
     }
+}
+
+/// Emit a floating-point binary op.  Operand values live in their stack
+/// slots (the same slots `ss_load_value` reads for integers); we load them
+/// directly into FPRs with LDT/LDS, operate, and store back with STT/STS.
+/// The result is then reloaded into S0 so downstream integer-path code
+/// (which expects every value in a GPR) sees a consistent representation.
+///
+/// Alpha FP arithmetic is performed in double (T) precision.  For F32
+/// operands, we widen via CVTST on entry and narrow via CVTTS on exit.
+fn emit_fp_binop(
+    op: &BinOpKind,
+    dst: &IRValue,
+    lhs: &IRValue,
+    rhs: &IRValue,
+    ty: &Option<IRType>,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let dst_id = dst.as_register().unwrap_or(0);
+    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+    let is_f64 = matches!(ty, Some(IRType::F64));
+
+    // Resolve operand stack offsets.  Register operands are loaded directly
+    // from their own slot; immediates / addresses / labels are ferried into
+    // S0 and spilled to dst_off (which we'll overwrite with the result
+    // before returning, so the spill is safe).  Both operands are loaded
+    // into FPRs BEFORE the result is written back.
+    let lhs_off: i32 = lhs.as_register()
+        .and_then(|id| vreg_stack_slots.get(&id).copied())
+        .unwrap_or(dst_off);
+    let rhs_off: i32 = rhs.as_register()
+        .and_then(|id| vreg_stack_slots.get(&id).copied())
+        .unwrap_or(dst_off);
+
+    // Spill lhs immediate (if any) to its resolved slot, then load FA.
+    if lhs.as_register().is_none() {
+        code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+        code.extend(ss_st(S0, lhs_off));
+    }
+    if is_f64 {
+        code.extend(fp_ldt(FA, FP, lhs_off as i16));
+    } else {
+        code.extend(fp_lds(FA, FP, lhs_off as i16));
+        code.extend(fp_op(FP_CVTST, FA, FA, FA)); // widen f32 -> f64
+    }
+
+    // Spill rhs immediate (after FA is loaded, so even if rhs_off == lhs_off
+    // the lhs value is already safe in FA), then load FB.
+    if rhs.as_register().is_none() {
+        code.extend(ss_load_value(rhs, vreg_stack_slots, S0));
+        code.extend(ss_st(S0, rhs_off));
+    }
+    if is_f64 {
+        code.extend(fp_ldt(FB, FP, rhs_off as i16));
+    } else {
+        code.extend(fp_lds(FB, FP, rhs_off as i16));
+        code.extend(fp_op(FP_CVTST, FB, FB, FB)); // widen f32 -> f64
+    }
+
+    // Dispatch.  Arithmetic is always in T (double); S narrowing happens at
+    // the very end if the result type is F32.
+    match op {
+        BinOpKind::Add => { code.extend(fp_op(FP_ADDT, FA, FB, FA)); }
+        BinOpKind::Sub => { code.extend(fp_op(FP_SUBT, FA, FB, FA)); }
+        BinOpKind::Mul => { code.extend(fp_op(FP_MULT, FA, FB, FA)); }
+        BinOpKind::SDiv | BinOpKind::UDiv => { code.extend(fp_op(FP_DIVT, FA, FB, FA)); }
+        BinOpKind::Eq | BinOpKind::Ne
+        | BinOpKind::SLt | BinOpKind::ULt
+        | BinOpKind::SLe | BinOpKind::ULe
+        | BinOpKind::SGt | BinOpKind::UGt
+        | BinOpKind::SGe | BinOpKind::UGe => {
+            // Alpha FP compare writes 0.0 (false) or 1.0 (true) to the
+            // destination FPR -- NOT a flags register.  We convert that to
+            // the i1 result VUMA expects via CVTTQ (f64 -> i64), STT, LDQ,
+            // then mask to 1 bit.
+            let fc_code = match op {
+                BinOpKind::Eq => FP_CMPTEQ,
+                BinOpKind::Ne => FP_CMPTEQ, // inverted below
+                BinOpKind::SLt | BinOpKind::ULt => FP_CMPTLT,
+                BinOpKind::SLe | BinOpKind::ULe => FP_CMPTLE,
+                BinOpKind::SGt | BinOpKind::UGt => FP_CMPTLT, // swapped below
+                BinOpKind::SGe | BinOpKind::UGe => FP_CMPTLE, // swapped below
+                _ => FP_CMPTEQ,
+            };
+            if matches!(op, BinOpKind::SGt | BinOpKind::UGt | BinOpKind::SGe | BinOpKind::UGe) {
+                // For > / >=, compare FB < FA (or FB <= FA) instead of
+                // FA < FB.
+                code.extend(fp_op(fc_code, FB, FA, FA));
+            } else {
+                code.extend(fp_op(fc_code, FA, FB, FA));
+            }
+            // FA now holds 0.0 or 1.0 as f64.  For Ne, invert: compute
+            // 1.0 - (CMPTEQ result).  Materialize 1.0 in FB via CVTQT
+            // (no FP immediate on Alpha).
+            if matches!(op, BinOpKind::Ne) {
+                code.extend(ss_load_imm(S0, 1));
+                code.extend(ss_st(S0, dst_off));
+                code.extend(fp_ldt(FB, FP, dst_off as i16));
+                code.extend(fp_op(FP_CVTQT, FB, FB, FB)); // int 1 -> f64 1.0
+                code.extend(fp_op(FP_SUBT, FB, FA, FA)); // FA = 1.0 - FA
+            }
+            // Convert f64 0.0/1.0 -> i64 0/1, store, reload, mask.
+            code.extend(fp_op(FP_CVTTQ, FA, FA, FA));
+            code.extend(fp_stt(FA, FP, dst_off as i16));
+            code.extend(ss_ld(S0, dst_off));
+            code.extend(ss_load_imm(S1, 1));
+            code.extend(Instruction::And { ra: S0, rb: S1, rc: S0 }.encode());
+            code.extend(ss_st(S0, dst_off));
+            return; // done -- skip the post-arithmetic store below
+        }
+        // Bitwise / shift ops on floats are invalid; the IR verifier (F2a)
+        // should reject these before codegen.  Fallback: delegate to the
+        // integer path (will produce wrong results, but is safe).
+        _ => {
+            code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+            code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+            emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+            return;
+        }
+    }
+
+    // Narrow f64 -> f32 if the result type is F32, then store to dst slot.
+    if is_f64 {
+        code.extend(fp_stt(FA, FP, dst_off as i16));
+    } else {
+        code.extend(fp_op(FP_CVTTS, FA, FA, FA)); // narrow f64 -> f32
+        code.extend(fp_sts(FA, FP, dst_off as i16));
+    }
+    // Reload into S0 so the integer-path slot is consistent.  Downstream FP
+    // ops will fp_ldt/fp_lds directly from the slot, so this is harmless.
+    code.extend(ss_ld(S0, dst_off));
+    let _ = (lhs_off, rhs_off);
 }
 
 // ===========================================================================
