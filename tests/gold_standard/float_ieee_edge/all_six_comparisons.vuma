@@ -1,5 +1,5 @@
 // all_six_comparisons — Test <, <=, >, >=, ==, != on (3.0, 5.0).
-// Expected exit code: 15
+// Expected exit code: 3
 //
 // For a=3.0, b=5.0:
 //   a <  b = 1, a <= b = 1, a >  b = 0, a >= b = 0, a == b = 0, a != b = 1
