@@ -1,0 +1,553 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/crypto/api.vuma
+// VWK Crypto Subsystem — Cipher + Hash API wrapper (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K10a layer of the VWK kernel: the unified crypto API
+// surface — CipherCtx + HashCtx context structs + the init/update/final
+// dispatcher functions that K10b (real AES-128/256), K10c (real SHA-256),
+// K10d (real ChaCha20), and K10e (HW-accelerated AES-NI / SHA-NI paths)
+// will hang their implementations off of. K10a is the dispatch shell: it
+// defines the context layouts, the per-algo init path, the stub encrypt/
+// decrypt + hash-update path (verbatim copy + zero-digest for K10a), and
+// the SHA-256 IV setup (the one piece of real cryptography K10a emits —
+// the eight 32-bit initial hash values are baked into the binary).
+//
+// ── What K10a provides ──────────────────────────────────────────────────────
+//   cipher_init(ctx, algo)                       — zero key + IV, set
+//                                                  ctx.algo + ctx.len=0.
+//                                                  Called once per CipherCtx
+//                                                  before set_key + set_iv +
+//                                                  encrypt/decrypt.
+//   cipher_set_key(ctx, key)                     — copy the 32-byte key from
+//                                                  CipherKey into ctx.key
+//                                                  (up to 256 bits; AES-128
+//                                                  uses 16, AES-256 + ChaCha20
+//                                                  use 32).
+//   cipher_set_iv(ctx, iv)                       — copy the 16-byte IV from
+//                                                  CipherIV into ctx.iv
+//                                                  (AES uses 16-byte IV,
+//                                                  ChaCha20 uses 12 but K10a
+//                                                  pads to 16 for a uniform
+//                                                  CipherCtx shape).
+//   cipher_encrypt(ctx, in, out, len) -> i64     — encrypt `len` bytes from
+//                                                  `in` into `out`. K10a
+//                                                  STUB: byte-wise copy
+//                                                  (placeholder for K10b's
+//                                                  AES + K10d's ChaCha20).
+//   cipher_decrypt(ctx, in, out, len) -> i64     — decrypt (K10a stub: same
+//                                                  as encrypt for symmetric
+//                                                  ciphers).
+//   hash_init(ctx, algo)                         — zero state + buffer, set
+//                                                  ctx.algo + ctx.len=0 +
+//                                                  ctx.total=0, and for
+//                                                  SHA-256 (algo==2) seed
+//                                                  ctx.state with the eight
+//                                                  32-bit SHA-256 IV words.
+//   hash_update(ctx, data, len)                  — account for `len` bytes
+//                                                  of input (K10a stub: only
+//                                                  bumps ctx.total; K10c
+//                                                  absorbs the bytes into the
+//                                                  SHA-256 state via the
+//                                                  compression function).
+//   hash_final(ctx, out)                         — emit the digest. K10a
+//                                                  STUB: writes 32 zero
+//                                                  bytes (K10c emits the
+//                                                  real SHA-256 digest).
+//
+// ── Algorithm IDs ──────────────────────────────────────────────────────────
+//   0 = AES-128     — 128-bit key, 128-bit block, 10 rounds.
+//   1 = AES-256     — 256-bit key, 128-bit block, 14 rounds.
+//   2 = SHA-256     — 256-bit digest, 64-byte block, 64 rounds.
+//   3 = SHA-512     — 512-bit digest, 128-byte block, 80 rounds.
+//   4 = ChaCha20    — 256-bit key, 96-bit nonce, 20-round stream cipher.
+//   5 = Ed25519     — 256-bit secret key, 512-bit public key, 512-bit
+//                     signature (asymmetric — not exposed via CipherCtx,
+//                     reserved for K10f).
+//
+// ── SHA-256 initial hash values (FIPS 180-4 §5.3.3) ─────────────────────────
+//   The eight SHA-256 IV words are the fractional parts of the square
+//   roots of the first eight primes (2, 3, 5, 7, 11, 13, 17, 19), taken
+//   as 32-bit words:
+//     state[0] = 0x6a09e667 = 1779033703   (√2 fractional)
+//     state[1] = 0xbb67ae85 = 3144134277   (√3 fractional)
+//     state[2] = 0x3c6ef372 = 1013904242   (√5 fractional)
+//     state[3] = 0xa54ff53a = 2773480762   (√7 fractional)
+//     state[4] = 0x510e527f = 1359893119   (√11 fractional)
+//     state[5] = 0x9b05688c = 2600822924   (√13 fractional)
+//     state[6] = 0x1f83d9ab = 528734635    (√17 fractional)
+//     state[7] = 0x5be0cd19 = 1541459225   (√19 fractional)
+//   K10a writes these IVs into ctx.state when algo == 2 (SHA-256). The
+//   decimal values are used per the K10a contract's "Use decimal
+//   constants for SHA-256 IV values" rule — the byte-by-byte
+//   decomposition (see "Why byte-by-byte IV storage?" below) emits the
+//   low byte of each IV as a decimal constant in [0..255].
+//
+// ── Why byte-by-byte IV storage? ────────────────────────────────────────────
+//   The K10a contract specifies `state: [u64; 8]` for HashCtx — eight
+//   64-bit words (room for either SHA-256's 32-bit-per-word state or
+//   SHA-512's 64-bit-per-word state). VUMA's array indexing, however,
+//   is BYTE-GRANULAR regardless of the element type (see K7b's
+//   signal.vuma note: "VUMA's parser accepts `[u64; 32]` as a layout
+//   field, but indexing it (`tbl.handlers[i]`) only yields a u8 cell —
+//   VUMA's array indexing is byte-granular regardless of the element
+//   type"). The same applies to K7c's futex.vuma (`uaddrs: [u8; 512]`
+//   rather than `[u64; 64]`), K9e's dns.vuma (byte-wise DNS header
+//   writes), and K4a's ProcessTable.names ([u8; 256*32] rather than
+//   [u8; 32][32]).
+//
+//   Concretely: `ctx.state[0] = 1779033703` would store only the low
+//   byte (1779033703 & 0xFF = 103 = 0x67), not the full 32-bit word, and
+//   `ctx.state[0] != 1779033703` would compare 103 != 1779033703 = TRUE
+//   (the comparison is byte-granular too — VUMA does NOT sign/zero-
+//   extend the loaded byte to the RHS's type). The K10a contract's
+//   literal `ctx.state[0] = 1779033703` + `if hctx.state[0] !=
+//   1779033703` would therefore FAIL the self-test (return 6) under
+//   VUMA's byte-granular indexing.
+//
+//   K10a's adaptation: keep the `[u64; 8]` layout (per the K10a
+//   contract) but write each SHA-256 IV as 4 little-endian bytes into
+//   the first 4 bytes of the corresponding 8-byte word slot
+//   (state[8*w + 0..3], leaving state[8*w + 4..7] = 0 — the upper 4
+//   bytes per word, room for SHA-512's 64-bit IVs which K10c+ may
+//   write). The self-test verifies the byte at state[0] (= 103 = low
+//   byte of 0x6a09e667 = 1779033703) rather than the full u64. The
+//   intent (SHA-256 IV word 0 lands in the first slot of state) is
+//   preserved; only the access granularity is adapted to VUMA's
+//   byte-granular indexing model. This is the same adaptation K7c's
+//   futex.vuma + K7b's signal.vuma made for their [u8; 256] / [u64; 32]
+//   handler-address fields.
+//
+//   For K10c (real SHA-256 compression), the same byte-granular rule
+//   applies: the compression function reads state bytes 0..63 (8 words
+//   × 8 bytes/word), byte-xors + byte-adds to fold new message-block
+//   bytes into the state, and writes the digest out byte-by-byte. K10c
+//   will re-use the byte-by-byte IV pattern established here.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   CipherCtx + HashCtx + CipherKey + CipherIV + CryptoBuf buffers are
+//   flat-byte-array structs held in `___pmt_buffer`-backed State<T>
+//   values; the CALLER allocates them via `state_new(CipherCtx)` etc.
+//   and passes them by reference to cipher_* / hash_* (init-style API
+//   — see "Why init-style?" in K4e's wait.vuma header for the codegen
+//   rationale: the current codegen does NOT propagate State-typedness
+//   through function return values, so `fn cipher_new() ->
+//   State<CipherCtx>` would produce broken field-access code in
+//   callers).
+//
+//   State<T> params: 1-3 per function (ctx alone, ctx+key/iv, or
+//   ctx+in+out), per the K4b contract's "1-2 per function" rule
+//   (relaxed to "1-3" for crypto functions that necessarily take both
+//   context + input + output buffers — same convention as K7a's
+//   pipe_write (tbl+fd+buf+len) + K9a's sys_send (tbl+fd+buf+len)).
+//   The caller owns all buffers.
+//
+//   No externs: K10a's API surface is pure-state manipulation (no
+//   console write, no syscall, no real I/O — the self-test returns 0
+//   via `return 0` from main without touching host I/O). This is the
+//   same self-contained style as K4a's task.vuma + K6c's vt100.vuma
+//   (both pure-state self-tests with no externs).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares CipherCtx + HashCtx +
+//   CipherKey + CipherIV + CryptoBuf + the 8 API functions + main. K10b
+//   (real AES) will re-declare CipherCtx byte-identically when it
+//   implements cipher_encrypt / cipher_decrypt for real; K10c (real
+//   SHA-256) will re-declare HashCtx byte-identically when it
+//   implements hash_update / hash_final for real. The byte-identical-
+//   redeclaration invariant (K2c "extern signatures MUST stay byte-
+//   identical" — extended to layouts in K3d, re-applied in K4a/K7a/
+//   K8a/K8e/K8f/K9a/K9d/K9e/K9f) extends to K10a's CipherCtx + HashCtx
+//   + CipherKey + CipherIV + CryptoBuf.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/crypto/api.vuma \
+//         /tmp/crypto_api.bin x86_64 --verify
+//     /tmp/crypto_api.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — cipher
+// init+set_key+encrypt stub + hash init with SHA-256 IV byte +
+// hash_update total accounting + hash_final stub).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// CipherCtx: 116-byte symmetric-cipher context (AES-128/256, ChaCha20).
+// Carries the algorithm ID, key (up to 256 bits = 32 bytes), IV (16
+// bytes — AES uses 16, ChaCha20's 12-byte nonce is zero-padded to 16
+// for a uniform CipherCtx shape), an internal 64-byte buffer for
+// block-buffering (AES's 16-byte block × 4 = 64 bytes), and `len`
+// tracking bytes currently in the buffer. K10a's stub encrypt path
+// does not use `buf` or `len` (it copies input to output directly);
+// K10b (real AES) will use them to absorb partial blocks across
+// cipher_encrypt calls (the typical "update / final" streaming API
+// shape — see OpenSSL's EVP_EncryptUpdate).
+layout CipherCtx = {
+    algo: u32,       // algorithm ID (0=AES-128, 1=AES-256, 4=ChaCha20)
+    key: [u8; 32],   // key (up to 256 bits; AES-128 uses bytes 0..15)
+    iv: [u8; 16],    // initialization vector (AES=16B, ChaCha20 nonce padded)
+    buf: [u8; 64],   // internal buffer (4 × AES-128 blocks for streaming)
+    len: u32,        // bytes currently in `buf` (0..64)
+}
+
+// HashCtx: 200-byte digest context (SHA-256/SHA-512). Carries the
+// algorithm ID, the 8-word hash state (8 × u64 = 64 bytes — room for
+// either SHA-256's 32-bit-per-word state or SHA-512's 64-bit-per-word
+// state), a 128-byte internal buffer (SHA-256's 64-byte block × 2 =
+// 128 bytes, also fits SHA-512's single 128-byte block), `len` for
+// bytes in the buffer, and `total` for the total bytes processed
+// (used by hash_final to compute the message-length suffix during
+// padding — see FIPS 180-4 §5.1.1 for SHA-256's "1-bit + zero-pad +
+// 64-bit length" padding scheme). The `state: [u64; 8]` declaration
+// is per the K10a contract — VUMA's byte-granular indexing (see
+// "Why byte-by-byte IV storage?" in the file header) means the field
+// is treated operationally as 64 byte-cells, but the `[u64; 8]`
+// spelling documents the 8-word SHA-256/SHA-512 state shape.
+layout HashCtx = {
+    algo: u32,        // algorithm ID (2=SHA-256, 3=SHA-512)
+    state: [u64; 8],  // hash state (8 words for SHA-256/512; 64 bytes)
+    buf: [u8; 128],   // internal buffer (SHA-256's 64B block × 2 = 128B)
+    len: u32,         // bytes currently in `buf` (0..128)
+    total: u64,       // total bytes processed (for hash_final padding)
+}
+
+// CipherKey: 32-byte key wrapper. Carries a raw symmetric key (up to
+// 256 bits — AES-128 uses bytes 0..15, AES-256 + ChaCha20 use all 32
+// bytes). Passed by reference to cipher_set_key (init-style API — see
+// "PMT discipline" in the file header).
+layout CipherKey = {
+    data: [u8; 32],
+}
+
+// CipherIV: 16-byte IV wrapper. Carries a raw initialization vector
+// (16 bytes for AES-CBC/AES-CTR, 12 bytes for ChaCha20's nonce —
+// K10a pads ChaCha20's nonce to 16 in CipherCtx.iv for a uniform
+// CipherCtx shape; the upper 4 bytes are ignored by the ChaCha20
+// implementation). Passed by reference to cipher_set_iv.
+layout CipherIV = {
+    data: [u8; 16],
+}
+
+// CryptoBuf: 256-byte general-purpose crypto buffer. Used as both
+// cipher input/output (cipher_encrypt, cipher_decrypt) and hash input/
+// output (hash_update input, hash_final digest output). 256 bytes
+// covers SHA-256's 32-byte digest + SHA-512's 64-byte digest + AES's
+// typical 16/32/64/128-byte block-aligned input chunks. K10g+ may bump
+// to 4096 (a typical Linux page) when larger buffers land.
+layout CryptoBuf = {
+    data: [u8; 256],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Cipher API functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// cipher_init: zero a CipherCtx's key + IV + buffer, set algo + len.
+//
+//   ctx:  caller-allocated State<CipherCtx> (output — modified in
+//         place).
+//   algo: algorithm ID (0=AES-128, 1=AES-256, 4=ChaCha20 — see
+//         "Algorithm IDs" in the file header).
+//
+// After cipher_init, the caller typically calls cipher_set_key +
+// cipher_set_iv to load keying material before cipher_encrypt /
+// cipher_decrypt. K10a's cipher_init does NOT validate the algo ID
+// (K10b's real AES will reject unknown algos with -EINVAL).
+fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
+    ctx.algo = algo;
+    ctx.len = 0;
+    // Zero the 32-byte key.
+    let i = 0;
+    while i < 32 {
+        ctx.key[i] = 0;
+        i = i + 1;
+    }
+    // Zero the 16-byte IV.
+    let j = 0;
+    while j < 16 {
+        ctx.iv[j] = 0;
+        j = j + 1;
+    }
+}
+
+// cipher_set_key: copy a 32-byte key from CipherKey into CipherCtx.key.
+//
+//   ctx: caller-allocated State<CipherCtx> (modified in place).
+//   key: caller-allocated State<CipherKey> holding the raw key bytes.
+//
+// All 32 bytes are copied unconditionally — AES-128's upper 16 bytes
+// are unused but cleared to keep CipherCtx.key deterministic across
+// algo switches (K10b's real AES will only read the first 16 bytes for
+// AES-128 / 32 bytes for AES-256, but the unused bytes are zeroed by
+// cipher_init so they don't leak prior-key state).
+fn cipher_set_key(ctx: State<CipherCtx>, key: State<CipherKey>) {
+    let i = 0;
+    while i < 32 {
+        ctx.key[i] = key.data[i];
+        i = i + 1;
+    }
+}
+
+// cipher_set_iv: copy a 16-byte IV from CipherIV into CipherCtx.iv.
+//
+//   ctx: caller-allocated State<CipherCtx> (modified in place).
+//   iv:  caller-allocated State<CipherIV> holding the raw IV bytes.
+//
+// All 16 bytes are copied unconditionally — ChaCha20's 12-byte nonce
+// is zero-padded to 16 by the caller before calling cipher_set_iv
+// (K10d's real ChaCha20 will only read the first 12 bytes of
+// CipherCtx.iv for its nonce, but the layout reserves 16 for
+// uniformity with AES's 16-byte IV).
+fn cipher_set_iv(ctx: State<CipherCtx>, iv: State<CipherIV>) {
+    let i = 0;
+    while i < 16 {
+        ctx.iv[i] = iv.data[i];
+        i = i + 1;
+    }
+}
+
+// cipher_encrypt: encrypt `len` bytes from `input` into `output`.
+//
+//   ctx:    caller-allocated State<CipherCtx> (carries algo + key + IV;
+//           not modified by K10a's stub but used by K10b's real AES to
+//           look up the round keys + IV).
+//   input:  caller-allocated State<CryptoBuf> holding the plaintext.
+//   output: caller-allocated State<CryptoBuf> (ciphertext output).
+//   len:    number of bytes to encrypt (0..256).
+//
+// Returns `len` (the number of bytes encrypted) on success, or a
+// negative errno on failure. K10a STUB: byte-wise copy of input to
+// output (placeholder for K10b's AES-128/256 + K10d's ChaCha20). The
+// stub preserves the streaming-API contract — callers can swap K10a's
+// stub for K10b's real AES by replacing just the body of cipher_encrypt
+// (same signature, same return convention). The `ctx` param is
+// accepted but not used by the stub; K10b will read ctx.algo +
+// ctx.key + ctx.iv from it.
+fn cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
+    // Stub: copy input to output byte-by-byte. K10b (real AES) will
+    // replace this with the AES-128/256 round-function loop; K10d
+    // (ChaCha20) will replace it with the 20-round quarter-round
+    // loop; K10e (HW accel) will dispatch to AES-NI / SHA-NI intrinsics.
+    let i = 0;
+    while i < len {
+        output.data[i] = input.data[i];
+        i = i + 1;
+    }
+    return len as i64;
+}
+
+// cipher_decrypt: decrypt `len` bytes from `input` into `output`.
+//
+//   ctx:    caller-allocated State<CipherCtx> (carries algo + key + IV).
+//   input:  caller-allocated State<CryptoBuf> holding the ciphertext.
+//   output: caller-allocated State<CryptoBuf> (plaintext output).
+//   len:    number of bytes to decrypt (0..256).
+//
+// Returns `len` on success. K10a STUB: delegates to cipher_encrypt
+// (symmetric ciphers — AES + ChaCha20 — have the same encrypt/decrypt
+// codepath modulo the round-key schedule inversion, so K10a's stub
+// reuses cipher_encrypt's byte-copy body). K10b's real AES-CBC will
+// invert the round-key schedule (last round first) for decrypt; K10d's
+// ChaCha20 will use the identical codepath as encrypt (XOR-keystream
+// is symmetric).
+fn cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
+    return cipher_encrypt(ctx, input, output, len);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hash API functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// hash_init: zero a HashCtx's state + buffer, set algo + len + total,
+// and for SHA-256 seed the eight 32-bit IV words into state.
+//
+//   ctx:  caller-allocated State<HashCtx> (output — modified in place).
+//   algo: algorithm ID (2=SHA-256, 3=SHA-512 — see "Algorithm IDs" in
+//         the file header).
+//
+// After hash_init, the caller typically calls hash_update one or more
+// times to absorb input bytes, then hash_final to emit the digest.
+// K10a seeds the SHA-256 IVs (algo == 2) but NOT the SHA-512 IVs
+// (algo == 3) — K10c+ will add the SHA-512 IV seeding when the SHA-512
+// compression path lands. The SHA-256 IVs are written byte-by-byte
+// into the first 4 bytes of each 8-byte word slot (state[8*w + 0..3])
+// in little-endian order — see "Why byte-by-byte IV storage?" in the
+// file header for the VUMA-byte-granular-indexing rationale.
+fn hash_init(ctx: State<HashCtx>, algo: u32) {
+    ctx.algo = algo;
+    ctx.len = 0;
+    ctx.total = 0;
+    // Zero the 64-byte hash state (8 × u64 = 64 byte-cells — VUMA's
+    // byte-granular indexing means `ctx.state[i]` accesses byte i).
+    let i = 0;
+    while i < 64 {
+        ctx.state[i] = 0;
+        i = i + 1;
+    }
+    // Zero the 128-byte buffer.
+    let j = 0;
+    while j < 128 {
+        ctx.buf[j] = 0;
+        j = j + 1;
+    }
+    // Seed the SHA-256 IVs for algo == 2. Each 32-bit IV is written
+    // as 4 little-endian bytes into the first 4 bytes of the
+    // corresponding 8-byte word slot. The decimal values shown in
+    // the comments are the FULL IV values (1779033703 = 0x6a09e667,
+    // etc.); the byte literals emitted (103, 230, 9, 106) are the
+    // little-endian decomposition of those values.
+    if algo == 2 {
+        // Word 0: 0x6a09e667 = 1779033703 → LE bytes 67 e6 09 6a.
+        ctx.state[0] = 103;   // 0x67 (low byte of 0x6a09e667)
+        ctx.state[1] = 230;   // 0xe6
+        ctx.state[2] = 9;     // 0x09
+        ctx.state[3] = 106;   // 0x6a (high byte)
+        // Word 1: 0xbb67ae85 = 3144134277 → LE bytes 85 ae 67 bb.
+        ctx.state[8]  = 133;  // 0x85
+        ctx.state[9]  = 174;  // 0xae
+        ctx.state[10] = 103;  // 0x67
+        ctx.state[11] = 187;  // 0xbb
+        // Word 2: 0x3c6ef372 = 1013904242 → LE bytes 72 f3 6e 3c.
+        ctx.state[16] = 114;  // 0x72
+        ctx.state[17] = 243;  // 0xf3
+        ctx.state[18] = 110;  // 0x6e
+        ctx.state[19] = 60;   // 0x3c
+        // Word 3: 0xa54ff53a = 2773480762 → LE bytes 3a f5 4f a5.
+        ctx.state[24] = 58;   // 0x3a
+        ctx.state[25] = 245;  // 0xf5
+        ctx.state[26] = 79;   // 0x4f
+        ctx.state[27] = 165;  // 0xa5
+        // Word 4: 0x510e527f = 1359893119 → LE bytes 7f 52 0e 51.
+        ctx.state[32] = 127;  // 0x7f
+        ctx.state[33] = 82;   // 0x52
+        ctx.state[34] = 14;   // 0x0e
+        ctx.state[35] = 81;   // 0x51
+        // Word 5: 0x9b05688c = 2600822924 → LE bytes 8c 68 05 9b.
+        ctx.state[40] = 140;  // 0x8c
+        ctx.state[41] = 104;  // 0x68
+        ctx.state[42] = 5;    // 0x05
+        ctx.state[43] = 155;  // 0x9b
+        // Word 6: 0x1f83d9ab = 528734635 → LE bytes ab d9 83 1f.
+        ctx.state[48] = 171;  // 0xab
+        ctx.state[49] = 217;  // 0xd9
+        ctx.state[50] = 131;  // 0x83
+        ctx.state[51] = 31;   // 0x1f
+        // Word 7: 0x5be0cd19 = 1541459225 → LE bytes 19 cd e0 5b.
+        ctx.state[56] = 25;   // 0x19
+        ctx.state[57] = 205;  // 0xcd
+        ctx.state[58] = 224;  // 0xe0
+        ctx.state[59] = 91;   // 0x5b
+    }
+}
+
+// hash_update: absorb `len` bytes of input into the hash state.
+//
+//   ctx:  caller-allocated State<HashCtx> (modified in place).
+//   data: caller-allocated State<CryptoBuf> holding the input bytes.
+//   len:  number of bytes to absorb (0..256).
+//
+// K10a STUB: only bumps `ctx.total` by `len` (the message-length
+// counter that hash_final uses for the padding suffix). K10c (real
+// SHA-256) will absorb the bytes via the SHA-256 compression
+// function — buffer partial blocks into ctx.buf[0..len], and when a
+// full 64-byte block accumulates, run the 64-round compression loop
+// to fold the block into ctx.state. The stub preserves the streaming-
+// API contract — callers can swap K10a's stub for K10c's real SHA-256
+// by replacing just the body of hash_update.
+fn hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
+    ctx.total = ctx.total + len;
+}
+
+// hash_final: emit the digest into `out`.
+//
+//   ctx: caller-allocated State<HashCtx> (read by K10c+; not modified
+//        by K10a's stub).
+//   out: caller-allocated State<CryptoBuf> (digest output — first 32
+//        bytes for SHA-256, first 64 bytes for SHA-512).
+//
+// K10a STUB: writes 32 zero bytes to out.data[0..31]. K10c (real
+// SHA-256) will: (1) append a 0x80 byte + zero-pad to 56 mod 64,
+// (2) append the 64-bit big-endian bit-count (ctx.total × 8),
+// (3) run the final compression pass, (4) emit the 8 little-endian
+// 32-bit state words as the 32-byte digest. See FIPS 180-4 §5.1.1
+// for the SHA-256 padding scheme. The stub preserves the API contract
+// (always writes 32 bytes to out — the digest size for SHA-256).
+fn hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
+    // Stub: write 32 zero bytes. K10c will replace this with the real
+    // SHA-256 padding + final compression + digest-emit path.
+    let i = 0;
+    while i < 32 {
+        out.data[i] = 0;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K10a API surface end-to-end:
+//   1. cipher_init(cctx, 0)  → AES-128 algo set, len=0, key+IV zeroed.
+//   2. cipher_set_key(cctx, key) → 32-byte key copied (verify key[0]).
+//   3. cipher_encrypt(cctx, input, output, 16) → 16 bytes copied
+//      (stub: output[0] == input[0]).
+//   4. hash_init(hctx, 2)  → SHA-256 algo set, state seeded with IV.
+//   5. hash_update(hctx, data, 10) → ctx.total bumped to 10.
+//   6. hash_final(hctx, digest) → 32 zero bytes written.
+//
+// Returns 0 on success, 1..7 on the 7 individual check failures.
+//
+// ── Why state[0] == 103 instead of 1779033703? ──────────────────────────────
+//   The K10a contract's literal self-test had `if hctx.state[0] !=
+//   1779033703 { return 6; }` — but VUMA's byte-granular array
+//   indexing (see "Why byte-by-byte IV storage?" in the file header)
+//   means `state[0]` reads back the byte at offset 0 (the low byte
+//   of word 0's IV = 0x67 = 103), not the full 32-bit IV word. K10a
+//   adapts the self-test to verify the byte at state[0] (= 103, the
+//   low byte of the SHA-256 IV word 0 = 0x6a09e667 = 1779033703).
+//   This is the same byte-level verification pattern used in K7c's
+//   futex self-test (which verifies uaddr bytes 0..7 individually
+//   rather than the full u64) + K9e's dns self-test (which verifies
+//   header bytes 0..11 individually rather than the full u128).
+fn main() -> i32 {
+    // ── Cipher path: init + set_key + encrypt ──
+    let cctx = state_new(CipherCtx);
+    cipher_init(cctx, 0);  // AES-128
+    if cctx.algo != 0 { return 1; }
+    if cctx.len != 0 { return 2; }
+    // Set a key + verify byte 0 round-trips through cipher_set_key.
+    let key = state_new(CipherKey);
+    key.data[0] = 42;
+    key.data[31] = 99;
+    cipher_set_key(cctx, key);
+    if cctx.key[0] != 42 { return 3; }
+    // Encrypt (stub: copy) + verify byte 0 round-trips.
+    let input = state_new(CryptoBuf);
+    let output = state_new(CryptoBuf);
+    input.data[0] = 99;
+    input.data[15] = 7;
+    let n = cipher_encrypt(cctx, input, output, 16);
+    if n != 16 { return 4; }
+    if output.data[0] != 99 { return 5; }   // stub: copy
+    // ── Hash path: init + IV check + update + final ──
+    let hctx = state_new(HashCtx);
+    hash_init(hctx, 2);  // SHA-256
+    if hctx.algo != 2 { return 6; }
+    // Verify SHA-256 IV word 0's low byte landed in state[0]
+    // (= 103 = 0x67 = low byte of 0x6a09e667 = 1779033703).
+    // See "Why state[0] == 103 instead of 1779033703?" above for
+    // the VUMA-byte-granular-indexing rationale.
+    if hctx.state[0] != 103 { return 7; }
+    // Update + final (stubs: only total accounting + zero-digest).
+    let data = state_new(CryptoBuf);
+    hash_update(hctx, data, 10);
+    if hctx.total != 10 { return 8; }
+    let digest = state_new(CryptoBuf);
+    hash_final(hctx, digest);
+    if digest.data[0] != 0 { return 9; }    // stub: zero digest
+    if digest.data[31] != 0 { return 10; }  // stub: zero digest
+    return 0;
+}
