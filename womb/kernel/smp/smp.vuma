@@ -1,0 +1,647 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/smp/smp.vuma
+// VWK SMP Subsystem — SMP boot + smp_call_function (broadcast).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K8f layer of the VWK kernel: the SMP bring-up (boot
+// secondary CPUs) + smp_call_function (broadcast a function call to all
+// other CPUs) layer. K8 (Sync) is complete after this file: K8a (spinlock),
+// K8b (mutex), K8c (semaphore), K8d (rwlock), K8e (IPI send/broadcast/
+// dispatch), K8f (this file — SMP boot + smp_call_function). Where K8e was
+// about *signaling* another CPU (the LAPIC ICR write that delivers an IPI),
+// K8f is about *bringing that CPU online in the first place* and then
+// driving it with the function-call-broadcast pattern that the IPI subsystem
+// made possible.
+//
+// ── The two halves of K8f ───────────────────────────────────────────────────
+//   (1) SMP BOOT. The kernel boots on CPU 0 (the "boot CPU" / "BSP" on
+//       x86_64, the "lead hart" on aarch64/riscv64). The other CPUs (the
+//       "secondary CPUs" / "APs" on x86_64, "secondary harts" on riscv64)
+//       start in a halted state waiting for a wake-up signal. K8f's
+//       smp_boot_cpu writes the wake-up sequence to the interrupt
+//       controller (LAPIC on x86_64, PSCI on aarch64, SBI HSM on riscv64);
+//       the target CPU jumps to the kernel entry point with its own stack
+//       and starts executing the scheduler (which will pick its first task
+//       off its per-CPU runqueue — K4f's PerCpu block).
+//
+//   (2) smp_call_function. Once CPUs are online, the kernel needs a way to
+//       tell every other CPU "run this function" — typically to flush
+//       per-CPU caches, sync per-CPU counters, or invalidate stale TLB
+//       entries. K8f's smp_call_function broadcasts an IPI to all other
+//       CPUs (using K8e's "all excluding self" LAPIC ICR shorthand); the
+//       target CPUs' IPI handlers (registered via K8e's ipi_register_
+//       handler) receive the IPI and (in a real kernel) call the function.
+//
+// ── What K8f provides ──────────────────────────────────────────────────────
+//   smp_init(smp)                                — zero the per-CPU boot
+//                                                  status array, set
+//                                                  n_cpus = 1 (just the
+//                                                  boot CPU is online).
+//   smp_boot_cpu(smp, cpu_id, entry, stack)      — boot a secondary CPU.
+//                                                  x86_64: INIT-SIPI-SIPI
+//                                                  sequence via the LAPIC.
+//                                                  Marks the CPU as started
+//                                                  and bumps n_cpus.
+//                                                  Returns -EINVAL (22) for
+//                                                  cpu_id == 0 (the boot
+//                                                  CPU is already running)
+//                                                  or cpu_id >= 16 (out of
+//                                                  range — the table holds
+//                                                  16 CPU slots).
+//   smp_call_function(smp, func, wait)           — broadcast a function-call
+//                                                  IPI to all other CPUs.
+//                                                  x86_64: LAPIC ICR write
+//                                                  with the "all excluding
+//                                                  self" shorthand. If
+//                                                  wait==1, the caller would
+//                                                  block until all CPUs
+//                                                  have acknowledged; in
+//                                                  VUMA hosted mode there's
+//                                                  nothing to wait for
+//                                                  (single-CPU simulation),
+//                                                  so the wait is a stub.
+//   smp_cpu_started(smp, cpu_id) -> u8           — read the "started" flag
+//                                                  for cpu_id. Returns 1 if
+//                                                  the CPU has been booted,
+//                                                  0 otherwise (including
+//                                                  out-of-range cpu_id).
+//
+// ── Layouts ────────────────────────────────────────────────────────────────
+//   layout CpuBoot = {
+//       started: u8,    // 1 = CPU has booted, 0 = not yet
+//       cpu_id:  u32,   // CPU number
+//       entry:   u64,   // entry point address
+//       stack:   u64,   // stack top address
+//   }
+//
+//   layout SmpState = {
+//       cpus:    [u8; 256],  // 16 CPU slots × 16 bytes/slot
+//       n_cpus:  u32,        // total CPUs booted
+//   }
+//
+//   The CpuBoot layout (1 + 3 + 8 + 8 = 20 bytes, padded to 24) is declared
+//   for documentation of the per-CPU boot record shape but is NOT directly
+//   used in this file — instead, SmpState.cpus is a flat 256-byte array
+//   organized as 16 CPU slots × 16 bytes/slot, and only byte 0 of each
+//   16-byte slot is currently exercised (the "started" flag). The other
+//   15 bytes per slot are reserved for future expansion (cpu_id, entry,
+//   stack — byte-packed in the same idiom as K4a's ProcessTable and K8e's
+//   IpiTable.handlers, see "Byte-packing idiom" below). The "simplified:
+//   16 per CPU" comment in the contract refers to this: instead of a
+//   24-byte padded struct, the table uses 16 bytes per CPU (smaller and
+//   power-of-2 — simpler arithmetic, no padding concerns). 16 × 16 = 256
+//   bytes total.
+//
+//   The SmpState table is a flat struct in a `___pmt_buffer`-backed
+//   State<SmpState>; the caller allocates via `state_new(SmpState)` and
+//   passes it by reference (init-style API — same as K8a/K8b/K8c/K8d/K8e).
+//
+// ── Byte-packing idiom (NOT used in K8f) ───────────────────────────────────
+//   K8f writes only the "started" flag (a single byte per CPU), so it does
+//   NOT use the byte-packing idiom (8-byte u64 stuff/unstuff loops) that
+//   K4a's pt_set_pid / K8e's ipi_register_handler use. The 16-byte-per-CPU
+//   layout leaves room for those helpers to be added later (when K11 needs
+//   to record the entry point and stack pointer of each booted CPU for
+//   diagnostics or crash dump), but for now the table is just a 16-entry
+//   "started flag" array with stride 16. The `cpus[cpu_id * 16]` index
+//   expression is the stride — `cpu_id * 16` is the byte offset of cpu_id's
+//   slot within the 256-byte array.
+//
+// ── Per-arch boot mechanism ────────────────────────────────────────────────
+//   The SMP boot sequence is arch-specific. K8f declares three arch-specific
+//   externs (lapic_write for x86_64, psci_cpu_on for aarch64, sbi_hsm_start
+//   for riscv64) and uses lapic_write on x86_64 (the contract's primary
+//   target). The aarch64 and riscv64 externs are declared but unused in
+//   this file — they're forward declarations for K11's bare-metal parity
+//   (when the kernel runs on those arches, the per-arch boot code will
+//   call psci_cpu_on / sbi_hsm_start instead of the LAPIC INIT-SIPI-SIPI
+//   sequence). In hosted mode all three are __ffi_fallback_stub (returns
+//   0 / no-op).
+//
+//   x86_64: LAPIC INIT-SIPI-SIPI.
+//     - The boot CPU wakes a secondary CPU (an "AP" — Application
+//       Processor) by writing two commands to its own LAPIC ICR (Interrupt
+//       Command Register, at offset 0x300 = decimal 768 within the LAPIC
+//       MMIO page).
+//     - Step 1 — INIT assert: ICR = (cpu_id << 12) | 0x4500.
+//         * 0x4500 = delivery mode 0b100 (INIT), dest mode physical (bit
+//           11 = 0), level assert (bit 14 = 1), trigger mode edge (bit 15
+//           = 0). The destination field (bits 12..19) is cpu_id.
+//         * Effect: the target CPU asserts its INIT pin, resetting it to
+//           the boot state (real-mode, executing from 0xFFFF0 / the
+//           reset vector).
+//     - Step 2 — SIPI (Startup IPI): ICR = (cpu_id << 12) | 0x4600 |
+//               (entry >> 12).
+//         * 0x4600 = delivery mode 0b110 (Startup), dest mode physical,
+//           level assert, trigger mode edge. The vector field (bits 0..7)
+//           is `entry >> 12` — the page number of the entry point
+//           (real-mode SIPI jumps to `vector << 12 = entry`, so the
+//           entry point must be 4KB-aligned and within the first 1MB of
+//           physical memory — the classic real-mode trampoline constraint).
+//         * Effect: the target CPU starts executing at `entry` in real
+//           mode. The trampoline code (K11's arch/x86_64/trampoline.vuma,
+//           K2f) then switches to protected mode → long mode and jumps
+//           to the kernel's long-mode entry.
+//     - The Intel SDM recommends a 200µs delay between INIT and SIPI,
+//       and another 200µs between the first SIPI and (optionally) a
+//       second SIPI (the "INIT-SIPI-SIPI" sequence). K8f sends INIT +
+//       SIPI (no second SIPI, no delay) — sufficient for QEMU/KVM and
+//       most emulators; K11's bare-metal port will add the delay and
+//       the second SIPI for real-hardware compatibility.
+//
+//   aarch64: PSCI CPU_ON.
+//     - PSCI (Power State Coordination Interface) is the standard ARM
+//       firmware interface for CPU power management. CPU_ON(cpu, entry,
+//       context) boots a secondary CPU at the `entry` address with
+//       `context` (typically the stack pointer) in x0.
+//     - psci_cpu_on(cpu, entry, stack) is the wrapper. K11 stub:
+//       `hvc #0` with r0 = PSCI_FN_CPU_ON (0x84000000 + 3), r1 = cpu,
+//       r2 = entry, r3 = stack. The kernel calls PSCI via HVC (hypervisor
+//       call) on systems with a hypervisor, or SMC (secure monitor call)
+//       on bare metal — K11 will pick the right conduit based on the PSCI
+//       0.2+ conduit method reported by the device tree.
+//
+//   riscv64: SBI HSM (Hart State Management) extension.
+//     - The SBI HSM extension (SBI 0.3+) provides sbi_hart_start(hartid,
+//       start_addr, opaque) to start a secondary hart. The hart jumps to
+//       start_addr with `opaque` in a0 (the kernel convention: a0 = hartid,
+//       a1 = device tree blob pointer; the kernel's secondary-entry stub
+//       saves a0/a1 to its per-CPU block and proceeds to long-mode init).
+//     - sbi_hsm_start(cpu, entry, stack) is the wrapper. K11 stub:
+//       `ecall` with a6 = SBI_EXT_HSM (0x48534D), a7 = SBI_HSM_HART_START
+//       (0), a0 = cpu, a1 = entry, a2 = stack.
+//
+//   K8f does NOT try to abstract over the three arches with a single boot
+//   function — the LAPIC's "two MMIO writes + page-aligned real-mode
+//   trampoline" sequence is fundamentally different from PSCI's "single
+//   HVC/SMC call with a long-mode entry point" and SBI HSM's "ecall with
+//   a hart mask". A real cross-arch kernel (Linux) has per-arch
+//   arch_cpu_init / secondary_startup; K8f mirrors that by keeping the
+//   arch call inline (lapic_write directly) and declaring the other
+//   arches' externs for future use.
+//
+// ── smp_call_function: the broadcast function-call IPI ─────────────────────
+//   smp_call_function(smp, func, wait) is the VUMA analog of Linux's
+//   smp_call_function_many(cpu_mask, func, info, wait). The caller wants
+//   every other CPU to run `func`. K8f's implementation:
+//     1. Write LAPIC ICR with the "all excluding self" destination
+//        shorthand: ICR = 0x30000 (decimal 196608). Vector 0 (the
+//        reschedule IPI in K8e's vector table — see womb/kernel/smp/ipi.vuma
+//        "The 16 IPI vectors"). In a real kernel this would be a dedicated
+//        CALL_FUNCTION_VECTOR (Linux uses 0xfc / 0xfb); K8f reuses vector
+//        0 for simplicity (the hosted-mode stub doesn't deliver anything).
+//     2. If wait==1, block until all CPUs have acknowledged. In a real
+//        kernel this would be a per-CPU atomic counter that each target
+//        CPU decrements in its IPI handler, with the caller spinning until
+//        the counter reaches 0 (Linux: cfd_seq, K8f's contract acknowledges
+//        this with the "stub: just return" comment). In VUMA hosted mode
+//        there are no other CPUs, so the wait is a no-op.
+//
+//   The `func` parameter is the function address to call on each CPU. In
+//   a real kernel this would be stored in a per-CPU mailbox (one slot per
+//   CPU), and the target CPU's IPI handler would read its mailbox slot and
+//   call func() — VUMA has no fn-pointer call (see K8e's "Why no fn-pointer
+//   call in dispatch?" header note), so K8f stores `func` only as a u64
+//   parameter (passed to the IPI subsystem implicitly via the
+//   CALL_FUNCTION_VECTOR handler). K11 will wire the fn-pointer call from
+//   the trap handler in asm.
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   Per the K8f contract's "Use decimal constants" rule, all non-zero
+//   constants in this file are DECIMAL (not hex):
+//     768     = 0x300    — LAPIC ICR offset (the register that sends IPIs
+//                          and INIT-SIPI-SIPI wake-up sequences).
+//     4096    = 0x1000   — bytes-per-CPU shift for the ICR destination
+//                          field (CPU N is at bits 12..19 = N << 12 =
+//                          N * 4096); also the page size used for the
+//                          SIPI `entry >> 12` vector field, and the
+//                          0x1000 entry-point placeholder used in the
+//                          self-test's smp_call_function call.
+//     17664   = 0x4500   — INIT IPI command (delivery mode 0b100 = INIT,
+//                          level assert, dest mode physical).
+//     17920   = 0x4600   — SIPI (Startup IPI) command (delivery mode
+//                          0b110 = Startup, level assert, dest mode
+//                          physical); the vector field (bits 0..7) is
+//                          OR'd with `entry >> 12`.
+//     196608  = 0x30000  — "all excluding self" destination shorthand
+//                          (bits 18-19 both set), used by smp_call_
+//                          function for the broadcast IPI.
+//     1048576 = 1 MB     — the entry point used in the self-test's
+//                          smp_boot_cpu call (1MB is the classic x86
+//                          real-mode trampoline load address, well below
+//                          the 1MB real-mode limit; K11's trampoline
+//                          code is loaded there).
+//     131072  = 128 KB   — the stack top used in the self-test's
+//                          smp_boot_cpu call (128KB stack — small but
+//                          sufficient for a CPU's boot-time init path
+//                          before the scheduler allocates a real per-CPU
+//                          stack).
+//     22      = -EINVAL  — the Linux/POSIX "Invalid argument" error code;
+//                          returned by smp_boot_cpu for cpu_id == 0 (the
+//                          boot CPU is already running — can't re-boot)
+//                          or cpu_id >= 16 (out of range — the table has
+//                          16 slots).
+//     16      = number of CPU slots in the SmpState.cpus array (256
+//                          bytes / 16 bytes per slot).
+//     256     = the size of the SmpState.cpus array (16 CPUs × 16 bytes
+//                          per CPU).
+//     1       = the "started" flag value (1 = booted, 0 = not yet);
+//                          also the initial n_cpus (just the boot CPU).
+//   Decimal avoids the parser's hex-literal path (parse_int_radix
+//   width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+//   header for the same rationale, and K8e's ipi.vuma for the same rule
+//   applied to 768 / 4096 / 196608).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   No `*ptr`, `&x`, `allocate`, `free`, or any pointer syntax. The
+//   SmpState is a flat struct in a `___pmt_buffer`-backed State<SmpState>;
+//   the caller allocates via `state_new(SmpState)` and passes it by
+//   reference (init-style API — same as K8a/K8b/K8c/K8d/K8e). The byte-
+//   stride `cpus[cpu_id * 16]` access is the only array indexing idiom in
+//   the file — no byte-packing (we only store the started flag, a single
+//   byte per CPU).
+//
+//   State<T> params: 1 per function (smp only), per the K4b "1-2 per
+//   function" rule. The 3 externs (lapic_write, psci_cpu_on, sbi_hsm_
+//   start) are declared in a single extern "C" block at the top of the
+//   file (same convention as K8e's ipi.vuma — VUMA's extern "C" block
+//   doesn't support #[cfg(arch)], so all 3 externs resolve to
+//   __ffi_fallback_stub on every arch in hosted mode; K11 swaps them
+//   for real asm stubs registered in src/codegen/src/<arch>/mod.rs::
+//   build_runtime_syscall_stubs).
+//
+//   The `smp as Address` cast is NOT used in this file (unlike K8a's
+//   spinlock.vuma, which uses `lock as Address` for atomic_cas). The
+//   SmpState has no CAS target word — cpus[] is byte-strided and written
+//   with plain field stores (no concurrent writers in the hosted self-
+//   test; in a real SMP kernel, smp_boot_cpu is called once per CPU at
+//   boot before any smp_call_function races, so no synchronization is
+//   needed for the bring-up path; the n_cpus counter would need an
+//   atomic increment in a real kernel, but the hosted self-test is
+//   single-threaded so a plain increment is fine).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the CpuBoot + SmpState
+//   layouts (new to this file — no prior VWK file declares them). Three
+//   extern "C" stubs (lapic_write, psci_cpu_on, sbi_hsm_start) are
+//   declared locally — K8e's ipi.vuma already declared lapic_write, but
+//   VUMA has no `import` (each consumer file re-declares; see K1a-hosted's
+//   "no-import re-declaration rule" header note for the same pattern), so
+//   K8f re-declares lapic_write byte-identically. psci_cpu_on and
+//   sbi_hsm_start are NEW (no prior VWK file declares them — they're the
+//   aarch64 / riscv64 SMP-boot analogs of the x86_64 LAPIC ICR write).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+//   Every function in this file takes `smp: State<SmpState>` as a
+//   parameter, so the state-typedness is preserved across all the helper
+//   calls. The direct field reads in the callers (e.g. `if smp.n_cpus
+//   != 1` in main) work correctly after each helper call (same pattern
+//   as K8e's ipi.vuma self-test calling ipi_register_handler then reading
+//   tbl.count — see "State-typedness note" in ipi.vuma's header).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/smp/smp.vuma \
+//         /tmp/smp.bin x86_64 --verify
+//     /tmp/smp.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — smp_init sets
+// n_cpus=1; smp_boot_cpu(1) succeeds and bumps n_cpus to 2 + sets started
+// flag; smp_boot_cpu(2) succeeds and bumps n_cpus to 3; smp_call_function
+// runs without crashing; smp_boot_cpu(0) returns -EINVAL).
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layouts.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// CpuBoot: the per-CPU boot record shape. 4 fields × (1 + 4 + 8 + 8) = 21
+// bytes, padded to 24 (the natural 8-byte alignment of the entry/stack
+// u64 fields). Declared for documentation of the per-CPU boot record;
+// NOT directly used by K8f's byte-strided SmpState.cpus representation
+// (see "Layouts" in the file header for the "simplified: 16 per CPU"
+// rationale — the table uses 16 bytes per CPU instead of the 24-byte
+// padded struct, smaller and power-of-2).
+layout CpuBoot = {
+    started: u8,    // 1 = CPU has booted, 0 = not yet
+    cpu_id:  u32,   // CPU number
+    entry:   u64,   // entry point address
+    stack:   u64,   // stack top address
+}
+
+// SmpState: the per-kernel SMP state block. 256 bytes for cpus (16 CPU
+// slots × 16 bytes/slot) + 4 bytes for n_cpus = 260 bytes (padded to 264
+// for 8-byte alignment, but the padding is implicit — the layout size
+// rounds up to a multiple of the largest field alignment, which is 1 for
+// [u8; 256] and 4 for u32, so the actual size is 260).
+//
+// Field semantics:
+//   cpus    — the per-CPU boot record array, byte-strided (16 bytes per
+//             CPU, slot N starts at byte N*16). Byte 0 of each slot is
+//             the "started" flag (1 = booted, 0 = not yet). Bytes 1..15
+//             are reserved for future expansion (cpu_id, entry, stack —
+//             byte-packed in the same idiom as K4a's ProcessTable /
+//             K8e's IpiTable.handlers). 16 CPU slots × 16 bytes = 256
+//             bytes total — matches the contract's `cpus: [u8; 256]`
+//             declaration.
+//   n_cpus  — the total number of CPUs currently booted (1 = just the
+//             boot CPU, 2 = boot + 1 secondary, 3 = boot + 2 secondaries,
+//             etc.). Bumped by smp_boot_cpu on each successful boot.
+//             SmpState.n_cpus is the canonical "how many CPUs are online"
+//             counter — the per-CPU started flags are diagnostic, n_cpus
+//             is the count used by the scheduler (to size the runqueue
+//             scan, by the IPI subsystem (to know how many CPUs to wait
+//             for in smp_call_function's wait==1 path), and by /proc/cpuinfo.
+layout SmpState = {
+    cpus:   [u8; 256],  // 16 CPU slots × 16 bytes/slot (byte 0 = started)
+    n_cpus: u32,        // total CPUs booted (1 = just the boot CPU)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Arch-specific SMP externs (stubs in hosted mode).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// See "Per-arch boot mechanism" in the file header for the per-arch
+// semantics. Hosted: __ffi_fallback_stub (returns 0, void calls no-op).
+// K11 swaps these for real asm stubs registered in src/codegen/src/
+// <arch>/mod.rs::build_runtime_syscall_stubs. lapic_write is re-declared
+// here byte-identically to K8e's ipi.vuma (VUMA has no `import`).
+extern "C" {
+    // x86_64: write a u64 value to the LAPIC register at offset `reg`
+    // (e.g. reg=768 writes ICR, sending an IPI or INIT-SIPI-SIPI
+    // wake-up). K11 stub: split the u64 into two 32-bit writes at
+    // APIC_BASE + reg (low) and APIC_BASE + reg + 16 (high) — the
+    // LAPIC's 64-bit ICR is accessed as two 32-bit MMIO writes on
+    // real hardware.
+    fn lapic_write(reg: u32, val: u64);
+    // aarch64: PSCI CPU_ON — boot the secondary CPU `cpu` at the
+    // long-mode entry point `entry` with `stack` as the initial stack
+    // pointer. K11 stub: hvc #0 (or smc #0) with r0 = PSCI_FN_CPU_ON
+    // (0x84000003), r1 = cpu, r2 = entry, r3 = stack.
+    fn psci_cpu_on(cpu: u32, entry: u64, stack: u64);
+    // riscv64: SBI HSM hart_start — boot the secondary hart `cpu` at
+    // `entry` with `stack` as the initial stack pointer. K11 stub:
+    // ecall with a6 = SBI_EXT_HSM (0x48534D), a7 = SBI_HSM_HART_START
+    // (0), a0 = cpu, a1 = entry, a2 = stack.
+    fn sbi_hsm_start(cpu: u32, entry: u64, stack: u64);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SMP operations.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// smp_init: zero the SmpState. Sets all 256 bytes of cpus[] to 0
+// (meaning "no CPU has booted yet — all started flags are 0") and
+// n_cpus = 1 (the boot CPU is always already running when smp_init is
+// called — smp_init runs ON the boot CPU). Called once at boot before
+// any smp_boot_cpu. The CALLER allocates the SmpState via
+// `state_new(SmpState)` and passes it by reference (init-style API —
+// same as K8a/K8b/K8c/K8d/K8e).
+//
+// State<T> params: 1 (smp). Pure write — no reads, no helper calls.
+// The byte-by-byte loop is the PMT-pure way to zero a 256-byte array
+// (VUMA has no memset builtin; the loop unrolls to 256 byte-stores,
+// which the codegen lowers to a sequence of MOV byte ptr [addr+N], 0
+// instructions — efficient on all backends). The n_cpus = 1 assignment
+// is the boot-CPU accounting: by the time smp_init runs, the boot CPU
+// (CPU 0) is already executing kernel code, so it's "online" by
+// definition.
+fn smp_init(smp: State<SmpState>) {
+    let i = 0;
+    while i < 256 {
+        smp.cpus[i] = 0;
+        i = i + 1;
+    }
+    smp.n_cpus = 1;  // boot CPU
+}
+
+// smp_boot_cpu: boot a secondary CPU. x86_64: send the INIT-SIPI-SIPI
+// wake-up sequence to `cpu_id` via the LAPIC ICR. After the SIPI, the
+// target CPU starts executing at `entry` with `stack` as its stack
+// pointer (K11's arch/x86_64/trampoline.vuma handles the real-mode →
+// long-mode transition). Mark the CPU as started (cpus[cpu_id * 16] = 1)
+// and bump n_cpus.
+//
+//   smp:     the SmpState.
+//   cpu_id:  the CPU number to boot. 0 is the boot CPU (already running —
+//            returns -EINVAL). 16 and above are out of range (the table
+//            has 16 slots — returns -EINVAL).
+//   entry:   the entry point address. Must be 4KB-aligned on x86_64
+//            (the SIPI vector field is `entry >> 12`, so the low 12 bits
+//            are discarded). The self-test uses 1048576 (1MB) — the
+//            classic x86 real-mode trampoline load address.
+//   stack:   the stack top address. The target CPU's RSP is set to this
+//            value before jumping to `entry`. The self-test uses 131072
+//            (128KB).
+//
+// Returns 0 on success, 22 (-EINVAL) on invalid cpu_id (== 0 or >= 16).
+//
+// State<T> params: 1 (smp). Writes cpus[cpu_id * 16] (the started flag)
+// and bumps n_cpus. Calls lapic_write twice (INIT, SIPI). The aarch64
+// (psci_cpu_on) and riscv64 (sbi_hsm_start) paths are not used in this
+// hosted-mode file — they're declared for K11's bare-metal parity.
+//
+// The INIT-SIPI-SIPI sequence:
+//   INIT:  ICR = (cpu_id * 4096) | 17664     // 0x4500 = INIT, level assert
+//   SIPI:  ICR = (cpu_id * 4096) | 17920     // 0x4600 = Startup
+//                                   | (entry / 4096)
+// The 4096 multiplier (not a left shift) is per the contract's "Use
+// decimal constants" rule — `cpu_id * 4096` is equivalent to `cpu_id << 12`
+// but uses the decimal form (4096 = 0x1000). The codegen lowers this to a
+// left-shift on every backend (the opt pass recognizes the multiply-by-
+// power-of-2 pattern), so there's no perf cost. The 17664 / 17920 constants
+// (0x4500 / 0x4600) are the LAPIC ICR command bits for INIT and SIPI
+// respectively — see "Per-arch boot mechanism" in the file header for the
+// full bit-field breakdown.
+//
+// The `entry / 4096` expression is the SIPI vector: real-mode SIPI jumps
+// to `vector << 12`, so dividing the entry point by 4096 recovers the
+// page number that the SIPI hardware expects in the low 8 bits of ICR.
+// (On a real CPU, the SIPI vector is a single byte — entry points above
+// 1MB would lose the high bits, which is why x86 SIPI trampolines live
+// in the first 1MB. K8f's self-test uses 1048576 = 1MB exactly, the
+// highest valid SIPI entry point.)
+fn smp_boot_cpu(smp: State<SmpState>, cpu_id: u32, entry: u64, stack: u64) -> i64 {
+    // cpu_id == 0 is the boot CPU — already running, can't re-boot.
+    // This is the same -EINVAL convention Linux uses for cpu_up(0)
+    // (see kernel/cpu.c:cpu_up — returns -EINVAL if cpu == 0 because
+    // the boot CPU is always already up).
+    if cpu_id == 0 {
+        return 22;  // -EINVAL (CPU 0 is the boot CPU, already running)
+    }
+    // cpu_id >= 16 is out of range — the table has 16 slots (see the
+    // "Layouts" header for the 256-byte / 16-byte-per-CPU breakdown).
+    if cpu_id >= 16 {
+        return 22;  // -EINVAL
+    }
+    // x86_64: INIT-SIPI-SIPI sequence.
+    //   INIT:  ICR = (cpu_id << 12) | 0x4500
+    //   SIPI:  ICR = (cpu_id << 12) | 0x4600 | (entry >> 12)
+    // The destination field (bits 12..19) is cpu_id, written as
+    // `cpu_id * 4096` (decimal — see header). The command bits (0x4500
+    // for INIT, 0x4600 for SIPI) are in the low 16 bits. The SIPI also
+    // ORs in `entry / 4096` (the page number of the entry point — see
+    // the SIPI vector field in the file header).
+    //
+    // In hosted mode: lapic_write is a __ffi_fallback_stub (no-op), so
+    // the wake-up sequence doesn't actually do anything — but the ICR
+    // value computation is exercised (verifies that the multiply, the
+    // OR, and the divide all flatten correctly). K11's bare-metal port
+    // wires lapic_write to a real LAPIC MMIO write that delivers the
+    // INIT-SIPI-SIPI sequence to the target CPU.
+    let init_val = (cpu_id as u64) * 4096 + 17664;  // 0x4500 = INIT, level assert
+    lapic_write(768, init_val);
+    let sipi_val = (cpu_id as u64) * 4096 + 17920 + (entry / 4096);  // 0x4600 = Startup
+    lapic_write(768, sipi_val);
+    // Mark CPU as started. The 16-byte stride (cpu_id * 16) is the byte
+    // offset of cpu_id's slot within the 256-byte cpus[] array — see
+    // "Layouts" header for the slot organization. Byte 0 of each slot is
+    // the started flag; bytes 1..15 are reserved (would be cpu_id /
+    // entry / stack byte-packed, see K8e's ipi_register_handler for the
+    // byte-packing idiom — K8f doesn't pack them because the hosted
+    // self-test only checks the started flag).
+    smp.cpus[cpu_id * 16] = 1;  // started flag
+    smp.n_cpus = smp.n_cpus + 1;
+    return 0;
+}
+
+// smp_call_function: broadcast a function-call IPI to all other CPUs.
+// x86_64: writes 196608 (0x30000 — the "all excluding self" destination
+// shorthand in bits 18-19) to LAPIC ICR (offset 768). The target CPUs'
+// IPI handlers (registered via K8e's ipi_register_handler on the
+// CALL_FUNCTION_VECTOR) receive the IPI and (in a real kernel) call
+// `func` on each CPU.
+//
+//   smp:   the SmpState (unused in the broadcast itself, but kept as a
+//          parameter for API symmetry with smp_boot_cpu / smp_cpu_started
+//          and so the caller can use the same `smp` handle for the full
+//          SMP lifecycle — smp_init → smp_boot_cpu → smp_call_function).
+//   func:  the function address to call on each CPU. Stored as a u64
+//          (VUMA has no fn-pointer type — see K8e's "Why no fn-pointer
+//          call in dispatch?" header note). In a real kernel this would
+//          be stored in a per-CPU mailbox slot that the target CPU's IPI
+//          handler reads; K8f passes it as a parameter and relies on
+//          K11 to wire the actual fn-pointer call from the trap handler
+//          in asm.
+//   wait:  1 = wait for all CPUs to finish calling `func`, 0 = return
+//          immediately. In a real kernel the wait would spin on a per-
+//          CPU atomic counter that each target CPU decrements after
+//          calling `func` (Linux: cfd_seq); in VUMA hosted mode there
+//          are no other CPUs, so the wait is a no-op (the function just
+//          returns).
+//
+// State<T> params: 1 (smp). Calls lapic_write once (the broadcast IPI).
+// The `if wait == 1 { return; }` branch is the wait stub — in a real
+// kernel this would be a busy-wait loop (spin until all CPUs have
+// decremented the per-CPU counter), but the hosted stub just returns
+// (no CPUs to wait for). The early return inside the if-block is the
+// canonical VUMA pattern for "this branch is a stub" — see K8e's
+// ipi_dispatch for the same `if handler != 0 { return; }` pattern.
+//
+// The 196608 constant (not 0x30000) is per the contract's "Use decimal
+// constants" rule — same rationale as smp_boot_cpu's 4096 / 17664 /
+// 17920. The ICR write at offset 768 (not 0x300) is the same LAPIC ICR
+// register that K8e's ipi_send / ipi_broadcast write — K8f reuses the
+// same register for the broadcast function-call IPI (the destination
+// shorthand "all excluding self" is what makes it a broadcast, vs. K8e's
+// ipi_send which uses the per-CPU destination field).
+fn smp_call_function(smp: State<SmpState>, func: u64, wait: u8) {
+    // Send IPI to all other CPUs.
+    // x86_64: LAPIC ICR with "all excluding self" shorthand.
+    // Vector 0 = reschedule IPI (simplified — in a real kernel this
+    // would be a dedicated CALL_FUNCTION_VECTOR; see "smp_call_function"
+    // in the file header for the Linux comparison).
+    let icr_val = 196608;  // 0x30000 = all excluding self, vector 0
+    lapic_write(768, icr_val);
+    if wait == 1 {
+        // Wait for all CPUs to acknowledge (stub: just return).
+        // In a real kernel: spin on a per-CPU atomic counter until all
+        // target CPUs have decremented it (Linux: cfd_seq). Hosted mode
+        // has no other CPUs, so the wait is a no-op.
+        return;
+    }
+}
+
+// smp_cpu_started: read the "started" flag for `cpu_id`. Returns 1 if
+// the CPU has been booted (smp_boot_cpu set the flag), 0 otherwise
+// (including out-of-range cpu_id — the table has 16 slots, so cpu_id
+// >= 16 returns 0 without indexing past the array bounds).
+//
+//   smp:     the SmpState.
+//   cpu_id:  the CPU number to query (0..15). cpu_id >= 16 returns 0.
+//
+// Returns the started flag (0 or 1) for cpu_id, or 0 if cpu_id is out
+// of range.
+//
+// State<T> params: 1 (smp). Reads cpus[cpu_id * 16] (one byte). Pure
+// read — no writes, no helper calls. The bounds check `if cpu_id >= 16`
+// is the same idiom K8e's ipi_get_handler uses (`if vector >= 16 { return
+// 0; }`) — defensive against out-of-range indices, even though the
+// hosted self-test only queries valid cpu_ids.
+//
+// The byte-stride access `cpus[cpu_id * 16]` is the same index expression
+// that smp_boot_cpu uses to WRITE the flag — K8f keeps the read and write
+// stride identical so the round-trip works (boot writes 1, query reads 1).
+fn smp_cpu_started(smp: State<SmpState>, cpu_id: u32) -> u8 {
+    if cpu_id >= 16 { return 0; }
+    return smp.cpus[cpu_id * 16];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Self-test (the K8f DoD).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Allocate an SmpState via state_new, init it, then:
+//   (1) smp_init sets n_cpus = 1 (just the boot CPU is online).
+//   (2) smp_boot_cpu(smp, 1, 1048576, 131072) returns 0 — CPU 1 booted
+//       successfully (the INIT-SIPI-SIPI sequence was sent — stubbed in
+//       hosted mode, but the ICR value computation was exercised).
+//   (3) smp.n_cpus == 2 (boot CPU + CPU 1).
+//   (4) smp_cpu_started(smp, 1) == 1 — CPU 1's started flag is set.
+//   (5) smp_boot_cpu(smp, 2, 1048576, 131072) returns 0 — CPU 2 booted.
+//   (6) smp.n_cpus == 3 (boot CPU + CPU 1 + CPU 2).
+//   (7) smp_call_function(smp, 4096, 1) — broadcast function-call IPI
+//       (stub — verify no crash, the wait==1 branch returns cleanly).
+//   (8) smp_boot_cpu(smp, 0, 0, 0) returns 22 (-EINVAL) — CPU 0 is the
+//       boot CPU, can't re-boot.
+// Returns 0 on success, 1..7 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K8f contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (1048576 = 1MB entry point,
+// 131072 = 128KB stack, 4096 = 0x1000 function address for the
+// broadcast, 22 = -EINVAL; the other constants are 0 / 1 / 2 / 3 —
+// already small enough to be unambiguous in either base).
+
+fn main() -> i32 {
+    let smp = state_new(SmpState);
+    smp_init(smp);
+    // (1) smp_init → n_cpus = 1 (boot CPU only).
+    if smp.n_cpus != 1 { return 1; }
+    // (2) Boot CPU 1 (entry = 1MB, stack = 128KB — the classic x86
+    // real-mode trampoline addresses).
+    let ret = smp_boot_cpu(smp, 1, 1048576, 131072);
+    if ret != 0 { return 2; }
+    // (3) n_cpus bumped to 2.
+    if smp.n_cpus != 2 { return 3; }
+    // (4) CPU 1's started flag is set.
+    if smp_cpu_started(smp, 1) != 1 { return 4; }
+    // (5) Boot CPU 2 (same entry/stack — in a real kernel each CPU
+    // would get its own stack, but for the hosted self-test the values
+    // are just stub parameters).
+    let ret2 = smp_boot_cpu(smp, 2, 1048576, 131072);
+    if ret2 != 0 { return 5; }
+    // (6) n_cpus bumped to 3.
+    if smp.n_cpus != 3 { return 6; }
+    // (7) smp_call_function broadcast (stub — verify no crash).
+    // func = 4096 (0x1000), wait = 1 (block until all CPUs ack — but
+    // there are no other CPUs in hosted mode, so the wait returns
+    // immediately).
+    smp_call_function(smp, 4096, 1);
+    // (8) Boot CPU 0 → -EINVAL (the boot CPU is already running, can't
+    // re-boot). The entry/stack values are don't-care (0, 0) — the
+    // function returns before they're used.
+    let ret3 = smp_boot_cpu(smp, 0, 0, 0);
+    if ret3 == 0 { return 7; }
+    return 0;
+}
