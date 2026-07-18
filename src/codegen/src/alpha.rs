@@ -486,27 +486,28 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         // This zero-extends the 32-bit result to 64 bits.
         code.extend_from_slice(&op_lit(0x12, dst, 0x0F, dst, 0x31).to_le_bytes());
         if hi32 != 0 {
-            // 64-bit value: load high 32 bits into S2, shift left by 32,
-            // then OR into dst.
+            // 64-bit value: load high 32 bits into S3, shift left by 32,
+            // then OR into dst. (Use S3, NOT S2 — S2 is used by callers
+            // for address computation and must not be clobbered.)
             let hi_lo16 = (hi32 & 0xFFFF) as i16 as i32;
             let mut hi_hi16 = ((hi32 >> 16) & 0xFFFF) as i32;
             if hi_lo16 < 0 {
                 hi_hi16 += 1;
             }
-            // LDA S2, hi_lo16(ZERO)
-            code.extend(Instruction::Lda { ra: S2, disp: hi_lo16 as i16, rb: ZERO }.encode());
-            // LDAH S2, hi_hi16(S2)
+            // LDA S3, hi_lo16(ZERO)
+            code.extend(Instruction::Lda { ra: S3, disp: hi_lo16 as i16, rb: ZERO }.encode());
+            // LDAH S3, hi_hi16(S3)
             let word2: u32 = (0x09u32 << 26)
-                | ((S2.encoding() as u32) << 21)
-                | ((S2.encoding() as u32) << 16)
+                | ((S3.encoding() as u32) << 21)
+                | ((S3.encoding() as u32) << 16)
                 | (hi_hi16 as u32 & 0xFFFF);
             code.extend_from_slice(&word2.to_le_bytes());
-            // ZAPNOT S2, 0x0F, S2 — zero-extend high 32 bits.
-            code.extend_from_slice(&op_lit(0x12, S2, 0x0F, S2, 0x31).to_le_bytes());
-            // SLL S2, 32, S2 — shift left by 32 (high bits now in upper half).
-            code.extend_from_slice(&op_lit(0x12, S2, 32, S2, 0x39).to_le_bytes());
-            // BIS dst, S2, dst — OR high bits into dst.
-            code.extend_from_slice(&op_reg(0x11, dst, S2, dst, 0x20).to_le_bytes());
+            // ZAPNOT S3, 0x0F, S3 — zero-extend high 32 bits.
+            code.extend_from_slice(&op_lit(0x12, S3, 0x0F, S3, 0x31).to_le_bytes());
+            // SLL S3, 32, S3 — shift left by 32 (high bits now in upper half).
+            code.extend_from_slice(&op_lit(0x12, S3, 32, S3, 0x39).to_le_bytes());
+            // BIS dst, S3, dst — OR high bits into dst.
+            code.extend_from_slice(&op_reg(0x11, dst, S3, dst, 0x20).to_le_bytes());
         }
         code
     }
