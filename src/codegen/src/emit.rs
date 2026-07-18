@@ -1089,13 +1089,27 @@ impl Emitter {
                 })?;
             } else {
                 self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
-                self.emit_instruction(Instruction::SUB {
-                    rd: Register::SP,
+                // SUB (shifted register) encodes Rn=31 as XZR (not SP), so
+                // `SUB SP, SP, X9` silently becomes `SUB SP, XZR, X9` and
+                // never decrements SP.  Route through X10 using the immediate
+                // form (where R31=SP is valid for both Rd and Rn).
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::X10,
                     rn: Register::SP,
+                    rm: Operand::Imm12(0),
+                })?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::X10,
+                    rn: Register::X10,
                     rm: Operand::Reg {
                         reg: Register::X9,
                         shift: None,
                     },
+                })?;
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X10,
+                    rm: Operand::Imm12(0),
                 })?;
             }
         }
@@ -1265,13 +1279,27 @@ impl Emitter {
                 })?;
             } else {
                 self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
-                self.emit_instruction(Instruction::SUB {
-                    rd: Register::SP,
+                // SUB (shifted register) encodes Rn=31 as XZR (not SP), so
+                // `SUB SP, SP, X9` silently becomes `SUB SP, XZR, X9` and
+                // never decrements SP.  Route through X10 using the immediate
+                // form (where R31=SP is valid for both Rd and Rn).
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::X10,
                     rn: Register::SP,
+                    rm: Operand::Imm12(0),
+                })?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::X10,
+                    rn: Register::X10,
                     rm: Operand::Reg {
                         reg: Register::X9,
                         shift: None,
                     },
+                })?;
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X10,
+                    rm: Operand::Imm12(0),
                 })?;
             }
         }
@@ -2423,13 +2451,25 @@ impl Emitter {
             })?;
         } else {
             self.emit_load_immediate(Register::X9, frame_bytes as i64)?;
-            self.emit_instruction(Instruction::SUB {
-                rd: Register::SP,
+            // SUB (shifted register) encodes Rn=31 as XZR (not SP); route
+            // through X10 using the immediate form (R31=SP valid for Rd/Rn).
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::X10,
                 rn: Register::SP,
+                rm: Operand::Imm12(0),
+            })?;
+            self.emit_instruction(Instruction::SUB {
+                rd: Register::X10,
+                rn: Register::X10,
                 rm: Operand::Reg {
                     reg: Register::X9,
                     shift: None,
                 },
+            })?;
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::SP,
+                rn: Register::X10,
+                rm: Operand::Imm12(0),
             })?;
         }
 
@@ -2506,13 +2546,25 @@ impl Emitter {
             })?;
         } else {
             self.emit_load_immediate(Register::X9, frame_bytes as i64)?;
+            // ADD (shifted register) encodes Rn=31 as XZR (not SP); route
+            // through X10 using the immediate form (R31=SP valid for Rd/Rn).
             self.emit_instruction(Instruction::ADD {
-                rd: Register::SP,
+                rd: Register::X10,
                 rn: Register::SP,
+                rm: Operand::Imm12(0),
+            })?;
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::X10,
+                rn: Register::X10,
                 rm: Operand::Reg {
                     reg: Register::X9,
                     shift: None,
                 },
+            })?;
+            self.emit_instruction(Instruction::ADD {
+                rd: Register::SP,
+                rn: Register::X10,
+                rm: Operand::Imm12(0),
             })?;
         }
         Ok(())
@@ -3282,13 +3334,26 @@ impl Emitter {
                 })?;
             } else {
                 self.emit_load_immediate(Register::X9, frame_size as i64)?;
-                self.emit_instruction(Instruction::SUB {
-                    rd: Register::SP,
+                // SUB (shifted register) encodes Rn=31 as XZR (not SP), so
+                // `SUB SP, SP, X9` never decrements SP.  Route through X10
+                // using the immediate form (R31=SP valid for Rd/Rn).
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::X10,
                     rn: Register::SP,
+                    rm: Operand::Imm12(0),
+                })?;
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::X10,
+                    rn: Register::X10,
                     rm: Operand::Reg {
                         reg: Register::X9,
                         shift: None,
                     },
+                })?;
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP,
+                    rn: Register::X10,
+                    rm: Operand::Imm12(0),
                 })?;
             }
         }
