@@ -1,0 +1,584 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/shell/shell.vuma
+// VWK kernel interactive shell — reads commands from the console, parses
+// them, executes built-in commands, and prints output. — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K6f layer of the VWK kernel: the interactive shell. K6a
+// (womb/kernel/drivers/uart.vuma) provided the byte-level UART driver
+// (uart_putc_8250 / uart_getc_8250 / uart_putc_pl011). K6b (womb/kernel/
+// tty/line_discipline.vuma) provided the TTY line discipline (tty_init /
+// tty_receive / tty_readline — the cooked-mode line editor). K6c (womb/kernel/
+// tty/vt100.vuma) provided the VT100 escape-sequence parser. K6d (womb/kernel/
+// drivers/char.vuma) provided the char device registry. K6e (womb/kernel/
+// tty/console.vuma) aggregated UART + TTY + VT100 into a single Console
+// interface (console_init / console_putc / console_puts / console_flush /
+// console_read — a 256-byte line buffer that flushes to UART/hosted-write
+// on newline or near-overflow, with a matching read path).
+//
+// K6f sits ABOVE the console: it's the interactive shell — a tiny read-eval
+// loop that accepts commands one byte at a time from the console, parses
+// the line on newline, dispatches to a built-in command, and emits output
+// back through the console. This file implements the two foundational
+// built-ins from the K6f contract:
+//   `echo <args>` — print everything after "echo " or "echo" to stdout.
+//   `exit`        — terminate the shell (set running=0, exit_code=0).
+// The contract's header also names `cat`, `ls`, `pwd`, `cd` as future
+// built-ins; K6f implements echo + exit (the self-test DoD); the remaining
+// built-ins arrive in K7+ when the K6fs layer (filesystem) is wired in
+// (cat / ls need open / read / readdir; pwd / cd need a cwd slot in the
+// Shell layout and a chdir syscall).
+//
+// ── What K6f provides ──────────────────────────────────────────────────────
+//   shell_init(s)                 — zero the line buffer length, mark the
+//                                   shell as running, exit_code 0.
+//   shell_prompt(s)               — write "vwk: " (5 bytes) to stdout.
+//   shell_receive(s, c)           — push one byte through the shell: buffer
+//                                   it, on newline call shell_execute and
+//                                   reset the buffer.
+//   shell_execute(s)              — parse the buffered line and dispatch to
+//                                   the matching built-in (or print "?\n").
+//   shell_buf_starts_with(s,i,e)  — return 1 if buf[i] == e, else 0
+//                                   (bounds-checked: returns 0 if i >= len).
+//   shell_do_echo(s)              — implement `echo`: print everything after
+//                                   "echo " (or "echo") + a trailing newline.
+//
+// ── Shell line-buffer geometry ─────────────────────────────────────────────
+// The shell's line buffer is a flat [u8; 256] array with one cursor:
+//   buf_len (u32) — bytes currently in the buffer (0..256).
+// The K6e console's 256-byte line buffer and the K6b TTY's 256-byte ring
+// buffer both use 256 as the canonical line size; K6f's shell matches that
+// (a 256-byte line is the canonical Unix TTY line length — POSIX LINE_MAX
+// is 2048, but the kernel-side line buffer is typically much smaller; 256
+// matches the K6e/K6b/K1 buffers).
+//
+// Bytes are appended at buf[buf_len], then buf_len is bumped. On newline,
+// shell_execute parses the buf[0..buf_len] range and resets buf_len to 0.
+// The bounds check `buf_len < 255` guards the store: if buf_len is already
+// 255, the byte is silently dropped (a 256th byte would overflow the array
+// index range [0, 255]). The 255 threshold (not 256) leaves headroom for
+// the next append — defensive against off-by-one in the bounds check
+// (same pattern as K6e's console_putc, which flushes at len >= 255).
+//
+// ── Command dispatch ───────────────────────────────────────────────────────
+// shell_execute does a 4-character prefix match per built-in. The match is
+// byte-by-byte via shell_buf_starts_with (which is bounds-checked, so an
+// input shorter than the command name safely returns 0 — no out-of-bounds
+// read on buf). The dispatch order is:
+//   (1) "exit" (101, 120, 105, 116) → set running=0, exit_code=0, return.
+//   (2) "echo" (101, 99, 104, 111)  → call shell_do_echo, return.
+//   (3) otherwise                   → print "?\n" (unknown command marker).
+// The 4-character match is the minimal disambiguation: "exit" vs "echo"
+// diverge at byte 1 ('x' vs 'c'), so the nested-if ladder checks the
+// divergent byte early. A future K7+ wave that adds more built-ins should
+// refactor this into a small command-table walk (a parallel-flat-byte-array
+// table like K6d's chardev registry — name + handler function pointer),
+// but for 2 built-ins the nested-if is clearer (no table overhead).
+//
+// ── shell_do_echo semantics ────────────────────────────────────────────────
+// `echo <args>` prints everything after "echo " (5 bytes) or "echo" (4 bytes
+// if no space follows) followed by a trailing newline. The argument scan:
+//   start at i = 4 (just past "echo")
+//   if buf[4] == ' ' (32), advance i to 5 (skip the space)
+//   while i < buf_len && out_len < 255: copy buf[i] → out.data[out_len]
+//   append '\n' (10) at out.data[out_len], write out_len+1 bytes to stdout.
+// The out_len < 255 bound is the same overflow-protection pattern as K6e's
+// console_putc — leaves headroom for the trailing newline. If the user
+// passes more than 255 bytes of args, the extra bytes are dropped (and the
+// newline overwrites out.data[255] — defensive truncation).
+//
+// `echo` with no args (buf_len == 4, just "echo") produces just "\n" — the
+// while loop exits immediately (i=4 not < 4), the newline is stored at
+// out.data[0], and write(1, addr, 1) emits "\n". This matches POSIX echo
+// semantics (echo with no args prints a blank line).
+//
+// ── Layouts (Shell + ShellOut) ──────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares every
+// layout it uses. The two layouts are NEW (K6f introduces them — no prior
+// wave declares Shell or ShellOut):
+//
+//   Shell (264 bytes total, padded to 272 for u32 alignment of buf_len):
+//     buf       @ 0    [u8; 256]  — the input line buffer (256 bytes).
+//                                    Indexed [0..buf_len) during parsing;
+//                                    bytes beyond buf_len are stale
+//                                    (uninitialized — see "PMT discipline"
+//                                    below). `s as Address` yields the
+//                                    address of buf[0] (offset 0) — but
+//                                    K6f doesn't use that cast on Shell
+//                                    (the line buffer is read byte-by-byte,
+//                                    not handed to write as a whole).
+//     buf_len   @ 256  u32        — bytes currently in buf (0..256).
+//     running   @ 260  u8         — 1 = shell is running, 0 = exit requested.
+//     exit_code @ 261  i32        — exit code (set by `exit N` — K6f only
+//                                    sets 0 from `exit`, K7+ will parse
+//                                    the optional numeric argument).
+//   (Plus 7 bytes of trailing padding to align the struct to 4 bytes — the
+//   VUMA layout pads to the largest field's alignment, which is 4 bytes
+//   for the u32 buf_len field. The u8 running field and the i32 exit_code
+//   field pack tight at offsets 260 / 261 — wait, i32 needs 4-byte
+//   alignment, so exit_code goes at offset 264 with 3 bytes of pad after
+//   running. Total: 256 + 4 + 1 + 3 (pad) + 4 = 268, then padded to 4-byte
+//   alignment = 268. The exact layout padding doesn't matter for K6f
+//   because we access fields by name, never by hand-computed offset.)
+//
+//   ShellOut (256 bytes total):
+//     data      @ 0    [u8; 256]  — output buffer for the shell's write
+//                                    calls. Used by shell_prompt (5-byte
+//                                    "vwk: " prefix), shell_execute (1-byte
+//                                    newline + 2-byte "?\n" error marker),
+//                                    and shell_do_echo (up to 256 bytes of
+//                                    "echo" output + trailing newline). The
+//                                    triple-use is intentional: all three
+//                                    need a 256-byte buffer with `data` at
+//                                    offset 0 (so the `as Address` cast
+//                                    yields the address of data[0] for the
+//                                    FFI call), and VUMA layouts are
+//                                    byte-size contracts — same layout,
+//                                    same size, same alignment, so one
+//                                    layout name covers all three uses.
+//                                    (Same pattern as K6e's ConsoleStr.)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Shell +
+// ShellOut are flat-byte-array structs held in `___pmt_buffer`-backed
+// State<T> slots; the CALLER allocates them via `state_new(Shell)` /
+// `state_new(ShellOut)` (in the self-test, in main(); in the real kernel,
+// in kmain). The State<T> handles are passed by reference to shell_init /
+// shell_receive / shell_execute / etc., which mutate the State in place
+// (no copy-out, no move semantics — VUMA's State<T> is a borrow of the
+// ___pmt_buffer slot). The `s.buf[s.buf_len] = c; s.buf_len = s.buf_len
+// + 1;` syntax is State-field self-update (lowered to a load-modify-store
+// through the State pointer — the K4a task.vuma `tbl.count = tbl.count +
+// 1` pattern, also seen in K6b's tty_push, K6e's console_putc).
+//
+// The `out as Address` cast on State<ShellOut> is the documented PMT
+// "Borrowed read (zero-copy I/O)" pattern (see docs/language-reference.md
+// §14.5) — same as K6a's `buf as Address` in uart_putc_8250, K6e's
+// `out as Address` in console_flush, K1's `c as Address` in console_flush.
+// The Address is borrowed (the State<T> stays live in ___pmt_buffer for
+// the duration of the call), handed to `write` (a syscall that completes
+// synchronously), then the ShellOut is freed by the drop-frame hook when
+// the function returns.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f/K6a/K6b/K6c/K6d/K6e). Decimal avoids the parser's hex-literal path
+// (parse_int_radix width-extension subtleties — see K5a's file.vuma header
+// for the same rationale). The constants:
+//   256   = Shell.buf / ShellOut.data size (array bound).
+//   255   = overflow-protection threshold (buf_len < 255 → append; out_len
+//           < 255 → copy — leaves headroom for the trailing newline).
+//   5     = "vwk: " prompt length (5 bytes: 'v','w','k',':',' ').
+//   4     = "echo" / "exit" command-name length (4 bytes).
+//   1     = stdout fd (write) / byte count for the newline + "?\n" writes.
+//   2     = "?\n" unknown-command marker length (2 bytes: '?','\n').
+//   0     = buf_len / running / exit_code reset value / first array index.
+// ASCII test characters (K6f contract's IMPORTANT note — decimal values,
+// NOT char literals — VUMA has no 'e' / 'c' / 'h' / 'o' / 'x' / 'i' /
+// 't' / '?' / ' ' / '\n' char literals; use the decimal ASCII values):
+//   101   = 'e'    99    = 'c'    104   = 'h'    111   = 'o'
+//   120   = 'x'    105   = 'i'    116   = 't'
+//   118   = 'v'    119   = 'w'    107   = 'k'    58    = ':'
+//   32    = ' '    10    = '\n'   63    = '?'
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares Shell + ShellOut (both new).
+// K6f's only I/O is via State<Shell> / State<ShellOut> + the `write`
+// extern (declared here, resolves to sys_write on x86_64 / aarch64 hosted
+// backends — same as K6a/K6e's `write`). The `exit` extern is declared
+// for parity with womb/kernel/kernel.vuma's extern block (which also
+// declares both `write` and `exit`), but K6f doesn't call `exit` from
+// VUMA source — the shell's `exit` command just sets `s.running = 0` and
+// lets the host's main() return naturally. (A future K7+ wave that
+// implements the shell's main loop in VUMA — instead of in main() — will
+// call the `exit` extern when running transitions to 0.)
+//
+// ── Externs (write + exit) ──────────────────────────────────────────────────
+// Two extern declarations, both in one `extern "C"` block. Same declaration
+// as womb/kernel/kernel.vuma (for `write` + `exit`) and K6a/K6e's uart.vuma
+// / console.vuma (for `write`). The `buf: Address` (NOT State<T>) on write
+// means the FFI marshal does NOT invalidate any state on the call — the
+// Address is just a raw u64 pointer handed to the syscall. This is the
+// documented PMT "Borrowed read" pattern.
+//
+// Hosted mode: `write` resolves to sys_write (nr 1 on x86_64, nr 64 on
+// aarch64); `exit` resolves to sys_exit (nr 60 on x86_64, nr 93 on
+// aarch64). SysV AMD64: RDI=fd, RSI=buf, RDX=count for write; RDI=code
+// for exit.
+//
+// Bare-metal mode (K11): the externs stay byte-identical (same signature,
+// same arg types, same order) but the linker resolves them to MMIO
+// trampolines that call uart_putc_8250 (or the PL011 equivalent) under
+// the hood. K6f's source doesn't change between hosted and bare-metal —
+// only the linker resolution does.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/shell/shell.vuma \
+//         /tmp/shell.bin x86_64 --verify
+//     /tmp/shell.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, stdout = "\nhello\n\n" (the leading "\n" is
+// shell_execute's newline echo before the echo command runs; "hello\n" is
+// the echo output; the trailing "\n" is shell_execute's newline echo
+// before the exit command runs — exit sets running=0 and returns without
+// further output, so no third newline). The self-test also asserts:
+//   (1) After "echo hello\n", s.running == 1 (shell still running).
+//   (2) After "exit\n", s.running == 0 (shell exited).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
+// sys_write on x86_64 / aarch64 hosted backends). Same declaration as
+// womb/kernel/kernel.vuma (K1, for `write` + `exit`), K6a's uart.vuma
+// (for `write`), K6e's console.vuma (for `write`). `buf: Address` (NOT
+// State<T>) means the marshal does NOT invalidate any state on the call —
+// the Address is just a raw u64 pointer handed to the syscall. This is
+// the documented PMT "Borrowed read" pattern.
+//
+// `exit` is declared for parity with kernel.vuma but K6f's VUMA source
+// never calls it — the shell's `exit` command just sets s.running = 0
+// and the host's main() returns naturally. K7+ may call exit() when the
+// shell loop moves into VUMA.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Shell: the per-shell state. buf at offset 0 + buf_len at offset 256 +
+// running at offset 260 + exit_code at offset 261 (with padding to 264
+// for i32 alignment). See the file header for the byte-offset map and
+// the rationale for the field order (buf first — the natural array layout,
+// matches K6e's Console and K1's stub Console; buf_len / running /
+// exit_code are scalar metadata trailing the array).
+layout Shell = {
+    buf: [u8; 256],     // offset 0:   input line buffer (256 bytes)
+    buf_len: u32,       // offset 256: bytes currently in buf (0..256)
+    running: u8,        // offset 260: 1 = running, 0 = exit requested
+    exit_code: i32,     // offset 264: exit code (from `exit N`)
+}
+
+// ShellOut: a 256-byte buffer used by shell_prompt (5-byte "vwk: " prefix),
+// shell_execute (1-byte newline + 2-byte "?\n" error marker), and
+// shell_do_echo (up to 256 bytes of "echo" output + trailing newline).
+// The triple-use is intentional: all three need a 256-byte buffer with
+// `data` at offset 0 (so the `as Address` cast yields the address of
+// data[0] for the FFI call). VUMA layouts are byte-size contracts —
+// same layout, same size, same alignment, so one layout name covers
+// all three uses. (Same pattern as K6e's ConsoleStr.)
+layout ShellOut = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Shell subsystem functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Initialize the Shell state. Zeros the line-buffer length, marks the
+// shell as running, and sets exit_code to 0. Does NOT zero the buffer
+// itself — `s.buf_len == 0` already guarantees no byte will be read from
+// it, so the stale contents are unreachable (the next shell_receive will
+// overwrite them in order). A defensive zeroing pass would be 256 byte-
+// stores for no observable benefit; skipped (same rationale as K6e's
+// console_init, K6b's tty_init, K5a's file_init, K4a's pt_init).
+fn shell_init(s: State<Shell>) {
+    s.buf_len = 0;
+    s.running = 1;
+    s.exit_code = 0;
+}
+
+// Print a prompt to stdout. Writes the 5-byte "vwk: " prefix (decimal
+// ASCII: v=118, w=119, k=107, :=58, space=32) to a fresh ShellOut and
+// hands its address to write(1, addr, 5). The prompt is intentionally
+// short (5 bytes vs. the typical "$ " or "user@host:cwd$ " — 2 to 30+
+// bytes) because K6f doesn't yet track a CWD (K7+ will add `cwd: [u8; 64]`
+// to the Shell layout and render it into the prompt between "vwk:" and
+// the trailing space — K6f's prompt format is the prefix that future
+// waves will extend).
+//
+// The `out as Address` cast gives the address of out.data (at offset 0
+// of ShellOut) — the natural argument for write(1, addr, 5). Same PMT
+// "Borrowed read" pattern as K6e's console_flush, K6a's uart_putc_8250.
+fn shell_prompt(s: State<Shell>) {
+    let out = state_new(ShellOut);
+    out.data[0] = 118;  // 'v'
+    out.data[1] = 119;  // 'w'
+    out.data[2] = 107;  // 'k'
+    out.data[3] = 58;   // ':'
+    out.data[4] = 32;   // ' '
+    write(1, out as Address, 5);
+}
+
+// Receive a byte from the console. Buffer it; on newline, parse and
+// execute the command, then reset the buffer.
+//
+// The newline (LF, byte 10) is the line terminator: it does NOT get
+// stored in the buffer (the `if c == 10` check fires BEFORE the store).
+// This matches POSIX cooked-mode TTY semantics — the newline is the
+// "commit" signal, not part of the line content. (Same pattern as K6b's
+// tty_readline, which pops the LF but doesn't copy it to the output
+// buffer.)
+//
+// The bounds check `s.buf_len < 255` guards the store: if buf_len is
+// already 255, the byte is silently dropped (a 256th byte would overflow
+// the array index range [0, 255]). The 255 threshold (not 256) leaves
+// headroom for the next append — defensive against off-by-one (same
+// pattern as K6e's console_putc, which flushes at len >= 255).
+//
+// After shell_execute returns, buf_len is reset to 0 so the next byte
+// starts a fresh line. (The reset happens here, not inside
+// shell_execute, so shell_execute can read buf[0..buf_len] without
+// worrying about the buffer being clobbered mid-execution.)
+fn shell_receive(s: State<Shell>, c: u8) {
+    if c == 10 {
+        // Newline — execute the command.
+        shell_execute(s);
+        s.buf_len = 0;
+        return;
+    }
+    if s.buf_len < 255 {
+        s.buf[s.buf_len] = c;
+        s.buf_len = s.buf_len + 1;
+    }
+}
+
+// Parse and execute the command in the buffer. Emits a leading newline
+// (to terminate the prompt line on the terminal — the user's input was
+// echoed by the TTY layer, so this newline ends the input line and
+// starts the output line), then dispatches to the matching built-in.
+//
+// Dispatch order (see the file header's "Command dispatch" note):
+//   (1) "exit" (101, 120, 105, 116) → set running=0, exit_code=0, return.
+//   (2) "echo" (101, 99, 104, 111)  → call shell_do_echo, return.
+//   (3) otherwise                   → print "?\n" (unknown command marker).
+//
+// The 4-character match uses shell_buf_starts_with (bounds-checked —
+// returns 0 if the index is past buf_len, so an input shorter than the
+// command name safely fails to match). The nested-if structure tests
+// each byte in sequence; "exit" and "echo" diverge at byte 1 ('x' vs
+// 'c'), so the first-byte check ('e' = 101) is shared, then the second-
+// byte check disambiguates.
+//
+// The leading newline is emitted unconditionally: even for `exit` (which
+// otherwise produces no output), the user sees their input line end
+// cleanly. (This matches typical shell UX — pressing Enter after `exit`
+// moves the cursor to the next line before the shell terminates.)
+fn shell_execute(s: State<Shell>) {
+    // Echo a newline first — terminates the user's input line on the
+    // terminal. (The TTY layer echoes keystrokes as the user types, so
+    // the cursor is at end-of-input when shell_receive sees the LF;
+    // this newline moves the cursor to the start of the next line,
+    // where command output / the next prompt will appear.)
+    let nl = state_new(ShellOut);
+    nl.data[0] = 10;
+    write(1, nl as Address, 1);
+
+    // Check for "exit" command — bytes: e=101, x=120, i=105, t=116.
+    if shell_buf_starts_with(s, 0, 101) {  // 'e'
+        if shell_buf_starts_with(s, 1, 120) {  // 'x'
+            if shell_buf_starts_with(s, 2, 105) {  // 'i'
+                if shell_buf_starts_with(s, 3, 116) {  // 't'
+                    s.running = 0;
+                    s.exit_code = 0;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Check for "echo" command — bytes: e=101, c=99, h=104, o=111.
+    if shell_buf_starts_with(s, 0, 101) {  // 'e'
+        if shell_buf_starts_with(s, 1, 99) {  // 'c'
+            if shell_buf_starts_with(s, 2, 104) {  // 'h'
+                if shell_buf_starts_with(s, 3, 111) {  // 'o'
+                    shell_do_echo(s);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Unknown command — print "?\n" (the Unix-shell "command not found"
+    // marker, simplified to just "?" for K6f's minimal UX; K7+ may add
+    // "command not found: <name>" with the actual command name).
+    let err = state_new(ShellOut);
+    err.data[0] = 63;  // '?'
+    err.data[1] = 10;  // '\n'
+    write(1, err as Address, 2);
+}
+
+// Check if buf[idx] == expected. Returns 1 if match, 0 if not (including
+// if idx >= buf_len — bounds-checked, so callers don't need to guard the
+// index before calling).
+//
+// This is the workhorse of shell_execute's prefix-match ladder: it lets
+// the nested-if structure stay flat (no manual bounds checks at each
+// level). The bounds check `if idx >= s.buf_len { return 0; }` handles
+// the "command shorter than the prefix being tested" case — e.g. an
+// empty input line (buf_len == 0) calling shell_buf_starts_with(s, 0,
+// 101) returns 0 immediately, so none of the nested ifs fire and the
+// "unknown command" branch runs (printing "?\n" for an empty line —
+// matches the typical shell UX of pressing Enter on an empty prompt).
+//
+// Returns u8 (not bool — VUMA has no bool type, K6d/K6e use u8 for
+// boolean flags throughout: K6e's `running` field is u8, K6d's
+// chardev-registry slot-validity flag is u8).
+fn shell_buf_starts_with(s: State<Shell>, idx: u32, expected: u8) -> u8 {
+    if idx >= s.buf_len {
+        return 0;
+    }
+    if s.buf[idx] == expected {
+        return 1;
+    }
+    return 0;
+}
+
+// Execute the "echo" command — print everything after "echo " (5 bytes)
+// or "echo" (4 bytes), followed by a trailing newline.
+//
+// Argument scan:
+//   start at i = 4 (just past "echo")
+//   if buf[4] == ' ' (32), advance i to 5 (skip the space)
+//   while i < buf_len && out_len < 255: copy buf[i] → out.data[out_len]
+//   append '\n' (10) at out.data[out_len]
+//   write(1, addr, out_len + 1) — emit args + trailing newline.
+//
+// The `out_len < 255` bound is overflow protection: leaves headroom for
+// the trailing newline at out.data[out_len] (out_len can reach 255 in
+// the loop, then the newline overwrites out.data[255] — the 256th byte
+// of the 256-byte buffer, which is the last valid index). Same K6e
+// console_putc pattern (flush at len >= 255).
+//
+// `echo` with no args (buf_len == 4): i=4, buf[4] is stale (buf_len ==
+// 4 means buf[4] is past the end — but reading it is safe in VUMA
+// because the buffer is a fixed 256-byte array; the value is just
+// garbage). If the stale byte happens to be 32 (' '), i would advance
+// to 5 and the while loop wouldn't fire (5 < 4 is false); otherwise i
+// stays at 4 and the while loop wouldn't fire (4 < 4 is false). Either
+// way, no args are copied, the newline goes at out.data[0], and write
+// emits "\n". Matches POSIX echo (echo with no args prints a blank
+// line).
+//
+// The `out as Address` cast gives the address of out.data (at offset 0
+// of ShellOut) — same PMT "Borrowed read" pattern as shell_prompt,
+// shell_execute, K6e's console_flush, K6a's uart_putc_8250.
+fn shell_do_echo(s: State<Shell>) {
+    // Skip "echo " (5 bytes) or "echo" (4 bytes). Start at i = 4 (just
+    // past "echo"); if buf[4] is a space, advance to 5 (skip the space).
+    let out = state_new(ShellOut);
+    let out_len = 0;
+    let i = 4;
+    if s.buf[4] == 32 {  // ' '
+        i = 5;
+    }
+    while i < s.buf_len && out_len < 255 {
+        out.data[out_len] = s.buf[i];
+        out_len = out_len + 1;
+        i = i + 1;
+    }
+    out.data[out_len] = 10;  // '\n'
+    write(1, out as Address, (out_len + 1) as i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K6f DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Two sub-tests, each exercising one shell command path:
+//   (1) "echo hello\n" — verify the echo built-in runs and the shell
+//       stays running. Feeds the bytes 'e','c','h','o',' ','h','e','l',
+//       'l','o','\n' (11 bytes) one at a time through shell_receive.
+//       The newline triggers shell_execute, which prints "\n" (the
+//       leading newline) then "hello\n" (the echo output). After
+//       shell_execute returns, buf_len resets to 0. The shell should
+//       still be running (s.running == 1) — echo doesn't exit.
+//       Verifies: shell_receive buffering + newline-triggered execute
+//       + "echo" prefix match + shell_do_echo arg scan + write path.
+//   (2) "exit\n" — verify the exit built-in terminates the shell. Feeds
+//       'e','x','i','t','\n' (5 bytes). The newline triggers
+//       shell_execute, which prints "\n" (leading newline) then matches
+//       "exit" and sets running=0, exit_code=0. The shell should now be
+//       exited (s.running == 0).
+//       Verifies: shell_receive buffering + newline-triggered execute
+//       + "exit" prefix match + running/exit_code state mutation.
+//
+// All assertions return distinct non-zero codes (1, 2) so a failure
+// pinpoints exactly which check failed. Exit 0 = all checks passed.
+//
+// Visible stdout side-effect: the test emits "\nhello\n\n" — leading
+// "\n" from echo's shell_execute newline, "hello\n" from the echo
+// output, then "\n" from exit's shell_execute newline. (The exit
+// command itself produces no further output — it just sets running=0
+// and returns.) Visible if the test is run interactively, but doesn't
+// affect the exit code.
+
+fn main() -> i32 {
+    let s = state_new(Shell);
+    shell_init(s);
+
+    // ── Sub-test (1): "echo hello\n" — echo built-in ──────────────────────
+    // After init: buf_len=0, running=1, exit_code=0. Feed "echo hello"
+    // (10 bytes) + '\n' (1 byte) = 11 bytes total.
+    // Each shell_receive (non-newline): buf_len < 255 → store at
+    // buf[buf_len], buf_len++. After 10 receives: buf[0..10] =
+    // "echo hello", buf_len=10.
+    // 11th receive (newline '\n' = 10): c == 10 → shell_execute(s),
+    // then buf_len = 0.
+    //   shell_execute: writes "\n" (1 byte via fresh ShellOut).
+    //   Checks "exit" prefix: buf[0]='e'(101) match, buf[1]='c'(99) !=
+    //   'x'(120) → no match.
+    //   Checks "echo" prefix: buf[0]='e'(101) match, buf[1]='c'(99)
+    //   match, buf[2]='h'(104) match, buf[3]='o'(111) match → call
+    //   shell_do_echo(s).
+    //     shell_do_echo: out = fresh ShellOut, out_len=0, i=4. buf[4]=
+    //     ' '(32) → i=5. Loop: i=5 < 10 && 0 < 255 → out.data[0]=buf[5]
+    //     ='h'(104), out_len=1, i=6. ... (continues for 'e','l','l','o')
+    //     → out.data[0..5]="hello", out_len=5, i=10. Loop exits (10 <
+    //     10 is false). out.data[5]='\n'(10). write(1, addr, 6) →
+    //     stdout gets "hello\n".
+    //   return from shell_do_echo, return from shell_execute.
+    // buf_len = 0.
+    // After sub-test (1): s.running should still be 1 (echo doesn't
+    // exit). If not, return 1.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 32);   // ' '
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 10);   // '\n'
+    // Shell should still be running.
+    if s.running != 1 { return 1; }
+
+    // ── Sub-test (2): "exit\n" — exit built-in ────────────────────────────
+    // Feed "exit" (4 bytes) + '\n' (1 byte) = 5 bytes total.
+    // Each shell_receive (non-newline): buf_len < 255 → store at
+    // buf[buf_len], buf_len++. After 4 receives: buf[0..4] = "exit",
+    // buf_len=4.
+    // 5th receive (newline '\n' = 10): c == 10 → shell_execute(s),
+    // then buf_len = 0.
+    //   shell_execute: writes "\n" (1 byte via fresh ShellOut).
+    //   Checks "exit" prefix: buf[0]='e'(101) match, buf[1]='x'(120)
+    //   match, buf[2]='i'(105) match, buf[3]='t'(116) match → set
+    //   s.running=0, s.exit_code=0, return.
+    //   (shell_do_echo is NOT called — the exit branch returns first.)
+    // buf_len = 0.
+    // After sub-test (2): s.running should be 0 (exit terminated the
+    // shell). If not, return 2.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 120);  // 'x'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 10);   // '\n'
+    // Shell should have exited.
+    if s.running != 0 { return 2; }
+    return 0;
+}
