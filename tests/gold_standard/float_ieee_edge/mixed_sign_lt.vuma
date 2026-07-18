@@ -1,0 +1,21 @@
+// mixed_sign_lt — -5.0 < 3.0 must be true (sign bit distinguishes).
+// Expected exit code: 1
+//
+// -5.0 has bit pattern 0xC014000000000000; 3.0 is 0x4008000000000000.
+// As UNSIGNED integers, -5.0's bits > 3.0's bits, so integer CMP would
+// say -5.0 > 3.0 (WRONG).  FP compare correctly says -5.0 < 3.0.
+// Exercises:
+//   - f64 < comparison with mixed signs (CRITICAL for G1/G5a sparc64)
+//   - Negative f64 literal
+//
+// CRITICAL for G1: this test FAILS if < uses integer CMP.
+// CRITICAL for G5a: this test validates sparc64's sign-bit materialization.
+
+fn main() -> i32 {
+    a: f64 = -5.0;
+    b: f64 = 3.0;
+    if a < b {
+        return 1;
+    }
+    return 0;
+}

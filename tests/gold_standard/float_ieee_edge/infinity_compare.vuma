@@ -1,0 +1,21 @@
+// infinity_compare — 1.0/0.0 = +Inf; Inf > 1e300.
+// Expected exit code: 1
+//
+// Exercises:
+//   - f64 division producing Inf (1.0 / 0.0)
+//   - f64 > comparison with Inf (MUST use FP compare — integer CMP on
+//     Inf bits vs finite bits would give the wrong answer for negatives)
+//
+// Note: backends that trap on division-by-zero will crash here; this test
+// is for backends that produce IEEE Inf (x86_64 SSE, AArch64, RISC-V, etc.)
+
+fn main() -> i32 {
+    one: f64 = 1.0;
+    zero: f64 = 0.0;
+    inf: f64 = one / zero;    // +Inf
+    big: f64 = 1e300;         // a large finite number (literal)
+    if inf > big {
+        return 1;
+    }
+    return 0;
+}

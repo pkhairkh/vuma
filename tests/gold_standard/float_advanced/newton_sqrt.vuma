@@ -1,0 +1,30 @@
+// newton_sqrt — Newton's method for sqrt(1000), truncated to integer.
+// Expected exit code: 31
+//
+// Computes floor(sqrt(1000)) = 31 via Newton's iteration on f64:
+//   x_{n+1} = (x_n + N/x_n) / 2
+// Converges in ~6 iterations from x0 = N.  Exercises:
+//   - f64 division and addition
+//   - f64 < comparison (loop condition)
+//   - floattoint (final truncation)
+//   - inttofloat (initial N -> f64)
+//
+// IVE verifies Liveness, Interpretation, Origin, Cleanup.
+
+fn newton_sqrt(n: f64, guess: f64, iters: i64) -> f64 {
+    x: f64 = guess;
+    i: i64 = 0;
+    while i < iters {
+        half: f64 = x / 2.0;
+        ratio: f64 = n / x;
+        x = half + ratio;
+        i = i + 1;
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    n_f: f64 = inttofloat(1000);
+    result: f64 = newton_sqrt(n_f, n_f, 8);
+    return floattoint(result);
+}

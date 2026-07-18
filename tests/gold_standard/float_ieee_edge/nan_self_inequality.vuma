@@ -1,0 +1,20 @@
+// nan_self_inequality — NaN is the only value where x != x is true.
+// Expected exit code: 1
+//
+// 0.0 / 0.0 produces NaN.  The test NaN != NaN must return 1 (true).
+// This is the classic IEEE 754 NaN test.  Exercises:
+//   - f64 division producing NaN (0.0 / 0.0)
+//   - f64 != comparison on NaN (MUST use FP compare, not integer CMP —
+//     integer CMP on equal bit patterns would wrongly return 0).
+//
+// CRITICAL for G1: this test FAILS if the backend's != uses integer CMP
+// on the raw bits (NaN bits == NaN bits, so CMP=equal, != = false = 0).
+
+fn main() -> i32 {
+    zero: f64 = 0.0;
+    nan: f64 = zero / zero;   // NaN
+    if nan != nan {
+        return 1;
+    }
+    return 0;
+}
