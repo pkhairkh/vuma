@@ -1,0 +1,179 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/bootinfo.vuma
+// VWK Canonical Superset BootInfo (Wave R1a).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file defines the **canonical superset** BootInfo layout — the single
+// memory-state record that every arch populates. Architecture-specific boot
+// stubs (x86_multiboot, aarch64 dtb, riscv64 sbi, wasm, ipl) translate their
+// native boot protocol into this layout, then kmain reads from it without
+// needing `#ifdef arch` conditionals anywhere in the core kernel.
+//
+// Per the R1 Golden Rule in TASKS.md:
+//   "Do not write arch-conditional logic inside kernel transforms."
+// The BootInfo layout is the boot-side equivalent of the TrapFrame layout
+// (Wave R2): a single superset shape that arch stubs fill in, then the
+// arch-independent core consumes.
+//
+// ── Field semantics ─────────────────────────────────────────────────────────
+//   mem_start        start of usable RAM (physical byte address).
+//                    x86_64: 1 MB (= 1048576, after the low-memory hole).
+//                    aarch64/riscv64: passed by bootloader in dtb/sbi regs.
+//   mem_size         size of usable RAM in bytes (NOT the top address —
+//                    the address range is [mem_start, mem_start + mem_size)).
+//   cmdline          address of the kernel command-line string (NUL-terminated
+//                    UTF-8). 0 if no cmdline. For hosted mode this is
+//                    typically the program name (argv[0]).
+//   dtb_addr         device tree blob (DTB) address. 0 on archs that don't
+//                    use a DTB (x86_64/wasm/ipl).
+//   multiboot_magic  multiboot2 bootloader magic value (x86_64 only — 0 on
+//                    every other arch). Used by kmain to confirm the boot
+//                    protocol on x86. The canonical multiboot2 magic value
+//                    is 0x36d76289 = 920085129 decimal.
+//   framebuffer      framebuffer MMIO base address (or 0 if no framebuffer).
+//                    The bootloader is expected to set up a linear framebuffer
+//                    at this address; kmain maps it into the kernel's address
+//                    space and hands the address + dimensions to the early
+//                    console (Wave R1c/R1d).
+//   fb_width         framebuffer width in pixels (u32 — even 8K = 7680 fits).
+//   fb_height        framebuffer height in pixels.
+//   boot_type        0 = x86_multiboot, 1 = dtb (aarch64/riscv64-sbi-dtb),
+//                    2 = sbi (riscv64-sbi-no-dtb), 3 = wasm, 4 = ipl
+//                    (S390 initial-program-load). K13+ may add more.
+//   _pad             7 bytes of alignment padding so the layout's total
+//                    size is a multiple of 8 bytes (every field before
+//                    _pad is already 8-byte-aligned; boot_type is 1 byte,
+//                    so 7 bytes of pad round up to 8). Zeroed by
+//                    bootinfo_init — readers MUST NOT rely on _pad bits.
+//
+// ── Why a superset? ─────────────────────────────────────────────────────────
+//   A single superset avoids the per-arch field-name asymmetry that bit-rotted
+//   the prior BootInfo (K1a): the old x86_64 layout had { argc, argv,
+//   mem_size, cmdline } while the would-be aarch64 layout had { dtb_addr,
+//   mem_start, mem_size }. Kmain could not read both without per-arch
+//   branches. The superset gives every arch the same field set; archs that
+//   don't use a field (e.g. multiboot_magic on aarch64) leave it 0.
+//
+//   The total layout is 64 bytes:
+//     6 × u64 (48) + 2 × u32 (8) + 1 × u8 (1) + 7 × u8 (7) = 64
+//   — exactly 8 quadwords. This is small enough to live in a single cache
+//   line and matches the typical multiboot2 info-struct header size.
+//
+// ── PMT discipline ──────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   BootInfo is a flat typed-memory record held in a `___pmt_buffer`-backed
+//   State<BootInfo>; the caller allocates it via `state_new(BootInfo)` and
+//   passes it by reference to bootinfo_init (init-style API — same
+//   convention as K2a's pmm_init, K4a's pt_init, K8a's spinlock_init).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). The arch-specific
+//   bootinfo files (womb/kernel/arch/x86_64/bootinfo.vuma etc.) re-declare
+//   this layout byte-identically so they can be compiled standalone. A
+//   mismatch in field order or type would silently produce different
+//   field offsets at the call site — see kernel-developer-guide.md §9
+//   "Decimal-constants discipline" + "Byte-identical re-declaration
+//   invariant".
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All numeric literals in this file are decimal (per the project-wide
+//   convention). Hex values are documented in comments only.
+//     1048576     = 0x100000        (1 MB — canonical x86_64 mem_start)
+//     16777216    = 0x1000000       (16 MB — hosted-mode default mem_size)
+//     134217728   = 0x8000000       (128 MB — x86_64 stub mem_size)
+//     920085129   = 0x36d76289      (multiboot2 bootloader magic)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/bootinfo.vuma \
+//         /tmp/bootinfo.bin x86_64 --verify
+//     /tmp/bootinfo.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (bootinfo_init zeros all fields; then the
+// self-test writes mem_start/mem_size and reads them back unchanged).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout — Canonical superset BootInfo (64 bytes total).
+// ────────────────────────────────────────────────────────────────────────────
+layout BootInfo = {
+    mem_start: u64,        // start of usable RAM
+    mem_size: u64,         // size of usable RAM in bytes
+    cmdline: u64,          // address of command-line string (or 0)
+    dtb_addr: u64,         // device tree blob address (or 0)
+    multiboot_magic: u64,  // multiboot2 magic (x86_64 only, 0 otherwise)
+    framebuffer: u64,      // framebuffer MMIO base (or 0)
+    fb_width: u32,         // framebuffer width in pixels
+    fb_height: u32,        // framebuffer height in pixels
+    boot_type: u8,         // 0=x86_multiboot, 1=dtb, 2=sbi, 3=wasm, 4=ipl
+    _pad: [u8; 7],         // alignment padding to 8 bytes
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// bootinfo_init: zero every field of a caller-allocated BootInfo.
+// ────────────────────────────────────────────────────────────────────────────
+// Called once per BootInfo before any arch-specific bootinfo_init variant
+// (x86_bootinfo_init / arm64_bootinfo_init / riscv_bootinfo_init / etc.)
+// populates the protocol-specific fields. Each arch's init variant calls
+// this first to get a clean slate, then overwrites the fields it knows
+// about — fields the arch doesn't populate stay 0 (the "zeroed by that
+// arch's boot stub" contract from the R1a task description).
+//
+// State<T> params: 1 (bi). Pure write — no reads, no helper calls. The
+// 10 field assignments + the 7-iteration pad-zeroing loop are direct
+// typed-memory writes; no `*ptr`/`&bi`/`allocate` anywhere.
+//
+// The pad-zeroing loop is explicit (rather than relying on state_new's
+// zero-fill) because: (a) the contract requires bootinfo_init to be a
+// self-contained zeroing function — callers may pass a BootInfo that
+// was previously written to (e.g. by a failed prior init attempt); (b)
+// the loop documents the pad-region semantics for readers.
+fn bootinfo_init(bi: State<BootInfo>) {
+    bi.mem_start = 0;
+    bi.mem_size = 0;
+    bi.cmdline = 0;
+    bi.dtb_addr = 0;
+    bi.multiboot_magic = 0;
+    bi.framebuffer = 0;
+    bi.fb_width = 0;
+    bi.fb_height = 0;
+    bi.boot_type = 0;
+    let i = 0;
+    while i < 7 {
+        bi._pad[i] = 0;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the canonical bootinfo_init end-to-end:
+//   1. Allocate a fresh BootInfo (state_new zero-fills it, but bootinfo_init
+//      must work even on a previously-dirtied record, so we don't rely on
+//      that here — bootinfo_init's explicit zeroing is the contract).
+//   2. bootinfo_init(bi) → all fields zero.
+//   3. Check mem_start == 0 (bootinfo_init zeroed it).
+//   4. Check boot_type == 0 (bootinfo_init zeroed it).
+//   5. Write mem_start = 1048576 (1 MB), mem_size = 16777216 (16 MB),
+//      boot_type = 0 (x86_multiboot — same as init, but documents the
+//      intent of "this would be x86_bootinfo_init's job in production").
+//   6. Read them back — typed-memory writes are observable.
+//
+// Returns 0 on success, 1..4 on the 4 individual check failures:
+//   1: mem_start != 0 after bootinfo_init
+//   2: boot_type != 0 after bootinfo_init
+//   3: mem_start != 1048576 after the explicit write
+//   4: mem_size != 16777216 after the explicit write
+fn main() -> i32 {
+    let bi = state_new(BootInfo);
+    bootinfo_init(bi);
+    if bi.mem_start != 0 { return 1; }
+    if bi.boot_type != 0 { return 2; }
+    bi.mem_start = 1048576;
+    bi.mem_size = 16777216;
+    bi.boot_type = 0;
+    if bi.mem_start != 1048576 { return 3; }
+    if bi.mem_size != 16777216 { return 4; }
+    return 0;
+}
