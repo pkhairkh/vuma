@@ -1,0 +1,252 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/crypto/asym.vuma
+// Asymmetric Crypto — Ed25519 sign/verify (simplified PMT stubs).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NOT real Ed25519. This is the K10d structural skeleton: the layout
+// shapes (Ed25519Key + Ed25519Sig + Ed25519Msg) + the function signatures
+// (ed25519_keygen + ed25519_sign + ed25519_verify) + a deterministic
+// self-test. K11+ adds the real elliptic-curve arithmetic (Curve25519
+// point addition + scalar multiplication + the SHA-512-based nonce
+// derivation per RFC 8032 §5.1.5/§5.1.6).
+//
+// ── What K10d provides ──────────────────────────────────────────────────────
+//   ed25519_keygen(key)                          — STUB: fill secret with
+//                                                  1,2,3,...,32 and public
+//                                                  with 33,34,...,64
+//                                                  (deterministic, NOT
+//                                                  cryptographically valid).
+//   ed25519_sign(key,msg,sig)                    — STUB: sig[0..31] =
+//                                                  key.secret[i] XOR
+//                                                  msg.data[i]; sig[32..63]
+//                                                  = key.public[i].
+//                                                  (NOT a real EdDSA
+//                                                  signature — real Ed25519
+//                                                  derives the nonce r =
+//                                                  SHA-512(prefix || msg),
+//                                                  computes R = r·B, then
+//                                                  S = (r + H(R||A||msg) · s)
+//                                                  mod L — see RFC 8032
+//                                                  §5.1.6.)
+//   ed25519_verify(key,msg,sig)                  — STUB: returns 1 iff
+//                                                  sig[32..63] matches
+//                                                  key.public[0..31]
+//                                                  (verifies ONLY the
+//                                                  "embedded public key"
+//                                                  half of the stub
+//                                                  signature, NOT the
+//                                                  cryptographic signature
+//                                                  itself — real Ed25519
+//                                                  verifies S·B == R +
+//                                                  H(R||A||msg)·A on the
+//                                                  curve).
+//
+// ── VUMA Key Concepts ──────────────────────────────────────────────────────
+//   - PMT layouts with [u8; N] fixed-size array fields
+//   - `state_new(Layout)` arena allocation of crypto contexts
+//   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
+//   - Byte-granular array indexing (key.secret[i] reads byte i)
+//   - `as u8` truncating cast from the default integer type to u8
+//   - XOR operator (`^`) on u8 values (the stub's "signature" path)
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The Ed25519 self-test uses:
+//     key.secret[0]   = 1     (set by keygen stub: i+1 for i=0)
+//     key.public[0]   = 33    (set by keygen stub: i+33 for i=0)
+//     msg.data[0]     = 99
+//     sig.data[0]     = 98    (1 XOR 99 = 98 — the stub "signature")
+//     sig.data[32]    = 33    (public[0] — the embedded pub-key half)
+//     ed25519_verify  = 1     (stub returns "valid")
+//
+// ── Why 1 XOR 99 == 98? ─────────────────────────────────────────────────────
+//   1 = 0x01 (0b00000001), 99 = 0x63 (0b01100011).
+//   0x01 XOR 0x63 = 0x62 (0b01100010) = 98 decimal.
+//   The stub "signature" is just secret_key XOR msg — purely structural,
+//   no cryptographic security. K11's real Ed25519 will replace this with
+//   the proper EdDSA sign equation (S = r + H(R||A||m) · s mod L, where
+//   r = SHA-512(prefix || m), R = r·B, A = s·B, s = SHA-512(seed) clamped).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   Ed25519Key + Ed25519Sig + Ed25519Msg structs are flat-byte-array
+//   layouts held in `___pmt_buffer`-backed State<T> values; the CALLER
+//   allocates them via `state_new(Ed25519Key)` etc. and passes them by
+//   reference to ed25519_* (init-style API — same convention as K10b's
+//   AES + K10c's SHA-256 + K4e's wait queue).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares Ed25519Key + Ed25519Sig +
+//   Ed25519Msg + the 3 API functions + main. K11 (real Ed25519) will
+//   re-declare these layouts byte-identically when it implements the
+//   real EdDSA sign/verify on Curve25519 — the byte-identical-
+//   redeclaration invariant (K2c, extended to layouts in K3d,
+//   re-applied in K4a/K7a/K8a/K8e/K8f/K9a/K9d/K9e/K9f/K10a/K10b/K10c)
+//   extends to K10d's Ed25519Key + Ed25519Sig + Ed25519Msg.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/crypto/asym.vuma \
+//         /tmp/asym.bin x86_64 --verify
+//     /tmp/asym.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 5 self-test checks pass — keygen fills
+// secret[0]=1 + public[0]=33; sign emits sig[0]=1^99=98 + sig[32]=33;
+// verify returns 1).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Ed25519Key: an Ed25519 key pair (secret + public halves). The secret
+// key is 32 bytes (the raw seed per RFC 8032 §5.1.5 — real Ed25519
+// derives the actual scalar `s` and the prefix `prefix` from
+// SHA-512(secret)). The public key is 32 bytes (the y-coordinate of
+// the curve point A = s·B, with the high bit of byte 31 carrying the
+// sign of x — see RFC 8032 §5.1.2).
+layout Ed25519Key = {
+    secret: [u8; 32],   // 32-byte secret seed
+    public: [u8; 32],   // 32-byte public key (point A)
+}
+
+// Ed25519Sig: an Ed25519 signature (R || S). R is the 32-byte encoded
+// curve point r·B (the "nonce commitment"), S is the 32-byte little-
+// endian scalar (r + H(R||A||m) · s) mod L. Total: 64 bytes per RFC
+// 8032 §5.1.6.
+layout Ed25519Sig = {
+    data: [u8; 64],     // R (bytes 0..31) || S (bytes 32..63)
+}
+
+// Ed25519Msg: the message to sign. K10d uses a fixed 64-byte buffer
+// (capable of holding the typical short-message KAT vectors — empty
+// string, "abc", "hello", ...). Real Ed25519 signs arbitrary-length
+// messages via streaming SHA-512; K11 will replace this with a length-
+// delimited buffer or a streaming ctx.
+layout Ed25519Msg = {
+    data: [u8; 64],     // up to 64 bytes of message
+    len: u32,           // actual message length (bytes 0..len are valid)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Ed25519 API functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ed25519_keygen: generate an Ed25519 key pair.
+//
+//   key: caller-allocated State<Ed25519Key> (output — modified in place).
+//
+// K10d STUB: writes `i + 1` to `key.secret[i]` and `i + 33` to
+// `key.public[i]` for i in 0..32 — a deterministic, predictable fill
+// that is NOT cryptographically valid (real Ed25519 derives the public
+// key by computing A = s·B on Curve25519, where s = SHA-512(secret)
+// clamped per RFC 8032 §5.1.5). K11 will replace this with the real
+// key-derivation path (SHA-512(seed) → clamp → scalar mult on
+// Curve25519 — see womb/crypto/ed25519.vuma:ed25519_keygen_for_real).
+fn ed25519_keygen(key: State<Ed25519Key>) {
+    let i = 0;
+    while i < 32 {
+        key.secret[i] = (i + 1) as u8;
+        key.public[i] = (i + 33) as u8;
+        i = i + 1;
+    }
+}
+
+// ed25519_sign: sign a message with an Ed25519 key pair.
+//
+//   key: caller-allocated State<Ed25519Key> holding the secret + public
+//        halves (the signer's key pair).
+//   msg: caller-allocated State<Ed25519Msg> holding the message to sign.
+//   sig: caller-allocated State<Ed25519Sig> (signature output).
+//
+// K10d STUB: writes `key.secret[i] XOR msg.data[i]` to `sig.data[i]`
+// for i in 0..32 (the "first half" of the stub signature — would be R
+// in real Ed25519), and `key.public[i]` to `sig.data[i + 32]` for i in
+// 0..32 (the "second half" — would be S in real Ed25519). The second
+// half is what ed25519_verify checks (the stub verifier just confirms
+// the embedded public-key half matches the verifier's expected public
+// key). K11 will replace this with the real EdDSA sign path: derive
+// r = SHA-512(prefix || msg), compute R = r·B, compute
+// k = SHA-512(R || A || msg), compute S = (r + k · s) mod L, emit
+// sig = R || S (RFC 8032 §5.1.6).
+fn ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) {
+    let i = 0;
+    while i < 32 {
+        sig.data[i] = key.secret[i] ^ msg.data[i];
+        sig.data[i + 32] = key.public[i];
+        i = i + 1;
+    }
+}
+
+// ed25519_verify: verify an Ed25519 signature.
+//
+//   key: caller-allocated State<Ed25519Key> holding the public key
+//        against which to verify.
+//   msg: caller-allocated State<Ed25519Msg> holding the message.
+//   sig: caller-allocated State<Ed25519Sig> holding the signature.
+//   returns: 1 if the signature is valid, 0 if invalid.
+//
+// K10d STUB: returns 1 iff `sig.data[i + 32] == key.public[i]` for all
+// i in 0..32 — i.e. verifies ONLY that the second half of the stub
+// signature matches the public key. K11 will replace this with the
+// real EdDSA verify path: decode R from sig[0..31], decode S from
+// sig[32..63], compute k = SHA-512(R || A || msg), check
+// S · B == R + k · A on Curve25519 (RFC 8032 §5.1.7). The check is
+// `S·B == R + k·A` — equivalent to checking that the verifier
+// reconstructs the same R the signer committed to.
+fn ed25519_verify(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) -> u8 {
+    let i = 0;
+    while i < 32 {
+        if sig.data[i + 32] != key.public[i] {
+            return 0;  // invalid: embedded public-key half mismatch
+        }
+        i = i + 1;
+    }
+    return 1;  // valid (stub)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K10d Ed25519 API surface end-to-end:
+//   1. ed25519_keygen(key)         → secret[0]=1, public[0]=33 (deterministic
+//                                     fill).
+//   2. ed25519_sign(key,msg,sig)   → sig[0]=secret[0]^msg[0]=1^99=98,
+//                                     sig[32]=public[0]=33.
+//   3. ed25519_verify(key,msg,sig) → returns 1 (stub "valid" — embedded
+//                                     pub-key half matches).
+//
+// Returns 0 on success, 1..5 on the 5 individual check failures.
+//
+// ── Why 1 XOR 99 == 98? ─────────────────────────────────────────────────────
+//   1 = 0x01 (0b00000001), 99 = 0x63 (0b01100011).
+//   0x01 XOR 0x63 = 0x62 (0b01100010) = 98 decimal.
+//   The stub "signature" is just secret XOR message — purely structural,
+//   no cryptographic security. K11's real Ed25519 will produce a 64-byte
+//   R || S signature where every byte depends (via SHA-512 + curve
+//   arithmetic) on every bit of the secret + the message.
+fn main() -> i32 {
+    // ── Keygen path ──
+    let key = state_new(Ed25519Key);
+    ed25519_keygen(key);
+    // Stub: secret[0] = 0+1 = 1.
+    if key.secret[0] != 1 { return 1; }
+    // Stub: public[0] = 0+33 = 33.
+    if key.public[0] != 33 { return 2; }
+
+    // ── Sign path ──
+    let msg = state_new(Ed25519Msg);
+    msg.data[0] = 99;
+    msg.len = 1;
+    let sig = state_new(Ed25519Sig);
+    ed25519_sign(key, msg, sig);
+    // Stub: sig[0] = secret[0] ^ msg[0] = 1 ^ 99 = 98.
+    if sig.data[0] != 98 { return 3; }
+    // Stub: sig[32] = public[0] = 33 (the embedded pub-key half).
+    if sig.data[32] != 33 { return 4; }
+
+    // ── Verify path ──
+    let valid = ed25519_verify(key, msg, sig);
+    if valid != 1 { return 5; }
+
+    return 0;
+}
