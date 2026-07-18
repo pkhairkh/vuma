@@ -616,9 +616,9 @@ def run_one(args):
             qemu_bin = BACKENDS[backend]
             cmd = ["timeout", str(EXEC_TIMEOUT), qemu_bin]
             # riscv32: QEMU's default rv32 CPU lacks the D extension.
-            # Use sifive-u34 (RV32GC) which includes F+D.
+            # Enable D explicitly via CPU properties.
             if backend == "riscv32":
-                cmd += ["-cpu", "sifive-u34"]
+                cmd += ["-cpu", "rv32,d=true"]
             cmd.append(out)
 
         try:
