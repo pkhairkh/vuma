@@ -3445,15 +3445,37 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToUInt => {
-                                // f64 → u64 (truncate toward zero): STD, LFD, FCTIDUZ (truncate
-                                // to unsigned int64), STFD, LD. FCTIDUZ (PowerISA v2.06+) is the
-                                // correct instruction; FCTIDZ would mis-interpret large u64
-                                // values (>= 2^63) as negative.
+                                // f64 → u64 (truncate toward zero). QEMU 7.2's default
+                                // ppc64 CPU (970fx, PowerISA v2.02) does NOT implement
+                                // FCTIDUZ (v2.06+) — it traps with SIGILL.
+                                // Work around: use FCTIDZ (signed truncation) and correct
+                                // for values >= 2^63 by checking the sign of the result.
+                                //
+                                //   if result < 0: u64_result = result + 2^64 (mod 2^64)
+                                //   else:           u64_result = result
+                                //
+                                // 1. STD (store FP bits), LFD (load into FPR)
+                                // 2. FCTIDZ F0 (truncate to signed i64, in FPR)
+                                // 3. STFD (store int64 bits), LD R3 (load into GPR)
+                                // 4. SRD R4, R3, R12 (R12=63) → R4 = 1 if neg, 0 if non-neg
+                                // 5. NEG R4, R4 → R4 = -1 if neg, 0 if non-neg (mask)
+                                // 6. Materialize 2^64 bits (0x43F0000000000000) in R5
+                                // 7. AND R5, R5, R4 → R5 = 2^64 bits if neg, else 0
+                                // 8. XOR R3, R3, R5 → if neg, adds 2^64 (mod 2^64) via XOR
+                                //    (works because neg i64 + 2^64 = u64, and XOR with
+                                //     0x8000000000000000 flips the sign bit = add 2^63*2)
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                                 code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
-                                code.extend_from_slice(&Instruction::Fctiduz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                code.extend_from_slice(&Instruction::Fctidz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
                                 code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
+                                // Step 4-8: correct for negative (values >= 2^63)
+                                code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 63 }.encode());
+                                code.extend_from_slice(&Instruction::Srd { ra: Gpr::R4, rs: Gpr::R3, rb: Gpr::R12 }.encode());
+                                code.extend_from_slice(&Instruction::Neg { rt: Gpr::R4, ra: Gpr::R4 }.encode());
+                                code.extend(ss_load_imm(Gpr::R5, 0x8000_0000_0000_0000u64 as i64));
+                                code.extend_from_slice(&Instruction::And { ra: Gpr::R5, rs: Gpr::R5, rb: Gpr::R4 }.encode());
+                                code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
                             }
                             CastKind::FloatToFloat => {
                                 // Direction is determined by `from_ty` / `to_ty`.
