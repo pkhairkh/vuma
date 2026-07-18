@@ -701,8 +701,11 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         // s390x doesn't have a 3-operand 64-bit OR. We need OGR (OR 64-bit
         // 2-operand) which is [B9 81 00 R1|R2]. To compute dst = dst | lo,
         // we'd load lo into a temp first.
-        // Use temp = S5 (R5).
-        code.extend_from_slice(&encode_lgfi(S5, lo));
+        // Use temp = S5 (R5).  Use LLILF (zero-extend) for the low 32 bits:
+        // LGFI would sign-extend values with the high bit set (e.g. the low
+        // half of -3.7 as F64 = 0x9999999A), which would set the top 32 bits
+        // to all-ones and corrupt the already-placed high half via OGR.
+        code.extend_from_slice(&encode_llilf(S5, lo as u32));
         // OGR dst, S5: dst |= S5. op1=0xB9, op2=0x81.
         code.extend_from_slice(&encode_rre(0xB9, 0x81, dst, S5));
     }
@@ -1575,15 +1578,18 @@ fn emit_instr(
                         }
                         _ => {} // I64 / U* / None: no extension (U* should use UIntToFloat).
                     }
-                    // LDGR FA, S0: bit-copy int64 into FPR (no float interpretation).
-                    code.extend_from_slice(&encode_ldgr(FA, S0));
+                    // CDGBRA/CEGBRA take R1=FPR (dest), R2=GPR (source int64) per
+                    // s390x PoP (RRF_UUFR = { F_24, U4_16, R_28, U4_20 }).  No LDGR
+                    // needed — pass S0 directly as R2.  Verified on QEMU-s390x 7.2.
                     if matches!(to_ty, Some(IRType::F32)) {
-                        // CEGBRA: signed int64 → F32.  op1=0xB3, op2=0xA4.  m3=0 (current rounding).
-                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA4, FA, FA, 0, 0));
+                        // CEGBRA: signed int64 → F32.  op1=0xB3, op2=0xA4.  m3=0.
+                        //   binutils: b3a4 cegbra RRF_UUFR.
+                        code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA4, FA.encoding(), S0.encoding(), 0, 0));
                         code.extend_from_slice(&encode_ste(FA, FP, dst_off));
                     } else {
                         // CDGBRA: signed int64 → F64.  op1=0xB3, op2=0xA5.  m3=0.
-                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA5, FA, FA, 0, 0));
+                        //   binutils: b3a5 cdgbra RRF_UUFR.
+                        code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA5, FA.encoding(), S0.encoding(), 0, 0));
                         code.extend_from_slice(&encode_std(FA, FP, dst_off));
                     }
                     return; // skip trailing ss_st — S0 still holds the int, would clobber float bits.
@@ -1602,14 +1608,17 @@ fn emit_instr(
                         }
                         _ => {}
                     }
-                    code.extend_from_slice(&encode_ldgr(FA, S0));
+                    // CDLGBRA/CELGBRA take R1=FPR (dest), R2=GPR (source uint64)
+                    // per s390x PoP (RRF_UUFR).  No LDGR needed.
                     if matches!(to_ty, Some(IRType::F32)) {
-                        // CELGBRA: unsigned int64 → F32.  op1=0xB3, op2=0xA6.  m3=0.
-                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA6, FA, FA, 0, 0));
+                        // CELGBRA: unsigned int64 → F32.  op1=0xB3, op2=0xA0.  m3=0.
+                        //   binutils: b3a0 celgbr.
+                        code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA0, FA.encoding(), S0.encoding(), 0, 0));
                         code.extend_from_slice(&encode_ste(FA, FP, dst_off));
                     } else {
-                        // CDLGBRA: unsigned int64 → F64.  op1=0xB3, op2=0xA7.  m3=0.
-                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA7, FA, FA, 0, 0));
+                        // CDLGBRA: unsigned int64 → F64.  op1=0xB3, op2=0xA1.  m3=0.
+                        //   binutils: b3a1 cdlgbr.
+                        code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA1, FA.encoding(), S0.encoding(), 0, 0));
                         code.extend_from_slice(&encode_std(FA, FP, dst_off));
                     }
                     return; // skip trailing ss_st.
@@ -1617,17 +1626,20 @@ fn emit_instr(
                 CastKind::FloatToInt => {
                     // Float → signed int64 (truncating).  S0 holds src's bit
                     // pattern (LG-loaded from the slot).  CGDBRA takes an F64
-                    // operand, so widen F32 → F64 first if needed.
+                    // operand in FPR R2, so ferry S0's bits into FA via LDGR first,
+                    // widening F32 → F64 if needed.
                     code.extend_from_slice(&encode_ldgr(FA, S0)); // FA bits = float bits
                     if matches!(from_ty, Some(IRType::F32)) {
                         // LDEBR FA, FA: widen F32 → F64.  op1=0xB3, op2=0x04.
                         code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA));
                     }
                     // CGDBRA: F64 → signed int64, m3=5 (round toward zero / truncate).
-                    // op1=0xB3, op2=0xA1.  Result bits land in FA.
-                    code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA1, FA, FA, 5, 0));
-                    // LGDR S0, FA: bit-copy int64 from FPR back to GPR.
-                    code.extend_from_slice(&encode_lgdr(S0, FA));
+                    // Per s390x PoP (RRF_UURF = { R_24, U4_16, F_28, U4_20 }):
+                    //   R1 = GPR (dest int64), R2 = FPR (source F64).
+                    // So R1=S0 (GPR, dest), R2=FA (FPR, source).  No LGDR needed —
+                    // the result lands directly in S0.  Verified on QEMU-s390x 7.2.
+                    //   binutils: b3a9 cgdbra.
+                    code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA9, S0.encoding(), FA.encoding(), 5, 0));
                     // Fall through to trailing ss_st(S0, dst_off) — stores the int64.
                 }
                 CastKind::FloatToUInt => {
@@ -1636,10 +1648,10 @@ fn emit_instr(
                     if matches!(from_ty, Some(IRType::F32)) {
                         code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA)); // LDEBR widen
                     }
-                    // CLFDBRA: F64 → unsigned int64, m3=5 (truncate).
-                    // op1=0xB3, op2=0xA9.
-                    code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA9, FA, FA, 5, 0));
-                    code.extend_from_slice(&encode_lgdr(S0, FA));
+                    // CLGDBRA: F64 → unsigned int64, m3=5 (truncate).
+                    // R1 = GPR (dest uint64), R2 = FPR (source F64).  No LGDR needed.
+                    //   binutils: b3ad clgdbr.
+                    code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xAD, S0.encoding(), FA.encoding(), 5, 0));
                     // Fall through to trailing ss_st.
                 }
                 CastKind::FloatToFloat => {
@@ -1647,10 +1659,11 @@ fn emit_instr(
                     let src_is_f64 = !matches!(from_ty, Some(IRType::F32));
                     let dst_is_f64 = !matches!(to_ty, Some(IRType::F32));
                     if src_is_f64 && !dst_is_f64 {
-                        // F64 → F32: LEDBR (narrow, rounds per current rounding mode).
-                        // op1=0xB3, op2=0x05.
+                        // F64 → F32: LEDBRA (RRF-a, narrows with current rounding mode).
+                        // op1=0xB3, op2=0x44.  M3=0 (current rounding), M4=0 (silent).
+                        //   Verified against binutils s390-opc.txt: b344 ledbr.
                         code.extend_from_slice(&encode_ldgr(FA, S0));
-                        code.extend_from_slice(&encode_fp_rre(0xB3, 0x05, FA, FA));
+                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FA, FA, 0, 0));
                         code.extend_from_slice(&encode_ste(FA, FP, dst_off));
                         return; // skip trailing ss_st.
                     } else if !src_is_f64 && dst_is_f64 {
@@ -2001,19 +2014,40 @@ fn encode_fp_rre(op1: u8, op2: u8, r1: Fpr, r2: Fpr) -> [u8; 4] {
     ]
 }
 
-/// Encode an RRF-b format FP instruction (4 bytes): `op1 op2 r1r2 m3m4`.
+/// Encode an RRF-a format FP instruction (4 bytes): `op1 op2 m3m4 r1r2`,
+/// where both R1 and R2 are FPRs.  Used for LEDBRA (RRF_UUFF, F64→F32).
 ///
-/// Used for FP↔int conversions (CDGBRA, CGDBRA, CELGBRA, CLFDBRA, etc.).
+/// Per s390x PoP RRF-a layout (verified against binutils s390-opc.c:
+/// INSTR_RRF_UUFF = { F_24, U4_16, F_28, U4_20 }):
+///   byte 0: opcode1
+///   byte 1: opcode2
+///   byte 2: M3 (high nibble, bits 16-19) | M4 (low nibble, bits 20-23)
+///   byte 3: R1 (high nibble, bits 24-27) | R2 (low nibble, bits 28-31)
+///
 /// - `m3` = rounding mode (0=current, 1=to-nearest, 5=toward-zero/truncate,
 ///   7=round-away).  Use m3=0 for int→float (exact), m3=5 for float→int
 ///   (C-style truncation).
 /// - `m4` = inexact-flag-control (0=silent, 1=raise).  Use 0.
 fn encode_fp_rrf(op1: u8, op2: u8, r1: Fpr, r2: Fpr, m3: u8, m4: u8) -> [u8; 4] {
+    encode_fp_rrf_r(op1, op2, r1.encoding(), r2.encoding(), m3, m4)
+}
+
+/// Encode an RRF-a format FP↔int conversion (4 bytes), taking raw register
+/// numbers so the caller can mix GPR and FPR operands.
+///
+/// Per s390x PoP (verified on QEMU-s390x 7.2 and binutils s390-opc.c):
+/// - CDGBRA/CEGBRA/CDLGBRA/CELGBRA (RRF_UUFR, int→float): R1=FPR (dest),
+///   R2=GPR (source int64).  No LDGR needed before — pass the GPR directly.
+/// - CGDBRA/CLGDBRA (RRF_UURF, float→int): R1=GPR (dest int64),
+///   R2=FPR (source F64).  No LGDR needed after — the result lands in the GPR.
+///
+/// Same byte layout as `encode_fp_rrf`: byte 2 = M3|M4, byte 3 = R1|R2.
+fn encode_fp_rrf_r(op1: u8, op2: u8, r1: u8, r2: u8, m3: u8, m4: u8) -> [u8; 4] {
     [
         op1,
         op2,
-        ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF),
         ((m3 & 0xF) << 4) | (m4 & 0xF),
+        ((r1 & 0xF) << 4) | (r2 & 0xF),
     ]
 }
 
@@ -2078,24 +2112,28 @@ fn encode_fp_rxy_a(op1: u8, op2: u8, r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
     ]
 }
 
-/// Encode LD R1, D2(X2, B2) (Load F64, 8 bytes).  op1=0xED, op2=0x64.
+/// Encode LDY R1, D2(X2, B2) (Load F64, 8 bytes, long displacement).
+/// RXY format.  op1=0xED, op2=0x65.  binutils: `ed ... 65 ldy`.
 fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x65, r1, b2, disp)
+}
+
+/// Encode STDY R1, D2(X2, B2) (Store F64, 8 bytes, long displacement).
+/// RXY format.  op1=0xED, op2=0x67.  binutils: `ed ... 67 stdy`.
+fn encode_std(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x67, r1, b2, disp)
+}
+
+/// Encode LEY R1, D2(X2, B2) (Load F32, 4 bytes, long displacement).
+/// RXY format.  op1=0xED, op2=0x64.  binutils: `ed ... 64 ley`.
+fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_fp_rxy_a(0xED, 0x64, r1, b2, disp)
 }
 
-/// Encode STD R1, D2(X2, B2) (Store F64, 8 bytes).  op1=0xED, op2=0x66.
-fn encode_std(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
-    encode_fp_rxy_a(0xED, 0x66, r1, b2, disp)
-}
-
-/// Encode LE R1, D2(X2, B2) (Load F32, 4 bytes).  op1=0xED, op2=0x74.
-fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
-    encode_fp_rxy_a(0xED, 0x74, r1, b2, disp)
-}
-
-/// Encode STE R1, D2(X2, B2) (Store F32, 4 bytes).  op1=0xED, op2=0x78.
+/// Encode STEY R1, D2(X2, B2) (Store F32, 4 bytes, long displacement).
+/// RXY format.  op1=0xED, op2=0x66.  binutils: `ed ... 66 stey`.
 fn encode_ste(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
-    encode_fp_rxy_a(0xED, 0x78, r1, b2, disp)
+    encode_fp_rxy_a(0xED, 0x66, r1, b2, disp)
 }
 
 /// Emit a binary operation as s390x machine code.
