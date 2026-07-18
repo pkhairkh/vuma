@@ -1,0 +1,546 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/mount.vuma
+// VWK VFS Subsystem — Mount + MountTable + lifecycle (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5e layer of the VWK kernel VFS: the Mount (a mounted
+// filesystem at a dentry — the kernel's per-mount metadata, mirroring
+// Linux's `struct mount`) and the MountTable (a 16-slot array of Mounts
+// stored as parallel flat byte arrays — VUMA has no struct arrays). K5c
+// created tmpfs; K5d created initramfs. This file (K5e) provides the
+// mount layer that tracks which filesystems are mounted where, so K6
+// (syscall layer) can wire sys_mount / sys_umount2 to vfs_mount /
+// vfs_umount, and so the path-walking layer (K5b's namei + a future
+// follow_mount) can resolve "across the mount point" by consulting
+// vfs_mounted_at.
+//
+// ── What a Mount is ─────────────────────────────────────────────────────────
+// A Mount binds a mounted filesystem's superblock (sb) to a dentry in the
+// parent filesystem's dentry tree — the dentry IS the mount point. When a
+// path walk (K5b's namei) reaches a mount-point dentry, it consults
+// vfs_mounted_at to find the mounted filesystem's root dentry and
+// continues the walk there. Linux calls this "crossing a mount point";
+// the dentry that the FS is mounted on is `mnt->mnt_mountpoint`, and the
+// root dentry of the mounted FS is `mnt->mnt_root`. This simplified VWK
+// Mount only stores the mount-point dentry index + the mounted FS's sb
+// address — the mounted FS's root dentry is recoverable from its
+// superblock (K5b's superblock layout stores root_dentry as a field),
+// so we don't duplicate it here.
+//
+// ── Mount layout (4 fields, 32 bytes) ───────────────────────────────────────
+//   dentry (u64) — dentry INDEX (NOT a pointer — PMT discipline) where
+//                  the FS is mounted. This is the mount-point dentry in
+//                  the parent filesystem's DentryTable. A value of 0
+//                  doubles as the "free slot" marker (see "Why dentry == 0
+//                  as free marker?" below). Stored as an index into the
+//                  DentryTable (0..63).
+//   sb     (u64) — superblock ADDRESS (for the mounted FS). K5b's
+//                  superblock allocator returns a State<Superblock>; we
+//                  store its address here so a future path walker can
+//                  follow the mount by reading sb->root_dentry. (PMT
+//                  discipline permits storing State addresses in u64
+//                  fields — the value is opaque, never dereferenced by
+//                  the mount layer itself. K6's sys_mount will set this
+//                  to the sb returned by K5c's tmpfs_mount / K5d's
+//                  initramfs_mount.)
+//   parent (u64) — parent mount INDEX (or 0 for the root mount — the
+//                  root mount is its own parent, mirroring Linux's
+//                  `mnt->mnt_parent == &root_mnt` convention). Stored as
+//                  an index into the MountTable (0..15). The root mount
+//                  is the one mounted at the root dentry (dentry 0 in
+//                  a fresh DentryTable); all other mounts are descendants
+//                  of the root mount. A future follow_mount can walk
+//                  parent links to enumerate the mount tree.
+//   next   (u64) — next sibling mount INDEX (or 0 for the last sibling).
+//                  Stored as an index into the MountTable (0..15). The
+//                  sibling chain links all mounts sharing the same parent
+//                  — e.g. all filesystems mounted at the top level of
+//                  the root filesystem are siblings via their `next`
+//                  links. (Linux uses a `mnt_hash`-indexed list per
+//                  mountpoint; the simplified `next` chain is enough
+//                  for K5e's purposes — K6's sys_mount can prepend to
+//                  the chain by setting `next = parent's first child`.)
+//
+// ── Why sb == 0 as the free-slot marker? ────────────────────────────────────
+// The K5e contract literally specified `mount_get_dentry(tbl, i) == 0`
+// as the free-slot test in mount_find_free. That marker is provably
+// broken: dentry index 0 is the ROOT dentry, so the root mount (which
+// is the very first vfs_mount call, made by kmain at boot) has
+// dentry = 0. After the root mount is installed at slot 0, slot 0's
+// dentry field IS 0 — so the contract's `dentry == 0` test would
+// consider slot 0 "free" again and reuse it for the next mount,
+// clobbering the root mount. The K5e self-test exercises exactly this
+// case: it mounts at dentry 0 first (the root), then mounts at dentry 5,
+// expecting slot 1 — which is impossible under the contract's literal
+// `dentry == 0` marker.
+//
+// We resolve this by using `sb == 0` as the free-slot marker instead.
+// A valid mount ALWAYS has a non-zero sb (the superblock address is a
+// non-null State<Superblock> returned by K5b's sb_alloc / K5c's
+// tmpfs_mount / K5d's initramfs_mount — never 0). So sb == 0 unambigu-
+// ously means "this slot is not holding a mounted filesystem." This
+// choice:
+//   • Keeps the contract's MountTable layout byte-identical (no extra
+//     `used` flag — unlike K5a's FileTable, which added a `used` byte
+//     array to resolve the same kind of ambiguity for File slots; K5e
+//     avoids the extra field by reusing sb, which is never 0 for a
+//     valid mount).
+//   • Keeps the contract's self-test passing as written (mount at
+//     dentry 0 first → slot 0; mount at dentry 5 next → slot 1).
+//   • Requires only four localized code deviations from the contract:
+//       - mount_table_init zeros sbs (instead of / in addition to
+//         dentries) so every slot starts with sb == 0 (free).
+//       - mount_find_free tests `mount_get_sb(tbl, i) == 0` (instead
+//         of `mount_get_dentry(tbl, i) == 0`).
+//       - vfs_umount zeros sb (in addition to dentry) so the slot
+//         becomes free, and filters its scan by `sb != 0` so it does
+//         not match an already-free slot whose dentry happens to be 0.
+//       - vfs_mounted_at filters its scan by `sb != 0` so it does not
+//         match an already-free slot whose dentry is stale or 0.
+//   • Is semantically cleaner than adding a `used` flag: sb is ALREADY
+//     the "is this a real mount" indicator (no valid mount has sb = 0),
+//     so reusing it as the free marker costs nothing.
+//
+// ── MountTable layout (4 + 1 fields, 517 bytes) ─────────────────────────────
+//   dentries ([u8; 128]) — 16 slots * 8 bytes = 128 bytes. The dentry
+//                           field of each Mount slot, packed little-
+//                           endian. Accessed via mount_get_dentry /
+//                           mount_set_dentry (8-iteration pack/unpack).
+//   sbs      ([u8; 128]) — 16 slots * 8 bytes = 128 bytes. The sb field.
+//   parents  ([u8; 128]) — 16 slots * 8 bytes = 128 bytes. The parent
+//                           field.
+//   nexts    ([u8; 128]) — 16 slots * 8 bytes = 128 bytes. The next
+//                           field.
+//   count    (u32)        — number of Mount slots currently in use
+//                           (0..16). Bumped by vfs_mount, decremented
+//                           by vfs_umount. Used by K6's sys_mount to
+//                           return -ENFILE (0 - 23) when full.
+//
+//   Total size: 128*4 + 4 = 516 bytes (padded to 520 by the codegen's
+//   max-field-alignment rule — 4 bytes of trailing padding after the u32
+//   to align the next slot to 8 bytes).
+//
+// ── Why parallel flat byte arrays instead of [Mount; 16]? ───────────────────
+// VUMA's parser does NOT support struct arrays (`[Mount; 16]` doesn't
+// parse — only `[u8; N]` parses). So the MountTable stores each Mount
+// field as a separate [u8; 128] array, and the per-slot offset is
+// `idx * 8`. This is the same pattern as K5a's InodeTable /
+// DentryTable / FileTable (parallel flat byte arrays with per-slot
+// offset = `idx * width`).
+//
+// ── Helper inventory ────────────────────────────────────────────────────────
+//   mount_get_dentry(tbl, idx) -> u64   — read Mount[idx].dentry (u64)
+//   mount_set_dentry(tbl, idx, val)     — write Mount[idx].dentry (u64)
+//   mount_get_sb(tbl, idx) -> u64       — read Mount[idx].sb (u64)
+//   mount_set_sb(tbl, idx, val)         — write Mount[idx].sb (u64)
+//   mount_get_parent(tbl, idx) -> u64   — read Mount[idx].parent (u64)
+//   mount_set_parent(tbl, idx, val)     — write Mount[idx].parent (u64)
+//   mount_get_next(tbl, idx) -> u64     — read Mount[idx].next (u64)
+//   mount_set_next(tbl, idx, val)       — write Mount[idx].next (u64)
+//   mount_table_init(tbl)               — zero all 16 slots, count = 0
+//   mount_find_free(tbl) -> u32         — first slot with dentry == 0
+//                                          (16 if full)
+//   vfs_mount(tbl, dentry, sb) -> u32   — allocate slot, set dentry + sb
+//                                          (parent = next = 0), bump count;
+//                                          return slot (16 if full)
+//   vfs_umount(tbl, dentry) -> i64      — find slot with matching dentry,
+//                                          zero it, decrement count;
+//                                          return 0 on success,
+//                                          0 - 1 (= -1 as i64) if not
+//                                          mounted
+//   vfs_mounted_at(tbl, dentry) -> u32  — find slot with matching dentry;
+//                                          return slot (16 if not mounted)
+//
+// ── Decimal constants ───────────────────────────────────────────────────────
+// Per the K5e contract's "Use decimal constants" rule: all non-zero
+// constants use DECIMAL (8, 16, 1000, 2000, etc.) — decimal avoids the
+// parser's hex-literal path (parse_int_radix width-extension subtleties
+// — see womb/kernel/arch/x86_64/pt.vuma header for the same rationale,
+// and K5a's file.vuma for the same rule applied to slot widths and
+// self-test values). The -1 sentinel is written as `0 - 1` (NOT as the
+// literal `18446744073709551615`) — VUMA misinterprets that literal,
+// and `0 - 1` goes through flatten_expr's BinOp::Sub path which produces
+// the correct -1 as i64 (bit pattern 0xFFFF...FFFF). This matches the
+// convention in K4d's wait.vuma (`return 0 - 11; // -EAGAIN`).
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Layout declarations.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Mount: a single mounted filesystem, stored as 4 u64 fields. This
+// layout is for documentation — the actual MountTable uses parallel
+// flat byte arrays (VUMA has no struct arrays — see "Why parallel flat
+// byte arrays?" in the file header). K6 (syscall layer) and a future
+// follow_mount will re-declare this layout byte-identically.
+layout Mount = {
+    dentry: u64,
+    sb: u64,
+    parent: u64,
+    next: u64,
+}
+
+// MountTable: 16 Mount slots stored as parallel flat byte arrays (VUMA
+// has no struct-array support — see "Why parallel flat byte arrays?"
+// in the file header). Each u64 field is a separate [u8; 128] array
+// sized for 16 slots * 8 bytes. `count` tracks how many slots are in
+// use (0..16). The free-slot marker is dentry == 0 (see "Why dentry ==
+// 0 as free marker?" in the file header for the rationale and the
+// known root-mount-at-dentry-0 limitation).
+layout MountTable = {
+    dentries: [u8; 128],
+    sbs: [u8; 128],
+    parents: [u8; 128],
+    nexts: [u8; 128],
+    count: u32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// u64 pack/unpack helpers (dentries, sbs, parents, nexts).
+// ═══════════════════════════════════════════════════════════════════════════
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K2a's
+// pool_get_base / pool_set_base (pmm.vuma), K3e's syscall_table_get /
+// syscall_table_set (table.vuma), K4a's pt_get_vruntime / etc.
+// (task.vuma), K5a's inode_get_ino / etc. (inode.vuma), K5a's
+// dentry_get_parent / etc. (dentry.vuma), and K5a's file_get_dentry /
+// etc. (file.vuma): 8-iteration while loop, shift by i*8, mask 255 on
+// writes, sum-of-shifted-bytes on reads.
+
+// Read the u64 `dentry` field of Mount slot `idx` from MountTable.dentries.
+fn mount_get_dentry(tbl: State<MountTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.dentries[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `dentry` field of Mount slot `idx` into MountTable.dentries.
+fn mount_set_dentry(tbl: State<MountTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.dentries[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `sb` field of Mount slot `idx` from MountTable.sbs.
+fn mount_get_sb(tbl: State<MountTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.sbs[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `sb` field of Mount slot `idx` into MountTable.sbs.
+fn mount_set_sb(tbl: State<MountTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.sbs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `parent` field of Mount slot `idx` from MountTable.parents.
+fn mount_get_parent(tbl: State<MountTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.parents[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `parent` field of Mount slot `idx` into MountTable.parents.
+fn mount_set_parent(tbl: State<MountTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.parents[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Mount slot `idx` from MountTable.nexts.
+fn mount_get_next(tbl: State<MountTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Mount slot `idx` into MountTable.nexts.
+fn mount_set_next(tbl: State<MountTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Lifecycle primitives.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// mount_table_init: zero all 16 sbs (which marks every slot FREE —
+// see "Why sb == 0 as the free-slot marker?" in the file header) and
+// all 16 dentries (so vfs_mounted_at's `sb != 0` guard sees a fully
+// clean table even before the first mount), and set count = 0.
+// Idempotent. Called by kmain at boot before the first vfs_mount (K6's
+// sys_mount is the first caller; the root mount is the very first
+// vfs_mount call, establishing the root filesystem).
+//
+// Does NOT zero parents / nexts — those are populated by vfs_mount's
+// caller (K6's sys_mount sets parent + next), so zeroing them here
+// would be wasted work (and VUMA has no memset). mount_find_free only
+// inspects sbs, and vfs_mounted_at / vfs_umount filter by sb != 0, so
+// zeroing sbs (and dentries, for vfs_mounted_at's pre-first-mount
+// cleanliness) is enough to make every slot look free.
+//
+// NOTE: this deviates from the K5e contract, which specified zeroing
+// only dentries. That would be insufficient under the sb == 0 free
+// marker (the sbs array would hold garbage, and any non-zero garbage
+// byte at offset 0 of a slot's sb field would make that slot look
+// IN USE to mount_find_free). Zeroing sbs is required for the free
+// marker to work; zeroing dentries too is a defensive belt-and-
+// suspenders measure that costs only 16 extra 8-byte writes at boot.
+fn mount_table_init(tbl: State<MountTable>) {
+    let i = 0;
+    while i < 16 {
+        mount_set_dentry(tbl, i, 0);
+        mount_set_sb(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// mount_find_free: find the first FREE slot (sb == 0), return its
+// index. Returns 16 if the table is full (the caller MUST check — K6's
+// sys_mount returns -ENFILE = 0 - 23 in that case). The lowest-free-
+// slot-wins policy matches Linux's find_first_zero_bit and K5a's
+// file_alloc / dentry_alloc / inode_alloc.
+//
+// NOTE: this deviates from the K5e contract, which specified testing
+// `mount_get_dentry(tbl, i) == 0`. That marker is broken for root
+// mounts (dentry 0 is the root dentry, so the root mount's slot has
+// dentry = 0 and would look free). See "Why sb == 0 as the free-slot
+// marker?" in the file header for the full rationale. The sb == 0
+// test is unambiguous because a valid mount always has a non-zero sb.
+fn mount_find_free(tbl: State<MountTable>) -> u32 {
+    let i = 0;
+    while i < 16 {
+        if mount_get_sb(tbl, i) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 16;
+}
+
+// vfs_mount: mount a filesystem at `dentry_idx` with superblock address
+// `sb`. Allocates a free Mount slot (mount_find_free), sets dentry + sb,
+// leaves parent + next at 0 (the caller — K6's sys_mount — sets parent
+// to the enclosing mount's index and prepends to the sibling chain via
+// mount_set_next; for the simple K5e self-test, parent = next = 0 is
+// fine). Bumps count. Returns the slot index, or 16 if the table is
+// full.
+//
+// Does NOT check whether `dentry_idx` is already a mount point — K6's
+// sys_mount is responsible for that check (calling vfs_mounted_at first
+// and returning -EBUSY = 0 - 16 if already mounted). The K5e layer
+// keeps the primitive simple: mount_find_free + set fields + bump count.
+fn vfs_mount(tbl: State<MountTable>, dentry_idx: u64, sb: u64) -> u32 {
+    let slot = mount_find_free(tbl);
+    if slot == 16 {
+        return 16;
+    }
+    mount_set_dentry(tbl, slot, dentry_idx);
+    mount_set_sb(tbl, slot, sb);
+    mount_set_parent(tbl, slot, 0);
+    mount_set_next(tbl, slot, 0);
+    tbl.count = tbl.count + 1;
+    return slot;
+}
+
+// vfs_umount: unmount the filesystem mounted at `dentry_idx`. Finds the
+// in-use slot whose dentry matches (linear scan — 16 slots is small
+// enough that a hash table would be overkill), zeros the slot's dentry
+// AND sb (which marks it FREE for the next mount_find_free under the
+// sb == 0 free marker), and decrements count. Returns 0 on success, or
+// 0 - 1 (= -1 as i64) if no filesystem is mounted at `dentry_idx`. K6's
+// sys_umount2 calls this; on -1 it returns -EINVAL = 0 - 22 to
+// userspace.
+//
+// The `0 - 1` form (NOT the literal `18446744073709551615`) avoids the
+// parser's signed-literal path — see "Decimal constants" in the file
+// header. The function's return type is i64, so `0 - 1` is interpreted
+// as -1 in i64 (bit pattern 0xFFFF...FFFF), which the caller compares
+// against 0 to detect "not mounted" (the K5e self-test does exactly
+// this: `if ret2 == 0 { return 9; }`).
+//
+// The scan filters by `sb != 0` (slot is in use) BEFORE testing the
+// dentry match. This is required because a FREE slot's dentry field
+// might be 0 (if it was never used) or stale (if it was umounted
+// without zeroing dentry); without the sb != 0 guard, a vfs_umount(tbl,
+// 0) call on a table with free slots would erroneously match a free
+// slot (whose dentry happens to be 0) and underflow count.
+//
+// NOTE: this deviates from the K5e contract in two ways: (1) it filters
+// the scan by `sb != 0` (the contract had no filter), and (2) it zeros
+// sb in addition to dentry (the contract zeroed only dentry). Both
+// deviations are required by the sb == 0 free marker — see "Why sb == 0
+// as the free-slot marker?" in the file header. Zeroing dentry too is
+// defensive: it makes vfs_mounted_at's pre-mount state cleaner (a free
+// slot's dentry is 0, not stale).
+//
+// Does NOT zero parent / next — they stay stale until vfs_mount reuses
+// the slot (vfs_mount writes all four fields, so the stale values are
+// overwritten before use). This matches K5a's file_free (which only
+// clears `used`, leaving the other File fields stale).
+fn vfs_umount(tbl: State<MountTable>, dentry_idx: u64) -> i64 {
+    let i = 0;
+    while i < 16 {
+        if mount_get_sb(tbl, i) != 0 {
+            if mount_get_dentry(tbl, i) == dentry_idx {
+                mount_set_dentry(tbl, i, 0);
+                mount_set_sb(tbl, i, 0);
+                tbl.count = tbl.count - 1;
+                return 0;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// vfs_mounted_at: check whether a filesystem is mounted at `dentry_idx`.
+// Linear scan of all 16 IN-USE slots (filtered by `sb != 0`); returns
+// the slot index of the matching mount, or 16 if not mounted. K5b's
+// namei / a future follow_mount calls this when crossing a dentry to
+// decide whether to follow the mount (if 16, no mount — continue the
+// walk in the current FS; if 0..15, follow the mount by reading sb's
+// root_dentry and continuing the walk there). K6's sys_mount also
+// calls this as the "already mounted?" guard before calling vfs_mount.
+//
+// The scan filters by `sb != 0` (slot is in use) BEFORE testing the
+// dentry match. This is required because a FREE slot's dentry field
+// might be 0 (the sentinel value that mount_table_init writes) —
+// without the sb != 0 guard, vfs_mounted_at(tbl, 0) called on a table
+// with free slots would erroneously match a free slot (whose dentry
+// is 0) and return its index instead of 16. The K5e self-test's
+// check 5 exercises exactly this case: after umounting the root mount
+// (which zeroes slot 0's sb AND dentry), vfs_mounted_at(tbl, 0) must
+// return 16 (not 0).
+//
+// NOTE: this deviates from the K5e contract, which had no `sb != 0`
+// filter. The filter is required by the sb == 0 free marker — see
+// "Why sb == 0 as the free-slot marker?" in the file header.
+//
+// Note: returning 16 (not 0xFFFFFFFF) for "not mounted" matches the
+// K5e contract and is consistent with mount_find_free's "table full"
+// sentinel — both use 16 (the slot count) as the out-of-band value,
+// since valid slot indices are 0..15.
+fn vfs_mounted_at(tbl: State<MountTable>, dentry_idx: u64) -> u32 {
+    let i = 0;
+    while i < 16 {
+        if mount_get_sb(tbl, i) != 0 {
+            if mount_get_dentry(tbl, i) == dentry_idx {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 16;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Self-test (the K5e DoD).
+// ═══════════════════════════════════════════════════════════════════════════
+// Allocate a MountTable via state_new, init it via mount_table_init, then:
+//   (1) vfs_mount(tbl, 0, 1000) → returns 0 (first slot); tbl.count == 1.
+//   (2) vfs_mounted_at(tbl, 0) → returns 0 (slot 0 holds the mount at
+//       dentry 0 — confirms the dentry field was written and the linear
+//       scan finds it).
+//   (3) vfs_mount(tbl, 5, 2000) → returns 1 (second slot); tbl.count == 2
+//       (confirms mount_find_free skips slot 0 after step 1 and finds
+//       slot 1).
+//   (4) vfs_umount(tbl, 0) → returns 0 (slot 0 unmounted); tbl.count == 1
+//       (confirms the linear scan finds the matching dentry and the
+//       count decrement works).
+//   (5) vfs_mounted_at(tbl, 0) → returns 16 (no longer mounted at dentry
+//       0 — confirms the umount zeroed the dentry field).
+//   (6) vfs_umount(tbl, 99) → returns 0 - 1 (= -1 as i64, not 0 — confirms
+//       the not-found path returns the sentinel and not a bogus 0).
+// Returns 0 on success, 1..9 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// The 1000 / 2000 sb values are non-trivial u64 values (greater than
+// 255, with non-zero high bytes) — they would catch any pack/unpack
+// bug in mount_set_sb / mount_get_sb, though the K5e self-test does
+// not read sb back (K6's follow_mount will). The dentry values 0 and 5
+// exercise both the low-byte-only path (0, 5) and the "already used"
+// path (slot 0 reused after umount in a real K6 scenario).
+fn main() -> i32 {
+    let tbl = state_new(MountTable);
+    mount_table_init(tbl);
+
+    // Check 1: mount tmpfs at dentry 0 (root) → slot 0; count == 1.
+    let m0 = vfs_mount(tbl, 0, 1000);
+    if m0 != 0 { return 1; }
+    if tbl.count != 1 { return 2; }
+
+    // Check 2: vfs_mounted_at(0) → slot 0 (it's mounted there).
+    let found = vfs_mounted_at(tbl, 0);
+    if found != 0 { return 3; }
+
+    // Check 3: mount another FS at dentry 5 → slot 1; count == 2.
+    let m1 = vfs_mount(tbl, 5, 2000);
+    if m1 != 1 { return 4; }
+    if tbl.count != 2 { return 5; }
+
+    // Check 4: umount dentry 0 → 0; count == 1.
+    let ret = vfs_umount(tbl, 0);
+    if ret != 0 { return 6; }
+    if tbl.count != 1 { return 7; }
+
+    // Check 5: vfs_mounted_at(0) → 16 (no longer mounted at dentry 0).
+    let found2 = vfs_mounted_at(tbl, 0);
+    if found2 != 16 { return 8; }
+
+    // Check 6: umount non-existent dentry 99 → 0 - 1 (not 0).
+    let ret2 = vfs_umount(tbl, 99);
+    if ret2 == 0 { return 9; }
+
+    return 0;
+}
