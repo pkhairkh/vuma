@@ -787,6 +787,8 @@ pub enum Instruction {
     Fctiwz { ft: Fpr, fb: Fpr },
     /// Float Convert To Integer Doubleword with Round toward Zero: `fctidz fT, fB` (X-form, primary=63, xo=815)
     Fctidz { ft: Fpr, fb: Fpr },
+    /// Float Convert To Integer Doubleword Unsigned with Round toward Zero: `fctiduz fT, fB` (X-form, primary=63, xo=943)
+    Fctiduz { ft: Fpr, fb: Fpr },
     /// Float Round to Single Precision: `frsp fT, fB` (X-form, primary=63, xo=12)
     Frsp { ft: Fpr, fb: Fpr },
     /// Float Convert From Integer Doubleword Unsigned: `fcfidu fT, fB` (X-form, primary=63, xo=847)
@@ -1139,31 +1141,33 @@ impl Instruction {
             // ── Compare ────────────────────────────────────────
             Instruction::Cmp { bf, l, ra, rb } => {
                 // CMP crf, l, rA, rB: primary=31, xo=0, Rc=0
-                // bits [6:8] = bf, [9]=l, [10]=0, [11:15]=rA, [16:20]=rB
-                // l-field at MSB-first bit 9 = normal bit 22
+                // bits [6:8] = bf, [10]=l, [11:15]=rA, [16:20]=rB
+                // L-field at MSB-first bit 10 = LSB-first bit 21 (matches
+                // hardware cmpd=0x7C200000; the v3.0C spec text says bit 9
+                // but the actual silicon + QEMU use bit 10).
                 let word = (31u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 22)
+                    | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11);
                 encode_word(word)
             }
             Instruction::Cmpi { bf, l, ra, simm } => {
                 // CMPI crf, l, rA, simm16: primary=11
-                // l-field at MSB-first bit 9 = normal bit 22
+                // L-field at MSB-first bit 10 = LSB-first bit 21.
                 let word = (11u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 22)
+                    | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
                     | ((*simm as u32) & 0xFFFF);
                 encode_word(word)
             }
             Instruction::Cmpl { bf, l, ra, rb } => {
                 // CMPL crf, l, rA, rB: primary=31, xo=32, Rc=0
-                // l-field at MSB-first bit 9 = normal bit 22
+                // L-field at MSB-first bit 10 = LSB-first bit 21.
                 let word = (31u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 22)
+                    | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | (32 << 1);
@@ -1171,10 +1175,10 @@ impl Instruction {
             }
             Instruction::Cmpli { bf, l, ra, uimm } => {
                 // CMPLI crf, l, rA, uimm16: primary=10
-                // l-field at MSB-first bit 9 = normal bit 22
+                // L-field at MSB-first bit 10 = LSB-first bit 21.
                 let word = (10u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 22)
+                    | ((*l & 1) << 21)
                     | (ra.encoding() << 16)
                     | (uimm & 0xFFFF);
                 encode_word(word)
@@ -1340,6 +1344,10 @@ impl Instruction {
             Instruction::Fctidz { ft, fb } => {
                 // FCTIDZ: primary=63, frS=ft, frB=fb, xo=815, Rc=0
                 encode_x_form(63, ft.encoding(), 0, fb.encoding(), 815, 0)
+            }
+            Instruction::Fctiduz { ft, fb } => {
+                // FCTIDUZ: primary=63, frS=ft, frB=fb, xo=943, Rc=0
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 943, 0)
             }
             Instruction::Frsp { ft, fb } => {
                 // FRSP: primary=63, frS=ft, frB=fb, xo=12, Rc=0
@@ -1527,6 +1535,7 @@ impl Instruction {
             Instruction::Fctiw { .. } => "fctiw",
             Instruction::Fctiwz { .. } => "fctiwz",
             Instruction::Fctidz { .. } => "fctidz",
+            Instruction::Fctiduz { .. } => "fctiduz",
             Instruction::Frsp { .. } => "frsp",
             Instruction::Fcfidu { .. } => "fcfidu",
             Instruction::Fcfidus { .. } => "fcfidus",
@@ -1677,6 +1686,7 @@ impl fmt::Display for Instruction {
             Instruction::Fctiw { ft, fb } => write!(f, "fctiw {}, {}", ft, fb),
             Instruction::Fctiwz { ft, fb } => write!(f, "fctiwz {}, {}", ft, fb),
             Instruction::Fctidz { ft, fb } => write!(f, "fctidz {}, {}", ft, fb),
+            Instruction::Fctiduz { ft, fb } => write!(f, "fctiduz {}, {}", ft, fb),
             Instruction::Frsp { ft, fb } => write!(f, "frsp {}, {}", ft, fb),
             Instruction::Fcfidu { ft, fb } => write!(f, "fcfidu {}, {}", ft, fb),
             Instruction::Fcfidus { ft, fb } => write!(f, "fcfidus {}, {}", ft, fb),
@@ -2279,6 +2289,90 @@ fn ss_store_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
     }
 }
 
+/// Load a 64-bit FPR (LFD) from stack slot [R31 - offset_from_r31].
+fn ss_load_fpr_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Lfd { ft: dst_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Lfd { ft: dst_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
+/// Store a 64-bit FPR (STFD) to stack slot [R31 - offset_from_r31].
+fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Stfd { fs: src_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Stfd { fs: src_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
+/// Load a 32-bit FPR (LFS) from stack slot [R31 - offset_from_r31].
+fn ss_load_fpr_single_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Lfs { ft: dst_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Lfs { ft: dst_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
+/// Store a 32-bit FPR (STFS) to stack slot [R31 - offset_from_r31].
+fn ss_store_fpr_single_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Stfs { fs: src_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Stfs { fs: src_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
+/// Store a 32-bit GPR (STW) to stack slot [R31 - offset_from_r31].
+fn ss_store_word_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Stw { rs: src_reg, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Stw { rs: src_reg, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
+/// Load a 32-bit GPR (LWZ) from stack slot [R31 - offset_from_r31].
+fn ss_load_word_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32768 && neg_off <= 32767 {
+        Instruction::Lwz { rt: dst_reg, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+        code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: Gpr::R12, d: 0 }.encode());
+        code
+    }
+}
+
 /// Load an IRValue into a scratch register.
 fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
     match val {
@@ -2736,12 +2830,16 @@ impl Backend for PPC64Backend {
                                     // Determine BO/BI based on op (CR0 field is at BI=0..3,
                                     // but the encoded BI is the bit INDEX in the 32-bit CR).
                                     // CR0: LT=bit0, GT=bit1, EQ=bit2, SO=bit3.
+                                    // For SGt/SGe/UGt/UGe the operand swap above reverses
+                                    // CR0.LT/GT (CR0.LT after swap = (b<a) = (a>b)), so the
+                                    // SAME (BO,BI) values as SLt/SLe select the desired result.
                                     let (bo, bi): (u32, u32) = match op {
-                                        BinOpKind::Eq | BinOpKind::Ne => (4, 2),  // branch if EQ=0
-                                        BinOpKind::SLt | BinOpKind::ULt => (4, 0), // branch if LT=0
-                                        BinOpKind::SLe | BinOpKind::ULe => (12, 1), // branch if GT=1 (not <=)
-                                        BinOpKind::SGt | BinOpKind::UGt => (4, 1), // branch if GT=0 (after swap: LT=0 of original)
-                                        BinOpKind::SGe | BinOpKind::UGe => (12, 0), // branch if LT=1 (not >=, after swap)
+                                        BinOpKind::Eq => (4, 2),   // R3 = CR0.EQ = (a==b)
+                                        BinOpKind::Ne => (12, 2),  // R3 = NOT CR0.EQ = (a!=b)
+                                        BinOpKind::SLt | BinOpKind::ULt => (4, 0), // R3 = CR0.LT = (a<b)
+                                        BinOpKind::SLe | BinOpKind::ULe => (12, 1), // R3 = NOT CR0.GT = (a<=b)
+                                        BinOpKind::SGt | BinOpKind::UGt => (4, 0), // R3 = CR0.LT (after swap = (a>b))
+                                        BinOpKind::SGe | BinOpKind::UGe => (12, 1), // R3 = NOT CR0.GT (after swap = (a>=b))
                                         _ => (4, 2),
                                     };
                                     // BC bo, bi, +2 (skip the LI 1 if condition false)
@@ -3174,13 +3272,17 @@ impl Backend for PPC64Backend {
                             // LI R3, 0
                             code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
                             // BO/BI for CR0: LT=bit0, GT=bit1, EQ=bit2, SO=bit3.
+                            // For SGt/SGe (and UGt/UGe) the operand swap above
+                            // reverses the sense of CR0.LT/GT (CR0.LT after swap
+                            // = (b<a) = (a>b)), so the SAME (BO,BI) values as
+                            // SLt/SLe select the desired result.
                             let (bo, bi): (u32, u32) = match kind {
-                                CmpKind::Eq => (4, 2),   // branch if EQ=0 → set 1 when EQ=1
-                                CmpKind::Ne => (12, 2),  // branch if EQ=1 → set 1 when EQ=0
-                                CmpKind::SLt | CmpKind::ULt => (4, 0),   // branch if LT=0
-                                CmpKind::SLe | CmpKind::ULe => (12, 1),  // branch if GT=1 (not <=)
-                                CmpKind::SGt | CmpKind::UGt => (4, 1),   // branch if GT=0 (after swap: LT=0 of original)
-                                CmpKind::SGe | CmpKind::UGe => (12, 0),  // branch if LT=1 (not >=, after swap)
+                                CmpKind::Eq => (4, 2),   // BO=4 → R3 = CR[bi]; bi=2 → CR0.EQ → R3 = (a==b)
+                                CmpKind::Ne => (12, 2),  // BO=12 → R3 = NOT CR[bi]; bi=2 → R3 = NOT (a==b)
+                                CmpKind::SLt | CmpKind::ULt => (4, 0),   // R3 = CR0.LT = (a<b)
+                                CmpKind::SLe | CmpKind::ULe => (12, 1),  // R3 = NOT CR0.GT = NOT (a>b) = (a<=b)
+                                CmpKind::SGt | CmpKind::UGt => (4, 0),   // R3 = CR0.LT (after swap = (a>b))
+                                CmpKind::SGe | CmpKind::UGe => (12, 1),  // R3 = NOT CR0.GT (after swap = NOT (a<b) = (a>=b))
                             };
                             // BC bo, bi, +2 (skip LI 1 if condition false)
                             code.extend_from_slice(&Instruction::Bc { bo, bi, bd: 2 }.encode());
@@ -3272,69 +3374,111 @@ impl Backend for PPC64Backend {
                             }
                             CastKind::Trunc | CastKind::BitCast => {}
                             CastKind::IntToFloat => {
-                                // Signed int → f64: STD, LFD, FCFID, STFD, LD
+                                // Signed i64 → f64: STD (store int bits), LFD (load raw 64-bit
+                                // pattern into FPR), FCFID (interpret bits as signed int64 → f64),
+                                // STFD (store f64 bits), LD (load into GPR).
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
-                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
                                 code.extend_from_slice(&Instruction::Fcfid { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::UIntToFloat => {
-                                // Unsigned int → f64: STD, LFD, FCFIDU, STFD, LD
+                                // Unsigned u64 → f64. QEMU 7.2's default ppc64
+                                // CPU (970fx v3.1, PowerISA v2.02) does NOT
+                                // implement FCFIDU (v2.06+) — it traps with
+                                // SIGILL. Work around with:
+                                //
+                                //   float(n_unsigned) = float(n_signed)
+                                //                       + (2^64 if n < 0 else 0)
+                                //
+                                // because n_unsigned = n_signed + 2^64 (mod 2^64)
+                                // when n_signed < 0, and 2^64 is exactly
+                                // representable in f64.
+                                //
+                                // 1. SRD R4, R3, R12 (R12=63) → R4 = 0 if non-neg, 1 if neg
+                                // 2. NEG R4, R4 → R4 = 0 or -1 (all-ones mask)
+                                // 3. STD R3, [scratch]; LFD F0; FCFID F0 → F0 = float(n_signed)
+                                // 4. Materialize 2^64 bits (0x43F0000000000000) in R5
+                                // 5. AND R5, R5, R4 → R5 = 2^64 bits if negative, else 0
+                                // 6. STD R5, [scratch]; LFD F1 → F1 = 2^64 or 0.0
+                                // 7. FADD F0, F0, F1 → F0 = float(n_unsigned)
+                                // 8. STFD F0; LD R3
+
+                                // Step 1: extract sign bit (high bit) into R4
+                                code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 63 }.encode());
+                                code.extend_from_slice(&Instruction::Srd { ra: Gpr::R4, rs: Gpr::R3, rb: Gpr::R12 }.encode());
+                                // Step 2: NEG R4, R4 — turns 0/1 into 0/-1 (mask)
+                                code.extend_from_slice(&Instruction::Neg { rt: Gpr::R4, ra: Gpr::R4 }.encode());
+                                // Step 3: FCFID on the signed interpretation of n
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
-                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Fcfidu { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
+                                code.extend_from_slice(&Instruction::Fcfid { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                // Step 4: materialize 2^64 as f64 bits (0x43F0000000000000)
+                                code.extend(ss_load_imm(Gpr::R5, 0x43F0_0000_0000_0000u64 as i64));
+                                // Step 5: AND R5, R5, R4 → mask out 2^64 if n was non-negative
+                                code.extend_from_slice(&Instruction::And { ra: Gpr::R5, rs: Gpr::R5, rb: Gpr::R4 }.encode());
+                                // Step 6: load F1 = 2^64 or 0.0
+                                code.extend(ss_store_to_slot(Gpr::R5, dst_offset));
+                                code.extend(ss_load_fpr_from_slot(Fpr::F1, dst_offset));
+                                // Step 7: F0 = float(n_signed) + (2^64 if negative else 0)
+                                code.extend_from_slice(&Instruction::Fadd { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
+                                // Step 8: store f64 result and load into R3
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToInt => {
-                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Fctiwz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                let lwz_off = -dst_offset + 4;
-                                if lwz_off >= -32768 && lwz_off <= 32767 {
-                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: lwz_off }.encode());
-                                } else {
-                                    code.extend(ss_load_imm(Gpr::R12, lwz_off as i64));
-                                    code.extend_from_slice(&Instruction::Add { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R12, d: 0 }.encode());
-                                }
-                                code.extend_from_slice(&Instruction::Extsw { ra: Gpr::R3, rs: Gpr::R3 }.encode());
+                                // f64 → i64 (truncate toward zero): STD (store FP bits to
+                                // memory), LFD (load into FPR), FCTIDZ (truncate to signed
+                                // int64, result in FPR as 64-bit int bits), STFD (store int64
+                                // bits), LD (load into GPR).
+                                //
+                                // Previous version used FCTIWZ (truncate to i32) and read only
+                                // the low 32 bits via LWZ — that silently truncated the result
+                                // to int32 and lost the upper half. Worse, it omitted the
+                                // initial STD so LFD read STALE memory (the SIGSEGV / wrong
+                                // result root cause).
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
+                                code.extend_from_slice(&Instruction::Fctidz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToUInt => {
-                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Fctiwz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                let lwz_off = -dst_offset + 4;
-                                if lwz_off >= -32768 && lwz_off <= 32767 {
-                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: lwz_off }.encode());
-                                } else {
-                                    code.extend(ss_load_imm(Gpr::R12, lwz_off as i64));
-                                    code.extend_from_slice(&Instruction::Add { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R12, d: 0 }.encode());
-                                }
-                                code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                // f64 → u64 (truncate toward zero): STD, LFD, FCTIDUZ (truncate
+                                // to unsigned int64), STFD, LD. FCTIDUZ (PowerISA v2.06+) is the
+                                // correct instruction; FCTIDZ would mis-interpret large u64
+                                // values (>= 2^63) as negative.
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
+                                code.extend_from_slice(&Instruction::Fctiduz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToFloat => {
                                 // Direction is determined by `from_ty` / `to_ty`.
-                                // f32 → f64: LFS (auto-promote), STFD, LD.
-                                // f64 → f32 (default): LFD, FRSP, STFS, LWZ.
+                                // f32 → f64 (widen): STW (4 bytes), LFS (auto-promote), STFD, LD.
+                                // f64 → f32 (narrow, default): STD, LFD, FRSP, STFS, LWZ.
                                 let widen = matches!(
                                     (from_ty, to_ty),
                                     (Some(IRType::F32), Some(IRType::F64))
                                 );
                                 if widen {
-                                    // f32 → f64 (FCFIDS-equivalent via LFS auto-promote)
-                                    code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
-                                    code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                    code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    // f32 → f64 via LFS auto-promote (PPC LFS loads 4 bytes and
+                                    // promotes the single-precision value to double in the FPR).
+                                    code.extend(ss_store_word_to_slot(Gpr::R3, dst_offset));
+                                    code.extend(ss_load_fpr_single_from_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                     code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                                 } else {
-                                    // f64 → f32 (default when type info is unavailable)
-                                    code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    // f64 → f32 (default when type info is unavailable).
+                                    // STD before LFD is required: the input FP bits are in R3
+                                    // and must be spilled to memory before LFD can read them.
+                                    code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                    code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
                                     code.extend_from_slice(&Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                    code.extend_from_slice(&Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend(ss_store_fpr_single_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::R3, dst_offset));
                                     code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
                                 }
                             }
@@ -3871,7 +4015,7 @@ impl Backend for PPC64Backend {
                                 CastKind::IntToFloat => "fcfid",
                                 CastKind::UIntToFloat => "fcfidu",
                                 CastKind::FloatToInt => "fctidz",
-                                CastKind::FloatToUInt => "fctidz",
+                                CastKind::FloatToUInt => "fctiduz",
                                 CastKind::FloatToFloat => "frsp",
                                 _ => "cast",
                             };
