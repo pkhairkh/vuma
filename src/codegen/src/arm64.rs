@@ -1940,8 +1940,13 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // G7: Base 0x1E020000 (rmode=00, opcode=010), Rn at [9:5]
-                Ok(0x1E020000u32
+                // SCVTF: float data-processing (1 source) encoding.
+                // AArch64: sf 00 11110 type 1 rmode opcode 000000 Rn Rd
+                // For SCVTF: rmode=00, opcode=010
+                // Base: 0x1E620000 (bit 21=1 for float data-processing)
+                // sf (bit 31) = src_64 (1 for 64-bit int source)
+                // type (bits 23:22) = dst_double ? 01 (double) : 00 (single)
+                Ok(0x1E620000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
                     | (rn.encoding() << 5)
@@ -1982,8 +1987,9 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // G7: Base 0x1E030000 (rmode=00, opcode=011), Rn at [9:5]
-                Ok(0x1E030000u32
+                // UCVTF: same as SCVTF but opcode=011 (unsigned).
+                // Base: 0x1E630000 (bit 21=1 for float data-processing)
+                Ok(0x1E630000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
                     | (rn.encoding() << 5)
