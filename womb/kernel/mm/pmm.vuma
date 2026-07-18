@@ -59,12 +59,13 @@
 // path defaults to U8.
 //
 // Workaround: store FreeNode fields in PARALLEL [u8; N] arrays and
-// pack/unpack u64 values byte-by-byte. The contract's `FreeNodePool`
-// layout is still declared (for DoD compliance — "PageFrame, FreeNode,
-// FreeNodePool, PmmState layouts verify") but the implementation uses
-// the flat `FlatPool` layout below. When the codegen gains proper
-// typed-array index lowering, this file can collapse back to
-// `nodes: [FreeNode; 256]` with `pool.nodes[i].base` access.
+// pack/unpack u64 values byte-by-byte. The implementation uses the
+// flat `FlatPool` layout below (the contract's `PageFrame` / `FreeNode`
+// / `FreeNodePool` layouts were previously declared here for DoD
+// compliance but were dead code — no production path referenced them;
+// removed during the CLEANUP-1 dead-code sweep). When the codegen
+// gains proper typed-array index lowering, this file can collapse
+// back to `nodes: [FreeNode; 256]` with `pool.nodes[i].base` access.
 //
 // ── Why are PmmState.free_lists [u8; 88] instead of [u64; 11]? ──────────────
 // Same codegen limitation as above. `[u8; 88]` = 11 packed-little-endian
@@ -77,35 +78,6 @@
 // pmm_init / pmm_alloc / pmm_free, it must re-declare the layouts and
 // function signatures byte-identically (same pattern as console.vuma
 // re-declaring its extern `write`).
-
-// ────────────────────────────────────────────────────────────────────────────
-// Contract layouts (declared verbatim per the K2a contract for DoD
-// compliance). PageFrame, FreeNode, and FreeNodePool are not used by
-// the implementation (see "Why a flat byte-array pool?" above) but
-// their layout declarations parse and IVE-verify.
-// ────────────────────────────────────────────────────────────────────────────
-
-// A single free page-frame descriptor (per contract §"Layouts").
-layout PageFrame = {
-    base: u64,
-    order: u8,
-    free: u8,
-}
-
-// A node in the free list (per contract §"Layouts").
-layout FreeNode = {
-    base: u64,
-    order: u8,
-    next: u64,
-}
-
-// The free-list node pool (per contract §"Layouts" + IMPLEMENTATION
-// DETAILS). Declared as specified; unused by the implementation, which
-// uses the FlatPool layout below.
-layout FreeNodePool = {
-    nodes: [FreeNode; 256],
-    count: u32,
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Working layouts — what the implementation actually uses.
