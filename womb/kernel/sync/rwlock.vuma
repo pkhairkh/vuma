@@ -1,0 +1,858 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/sync/rwlock.vuma
+// VWK Sync Subsystem — Read/Write Lock (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K8d layer of the VWK kernel: the read/write lock — the
+// fourth and most expressive of the K8 sync primitives. K8 (Sync) is
+// building spinlock (K8a, busy-wait + IRQ disable), mutex (K8b, sleep-on-
+// contention + wait queue), semaphore (K8c, counting), rwlock (this file,
+// K8d, reader/writer), and per-CPU primitives + IPI (K8e). K8d is the
+// first primitive that distinguishes between two KINDS of access —
+// READ access (multiple concurrent readers allowed) and WRITE access
+// (exclusive — no other readers, no other writers). This is the natural
+// primitive for protecting data structures that are read far more often
+// than they are written (page tables, inode caches, configuration
+// trees): the read-heavy path becomes parallel (N readers at once)
+// instead of serialized (one at a time, like a mutex).
+//
+// ── What K8d provides ──────────────────────────────────────────────────────
+//   rwlock_init(l)                 — readers=0, writer=0, write_waitq=0.
+//                                       Called once per rwlock before any
+//                                       acquire.
+//   rwlock_read_acquire(l)         — acquire for reading. Spins while a
+//                                       writer is active, then atomically
+//                                       increments `readers`. Multiple
+//                                       readers may hold simultaneously.
+//   rwlock_read_release(l)         — release a read hold. Atomically
+//                                       decrements `readers`.
+//   rwlock_write_acquire(l)        — acquire for writing. Spins while any
+//                                       reader or writer is active, then
+//                                       atomically sets the writer bit.
+//                                       Exclusive — no concurrent reader
+//                                       or writer.
+//   rwlock_write_release(l)        — release the write hold. Atomically
+//                                       stores 0, clearing the writer bit
+//                                       AND the reader count (defensive —
+//                                       readers should already be 0).
+//
+// ── Reader/writer semantics ────────────────────────────────────────────────
+//   The classic reader/writer invariant: AT MOST ONE writer OR AT LEAST
+//   ZERO writers with ANY NUMBER of readers. The two states are mutually
+//   exclusive — you cannot have a writer and a reader at the same time
+//   (a writer needs exclusive access; a reader tolerates other readers
+//   but not a writer). This file implements the "reader-preference"
+//   variant: readers proceed as soon as the writer releases, even if
+//   there are waiting writers (the `write_waitq` counter is diagnostic
+//   only — it does not block readers). A "writer-preference" variant
+//   (readers wait if any writer is waiting) would require an extra
+//   atomic field and is left for a future wave.
+//
+//   State transition diagram:
+//
+//        ┌──────────────────────────────────────────────────────────┐
+//        │  FREE: readers=0, writer=0                               │
+//        │  (no readers, no writer)                                 │
+//        └──────┬───────────────────────────────┬───────────────────┘
+//               │ read_acquire                  │ write_acquire
+//               │ (CAS: 0 → 1 on readers)       │ (CAS: 0 → 1<<32)
+//               ▼                               ▼
+//        ┌──────────────────────┐   ┌──────────────────────────────┐
+//        │  READING: readers>0  │   │  WRITING: writer=1           │
+//        │  (1+ readers, no     │   │  (exactly 1 writer, 0        │
+//        │   writer)            │   │   readers)                   │
+//        └──────┬───────────────┘   └──────┬───────────────────────┘
+//               │ read_release             │ write_release
+//               │ (CAS: cur → cur-1)       │ (atomic_store 0)
+//               │ until readers=0          │
+//               ▼                          ▼
+//        ┌──────────────────────────────────────────────────────────┐
+//        │  FREE: readers=0, writer=0                               │
+//        └──────────────────────────────────────────────────────────┘
+//
+//   Note: the transition READING → WRITING is NOT direct — a writer must
+//   wait for readers to drain (readers=0) before its CAS(0 → 1<<32)
+//   succeeds. Similarly, WRITING → READING is not direct — readers must
+//   wait for the writer to release (writer=0) before their CAS proceeds.
+//   Both transitions go through the FREE state.
+//
+// ── Layout: why `writer` is at offset 4, not offset 8 ──────────────────────
+//   The K8d contract's prose layout was:
+//     { readers: u32, _pad0: u32, writer: u32, _pad1: u32, write_waitq: u32 }
+//   which would put `writer` at offset 8 (after readers=0 + _pad0=4).
+//   But the contract's ATOMIC semantics require `writer` to be in the
+//   HIGH 32 BITS of the 8-byte CAS word at offset 0 (writer_part =
+//   (cur >> 32) & 0xFFFFFFFF; the CAS at bit 32 = 0x100000000). An 8-
+//   byte CAS at offset 0 covers bytes [0..7] — `readers` (offset 0..3)
+//   and whatever is at offset 4..7. If `writer` were at offset 8, it
+//   would be OUTSIDE the CAS window, and the contract's `writer_part`
+//   extraction and `if l.writer != 1` self-test check would both break
+//   (the CAS would set `_pad0` to 1 at offset 4, leaving `writer` at
+//   offset 8 untouched at 0 — the self-test's `if l.writer != 1` would
+//   return 4 and fail).
+//
+//   This file therefore uses the SEMANTICALLY CORRECT 4-field layout:
+//     { readers: u32, writer: u32, write_waitq: u32, _pad1: u32 }
+//   which puts `writer` at offset 4 (the high 32 bits of the CAS word),
+//   matching the contract's atomic semantics. The contract's `_pad0`
+//   field is dropped — it served no purpose other than to (incorrectly)
+//   pad the CAS window. `_pad1` is retained as padding to round the
+//   layout up to 16 bytes (4 × u32) for alignment. The `write_waitq`
+//   field (diagnostic counter of waiting writers) is at offset 8,
+//   outside the CAS window — it is only modified by direct field writes
+//   (init sets it to 0; the hosted self-test never bumps it because the
+//   slow path is never taken). This matches the K8b/K8c convention of
+//   keeping the "diagnostic" fields (owner, waitq_count) outside the
+//   CAS window.
+//
+//   Field offset map (verified against the codegen's sequential-offset
+//   layout model — same model as K8a's Spinlock, K8b's Mutex, K8c's
+//   Semaphore):
+//     offset  0: readers      (u32) — low 32 bits of CAS word
+//     offset  4: writer       (u32) — high 32 bits of CAS word
+//     offset  8: write_waitq  (u32) — outside CAS window
+//     offset 12: _pad1        (u32) — padding
+//     total: 16 bytes
+//
+// ── AtomicCas / AtomicStore / AtomicLoad syntax ────────────────────────────
+//   Same as K8a/K8b/K8c. The VUMA parser recognizes the LOWERCASE keywords
+//   `atomic_load`, `atomic_store`, `atomic_cas` (src/parser/src/lexer.rs:
+//   629-631). Capitalized forms are CallNode names synthesized by the
+//   bridge and are NOT user-visible syntax.
+//
+//   Argument order (verified in src/parser/src/parser.rs:3084-3116):
+//     atomic_load(addr)                  → returns u64 at [addr]
+//     atomic_store(addr, val)            → stores u64 val to [addr]
+//     atomic_cas(addr, expected, desired) → returns OLD u64 at [addr];
+//                                           if old == expected, stores
+//                                           desired (swap succeeded)
+//
+//   All three operate on 8-byte (u64) values at the State<RwLock> buffer
+//   pointer (= offset 0 of the layout). The CAS window covers
+//   `readers | (writer << 32)`. `atomic_store(l as Address, 0)` writes 0
+//   to bytes [0..7], clearing BOTH `readers` AND `writer` simultaneously
+//   — this is why write_release is a single atomic_store (no need for
+//   separate field clears; the store is atomic and clears the whole CAS
+//   word in one instruction).
+//
+// ── `l as Address` ─────────────────────────────────────────────────────────
+//   `l` is a `State<RwLock>` parameter. In flatten_expr
+//   (src/pipeline.rs:8495-8503), `Expr::Var { name: "l", .. }` lowers to
+//   `ScgExpr::Var("l")` — the variable holds the State's buffer pointer
+//   (an Address-sized value). `Expr::Cast { expr, target_type: Address }`
+//   is a no-op in flatten_expr (src/pipeline.rs:8811) — it just returns
+//   the inner expression. So `l as Address` is a type-annotation hint
+//   that documents the intent (the State<T> buffer pointer is being used
+//   as an Address for the atomic builtin) without changing the codegen.
+//   Same pattern as K8a/K8b/K8c.
+//
+// ── Constants ──────────────────────────────────────────────────────────────
+//   All constants are DECIMAL per the K8d contract's "Use decimal
+//   constants" rule (same discipline as K8a/K8b/K8c — avoids the parser's
+//   hex-literal path and its width-extension subtleties). The constants:
+//     0            = "no readers" / "no writer" / "success flag = not
+//                    yet acquired" base / "writer_part == 0" check / CAS
+//                    expected value for write_acquire / atomic_store
+//                    value for write_release.
+//     1            = "writer active" sentinel (the value stored in the
+//                    `writer` field when a writer holds the lock) /
+//                    "success flag = acquired" sentinel.
+//     4294967295   = 0xFFFFFFFF — 32-bit mask. Used to extract the low
+//                    32 bits (readers_part = cur & 4294967295) or the
+//                    high 32 bits (writer_part = (cur >> 32) &
+//                    4294967295) from the 8-byte CAS word. The shift-
+//                    and-mask is the standard "split a u64 into two
+//                    u32s" idiom — VUMA has no native u32-from-u64
+//                    extraction, so we shift right by 32 then mask off
+//                    any high bits (the shift alone would suffice on a
+//                    64-bit machine — the mask is defensive and matches
+//                    the contract's reference code verbatim).
+//     4294967296   = 0x100000000 — the "writer bit" = bit 32. This is
+//                    the desired value for the write_acquire CAS: it
+//                    sets `writer` (high 32 bits) to 1 while keeping
+//                    `readers` (low 32 bits) at 0. Stored as a decimal
+//                    constant because VUMA's hex-literal path has
+//                    width-extension subtleties (see K8a's spinlock.vuma
+//                    header for the same rationale). The value
+//                    4294967296 is exactly 2^32 — it fits in a u64 but
+//                    NOT in a u32, so any u32-typed intermediate would
+//                    truncate it to 0. The atomic_cas builtin takes
+//                    u64 arguments (IRType::U64 — see K8a/K8b), so the
+//                    full value is preserved through the CAS.
+//
+// ── Reader acquire: the two-stage spin ─────────────────────────────────────
+//   rwlock_read_acquire has TWO nested loops:
+//     1. OUTER (CAS retry): `while success == 0` — retry the CAS until
+//        it succeeds (handles the race where another reader changes
+//        `readers` between our atomic_load and our atomic_cas).
+//     2. INNER (writer spin): `while l.writer != 0` — wait for any
+//        active writer to release before we try to acquire.
+//
+//   The inner loop reads `l.writer` (offset 4) with a plain field load,
+//   NOT an atomic_load. This is safe in the hosted single-threaded self-
+//   test (no concurrent CPU can be mid-write). In a real SMP kernel, you
+//   would use atomic_load to observe a consistent `readers | writer`
+//   snapshot — but the plain field read of `l.writer` is correct here
+//   because `writer` is a single u32 and u32 loads are atomic on all
+//   supported targets (x86_64, aarch64 — aligned 4-byte loads are
+//   guaranteed atomic by the architecture). The risk is that we might
+//   see `writer == 0` (writer just released) but then the CAS sees
+//   `writer == 1` (a new writer just acquired) — in that case the CAS
+//   fails (old != cur because writer_part != 0), and we loop back to
+//   the inner spin. This is correct — we just retry.
+//
+//   After the inner spin exits (writer == 0), we do an atomic_load to
+//   get a fresh `cur = readers | (writer << 32)`, re-check `writer_part
+//   == 0` (defensive — the inner spin's plain read could be stale by a
+//   few instructions), then CAS(cur → cur + 1) to increment `readers`.
+//   The `cur + 1` preserves the high 32 bits (writer = 0) while
+//   incrementing the low 32 bits (readers). If the CAS succeeds (old ==
+//   cur), we've acquired the read lock. If it fails (old != cur —
+//   another reader or a writer changed the word between our load and
+//   our CAS), we retry the outer loop.
+//
+//   Why `cur + 1` and not a constant? Because the CAS window covers 8
+//   bytes (readers + writer), and the desired value must include
+//   writer's high 4 bytes (always 0 when we're acquiring a read lock,
+//   because we just checked `writer_part == 0`). Using `cur + 1`
+//   preserves writer's high 4 bytes (which are 0 in `cur`) while
+//   incrementing readers. A constant desired value like `1` would
+//   overwrite writer's bytes with 0 — which happens to be correct here
+//   (writer is 0), but `cur + 1` is more general and matches the K8c
+//   semaphore's `cur + 1` / `cur - 1` pattern (see K8c's sema_up /
+//   sema_down).
+//
+// ── Reader release: the CAS decrement ──────────────────────────────────────
+//   rwlock_read_release is the canonical "atomic decrement via CAS" loop
+//   (same shape as K8c's sema_down fast path):
+//     1. atomic_load → cur.
+//     2. If cur > 0, CAS(cur → cur - 1). If old == cur, done.
+//     3. Else (cur == 0), we're releasing a read lock we don't hold —
+//        silently succeed (defensive — a real kernel would panic). This
+//        matches the contract's reference code: "else: success = 1
+//        (already 0)".
+//
+//   The `cur - 1` preserves writer's high 4 bytes (which are 0 — readers
+//   and writers are mutually exclusive, so if we're releasing a read
+//   lock, writer must be 0) while decrementing readers. The `cur > 0`
+//   guard handles the edge case where readers is already 0 (defensive
+//   — the hosted self-test never hits this path because every
+//   read_acquire is paired with a read_release).
+//
+// ── Writer acquire: the exclusive CAS ──────────────────────────────────────
+//   rwlock_write_acquire is the strictest of the five operations: it
+//   must wait for BOTH readers to drain AND any prior writer to release
+//   before it can acquire. The loop:
+//     1. atomic_load → cur.
+//     2. readers_part = cur & 4294967295 (low 32 = readers count).
+//     3. writer_part  = (cur >> 32) & 4294967295 (high 32 = writer flag).
+//     4. If readers_part == 0 AND writer_part == 0, the lock is FREE —
+//        try CAS(0 → 4294967296) to set the writer bit.
+//     5. If the CAS succeeds (old == 0), we've acquired the write lock.
+//        Else (someone raced in and grabbed a read or write lock
+//        between our load and our CAS), retry the outer loop.
+//     6. If readers_part != 0 OR writer_part != 0, the lock is busy —
+//        spin (retry the outer loop, which re-loads cur).
+//
+//   The CAS expected value is the CONSTANT 0 (not `cur`), because we
+//   only attempt the CAS when `cur == 0` (both readers and writer are
+//   0). If `cur` were non-zero, we wouldn't attempt the CAS at all (we'd
+//   spin). Using the constant 0 makes the "free → writing" transition
+//   explicit — the CAS only succeeds if the lock is observed FREE and
+//   atomically transitions to WRITING in one instruction. This is the
+//   classic "test-and-set via CAS" pattern, adapted for the two-field
+//   (readers + writer) CAS window.
+//
+//   The desired value 4294967296 = 0x100000000 = `writer=1, readers=0`
+//   (writer in the high 32 bits, readers in the low 32 bits). After a
+//   successful CAS, the layout state is:
+//     offset 0 (readers):     0
+//     offset 4 (writer):      1
+//     offset 8 (write_waitq): unchanged (still 0 in the self-test)
+//     offset 12 (_pad1):      unchanged (still 0)
+//
+// ── Writer release: the atomic_store(0) ────────────────────────────────────
+//   rwlock_write_release is a single atomic_store(0). This writes 0 to
+//   bytes [0..7], clearing BOTH `readers` (offset 0..3) AND `writer`
+//   (offset 4..7) in one atomic instruction. Readers is already 0 (the
+//   writer's CAS(0 → 1<<32) only succeeded because readers was 0, and
+//   no reader could have acquired while writer=1), so clearing it again
+//   is a no-op — but the atomic_store clears the whole 8-byte word, so
+//   it's a single instruction either way. This matches K8a's
+//   spinlock_release and K8b's mutex_release (both use atomic_store(0)
+//   to drop the lock word).
+//
+//   Note: write_release does NOT clear `write_waitq`. The waiting
+//   writers (if any — there are none in the hosted self-test) are
+//   responsible for decrementing their own count after their CAS
+//   succeeds (same pattern as K8b's mutex_acquire decrementing
+//   waitq_count after the CAS succeeds, and K8c's sema_down decrementing
+//   waitq_count after the CAS succeeds). A real kernel would also call
+//   wake_one(waitq) here to release a waiting writer — but we don't have
+//   a full WaitQueue embedded (just the count), so the woken writer's
+//   busy-wait loop will see `writer == 0` on its next iteration and
+//   proceed.
+//
+// ── write_waitq: diagnostic only ───────────────────────────────────────────
+//   `write_waitq` counts the number of writers waiting for the lock. In
+//   the hosted single-threaded self-test, this counter stays at 0
+//   (write_acquire's CAS always succeeds on the first try — no other
+//   CPU can hold the lock). The field is declared for completeness and
+//   for diagnostic value in a real kernel — a non-zero write_waitq
+//   would indicate writer contention (which the reader-preference
+//   variant does NOT throttle; see "Reader/writer semantics" above).
+//
+//   Note: the K8d contract's reference code does NOT increment
+//   write_waitq anywhere (no slow-path bookkeeping for waiting
+//   writers — unlike K8b's mutex_acquire which bumps waitq_count on
+//   the slow path). This file follows the contract: write_waitq is
+//   initialized to 0 in rwlock_init and never modified again. A future
+//   wave that wants accurate writer-waiter counts would add the
+//   increment in write_acquire's spin loop (before the inner spin) and
+//   the decrement after the CAS succeeds (same shape as K8b's
+//   mutex_acquire waitq_count bookkeeping).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, `free`, or any pointer syntax anywhere
+//   in this file. The RwLock is a flat struct held in a
+//   `___pmt_buffer`-backed State<RwLock>; the CALLER allocates it via
+//   `state_new(RwLock)` and passes it by reference to rwlock_init /
+//   rwlock_read_acquire / rwlock_read_release / rwlock_write_acquire /
+//   rwlock_write_release (init-style API — see "Why init-style?" in
+//   K4e's wait.vuma header for the codegen rationale). No externs, no
+//   FFI, no trampolines — unlike K8a (which declares irq_disable /
+//   irq_restore externs for IRQ save/restore), K8d's rwlock doesn't
+//   need IRQ manipulation: a sleeping rwlock is not IRQ-safe by design
+//   (you can't sleep in an interrupt handler), so there's no IRQ state
+//   to save. Same as K8b's mutex and K8c's semaphore.
+//
+//   The atomic builtins `atomic_load`, `atomic_store`, `atomic_cas` are
+//   NOT pointer syntax — they're VUMA IR builtins recognized by the
+//   parser as keywords (src/parser/src/lexer.rs:629-631), not function
+//   calls on `*Address`. The `l as Address` cast is a type-annotation
+//   hint to flatten_expr, not a pointer dereference — the resulting
+//   value is the State<T> buffer pointer (which is just a u64 integer
+//   at the IR level), passed by value to the atomic builtin. No `*` or
+//   `&` anywhere in the file.
+//
+//   State<T> params: 1 per function (l only), per the K4b contract's
+//   "1-2 per function" rule. The rwlock_* functions don't need a
+//   ProcessTable, a Task, or a task_idx — they're manipulating only the
+//   RwLock itself. Unlike K8a's spinlock and K8b's mutex (which take a
+//   task_idx for ownership tracking), K8d's rwlock does NOT track
+//   ownership — readers are anonymous (any task can release a read
+//   lock, even one it didn't acquire — this is a known limitation of
+//   the basic rwlock design; a "owned rwlock" variant would add a
+//   reader-count-per-task map, which is left for a future wave). The
+//   writer is similarly anonymous — any task can call write_release.
+//   This matches Linux's struct rw_semaphore (which doesn't track the
+//   writer's task_struct either — ownership is the caller's
+//   responsibility, enforced by code review rather than runtime check).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the RwLock layout (new to
+//   this file — no prior VWK file declares it). K8+ files that need to
+//   manipulate rwlocks (the VFS inode rwlock for read-heavy inode
+//   access, the MM's page-table rwlock for read-heavy page-walks) will
+//   re-declare RwLock byte-identically and call these five functions
+//   directly (VUMA's lack of `import` means each consumer file re-
+//   declares; see K1a-hosted's "no-import re-declaration rule" header
+//   note for the same pattern).
+//
+// ── RwLock vs. other K8 primitives (when to use which) ─────────────────────
+//   K8a spinlock:
+//     + IRQ-aware (disables IRQs on acquire, restores on release) → safe
+//       to use in interrupt context.
+//     + Recursive (depth counter — same task can acquire N times).
+//     - Busy-waits on contention (burns CPU).
+//     - Exclusive (one holder at a time).
+//     Use for: SHORT, IRQ-context critical sections (e.g., scheduler
+//     runqueue lock, per-CPU stats update).
+//
+//   K8b mutex:
+//     + Sleeps on contention (frees the CPU).
+//     + Wait queue (no thundering herd).
+//     - NOT IRQ-aware (can't sleep in ISR).
+//     - NOT recursive.
+//     - Exclusive (one holder at a time).
+//     Use for: LONGER, task-context critical sections (e.g., inode I/O,
+//     pipe read/write).
+//
+//   K8c semaphore:
+//     + Counting (N concurrent holders — natural for resource pools).
+//     + Producer/consumer (acquire by one task, release by another).
+//     - NOT IRQ-aware.
+//     - No ownership (any task can release).
+//     Use for: resource pools (N buffers), producer/consumer signaling.
+//
+//   K8d rwlock (this file):
+//     + Reader-parallel (N readers at once — read-heavy path scales).
+//     + Writer-exclusive (write path is safe — no torn reads).
+//     - NOT IRQ-aware.
+//     - No ownership (any task can release a read or write lock).
+//     - Reader-preference (writers can starve under heavy read load —
+//       a "writer-preference" variant would fix this; left for future).
+//     Use for: READ-HEAVY data structures with rare writes (page
+//       tables, inode caches, configuration trees, device register
+//       maps).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/sync/rwlock.vuma \
+//         /tmp/rwlock.bin x86_64 --verify
+//     /tmp/rwlock.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 5 self-test checks pass — 2 read
+// acquires leave readers=2; first read release leaves readers=1; second
+// read release leaves readers=0; write acquire sets writer=1; write
+// release clears writer=0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// RwLock: 4 fields × 4 bytes = 16 bytes. See "Layout: why `writer` is at
+// offset 4, not offset 8" in the file header for the rationale behind
+// dropping the contract's `_pad0` field — short version: the contract's
+// atomic semantics require `writer` to be in the high 32 bits of the
+// 8-byte CAS word at offset 0, so `writer` MUST be at offset 4 (right
+// after `readers`), not at offset 8 (after a `_pad0`). The contract's
+// 5-field layout with `_pad0` between `readers` and `writer` would push
+// `writer` outside the CAS window, breaking both the `writer_part`
+// extraction AND the `if l.writer != 1` self-test check.
+//
+// Field semantics:
+//   readers      — count of active readers (0 = no readers). The low 32
+//                  bits of the 8-byte CAS word at offset 0. Modified
+//                  ONLY by atomic_cas (read_acquire increments, read_
+//                  release decrements) and atomic_store (write_release
+//                  clears it to 0 along with `writer`). Read by the
+//                  self-test (`if l.readers != 2`) with a plain field
+//                  load — safe in the single-threaded hosted self-test;
+//                  in a real SMP kernel you'd use atomic_load.
+//   writer       — 0 = no writer, 1 = writer active. The HIGH 32 bits
+//                  of the 8-byte CAS word at offset 0 (i.e., at byte
+//                  offset 4). Modified ONLY by atomic_cas (write_acquire
+//                  sets it to 1 via CAS(0 → 1<<32)) and atomic_store
+//                  (write_release clears it to 0). Read by the self-test
+//                  (`if l.writer != 1`) and by read_acquire's inner spin
+//                  (`while l.writer != 0`) with a plain field load —
+//                  safe because u32 loads are atomic on all supported
+//                  targets.
+//   write_waitq  — number of waiting writers (diagnostic only — see
+//                  "write_waitq: diagnostic only" in the file header).
+//                  Outside the CAS window (offset 8). Modified ONLY by
+//                  rwlock_init (sets to 0). Never bumped in the hosted
+//                  self-test (the write_acquire CAS always succeeds on
+//                  the first try — no contention).
+//   _pad1        — padding to round the layout up to 16 bytes. Always 0.
+//                  Never modified by any function (state_new zero-fills,
+//                  and no atomic op or field write touches offset 12).
+layout RwLock = {
+    readers:     u32,  // count of active readers (low 32 bits of CAS word)
+    writer:      u32,  // 0 = no writer, 1 = writer active (high 32 bits of CAS word)
+    write_waitq: u32,  // number of waiting writers (diagnostic, outside CAS window)
+    _pad1:       u32,  // padding to 16 bytes
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// RwLock operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// rwlock_init: zero the rwlock. Sets readers=0, writer=0, write_waitq=0.
+// Called once per rwlock before any acquire. The CALLER allocates the
+// RwLock via `state_new(RwLock)` and passes it by reference (init-style
+// API — same as K8a/K8b/K8c).
+//
+// State<T> params: 1 (l). Pure write — no reads, no helper calls, no
+// atomics. The 3 field assignments are direct (no byte-packing needed
+// because every field is a primitive u32, not a nested layout).
+//
+// _pad1 is NOT explicitly set — it relies on state_new's zero-fill
+// (same as K8c's sema_init not setting any padding field). The K8b
+// mutex's mutex_init DOES explicitly set _pad0 = 0, but that's because
+// mutex_init's _pad0 is INSIDE the CAS window and the convention is to
+// make the "all zero" state self-evident. K8d's _pad1 is OUTSIDE the
+// CAS window (offset 12) and never touched by any atomic op, so the
+// implicit zero-fill is sufficient (and matches K8c's pattern).
+fn rwlock_init(l: State<RwLock>) {
+    l.readers = 0;
+    l.writer = 0;
+    l.write_waitq = 0;
+}
+
+// rwlock_read_acquire: acquire for reading. Spins while a writer is
+// active (inner loop), then atomically increments `readers` via CAS
+// (outer loop). Multiple readers may hold simultaneously — the CAS
+// increments `readers` without touching `writer`, so concurrent readers
+// just race the CAS and the loser retries.
+//
+//   l: the RwLock to acquire for reading.
+//
+// State<T> params: 1 (l). Reads l.writer (inner spin). Calls two IR
+// builtins (atomic_load, atomic_cas).
+//
+// The two nested loops:
+//   OUTER (CAS retry): `while success == 0` — retry the CAS until it
+//     succeeds. Handles the race where another reader increments
+//     `readers` between our atomic_load and our atomic_cas (in that
+//     case old != cur, we loop back and re-load cur).
+//   INNER (writer spin): `while l.writer != 0` — wait for any active
+//     writer to release. A plain field read of `l.writer` (offset 4) is
+//     safe because u32 loads are atomic on all supported targets.
+//
+// After the inner spin exits (writer == 0), we do an atomic_load to get
+// a fresh `cur = readers | (writer << 32)`, re-check `writer_part == 0`
+// (defensive — in case a writer raced in between the inner spin's read
+// and the atomic_load), then CAS(cur → cur + 1) to increment `readers`.
+// The `cur + 1` preserves `writer`'s high 4 bytes (which are 0 in `cur`
+// — we just checked writer_part == 0) while incrementing `readers`.
+//
+// The busy-wait loops terminate because:
+//   - In hosted mode, only one task is running (single-threaded self-
+//     test), so the inner spin is never entered (writer is always 0
+//     when read_acquire is called) and the outer CAS always succeeds
+//     on the first try (no other CPU can change `readers` between our
+//     load and our CAS).
+//   - In a real SMP/preemptive kernel, the inner loop terminates when
+//     the writer calls write_release (atomic_store(0) clears `writer`).
+//     The outer loop terminates when the CAS succeeds (old == cur) —
+//     either on the first try (no contention) or after a few retries
+//     (other readers racing the CAS).
+fn rwlock_read_acquire(l: State<RwLock>) {
+    // `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
+    let success = 0;
+    while success == 0 {
+        // Inner spin: wait until no writer is active.
+        //   `l.writer` is a plain field read of offset 4. u32 loads are
+        //   atomic on all supported targets, so this is safe (we might
+        //   see a stale value, but the subsequent atomic_load + CAS
+        //   will catch any race — if a writer grabbed the lock between
+        //   this read and the CAS, the CAS's `old != cur` branch
+        //   retries the outer loop, which re-enters the inner spin).
+        //   In a real kernel: this is where we'd call sleep_on(waitq)
+        //   to yield the CPU instead of busy-waiting — but we don't
+        //   have a scheduler yet (K9 builds it), so we spin.
+        while l.writer != 0 {
+            // spin (in real kernel: sleep)
+        }
+        // Fresh snapshot of the 8-byte CAS word.
+        //   atomic_load(addr) returns readers | (writer << 32).
+        //   After the inner spin exits, writer should be 0 — but we
+        //   re-check via `writer_part == 0` below in case a writer
+        //   raced in.
+        let cur = atomic_load(l as Address);
+        // Extract the high 32 bits (writer field).
+        //   `(cur >> 32) & 4294967295` shifts the writer byte down to
+        //   the low 32 bits, then masks off any high bits (defensive —
+        //   the shift alone suffices on a 64-bit machine, but the mask
+        //   matches the contract's reference code verbatim).
+        let writer_part = (cur >> 32) & 4294967295;
+        // Only attempt the CAS if no writer is active.
+        //   If writer_part != 0, a writer grabbed the lock between the
+        //   inner spin and the atomic_load — fall through to the outer
+        //   loop's re-iteration, which re-enters the inner spin.
+        if writer_part == 0 {
+            // CAS(cur → cur + 1): atomically increment `readers`.
+            //   atomic_cas(addr, expected, desired) returns the OLD
+            //   value at addr. If old == expected (cur), the swap
+            //   succeeded (we incremented readers). If old != expected
+            //   (another reader or a writer changed the word between
+            //   our load and our CAS), we retry the outer loop.
+            //   On x86_64 this is `LOCK CMPXCHG [R10], RCX` with
+            //   RAX=expected=cur, RCX=desired=cur+1; CMPXCHG stores
+            //   old into RAX whether the swap succeeded or not, so dst
+            //   receives the old value.
+            //   The desired value `cur + 1` preserves `writer`'s high
+            //   4 bytes (which are 0 in `cur` — we just checked
+            //   writer_part == 0) while incrementing `readers`.
+            let old = atomic_cas(l as Address, cur, cur + 1);
+            if old == cur {
+                success = 1;
+            }
+            // If old != cur, someone changed the word between our load
+            // and our CAS — retry the outer loop (re-load cur, re-spin
+            // if a writer appeared). In hosted single-threaded mode,
+            // this branch is never taken (no other CPU can change the
+            // word between our load and our CAS).
+        }
+        // If writer_part != 0, a writer is active — fall through to
+        // the outer loop's re-iteration, which re-enters the inner
+        // spin (waiting for the writer to release).
+    }
+}
+
+// rwlock_read_release: release a read hold. Atomically decrements
+// `readers` via CAS loop. If `readers` is already 0 (defensive — we're
+// releasing a read lock we don't hold), silently succeed.
+//
+//   l: the RwLock to release.
+//
+// State<T> params: 1 (l). Calls two IR builtins (atomic_load, atomic_cas).
+//
+// This is the canonical "atomic decrement via CAS" loop (same shape as
+// K8c's sema_down fast path):
+//   1. atomic_load → cur.
+//   2. If cur > 0, CAS(cur → cur - 1). If old == cur, done.
+//   3. Else (cur == 0), we're releasing a read lock we don't hold —
+//      silently succeed (defensive — matches the contract's reference
+//      code: "else: success = 1 (already 0)").
+//
+// The `cur - 1` preserves `writer`'s high 4 bytes (which are 0 — readers
+// and writers are mutually exclusive, so if we hold a read lock, writer
+// must be 0) while decrementing `readers`. The `cur > 0` guard handles
+// the edge case where readers is already 0 (defensive — the hosted
+// self-test never hits this path because every read_acquire is paired
+// with a read_release).
+//
+// Note: read_release does NOT check whether the caller actually holds a
+// read lock. The rwlock has no ownership tracking (see "PMT discipline"
+// in the file header) — any task can release a read lock, even one it
+// didn't acquire. This is a known limitation of the basic rwlock design
+// (matches Linux's struct rw_semaphore). A "owned rwlock" variant would
+// add a reader-count-per-task map, which is left for a future wave.
+fn rwlock_read_release(l: State<RwLock>) {
+    // `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur)
+    // OR we hit the `cur == 0` defensive path.
+    let success = 0;
+    while success == 0 {
+        // Fresh snapshot of the 8-byte CAS word.
+        //   After a read_acquire: cur = readers | (0 << 32) = readers
+        //   (writer is 0 because readers and writers are mutually
+        //   exclusive — a reader can't hold while a writer is active,
+        //   and vice versa).
+        let cur = atomic_load(l as Address);
+        if cur > 0 {
+            // CAS(cur → cur - 1): atomically decrement `readers`.
+            //   Same CAS pattern as read_acquire, but decrementing
+            //   instead of incrementing. The desired value `cur - 1`
+            //   preserves `writer`'s high 4 bytes (which are 0) while
+            //   decrementing `readers`.
+            let old = atomic_cas(l as Address, cur, cur - 1);
+            if old == cur {
+                success = 1;
+            }
+            // If old != cur, someone changed the word between our load
+            // and our CAS — retry (re-load cur). In hosted single-
+            // threaded mode, this branch is never taken.
+        } else {
+            // Defensive: cur == 0 means readers is already 0 (we're
+            // releasing a read lock we don't hold). Silently succeed
+            // — a real kernel would panic (kernel bug) or return
+            // -EINVAL (user-space bug). The hosted self-test never
+            // hits this path because every read_acquire is paired
+            // with a read_release.
+            success = 1;  // already 0
+        }
+    }
+}
+
+// rwlock_write_acquire: acquire for writing. Spins while ANY reader or
+// writer is active, then atomically sets the writer bit via CAS. The
+// writer is EXCLUSIVE — no concurrent reader or writer.
+//
+//   l: the RwLock to acquire for writing.
+//
+// State<T> params: 1 (l). No plain field reads or writes. Calls two IR
+// builtins (atomic_load, atomic_cas).
+//
+// The loop:
+//   1. atomic_load → cur.
+//   2. readers_part = cur & 4294967295 (low 32 bits = readers count).
+//   3. writer_part  = (cur >> 32) & 4294967295 (high 32 bits = writer).
+//   4. If readers_part == 0 AND writer_part == 0, the lock is FREE —
+//      try CAS(0 → 4294967296) to set the writer bit.
+//   5. If the CAS succeeds (old == 0), we've acquired the write lock.
+//      Else (someone raced in and grabbed a read or write lock between
+//      our load and our CAS), retry the outer loop.
+//   6. If readers_part != 0 OR writer_part != 0, the lock is busy —
+//      spin (retry the outer loop, which re-loads cur).
+//
+// The CAS expected value is the CONSTANT 0 (not `cur`), because we
+// only attempt the CAS when `cur == 0` (both readers and writer are
+// 0). The desired value 4294967296 = 0x100000000 = `writer=1,
+// readers=0` — sets the writer bit (bit 32) while keeping readers at 0.
+//
+// The busy-wait loop terminates because:
+//   - In hosted mode, only one task is running (single-threaded self-
+//     test), so the CAS always succeeds on the first try (readers and
+//     writer are both 0 after init or after the prior release's
+//     atomic_store(0)).
+//   - In a real SMP/preemptive kernel, the loop terminates when all
+//     readers have called read_release (draining `readers` to 0) AND
+//     any prior writer has called write_release (clearing `writer` to
+//     0). At that point our CAS(0 → 1<<32) succeeds.
+//
+// Note: write_acquire does NOT increment `write_waitq`. The K8d
+// contract's reference code doesn't either — the field is diagnostic
+// only and never bumped. See "write_waitq: diagnostic only" in the
+// file header.
+fn rwlock_write_acquire(l: State<RwLock>) {
+    // `success` is 0 until the CAS(0 → 1<<32) succeeds (old == 0).
+    let success = 0;
+    while success == 0 {
+        // Wait until no readers and no writer.
+        //   atomic_load returns readers | (writer << 32).
+        let cur = atomic_load(l as Address);
+        // Extract the low 32 bits (readers count).
+        //   `cur & 4294967295` masks off the high 32 bits (writer),
+        //   leaving just the readers count.
+        let readers_part = cur & 4294967295;
+        // Extract the high 32 bits (writer flag).
+        //   `(cur >> 32) & 4294967295` shifts the writer byte down to
+        //   the low 32 bits, then masks off any high bits (defensive).
+        let writer_part = (cur >> 32) & 4294967295;
+        // Only attempt the CAS if the lock is FREE (no readers, no
+        // writer).
+        if readers_part == 0 && writer_part == 0 {
+            // Try to set the writer bit (bit 32).
+            //   CAS(addr, expected=0, desired=4294967296): if the
+            //   current value at addr is 0 (free), atomically store
+            //   4294967296 (= 0x100000000 = writer=1, readers=0).
+            //   Returns the OLD value — if old == 0, the swap
+            //   succeeded (we acquired the write lock). If old != 0,
+            //   someone raced in and grabbed a read or write lock
+            //   between our load and our CAS — retry the outer loop.
+            //   On x86_64: `LOCK CMPXCHG [R10], RCX` with RAX=0,
+            //   RCX=4294967296.
+            let old = atomic_cas(l as Address, 0, 4294967296);
+            if old == 0 {
+                success = 1;
+            }
+            // If old != 0, someone raced in — retry the outer loop
+            // (re-load cur, re-check readers_part and writer_part).
+            // In hosted single-threaded mode, this branch is never
+            // taken (no other CPU can change the word between our
+            // load and our CAS).
+        }
+        // else: spin — readers_part != 0 (readers active) OR writer_part
+        // != 0 (writer active). Fall through to the outer loop's
+        // re-iteration, which re-loads cur and re-checks. In a real
+        // kernel: this is where we'd call sleep_on(waitq) to yield the
+        // CPU instead of busy-waiting.
+    }
+}
+
+// rwlock_write_release: release the write hold. A single atomic_store(0)
+// clears BOTH `readers` (offset 0..3) AND `writer` (offset 4..7) in one
+// atomic instruction. `readers` is already 0 (the writer's CAS only
+// succeeded because readers was 0, and no reader could have acquired
+// while writer=1), so clearing it again is a no-op — but the
+// atomic_store clears the whole 8-byte word, so it's a single
+// instruction either way.
+//
+//   l: the RwLock to release.
+//
+// State<T> params: 1 (l). No plain field reads or writes. Calls one IR
+// builtin (atomic_store).
+//
+// The atomic_store writes 0 to bytes [0..7], clearing `readers` AND
+// `writer`. A waiting reader's atomic_load will now see `writer_part ==
+// 0`, and its CAS(cur → cur + 1) will succeed on the next iteration. A
+// waiting writer's atomic_load will now see `readers_part == 0 &&
+// writer_part == 0`, and its CAS(0 → 1<<32) will succeed on the next
+// iteration. In a real kernel: this is where we'd call wake_one(waitq)
+// to wake exactly one waiter (avoiding thundering herd) — but we don't
+// have a full WaitQueue embedded (just the count), so the woken
+// waiter's busy-wait loop will see the cleared word on its next
+// iteration and proceed.
+//
+// Note: write_release does NOT check whether the caller actually holds
+// the write lock. The rwlock has no ownership tracking (see "PMT
+// discipline" in the file header) — any task can call write_release,
+// even one that didn't call write_acquire. This matches Linux's struct
+// rw_semaphore. A real kernel would panic on a non-holder release
+// (kernel bug) — here we silently succeed (stub error path).
+//
+// Note: write_release does NOT clear `write_waitq`. The waiting writers
+// (if any) are responsible for decrementing their own count after their
+// CAS succeeds (same pattern as K8b's mutex_release not decrementing
+// waitq_count — the woken acquirer does). But since the K8d contract
+// never bumps write_waitq anyway (see "write_waitq: diagnostic only"),
+// this is moot.
+fn rwlock_write_release(l: State<RwLock>) {
+    // atomic_store(addr, val): store `val` atomically to [addr].
+    //   On x86_64 this is a plain MOV (already atomic for aligned
+    //   accesses — no LOCK prefix needed for stores). Writes 0 to
+    //   bytes [0..7], clearing `readers` AND `writer`. A waiting
+    //   reader's CAS(cur → cur+1) will now succeed on its next
+    //   iteration. A waiting writer's CAS(0 → 1<<32) will now succeed
+    //   on its next iteration.
+    //   In a real kernel: this is where we'd call wake_one(waitq).
+    atomic_store(l as Address, 0);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (hosted x86_64).
+// ────────────────────────────────────────────────────────────────────────────
+
+// main: exercise the rwlock end-to-end with 5 sequential checks.
+//   1. Create + init the rwlock.
+//   2. Two read acquires — readers should be 2 (multiple readers OK).
+//   3. Two read releases — readers should be 1, then 0.
+//   4. One write acquire — writer should be 1 (exclusive).
+//   5. One write release — writer should be 0.
+// Exit 0 on all-pass, exit 1..5 on the corresponding check failure.
+//
+// The self-test runs single-threaded in hosted mode, so:
+//   - The read_acquire inner spin (`while l.writer != 0`) is never
+//     entered (writer is always 0 when read_acquire is called in the
+//     self-test — the write_acquire happens AFTER all read operations
+//     complete).
+//   - The read_acquire outer CAS always succeeds on the first try (no
+//     other CPU can change `readers` between our load and our CAS).
+//   - The read_release CAS always succeeds on the first try.
+//   - The write_acquire CAS always succeeds on the first try (readers
+//     and writer are both 0 after the read releases complete).
+//   - The write_waitq counter stays at 0 throughout (never bumped —
+//     the contract's reference code doesn't bump it).
+//
+// The test exercises:
+//   - Multiple concurrent readers (read_acquire twice → readers=2).
+//   - Reader release (read_release decrements readers via CAS).
+//   - Writer exclusivity (write_acquire only succeeds when readers=0
+//     AND writer=0).
+//   - Writer release (write_release's atomic_store(0) clears writer).
+// It does NOT exercise:
+//   - The read_acquire inner spin (would require a writer to be active
+//     when read_acquire is called — K8e covers this with the SMP IPI
+//     test infrastructure).
+//   - The write_acquire spin (would require readers or a writer to be
+//     active when write_acquire is called — K8e covers).
+//   - The CAS retry loops (old != cur — would require SMP contention).
+//   - The `cur == 0` defensive path in read_release (would require a
+//     buggy caller releasing a read lock they don't hold).
+//   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers).
+fn main() -> i32 {
+    let l = state_new(RwLock);
+    rwlock_init(l);
+    // Multiple readers — acquire twice. Both should succeed (readers
+    // are not exclusive). After both acquires, readers=2.
+    //   First read_acquire: cur=0 (readers=0, writer=0), writer_part=0,
+    //     CAS(0 → 1) succeeds, readers becomes 1.
+    //   Second read_acquire: cur=1 (readers=1, writer=0), writer_part=0,
+    //     CAS(1 → 2) succeeds, readers becomes 2.
+    rwlock_read_acquire(l);
+    rwlock_read_acquire(l);
+    // Verify readers count is 2.
+    if l.readers != 2 { return 1; }
+    // Release one read lock — readers should drop to 1.
+    //   cur=2, CAS(2 → 1) succeeds, readers becomes 1.
+    rwlock_read_release(l);
+    if l.readers != 1 { return 2; }
+    // Release the other read lock — readers should drop to 0.
+    //   cur=1, CAS(1 → 0) succeeds, readers becomes 0.
+    rwlock_read_release(l);
+    if l.readers != 0 { return 3; }
+    // Writer (exclusive) — acquire should succeed immediately (no
+    // readers, no writer). CAS(0 → 4294967296) sets writer=1, readers=0.
+    rwlock_write_acquire(l);
+    // Verify writer flag is set.
+    if l.writer != 1 { return 4; }
+    // Release the write lock — atomic_store(0) clears both readers and
+    // writer. writer should be 0.
+    rwlock_write_release(l);
+    if l.writer != 0 { return 5; }
+    return 0;
+}
