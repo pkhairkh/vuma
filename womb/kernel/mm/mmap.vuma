@@ -64,7 +64,7 @@
 // In K11 bare-metal mode, the linker resolves these externs against the
 // real pmm.vuma / vmm.vuma compiled object files, and sys_mmap / sys_munmap
 // work end-to-end with no source changes (the extern block is the ONLY swap
-// point — same pattern as womb/kernel/console.vuma re-declaring its extern
+// point — same pattern as womb/kernel/tty/console.vuma re-declaring its extern
 // `write`, and womb/kernel/mm/vmm.vuma re-declaring pte_read / pte_write).
 //
 // The FlatPool / PmmState / PageTable layouts are re-declared here

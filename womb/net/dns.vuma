@@ -1,4 +1,4 @@
-// womb/lib/dns.vuma — DNS Resolver (RFC 1035)
+// womb/net/dns.vuma — DNS Resolver (RFC 1035)
 // No main() — importable library module.
 // Builds and parses DNS query/response packets.
 // Uses the vuma-native syscall() intrinsic for socket / sendto / recvfrom /

@@ -1,4 +1,4 @@
-// womb/ieee/fp.vuma — IEEE 754 Floating-Point Helpers
+// womb/lib/sys/fp.vuma — IEEE 754 Floating-Point Helpers
 // Expected exit code: 0 (self-test passes)
 //
 // IEEE 754-2008 floating-point operations that supplement the codegen's

@@ -1,4 +1,4 @@
-// womb/lib/dns_extra.vuma — DNSSEC, mDNS, DoT, DoH, EDNS0
+// womb/net/dns_extra.vuma — DNSSEC, mDNS, DoT, DoH, EDNS0
 // No main() — importable library module.
 //
 // Implements:
@@ -13,7 +13,7 @@
 //   - tcp.vuma:       tcp_connect(ip, port) -> i64,
 //                     tcp_send(fd, data, len) -> i64,
 //                     tcp_recv(fd, buf, len) -> i64
-//   - sha256.vuma:    sha256_oneshot(data, len, out)
+//   - sha256_sha224.vuma:    sha256_oneshot(data, len, out)
 //   - ecdsa_p256.vuma: ecdsa_p256_verify(pubkey, msg, msg_len, sig, sig_len) -> u32
 //   - rsa.vuma:       rsa_pkcs1_v15_verify(pubkey, msg, msg_len, sig, sig_len) -> u32
 //

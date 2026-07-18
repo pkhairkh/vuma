@@ -34,7 +34,7 @@
 // COM1 serial port at I/O port 0x3F8; aarch64: PL011 UART; riscv64: NS16550
 // UART). The handler signatures (sys_write, sys_read) stay byte-identical
 // across modes — only the extern block is the swap point. Same pattern as
-// womb/kernel/console.vuma re-declaring its `write` extern.
+// womb/kernel/tty/console.vuma re-declaring its `write` extern.
 //
 // ── ByteBuf layout ─────────────────────────────────────────────────────────
 // A flat 16-byte buffer used by the self-test. The `data` field is at
@@ -97,7 +97,7 @@
 // This file is self-contained. The `extern "C" { fn write, fn read }`
 // declarations are byte-identical to:
 //   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
-//   - womb/kernel/console.vuma (K1d)
+//   - womb/kernel/tty/console.vuma (K1d)
 //   - womb/kernel/hosted/host.vuma (K1a)
 // Future files that want to call sys_write / sys_read (e.g. K4's kmain
 // when it bootstraps the syscall table) must re-declare ByteBuf byte-

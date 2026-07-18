@@ -1,4 +1,4 @@
-// womb/crypto/crc.vuma — CRC-16, CRC-32, CRC-64
+// womb/encoding/crc.vuma — CRC-16, CRC-32, CRC-64
 // IEEE 802.3 CRC-32, CCITT CRC-16, Modbus CRC-16, CRC-64 (ECMA-182).
 // No main().
 
