@@ -8,16 +8,13 @@
 //   - f64 < comparison (loop condition)
 //   - floattoint (final truncation)
 //   - inttofloat (initial N -> f64)
-//
-// IVE verifies Liveness, Interpretation, Origin, Cleanup.
 
 fn newton_sqrt(n: f64, guess: f64, iters: i64) -> f64 {
     x: f64 = guess;
     i: i64 = 0;
     while i < iters {
-        half: f64 = x / 2.0;
         ratio: f64 = n / x;
-        x = half + ratio;
+        x = (x + ratio) / 2.0;
         i = i + 1;
     }
     return x;

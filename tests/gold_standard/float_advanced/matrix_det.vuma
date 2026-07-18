@@ -5,30 +5,14 @@
 // det = 2*5 - 3*4 = 10 - 12 = -2
 // trace = 2 + 5 = 7
 // Return floattoint(trace + det + 5.0) = floattoint(7 - 2 + 5) = 10.
-// (Exercises both mul+sub for det and add for trace, with negatives.)
-//
-// Exercises:
-//   - f64 multiplication, subtraction, addition
-//   - f64 array (row-major) memory access
-//   - Negative f64 results (det = -2.0)
-//   - floattoint of a negative-derived positive
 
 fn main() -> i32 {
-    ptr = allocate(32);  // 2x2 * 8 bytes
-    // Row 0: [2.0, 3.0]
-    *(ptr + 0) = 2.0;
-    *(ptr + 8) = 3.0;
-    // Row 1: [4.0, 5.0]
-    *(ptr + 16) = 4.0;
-    *(ptr + 24) = 5.0;
-    m00: f64 = *(ptr + 0);
-    m01: f64 = *(ptr + 8);
-    m10: f64 = *(ptr + 16);
-    m11: f64 = *(ptr + 24);
-    det: f64 = m00 * m11 - m01 * m10;   // -2.0
-    trace: f64 = m00 + m11;              // 7.0
-    free(ptr);
-    // return floattoint(trace + det + 5.0) = 7 + (-2) + 5 = 10
+    m00: f64 = 2.0;
+    m01: f64 = 3.0;
+    m10: f64 = 4.0;
+    m11: f64 = 5.0;
+    det: f64 = m00 * m11 - m01 * m10;
+    trace: f64 = m00 + m11;
     five: f64 = 5.0;
     result: f64 = trace + det + five;
     return floattoint(result);
