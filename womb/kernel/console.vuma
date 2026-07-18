@@ -51,20 +51,9 @@ extern "C" {
 // `write(1, base, c.len)`.
 //
 // Field order matters: `buf` MUST precede `len` so the buffer is at
-// offset 0. (Mirror the layout in kmain.vuma and kernel.vuma exactly.)
+// offset 0. (Mirror the layout in kernel.vuma exactly.)
 layout Console = {
     buf: [u8; 256],
-    len: u32,
-}
-
-// ── String layout (for console_puts) ────────────────────────────────────────
-// VUMA has no string literals (no `"..."` lowering). Kernel code that
-// wants to print a fixed message either calls `console_putc` per byte
-// (as kmain_print_banner does) or builds a State<String> byte-by-byte
-// and calls `console_puts`. The String layout is also mirrored in
-// kmain.vuma / kernel.vuma where used.
-layout String = {
-    data: [u8; 256],
     len: u32,
 }
 
@@ -114,20 +103,6 @@ fn console_flush(c: State<Console>) {
         let base = c as Address;
         let _n = write(1, base, c.len as i64);
         c.len = 0;
-    }
-}
-
-// ── console_puts ───────────────────────────────────────────────────────────
-// Append every byte of a State<String> to the console buffer. The String's
-// `len` field gives the byte count; bytes `data[0..len]` are copied via
-// repeated console_putc. No bounds check on `s.len` beyond the implicit
-// Console-side drop-on-overflow in console_putc.
-
-fn console_puts(c: State<Console>, s: State<String>) {
-    let i = 0;
-    while i < s.len {
-        console_putc(c, s.data[i]);
-        i = i + 1;
     }
 }
 
