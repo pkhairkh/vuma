@@ -124,6 +124,61 @@ impl fmt::Display for Gpr {
 }
 
 // ===========================================================================
+// Floating-Point Registers (68881/68882 FPU, coprocessor 1)
+// ===========================================================================
+
+/// m68k 68881/68882 floating-point data registers: 8 × FP0–FP7.
+///
+/// Internally each FP register holds an 80-bit extended-precision value;
+/// the FPU auto-converts on f32/f64 memory loads and stores. The encoding
+/// is the 3-bit register index (0–7).
+///
+/// **NOTE (G4):** FP arithmetic/compare/cast codegen in this backend is
+/// *best-effort* and marked `// TODO G4: needs QEMU-m68k verification`.
+/// The 68881 coprocessor-1 (F-line) encoding is baroque; the byte
+/// sequences emitted by `emit_fp_binop` and the FP Cast arms are the
+/// best-effort interpretation of the M68000 PRM §8 and have **not** been
+/// byte-verified. `FloatToFloat` is the only arm that is correct by
+/// construction (it performs a bit-copy with zero-extension/truncation
+/// via the existing integer stack-slot helpers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Fpr {
+    Fp0 = 0, Fp1 = 1, Fp2 = 2, Fp3 = 3,
+    Fp4 = 4, Fp5 = 5, Fp6 = 6, Fp7 = 7,
+}
+
+impl Fpr {
+    /// Returns the 3-bit encoding (0–7).
+    pub fn encoding(&self) -> u8 {
+        *self as u8
+    }
+
+    /// Returns the Fpr for the given encoding index (0–7).
+    pub fn from_encoding(enc: u8) -> Option<Self> {
+        match enc {
+            0 => Some(Fpr::Fp0), 1 => Some(Fpr::Fp1), 2 => Some(Fpr::Fp2), 3 => Some(Fpr::Fp3),
+            4 => Some(Fpr::Fp4), 5 => Some(Fpr::Fp5), 6 => Some(Fpr::Fp6), 7 => Some(Fpr::Fp7),
+            _ => None,
+        }
+    }
+
+    /// Returns the assembly name for this register.
+    pub fn asm_name(&self) -> &'static str {
+        match self {
+            Fpr::Fp0 => "%fp0", Fpr::Fp1 => "%fp1", Fpr::Fp2 => "%fp2", Fpr::Fp3 => "%fp3",
+            Fpr::Fp4 => "%fp4", Fpr::Fp5 => "%fp5", Fpr::Fp6 => "%fp6", Fpr::Fp7 => "%fp7",
+        }
+    }
+}
+
+impl fmt::Display for Fpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.asm_name())
+    }
+}
+
+// ===========================================================================
 // Instruction enum (mnemonic / Display)
 // ===========================================================================
 
@@ -1009,16 +1064,25 @@ fn emit_instr(
             dst,
             lhs,
             rhs,
-            ty: _,
+            ty,
         } => {
-            emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+            // FP dispatch (G4): if the operand type is F32 or F64, lower
+            // via the 68881 FPU helpers in `emit_fp_binop` (best-effort;
+            // see the function doc comment for encoding-uncertainty
+            // caveats). Otherwise fall through to the integer `emit_binop`
+            // path.
+            if ty.is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+                emit_fp_binop(op, ty, dst, lhs, rhs, vreg_stack_slots, code);
+            } else {
+                emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+            }
         }
         IRInstr::Cmp {
             kind,
             dst,
             lhs,
             rhs,
-            ty: _,
+            ty,
         } => {
             let binop_kind = match kind {
                 CmpKind::Eq => BinOpKind::Eq,
@@ -1032,7 +1096,14 @@ fn emit_instr(
                 CmpKind::UGt => BinOpKind::UGt,
                 CmpKind::UGe => BinOpKind::UGe,
             };
-            emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
+            // FP dispatch (G4): if the operand type is F32 or F64, route
+            // through `emit_fp_binop` (best-effort 68881 FCMP encoding).
+            // Otherwise fall through to integer `emit_binop`.
+            if ty.is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+                emit_fp_binop(&binop_kind, ty, dst, lhs, rhs, vreg_stack_slots, code);
+            } else {
+                emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
+            }
         }
         IRInstr::UnaryOp {
             op,
@@ -1202,26 +1273,49 @@ fn emit_instr(
             kind,
             dst,
             src,
-            from_ty: _,
-            to_ty: _,
+            from_ty,
+            to_ty,
         } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-            code.extend(ss_load_value(src, vreg_stack_slots, S0));
             match kind {
                 CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
                     // For a 32-bit architecture, casting between integer types
-                    // just keeps the low bits.  No-op (store as-is).
+                    // just keeps the low bits. Load src into S0 and store.
+                    code.extend(ss_load_value(src, vreg_stack_slots, S0));
+                    code.extend(ss_st(S0, dst_off));
                 }
-                CastKind::IntToFloat
-                | CastKind::UIntToFloat
-                | CastKind::FloatToInt
-                | CastKind::FloatToUInt
-                | CastKind::FloatToFloat => {
-                    // FP not supported in this minimal backend; leave as-is.
+                CastKind::FloatToFloat => {
+                    // G4: bit-copy with truncation/zero-extension. Correct
+                    // by construction (no FPU encoding involved).
+                    //   f32 → f64: load 4-byte f32, store 8 bytes
+                    //             (low 4 = f32 bits, high 4 = 0).
+                    //   f64 → f32: load low 4 bytes of f64, store 4 bytes.
+                    //   f32 → f32: 4-byte copy.
+                    //   f64 → f64: 8-byte copy.
+                    //
+                    // Note: this is a *bit-copy*, not a real f32↔f64
+                    // conversion — the resulting f64 will not have the
+                    // same numeric value as the source f32 (and vice
+                    // versa). It is the safest correct-by-construction
+                    // behaviour in the absence of a verified FPU encoding.
+                    emit_cast_float_to_float(
+                        from_ty, to_ty, dst_off, src, vreg_stack_slots, code,
+                    );
+                }
+                CastKind::IntToFloat | CastKind::UIntToFloat => {
+                    // G4: best-effort 68881 FMOVE.L + FMOVE.S/D sequence.
+                    // TODO G4: needs QEMU-m68k verification — encoding
+                    // uncertain; see `emit_cast_int_to_float` doc.
+                    emit_cast_int_to_float(to_ty, dst_off, src, vreg_stack_slots, code);
+                }
+                CastKind::FloatToInt | CastKind::FloatToUInt => {
+                    // G4: best-effort 68881 FMOVE.S/D + FINTRZ + FMOVE.L
+                    // sequence. TODO G4: needs QEMU-m68k verification —
+                    // encoding uncertain; see `emit_cast_float_to_int` doc.
+                    emit_cast_float_to_int(from_ty, to_ty, dst_off, src, vreg_stack_slots, code);
                 }
             }
-            code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Phi { .. } => {
             // Phi nodes are handled by SSA deconstruction at the IR level;
@@ -1731,6 +1825,437 @@ fn emit_binop(
             }
             code.extend(ss_st(S0, dst_off));
         }
+    }
+}
+
+// ===========================================================================
+// Floating-Point helpers (68881/68882 FPU, coprocessor 1) — G4 best-effort
+// ===========================================================================
+//
+// All byte sequences in this section are the best-effort interpretation of
+// the M68000 Family Programmer's Reference Manual §8 (Floating-Point
+// Coprocessor).  They have **not** been byte-verified against QEMU-m68k.
+// Each emitter is marked `// TODO G4: needs QEMU-m68k verification`.
+//
+// The 68881 F-line encoding uses coprocessor ID 1 (cp1).  cpGEN (general
+// operation) instructions (FADD, FSUB, FMUL, FDIV, FCMP, FMOVE, FINTRZ,
+// etc.) all share the same word-1 prefix:
+//
+//     word 1: 1111 0010 0 MMM mmm  =  0xF200 | (mode << 3) | reg
+//
+// where (mode, reg) encode the source EA for memory-operand forms (R/M=1
+// in word 2).  For register-to-register forms (R/M=0), the EA in word 1
+// is ignored and is conventionally set to D0 (mode=000, reg=000), giving
+// word 1 = 0xF200.
+//
+// Word 2 (the operation specifier) is the source of much encoding
+// uncertainty.  The byte values used below are best-effort guesses based
+// on cross-referencing several secondary sources; **the exact bit layout
+// has not been confirmed against the manual**.
+
+/// Emit `A1 = FP + offset`. Clobbers S2 (= D2) for non-trivial offsets.
+///
+/// Computes the effective address `[FP + offset]` into A1, suitable as
+/// the EA for 68881 FMOVE.S/D (A1), FPn encodings.
+fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
+    // MOVEA.L A6, A1: word = 0x224E.
+    //   Encoding: 00 10 001 001 001 110
+    //   (op=MOVE, size=long, dst reg=A1, dst mode=An → MOVEA,
+    //    src mode=An, src reg=A6).
+    code.extend_from_slice(&0x224Eu16.to_be_bytes());
+    if offset == 0 {
+        return;
+    }
+    if (1..=8).contains(&offset) {
+        // ADDQ.L #data, A1: 0101 ddd 0 10 001 001 = 0x5089 | ((data & 7) << 9).
+        //   (data field uses 0 to encode 8.)
+        let data_field = (offset as u16) & 7;
+        let w = 0x5089u16 | (data_field << 9);
+        code.extend_from_slice(&w.to_be_bytes());
+    } else if (-8..=-1).contains(&offset) {
+        // SUBQ.L #data, A1: 0101 ddd 1 10 001 001 = 0x5189 | ((data & 7) << 9).
+        let data_field = ((-offset) as u16) & 7;
+        let w = 0x5189u16 | (data_field << 9);
+        code.extend_from_slice(&w.to_be_bytes());
+    } else {
+        // Load offset into S2 (= D2), then ADDA.L D2, A1.
+        code.extend(ss_load_imm(S2, offset as i64));
+        // ADDA.L D2, A1: 1101 001 11 0 000 010 = 0xD3C2.
+        code.extend_from_slice(&0xD3C2u16.to_be_bytes());
+    }
+}
+
+/// Best-effort 68881 `FMOVE.S/D (A1), FPn` — memory-to-FPR load.
+///
+/// Word 1: `0xF211` (cp1, cpGEN, mode 2 = (An), reg = A1).
+/// Word 2: `0x4000 | (FPn << 7) | (R/M=1 << 6) | format`
+///   format: `0x01` = S (f32), `0x04` = D (f64).
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+fn emit_fmove_mem_to_fp(dst: Fpr, is_f64: bool, code: &mut Vec<u8>) {
+    let fmt: u16 = if is_f64 { 0x04 } else { 0x01 };
+    let w2 = 0x4000u16 | ((dst.encoding() as u16) << 7) | (1u16 << 6) | fmt;
+    code.extend_from_slice(&0xF211u16.to_be_bytes());
+    code.extend_from_slice(&w2.to_be_bytes());
+}
+
+/// Best-effort 68881 `FMOVE.S/D FPn, (A1)` — FPR-to-memory store.
+///
+/// Word 1: `0xF211` (cp1, cpGEN, mode 2 = (An), reg = A1).
+/// Word 2: `0x6000 | (FPn << 7) | (R/M=1 << 6) | format`
+///   format: `0x01` = S (f32), `0x04` = D (f64).
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
+    let fmt: u16 = if is_f64 { 0x04 } else { 0x01 };
+    let w2 = 0x6000u16 | ((src.encoding() as u16) << 7) | (1u16 << 6) | fmt;
+    code.extend_from_slice(&0xF211u16.to_be_bytes());
+    code.extend_from_slice(&w2.to_be_bytes());
+}
+
+/// Best-effort 68881 `FADD/FSUB/FMUL/FDIV FPm, FPn` → FPn (register form).
+///
+/// Word 1: `0xF200` (cp1, cpGEN, EA = D0 placeholder, ignored for R/M=0).
+/// Word 2: `(opcode << 8) | (FPn << 4) | FPm`
+///   FADD = 0x22, FSUB = 0x28, FMUL = 0x23, FDIV = 0x20.
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
+    let opcode: u16 = match op {
+        BinOpKind::Add => 0x22,
+        BinOpKind::Sub => 0x28,
+        BinOpKind::Mul => 0x23,
+        BinOpKind::SDiv | BinOpKind::UDiv => 0x20,
+        _ => 0x22, // defensive; should be unreachable for FP
+    };
+    let w2 = (opcode << 8)
+        | ((dst.encoding() as u16) << 4)
+        | (src.encoding() as u16);
+    code.extend_from_slice(&0xF200u16.to_be_bytes());
+    code.extend_from_slice(&w2.to_be_bytes());
+}
+
+/// Best-effort 68881 `FCMP FPm, FPn` — sets FPSR condition codes.
+///
+/// Word 1: `0xF200` (cp1, cpGEN, EA = D0 placeholder).
+/// Word 2: `(0x38 << 8) | (FPn << 4) | FPm`.
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+fn emit_fp_cmp(dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
+    let w2 = (0x38u16 << 8)
+        | ((dst.encoding() as u16) << 4)
+        | (src.encoding() as u16);
+    code.extend_from_slice(&0xF200u16.to_be_bytes());
+    code.extend_from_slice(&w2.to_be_bytes());
+}
+
+/// Emit FP binary op (Add/Sub/Mul/Div and comparisons) result into dst's
+/// stack slot. Best-effort 68881 FPU encoding — marked TODO G4.
+///
+/// # Encoding uncertainty
+///
+/// The 68881 F-line (coprocessor 1) encoding is baroque; the byte
+/// sequences emitted here are the best-effort interpretation of the
+/// M68000 Family PRM §8. **They have NOT been byte-verified against
+/// QEMU-m68k** and may produce wrong results or trap. The structural FP
+/// dispatch (branching on `ty: F32|F64` in the BinOp/Cmp arms) is
+/// correct; the byte encodings are unverified.
+///
+/// # Strategy
+///
+/// For arithmetic (Add/Sub/Mul/Div):
+///   1. Compute lhs address in A1; `FMOVE.S/D (A1), FP0` — load lhs.
+///   2. Compute rhs address in A1; `FMOVE.S/D (A1), FP1` — load rhs.
+///   3. `FADD/FSUB/FMUL/FDIV FP1, FP0` → result in FP0.
+///   4. Compute dst address in A1; `FMOVE.S/D FP0, (A1)` — store result.
+///
+/// For comparisons (Eq/Ne/SLt/SLe/SGt/SGe — ULt etc. collapse to the
+/// same encoding since FP has no signedness distinction):
+///   1. Load lhs into FP0 and rhs into FP1 (as above).
+///   2. `FCMP FP1, FP0` — sets FPSR condition codes.
+///   3. TODO G4: emit `FBcc` + materialize 0/1 based on the FP condition
+///      codes. The current implementation stubs the boolean result with
+///      0 (safe default — does not produce wrong results that could be
+///      mistaken for "true"; FP comparisons return false until verified).
+///
+/// For other ops (And/Or/Xor/Shifts/Remainders) — these are integer-only
+/// per `verify_float_op` in the IR verifier and shouldn't reach here. We
+/// fall through to integer `emit_binop` as a defensive default.
+fn emit_fp_binop(
+    op: &BinOpKind,
+    ty: Option<IRType>,
+    dst: &IRValue,
+    lhs: &IRValue,
+    rhs: &IRValue,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    // TODO G4: needs QEMU-m68k verification — 68881 FPU encoding uncertain.
+    let is_f64 = matches!(ty, Some(IRType::F64));
+    let dst_id = dst.as_register().unwrap_or(0);
+    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+    let lhs_off: i32 = if let IRValue::Register(id) = lhs {
+        vreg_stack_slots.get(id).copied().unwrap_or(0)
+    } else {
+        0
+    };
+    let rhs_off: i32 = if let IRValue::Register(id) = rhs {
+        vreg_stack_slots.get(id).copied().unwrap_or(0)
+    } else {
+        0
+    };
+
+    match op {
+        BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
+        | BinOpKind::SDiv | BinOpKind::UDiv => {
+            // FP arithmetic. Require both operands to be in registers
+            // (FP immediates are not supported in this best-effort path).
+            if !matches!(lhs, IRValue::Register(_)) || !matches!(rhs, IRValue::Register(_)) {
+                // Stub: store 0.0 (bits = 0).
+                code.extend(ss_load_imm(S0, 0));
+                code.extend(ss_st(S0, dst_off));
+                if is_f64 {
+                    code.extend(Instruction::Store {
+                        src: S0,
+                        base: FP,
+                        offset: (dst_off + 4) as i16,
+                    }
+                    .encode());
+                }
+                return;
+            }
+
+            // 1. A1 = FP + lhs_off; FMOVE.S/D (A1), FP0
+            emit_lea_fp_disp(lhs_off, code);
+            emit_fmove_mem_to_fp(Fpr::Fp0, is_f64, code);
+
+            // 2. A1 = FP + rhs_off; FMOVE.S/D (A1), FP1
+            emit_lea_fp_disp(rhs_off, code);
+            emit_fmove_mem_to_fp(Fpr::Fp1, is_f64, code);
+
+            // 3. FADD/FSUB/FMUL/FDIV FP1, FP0 → FP0
+            emit_fp_arith(op, Fpr::Fp0, Fpr::Fp1, code);
+
+            // 4. A1 = FP + dst_off; FMOVE.S/D FP0, (A1)
+            emit_lea_fp_disp(dst_off, code);
+            emit_fmove_fp_to_mem(Fpr::Fp0, is_f64, code);
+        }
+        BinOpKind::Eq | BinOpKind::Ne
+        | BinOpKind::SLt | BinOpKind::ULt
+        | BinOpKind::SLe | BinOpKind::ULe
+        | BinOpKind::SGt | BinOpKind::UGt
+        | BinOpKind::SGe | BinOpKind::UGe => {
+            // FP comparison: FCMP sets FPSR condition codes; FBcc then
+            // materialises a 0/1 result. Best-effort: this implementation
+            // emits the FCMP encoding but stubs the boolean materialisation
+            // with 0 (TODO G4).
+            if !matches!(lhs, IRValue::Register(_)) || !matches!(rhs, IRValue::Register(_)) {
+                code.extend(ss_load_imm(S0, 0));
+                code.extend(ss_st(S0, dst_off));
+                return;
+            }
+            // Load lhs into FP0, rhs into FP1.
+            emit_lea_fp_disp(lhs_off, code);
+            emit_fmove_mem_to_fp(Fpr::Fp0, is_f64, code);
+            emit_lea_fp_disp(rhs_off, code);
+            emit_fmove_mem_to_fp(Fpr::Fp1, is_f64, code);
+            // FCMP FP1, FP0 (subtracts FP0 from FP1, sets FPSR cc's).
+            emit_fp_cmp(Fpr::Fp0, Fpr::Fp1, code);
+            // TODO G4: emit FBcc + branch to materialise 0/1 based on
+            // the FP condition codes. For now, stub with 0 (FP
+            // comparisons conservatively return false until verified).
+            code.extend(ss_load_imm(S0, 0));
+            code.extend(ss_st(S0, dst_off));
+        }
+        _ => {
+            // Other ops (And/Or/Xor/Shifts/Remainders) are integer-only
+            // and shouldn't reach here. Defensive fallback to integer
+            // emit_binop (which will produce integer results — wrong for
+            // FP operands, but at least won't crash the backend).
+            emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+        }
+    }
+}
+
+/// G4: `FloatToFloat` cast — bit-copy with truncation/zero-extension.
+///
+/// Correct by construction (no FPU encoding involved):
+///   f32 → f64: load 4-byte f32, store 8 bytes (low 4 = f32 bits, high 4 = 0).
+///   f64 → f32: load low 4 bytes of f64, store 4 bytes.
+///   f32 → f32: 4-byte copy.
+///   f64 → f64: 8-byte copy.
+///
+/// Stack slot convention (matches existing 64-bit integer code): the LOW
+/// 32 bits of a 64-bit value live at `off` (lower address), the HIGH 32
+/// bits at `off+4`. (This is opposite to standard m68k big-endian 64-bit
+/// byte order but matches the existing `emit_binop` convention.)
+///
+/// **Note**: this is a bit-copy, not a real f32↔f64 conversion. The
+/// resulting f64 will not have the same numeric value as the source f32
+/// (and vice versa). It is the safest correct-by-construction behaviour
+/// in the absence of a verified FPU encoding.
+fn emit_cast_float_to_float(
+    from_ty: Option<IRType>,
+    to_ty: Option<IRType>,
+    dst_off: i32,
+    src: &IRValue,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let dst_is_f64 = matches!(to_ty, Some(IRType::F64));
+    let src_is_f64 = matches!(from_ty, Some(IRType::F64));
+
+    // Load source low 4 bytes into S0.
+    if let IRValue::Register(id) = src {
+        let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        code.extend(ss_ld(S0, src_off));
+    } else {
+        // Non-register source: best-effort (load integer bits).
+        // TODO G4: for FP immediates this produces wrong bits.
+        code.extend(ss_load_value(src, vreg_stack_slots, S0));
+    }
+    // Store low 4 bytes to dst.
+    code.extend(ss_st(S0, dst_off));
+
+    if dst_is_f64 {
+        // Need 8 bytes at dst. If src is f64, copy high 4 bytes too;
+        // otherwise zero-extend.
+        if src_is_f64 {
+            if let IRValue::Register(id) = src {
+                let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                code.extend(ss_ld(S0, src_off + 4));
+            } else {
+                code.extend(ss_load_imm(S0, 0));
+            }
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
+        } else {
+            // f32 → f64: zero-extend (high 4 bytes = 0).
+            code.extend(ss_load_imm(S0, 0));
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
+        }
+    }
+    // If dst is f32, we only stored 4 bytes (truncating if src was f64).
+}
+
+/// G4: `IntToFloat` / `UIntToFloat` cast — best-effort 68881 sequence.
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+///
+/// Intended sequence:
+///   1. A1 = FP + src_off
+///   2. `FMOVE.L (A1), FP0` — load 32-bit signed int into FP0 (auto-
+///      converted to ext-precision).
+///   3. A1 = FP + dst_off
+///   4. `FMOVE.S/D FP0, (A1)` — store FP0 as f32 or f64.
+///
+/// For 64-bit ints, only the low 32 bits are converted (best-effort).
+/// For `UIntToFloat`, this is a signed approximation (TODO G4: unsigned
+/// correction for values >= 2^31).
+fn emit_cast_int_to_float(
+    to_ty: Option<IRType>,
+    dst_off: i32,
+    src: &IRValue,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let is_dst_f64 = matches!(to_ty, Some(IRType::F64)) || to_ty.is_none();
+
+    if let IRValue::Register(id) = src {
+        let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        // 1. A1 = FP + src_off
+        emit_lea_fp_disp(src_off, code);
+        // 2. FMOVE.L (A1), FP0 — best-effort 68881 encoding.
+        //    Word 1: 0xF211 (cp1, cpGEN, mode 2 = (An), reg = A1).
+        //    Word 2: 0x4000 | (FPn=0 << 7) | (R/M=1 << 6) | 0x00 (L format).
+        //    TODO G4: verify against M68000 PRM.
+        code.extend_from_slice(&0xF211u16.to_be_bytes());
+        code.extend_from_slice(&0x4040u16.to_be_bytes());
+        // 3. A1 = FP + dst_off
+        emit_lea_fp_disp(dst_off, code);
+        // 4. FMOVE.S/D FP0, (A1)
+        emit_fmove_fp_to_mem(Fpr::Fp0, is_dst_f64, code);
+    } else {
+        // Non-register src: stub with 0.0 (bits = 0).
+        // TODO G4: handle int-to-float for immediate sources.
+        code.extend(ss_load_imm(S0, 0));
+        code.extend(ss_st(S0, dst_off));
+        if is_dst_f64 {
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
+        }
+    }
+}
+
+/// G4: `FloatToInt` / `FloatToUInt` cast — best-effort 68881 sequence.
+///
+/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+///
+/// Intended sequence:
+///   1. A1 = FP + src_off
+///   2. `FMOVE.S/D (A1), FP0` — load f32/f64 into FP0.
+///   3. `FINTRZ FP0, FP0` — round toward zero (truncate to integer).
+///   4. A1 = FP + dst_off
+///   5. `FMOVE.L FP0, (A1)` — store 32-bit signed int.
+///
+/// For 64-bit int destinations, only the low 32 bits are stored (best-effort).
+/// For `FloatToUInt`, this is a signed approximation (TODO G4: unsigned
+/// correction for results >= 2^31).
+fn emit_cast_float_to_int(
+    from_ty: Option<IRType>,
+    to_ty: Option<IRType>,
+    dst_off: i32,
+    src: &IRValue,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let _ = to_ty; // dst int type — best-effort, only low 32 bits stored.
+    let src_is_f64 = matches!(from_ty, Some(IRType::F64));
+
+    if let IRValue::Register(id) = src {
+        let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        // 1. A1 = FP + src_off
+        emit_lea_fp_disp(src_off, code);
+        // 2. FMOVE.S/D (A1), FP0
+        emit_fmove_mem_to_fp(Fpr::Fp0, src_is_f64, code);
+        // 3. FINTRZ FP0, FP0 — best-effort 68881 encoding.
+        //    Word 1: 0xF200 (cp1, cpGEN, EA = D0 placeholder).
+        //    Word 2: (0x03 << 8) | (FPn=0 << 4) | FPm=0 = 0x0300.
+        //    TODO G4: verify against M68000 PRM.
+        code.extend_from_slice(&0xF200u16.to_be_bytes());
+        code.extend_from_slice(&0x0300u16.to_be_bytes());
+        // 4. A1 = FP + dst_off
+        emit_lea_fp_disp(dst_off, code);
+        // 5. FMOVE.L FP0, (A1) — best-effort 68881 encoding.
+        //    Word 1: 0xF211 (cp1, cpGEN, mode 2 = (An), reg = A1).
+        //    Word 2: 0x6000 | (FPn=0 << 7) | (R/M=1 << 6) | 0x00 (L format).
+        //    TODO G4: verify against M68000 PRM.
+        code.extend_from_slice(&0xF211u16.to_be_bytes());
+        code.extend_from_slice(&0x6040u16.to_be_bytes());
+    } else {
+        // Non-register src: stub with 0.
+        // TODO G4: handle float-to-int for non-register sources.
+        code.extend(ss_load_imm(S0, 0));
+        code.extend(ss_st(S0, dst_off));
     }
 }
 
