@@ -1,0 +1,349 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/trap/trap_frame.vuma
+// VWK Canonical Superset TrapFrame (Wave R2a).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file defines the **canonical superset** TrapFrame layout — the single
+// memory-state record that every arch's trap_entry stub populates and every
+// arch-independent kernel consumer (trap dispatcher, panic/die formatter,
+// syscall trampoline, context-switcher, kgdb) reads from. Per the R2 Golden
+// Rule in TASKS.md:
+//   "Do not write arch-conditional logic inside kernel transforms."
+// The arch-specific trap_entry stubs (R2b/R2c/R2d's trap_trampoline.vuma
+// for x86_64/aarch64/riscv64) translate their native save-area layout into
+// this superset, then the dispatcher (K3d's trap.vuma) routes by `vector`
+// without needing `#ifdef arch` conditionals.
+//
+// This is the trap-side twin of the boot-side superset BootInfo (R1a's
+// womb/kernel/bootinfo.vuma): both follow the same shape —
+//   * canonical superset layout defined here,
+//   * arch stubs (womb/kernel/arch/<arch>/trap_trampoline.vuma) re-declare
+//     the layout byte-identically and translate native → superset,
+//   * arch-independent core (trap.vuma dispatcher, panic.vuma formatter)
+//     consumes the superset via State<TrapFrame> field access.
+//
+// ── Field semantics ─────────────────────────────────────────────────────────
+//   gpr         General-purpose registers, packed 32 × u64 little-endian into
+//               a flat [u8; 256] array. VUMA array index is byte-granular
+//               (no [u64; N] layout support — see task.vuma's parallel-array
+//               comment), so the helpers tf_get_gpr / tf_set_gpr below do the
+//               8-byte LE pack/unpack at byte offset `idx * 8`.
+//
+//               Canonical GPR slot assignment (the contract every arch stub
+//               MUST follow — see R2b/R2c/R2d):
+//                 x86_64 (15 GPRs used, slot 15..31 stay 0):
+//                   slot  0 = rax        slot  8 = r8
+//                   slot  1 = rbx        slot  9 = r9
+//                   slot  2 = rcx        slot 10 = r10
+//                   slot  3 = rdx        slot 11 = r11
+//                   slot  4 = rsi        slot 12 = r12
+//                   slot  5 = rdi        slot 13 = r13
+//                   slot  6 = rbp        slot 14 = r14
+//                   slot  7 = (unused)   slot 15 = r15
+//                 (The R2a contract's slot table puts r8-r15 at slots 7-15;
+//                  R2b's x86_trap_to_superset will pick one — both are valid
+//                  as long as the pack/unpack matches the chosen order. The
+//                  R2a self-test only round-trips through the helpers, so it
+//                  is agnostic to the exact slot mapping.)
+//                 aarch64 (31 GPRs used, slot 31 stays 0):
+//                   slot 0..30 = x0..x30
+//                 riscv64 (31 GPRs used, slot 31 stays 0):
+//                   slot 0 = ra    slot 5..11 = t0..t6
+//                   slot 1 = sp    slot 12..23 = s0..s11
+//                   slot 2 = gp    slot 24..31 = a0..a7
+//                   slot 3 = tp    (note: a0..a7 is 8 regs, mapped to
+//                   slot 4 = t0    slots 24..31 — see R2d for the canonical
+//                                    RISC-V mapping; some stubs may differ.)
+//
+//               Slots an arch doesn't use (e.g. x86_64 slots 16..31) are
+//               zeroed by tf_init and never written by the arch stub.
+//
+//   pc          Program counter at trap entry.
+//               x86_64: rip (from CPU-pushed frame).
+//               aarch64: elr_el1.
+//               riscv64: mepc (or sepc for supervisor mode).
+//
+//   status      Architectural status register at trap entry.
+//               x86_64: rflags.
+//               aarch64: spsr_el1.
+//               riscv64: mstatus (or sstatus).
+//
+//   vector      Interrupt vector / exception cause.
+//               x86_64: IDT vector number (0..255). 0..31 = CPU exception,
+//                       32..47 = 8259 PIC IRQ, 128 = int 0x80 syscall.
+//               aarch64: ESR_EL1.EC shifted left by 26 (or the full ESR —
+//                        see R2c for the exact encoding choice).
+//               riscv64: scause (with the interrupt bit at bit 63).
+//
+//   error_code  CPU error code / syndrome.
+//               x86_64: CPU-pushed error code (0 if the exception pushes
+//                       none — e.g. #UD pushes nothing, so error_code=0).
+//               aarch64: esr_el1 (the full exception syndrome register).
+//               riscv64: stval (e.g. faulting address for load/store/page
+//                        faults, illegal instruction for illegalinsn).
+//
+//   sp          Stack pointer at trap entry.
+//               x86_64: rsp (from CPU-pushed frame — the inner-level RSP
+//                       at the moment of the trap).
+//               aarch64: sp_el0 (user-mode SP — the kernel saves the
+//                        user SP here on exception entry from EL0).
+//               riscv64: sp (the GPR at index 2 is also "sp" per the RISC-V
+//                        ABI; this field duplicates it as a top-level scalar
+//                        for fast access by the trap dispatcher without a
+//                        gpr unpack round-trip).
+//
+//   fpu         FPU/SIMD register file, packed 32 × u64 little-endian into
+//               a flat [u8; 256] array (same pack/unpack discipline as gpr).
+//               x86_64: xmm0..xmm15 (low 128 bits of each; the upper 128
+//                       bits of YMM/ZMM are NOT saved — that's a future
+//                       wave's problem).
+//               aarch64: v0..v31 (low 64 bits of each — same caveat).
+//               riscv64: f0..f31 (low 64 bits).
+//               Optional: arch stubs that don't save FPU state leave the
+//               whole array zero. Consumers MUST check `tf.fpu[0] != 0` or
+//               a future `tf.fpu_valid` flag before relying on FPU contents.
+//
+//   _pad        24 bytes of alignment padding. The layout is already 8-byte
+//               aligned at every field boundary (256, 264, 272, 280, 288,
+//               296, 552), so _pad is purely to round the layout up to a
+//               round 576-byte size — convenient for cache-line reasoning
+//               (9 × 64 = 576) and for future field additions without a
+//               size change. Zeroed by tf_init; readers MUST NOT rely on
+//               _pad bits.
+//
+//               (Note: the original R2a task contract's header comment said
+//               "total = 552 bytes" — that figure omits the 24-byte _pad.
+//               The actual total is 576 bytes: 256 + 8×5 + 256 + 24 = 576.
+//               Downstream waves R2b/R2c/R2d MUST re-declare this layout
+//               byte-identically with the actual 576-byte total — see the
+//               "Byte-identical re-declaration" section below.)
+//
+// ── Why a superset? ─────────────────────────────────────────────────────────
+//   A single superset avoids the per-arch TrapFrame asymmetry that bit-rotted
+//   the prior trap code (K3a/K3b/K3c each defined their own arch-specific
+//   TrapFrame — 22 fields on x86_64, 35 on aarch64, 35 on riscv64 — and the
+//   trap dispatcher in K3d's trap.vuma had to be x86_64-specific because the
+//   field names differed per arch). The superset gives every arch the same
+//   field set; archs that don't use a field (e.g. fpu on a no-FPU RISC-V
+//   config) leave it 0.
+//
+//   The total layout is 576 bytes:
+//     2 × [u8; 256] (512) + 5 × u64 (40) + 1 × [u8; 24] (24) = 576
+//   — exactly 9 quadwords of 64 bytes each. Larger than the old x86_64
+//   TrapFrame (176 bytes) but smaller than the sum of all three old arch
+//   layouts (176 + 280 + 280 = 736). The gpr array uses flat [u8; 256]
+//   rather than 32 separate u64 fields because:
+//     (a) it scales uniformly to all 32 canonical GPR slots without
+//         per-arch field-name churn,
+//     (b) the pack/unpack helpers are the same 8-byte LE loop already
+//         used everywhere in the kernel (task.vuma pt_get_pid etc.),
+//     (c) VUMA's array index is byte-granular, so [u8; 256] is the natural
+//         shape — declaring [u64; 32] would not be supported.
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+//   tf_get_gpr(tf, idx) and tf_set_gpr(tf, idx, val) do 8-byte LE
+//   pack/unpack at byte offset `idx * 8` in the gpr array. Same 8-byte
+//   loop pattern as task.vuma's pt_get_pid / pt_set_pid but with a
+//   u64 accumulator and an 8-byte loop bound. The cast `b as u64` widens
+//   a u8 array element to u64 before the shift; the cast `b as u8` narrows
+//   the masked u64 back to u8 for the array store.
+//
+// ── PMT discipline ──────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   TrapFrame is a flat typed-memory record held in a `___pmt_buffer`-backed
+//   State<TrapFrame>; the caller allocates it via `state_new(TrapFrame)` and
+//   passes it by reference to tf_init / tf_get_gpr / tf_set_gpr (init-style
+//   API — same convention as R1a's bootinfo_init, K2a's pmm_init, K4a's
+//   pt_init, K8a's spinlock_init).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). The arch-specific
+//   trap_trampoline files (womb/kernel/arch/x86_64/trap_trampoline.vuma etc.,
+//   R2b/R2c/R2d) re-declare this layout byte-identically so they can be
+//   compiled standalone. A mismatch in field order or type would silently
+//   produce different field offsets at the call site — see
+//   kernel-developer-guide.md §9 "Decimal-constants discipline" +
+//   "Byte-identical re-declaration invariant".
+//
+//   Byte-identical re-declaration means: same field names, same field
+//   types, same field order, same _pad size. R2b/R2c/R2d MUST copy this
+//   layout verbatim (the gpr [u8; 256] + pc/status/vector/error_code/sp
+//   u64 + fpu [u8; 256] + _pad [u8; 24] = 576 bytes shape) and re-declare
+//   tf_get_gpr / tf_set_gpr / tf_init byte-identically. K3d's trap.vuma
+//   dispatcher will be migrated off the old 22-field x86_64 TrapFrame onto
+//   this superset in a follow-up wave (after R2b lands); until then the
+//   dispatcher reads the old layout, which is fine because the superset is
+//   additive (R2a doesn't delete anything — it adds the canonical file).
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All numeric literals in this file are decimal (per the project-wide
+//   convention — see kernel-developer-guide.md §9 and the same rule applied
+//   in trap.vuma's header comment). Hex values are documented in comments
+//   only. The literals used in the self-test:
+//     42      = 0x2a            (arbitrary GPR round-trip value, slot 0)
+//     100000  = 0x186a0         (arbitrary GPR round-trip value, slot 5)
+//     4096    = 0x1000          (canonical "low page" PC test value)
+//     14      = 0xe             (x86_64 #PF page-fault vector — the same
+//                                value K3a's trap_trampoline.vuma self-test
+//                                uses for its vector=14 page-fault path)
+//     256     = 0x100           (gpr/fpu array size — byte-loop bound)
+//     8       = 0x8             (u64 pack/unpack byte count)
+//     24      = 0x18            (_pad array size — byte-loop bound)
+//     255     = 0xff            (u8 mask, applied after the >> shift)
+//     0..6    = self-test return codes (1..6 = individual check failures)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/trap/trap_frame.vuma \
+//         /tmp/trap_frame.bin x86_64 --verify
+//     /tmp/trap_frame.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (tf_init zeros all fields; then tf_set_gpr +
+// tf_get_gpr round-trip two slots; then a direct pc/vector write/read).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout — Canonical superset TrapFrame (576 bytes total).
+// ────────────────────────────────────────────────────────────────────────────
+layout TrapFrame = {
+    gpr: [u8; 256],        // 32 × 8 bytes — general-purpose registers (LE)
+    pc: u64,               // program counter (rip / elr_el1 / mepc)
+    status: u64,           // status register (rflags / spsr_el1 / mstatus)
+    vector: u64,           // interrupt vector / exception cause
+    error_code: u64,       // CPU error code / esr_el1 / stval
+    sp: u64,               // stack pointer at trap entry
+    fpu: [u8; 256],        // 32 × 8 bytes — FPU/SIMD registers (optional, LE)
+    _pad: [u8; 24],        // alignment padding (zeroed by tf_init)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_get_gpr: read the u64 GPR at canonical slot `idx` from tf.gpr.
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian unpack at byte offset `idx * 8`. Same loop pattern
+// as task.vuma's pt_get_pid / pt_get_vruntime etc., but with a u64
+// accumulator and an 8-byte loop bound. The cast `b as u64` widens the u8
+// array element before the left-shift; VUMA's left-shift result type
+// follows the left operand, so the addition stays in u64.
+//
+// State<T> params: 1 (tf). Pure read — no writes. The 8-iteration byte
+// loop is direct typed-memory reads; no `*ptr`/`&tf`/`allocate` anywhere.
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_set_gpr: write the u64 `val` to canonical slot `idx` in tf.gpr.
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack at byte offset `idx * 8`. Same loop pattern
+// as task.vuma's pt_set_pid etc., but with an 8-byte loop bound. The mask
+// `& 255` extracts the low byte after the right-shift; the cast `b as u8`
+// narrows the masked u64 back to u8 for the array store.
+//
+// State<T> params: 1 (tf). Pure write to tf.gpr[off..off+8]. No reads
+// of other tf fields, no helper calls.
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// tf_init: zero every field of a caller-allocated TrapFrame.
+// ────────────────────────────────────────────────────────────────────────────
+// Called once per TrapFrame before any arch-specific trap-to-superset
+// adapter (x86_trap_to_superset / arm64_trap_to_superset / riscv_trap_to_
+// superset in R2b/R2c/R2d) populates the arch-specific fields. Each arch's
+// adapter calls this first to get a clean slate, then overwrites the
+// fields it knows about — fields the arch doesn't populate stay 0 (the
+// "zeroed by that arch's trap_entry stub" contract from the R2a task
+// description, identical to the R1a BootInfo contract).
+//
+// State<T> params: 1 (tf). Pure write — no reads, no helper calls. The
+// 5 scalar-field assignments + the three byte-zeroing loops (gpr 256,
+// fpu 256, _pad 24) are direct typed-memory writes; no
+// `*ptr`/`&tf`/`allocate` anywhere.
+//
+// The byte-zeroing loops are explicit (rather than relying on state_new's
+// zero-fill) because: (a) the contract requires tf_init to be a self-
+// contained zeroing function — callers may pass a TrapFrame that was
+// previously written to (e.g. by a prior trap, then re-used); (b) the
+// loops document the gpr/fpu/_pad region semantics for readers (and
+// match the same explicit-zero pattern R1a's bootinfo_init uses for the
+// 7-byte _pad).
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the canonical superset TrapFrame end-to-end through 6 checks:
+//   1. tf_init zeros tf.pc (must read back 0).
+//   2. tf_init zeros tf.vector (must read back 0).
+//   3. tf_set_gpr(tf, 0, 42) then tf_get_gpr(tf, 0) == 42 — round-trip
+//      through the lowest GPR slot (byte offset 0..7). Verifies the 8-byte
+//      LE pack/unpack loop handles a small value (high bytes must be zero).
+//   4. tf_set_gpr(tf, 5, 100000) then tf_get_gpr(tf, 5) == 100000 —
+//      round-trip through slot 5 (byte offset 40..47). Verifies the
+//      helpers index correctly past slot 0, and that a value crossing
+//      the u16/u32 boundary (100000 = 0x186a0 — 3 bytes) packs/unpacks
+//      without truncation.
+//   5. Direct tf.pc = 4096 (0x1000) write/read — verifies the scalar u64
+//      field path (the most common path the dispatcher will use).
+//   6. Direct tf.vector = 14 (page fault) write/read — verifies the
+//      scalar u64 field path used by trap_handler's vector routing
+//      (vector 14 = #PF on x86_64).
+//
+// Returns 0 on success, 1..6 on the 6 individual check failures:
+//   1: tf.pc != 0 after tf_init
+//   2: tf.vector != 0 after tf_init
+//   3: tf_get_gpr(tf, 0) != 42 after tf_set_gpr(tf, 0, 42)
+//   4: tf_get_gpr(tf, 5) != 100000 after tf_set_gpr(tf, 5, 100000)
+//   5: tf.pc != 4096 after direct write
+//   6: tf.vector != 14 after direct write
+//
+// Per the R2a contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL — see the Decimal-constants
+// table in the file header for the rationale.
+fn main() -> i32 {
+    let tf = state_new(TrapFrame);
+    tf_init(tf);
+    if tf.pc != 0 { return 1; }
+    if tf.vector != 0 { return 2; }
+    // Set and get gpr[0]
+    tf_set_gpr(tf, 0, 42);
+    if tf_get_gpr(tf, 0) != 42 { return 3; }
+    // Set and get gpr[5]
+    tf_set_gpr(tf, 5, 100000);
+    if tf_get_gpr(tf, 5) != 100000 { return 4; }
+    // Set pc + vector
+    tf.pc = 4096;
+    tf.vector = 14;  // page fault
+    if tf.pc != 4096 { return 5; }
+    if tf.vector != 14 { return 6; }
+    return 0;
+}
