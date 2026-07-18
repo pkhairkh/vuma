@@ -671,21 +671,32 @@ impl AstToScg {
                 default_region.add_node(id);
                 Ok(id)
             }
+            // FIX1 (multi-param transforms): `TransformDef` is now lowered
+            // to the SCG exactly like `FnDef` — synthesize an `FnDef` with
+            // the same name, params, return type, and body, then run it
+            // through `convert_fn_def`. This makes transforms first-class
+            // functions in the semantic SCG (and thus visible to IVE
+            // verification, BD inference, MSG, etc.).
+            //
+            // The body is `Vec<Stmt>` on `TransformDef` but `Block` on
+            // `FnDef`; we wrap it in a `Block` with the transform's span.
             Item::TransformDef(td) => {
-                let id = scg.add_node(
-                    NodeType::Computation,
-                    NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!(
-                            "transform {}({}: State<{}>) -> State<{}> {{ ... }}  // PMT Wave 1c TODO",
-                            td.name, td.param_name, td.param_layout, td.return_layout
-                        )),
-                        result_type: None,
-                        tail_call: false,
-                    }),
-                    self.span_to_pp(&td.span),
-                );
-                default_region.add_node(id);
-                Ok(id)
+                let fn_def = FnDef {
+                    visibility: Visibility::Private,
+                    attrs: Vec::new(),
+                    name: td.name.clone(),
+                    type_params: Vec::new(),
+                    params: td.params.clone(),
+                    return_type: td.return_type.clone(),
+                    body: Block {
+                        statements: td.body.clone(),
+                        span: td.span,
+                    },
+                    is_async: false,
+                    where_clause: None,
+                    span: td.span,
+                };
+                self.convert_fn_def(&fn_def, scg)
             }
         }
     }
