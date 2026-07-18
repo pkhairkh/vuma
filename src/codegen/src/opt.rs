@@ -673,12 +673,32 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                 // the definition alive for cross-block references. The old code
                 // eliminated the instruction, which left register dst undefined
                 // in other blocks that referenced it.
-                new_instrs.push(IRInstr::Add {
-                    dst: IRValue::Register(dst_id),
-                    lhs: IRValue::Immediate(result),
-                    rhs: IRValue::Immediate(0),
-                    ty: None,
-                });
+                //
+                // Preserve the ty field for float BinOps so subsequent folds
+                // use the correct float type (F32 vs F64). Using Add with
+                // ty=None would cause the next fold to treat float bits as
+                // integers, producing wrong results.
+                let fold_ty = match &instr {
+                    IRInstr::BinOp { ty, .. } => ty.clone(),
+                    IRInstr::Cmp { ty, .. } => ty.clone(),
+                    _ => None,
+                };
+                if let Some(ty) = fold_ty {
+                    new_instrs.push(IRInstr::BinOp {
+                        op: crate::ir::BinOpKind::Add,
+                        dst: IRValue::Register(dst_id),
+                        lhs: IRValue::Immediate(result),
+                        rhs: IRValue::Immediate(0),
+                        ty: Some(ty),
+                    });
+                } else {
+                    new_instrs.push(IRInstr::Add {
+                        dst: IRValue::Register(dst_id),
+                        lhs: IRValue::Immediate(result),
+                        rhs: IRValue::Immediate(0),
+                        ty: None,
+                    });
+                }
                 continue;
             }
 
