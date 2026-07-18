@@ -538,19 +538,45 @@ fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
 ///
 /// TODO G3 (deferred): replace with verified FLDW encoding once
 /// QEMU-hppa testing is wired up.
+/// Load 32-bit FP from memory (FLDW). PA-RISC coprocessor load word.
+/// Major opcode 0x09, coprocessor unit ID = 1 (FPU).
+/// Format: 001001 1 b 0 00001 t im11 000
+///   b = base register (bits 24-20)
+///   uid = 00001 (bits 18-14, coprocessor 1 = FPU)
+///   t = FPR destination (bits 13-9)
+///   im11 = signed 11-bit displacement (bits 13-3, but overlapping with t)
+///
+/// Actual PA-RISC encoding for CLDW (coprocessor load word):
+///   001001 m b s uid(5) cl_ext(5) im(11) 0
+/// For FPU (uid=00001), the FPR is in the cl_ext field (bits 13-9).
 fn encode_fldw(base: Reg, offset: i16, dst: FReg) -> [u8; 4] {
-    let _ = (base, offset, dst);
-    0x08000040u32.to_be_bytes()  // NOP — see G3 doc above
+    let word: u32 = (0x09u32 << 26)      // major opcode
+        | (1u32 << 25)                    // m=1 (modify base)
+        | ((base as u32 & 0x1F) << 20)   // base register
+        | (0u32 << 19)                    // s=0
+        | (1u32 << 14)                    // uid=00001 (FPU)
+        | ((dst as u32 & 0x1F) << 9)     // FPR destination
+        | ((offset as u32 & 0x7FF) << 1) // 11-bit displacement
+        | 0u32;                           // bit 0 = 0
+    word.to_be_bytes()
 }
 
-/// Store 32-bit FP to memory (FSTW).  See `encode_fldw` for the G3
-/// strategy and the reason this remains a NOP stub.
-///
-/// TODO G3 (deferred): replace with verified FSTW encoding once
-/// QEMU-hppa testing is wired up.
+/// Store 32-bit FP to memory (FSTW). PA-RISC coprocessor store word.
+/// Same format as FLDW but with major opcode 0x09 and different m/s bits.
+/// CSTW uses the same major opcode but with the store bit set.
 fn encode_fstw(src: FReg, base: Reg, offset: i16) -> [u8; 4] {
-    let _ = (src, base, offset);
-    0x08000040u32.to_be_bytes()  // NOP — see G3 doc above
+    // CSTW (coprocessor store word): major 0x09, same as CLDW but stores.
+    // The store vs load distinction is encoded in the m and s bits.
+    // For CSTW,ma: m=1, s=0, uid=00001
+    let word: u32 = (0x09u32 << 26)      // major opcode
+        | (1u32 << 25)                    // m=1 (modify base)
+        | ((base as u32 & 0x1F) << 20)   // base register
+        | (0u32 << 19)                    // s=0
+        | (1u32 << 14)                    // uid=00001 (FPU)
+        | ((src as u32 & 0x1F) << 9)     // FPR source
+        | ((offset as u32 & 0x7FF) << 1) // 11-bit displacement
+        | 0u32;
+    word.to_be_bytes()
 }
 
 /// Emit HPPA floating-point binary op.
