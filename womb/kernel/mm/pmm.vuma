@@ -102,15 +102,21 @@
 // Flat free-list node pool. Holds 256 FreeNode records laid out as three
 // parallel byte arrays (bases, orders, nexts) so each field can be
 // accessed via `state.array[idx]` (which the codegen only lowers
-// correctly for [u8; N] arrays — see file header). `count` tracks how
-// many slots 0..count-1 are in use; allocation is bump-style and slots
-// are never recycled (sufficient for a modest physical-memory workload
-// — 256 nodes × 4 MB max-order block = 1 GB max tracked).
+// correctly for [u8; N] arrays — see file header). `count` is the
+// bump-alloc high-water mark (monotonically non-decreasing — it is NOT
+// the number of slots currently in use). `free_head` is the head of a
+// recycle list of slots that were bump-allocated, used as FreeNodes, and
+// then returned via pool_free_node (e.g. when a buddy is coalesced away
+// in pmm_free). pool_alloc_node drains free_head before bump-allocating,
+// so the pool can sustain an unbounded sequence of alloc/free cycles
+// without exhausting the 256-slot capacity (Fix 4). The sentinel 256
+// means "empty" (no slot at that index exists — slots are 0..255).
 layout FlatPool = {
     bases: [u8; 2048],   // 256 * 8 bytes — u64 base address per node, LE-packed
     orders: [u8; 256],   // 256 bytes    — u8 buddy order per node
     nexts: [u8; 2048],   // 256 * 8 bytes — u64 next-node index per node, LE-packed
-    count: u32,          // number of slots in use (0..256)
+    count: u32,          // bump-alloc high-water mark (0..256), never decreases
+    free_head: u32,      // head of recycle list, or 256 if empty (Fix 4)
 }
 
 // The PMM state. `pool` stores the FlatPool state's address (via
@@ -206,15 +212,51 @@ fn pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
     pool.orders[idx] = val;
 }
 
-// Bump-allocate a new FreeNode slot in the pool. Returns the slot index
-// (0..255), or 256 if the pool is exhausted.
+// Allocate a FreeNode slot from the pool. Tries the recycle list
+// (free_head) first; if empty, bump-allocates a new slot from the count
+// high-water mark. Returns the slot index (0..255), or 256 if the pool
+// is exhausted (both free_head empty AND count >= 256).
+//
+// The recycle path (Fix 4) is what prevents the documented "buddy block
+// is lost" leak: when pmm_free coalesces a buddy, it calls pool_free_node
+// to push the buddy's FreeNode onto free_head, and the next pool_alloc_node
+// reuses it instead of consuming a fresh bump-alloc slot. This lets the
+// pool sustain an unbounded alloc/free cycle without growing count past
+// the steady-state high-water mark (rather than monotonically consuming
+// all 256 slots and leaking buddy blocks once exhausted).
 fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
+    // Try to reuse a freed node first.
+    if pool.free_head < 256 {
+        let node = pool.free_head;
+        // The recycle list chains through each slot's `nexts` field
+        // (a recycled slot is not on any free_list, so nexts is free
+        // to be used as the recycle-list link).
+        pool.free_head = pool_get_next(pool, node) as u32;
+        // Mark the slot as allocated (defensive — the caller always
+        // overwrites nexts via pool_set_next before linking the slot
+        // into a free_list, but this prevents a stale recycle-link
+        // from corrupting state if a caller forgets).
+        pool_set_next(pool, node, 256);
+        return node;
+    }
+    // Bump-allocate a new slot.
     let idx = pool.count;
     if idx >= 256 {
         return 256;
     }
     pool.count = idx + 1;
     return idx;
+}
+
+// Return a FreeNode slot to the pool's recycle list (Fix 4). The slot is
+// pushed onto free_head; the next pool_alloc_node will reuse it. `node`
+// must be a valid slot index (0..255). The recycle list chains through
+// each slot's `nexts` field (read by pool_alloc_node). After this call,
+// `node` is NO LONGER on any free_list — the caller must have already
+// unlinked it (e.g. via the prev2/cur2 walk in pmm_free's coalesce path).
+fn pool_free_node(pool: State<FlatPool>, node: u32) {
+    pool_set_next(pool, node, pool.free_head as u64);
+    pool.free_head = node;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -287,8 +329,10 @@ fn pmm_buddy(addr: u64, order: u8) -> u64 {
 // to access the pool, not the pmm.pool field).
 
 fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_size: u64) {
-    // Reset pool.
+    // Reset pool: count = 0 (no slots bump-allocated yet) and free_head
+    // = 256 (recycle list empty — Fix 4). Both fields are u32.
     pool.count = 0;
+    pool.free_head = 256;
 
     // Capture pool address in pmm.pool for diagnostic use.
     pmm.pool = pool as Address;
@@ -412,8 +456,10 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
         // Pool exhausted — can't record the buddy. To avoid leaking
         // the buddy block, we'd ideally free `bigger` back; instead,
         // we just return 0 (caller treats as OOM). The buddy block is
-        // lost. This is acceptable for the K2a self-test (256 nodes is
-        // far more than needed).
+        // lost. With Fix 4's recycling, the pool only reaches exhaustion
+        // when count >= 256 AND free_head is empty (i.e. every slot is
+        // live on some free_list), which requires ~1 GB of in-flight
+        // buddy traffic — far beyond the K2a self-test's needs.
         return 0;
     }
     pool_set_base(pool, idx, buddy);
@@ -445,7 +491,9 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
     if order >= 10 {
         let idx = pool_alloc_node(pool);
         if idx == 256 {
-            // Pool exhausted — block is leaked. Acceptable for K2a.
+            // Pool exhausted — block is leaked. With Fix 4's recycling
+            // this requires every slot to be live on a free_list (count
+            // = 256 AND free_head empty). Acceptable for K2a.
             return;
         }
         pool_set_base(pool, idx, addr);
@@ -485,6 +533,15 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
             let next = pool_get_next(pool, found as u32);
             pool_set_next(pool, prev2 as u32, next);
         }
+        // Recycle the buddy's FreeNode slot — Fix 4. Without this, the
+        // slot would be "lost": still counted in pool.count but not on any
+        // free_list, never reusable. Over many alloc/free cycles the pool
+        // would exhaust (count >= 256) and the documented "buddy block is
+        // lost" leak would surface. pool_free_node pushes `found` onto
+        // free_head so the next pool_alloc_node (e.g. the prepend at the
+        // top of this recursive coalesce chain) reuses it instead of
+        // bump-allocating a fresh slot.
+        pool_free_node(pool, found as u32);
         // The buddy was previously counted in free_pages (2^order pages).
         // Decrement free_pages by 2^order.
         let pages = 1 as u64 << order;
@@ -500,7 +557,8 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
     // Buddy not found. Add addr to free_lists[order].
     let idx = pool_alloc_node(pool);
     if idx == 256 {
-        // Pool exhausted — block is leaked.
+        // Pool exhausted — block is leaked. With Fix 4's recycling
+        // this requires every slot to be live on a free_list.
         return;
     }
     pool_set_base(pool, idx, addr);
@@ -540,24 +598,28 @@ fn main() -> i32 {
     if pmm.free_pages != pmm.total_pages {
         return 101;
     }
+    // Fix 4: free_head should be 256 (empty) after init.
+    if pool.free_head != 256 {
+        return 102;
+    }
 
     // Alloc 3 pages of order 0 (4 KB each). Each split pops an order-N
     // block and adds the buddy back, so free_pages drops by 1 per alloc.
     let a = pmm_alloc(pool, pmm, 0);
-    if a == 0 { return 102; }
+    if a == 0 { return 103; }
     let b = pmm_alloc(pool, pmm, 0);
-    if b == 0 { return 103; }
+    if b == 0 { return 104; }
     let c = pmm_alloc(pool, pmm, 0);
-    if c == 0 { return 104; }
+    if c == 0 { return 105; }
 
     // Each alloc should return a distinct, 4 KB-aligned address.
-    if a == b { return 105; }
-    if b == c { return 106; }
-    if a == c { return 107; }
+    if a == b { return 106; }
+    if b == c { return 107; }
+    if a == c { return 108; }
 
     // free_pages should now be 4096 - 3 = 4093.
     if pmm.free_pages != 4093 {
-        return 108;
+        return 109;
     }
 
     // Free them in reverse — should coalesce back up to order 10.
@@ -566,8 +628,65 @@ fn main() -> i32 {
     pmm_free(pool, pmm, a, 0);
 
     // After coalescing, free_pages should equal total_pages.
-    if pmm.free_pages == pmm.total_pages {
-        return 0;
+    if pmm.free_pages != pmm.total_pages {
+        return 110;
     }
-    return 1;
+
+    // ── Fix 4: verify FreeNode recycling ───────────────────────────────
+    //
+    // The coalesce chain in free(a) removed 9 buddy FreeNodes from
+    // free_lists[1..9] (one per recursive coalesce step from order 0 up
+    // to order 9). Without recycling, those slots would be "lost"
+    // (counted in pool.count but never reusable). With Fix 4, each
+    // coalesce step calls pool_free_node, pushing the buddy's slot onto
+    // free_head. The final order-10 prepend reuses one slot, so free_head
+    // should hold 8+ recycled slots (non-256 = non-empty).
+
+    // Check 1: free_head is non-empty (recycling happened).
+    if pool.free_head == 256 {
+        return 111;
+    }
+
+    // Check 2: pool.count is modest. Without recycling, count = 18
+    // (4 init + 10 alloc-a splits + 1 alloc-c split + 1 free-c prepend
+    // + 1 free-b prepend + 1 free-a order-10 prepend). With recycling,
+    // count = 16 (free-c and free-a prepends reuse recycled slots).
+    // Allow up to 17 for slack; the no-recycle value of 18 would fail.
+    if pool.count > 17 {
+        return 112;
+    }
+
+    // Check 3: re-alloc reuses recycled slots. Alloc d (order 0) needs
+    // 10 FreeNodes for the splits (orders 9..0). Without recycling, all
+    // 10 come from bump-alloc (count += 10). With recycling, 9 come from
+    // free_head (draining it) and 1 from bump-alloc (count += 1).
+    let count_before_d = pool.count;
+    let d = pmm_alloc(pool, pmm, 0);
+    if d == 0 { return 113; }
+    let count_delta = pool.count - count_before_d;
+    if count_delta >= 10 {
+        return 114;  // didn't reuse recycled slots
+    }
+
+    // Alloc e, f — should also work and return distinct addresses.
+    let e = pmm_alloc(pool, pmm, 0);
+    if e == 0 { return 115; }
+    let f = pmm_alloc(pool, pmm, 0);
+    if f == 0 { return 116; }
+    if d == e { return 117; }
+    if e == f { return 118; }
+    if d == f { return 119; }
+    if pmm.free_pages != 4093 {
+        return 120;
+    }
+
+    // Free them in reverse — should coalesce back up to order 10 again.
+    pmm_free(pool, pmm, f, 0);
+    pmm_free(pool, pmm, e, 0);
+    pmm_free(pool, pmm, d, 0);
+    if pmm.free_pages != pmm.total_pages {
+        return 121;
+    }
+
+    return 0;
 }
