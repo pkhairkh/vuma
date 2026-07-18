@@ -1760,15 +1760,34 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                                     code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                                 } else {
-                                    // f64 → u64: threshold = 2^63
-                                    // Load 2^63 as double (0x43E0000000000000) into XMM1
-                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x43E0000000000000));
-                                    code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
-                                    code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                    // f64 → u64: For values < 2^63, CVTTSD2SI
+                                    // produces the correct unsigned result directly.
+                                    // For values >= 2^63, use the subtract-XOR technique:
+                                    //   1. CVTTSD2SI r64, xmm (direct — may be wrong for >= 2^63)
+                                    //   2. Save direct result in R10
+                                    //   3. Subtract 2^63 from float, CVTTSD2SI again, XOR 2^63
+                                    //   4. Compare original float with 2^63
+                                    //   5. CMOVAE: if float >= 2^63, use corrected result
+                                    // Load the float into XMM0
+                                    // Direct conversion (correct for < 2^63)
                                     code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
-                                    // XOR with 0x8000000000000000 to add 2^63 back
-                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x8000000000000000));
-                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R10));
+                                    code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rax)); // save direct result
+                                    // Corrected conversion (for >= 2^63)
+                                    code.extend(encode_mov_reg_imm64(Gpr::R11, 0x43E0000000000000)); // 2^63 as f64
+                                    code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R11));
+                                    code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); // value - 2^63
+                                    code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_mov_reg_imm64(Gpr::R11, 0x8000000000000000u64));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R11)); // add 2^63 back
+                                    // Now RAX = corrected, R10 = direct. Pick based on value.
+                                    // Compare 2^63 (in XMM1, still holds 2^63) with original value.
+                                    // We need the original value back in XMM0 for the comparison.
+                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0)); // recover (value - 2^63)
+                                    code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); // restore original value
+                                    code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm1, Xmm::Xmm0)); // compare 2^63 vs value
+                                    // If 2^63 <= value (value >= 2^63, i.e. above-or-equal), use corrected (RAX)
+                                    // Otherwise use direct (R10)
+                                    code.extend(encode_cmovcc_reg_reg(Cc::AboveEqual, Gpr::Rax, Gpr::R10));
                                 }
                             }
                         }
