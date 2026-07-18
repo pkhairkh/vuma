@@ -893,6 +893,7 @@ fn test_ffi_demo_compiles_x86_64() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Int(0)]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -1065,6 +1066,7 @@ fn test_dwarf_debug_full_pipeline() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 

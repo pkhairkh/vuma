@@ -105,6 +105,7 @@ fn make_simple_codegen_scg() -> Scg {
             params: vec![],
             results: vec![ScgType::I64],
             body: vec![ScgStatement::Return(vec![ScgExpr::Int(42)])],
+            var_types: std::collections::HashMap::new(),
         })],
     }
 }
@@ -143,6 +144,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("c".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     }
 }

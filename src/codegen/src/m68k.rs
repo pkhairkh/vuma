@@ -1071,7 +1071,7 @@ fn emit_instr(
             // see the function doc comment for encoding-uncertainty
             // caveats). Otherwise fall through to the integer `emit_binop`
             // path.
-            if ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+            if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
                 emit_fp_binop(op, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code);
             } else {
                 emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
@@ -1099,7 +1099,7 @@ fn emit_instr(
             // FP dispatch (G4): if the operand type is F32 or F64, route
             // through `emit_fp_binop` (best-effort 68881 FCMP encoding).
             // Otherwise fall through to integer `emit_binop`.
-            if ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64)) {
+            if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
                 emit_fp_binop(&binop_kind, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code);
             } else {
                 emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);

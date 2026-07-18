@@ -95,6 +95,7 @@ fn test_codegen_simple_add() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -147,6 +148,7 @@ fn test_codegen_stack_allocation() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("buf".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -215,6 +217,7 @@ fn test_codegen_load_store() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("val".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -278,6 +281,7 @@ fn test_codegen_if_else() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -337,6 +341,7 @@ fn test_codegen_loop() {
                 }),
                 ScgStatement::Return(vec![]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -388,6 +393,7 @@ fn test_codegen_function_call() {
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
@@ -434,6 +440,7 @@ fn test_codegen_multi_function_elf() {
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var("r".to_string())]),
                 ],
+                var_types: std::collections::HashMap::new(),
             }),
             ScgNode::Function(ScgFunction {
                 name: "helper".to_string(),
@@ -453,6 +460,7 @@ fn test_codegen_multi_function_elf() {
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var("doubled".to_string())]),
                 ],
+                var_types: std::collections::HashMap::new(),
             }),
         ],
     };
@@ -560,6 +568,7 @@ fn test_codegen_bare_metal_raw() {
                 }),
                 ScgStatement::Return(vec![]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 

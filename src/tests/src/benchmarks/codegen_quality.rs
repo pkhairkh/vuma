@@ -179,6 +179,7 @@ fn build_program_with_memory(size: usize) -> Scg {
             params: vec![],
             results: vec![ScgType::Ptr],
             body,
+            var_types: std::collections::HashMap::new(),
         })],
     }
 }
