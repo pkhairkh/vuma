@@ -309,11 +309,13 @@ impl<'src> Parser<'src> {
                 match lexeme {
                     "static" => self.parse_static_item(visibility, attrs).map(Item::Static),
                     // PMT (Wave 1a): `layout Name = { ... }` and
-                    // `transform name(s: State<L>) -> State<L> { ... }`.
+                    // `transform name(p: T, ...) -> T { ... }`.
                     // These are intentionally NOT promoted to keyword tokens
                     // — they are dispatched by lexeme so the lexer is
                     // untouched (the existing `Ref` keyword, lowercase `ref`,
                     // is unrelated to the capital-`R` `Ref<T,F>` PMT type).
+                    // FIX1: transforms now accept multiple params and any
+                    // return type (mirroring `fn`).
                     "layout" => self.parse_layout_def(attrs).map(Item::LayoutDef),
                     "transform" => self.parse_transform_def().map(Item::TransformDef),
                     _ => self.parse_stmt().map(Item::Stmt),
@@ -512,14 +514,15 @@ impl<'src> Parser<'src> {
         })
     }
 
-    /// `transform` <ident> `(` <ident> `:` `State` `<` <ident> `>` `)`
-    ///       `->` `State` `<` <ident> `>` `{` <block> `}`
+    /// `transform` <ident> `(` <params> `)` [`->` <type>] `{` <block> `}`
     ///
-    /// PMT (Wave 1a) — a pure function from one state layout to another.
-    /// Mirrors `parse_fn_def` but with a single `State<LayoutName>` parameter
-    /// and a `State<LayoutName>` return type. The layout names are extracted
-    /// from the `State<T>` type produced by `parse_type` (which special-cases
-    /// the `State` and `Ref` identifiers).
+    /// FIX1 (multi-param transforms): the parser now mirrors `parse_fn_def`
+    /// — comma-separated `name: Type` parameters (any types, not just
+    /// `State<LayoutName>`) and an optional `-> Type` return annotation.
+    /// The old `extract_state_layout_name` single-`State<T>` restriction
+    /// has been removed; transforms are now lowered to codegen exactly
+    /// like regular functions (see `src/pipeline.rs` and
+    /// `src/parser/src/to_scg.rs`).
     fn parse_transform_def(&mut self) -> Result<TransformDef, ParseError> {
         let start = self.current.span.start;
         // Consume 'transform' (lexed as Ident — see parse_item dispatch).
@@ -528,62 +531,25 @@ impl<'src> Parser<'src> {
         let name = self.expect_name()?;
 
         self.expect(TokenKind::LParen)?;
-        let param_name = self.expect_name()?;
-        self.expect(TokenKind::Colon)?;
-        let param_ty = self.parse_type()?;
-        let param_layout = Self::extract_state_layout_name(param_ty, "parameter")?;
+        let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
 
-        self.expect(TokenKind::Arrow)?;
-        let return_ty = self.parse_type()?;
-        let return_layout = Self::extract_state_layout_name(return_ty, "return")?;
+        let return_type = if self.at(TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
 
         let body_block = self.parse_block()?;
 
         Ok(TransformDef {
             name,
-            param_name,
-            param_layout,
-            return_layout,
+            params,
+            return_type,
             body: body_block.statements,
             span: Span::new(start, self.current.span.end),
         })
-    }
-
-    /// Given a `Type` produced by `parse_type`, require it to be
-    /// `State<BDBase(layout_name)>` and return the layout name. Used by
-    /// `parse_transform_def` to enforce the `State<LayoutName>` signature.
-    ///
-    /// `position` is "parameter" or "return" — used in the error message.
-    ///
-    /// This is a free function (not a `&self` method) so it can be called
-    /// inline with `parse_type()` without running afoul of the borrow
-    /// checker (`parse_type` takes `&mut self`).
-    fn extract_state_layout_name(
-        ty: Type,
-        position: &str,
-    ) -> Result<String, ParseError> {
-        match ty {
-            Type::State(inner) => match *inner {
-                Type::BDBase(name) => Ok(name),
-                other => Err(ParseError::new(
-                    format!(
-                        "transform {} layout must be a plain layout name, got {}",
-                        position, other
-                    ),
-                    Span::synthetic(),
-                    ParseErrorKind::UnexpectedToken,
-                )),
-            },
-            other => Err(ParseError::new(
-                format!(
-                    "transform {} type must be State<LayoutName>, got {}",
-                    position, other
-                ),
-                Span::synthetic(),
-                ParseErrorKind::UnexpectedToken,
-            )),
-        }
     }
 
     /// `enum` <ident> [`<` type_params `>`] `{` <variants> `}`

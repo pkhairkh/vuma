@@ -5499,6 +5499,19 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
                         merged_items.push(item.clone());
                     }
                 }
+                // FIX1: transforms are lowered to codegen exactly like fns
+                // (see `bridge_ast_to_codegen_scg` and `to_scg.rs`). For
+                // multi-module dedup, treat a `TransformDef` as a first-class
+                // function name: first occurrence wins, subsequent
+                // occurrences (under the same name) are silently dropped.
+                // The item is pushed as-is (`Item::TransformDef`) so the
+                // downstream lowering arms in `bridge_ast_to_codegen_scg`
+                // and `to_scg.rs` still fire.
+                Item::TransformDef(td) => {
+                    if emitted_fns.insert(td.name.clone()) {
+                        merged_items.push(item.clone());
+                    }
+                }
                 Item::ExternBlock(eb) => {
                     // Keep only the extern fn declarations for which NO
                     // real fn definition exists in any module. The rest
@@ -7818,14 +7831,39 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // Collect void function names (functions with no return type annotation).
     // Used by flatten_expr to emit dst=None for void function calls — critical
     // for wasm32 which loads from mem[0] for non-void calls.
+    //
+    // FIX1: transforms are lowered exactly like fns, so a transform with no
+    // `-> Type` annotation is also "void" for this purpose.
     let void_functions: HashSet<String> = program.items.iter()
         .filter_map(|item| {
-            if let Item::FnDef(fn_def) = item {
-                if fn_def.return_type.is_none() {
-                    return Some(fn_def.name.clone());
+            match item {
+                Item::FnDef(fn_def) if fn_def.return_type.is_none() => {
+                    Some(fn_def.name.clone())
                 }
+                Item::TransformDef(td) if td.return_type.is_none() => {
+                    Some(td.name.clone())
+                }
+                _ => None,
             }
-            None
+        })
+        .collect();
+
+    // FIX1: build a map of `fn/transform name → State<L> layout name` for
+    // every function or transform whose return type is `State<LayoutName>`.
+    // When a `let c = add_points(p, q);` call binds the result of such a
+    // callee, `c` is registered as state-typed with that layout so
+    // subsequent `c.field` accesses resolve to Loads at the right offset.
+    // Without this, callers must annotate `let c: State<L> = ...` manually.
+    let state_returning_fns: HashMap<String, String> = program.items.iter()
+        .filter_map(|item| {
+            let (name, ret_ty) = match item {
+                Item::FnDef(fn_def) => (&fn_def.name, &fn_def.return_type),
+                Item::TransformDef(td) => (&td.name, &td.return_type),
+                _ => return None,
+            };
+            ret_ty.as_ref().and_then(|ty| {
+                extract_state_layout_name_from_ast(ty).map(|ln| (name.clone(), ln))
+            })
         })
         .collect();
 
@@ -7851,6 +7889,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         tl_ctx.layouts = layouts.clone();
         tl_ctx.extern_fn_decls = extern_fn_decls.clone();
         tl_ctx.layout_decls = layout_decls.clone();
+        tl_ctx.state_returning_fns = state_returning_fns.clone();
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
                 top_level_stmts.extend(bridge_stmt_to_scg(stmt, &mut tl_ctx));
@@ -7860,8 +7899,40 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
 
     let mut nodes: Vec<ScgNode> = Vec::new();
 
+    // FIX1: `Item::TransformDef` is lowered to codegen exactly like
+    // `Item::FnDef` — synthesize an `FnDef` with the transform's name,
+    // params, return type, and body, then process it through the same
+    // codegen path. The transform's `Vec<Stmt>` body is wrapped in a
+    // `Block` (the structural type `FnDef` expects).
     for item in &program.items {
-        if let Item::FnDef(fn_def) = item {
+        // Produce a borrowed `FnDef` to process. For a real `Item::FnDef`
+        // we borrow it directly; for `Item::TransformDef` we synthesize an
+        // owned `FnDef` and borrow that. Both arms below share the same
+        // processing code via a unified `&FnDef` reference.
+        let synthesized: vuma_parser::ast::FnDef;
+        let fn_def: &vuma_parser::ast::FnDef = match item {
+            Item::FnDef(fd) => fd,
+            Item::TransformDef(td) => {
+                synthesized = vuma_parser::ast::FnDef {
+                    visibility: vuma_parser::ast::Visibility::Private,
+                    attrs: Vec::new(),
+                    name: td.name.clone(),
+                    type_params: Vec::new(),
+                    params: td.params.clone(),
+                    return_type: td.return_type.clone(),
+                    body: vuma_parser::ast::Block {
+                        statements: td.body.clone(),
+                        span: td.span,
+                    },
+                    is_async: false,
+                    where_clause: None,
+                    span: td.span,
+                };
+                &synthesized
+            }
+            _ => continue,
+        };
+        {
             let params: Vec<ScgParam> = fn_def
                 .params
                 .iter()
@@ -7884,6 +7955,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.layouts = layouts.clone();
             ctx.extern_fn_decls = extern_fn_decls.clone();
             ctx.layout_decls = layout_decls.clone();
+            ctx.state_returning_fns = state_returning_fns.clone();
             // PMT (Wave 2): register state-typed params (those with
             // `State<L>` type annotation) so `param.field` accesses inside
             // the body lower to Loads with the layout's field offsets.
@@ -8010,6 +8082,13 @@ pub struct BridgeCtx {
     /// Used to check if a layout has #[foreign(raw)]. Populated by
     /// `bridge_ast_to_codegen_scg`.
     pub layout_decls: HashMap<String, vuma_parser::ast::LayoutDef>,
+    /// FIX1: fn/transform name → `State<L>` layout name, for every function
+    /// or transform whose return type is `State<LayoutName>`. When a
+    /// `let c = callee(...)` call binds such a callee's result, `c` is
+    /// registered in `state_var_layouts` with this layout so subsequent
+    /// `c.field` accesses resolve to Loads at the right offset — without
+    /// requiring the caller to annotate `let c: State<L> = ...`.
+    pub state_returning_fns: HashMap<String, String>,
 }
 
 impl Default for BridgeCtx {
@@ -8032,6 +8111,7 @@ impl BridgeCtx {
             state_var_layouts: HashMap::new(),
             extern_fn_decls: HashMap::new(),
             layout_decls: HashMap::new(),
+            state_returning_fns: HashMap::new(),
         }
     }
 
@@ -8144,6 +8224,14 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
         },
         Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
         Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
+        // FIX1: a `State<L>` value is represented at runtime as a pointer
+        // to a stack-allocated buffer (see `state_new` lowering →
+        // `AllocationNode::Stack` with `ty: ScgType::Ptr`). Mapping
+        // `State<_>` to `Ptr` here lets transform/fn signatures with
+        // `State<L>` return types lower correctly (the function returns
+        // the buffer pointer) and lets `let p: State<L> = ...` bindings
+        // register a pointer var type for shift-inference.
+        Some(vuma_parser::ast::Type::State(_)) => ScgType::Ptr,
         _ => ScgType::Void,
     }
 }
@@ -9538,6 +9626,14 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     let is_extern = ctx.extern_fns.contains(name)
                         || name == "__vuma_alloc"
                         || name == "__vuma_dealloc";
+                    // FIX1: if the callee is a fn/transform whose return
+                    // type is `State<L>`, register the let-binding as
+                    // state-typed with that layout so subsequent `dst.field`
+                    // accesses resolve to Loads at the right offset —
+                    // without requiring `let dst: State<L> = ...`.
+                    if let Some(layout_name) = ctx.state_returning_fns.get(name).cloned() {
+                        ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name);
+                    }
                     stmts.push(ScgStatement::Call(CallNode {
                         dst: Some(let_stmt.name.clone()),
                         func: name.clone(),
