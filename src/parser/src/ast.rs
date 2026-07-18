@@ -128,10 +128,11 @@ pub enum Item {
     /// PMT (Programs as Memory Transformations) construct — a typed view of
     /// a memory buffer region. Wave 1a: parsed only; not yet lowered to SCG.
     LayoutDef(LayoutDef),
-    /// State transformation: `transform name(s: State<T>) -> State<U> { ... }`
+    /// State transformation: `transform name(p1: T1, ...) -> T { ... }`
     ///
-    /// PMT construct — a pure function from one memory-state layout to
-    /// another. Wave 1a: parsed only; not yet lowered to SCG.
+    /// PMT construct — a pure function over `State<Layout>` values.
+    /// FIX1: lowered to codegen exactly like `FnDef` (multi-param, any
+    /// return type).
     TransformDef(TransformDef),
     /// Top-level statement (assignment, expression, free, etc.) that
     /// appears outside of any function body.
@@ -442,21 +443,27 @@ pub struct LayoutDef {
     pub span: Span,
 }
 
-/// A state transformation: `transform name(s: State<T>) -> State<U> { ... }`
+/// A state transformation: `transform name(p1: T1, p2: T2, ...) -> T { ... }`
 ///
-/// A transform is a pure function from one memory-state layout to another.
-/// The body is a sequence of statements; the final statement is expected to
-/// produce the return state (Wave 1c will enforce this).
+/// A transform is a pure function whose parameters and return value are
+/// (typically) `State<Layout>` values, though any type is accepted. The
+/// body is a sequence of statements; the final statement is expected to
+/// produce the return value.
+///
+/// FIX1 (multi-param transforms): the old single-`State<LayoutName>`
+/// parameter restriction has been lifted. `TransformDef` now mirrors
+/// `FnDef` — `params: Vec<Param>` and `return_type: Option<Type>` — and
+/// is lowered to codegen exactly like a regular function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformDef {
     /// Transform name.
     pub name: String,
-    /// Parameter name (e.g. `s`).
-    pub param_name: String,
-    /// Parameter layout name (e.g. `Request`).
-    pub param_layout: String,
-    /// Return layout name (e.g. `Response`).
-    pub return_layout: String,
+    /// Formal parameters (comma-separated, any types). Reuses the same
+    /// `Param` struct as [`FnDef`]).
+    pub params: Vec<Param>,
+    /// Optional return type annotation (was: `return_layout: String`,
+    /// restricted to `State<LayoutName>`).
+    pub return_type: Option<Type>,
     /// Transform body — a sequence of statements.
     pub body: Vec<Stmt>,
     /// Source span.
