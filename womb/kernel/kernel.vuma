@@ -1,7 +1,7 @@
 // womb/kernel/kernel.vuma — VWK Integrated Interactive Kernel
 //
 // Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc,
-//                  free, ver, memstat, cd, pwd
+//                  free, ver, memstat, cd, pwd, write
 //
 // Terminal mode: RAW.  The kernel switches stdin to raw mode on startup
 // and handles all line editing itself (echo, backspace, arrow keys,
@@ -30,6 +30,14 @@ extern "C" {
 }
 
 layout KBuf = { data: [u8; 256] }
+
+// File content store: 16 files × 256 bytes + sizes.
+// inode_get_private() stores the slot index (1..16); slot 0 = no data.
+layout FileStore = {
+    data: [u8; 4096],   // 16 × 256
+    sizes: [u32; 16],
+    next: u32,           // next free slot (1..16)
+}
 
 // Linux struct termios — 36 bytes (NCCS=19, no c_ispeed/c_ospeed).
 // Field offsets: iflag=0, oflag=4, cflag=8, lflag=12, line=16, cc[0..18]=17..35
@@ -73,8 +81,27 @@ fn kprint(ec: State<EarlyConsole>, c: u8) {
 
 fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 13); kprint(ec, 10); }
 
+// ── ANSI color helpers ─────────────────────────────────────────────────
+// ESC [ N m  — set color.  0=reset, 1=bold, 31=red, 32=green, 33=yellow,
+// 34=blue, 35=magenta, 36=cyan, 37=white, 90=gray
+fn kcolor(ec: State<EarlyConsole>, code: u8) {
+    kprint(ec, 27); kprint(ec, 91);
+    // Print code as decimal (1-2 digits)
+    if code >= 10 { kprint(ec, 48 + code / 10); }
+    kprint(ec, 48 + code % 10);
+    kprint(ec, 109);
+}
+
+fn kreset(ec: State<EarlyConsole>) {
+    kprint(ec, 27); kprint(ec, 91); kprint(ec, 48); kprint(ec, 109);
+}
+
 fn kputs_banner(ec: State<EarlyConsole>) {
-    kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
+    // Cyan bold: "VWK" + reset + " kernel booted"
+    kcolor(ec, 36); kcolor(ec, 1);
+    kprint(ec, 86); kprint(ec, 87); kprint(ec, 75);  // VWK
+    kreset(ec);
+    kprint(ec, 32);  // space
     kprint(ec, 107); kprint(ec, 101); kprint(ec, 114); kprint(ec, 110);
     kprint(ec, 101); kprint(ec, 108); kprint(ec, 32);
     kprint(ec, 98); kprint(ec, 111); kprint(ec, 111); kprint(ec, 116);
@@ -82,23 +109,32 @@ fn kputs_banner(ec: State<EarlyConsole>) {
 }
 
 fn kputs_prompt(ec: State<EarlyConsole>) {
-    kprint(ec, 118); kprint(ec, 119); kprint(ec, 107); kprint(ec, 62); kprint(ec, 32);
+    // Magenta "vwk" + yellow "> " + reset
+    kcolor(ec, 35); kcolor(ec, 1);
+    kprint(ec, 118); kprint(ec, 119); kprint(ec, 107);  // vwk
+    kcolor(ec, 33); kprint(ec, 62); kprint(ec, 32);  // > space
+    kreset(ec);
 }
 
 fn kputs_shutdown(ec: State<EarlyConsole>) {
+    kcolor(ec, 31); kcolor(ec, 1);
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
     kprint(ec, 116); kprint(ec, 105); kprint(ec, 110); kprint(ec, 103);
     kprint(ec, 32); kprint(ec, 100); kprint(ec, 111); kprint(ec, 119);
-    kprint(ec, 110); kputs_nl(ec);
+    kprint(ec, 110); kreset(ec); kputs_nl(ec);
 }
 
 fn kputs_ok(ec: State<EarlyConsole>) {
-    kprint(ec, 79); kprint(ec, 75); kputs_nl(ec);
+    kcolor(ec, 32);  // green
+    kprint(ec, 79); kprint(ec, 75);  // OK
+    kreset(ec); kputs_nl(ec);
 }
 
 fn kputs_err(ec: State<EarlyConsole>) {
-    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kputs_nl(ec);
+    kcolor(ec, 31);  // red
+    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82);  // ERR
+    kreset(ec); kputs_nl(ec);
 }
 
 fn kputs_num(ec: State<EarlyConsole>, n: u64) {
@@ -278,6 +314,9 @@ fn kmain() -> i32 {
     let cbuf = state_new(KBuf);
     let hist = state_new(History);
     history_init(hist);
+
+    let fstore = state_new(FileStore);
+    fstore.next = 1;  // slot 0 = "no data"
 
     let pos: u32 = 0;
     let cursor: u32 = 0;
@@ -475,6 +514,7 @@ fn kmain() -> i32 {
             kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kprint(ec, 44);
             kprint(ec, 32); kprint(ec, 99); kprint(ec, 100); kprint(ec, 44);
             kprint(ec, 32); kprint(ec, 112); kprint(ec, 119); kprint(ec, 100);
+            kprint(ec, 44); kprint(ec, 32); kprint(ec, 119); kprint(ec, 114); kprint(ec, 105); kprint(ec, 116); kprint(ec, 101);
             kputs_nl(ec);
         }
 
@@ -482,15 +522,35 @@ fn kmain() -> i32 {
         if cmd == 112 {
             if pos > 1 {
                 if cbuf.data[1] == 119 {
-                    // pwd
-                    if cwd == 0 { kprint(ec, 47); kputs_nl(ec); }
-                    else {
-                        let j = 0;
-                        while j < 64 {
-                            let nc = dentry_get_name_byte(dentries, cwd, j);
-                            if nc == 0 { break; }
-                            kprint(ec, nc);
-                            j = j + 1;
+                    // pwd — print full path from root to cwd
+                    if cwd == 0 {
+                        kprint(ec, 47); kputs_nl(ec);  // "/"
+                    } else {
+                        // Walk up the parent chain, collecting dentry indices
+                        let path_buf = state_new(KBuf);  // store dentry indices
+                        let depth = 0;
+                        let cur = cwd;
+                        while cur != 0 && depth < 32 {
+                            path_buf.data[depth] = cur as u8;
+                            depth = depth + 1;
+                            let p = dentry_get_parent(dentries, cur);
+                            if p == 0 || p >= 64 { break; }
+                            if p == cur { break; }
+                            cur = p as u32;
+                        }
+                        // Print "/" + names in reverse order (root → cwd)
+                        let i = depth;
+                        while i > 0 {
+                            i = i - 1;
+                            kprint(ec, 47);  // "/"
+                            let idx = path_buf.data[i] as u32;
+                            let j = 0;
+                            while j < 64 {
+                                let nc = dentry_get_name_byte(dentries, idx, j);
+                                if nc == 0 { break; }
+                                kprint(ec, nc);
+                                j = j + 1;
+                            }
                         }
                         kputs_nl(ec);
                     }
@@ -650,10 +710,28 @@ fn kmain() -> i32 {
                 if found_idx < 64 {
                     let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
                     let fsize = inode_get_size(inodes, ino_idx);
-                    if fsize > 0 { kprint(ec, 104); kprint(ec, 105); kputs_nl(ec); }
-                    else { kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112); kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec); }
+                    let slot = inode_get_private(inodes, ino_idx);
+                    if fsize > 0 && slot > 0 && slot <= 16 {
+                        // Print actual file content from FileStore
+                        let s = slot as u32;
+                        let i = 0;
+                        while i < fsize && i < 256 {
+                            kprint(ec, fstore.data[(s - 1) * 256 + i]);
+                            i = i + 1;
+                        }
+                        kputs_nl(ec);
+                    } else {
+                        // Empty file
+                        kcolor(ec, 90);  // gray
+                        kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
+                        kprint(ec, 116); kprint(ec, 121); kprint(ec, 41);  // (empty)
+                        kreset(ec); kputs_nl(ec);
+                    }
                 } else {
-                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102); kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
+                    kcolor(ec, 31);  // red
+                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102);
+                    kprint(ec, 105); kprint(ec, 108); kprint(ec, 101);  // no file
+                    kreset(ec); kputs_nl(ec);
                 }
             }
         }
@@ -685,11 +763,85 @@ fn kmain() -> i32 {
                 let old_child = dentry_get_child(dentries, cwd);
                 dentry_set_next(dentries, new_d, old_child);
                 dentry_set_child(dentries, cwd, new_d as u64);
-                inode_set_size(inodes, new_ino, 2);
-                inode_set_private(inodes, new_ino, 1);
+                inode_set_size(inodes, new_ino, 0);
+                inode_set_private(inodes, new_ino, 0);  // no data slot yet
                 kputs_ok(ec);
             } else {
                 kprint(ec, 102); kprint(ec, 117); kprint(ec, 108); kprint(ec, 108); kputs_nl(ec);
+            }
+        }
+
+        // write (119='w') — write <file> <text...>
+        if cmd == 119 {
+            // Parse: "write <filename> <text>"
+            // Skip "write " (6 bytes), find filename, then text starts after space
+            let src: u32 = 6;
+            if cbuf.data[5] == 32 { src = 6; }
+            // Strip opening quote
+            if cbuf.data[src] == 34 || cbuf.data[src] == 39 { src = src + 1; }
+            // Find end of filename (space or closing quote)
+            let fname_end: u32 = src;
+            let in_quote = 0;
+            while fname_end < pos {
+                let ch = cbuf.data[fname_end];
+                if ch == 34 || ch == 39 { in_quote = 1; fname_end = fname_end + 1; break; }
+                if ch == 32 || ch == 0 { break; }
+                fname_end = fname_end + 1;
+            }
+            // Text starts after the space following filename
+            let text_start = fname_end;
+            if in_quote == 0 {
+                // Skip the space
+                if text_start < pos && cbuf.data[text_start] == 32 { text_start = text_start + 1; }
+            }
+            // Find the file in CWD
+            let child = dentry_get_child(dentries, cwd) as u32;
+            let cur = child;
+            let found_idx = 64;
+            while cur < 64 {
+                if dentry_get_used(dentries, cur) == 1 {
+                    let match_ok = 1;
+                    let j = 0;
+                    while j < 58 && (src + j) < fname_end {
+                        let fn_c = dentry_get_name_byte(dentries, cur, j);
+                        let cmd_c = cbuf.data[src + j];
+                        if fn_c == 0 { match_ok = 0; break; }
+                        if fn_c != cmd_c { match_ok = 0; break; }
+                        j = j + 1;
+                    }
+                    if match_ok == 1 {
+                        let fn_c = dentry_get_name_byte(dentries, cur, j);
+                        if fn_c == 0 { found_idx = cur; break; }
+                    }
+                }
+                let nxt = dentry_get_next(dentries, cur);
+                if nxt == 0 { break; }
+                cur = nxt as u32;
+            }
+            if found_idx < 64 {
+                let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                // Allocate a file data slot
+                let slot = fstore.next;
+                if slot < 16 {
+                    fstore.next = fstore.next + 1;
+                    // Copy text into fstore
+                    let i = 0;
+                    while i < 256 && (text_start + i) < pos {
+                        fstore.data[(slot - 1) * 256 + i] = cbuf.data[text_start + i];
+                        i = i + 1;
+                    }
+                    let text_len = pos - text_start;
+                    let clen = 256;
+                    if text_len < 256 { clen = text_len; }
+                    fstore.sizes[slot - 1] = clen;
+                    inode_set_size(inodes, ino_idx, clen as u64);
+                    inode_set_private(inodes, ino_idx, slot as u64);
+                    kputs_ok(ec);
+                } else {
+                    kcolor(ec, 31); kprint(ec, 102); kprint(ec, 117); kprint(ec, 108); kprint(ec, 108); kreset(ec); kputs_nl(ec);
+                }
+            } else {
+                kcolor(ec, 31); kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102); kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kreset(ec); kputs_nl(ec);
             }
         }
 
