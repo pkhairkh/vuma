@@ -1,0 +1,1264 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/fs/tmpfs.vuma
+// VWK Tmpfs — in-memory filesystem (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5c layer of the VWK kernel VFS: an in-memory filesystem
+// (tmpfs) that stores all file data in a flat byte array backed by a
+// `___pmt_buffer`-allocated State<TmpfsData>. It consumes K5a's InodeTable +
+// DentryTable + FileTable (re-declared byte-identically below — VUMA has no
+// `import`) and K5b's name-matching primitive (re-declared below as
+// `name_matches`, byte-identical to namei.vuma). K5d (file ops) will wire
+// sys_open / sys_read / sys_write / sys_close to these tmpfs primitives;
+// K6 (syscall layer) will dispatch to them via the File.ops function pointer.
+//
+// ── What tmpfs is ───────────────────────────────────────────────────────────
+// tmpfs is a filesystem whose "backing store" is RAM — there is no disk.
+// Linux's tmpfs is backed by the page cache + swap (it can swap pages out
+// under memory pressure); this simplified VWK tmpfs is backed by a single
+// flat [u8; 16384] array split into 64 fixed-size pages of 256 bytes each.
+// Each file gets ONE page (so the max file size is 256 bytes — plenty for
+// a self-test, and the layout generalizes to K5d's real per-inode page
+// list when the codegen grows). The `page_used` array tracks which pages
+// are allocated (1 = allocated, 0 = free); `count` tracks how many.
+//
+// ── TmpfsData layout (3 fields) ─────────────────────────────────────────────
+//   pages     ([u8; 16384]) — 64 pages * 256 bytes = 16384 bytes of file
+//                              data. Page `p` occupies bytes [p*256 ..
+//                              p*256+255]. Accessed byte-by-byte via
+//                              `data.pages[p*256 + off]` (direct u8 index
+//                              — VUMA supports u8 array indexing).
+//   page_used ([u8; 64])    — 1 byte per page: 1 = allocated, 0 = free.
+//                              Accessed directly via `data.page_used[p]`.
+//   count     (u32)         — number of pages currently allocated (0..64).
+//
+//   Total size: 16384 + 64 + 4 = 16452 bytes (padded by the codegen's
+//   max-field-alignment rule — 4 bytes of trailing padding after the u32
+//   to align the next slot to 8 bytes. The codegen's layout allocator
+//   handles this automatically.)
+//
+// ── Why a flat [u8; 16384] instead of [[u8; 256]; 64]? ─────────────────────
+// VUMA's parser does NOT support nested arrays (`[[u8; 256]; 64]` doesn't
+// parse — only `[u8; N]` parses). So the page pool is a single flat
+// 16384-byte array, and the per-page offset is computed by the caller
+// (`base = page * 256`, then `data.pages[base + off]`). This is the same
+// pattern as K5a's InodeTable / DentryTable / FileTable (parallel flat
+// byte arrays with per-slot offset = `idx * width`). When the codegen
+// gains nested-array support, this file can collapse back to
+// `[[u8; 256]; 64]` with `data.pages[p][o]` access.
+//
+// ── Why one page per file (simplified)? ────────────────────────────────────
+// Real tmpfs uses a per-inode page list (an array of page pointers indexed
+// by `pos / PAGE_SIZE`). This simplified version gives each file ONE page
+// (256 bytes max), stored as the page index in the File's `private` field.
+// The 64-page pool thus supports 64 simultaneously-open files (more than
+// enough for the K5c self-test). K5d (or a later wave) can extend this to
+// a per-inode page list when the codegen supports the needed indexing
+// patterns. The contract explicitly calls this out: "TmpfsData uses
+// [u8; 16384] for 64 pages × 256 bytes. Each file gets one page
+// (simplified)."
+//
+// ── File.private as the page index ─────────────────────────────────────────
+// The File layout (re-declared below) has a `private: u64` field for FS-
+// specific data. tmpfs_read / tmpfs_write use `file.private` as the index
+// of the page holding this file's data. The page is allocated when the
+// file is opened (tmpfs_open in K5c, or manually in the self-test) and
+// stored in the File. Storing it in the File (rather than the Inode) means
+// each open file description has its own page — matching real tmpfs
+// semantics where a file's data lives in the page cache, and the open file
+// description just holds a position into it. (In a real multi-reader
+// design, the page would be in the Inode's page list and shared; this
+// simplified one-page-per-open-file model is enough for K5c.)
+//
+// ── Tmpfs operations (the 6 contract functions) ────────────────────────────
+//   tmpfs_mount(inodes, dentries, data) -> u32
+//       Initialize the InodeTable, DentryTable, and TmpfsData; allocate
+//       the root inode (S_IFDIR | 0o755 = 16877) + root dentry (name "/",
+//       parent = self); return the root dentry index (0 on a fresh mount).
+//       Returns 256 if either table is full (shouldn't happen on a fresh
+//       mount — both tables hold 64 slots, the root takes slot 0).
+//   tmpfs_create(inodes, dentries, parent_idx, name) -> u32
+//       Allocate a regular-file inode (S_IFREG | 0o644 = 33188) + dentry,
+//       copy `name` into the dentry's name field, link the dentry into
+//       parent's child list (prepend — O(1) insert at head). Returns the
+//       new dentry index, or 256 if either table is full.
+//   tmpfs_mkdir(inodes, dentries, parent_idx, name) -> u32
+//       Same as tmpfs_create but with directory mode (S_IFDIR | 0o755 =
+//       16877). Returns the new dentry index, or 256 if either table is
+//       full.
+//   tmpfs_lookup(dentries, parent_idx, name) -> u32
+//       Walk parent's child list looking for a dentry whose name matches
+//       `name` (byte-by-byte compare via `name_matches`, byte-identical
+//       to K5b's namei inner loop). Returns the matching dentry index, or
+//       256 if not found.
+//   tmpfs_read(data, file, buf, count) -> i64
+//       Read `count` bytes from `file.private`'s page at `file.pos` into
+//       `buf.data`; advance `file.pos` by `count`; return `count` (or a
+//       negative errno on error — not implemented in this simplified
+//       version, which always returns `count`).
+//   tmpfs_write(data, file, buf, count) -> i64
+//       Write `count` bytes from `buf.data` into `file.private`'s page at
+//       `file.pos`; advance `file.pos` by `count`; return `count` (or a
+//       negative errno on error — same caveat as read).
+//
+// ── Re-declared layouts + helpers ──────────────────────────────────────────
+// VUMA has no `import`, so this file re-declares everything it consumes:
+//   - PathBuf (1 field, 64 bytes) — re-declared byte-identically to K5b's
+//     namei.vuma. Used as the `name` parameter type for tmpfs_create /
+//     tmpfs_mkdir / tmpfs_lookup.
+//   - ByteBuf (1 field, 256 bytes) — NEW in this file (K5b doesn't have
+//     it). 256 bytes matches one tmpfs page, so a single tmpfs_read /
+//     tmpfs_write can transfer an entire page in one call.
+//   - Inode + InodeTable + 12 inode helpers — re-declared byte-identically
+//     to K5a's inode.vuma (init + alloc + ino/mode/size/private get/set).
+//   - Dentry + DentryTable + 14 dentry helpers — re-declared byte-
+//     identically to K5a's dentry.vuma (init + alloc + name byte accessors
+//     + parent/inode/next/child/mounted/used get/set).
+//   - File + FileTable + 14 file helpers — re-declared byte-identically to
+//     K5a's file.vuma (init + alloc + free + dentry/pos/flags/ops/private
+//     get/set + used get/set). The self-test uses State<File> directly
+//     (single-file handle), but the FileTable helpers are re-declared for
+//     K5c/K5d consumers that will use the table.
+//   - name_matches — re-declared byte-identically to K5b's namei.vuma
+//     (byte-by-byte name comparison with null-terminator handling).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All state
+// (InodeTable, DentryTable, FileTable, TmpfsData, PathBuf, ByteBuf, File)
+// is held in `___pmt_buffer`-backed State<T>'s, allocated by the CALLER
+// via `state_new(T)` and passed by reference to the helpers (init-style
+// API — see K5a's inode.vuma header "Why init-style?" for the codegen
+// rationale). No externs are declared in this file — the tmpfs primitives
+// are pure-PM (K5c's sys_open will declare its own externs for the user-
+// buffer copy; K6's syscall dispatcher will declare externs for the
+// trap-frame access).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see womb/kernel/
+// arch/x86_64/pt.vuma header for the same rationale, and K4a's task.vuma
+// for the same rule applied to slot count 256). The constants:
+//     64     = number of Inode / Dentry / File slots in their tables (and
+//              the "table full" sentinel returned by the alloc helpers);
+//              also the number of pages in TmpfsData (and the "pool full"
+//              sentinel returned by tmpfs_data_alloc_page); also the per-
+//              name byte count (NAME_MAX+1 in this simplified VFS).
+//     256    = bytes per page in TmpfsData; also the "not found" sentinel
+//              returned by tmpfs_mount / tmpfs_create / tmpfs_mkdir /
+//              tmpfs_lookup on failure; also the ByteBuf size.
+//     16384  = 64 * 256 — total bytes in TmpfsData.pages.
+//     8      = bytes per u64 field (loop bound for ino/size/private/parent/
+//              inode/next/child/dentry/pos/ops pack/unpack).
+//     4      = bytes per u32 field (loop bound for mode/flags pack/unpack).
+//     255    = 0xFF (byte mask for the unpack-shift-and-truncate path).
+//     16877  = S_IFDIR | 0o755 = 16384 + 493 — directory mode (rwxr-xr-x).
+//     33188  = S_IFREG | 0o644 = 32768 + 420 — regular-file mode (rw-r--r--).
+//     16384  = S_IFDIR = 0x4000 — directory type bit (used in mode
+//              arithmetic; same value as the pages-array size by
+//              coincidence — both are 64*256 = 16384 vs 0x4000 = 16384).
+//     32768  = S_IFREG = 0x8000 — regular-file type bit.
+//     493    = 0o755 — rwxr-xr-x permission bits.
+//     420    = 0o644 — rw-r--r-- permission bits.
+//     2      = O_RDWR — read/write access mode (the low 2 bits of flags).
+//     47     = ASCII '/' (root dentry name byte 0).
+//     116    = ASCII 't'; 101 = 'e'; 115 = 's'; 116 = 't' — "test".
+//     104    = ASCII 'h'; 101 = 'e'; 108 = 'l'; 108 = 'l'; 111 = 'o' — "hello".
+//     1      = the "used" / "page_used" set value; the "found" flag.
+//     0      = FREE marker (used == 0 / page_used == 0 / ino == 0),
+//              initial count, name null terminator, "not found" flag,
+//              "no next sibling" sentinel, "no children" sentinel.
+// All `0x...` mentions in this file are in doc-comments only (verified
+// by rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares InodeTable, DentryTable,
+// FileTable, File, Inode, Dentry, PathBuf, ByteBuf, TmpfsData, and all
+// needed helpers byte-identically to K5a/K5b. K5c's file ops (sys_open /
+// sys_read / sys_write / sys_close) will re-declare them again when it
+// consumes tmpfs.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/fs/tmpfs.vuma \
+//         /tmp/k5c_tmpfs.bin x86_64 --verify
+//     /tmp/k5c_tmpfs.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — mount returns
+// 0, create returns 1, lookup returns 1, page alloc returns 0, write
+// returns 5, read returns 5, read bytes match "hello").
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PathBuf: a [u8; 64] holding a null-terminated path string. Re-declared
+// byte-identically to K5b's namei.vuma. Used as the `name` parameter type
+// for tmpfs_create / tmpfs_mkdir / tmpfs_lookup (a single path component,
+// NOT a full path — tmpfs_create / mkdir / lookup operate on a single name
+// under a known parent dentry, not on a multi-component path).
+layout PathBuf = {
+    data: [u8; 64],
+}
+
+// ByteBuf: a [u8; 256] holding a read/write data buffer. NEW in this file
+// (K5b doesn't have it). 256 bytes matches one tmpfs page, so a single
+// tmpfs_read / tmpfs_write can transfer an entire page in one call. Used
+// as the `buf` parameter type for tmpfs_read / tmpfs_write.
+layout ByteBuf = {
+    data: [u8; 256],
+}
+
+// An Inode (index node — describes a file's metadata). Re-declared byte-
+// identically to K5a's inode.vuma. Stored as a layout for documentation;
+// the actual InodeTable uses parallel flat byte arrays (VUMA has no struct
+// arrays). See K5a's inode.vuma header for field-by-field documentation.
+layout Inode = {
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    blocks: u64,
+    atime: u64,
+    mtime: u64,
+    ops: u64,
+    private: u64,
+}
+
+// InodeTable: 64 Inode slots stored as parallel flat byte arrays. Re-
+// declared byte-identically to K5a's inode.vuma. `ino == 0` is the FREE
+// marker. See K5a's inode.vuma header for the full rationale on the
+// parallel-flat-byte-array layout.
+layout InodeTable = {
+    inos: [u8; 512],
+    modes: [u8; 256],
+    uids: [u8; 256],
+    gids: [u8; 256],
+    sizes: [u8; 512],
+    blocks: [u8; 512],
+    atimes: [u8; 512],
+    mtimes: [u8; 512],
+    ops: [u8; 512],
+    privates: [u8; 512],
+    count: u32,
+}
+
+// A Dentry (directory entry — links a name to an inode, forms the
+// directory tree via parent / child / next-sibling pointers). Re-declared
+// byte-identically to K5a's dentry.vuma. See K5a's dentry.vuma header for
+// field-by-field documentation.
+layout Dentry = {
+    name: [u8; 64],
+    parent: u64,
+    inode: u64,
+    next: u64,
+    child: u64,
+    mounted: u8,
+}
+
+// DentryTable: 64 Dentry slots stored as parallel flat byte arrays. Re-
+// declared byte-identically to K5a's dentry.vuma. `used` is the alloc/free
+// flag (1 = used, 0 = free); `count` tracks how many slots are in use.
+layout DentryTable = {
+    names: [u8; 4096],
+    parents: [u8; 512],
+    inodes: [u8; 512],
+    nexts: [u8; 512],
+    children: [u8; 512],
+    mounteds: [u8; 64],
+    used: [u8; 64],
+    count: u32,
+}
+
+// A File (open file descriptor — the per-process handle that ties a file
+// position + flags + ops to a dentry). Re-declared byte-identically to
+// K5a's file.vuma. The `private` field stores the tmpfs page index for
+// open files on tmpfs (see "File.private as the page index" in the file
+// header). Stored as a layout for documentation; the actual FileTable
+// uses parallel flat byte arrays. The self-test ALSO uses State<File>
+// directly (a single-File state — not the table) for tmpfs_read /
+// tmpfs_write, since the contract's signature is `file: State<File>`.
+layout File = {
+    dentry: u64,
+    pos: u64,
+    flags: u32,
+    ops: u64,
+    private: u64,
+}
+
+// FileTable: 64 File slots stored as parallel flat byte arrays. Re-declared
+// byte-identically to K5a's file.vuma. `used` is the alloc/free flag (1 =
+// used, 0 = free); `count` tracks how many slots are in use. Re-declared
+// here per the K5c contract ("Re-declare InodeTable + DentryTable +
+// FileTable + helpers locally") for K5c/K5d consumers that will use the
+// table (the self-test uses State<File> directly instead).
+layout FileTable = {
+    dentries: [u8; 512],
+    poses: [u8; 512],
+    flags: [u8; 256],
+    ops: [u8; 512],
+    privates: [u8; 512],
+    used: [u8; 64],
+    count: u32,
+}
+
+// TmpfsData: the in-memory backing store for tmpfs. `pages` is a flat
+// [u8; 16384] split into 64 pages of 256 bytes each (page `p` occupies
+// bytes [p*256 .. p*256+255]); `page_used` is the per-page allocation flag
+// (1 = allocated, 0 = free); `count` tracks how many pages are in use
+// (0..64). See the file header for the full rationale on the flat-array
+// layout (no nested arrays in VUMA) and the one-page-per-file simplified
+// model.
+layout TmpfsData = {
+    pages: [u8; 16384],
+    page_used: [u8; 64],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Inode helpers (re-declared byte-identically to K5a's inode.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack for u64 fields (ino, size, private);
+// 4-byte little-endian pack/unpack for u32 fields (mode). Same pattern as
+// K2a's pool_get_base / pool_set_base (pmm.vuma), K3e's syscall_table_get
+// / syscall_table_set (table.vuma), K4a's pt_get_vruntime / etc.
+// (task.vuma), and K5a's own inode_get_ino / etc. (inode.vuma): N-iteration
+// while loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on
+// reads. Lifecycle (inode_init / inode_alloc) byte-identical to K5a.
+
+// Read the u64 `ino` field of Inode slot `idx`.
+fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inos[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ino` field of Inode slot `idx`.
+fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inos[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `mode` field of Inode slot `idx`.
+fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.modes[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `mode` field of Inode slot `idx`.
+fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.modes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `size` field of Inode slot `idx`.
+fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.sizes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `size` field of Inode slot `idx`.
+fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.sizes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `private` field of Inode slot `idx`.
+fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.privates[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `private` field of Inode slot `idx`.
+fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.privates[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// inode_init: zero all 64 inos (mark every slot FREE — ino == 0 is the
+// free marker) and set count = 0. Idempotent. Byte-identical to K5a's
+// inode.vuma.
+fn inode_init(tbl: State<InodeTable>) {
+    let i = 0;
+    while i < 64 {
+        inode_set_ino(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// inode_alloc: find the first FREE slot (ino == 0), set ino = idx + 1, bump
+// count, return the slot index. Returns 64 if the table is full. Byte-
+// identical to K5a's inode.vuma.
+fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if inode_get_ino(tbl, i) == 0 {
+            inode_set_ino(tbl, i, i + 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Dentry helpers (re-declared byte-identically to K5a's dentry.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing for name bytes (the [u8; 64] name field, accessed via
+// `tbl.names[idx*64 + off]`); 8-byte LE pack/unpack for u64 fields
+// (parent, inode, next, child); direct u8 indexing for u8 fields (mounted,
+// used). Lifecycle (dentry_init / dentry_alloc) byte-identical to K5a.
+
+// Read byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+    let base = idx * 64;
+    return tbl.names[base + off];
+}
+
+// Write byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+    let base = idx * 64;
+    tbl.names[base + off] = val;
+}
+
+// Read the u64 `parent` field of Dentry slot `idx`.
+fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.parents[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `parent` field of Dentry slot `idx`.
+fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.parents[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `inode` field of Dentry slot `idx`.
+fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inodes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `inode` field of Dentry slot `idx`.
+fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inodes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Dentry slot `idx` (next sibling — 0 = EOL).
+fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Dentry slot `idx`.
+fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `child` field of Dentry slot `idx` (first child — 0 = none).
+fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.children[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `child` field of Dentry slot `idx`.
+fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.children[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u8 `mounted` field of Dentry slot `idx`.
+fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.mounteds[idx];
+}
+
+// Write the u8 `mounted` field of Dentry slot `idx`.
+fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.mounteds[idx] = val;
+}
+
+// Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
+fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of Dentry slot `idx`.
+fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// dentry_init: zero all 64 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Byte-identical to K5a's dentry.vuma.
+fn dentry_init(tbl: State<DentryTable>) {
+    let i = 0;
+    while i < 64 {
+        dentry_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// dentry_alloc: find the first FREE slot (used == 0), set used = 1, bump
+// count, return the slot index. Returns 64 if the table is full. Byte-
+// identical to K5a's dentry.vuma.
+fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if dentry_get_used(tbl, i) == 0 {
+            dentry_set_used(tbl, i, 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// File helpers (re-declared byte-identically to K5a's file.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte LE pack/unpack for u64 fields (dentry, pos, ops, private); 4-byte
+// LE pack/unpack for u32 fields (flags); direct u8 indexing for u8 fields
+// (used). Lifecycle (file_init / file_alloc / file_free) byte-identical to
+// K5a. Re-declared per the K5c contract; the self-test uses State<File>
+// directly (not the table), but K5c/K5d consumers will use the table.
+
+// Read the u64 `dentry` field of File slot `idx`.
+fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.dentries[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `dentry` field of File slot `idx`.
+fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.dentries[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `pos` field of File slot `idx`.
+fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.poses[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `pos` field of File slot `idx`.
+fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.poses[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `ops` field of File slot `idx`.
+fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.ops[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ops` field of File slot `idx`.
+fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ops[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `private` field of File slot `idx`.
+fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.privates[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `private` field of File slot `idx`.
+fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.privates[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `flags` field of File slot `idx`.
+fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.flags[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `flags` field of File slot `idx`.
+fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.flags[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u8 `used` flag of File slot `idx` (1 = in use, 0 = free).
+fn file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of File slot `idx`.
+fn file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// file_init: zero all 64 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Byte-identical to K5a's file.vuma.
+fn file_init(tbl: State<FileTable>) {
+    let i = 0;
+    while i < 64 {
+        file_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// file_alloc: find the first FREE slot (used == 0), set used = 1, bump
+// count, return the slot index. Returns 64 if the table is full. Byte-
+// identical to K5a's file.vuma.
+fn file_alloc(tbl: State<FileTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if file_get_used(tbl, i) == 0 {
+            file_set_used(tbl, i, 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// file_free: mark slot `idx` as FREE (used = 0), decrement count. Byte-
+// identical to K5a's file.vuma.
+fn file_free(tbl: State<FileTable>, idx: u32) {
+    file_set_used(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// name_matches: byte-by-byte name comparison (re-declared byte-identically
+// to K5b's namei.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Compare Dentry idx's name (in tbl.names) byte-by-byte against the name
+// in `name.data`, handling null terminators. Returns 1 on match, 0 on
+// mismatch. The 4 cases are:
+//   - Both null at the same position → match (both names end here).
+//   - Dentry name null, search name not null → no match (dentry name
+//     is shorter).
+//   - Search name null, dentry name not null → no match (search name
+//     is shorter).
+//   - Both non-null and differ → no match (mismatch at this byte).
+//   - Both non-null and equal → advance to the next byte.
+// If all 64 bytes match without hitting a null, return 1 (both names fill
+// the entire 64-byte field — the no-null-needed edge case).
+
+fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
+    let i = 0;
+    while i < 64 {
+        let c = dentry_get_name_byte(tbl, idx, i);
+        let n = name.data[i];
+        if c == 0 {
+            if n == 0 {
+                return 1;  // both end at the same position
+            }
+            return 0;  // dentry name is shorter
+        }
+        if n == 0 {
+            return 0;  // search name is shorter
+        }
+        if c != n {
+            return 0;  // mismatch at this byte
+        }
+        i = i + 1;
+    }
+    return 1;  // all 64 bytes match (no null hit)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TmpfsData helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle for the in-memory page pool. Direct u8 indexing on `page_used`
+// (the byte IS the value — same pattern as K5a's dentry_get_used /
+// dentry_set_used). The pages array is accessed byte-by-byte in tmpfs_read
+// / tmpfs_write (no separate byte accessor — the index math
+// `page * 256 + off` is inlined into the read/write loops).
+
+// tmpfs_data_init: zero all 64 page_used flags (mark every page FREE) and
+// set count = 0. Idempotent. Called by tmpfs_mount on a fresh TmpfsData.
+// Does NOT zero the pages array (VUMA has no memset, and the read/write
+// loops only touch bytes they explicitly write — uninitialized bytes are
+// never read because tmpfs_read only reads bytes that tmpfs_write wrote
+// within the same page, and the self-test verifies this by writing 5
+// bytes then reading exactly 5 bytes back).
+fn tmpfs_data_init(data: State<TmpfsData>) {
+    let i = 0;
+    while i < 64 {
+        data.page_used[i] = 0;
+        i = i + 1;
+    }
+    data.count = 0;
+}
+
+// tmpfs_data_alloc_page: find the first FREE page (page_used == 0), set
+// page_used = 1, bump count, return the page index. Returns 64 if the
+// pool is full (the caller MUST check — tmpfs_open in K5c will return
+// -ENOSPC in that case). Lowest-free-page-wins policy matches Linux's
+// find_first_zero_bit (same as K5a's inode_alloc / dentry_alloc /
+// file_alloc).
+fn tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if data.page_used[i] == 0 {
+            data.page_used[i] = 1;
+            data.count = data.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // pool full
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tmpfs operations (the 6 contract functions).
+// ────────────────────────────────────────────────────────────────────────────
+
+// tmpfs_mount: initialize the InodeTable, DentryTable, and TmpfsData;
+// allocate the root inode (S_IFDIR | 0o755 = 16877) + root dentry (name
+// "/", parent = self); return the root dentry index. Returns 256 if either
+// table is full (shouldn't happen on a fresh mount — both tables hold 64
+// slots, the root takes slot 0). The root dentry's `parent` is set to
+// itself (root_dentry index) — mirrors Linux's dentry->d_parent ==
+// &root_dentry convention (K5a's dentry.vuma documents this). The root
+// dentry's `child` is set to 0 (no children yet — tmpfs_create / mkdir
+// will set it when the first child is linked in).
+fn tmpfs_mount(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>) -> u32 {
+    // Initialize all three tables (idempotent — safe to call on a fresh
+    // state_new(T), which is already zeroed, but explicit init makes the
+    // "fresh mount" semantics clear and matches the K5a contract's
+    // "caller must init before first alloc" expectation).
+    inode_init(inodes);
+    dentry_init(dentries);
+    tmpfs_data_init(data);
+
+    // Allocate the root inode. On a fresh InodeTable, this returns 0
+    // (lowest-free-slot-wins). Set its mode to S_IFDIR | 0o755 = 16877
+    // (a directory with rwxr-xr-x permissions — the conventional root
+    // mode on Linux).
+    let root_inode = inode_alloc(inodes);
+    if root_inode == 64 { return 256; }  // table full (shouldn't happen)
+    inode_set_mode(inodes, root_inode, 16877);
+
+    // Allocate the root dentry. On a fresh DentryTable, this returns 0.
+    // Set its name to "/" (byte 0 = 47, byte 1 = 0 — null terminator).
+    // Set its parent to itself (root's parent is root — mirrors Linux's
+    // dentry->d_parent == &root_dentry convention). Set its inode to
+    // root_inode. Leave child = 0 (no children yet) and next = 0 (no
+    // siblings — root has no parent so no sibling list).
+    let root_dentry = dentry_alloc(dentries);
+    if root_dentry == 64 { return 256; }  // table full (shouldn't happen)
+    dentry_set_name_byte(dentries, root_dentry, 0, 47);   // '/'
+    dentry_set_name_byte(dentries, root_dentry, 1, 0);    // null terminator
+    dentry_set_parent(dentries, root_dentry, root_dentry as u64);
+    dentry_set_inode(dentries, root_dentry, root_inode as u64);
+    dentry_set_child(dentries, root_dentry, 0);   // no children yet
+    dentry_set_next(dentries, root_dentry, 0);    // no siblings
+
+    return root_dentry;
+}
+
+// tmpfs_create: allocate a regular-file inode (S_IFREG | 0o644 = 33188) +
+// dentry under `parent_idx`, copy `name` into the dentry's name field, and
+// link the dentry into parent's child list (prepend — O(1) insert at head,
+// same as Linux's dcache). Returns the new dentry index, or 256 if either
+// table is full.
+//
+// Does NOT allocate a TmpfsData page — the page is allocated when the file
+// is opened (tmpfs_open in K5c, or manually in the self-test) and stored
+// in the File's `private` field. This matches the contract: tmpfs_create
+// takes no `data` parameter, so it can't allocate a page. The inode's
+// `private` field is left at 0 (zero-init default) — K5c's tmpfs_open will
+// allocate the page and store it in the inode's `private` (so subsequent
+// opens can share the same page), but this K5c wave doesn't implement
+// tmpfs_open (the self-test does the allocation manually).
+fn tmpfs_create(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+    // Allocate the new inode. Set its mode to S_IFREG | 0o644 = 33188
+    // (a regular file with rw-r--r-- permissions — the conventional
+    // default file mode on Linux, matching the K5a inode.vuma self-test).
+    let ino_idx = inode_alloc(inodes);
+    if ino_idx == 64 { return 256; }  // table full
+    inode_set_mode(inodes, ino_idx, 33188);
+
+    // Allocate the new dentry.
+    let den_idx = dentry_alloc(dentries);
+    if den_idx == 64 { return 256; }  // table full
+
+    // Copy name bytes from name.data into the dentry's name field, stopping
+    // at the null terminator. Bytes after the null are left at their zero-
+    // init default (state_new zero-initializes the DentryTable, so unused
+    // name bytes are already 0).
+    let i = 0;
+    while i < 64 {
+        let b = name.data[i];
+        dentry_set_name_byte(dentries, den_idx, i, b);
+        if b == 0 {
+            break;  // stop at null terminator
+        }
+        i = i + 1;
+    }
+
+    // Link the dentry into the tree: parent = parent_idx, inode = ino_idx,
+    // child = 0 (leaf file — no children), next = parent's current first
+    // child (prepend to the sibling list). Then update parent's child
+    // pointer to the new dentry.
+    dentry_set_parent(dentries, den_idx, parent_idx as u64);
+    dentry_set_inode(dentries, den_idx, ino_idx as u64);
+    dentry_set_child(dentries, den_idx, 0);   // leaf file
+    let prev_first_child = dentry_get_child(dentries, parent_idx);
+    dentry_set_next(dentries, den_idx, prev_first_child);
+    dentry_set_child(dentries, parent_idx, den_idx as u64);
+
+    return den_idx;
+}
+
+// tmpfs_mkdir: same as tmpfs_create but with directory mode (S_IFDIR |
+// o755 = 16877 — a directory with rwxr-xr-x permissions, matching the
+// root inode's mode). Returns the new dentry index, or 256 if either
+// table is full. The new directory starts with child = 0 (empty — files
+// can be created under it via subsequent tmpfs_create / mkdir calls,
+// which will set its `child` pointer when the first child is linked in).
+fn tmpfs_mkdir(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+    // Allocate the new inode. Set its mode to S_IFDIR | 0o755 = 16877.
+    let ino_idx = inode_alloc(inodes);
+    if ino_idx == 64 { return 256; }  // table full
+    inode_set_mode(inodes, ino_idx, 16877);
+
+    // Allocate the new dentry.
+    let den_idx = dentry_alloc(dentries);
+    if den_idx == 64 { return 256; }  // table full
+
+    // Copy name bytes (same as tmpfs_create).
+    let i = 0;
+    while i < 64 {
+        let b = name.data[i];
+        dentry_set_name_byte(dentries, den_idx, i, b);
+        if b == 0 {
+            break;
+        }
+        i = i + 1;
+    }
+
+    // Link the dentry into the tree (same as tmpfs_create — the only
+    // difference from tmpfs_create is the inode mode; the dentry linking
+    // logic is identical because directories and regular files both
+    // participate in the directory tree the same way).
+    dentry_set_parent(dentries, den_idx, parent_idx as u64);
+    dentry_set_inode(dentries, den_idx, ino_idx as u64);
+    dentry_set_child(dentries, den_idx, 0);   // empty directory
+    let prev_first_child = dentry_get_child(dentries, parent_idx);
+    dentry_set_next(dentries, den_idx, prev_first_child);
+    dentry_set_child(dentries, parent_idx, den_idx as u64);
+
+    return den_idx;
+}
+
+// tmpfs_lookup: walk parent's child list looking for a dentry whose name
+// matches `name` (byte-by-byte compare via `name_matches`, byte-identical
+// to K5b's namei inner loop). Returns the matching dentry index, or 256
+// if not found. The walk:
+//   1. next = dentry_get_child(parent_idx) — first child.
+//   2. While next != 256 AND dentry_get_used(next) == 1:
+//        a. If name_matches(next, name) → return next.
+//        b. n = dentry_get_next(next). If n == 0 → return 256 (end of
+//           sibling list, no match). Else next = n.
+//   3. Return 256 (loop exited without a match — either the child list
+//      was empty or next wrapped to the 256 sentinel).
+//
+// This is byte-identical to K5b's namei sibling-walk inner loop, extracted
+// into its own function (K5b's namei does the walk inline as part of the
+// path-resolution outer loop; tmpfs_lookup does just the sibling walk for
+// a single component, since tmpfs_create / mkdir / lookup operate on a
+// single name under a known parent, not on a multi-component path).
+fn tmpfs_lookup(dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+    let next = dentry_get_child(dentries, parent_idx) as u32;
+    while next != 256 && dentry_get_used(dentries, next) == 1 {
+        if name_matches(dentries, next, name) == 1 {
+            return next;  // found
+        }
+        let n = dentry_get_next(dentries, next);
+        if n == 0 {
+            return 256;  // end of sibling list, not found
+        }
+        next = n as u32;
+    }
+    return 256;  // not found
+}
+
+// tmpfs_read: read `count` bytes from `file.private`'s page at `file.pos`
+// into `buf.data`; advance `file.pos` by `count`; return `count`. The
+// page index comes from `file.private` (cast to u32 — page indices are
+// 0..63, so the cast is well-defined). The base byte offset in the pages
+// array is `page * 256`; the per-byte offset within the page is
+// `pos + i`. The loop counter `i` is u32 (cast from `count: u64` — counts
+// larger than 2^32 would overflow, but the page size is 256, so this is
+// never an issue in practice).
+//
+// This simplified version does NOT bound-check `pos + i` against 256 (the
+// page size) — the caller is responsible for not reading past the end of
+// the file. A real implementation would return a short read (fewer bytes
+// than requested) at EOF. K5c's sys_read wrapper will do the EOF check
+// via inode_get_size before calling tmpfs_read.
+fn tmpfs_read(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
+    let page = file.private as u32;
+    let pos = file.pos as u32;
+    let base = page * 256;
+    let c = count as u32;
+    let i: u32 = 0;
+    while i < c {
+        let off = pos + i;
+        let b = data.pages[base + off];
+        buf.data[i] = b;
+        i = i + 1;
+    }
+    file.pos = file.pos + count;
+    return count as i64;
+}
+
+// tmpfs_write: write `count` bytes from `buf.data` into `file.private`'s
+// page at `file.pos`; advance `file.pos` by `count`; return `count`. Same
+// indexing math as tmpfs_read, but the byte flow is reversed (buf → page
+// instead of page → buf). Same caveats: no EOF check (the caller must
+// ensure `pos + count <= 256`), u32 cast on the count is well-defined
+// because the page size is 256.
+fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
+    let page = file.private as u32;
+    let pos = file.pos as u32;
+    let base = page * 256;
+    let c = count as u32;
+    let i: u32 = 0;
+    while i < c {
+        let off = pos + i;
+        let b = buf.data[i];
+        data.pages[base + off] = b;
+        i = i + 1;
+    }
+    file.pos = file.pos + count;
+    return count as i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5c DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Mount a fresh tmpfs, create a file "test" under root, allocate a data
+// page for it, write "hello" (5 bytes), read it back, verify the bytes
+// match. Returns 0 on success, 1..7 on the corresponding check failure
+// (so a future CI failure pinpoints the broken step).
+//
+// The 7 checks:
+//   (1) tmpfs_mount → returns 0 (root dentry = 0 on a fresh mount).
+//   (2) tmpfs_create(root, "test") → returns 1 (first non-root dentry).
+//   (3) tmpfs_lookup(root, "test") → returns 1 (finds the dentry we
+//       just created — verifies the child-list prepend + name_matches
+//       walk).
+//   (4) tmpfs_data_alloc_page → returns 0 (first page on a fresh pool).
+//   (5) tmpfs_write(file, "hello", 5) → returns 5 (writes 5 bytes to
+//       the file's data page, advances pos to 5).
+//   (6) tmpfs_read(file, buf, 5) → returns 5 (after resetting pos = 0,
+//       reads 5 bytes from the file's data page).
+//   (7) buf bytes == "hello" (104, 101, 108, 108, 111) — verifies the
+//       write → read round-trip preserved every byte.
+//
+// Per the K5c contract's "Use decimal ASCII values for byte constants"
+// rule, all ASCII constants in this self-test use DECIMAL: 47='/', 116=
+// 't', 101='e', 115='s', 104='h', 108='l', 111='o'. The 16877 / 33188 /
+// 256 / 64 / 5 / 1 / 0 / 2 constants are also decimal (16877 = S_IFDIR |
+// 0o755, 33188 = S_IFREG | 0o644, 256 = "not found" / "table full"
+// sentinel, 64 = slot count, 5 = byte count, 1 = expected dentry / page
+// index, 0 = root dentry / page index / null terminator / initial pos,
+// 2 = O_RDWR).
+
+fn main() -> i32 {
+    // Allocate the three tmpfs tables. state_new zero-initializes them,
+    // but tmpfs_mount re-initializes them explicitly (idempotent — safe
+    // on a fresh table, and makes the "fresh mount" semantics clear).
+    let inodes = state_new(InodeTable);
+    let dentries = state_new(DentryTable);
+    let data = state_new(TmpfsData);
+
+    // ── Check 1: tmpfs_mount → returns 0 (root dentry = 0). ──────────────
+    // The mount initializes all three tables, allocates the root inode
+    // (slot 0) with directory mode, and allocates the root dentry (slot
+    // 0) with name "/" and parent = self. The return value is the root
+    // dentry index, which should be 0 on a fresh mount.
+    let root = tmpfs_mount(inodes, dentries, data);
+    if root != 0 { return 1; }
+
+    // ── Check 2: tmpfs_create(root, "test") → returns 1. ────────────────
+    // The create allocates a new inode (slot 1, since slot 0 is the root
+    // inode) and a new dentry (slot 1, since slot 0 is the root dentry),
+    // copies "test" into the dentry's name field, and links the dentry
+    // into root's child list (root's child pointer goes from 0 to 1).
+    // The return value is the new dentry index, which should be 1.
+    //
+    // Path bytes: 't' 'e' 's' 't' '\0' = 116 101 115 116 0
+    let name = state_new(PathBuf);
+    name.data[0] = 116;  // 't'
+    name.data[1] = 101;  // 'e'
+    name.data[2] = 115;  // 's'
+    name.data[3] = 116;  // 't'
+    name.data[4] = 0;    // null terminator
+    let test_dentry = tmpfs_create(inodes, dentries, root, name);
+    if test_dentry != 1 { return 2; }
+
+    // ── Check 3: tmpfs_lookup(root, "test") → returns 1. ────────────────
+    // The lookup walks root's child list (which now has one entry: the
+    // "test" dentry at slot 1), compares each name byte-by-byte via
+    // name_matches, and returns the matching dentry index. Should be 1.
+    let lookup_result = tmpfs_lookup(dentries, root, name);
+    if lookup_result != 1 { return 3; }
+
+    // ── Check 4: tmpfs_data_alloc_page → returns 0. ─────────────────────
+    // The page pool was zeroed by tmpfs_mount → tmpfs_data_init, so the
+    // first free page is at index 0. Allocating it returns 0 and marks
+    // page_used[0] = 1.
+    let page = tmpfs_data_alloc_page(data);
+    if page != 0 { return 4; }
+
+    // ── Set up the File state for the write + read. ─────────────────────
+    // The contract's tmpfs_read / tmpfs_write take `file: State<File>`
+    // (a single File, not the FileTable). We allocate it via state_new
+    // and populate the fields directly (the same direct-field-access
+    // pattern as K3a's trap_frame_init — see womb/kernel/arch/x86_64/
+    // trap_trampoline.vuma:189). The `private` field stores the page
+    // index (the contract specifies this); `pos` starts at 0; `flags`
+    // is O_RDWR (= 2); `dentry` points at the test dentry; `ops` is
+    // left at 0 (no file_operations table in this simplified self-test
+    // — K5d will populate it with tmpfs_file_ops).
+    let file = state_new(File);
+    file.dentry = test_dentry as u64;
+    file.pos = 0;
+    file.flags = 2;  // O_RDWR
+    file.ops = 0;
+    file.private = page as u64;
+
+    // ── Check 5: tmpfs_write(file, "hello", 5) → returns 5. ─────────────
+    // Write 5 bytes ("hello") from write_buf into the file's data page
+    // at pos 0. The write advances file.pos to 5. The return value is
+    // the number of bytes written (5).
+    //
+    // "hello" bytes: 'h' 'e' 'l' 'l' 'o' = 104 101 108 108 111
+    let write_buf = state_new(ByteBuf);
+    write_buf.data[0] = 104;  // 'h'
+    write_buf.data[1] = 101;  // 'e'
+    write_buf.data[2] = 108;  // 'l'
+    write_buf.data[3] = 108;  // 'l'
+    write_buf.data[4] = 111;  // 'o'
+    let written = tmpfs_write(data, file, write_buf, 5);
+    if written != 5 { return 5; }
+
+    // Reset file.pos to 0 so we read from the start of the file. (Real
+    // syscalls would use lseek(2) for this; the self-test does it
+    // directly since we own the File state.)
+    file.pos = 0;
+
+    // ── Check 6: tmpfs_read(file, read_buf, 5) → returns 5. ─────────────
+    // Read 5 bytes from the file's data page at pos 0 into read_buf.
+    // The read advances file.pos to 5. The return value is the number
+    // of bytes read (5). read_buf was zero-initialized by state_new, so
+    // any bytes NOT written by tmpfs_read would stay at 0 — but we read
+    // exactly 5 bytes, all of which were written in check 5.
+    let read_buf = state_new(ByteBuf);
+    let nread = tmpfs_read(data, file, read_buf, 5);
+    if nread != 5 { return 6; }
+
+    // ── Check 7: read_buf bytes == "hello". ─────────────────────────────
+    // Verify the write → read round-trip preserved every byte. The
+    // expected bytes are 104 ('h'), 101 ('e'), 108 ('l'), 108 ('l'),
+    // 111 ('o'). Any mismatch indicates a bug in tmpfs_write (wrong
+    // page, wrong offset, wrong byte) or tmpfs_read (same — or a
+    // different page, if the page index was corrupted between write
+    // and read).
+    if read_buf.data[0] != 104 { return 7; }  // 'h'
+    if read_buf.data[1] != 101 { return 7; }  // 'e'
+    if read_buf.data[2] != 108 { return 7; }  // 'l'
+    if read_buf.data[3] != 108 { return 7; }  // 'l'
+    if read_buf.data[4] != 111 { return 7; }  // 'o'
+
+    return 0;
+}
