@@ -1,0 +1,471 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/trap/irq_ring.vuma
+// VWK IRQ Ring Buffer — lock-free decoupling of asm IRQ entry from PMT
+// dispatcher (Wave R2e).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file defines a 32-entry lock-free ring buffer for IRQ vectors. The
+// asm IRQ trampoline (the per-arch trap_entry stub that runs at IRQ entry
+// time, with interrupts off and only the CPU-pushed frame on stack) pushes
+// the IRQ vector into this ring; the PMT dispatcher (the arch-independent
+// trap.vuma handler that runs later, with full TrapFrame saved and
+// interrupts re-enabled) pops vectors off and routes each to its handler.
+// Decoupling the two halves lets the asm trampoline do the absolute
+// minimum work (just the push) and defer all the heavy dispatch logic
+// (handler-table lookup, EOI, signal delivery, etc.) to the dispatcher
+// running on a clean stack with full GPRs saved.
+//
+// ── Why a ring buffer? ──────────────────────────────────────────────────────
+//   The asm trampoline MUST stay short: it runs on the per-CPU exception
+//   stack with interrupts off and most GPRs still live from the interrupted
+//   context. Doing the full IRQ dispatch in the trampoline (handler-table
+//   lookup, conditional handler call, EOI) would:
+//     (a) blow the exception stack if a handler itself traps, and
+//     (b) keep interrupts off for hundreds of cycles per IRQ.
+//   The ring buffer breaks this: the trampoline pushes 1 vector (8 bytes +
+//   2 u32 increments = ~20 cycles, well under a cache line), then returns.
+//   The dispatcher (called from the trap return path, with full TrapFrame
+//   saved and interrupts re-enabled) drains the ring in a tight loop until
+//   it sees the empty sentinel (9999), calling each handler in turn.
+//
+//   The ring is "lock-free" in the SPSC sense: there is exactly ONE producer
+//   (the asm trampoline on this CPU — it runs with interrupts off, so it's
+//   already serialized) and exactly ONE consumer (the PMT dispatcher on
+//   this CPU — it runs after the trap return path has saved everything).
+//   No cross-CPU sharing today; a future wave (likely K9's SMP IRQ
+//   steering) will replace the single-IrqRing with a per-CPU IrqRing and
+//   the lock-free semantics will fall out naturally. The `count` field is
+//   the SPSC watermark: the producer increments it AFTER the vector write
+//   (so the consumer never sees a vector that isn't fully written); the
+//   consumer decrements it AFTER the vector read (so the producer never
+//   overwrites a vector the consumer is still reading).
+//
+//   The contract says "lock-free" — strictly speaking this implementation
+//   is SPSC atomic-free (no CompareAndSwap, no LoadLinked/StoreConditional):
+//   the only synchronization is the producer/consumer ordering of the
+//   count field. On a single CPU with interrupts off in the producer,
+//   this is sufficient (the producer and consumer can't run simultaneously
+//   on the same CPU). On SMP, the per-CPU IrqRing is still SPSC — the
+//   cross-CPU IPI delivery model is what makes this work (the IPI handler
+//   on the target CPU pushes into that CPU's IrqRing; the target CPU's
+//   dispatcher pops from its own IrqRing).
+//
+// ── Field semantics ─────────────────────────────────────────────────────────
+//   buf      Flat [u8; 256] array holding 32 × 8-byte u64 IRQ vectors,
+//            packed little-endian. VUMA's array index is byte-granular
+//            (no [u64; N] layout support — same constraint that forces
+//            task.vuma to use parallel [u8; N] arrays for the process
+//            table), so the helpers irq_ring_push / irq_ring_pop do the
+//            8-byte LE pack/unpack at byte offset `tail * 8` / `head * 8`.
+//            This is the same pack/unpack discipline as trap_frame.vuma's
+//            tf_set_gpr / tf_get_gpr (R2a) and irq.vuma's
+//            irq_set_handler / irq_get_handler (K6).
+//
+//   head     Read position (consumer cursor). 0..31. The next pop will
+//            read buf[head * 8 .. head * 8 + 8] and advance head to
+//            (head + 1) & 31 (wrap around 32 — the & 31 mask implements
+//            the modular arithmetic; same idiom as panic/kmsg.vuma's
+//            & 255 mask on its 256-byte buffer).
+//
+//   tail     Write position (producer cursor). 0..31. The next push will
+//            write buf[tail * 8 .. tail * 8 + 8] and advance tail to
+//            (tail + 1) & 31. When tail == head, the buffer is either
+//            empty (count == 0) or full (count == 32) — the count field
+//            disambiguates. This is the classic "ring buffer with explicit
+//            count" shape (as opposed to the "ring buffer with one slot
+//            always empty" shape — the explicit-count shape is preferred
+//            here because it uses the full 32-entry capacity, not 31).
+//
+//   count    Entries currently in the buffer. 0..32. Producer increments
+//            after a push, consumer decrements after a pop. The
+//            full-empty discrimination is the ONLY use of count — the
+//            head/tail pointers themselves never alias-check.
+//
+// ── Layout total ────────────────────────────────────────────────────────────
+//   256 + 4 + 4 + 4 = 268 bytes (would round up to 272 for 8-byte alignment
+//   if VUMA auto-padded, but VUMA layouts are tightly packed — see
+//   kernel-developer-guide.md §9 "PMT layouts are flat, no auto-padding").
+//   The 268 bytes fit comfortably in a single cache line on most archs
+//   (cache line = 64 bytes; 268 / 64 = 4.19 — the layout spans 5 cache
+//   lines but the hot fields head/tail/count are at offsets 256/260/264,
+//   all in the same 64-byte cache line as the high half of buf, so a
+//   producer's push (which writes buf[tail*8..tail*8+8] then tail/count)
+//   typically touches only 1-2 cache lines). No _pad field — the layout
+//   is exactly 268 bytes, the same shape the R2e task contract specified.
+//
+// ── Empty / full discrimination ─────────────────────────────────────────────
+//   Two sentinels are used (rather than, say, errno-style signaling):
+//     * push returns 0 - 1 (= -1 as i64) when the buffer is full.
+//     * pop returns 9999 (a deliberately-out-of-range value — x86_64 IRQ
+//       vectors are 0..255; aarch64 ESR_EL1.EC is 0..63; riscv64 scause
+//       is 0..63 in the synchronous-exception space; the value 9999 is
+//       outside all of them, so a real IRQ vector will never collide
+//       with the empty sentinel).
+//   The 9999 sentinel matches the same shape panic/kmsg.vuma uses (256
+//   for "no message") and ipc/waitq.vuma uses (256 for "queue empty"):
+//   a value outside the domain of valid items, returned when the
+//   collection is empty, rather than a separate error flag.
+//
+//   The push -1 sentinel matches ipc/waitq.vuma's `return 0 - 1` idiom
+//   for "operation failed" (K7e) — see the `0 - 1` form rationale in
+//   waitq.vuma's header: VUMA's `0 - 1` is the safe spelling of -1
+//   (the codegen handles Sub 0, 1 → 0xFFFFFFFFFFFFFFFF as i64 cleanly,
+//   vs. the lexer's negative-number path which has edge cases).
+//
+// ── Pack/unpack discipline ──────────────────────────────────────────────────
+//   irq_ring_push packs `vector` (u64) into buf[tail*8 .. tail*8+8] using
+//   the same 8-iteration LE loop as trap_frame.vuma's tf_set_gpr:
+//       let i = 0;
+//       while i < 8 {
+//           let sh = i * 8;
+//           let b = (vector >> sh) & 255;
+//           ring.buf[off + i] = b as u8;
+//           i = i + 1;
+//       }
+//   The `& 255` mask extracts the low byte after the right-shift; the
+//   `b as u8` cast narrows the masked u64 back to u8 for the array store.
+//
+//   irq_ring_pop unpacks the u64 from buf[head*8 .. head*8+8] using the
+//   same 8-iteration LE loop as trap_frame.vuma's tf_get_gpr:
+//       let v: u64 = 0;
+//       let i = 0;
+//       while i < 8 {
+//           let sh = i * 8;
+//           let b = ring.buf[off + i] as u64;
+//           v = v + (b << sh);
+//           i = i + 1;
+//       }
+//   The `b as u64` cast widens the u8 array element before the left-
+//   shift; VUMA's left-shift result type follows the left operand, so
+//   the addition stays in u64.
+//
+// ── Producer / consumer ordering (the "lock-free" invariant) ────────────────
+//   The producer (irq_ring_push) does:
+//     1. Read count, check it's < 32 (else return -1).
+//     2. Write the 8 bytes of `vector` to buf[tail*8 .. tail*8+8].
+//     3. Increment tail (with & 31 wrap).
+//     4. Increment count.
+//   The consumer (irq_ring_pop) does:
+//     1. Read count, check it's > 0 (else return 9999).
+//     2. Read the 8 bytes from buf[head*8 .. head*8+8].
+//     3. Increment head (with & 31 wrap).
+//     4. Decrement count.
+//
+//   The order matters: the producer writes the vector BEFORE incrementing
+//   count, so the consumer (which checks count > 0 before reading) can
+//   never observe a stale vector. The consumer reads the vector BEFORE
+//   decrementing count, so the producer (which checks count < 32 before
+//   writing) can never overwrite a slot the consumer is still reading.
+//   On a single CPU with the producer running interrupts-off, this is
+//   sufficient without any explicit memory barrier — the implicit
+//   program-order between the producer's writes and the consumer's reads
+//   (which happens-after the producer's iret) provides the necessary
+//   ordering.
+//
+//   On SMP, this single-IrqRing is NOT safe (two CPUs would race on the
+//   head/tail/count updates). The R2e contract is for a per-CPU IrqRing
+//   (the SPSC model: one producer = this CPU's IRQ trampoline, one
+//   consumer = this CPU's dispatcher); the SMP cross-CPU case is K9's
+//   job (per-CPU IrqRing + IPI-based steering).
+//
+// ── PMT discipline ──────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   IrqRing is a 268-byte flat typed-memory record held in a
+//   `___pmt_buffer`-backed State<IrqRing>; the caller allocates it via
+//   `state_new(IrqRing)` and passes it by reference to irq_ring_init /
+//   irq_ring_push / irq_ring_pop (init-style API — same convention as
+//   R2a's trap_frame.vuma tf_init, R1a's bootinfo_init, K2a's pmm_init).
+//
+//   The State<IrqRing> params to irq_ring_init / irq_ring_push /
+//   irq_ring_pop are regular VUMA-fn borrows (NOT extern #[borrow] —
+//   only extern FFI calls conservatively invalidate). The 3 helpers
+//   touch only the IrqRing's own fields — no extern calls, no other
+//   State<T> references, so the codegen can keep all 3 State<IrqRing>
+//   writes in the same arena-backed buffer without invalidation.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). The future consumer
+//   (K3d's trap.vuma dispatcher, after R2f migrates it onto the superset
+//   TrapFrame) will re-declare the IrqRing layout + helpers byte-
+//   identically to this file (same convention as R2a's TrapFrame being
+//   re-declared byte-identically by R2b/R2c/R2d's per-arch
+//   trap_trampoline.vuma files). A mismatch in field order or type would
+//   silently produce different field offsets at the call site — see
+//   kernel-developer-guide.md §9 "Byte-identical re-declaration
+//   invariant".
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All numeric literals in this file are decimal (per the project-wide
+//   convention — see kernel-developer-guide.md §9 and the same rule
+//   applied in trap_frame.vuma's header comment). Hex values are
+//   documented in comments only. The literals used:
+//     256     = 0x100          (buf array size — 32 × 8 bytes)
+//     32      = 0x20           (ring capacity — 32 entries)
+//     31      = 0x1f           (wrap mask for the 32-entry ring)
+//     8       = 0x8            (u64 pack/unpack byte count)
+//     255     = 0xff           (u8 mask, applied after the >> shift)
+//     9999    = 0x270f         (empty sentinel — out-of-range for any
+//                               arch's IRQ vector space)
+//     0 - 1   = -1 as i64      (full sentinel — VUMA's `0 - 1` idiom
+//                               for -1, see waitq.vuma's header for
+//                               the codegen rationale)
+//     0       = 0              (success return code from push)
+//     32, 33, 34 = 0x20,0x21,0x22  (self-test FIFO vectors, first batch)
+//     64, 99  = 0x40, 0x63     (self-test FIFO vectors, second batch
+//                               base; 99 is the rejected-when-full value)
+//     1..12   = self-test return codes (1..12 = individual check failures)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/trap/irq_ring.vuma \
+//         /tmp/irq_ring.bin x86_64 --verify
+//     /tmp/irq_ring.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (init zeros; push 3 + pop 3 FIFO; pop empty
+// returns 9999; fill 32; push when full returns -1; pop all 32 FIFO with
+// wrap-around).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout — 32-entry IRQ ring buffer (268 bytes total).
+// ────────────────────────────────────────────────────────────────────────────
+layout IrqRing = {
+    buf: [u8; 256],   // 32 × 8 bytes — u64 IRQ vectors (LE-packed)
+    head: u32,        // read position (0..31, wraps via & 31)
+    tail: u32,        // write position (0..31, wraps via & 31)
+    count: u32,       // entries currently in buffer (0..32)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// irq_ring_init: zero a caller-allocated IrqRing.
+// ────────────────────────────────────────────────────────────────────────────
+// Called once per IrqRing before any push or pop. Zeros the 256-byte buf
+// (so stale IRQ vectors from a prior use don't leak through if a future
+// caller forgets to check count before popping — defensive), then sets
+// head/tail/count to 0 (empty ring).
+//
+// The explicit byte-zeroing loop (rather than relying on state_new's
+// zero-fill) is the same pattern R2a's tf_init uses for the gpr/fpu/_pad
+// arrays: the contract requires irq_ring_init to be a self-contained
+// zeroing function — callers may pass an IrqRing that was previously
+// written to (e.g. by a prior IRQ storm, then re-used after the dispatcher
+// drained it).
+//
+// State<T> params: 1 (ring). Pure write — no reads, no helper calls. The
+// 256-iteration byte-zeroing loop + 3 scalar-field assignments are direct
+// typed-memory writes; no `*ptr`/`&ring`/`allocate` anywhere.
+fn irq_ring_init(ring: State<IrqRing>) {
+    ring.head = 0;
+    ring.tail = 0;
+    ring.count = 0;
+    let i = 0;
+    while i < 256 { ring.buf[i] = 0; i = i + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// irq_ring_push: enqueue one IRQ vector into the ring.
+// ────────────────────────────────────────────────────────────────────────────
+// Producer side. Returns 0 on success, -1 (written as `0 - 1` to avoid
+// VUMA's negative-literal edge case — see waitq.vuma's header for the
+// codegen rationale) if the ring is full.
+//
+// Order of operations (the "lock-free" SPSC invariant):
+//   1. Check `ring.count >= 32` — if so, the ring is full; return -1
+//      WITHOUT modifying any state. (Defensive: a full ring means the
+//      dispatcher is lagging behind the producer — the kernel should
+//      drop the new IRQ and log an overflow, NOT overwrite the oldest
+//      pending IRQ. The `>= 32` rather than `== 32` guards against a
+//      buggy producer somehow pushing past the capacity.)
+//   2. Write the 8 bytes of `vector` (LE) into buf[tail*8 .. tail*8+8].
+//      Done BEFORE incrementing count, so the consumer can't observe a
+//      half-written slot.
+//   3. Advance tail: `ring.tail = (ring.tail + 1) & 31`. The & 31 mask
+//      implements modular arithmetic on the 32-entry ring — same idiom
+//      as kmsg.vuma's & 255 mask on its 256-byte buffer.
+//   4. Increment count: `ring.count = ring.count + 1`. Done AFTER the
+//      vector write, so the consumer's count > 0 check is a valid
+//      "there's a fully-written vector available" signal.
+//
+// State<T> params: 1 (ring). Reads ring.count + ring.tail; writes
+// ring.buf[tail*8..tail*8+8] + ring.tail + ring.count. No helper calls,
+// no extern calls — the entire push is direct typed-memory ops.
+fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
+    if ring.count >= 32 {
+        return 0 - 1;  // -1 (full)
+    }
+    // Write vector at tail position (8-byte LE pack).
+    let off = ring.tail * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (vector >> sh) & 255;
+        ring.buf[off + i] = b as u8;
+        i = i + 1;
+    }
+    ring.tail = (ring.tail + 1) & 31;  // wrap around 32
+    ring.count = ring.count + 1;
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// irq_ring_pop: dequeue one IRQ vector from the ring.
+// ────────────────────────────────────────────────────────────────────────────
+// Consumer side. Returns the u64 vector, or 9999 if the ring is empty.
+//
+// The 9999 sentinel is a deliberately-out-of-range value: x86_64 IRQ
+// vectors are 0..255, aarch64 ESR_EL1.EC is 0..63, riscv64 scause
+// (synchronous-exception space) is 0..63 — 9999 is outside all of them,
+// so a real IRQ vector will never collide with the empty sentinel. Same
+// shape as kmsg.vuma (256 = "no message") and waitq.vuma (256 = "queue
+// empty"): a value outside the domain of valid items, returned when the
+// collection is empty.
+//
+// Order of operations (the "lock-free" SPSC invariant):
+//   1. Check `ring.count == 0` — if so, the ring is empty; return 9999
+//      WITHOUT modifying any state.
+//   2. Read the 8 bytes from buf[head*8 .. head*8+8] into a u64 (LE
+//      unpack). Done BEFORE decrementing count, so the producer can't
+//      overwrite the slot while we're still reading it.
+//   3. Advance head: `ring.head = (ring.head + 1) & 31`. The & 31 mask
+//      implements modular arithmetic on the 32-entry ring.
+//   4. Decrement count: `ring.count = ring.count - 1`. Done AFTER the
+//      vector read, so the producer's count < 32 check correctly sees
+//      this slot as free only after the consumer has finished reading.
+//
+// State<T> params: 1 (ring). Reads ring.count + ring.head +
+// ring.buf[head*8..head*8+8]; writes ring.head + ring.count. No helper
+// calls, no extern calls.
+fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
+    if ring.count == 0 {
+        return 9999;  // empty sentinel
+    }
+    // Read vector at head position (8-byte LE unpack).
+    let off = ring.head * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = ring.buf[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    ring.head = (ring.head + 1) & 31;  // wrap around 32
+    ring.count = ring.count - 1;
+    return v;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the IRQ ring buffer end-to-end through 12 checks across 4
+// phases:
+//
+//   Phase 1: basic FIFO (push 3, pop 3 in order).
+//     1. irq_ring_push(ring, 32) returns 0 (success — ring not full).
+//     2. irq_ring_push(ring, 33) returns 0.
+//     3. irq_ring_push(ring, 34) returns 0.
+//     4. ring.count == 3 after the 3 pushes.
+//     5. irq_ring_pop(ring) == 32 (FIFO: first-in-first-out).
+//     6. irq_ring_pop(ring) == 33.
+//     7. irq_ring_pop(ring) == 34.
+//     8. ring.count == 0 after the 3 pops.
+//
+//   Phase 2: pop-from-empty sentinel.
+//     9. irq_ring_pop(ring) == 9999 (empty sentinel).
+//
+//   Phase 3: fill the ring + push-when-full.
+//    10. Push 32 vectors (64..95); ring.count == 32 after.
+//    11. irq_ring_push(ring, 99) on a full ring returns non-zero (-1).
+//        (The check is `r4 == 0 { return 11 }` — i.e. fail if push
+//        succeeded; the actual return value is -1, but the check is
+//        "should have failed" rather than "should be exactly -1", to
+//        match the contract's literal `if r4 == 0 { return 11; }`
+//        shape.)
+//
+//   Phase 4: drain the ring + verify FIFO with wrap-around.
+//    12. Pop 32 vectors; each must equal 64 + j for j = 0..31. This
+//        verifies the head pointer wrapped correctly from 31 back to 0
+//        during the drain (the 32-entry ring started the drain at
+//        head = 3 — see the Phase 3 trace in the file header — so pops
+//        29..31 read from buf[0..24], the slots that were overwritten
+//        by the Phase 3 pushes after the wrap). Without the & 31 mask,
+//        head would advance past 31 and the pops would read garbage
+//        from buf[256..] — out of bounds; with the mask, head wraps
+//        to 0 and the pops correctly read the slots written by the
+//        tail-wrapped pushes.
+//
+// Returns 0 on success, 1..12 on the 12 individual check failures:
+//   1:  push #1 (vector 32) failed (returned non-zero)
+//   2:  push #2 (vector 33) failed
+//   3:  push #3 (vector 34) failed
+//   4:  count != 3 after the 3 pushes
+//   5:  pop #1 != 32 (FIFO violated)
+//   6:  pop #2 != 33
+//   7:  pop #3 != 34
+//   8:  count != 0 after the 3 pops
+//   9:  pop #4 != 9999 (empty sentinel violated)
+//  10:  count != 32 after filling the ring
+//  11:  push #36 (vector 99) on a full ring succeeded (should have failed)
+//  12:  pop during the drain != 64 + j (FIFO-with-wrap violated)
+//
+// Per the R2e contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL — see the Decimal-constants
+// table in the file header for the rationale. The `0 - 1` form for
+// push's -1 return is the same idiom K7e's waitq.vuma uses.
+fn main() -> i32 {
+    let ring = state_new(IrqRing);
+    irq_ring_init(ring);
+
+    // ── Phase 1: push 3 vectors, pop 3 vectors, verify FIFO. ───────────
+    let r1 = irq_ring_push(ring, 32);
+    if r1 != 0 { return 1; }
+    let r2 = irq_ring_push(ring, 33);
+    if r2 != 0 { return 2; }
+    let r3 = irq_ring_push(ring, 34);
+    if r3 != 0 { return 3; }
+    if ring.count != 3 { return 4; }
+
+    let v1 = irq_ring_pop(ring);
+    if v1 != 32 { return 5; }
+    let v2 = irq_ring_pop(ring);
+    if v2 != 33 { return 6; }
+    let v3 = irq_ring_pop(ring);
+    if v3 != 34 { return 7; }
+    if ring.count != 0 { return 8; }
+
+    // ── Phase 2: pop from empty → 9999 sentinel. ───────────────────────
+    let v4 = irq_ring_pop(ring);
+    if v4 != 9999 { return 9; }
+
+    // ── Phase 3: fill the ring (32 pushes); push when full → -1. ───────
+    // After Phase 1+2, head == 3, tail == 3, count == 0. The 32 pushes
+    // start at tail = 3 and wrap: tail goes 3, 4, ..., 31, 0, 1, 2,
+    // ending at tail = 3 again. The 32 vectors written are 64..95 at
+    // buf offsets 24..256, 0..24 (i.e. buf[24..32]=64, buf[32..40]=65,
+    // ..., buf[248..256]=92, buf[0..8]=93, buf[8..16]=94, buf[16..24]=95).
+    let i = 0;
+    while i < 32 {
+        irq_ring_push(ring, 64 + i as u64);
+        i = i + 1;
+    }
+    if ring.count != 32 { return 10; }
+
+    // Push when full → -1 (the check is "should have failed", so we fail
+    // if the return value is 0 — i.e. the push succeeded).
+    let r4 = irq_ring_push(ring, 99);
+    if r4 == 0 { return 11; }  // should fail
+
+    // ── Phase 4: drain the ring, verify FIFO with wrap-around. ─────────
+    // Pops start at head = 3. Each pop reads buf[head*8..head*8+8] and
+    // advances head via (head + 1) & 31. The 32 pops read 64..95 in
+    // order, verifying the & 31 wrap correctly cycles head back to 0
+    // after slot 31.
+    let j = 0;
+    while j < 32 {
+        let v = irq_ring_pop(ring);
+        if v != 64 + j as u64 { return 12; }
+        j = j + 1;
+    }
+
+    return 0;
+}
