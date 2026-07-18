@@ -8479,6 +8479,55 @@ pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive:
 /// against the layout registry. Returns `(cumulative_offset, size, ir_type)`
 /// of the leaf field, descending into nested layout-typed fields. Returns
 /// `None` if any field in the chain isn't found.
+
+/// Detect the element type and size of an array field being indexed.
+/// Returns `(elem_size, Some(ir_type))` for known types, `(1, None)` for u8/unknown.
+/// This enables typed-array index scaling: `arr[i]` → `*(base + i * elem_size)`
+/// instead of the byte-granular default `*(base + i)`.
+fn detect_array_elem_type(
+    expr: &vuma_parser::ast::Expr,
+    ctx: &BridgeCtx,
+) -> (u64, Option<vuma_codegen::ir::IRType>) {
+    use vuma_parser::ast::Expr;
+
+    // Only FieldAccess chains can resolve to typed arrays.
+    if !matches!(expr, Expr::FieldAccess { .. }) {
+        return (1, None);
+    }
+
+    // Walk the chain to find the field's type_name.
+    let mut chain: Vec<String> = Vec::new();
+    let mut cur = expr;
+    while let Expr::FieldAccess { expr: inner, field, .. } = cur {
+        chain.push(field.clone());
+        cur = inner.as_ref();
+    }
+    if let Expr::Var { name: bv, .. } = cur {
+        if let Some(layout_name) = ctx.state_var_layouts.get(bv).cloned() {
+            chain.reverse();
+            if let Some((_offset, _size, _field_ty, type_name)) =
+                resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
+            {
+                // Parse element type from "[T; N]" format.
+                if type_name.starts_with('[') {
+                    let inner = &type_name[1..];
+                    if let Some(semi_pos) = inner.find(';') {
+                        let elem_type_str = inner[..semi_pos].trim();
+                        return match elem_type_str {
+                            "u8" | "i8" | "bool" => (1, Some(vuma_codegen::ir::IRType::U8)),
+                            "u16" | "i16" => (2, Some(vuma_codegen::ir::IRType::U16)),
+                            "u32" | "i32" | "f32" => (4, Some(vuma_codegen::ir::IRType::U32)),
+                            "u64" | "i64" | "f64" => (8, Some(vuma_codegen::ir::IRType::U64)),
+                            _ => (1, None),
+                        };
+                    }
+                }
+            }
+        }
+    }
+    (1, None)
+}
+
 fn resolve_state_field_chain(
     layouts: &HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
     start_layout: &str,
@@ -8905,12 +8954,32 @@ pub fn flatten_expr(
         Expr::Index { expr, index, .. } => {
             let base_expr = flatten_expr(expr, stmts, ctx);
             let idx_expr = flatten_expr(index, stmts, ctx);
+
+            // Determine the array element type and size for proper index scaling.
+            let (elem_size, elem_ir_type) = detect_array_elem_type(expr, ctx);
+
+            // Scale the index by element size if needed.
+            let scaled_idx = if elem_size > 1 {
+                let mul_dst = ctx.alloc_temp();
+                stmts.push(ScgStatement::Computation(ComputationNode {
+                    dst: mul_dst.clone(),
+                    op: BinOpKind::Mul,
+                    lhs: idx_expr,
+                    rhs: ScgExpr::Int(elem_size as i64),
+                    tail_call: false,
+                    reassigns: None,
+                }));
+                ScgExpr::Var(mul_dst)
+            } else {
+                idx_expr
+            };
+
             let addr = ctx.alloc_temp();
             stmts.push(ScgStatement::Computation(ComputationNode {
                 dst: addr.clone(),
                 op: BinOpKind::Add,
                 lhs: base_expr,
-                rhs: idx_expr,
+                rhs: scaled_idx,
                 tail_call: false,
                 reassigns: None,
             }));
@@ -8919,7 +8988,7 @@ pub fn flatten_expr(
                 dst: dst.clone(),
                 ptr: ScgExpr::Var(addr),
                 offset: None,
-                ty: None,
+                ty: elem_ir_type,
             }));
             ScgExpr::Var(dst)
         }
@@ -9764,12 +9833,32 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             if let vuma_parser::ast::AssignTarget::Index { expr, index, .. } = &assign_stmt.target {
                 let base = flatten_expr(expr, &mut stmts, ctx);
                 let idx = flatten_expr(index, &mut stmts, ctx);
+
+                // Determine the array element type for proper index scaling.
+                let (elem_size, elem_ir_type) = detect_array_elem_type(expr, ctx);
+
+                // Scale the index by element size if needed.
+                let scaled_idx = if elem_size > 1 {
+                    let mul_dst = ctx.alloc_temp();
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: mul_dst.clone(),
+                        op: BinOpKind::Mul,
+                        lhs: idx,
+                        rhs: ScgExpr::Int(elem_size as i64),
+                        tail_call: false,
+                        reassigns: None,
+                    }));
+                    ScgExpr::Var(mul_dst)
+                } else {
+                    idx
+                };
+
                 let addr = ctx.alloc_temp();
                 stmts.push(ScgStatement::Computation(ComputationNode {
                     dst: addr.clone(),
                     op: BinOpKind::Add,
                     lhs: base,
-                    rhs: idx,
+                    rhs: scaled_idx,
                     tail_call: false,
                     reassigns: None,
                 }));
@@ -9778,7 +9867,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     ptr: ScgExpr::Var(addr),
                     offset: None,
                     value,
-                    ty: None,
+                    ty: elem_ir_type,
                 }));
                 return stmts;
             }
