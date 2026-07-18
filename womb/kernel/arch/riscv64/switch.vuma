@@ -1,344 +1,327 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/arch/riscv64/switch.vuma
-// riscv64 context switch — Task saved-register subset + context_switch extern.
+// riscv64 context switch on the superset TrapFrame (Wave R4a+b).
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file is the K4c layer of the VWK kernel on riscv64: the per-arch
-// context-switch extern declarations, the direct analogue of
-// womb/kernel/arch/x86_64/switch.vuma and
-// womb/kernel/arch/aarch64/switch.vuma. K4b's scheduler.vuma picks the
-// next runnable task from the runqueue (sched_dequeue); THIS file
-// declares the `context_switch(prev, next)` extern that actually
-// transfers control from the current task to the next one by saving
-// prev's callee-saved register file to `prev.{sp,pc,s0..s11}` and
-// loading `next.{sp,pc,s0..s11}` back into the CPU.
+// This file is the R4a+b rewrite of K4c's riscv64 switch.vuma, the direct
+// analogue of womb/kernel/arch/x86_64/switch.vuma and
+// womb/kernel/arch/aarch64/switch.vuma. K4c declared a
+// `context_switch(prev: State<Task>, next: State<Task>)` extern that saved
+// prev's callee-saved register file to a per-arch Task layout's flat
+// fields (sp, pc, s0..s11). R4a+b narrows the surface to the superset
+// TrapFrame (R2a) ONLY:
 //
-// ── What context_switch does (semantics) ─────────────────────────────────────
-// `context_switch(prev: State<Task>, next: State<Task>)` is a hand-written
-// asm routine (K11's switch.S). On entry, the RISC-V calling convention
-// (the standard LP64 ABI — RISC-V ELF psABI) places:
-//     a0 = &prev (base address of prev's ___pmt_buffer slot)
-//     a1 = &next (base address of next's ___pmt_buffer slot)
-// The routine saves the current CPU's callee-saved register file into
-// `prev.{sp,pc,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11}` (the 12
-// callee-saved GPs the LP64 ABI guarantees preserved across calls, plus
-// the stack pointer and the return address). Then it loads
-// `next.{sp,pc,s0..s11}` into the CPU and executes `ret` (RISC-V `ret`
-// is pseudo-instruction for `jalr x0, 0(ra)` — ra = x1 = the return
-// address register; the saved `pc` is loaded into ra before ret).
+//   * `arch_context_switch(prev_tf, next_tf)` — a VUMA fn (not an extern).
+//     In hosted mode it is a no-op: the scheduler's sched_save_context /
+//     sched_restore_context (womb/kernel/proc/scheduler.vuma, R4a+b) have
+//     already copied the prev task's PC/SP/status into its Task slot and
+//     copied the next task's saved PC/SP/status back into next_tf. The
+//     bare-metal asm step that actually loads next_tf's GPRs into the CPU
+//     is `arch_load_context` (the extern below) — arch_context_switch in
+//     bare-metal mode would call arch_load_context(next_tf) before
+//     returning, but R4a+b leaves that call to the K11 switch.S
+//     implementation (the hosted self-test just verifies the call site
+//     doesn't crash).
 //
-// The asm (K11 switch.S, sketched for reference):
-//     context_switch:
-//         // Save the callee-saved GPs to prev's Task fields.
-//         sd ra,  offsetof(Task.pc)(a0)    ; ra = return addr = saved pc
-//         sd sp,  offsetof(Task.sp)(a0)
-//         sd s0,  offsetof(Task.s0)(a0)
-//         sd s1,  offsetof(Task.s1)(a0)
-//         sd s2,  offsetof(Task.s2)(a0)
-//         sd s3,  offsetof(Task.s3)(a0)
-//         sd s4,  offsetof(Task.s4)(a0)
-//         sd s5,  offsetof(Task.s5)(a0)
-//         sd s6,  offsetof(Task.s6)(a0)
-//         sd s7,  offsetof(Task.s7)(a0)
-//         sd s8,  offsetof(Task.s8)(a0)
-//         sd s9,  offsetof(Task.s9)(a0)
-//         sd s10, offsetof(Task.s10)(a0)
-//         sd s11, offsetof(Task.s11)(a0)
-//         // Load next's callee-saved GPs.
-//         ld ra,  offsetof(Task.pc)(a1)
-//         ld sp,  offsetof(Task.sp)(a1)
-//         ld s0,  offsetof(Task.s0)(a1)
-//         ld s1,  offsetof(Task.s1)(a1)
-//         ld s2,  offsetof(Task.s2)(a1)
-//         ld s3,  offsetof(Task.s3)(a1)
-//         ld s4,  offsetof(Task.s4)(a1)
-//         ld s5,  offsetof(Task.s5)(a1)
-//         ld s6,  offsetof(Task.s6)(a1)
-//         ld s7,  offsetof(Task.s7)(a1)
-//         ld s8,  offsetof(Task.s8)(a1)
-//         ld s9,  offsetof(Task.s9)(a1)
-//         ld s10, offsetof(Task.s10)(a1)
-//         ld s11, offsetof(Task.s11)(a1)
-//         ret                                ; jalr x0, 0(ra) — jumps to
-//                                            ; next's saved pc
+//   * `extern "C" fn arch_load_context(tf)` — the bare-metal asm stub that
+//     loads tf's GPRs (riscv64: ra, sp, gp, tp, t0..t6, s0..s11, a0..a7
+//     at canonical slots per R2d) into the CPU. Hosted:
+//     __ffi_fallback_stub (no-op). Bare-metal (K11): the asm stub in
+//     womb/kernel/arch/riscv64/switch.S reads tf at the superset
+//     TrapFrame's field offsets and `sret`s into the new context.
 //
-// The caller-saved registers (a0..a7, t0..t6 — the RISC-V LP64 caller-
-// saved GPs) are NOT saved here — the LP64 ABI makes the caller
-// responsible for spilling them around a call. Only the 12 callee-saved
-// GPs (s0..s11, where s0 is the frame pointer) plus sp need explicit
-// save/restore. The saved `pc` is held in `ra` (x1) and restored by
-// `ret` (which jumps to the address in `ra`).
+// ── Why a no-op arch_context_switch in hosted mode? ───────────────────────
+// The R4a+b scheduler surface (womb/kernel/proc/scheduler.vuma) does the
+// context copy in arch-independent VUMA code:
+//     sched_save_context(tbl, prev_idx, prev_tf)    // tf.{pc,sp,status} → tbl
+//     next_idx = schedule(rq, tbl)                  // CFS pick
+//     sched_restore_context(tbl, next_idx, next_tf) // tbl → tf.{pc,sp,status}
+//     arch_context_switch(prev_tf, next_tf)         // <-- this file
+// The first 3 steps are pure PMT field-copies; they fully transfer the
+// relevant saved-register state. The 4th step (arch_context_switch) only
+// needs to do work in bare-metal mode, where it must load next_tf's GPRs
+// into the actual hardware registers (which can ONLY be done in asm —
+// VUMA has no inline-asm or `csrw satp, reg` builtin). In hosted mode
+// the hardware registers are the host process's registers, which we
+// can't and shouldn't touch — so arch_context_switch is a no-op.
 //
-// ── Hosted vs bare-metal ───────────────────────────────────────────────────
-// Hosted (compile_dump --verify, this file's self-test):
-//     `context_switch` and `satp_write` resolve to
-//     `__ffi_fallback_stub` (xor eax, eax; ret — returns 0, void calls
-//     no-op). The self-test calls `context_switch(prev, next)` to
-//     verify the call site compiles + links + doesn't crash; it does
-//     NOT verify that the registers actually switched (the stub is a
-//     no-op). K4b's scheduler self-test covers the runqueue logic;
-//     THIS file's self-test covers the layout + the call site, not the
-//     asm semantics.
-// Bare-metal (K11):
-//     `context_switch` and `satp_write` link against real asm stubs in
-//     womb/kernel/arch/riscv64/switch.S (registered by the riscv64
-//     backend's build_runtime_syscall_stubs equivalent). The real
-//     `context_switch` is the asm sketch above; the real
-//     `satp_write(val)` is `csrw satp, a0; ret` (a0 = val under the
-//     LP64 ABI — switches address spaces; sfence.vma zero, zero is
-//     implied by the satp write on implementations that auto-flush, or
-//     explicit on those that don't — K11 will add the sfence.vma as
-//     needed). `satp_write` is the address-space switch that pairs
-//     with `context_switch`'s register-file switch; the scheduler calls
-//     `satp_write(next.mm_root)` immediately before `context_switch(
-//     prev, next)` so the new task's page tables are live when its
-//     registers come back.
+// ── Saved-context fields used ─────────────────────────────────────────────
+// Per the R4a+b contract, the scheduler uses ONLY the superset TrapFrame's
+// scalar fields (pc, sp, status) plus the gpr helper accessors
+// (tf_get_gpr / tf_set_gpr). NO arch-specific fields (tf.mepc, tf.s0,
+// etc.) exist on the superset TrapFrame — R2a deliberately collapsed all
+// 3 arches' register files into the gpr [u8; 256] array indexed by
+// canonical slot. The riscv64 canonical GPR slot mapping (R2d):
+//     slot 0 = ra    slot 5..11 = t0..t6
+//     slot 1 = sp    slot 12..23 = s0..s11
+//     slot 2 = gp    slot 24..31 = a0..a7
+//     slot 3 = tp
+//     slot 4 = t0
+// The scalar fields map naturally:
+//     tf.pc     ← mepc   (machine-mode exception PC at trap entry)
+//     tf.status ← mstatus (machine status register)
+//     tf.sp     ← sp     (the GPR at index 2 is also "sp" per the RISC-V
+//                         ABI; this field duplicates it as a top-level
+//                         scalar for fast access by the trap dispatcher
+//                         without a gpr unpack round-trip — R2a rationale)
+// arch_load_context's K11 asm stub reads tf.pc / tf.status / tf.sp + the
+// 31 used GPR slots out of tf.gpr, sets mepc / mstatus / sp to the
+// trap-frame values, then `mret`s (or `sret` for supervisor mode).
 //
-// ── Task layout (saved-register subset, flat fields) ────────────────────────
-// The Task layout here is the context-switch-relevant SUBSET of K4a's
-// full Task (womb/kernel/proc/task.vuma). K4a nests the full TrapFrame
-// (35 u64 fields, 280 bytes — the trap-entry save area, see
-// womb/kernel/arch/riscv64/trap_trampoline.vuma) as `regs: TrapFrame`.
-// THIS file flattens only the 14 callee-saved registers the
-// context_switch asm touches (sp, pc, s0..s11) directly into Task as
-// top-level u64 fields. The two layouts are NOT byte-identical and
-// need not be — context_switch is hand-written asm that reads Task at
-// THIS file's offsets, not K4a's; the trap entry/exit path (K3a/K3d's
-// riscv64 trap_trampoline) reads TrapFrame at its own offsets, not
-// Task's. They share the same conceptual Task object but view it
-// through different field subsets:
-//     - K3a/K3d's TrapFrame: the 35-word trap-entry save area (full GP
-//       file x1..x31 + mepc, mstatus, scause, stval).
-//     - K4a's Task.regs: the same TrapFrame, nested by value.
-//     - THIS file's flat fields: the 14 callee-saved regs the asm
-//       context_switch actually touches (sp, pc, s0..s11).
-// The first 5 fields (pid, ppid, state, prio, vruntime) and the last 4
-// (mm_root, fs_root, fds, next) ARE byte-identical to K4a's Task (same
-// field names, types, and order). Only the middle "saved register"
-// block differs in shape (flat fields here vs nested TrapFrame in K4a).
-// When K11 lands, switch.S will read these flat fields by offset;
-// task.S (K3a/K3d) will read TrapFrame fields by offset; the two never
-// cross-reference each other, so the layout divergence is safe.
-//
-// ── Why #[borrow] on context_switch? ───────────────────────────────────────
-// `#[borrow]` is load-bearing (K2b note in worklog.md): it tells the
-// marshal module (src/codegen/src/marshal.rs::classify_arg_mode) to pass
-// the State<Task> buffer's BASE ADDRESS (NOT invalidate the state after
-// the call). Without `#[borrow]`, the default mode is `Invalidate`,
-// which would mark both `prev` and `next` as consumed after the
-// context_switch call — fine for this file's main() (which doesn't read
-// them again) but WRONG for K4b's scheduler, which may want to read
-// `prev.vruntime` after the switch to bump it by the tick delta. K4b's
-// scheduler.vuma re-declares context_switch with the same `#[borrow]`
-// attribute (byte-identical-redeclaration invariant, K2c).
-//
-// `satp_write(val: u64)` takes a plain `u64`, NOT a State<T> — no
-// `#[borrow]` needed because there is no State<T> to invalidate.
+// ── The OLD arch-specific Task layout (KEPT FOR REFERENCE, NOT USED) ──────
+// The K4c Task layout (flat fields sp/pc/s0..s11) is preserved below in
+// a comment block — it documents the old K4c context_switch asm sketch
+// for future K11 reference, but R4a+b does NOT use it. The scheduler no
+// longer takes a State<Task>; it takes a State<TrapFrame>. The K4c asm
+// sketch (switch.S) is also preserved as a comment for the same reason —
+// K11's switch.S will be a NEW asm stub that reads the superset
+// TrapFrame, not the old flat-fields Task.
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
-// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The Task
-// is a flat-fields struct held in a `___pmt_buffer`-backed State<Task>;
-// the CALLER allocates it via `state_new(Task)` and passes it by
-// reference to task_init_for_switch and (in K4b's scheduler) to
-// context_switch itself (init-style API — see "Why init-style?" in
-// womb/kernel/mm/pmm.vuma for the codegen rationale). The externs'
-// State<Task> params are borrow-by-reference handles (the marshal
-// module lowers them to the buffer's base Address under the hood); we
-// never write `&prev` or `*prev` in VUMA source.
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// TrapFrame is a flat typed-memory record held in a ___pmt_buffer-backed
+// State<TrapFrame>; the CALLER allocates it via `state_new(TrapFrame)` and
+// passes it by reference to arch_context_switch and (in K11's switch.S)
+// to arch_load_context. The extern's State<TrapFrame> param is a borrow-
+// by-reference handle (#[borrow] — the marshal module lowers it to the
+// buffer's base Address; we never write `&tf` or `*tf` in VUMA source).
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
-// All non-zero constants in the self-test use DECIMAL per the K4c
-// contract's "Use decimal constants in self-tests (4096 not 0x1000)"
-// rule. Decimal avoids the parser's hex-literal path (parse_int_radix
-// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
-// header for the same rationale, and K3a's trap_trampoline.vuma for
-// the same rule applied to vector=14 and rip=4096). The self-test's
-// constants:
-//     4096   = prev.pc (entry point of prev's first run)
-//     32768  = prev.sp (initial stack pointer of prev)
-//     8192   = next.pc (entry point of next's first run)
-//     36864  = next.sp (initial stack pointer of next)
-// (4096 = 0x1000, 32768 = 0x8000, 8192 = 0x2000, 36864 = 0x9000 —
-// the K4c contract's hex values, here in decimal form per the rule.)
+// All non-zero constants in the self-test use DECIMAL per the contract's
+// "Use decimal constants" rule. The self-test's constants:
+//     4096   = prev_tf.pc (arbitrary PC value, round-tripped through the
+//             no-op arch_context_switch to prove it survives the call)
+//     8192   = next_tf.pc (same, for the second TrapFrame)
+//     32768  = prev_tf.sp (arbitrary SP value, same purpose)
+//     36864  = next_tf.sp (same, for the second TrapFrame)
+//     256, 8, 255, 24 = TrapFrame array sizes / loop bounds / masks.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. K4b's scheduler.vuma will re-declare
-// Task + the context_switch extern byte-identically to this file (same
-// pattern as womb/kernel/arch/riscv64/mm_trampoline.vuma re-declaring
-// PageTable byte-identically to womb/kernel/mm/vmm.vuma). The byte-
-// identical-redeclaration invariant (K2c "extern signatures MUST stay
-// byte-identical" — extended to layouts in K3d) applies: this file's
-// `Task` MUST have the same field offsets, field names, and field
-// types as any future re-declaration in K4b/K4d/K4e.
+// This file is self-contained. It re-declares the superset TrapFrame +
+// tf_get_gpr + tf_set_gpr + tf_init byte-identically to R2a's
+// womb/kernel/trap/trap_frame.vuma (same pattern as R2d's
+// womb/kernel/arch/riscv64/trap_trampoline.vuma re-declaring them).
 //
 // ── Build & verify (hosted x86_64 — the file is riscv64-targeted but
 //    compiles + verifies under the x86_64 backend for the self-test) ─────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
 //     ./target/release-fast/compile_dump \
 //         womb/kernel/arch/riscv64/switch.vuma \
 //         /tmp/switch_riscv64.bin x86_64 --verify
 //     /tmp/switch_riscv64.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 4 self-test checks pass — prev.pc
-// = 4096, next.pc = 8192, prev.sp = 32768, next.sp = 36864 — and
-// the context_switch stub call doesn't crash).
+// Expected: IVE Pass, exit=0 (all 4 self-test checks pass — prev_tf.pc
+// = 4096, next_tf.pc = 8192, prev_tf.sp = 32768, next_tf.sp = 36864 —
+// and the arch_context_switch no-op call doesn't crash).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Layout.
+// Layout — Canonical superset TrapFrame (576 bytes, re-declared from R2a).
 // ────────────────────────────────────────────────────────────────────────────
-
-// A Task's context-switch-relevant subset on riscv64. The first 5
-// fields (pid, ppid, state, prio, vruntime) and the last 4 (mm_root,
-// fs_root, fds, next) match K4a's Task byte-identically. The middle 14
-// fields are the callee-saved register file that context_switch
-// saves/loads:
-//   sp  — stack pointer (the asm reads/writes this directly)
-//   pc  — program counter (the saved return address; on RISC-V this
-//         is the same as the link register ra = x1 at the moment of
-//         switch — `ret` is `jalr x0, 0(ra)` and jumps to the address
-//         in ra, which holds the saved pc)
-//   s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11
-//      — the 12 LP64 callee-saved GPs (s0 is the frame pointer, also
-//        known as fp; s2..s11 are general callee-saved)
-//
-// Total: 5 (header) + 14 (saved regs) + 4 (trailer) = 23 fields.
-// Sizes: u32+u32+u8+u8+pad+u64 (24) + 14×u64 (112) + 4×u64 (32) = 168
-// bytes (with 6 bytes of padding after the u8s to align the first u64).
-layout Task = {
-    pid: u32,
-    ppid: u32,
-    state: u8,
-    prio: u8,
-    vruntime: u64,
-    sp: u64,    // saved stack pointer
-    pc: u64,    // saved program counter (mepc at switch time)
-    s0: u64,
-    s1: u64,
-    s2: u64,
-    s3: u64,
-    s4: u64,
-    s5: u64,
-    s6: u64,
-    s7: u64,
-    s8: u64,
-    s9: u64,
-    s10: u64,
-    s11: u64,
-    mm_root: u64,
-    fs_root: u64,
-    fds: u64,
-    next: u64,
+layout TrapFrame = {
+    gpr: [u8; 256],
+    pc: u64,
+    status: u64,
+    vector: u64,
+    error_code: u64,
+    sp: u64,
+    fpu: [u8; 256],
+    _pad: [u8; 24],
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampolines — context switch + SATP write.
+// TrapFrame helpers (re-declared from R2a, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Read the u64 GPR at canonical slot `idx` from tf.gpr. Byte-identical to
+// R2a's tf_get_gpr.
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `val` to canonical slot `idx` in tf.gpr. Byte-identical
+// to R2a's tf_set_gpr.
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Zero every field of a caller-allocated TrapFrame. Byte-identical to
+// R2a's tf_init.
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// arch_context_switch — VUMA fn (no-op in hosted mode).
+// ────────────────────────────────────────────────────────────────────────────
+// Per the R4a+b contract: "In hosted mode: no-op (the scheduler's
+// save/restore already copied the data). Just return."
+//
+// The scheduler (womb/kernel/proc/scheduler.vuma) calls this AFTER
+// sched_save_context + sched_restore_context have already done the
+// TrapFrame field copies. In hosted mode there's nothing more to do —
+// the host process's hardware registers stay whatever they are, and the
+// caller continues executing on the host's stack. In bare-metal mode
+// (K11), this function would call arch_load_context(next_tf) to load
+// next_tf's GPRs + pc + sp + status into the CPU; R4a+b leaves that
+// call to K11's switch.S because the load can ONLY be done in asm (no
+// VUMA builtin for `mret` / `csrw satp, reg` / direct GPR write).
+//
+// State<T> params: 2 (prev_tf + next_tf). Both are regular VUMA-fn
+// borrows. No reads, no writes — the function body is empty. The params
+// are kept in the signature so the call site compiles + links against
+// the no-op stub.
+fn arch_context_switch(prev_tf: State<TrapFrame>, next_tf: State<TrapFrame>) {
+    // Hosted-mode no-op. Bare-metal (K11) implementation will:
+    //   1. satp_write(pt_get_mm_root(tbl, next_idx))  — switch address
+    //      spaces (the saved PC is currently in mm_root per R4a+b's
+    //      overload — TODO for K11 to reorganize; the bare-metal load
+    //      uses arch_load_context(next_tf), which reads next_tf directly
+    //      after sched_restore_context populated it).
+    //   2. arch_load_context(next_tf)  — load GPRs + pc + sp + status
+    //      into the CPU via the asm stub.
+    //   3. (the asm stub ends with `mret`/`sret`, so this fn never
+    //      returns in bare-metal mode — control transfers to next_tf.pc).
+    return;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines.
 // ────────────────────────────────────────────────────────────────────────────
 // Hosted: __ffi_fallback_stub (returns 0, void calls no-op). K11 swaps
-// these for per-arch asm stubs registered by the riscv64 backend's
-// build_runtime_syscall_stubs equivalent.
+// these for real asm stubs in womb/kernel/arch/riscv64/switch.S,
+// registered by the riscv64 backend's build_runtime_syscall_stubs.
 extern "C" {
-    // context_switch(prev, next) — saves prev's callee-saved register
-    // file to prev.{sp,pc,s0..s11}, loads next's register file from
-    // next.{...}, then `ret` jumps to next's saved pc (via ra). Both
-    // args are State<Task> (#[borrow] — C reads but doesn't
-    // invalidate). K11 stub: the asm sketch in the file header
-    // (switch.S). Hosted stub: no-op. The scheduler (K4b) calls this
-    // after picking the next task via sched_dequeue; before calling,
-    // it also calls satp_write(next.mm_root) to switch address
-    // spaces.
+    // arch_load_context(tf) — bare-metal asm stub that loads tf's GPRs
+    // (ra/sp/gp/tp/t0..t6/s0..s11/a0..a7 at canonical slots per R2d) +
+    // tf.pc / tf.status / tf.sp into the CPU and `mret`s (or `sret`s)
+    // into the new context. The arg is State<TrapFrame> (#[borrow] — C
+    // reads but doesn't invalidate). K11 stub: the asm sketch in the
+    // file header (reads the superset TrapFrame at R2a's field offsets,
+    // NOT the old K4c flat-fields Task). Hosted stub: no-op.
     #[borrow]
-    fn context_switch(prev: State<Task>, next: State<Task>);
-    // Load SATP (Supervisor Address Translation and Protection
-    // register) for the new task. `val` is the new SATP value — on
-    // RV64 the format is (mode << 60) | (asid << 44) | ppn (where
-    // mode=8 selects Sv39 paging, mode=9 selects Sv48, mode=10
-    // selects Sv57; ppn is the physical page number of the root
-    // table; asid is the address-space ID for non-global TLB
-    // tagging). Task.mm_root holds this packed SATP value (K4d's
-    // fork will compute it from the page table's physical address).
-    // K11 stub: `csrw satp, a0; ret` (a0 = val under the LP64 ABI),
-    // optionally followed by `sfence.vma zero, zero` for TLB flush
-    // (K11 may fold the sfence into the stub or rely on the caller
-    // to do it separately). Called by K4b's scheduler immediately
-    // before context_switch, so the new task's page tables are live
-    // when its registers come back.
+    fn arch_load_context(tf: State<TrapFrame>);
+    // Load SATP (Supervisor Address Translation and Protection register)
+    // for the new task. `val` is the new SATP value — on RV64 the format
+    // is (mode << 60) | (asid << 44) | ppn (where mode=8 selects Sv39
+    // paging). K11 stub: `csrw satp, a0; ret` (a0 = val under the LP64
+    // ABI), optionally followed by `sfence.vma zero, zero` for TLB flush.
+    // (Preserved from K4c for K11's switch.S to call — R4a+b's
+    // arch_context_switch no-op does NOT call this, but K11's will.)
     fn satp_write(val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Helpers.
+// OLD arch-specific Task layout — KEPT FOR REFERENCE, NOT USED by R4a+b.
 // ────────────────────────────────────────────────────────────────────────────
-// Init-style API (caller allocates `t` via state_new(Task), passes by
-// reference). The State<Task> param here is a regular VUMA-fn borrow
-// (NOT an extern #[borrow] — VUMA fn calls don't need the attribute,
-// only extern "C" calls do, because the codegen tracks the State's
-// lifetime through regular fn calls but conservatively invalidates on
-// extern calls). See womb/kernel/arch/riscv64/trap_trampoline.vuma::
-// trap_frame_init for the same pattern (regular fn writing through a
-// State<T> param).
-
-// Initialize a Task for its first context_switch. Sets `pc` to the
-// task's entry point, `sp` to its initial stack pointer, and zeroes
-// the rest of the saved-register fields (s0..s11). After this call
-// the Task is ready to be the `next` argument of context_switch — the
-// asm will load sp from `t.sp` (giving the task a fresh stack), load
-// zero into s0..s11 (a deterministic initial state), and `ret` will
-// jump to next's saved pc. (Actually for a fresh task, the scheduler
-// pre-pushes `entry` onto the task's stack so the first `ret` after
-// the register-file load jumps to `entry`; this is K11's switch.S
-// concern, not VUMA's. K4b's scheduler.vuma or K11's kmain will set
-// up the initial stack frame before calling context_switch with this
-// Task as `next`.)
-fn task_init_for_switch(t: State<Task>, entry: u64, stack: u64) {
-    t.pc = entry;
-    t.sp = stack;
-    t.s0 = 0;
-    t.s1 = 0;
-    t.s2 = 0;
-    t.s3 = 0;
-    t.s4 = 0;
-    t.s5 = 0;
-    t.s6 = 0;
-    t.s7 = 0;
-    t.s8 = 0;
-    t.s9 = 0;
-    t.s10 = 0;
-    t.s11 = 0;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K4c DoD).
-// ────────────────────────────────────────────────────────────────────────────
-// Allocate two Tasks via state_new, init them via task_init_for_switch
-// (prev: entry=4096, stack=32768; next: entry=8192, stack=36864), then:
-//   (1) prev.pc == 4096 (entry round-trips through State<Task>.pc).
-//   (2) next.pc == 8192 (entry round-trips for the second Task).
-//   (3) prev.sp == 32768 (stack round-trips through State<Task>.sp).
-//   (4) next.sp == 36864 (stack round-trips for the second Task).
-// Then call context_switch(prev, next) — in hosted mode this is a
-// no-op stub, so the call site compiles + links + doesn't crash but
-// doesn't actually switch registers. Returns 0 on success, 1..4 on the
-// corresponding check failure (so a future CI failure pinpoints the
-// broken check).
+// The K4c Task layout (flat fields sp/pc/s0..s11) is documented here as
+// a comment block so a future K11 implementer can see what the old asm
+// sketch expected. R4a+b does NOT declare this layout — the scheduler
+// no longer takes State<Task>; it takes State<TrapFrame>. K11's new
+// switch.S will read the superset TrapFrame at R2a's field offsets, NOT
+// this old flat-fields layout.
 //
-// Per the K4c contract's "decimal constants" rule: all non-zero
-// constants use DECIMAL (4096, 32768, 8192, 36864) — decimal avoids
-// the parser's hex-literal path (parse_int_radix width-extension
-// subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the same
-// rationale, and K3a's trap_trampoline.vuma for the same rule applied
-// to vector=14 and rip=4096). The values are the contract's hex values
-// 0x1000, 0x8000, 0x2000, 0x9000 expressed in decimal.
+// Old K4c Task layout (DO NOT REDECLARE — reference only):
+//   layout Task = {
+//       pid: u32, ppid: u32, state: u8, prio: u8, vruntime: u64,
+//       sp: u64, pc: u64,
+//       s0: u64, s1: u64, s2: u64, s3: u64, s4: u64,
+//       s5: u64, s6: u64, s7: u64, s8: u64, s9: u64, s10: u64, s11: u64,
+//       mm_root: u64, fs_root: u64, fds: u64, next: u64,
+//   }
+//
+// Old K4c context_switch asm sketch (DO NOT USE — K11 will write a new
+// stub that reads the superset TrapFrame):
+//     context_switch:
+//         sd ra,  offsetof(Task.pc)(a0)
+//         sd sp,  offsetof(Task.sp)(a0)
+//         sd s0,  offsetof(Task.s0)(a0)
+//         ... (saves 12 callee-saved GPs + sp + pc to prev's flat fields)
+//         ld ra,  offsetof(Task.pc)(a1)
+//         ld sp,  offsetof(Task.sp)(a1)
+//         ld s0,  offsetof(Task.s0)(a1)
+//         ... (loads 12 callee-saved GPs + sp from next's flat fields)
+//         ret                                ; jalr x0, 0(ra) — jumps to
+//                                            ; next's saved pc
+//
+// K11's NEW arch_load_context asm sketch (reads superset TrapFrame):
+//     arch_load_context:
+//         ; a0 = &tf (base of the TrapFrame's ___pmt_buffer)
+//         ; Load GPRs from tf.gpr[0..255] (32 × 8 bytes, slots 0..31).
+//         ld ra,  0(a0)     ; slot 0 = ra
+//         ld sp,  8(a0)     ; slot 1 = sp
+//         ld gp,  16(a0)    ; slot 2 = gp
+//         ld tp,  24(a0)    ; slot 3 = tp
+//         ... (slots 4..31 → t0..t6, s0..s11, a0..a7 — 28 more regs)
+//         ; Set mepc = tf.pc, mstatus = tf.status, sp = tf.sp.
+//         ld t0, 256(a0)    ; tf.pc (offset 256 in the layout)
+//         csrw mepc, t0
+//         ld t0, 264(a0)    ; tf.status (offset 264)
+//         csrw mstatus, t0
+//         ld t0, 288(a0)    ; tf.sp (offset 288 = 256 + 4*8)
+//         ; sp was already loaded from tf.gpr[1] (slot 1 = sp per R2d);
+//         ; the tf.sp top-level scalar duplicates it. K11 picks one
+//         ; representation — the canonical slot 1 in tf.gpr, since that
+//         ; matches the RISC-V ABI's "sp = x2" identity.
+//         mret              ; transfers control to mepc
+// (The exact register-move sequence is K11's concern — R4a+b just
+//  declares the extern and provides the no-op hosted stub.)
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the R4a+b DoD for switch.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate two TrapFrames via state_new, init them via tf_init, then set
+// prev_tf.{pc, sp} and next_tf.{pc, sp} to test values:
+//   (1) prev_tf.pc == 4096 (round-trips through State<TrapFrame>.pc).
+//   (2) next_tf.pc == 8192 (round-trips for the second TrapFrame).
+//   (3) prev_tf.sp == 32768 (round-trips through State<TrapFrame>.sp).
+//   (4) next_tf.sp == 36864 (round-trips for the second TrapFrame).
+// Then call arch_context_switch(prev_tf, next_tf) — in hosted mode this
+// is a no-op, so the call site compiles + links + doesn't crash but
+// doesn't actually switch registers. Returns 0 on success, 1..4 on the
+// corresponding check failure.
 
 fn main() -> i32 {
-    let prev = state_new(Task);
-    let next = state_new(Task);
-    task_init_for_switch(prev, 4096, 32768);
-    task_init_for_switch(next, 8192, 36864);
-    if prev.pc != 4096 { return 1; }
-    if next.pc != 8192 { return 2; }
-    if prev.sp != 32768 { return 3; }
-    if next.sp != 36864 { return 4; }
-    // In hosted mode, context_switch is a stub (no-op). Just verify it
-    // doesn't crash. Both `prev` and `next` are #[borrow] so they
-    // survive the call (no use-after-invalidate).
-    context_switch(prev, next);
+    let prev_tf = state_new(TrapFrame);
+    let next_tf = state_new(TrapFrame);
+    tf_init(prev_tf);
+    tf_init(next_tf);
+    prev_tf.pc = 4096;
+    prev_tf.sp = 32768;
+    next_tf.pc = 8192;
+    next_tf.sp = 36864;
+    if prev_tf.pc != 4096 { return 1; }
+    if next_tf.pc != 8192 { return 2; }
+    if prev_tf.sp != 32768 { return 3; }
+    if next_tf.sp != 36864 { return 4; }
+    // Hosted-mode no-op. Both TrapFrames survive the call (regular VUMA
+    // fn — no #[borrow] needed; the State<T> lifetime is tracked through
+    // the call).
+    arch_context_switch(prev_tf, next_tf);
     return 0;
 }
