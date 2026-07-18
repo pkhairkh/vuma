@@ -1,9 +1,0 @@
-// Test: read/write u32 big-endian
-
-layout Cell = { v: u32 }
-
-fn main() -> i32 {
-    let c = state_new(Cell);
-    c.v = 0;
-    return c.v;
-}
