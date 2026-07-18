@@ -1,0 +1,565 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/sync/mutex.vuma
+// VWK Sync Subsystem — Sleeping Mutex with wait queue (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K8b layer of the VWK kernel: the mutex — the sleeping
+// lock. K8 (Sync) is building spinlock (K8a, busy-wait + IRQ disable),
+// mutex (this file, K8b, sleep-on-contention + wait queue), semaphore
+// (K8c, counting), rwlock (K8d, reader/writer), and per-CPU primitives +
+// IPI (K8e). K8b is the second sync primitive and the first that
+// "sleeps instead of spins" — the spinlock burns CPU on contention
+// (lockup-prone in single-CPU hosted mode), while the mutex queues the
+// contended acquirer on a wait queue and (in a real kernel) schedules
+// another task. In hosted single-CPU mode, the sleep is stubbed to a
+// single retry of the CAS — the contract calls this out explicitly:
+// "In a real kernel: sleep_on(waitq), then retry when woken. For hosted
+// mode: just spin once and try again." In practice, the hosted self-test
+// is single-threaded so contention never arises (the first CAS always
+// succeeds), and the wait-queue path is exercised only by the book-
+// keeping increments / decrements of m.waitq_count.
+//
+// ── What K8b provides ──────────────────────────────────────────────────────
+//   mutex_init(m)                          — locked=0, _pad0=0, owner=256,
+//                                              waitq_count=0. Called once
+//                                              per mutex before any acquire.
+//   mutex_acquire(m, task_idx)             — acquire the mutex. Fast path:
+//                                              AtomicCas(0 → 1) succeeds,
+//                                              record owner, return. Slow
+//                                              path: bump waitq_count (in a
+//                                              real kernel: sleep_on(waitq)),
+//                                              retry CAS until success,
+//                                              decrement waitq_count, record
+//                                              owner.
+//   mutex_release(m, task_idx)             — release the mutex. Ownership
+//                                              check (silent no-op if not
+//                                              the owner), clear owner,
+//                                              atomic_store(0). In a real
+//                                              kernel: wake_one(waitq).
+//
+// ── WaitQueue (re-declared from K7e — no import in VUMA) ───────────────────
+//   layout WaitQueue = { head: u64, tail: u64, count: u32 }
+//
+// K7e (womb/kernel/ipc/waitq.vuma) is the authoritative declaration of the
+// IPC wait queue. K8b re-declares it byte-identically for documentation
+// (VUMA has no `import`, so each consumer file re-declares — see K8a's
+// "VUMA has no `import`" header note for the same pattern). The Mutex
+// itself, however, does NOT embed a full WaitQueue — it tracks only
+// `waitq_count: u32`, a simplified counter (the K8b contract specifies
+// this: "waitq_count: u32, // number of waiters (simplified WaitQueue)").
+// A real kernel would store a `waitq: WaitQueue` field inside the Mutex
+// and call waitq_add / waitq_wake_one from the slow paths. K8b keeps the
+// layout simple because:
+//   (1) The hosted self-test is single-threaded — no contention ever
+//       arises, so the wait queue is never actually populated. The
+//       waitq_count is bumped only on the (unreachable-in-hosted)
+//       contended path.
+//   (2) VUMA has no struct-array support, so a real wait queue would
+//       need the same parallel-byte-array hack K7e uses (Task.next field
+//       in ProcessTable.nexts). That's a K8+ scheduler-coupling concern
+//       — K8b stays self-contained, manipulating only the Mutex state.
+//   (3) The full WaitQueue is re-declared here as documentation so a
+//       future wave that adds a `waitq: WaitQueue` field can do so
+//       without cross-referencing K7e.
+//
+// ── Why _pad0? (AtomicCas is hardcoded to U64) ─────────────────────────────
+//   The Mutex layout is:
+//     locked:      u32,  // offset 0 — CAS target word (0 = unlocked, 1 = locked)
+//     _pad0:       u32,  // offset 4 — padding (see below)
+//     owner:       u32,  // offset 8 — task index of the holder, or 256 = none
+//     waitq_count: u32,  // offset 12 — number of waiters
+//
+//   This is the SAME workaround K8a's spinlock.vuma uses (see "Why _pad0?"
+//   in spinlock.vuma's header). Short version: AtomicCas is hardcoded to
+//   IRType::U64 (8 bytes) in src/codegen/src/scg_to_ir.rs:3782-3818
+//   ("AtomicCas" arm of lower_call, `ty: IRType::U64`). The x86_64 backend
+//   lowers this to LOCK CMPXCHG [R10], RCX (REX.W=0x48 — 64-bit operand
+//   size; src/codegen/src/x86_64/stack_slot_isel.rs:1616-1641). The 8-byte
+//   CAS reads bytes [offset+0..offset+7].
+//
+//   WITHOUT _pad0, the layout would be `locked: u32, owner: u32, ...` —
+//   the 8-byte CAS window at offset 0 would span `locked | (owner << 32)`.
+//   mutex_init sets locked=0 and owner=256. After init, bytes [0..7] would
+//   be 0x0000010000000000 — NOT 0. The CAS(expected=0) would fail forever,
+//   the slow-path busy-wait would spin forever, and the self-test would
+//   hang.
+//
+//   WITH _pad0, the layout pushes `owner` to offset 8 (outside the 8-byte
+//   CAS window). After init, bytes [0..7] = locked(0) + _pad0(0) =
+//   0x0000000000000000, so CAS(0 → 1) succeeds and writes
+//   0x0000000000000001 (locked=1, _pad0=0). The `owner` field at offset 8
+//   is untouched by the CAS. Probe-confirmed in K8a (see
+//   /home/z/probe/probe_cas_with_pad.vuma).
+//
+//   This is a codegen workaround — a future compiler improvement could
+//   (a) infer the access width from the State<T> field at the cast
+//   address, or (b) add a width-suffixed syntax like `atomic_cas_32(addr,
+//   exp, des)`. Either would let K8b drop the _pad0 field. Until then,
+//   _pad0 is the surgical workaround.
+//
+// ── AtomicCas / AtomicStore syntax ──────────────────────────────────────────
+//   The VUMA parser recognizes the LOWERCASE keywords `atomic_load`,
+//   `atomic_store`, `atomic_cas` (src/parser/src/lexer.rs:629-631).
+//   Capitalized `AtomicLoad`/`AtomicStore`/`AtomicCas` are CallNode names
+//   synthesized by the bridge (src/pipeline.rs:8705-8747) and matched by
+//   the SCG-to-IR lowerer (src/codegen/src/scg_to_ir.rs:3731-3822) — they
+//   are NOT user-visible syntax. The K8b contract uses the capitalized
+//   forms in its prose example, which is a notational shorthand; the
+//   actual code uses the lowercase forms (same as K8a).
+//
+//   Argument order (verified in src/parser/src/parser.rs:3084-3116):
+//     atomic_load(addr)
+//     atomic_store(addr, val)         // addr FIRST, val SECOND
+//     atomic_cas(addr, expected, desired)
+//
+//   The K8b contract's example `atomic_cas(m as Address, 0, 1)` and
+//   `atomic_store(m as Address, 0)` are already in the correct addr-first
+//   order. (K8a's contract had them reversed — K8b's contract is correct.)
+//
+// ── `m as Address` ──────────────────────────────────────────────────────────
+//   `m` is a `State<Mutex>` parameter. In flatten_expr
+//   (src/pipeline.rs:8495-8503), `Expr::Var { name: "m", .. }` lowers to
+//   `ScgExpr::Var("m")` — the variable holds the State's buffer pointer
+//   (an Address-sized value). `Expr::Cast { expr, target_type: Address }`
+//   is a no-op in flatten_expr (src/pipeline.rs:8811) — it just returns
+//   the inner expression. So `m as Address` is a type-annotation hint that
+//   documents the intent (the State<T> buffer pointer is being used as an
+//   Address for the atomic builtin) without changing the codegen. The
+//   atomic builtin receives the State<Mutex>'s buffer pointer as its addr
+//   argument, which points at offset 0 of the Mutex layout — the `locked`
+//   field. Probe-confirmed in K8a (probe_atom_cas.vuma).
+//
+// ── Fast path vs. slow path ─────────────────────────────────────────────────
+//   mutex_acquire has two paths:
+//
+//   FAST PATH (uncontended): atomic_cas(addr, 0, 1) returns 0 (the old
+//   value, meaning the swap 0→1 succeeded). Record owner = task_idx and
+//   return. NO waitq_count increment, NO busy-wait, NO sleep. This is
+//   the path taken in the hosted self-test (single-threaded, no
+//   contention). Cost: one LOCK CMPXCHG (always succeeds on first try).
+//
+//   SLOW PATH (contended): atomic_cas returns non-zero (the old value
+//   was 1 — someone else holds the lock). Increment waitq_count (in a
+//   real kernel: this is where we'd call sleep_on(waitq) to schedule
+//   another task; here we just bump the counter for diagnostics). Then
+//   retry CAS in a busy-wait loop until it succeeds. The contract calls
+//   this out: "In a real kernel: sleep_on(waitq), then retry when woken.
+//   For hosted mode: just spin once and try again." In practice, the
+//   loop is identical to K8a's spinlock busy-wait — the only difference
+//   is the waitq_count bookkeeping around it. After the CAS succeeds,
+//   decrement waitq_count (we're no longer a waiter) and record owner.
+//
+//   The slow path's busy-wait is the same shape as K8a's spinlock
+//   busy-wait — but the SEMANTICS are different. K8a's spinlock is
+//   SUPPOSED to spin (it's a spinlock — that's the point). K8b's mutex
+//   is NOT supposed to spin — in a real kernel, the slow path would
+//   call into the scheduler (sleep_on(waitq)), which would context-
+//   switch to another task. The hosted-mode stub just spins because
+//   there's no scheduler yet (K9 builds the scheduler). The waitq_count
+//   counter is the diagnostic that tells you "this would have slept in
+//   a real kernel."
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+//   All non-zero constants in this file use DECIMAL per the K8b contract's
+//   "Use decimal constants (0=unlocked, 1=locked, 256=no owner)" rule.
+//   Decimal avoids the parser's hex-literal path (parse_int_radix width-
+//   extension subtleties — see K8a's spinlock.vuma header for the same
+//   rationale). The constants:
+//     0    = unlocked flag, "CAS expected value" (unlocked word), "AtomicStore
+//            value on release" (drop the lock word), "success flag = not
+//            yet acquired" base, "waitq_count > 0" lower bound.
+//     1    = locked flag, "CAS desired value" (lock word), "success flag
+//            = acquired" sentinel.
+//     256  = "no owner" sentinel for the owner field (matches K7e's
+//            waitq.vuma head/tail sentinel AND K8a's spinlock holder
+//            sentinel — chosen for cross-file consistency; chosen because
+//            it's a round number that exceeds any reasonable task index in
+//            a small embedded kernel; the K8b self-test uses task_idx=5
+//            and task_idx=10, both comfortably below 256).
+//     5    = the self-test's first task_idx (arbitrary — matches the K8a
+//            contract's reference text).
+//     10   = the self-test's second task_idx (arbitrary — distinct from
+//            the first, exercises the re-acquire-after-release path).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+//   Every function in this file takes `m: State<Mutex>` as a parameter,
+//   so the state-typedness is preserved across all the helper calls
+//   (mutex_acquire and mutex_release are the only helpers; the self-test
+//   main calls both). The direct field reads in the callers (e.g.
+//   `if m.locked != 1` in main) work correctly after each helper call
+//   (same pattern as K8a's spinlock self-test calling spinlock_acquire
+//   then reading lock.locked).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, `free`, or any pointer syntax anywhere
+//   in this file. The Mutex is a flat struct held in a
+//   `___pmt_buffer`-backed State<Mutex>; the CALLER allocates it via
+//   `state_new(Mutex)` and passes it by reference to mutex_init /
+//   mutex_acquire / mutex_release (init-style API — see "Why init-style?"
+//   in K4e's wait.vuma header for the codegen rationale). No externs,
+//   no FFI, no trampolines — unlike K8a (which declares irq_disable /
+//   irq_restore externs for IRQ save/restore), K8b's mutex doesn't need
+//   IRQ manipulation at all: a sleeping lock is not IRQ-safe by design
+//   (you can't sleep in an interrupt handler), so there's no IRQ state
+//   to save. K8a's spinlock is for IRQ-context locking (short critical
+//   sections, no sleeping); K8b's mutex is for task-context locking
+//   (longer critical sections, can sleep on contention). They're
+//   complementary, not redundant.
+//
+//   The atomic builtins `atomic_cas` and `atomic_store` are NOT pointer
+//   syntax — they're VUMA IR builtins recognized by the parser as
+//   keywords (src/parser/src/lexer.rs:629-631), not function calls on
+//   `*Address`. The `m as Address` cast is a type-annotation hint to
+//   flatten_expr, not a pointer dereference — the resulting value is the
+//   State<T> buffer pointer (which is just a u64 integer at the IR
+//   level), passed by value to the atomic builtin. No `*` or `&`
+//   anywhere in the file.
+//
+//   State<T> params: 1 per function (m only), per the K4b contract's
+//   "1-2 per function" rule. The mutex_* functions don't need a
+//   ProcessTable or a Task — they're manipulating only the Mutex itself.
+//   The task_idx parameter is a plain u32 (not a State<Task>) because
+//   the mutex only needs the task's *index*, not its full task struct
+//   (same as K8a's spinlock).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the Mutex layout (new to this
+//   file — no prior VWK file declares it). It also re-declares WaitQueue
+//   byte-identically to K7e (womb/kernel/ipc/waitq.vuma) — see "WaitQueue
+//   (re-declared from K7e)" above for the rationale. K8+ files that need
+//   to manipulate mutexes (the scheduler's runqueue mutex, the PMM's pool
+//   mutex, the VFS inode mutex) will re-declare Mutex byte-identically
+//   and call these three functions directly (VUMA's lack of `import`
+//   means each consumer file re-declares; see K1a-hosted's "no-import
+//   re-declaration rule" header note for the same pattern).
+//
+// ── Mutex vs. spinlock (when to use which) ──────────────────────────────────
+//   K8a spinlock:
+//     + IRQ-aware (disables IRQs on acquire, restores on release) → safe
+//       to use in interrupt context.
+//     + Recursive (depth counter — same task can acquire N times, must
+//       release N times).
+//     - Busy-waits on contention (burns CPU) → use only for SHORT
+//       critical sections.
+//     - Cannot sleep while held (would defeat the busy-wait).
+//
+//   K8b mutex:
+//     + Sleeps on contention (frees the CPU for other work) → use for
+//       LONGER critical sections (e.g. inode I/O, pipe read/write).
+//     + Wait queue (in a real kernel) — contended acquirers queue up
+//       and are woken one-by-one on release, avoiding thundering herd.
+//     - NOT IRQ-aware (acquiring a mutex in interrupt context would
+//       deadlock if the lock is held — the ISR can't sleep waiting for
+//       the holder to release). Use spinlock_save_irq first, then mutex.
+//     - NOT recursive (the contract doesn't specify a depth counter).
+//       A recursive acquire would deadlock: the second CAS(0→1) would
+//       fail (locked=1), the slow path would bump waitq_count, the
+//       busy-wait would spin forever (no one can release because we're
+//       the holder). K8c/K8d may add recursive mutex support; K8b stays
+//       non-recursive for simplicity.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/sync/mutex.vuma \
+//         /tmp/mutex.bin x86_64 --verify
+//     /tmp/mutex.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 4 self-test checks pass — first acquire
+// sets locked=1/owner=5; release clears owner to 256; re-acquire as a
+// different task sets owner=10; final release clears owner back to 256).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// WaitQueue — re-declared byte-identically to K7e (womb/kernel/ipc/waitq.vuma).
+// See "WaitQueue (re-declared from K7e)" in the file header for the rationale.
+// This layout is declared for documentation only — the Mutex itself uses a
+// simplified `waitq_count: u32` counter (see Mutex layout below). A future
+// wave that wants a real wait queue inside the Mutex can swap
+// `waitq_count: u32` for `waitq: WaitQueue` and use K7e's waitq_add /
+// waitq_wake_one helpers from the mutex slow paths.
+//
+// 3 fields, 8 + 8 + 4 = 20 bytes (padded to 24 for 8-byte alignment of the
+// leading u64-pair block — the codegen rounds State<T> footprints up to a
+// multiple of the largest field's alignment; here that's 8, so 20 → 24).
+// head/tail are u64 (not u32 like K4e's WaitQueue) because the K7e contract
+// specifies task_idx: u64 in waitq_add / waitq_remove / waitq_wake_one —
+// using u64 for head/tail avoids a u32↔u64 cast on every field touch.
+layout WaitQueue = {
+    head:  u64,  // task index of first waiter, or 256 = empty
+    tail:  u64,  // task index of last waiter,  or 256 = empty
+    count: u32,  // number of waiters
+}
+
+// Mutex: 4 fields × (4 + 4 + 4 + 4) = 16 bytes. See "Why _pad0?" in the
+// file header for the rationale behind the _pad0 field — short version:
+// AtomicCas is hardcoded to IRType::U64 (8 bytes), so without _pad0 the
+// 8-byte CAS at offset 0 would read `locked | (owner << 32)` and never
+// match expected=0 when owner=256.
+//
+// Field semantics:
+//   locked      — the CAS target word. 0 = unlocked, 1 = locked. Modified
+//                 ONLY by atomic_cas (acquire fast path + slow path) and
+//                 atomic_store (release). The `if m.locked != 1` self-test
+//                 check reads it with a plain field load (no atomic_load)
+//                 — this is safe in the single-threaded hosted self-test;
+//                 in a real SMP kernel you'd use atomic_load to observe
+//                 the lock state from a non-holder CPU.
+//   _pad0       — padding to push `owner` outside the 8-byte CAS window.
+//                 Always 0. Modified ONLY as a side effect of the 8-byte
+//                 atomic_cas / atomic_store (which write 0 to bytes 4..7
+//                 when writing 0 or 1 to bytes 0..3). mutex_init
+//                 explicitly sets _pad0 = 0 to make the "all zero" state
+//                 self-evident (rather than relying on state_new's
+//                 initial zero-fill).
+//   owner       — task index of the current holder, or 256 = "no owner".
+//                 Modified by mutex_acquire (sets to task_idx on
+//                 successful CAS, both fast and slow paths) and
+//                 mutex_release (sets to 256 on release). Read by
+//                 mutex_release (ownership check) and the self-test (m
+//                 .owner sanity checks). The value 256 is the same "no
+//                 entry" sentinel used by K7e's WaitQueue head/tail AND
+//                 K8a's Spinlock holder — chosen for cross-file
+//                 consistency.
+//   waitq_count — number of waiters (simplified WaitQueue — see "WaitQueue
+//                 (re-declared from K7e)" in the file header). Modified
+//                 by mutex_acquire (incremented on the slow path before
+//                 the busy-wait, decremented after the CAS succeeds) and
+//                 read by the self-test indirectly (no direct check in
+//                 the contract's main — but the field is touched on the
+//                 slow path). In the hosted single-threaded self-test,
+//                 this counter stays at 0 (the slow path is never taken)
+//                 — but the increment / decrement logic is present and
+//                 correct so a real kernel that does encounter
+//                 contention will see accurate counts.
+layout Mutex = {
+    locked:      u32,  // 0 = unlocked, 1 = locked (CAS target word)
+    _pad0:       u32,  // padding so 8-byte CAS only sees `locked` (see header)
+    owner:       u32,  // task index of the owner, or 256 = "no owner"
+    waitq_count: u32,  // number of waiters (simplified WaitQueue)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Mutex operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// mutex_init: zero the mutex. Sets locked=0, _pad0=0, owner=256 (no owner),
+// waitq_count=0. Called once per mutex before any mutex_acquire. The
+// CALLER allocates the Mutex via `state_new(Mutex)` and passes it by
+// reference (init-style API).
+//
+// State<T> params: 1 (m). Pure write — no reads, no helper calls.
+// The 4 field assignments are direct (no byte-packing needed because
+// every field is a primitive u32, not a nested layout).
+fn mutex_init(m: State<Mutex>) {
+    m.locked = 0;
+    m._pad0 = 0;
+    m.owner = 256;
+    m.waitq_count = 0;
+}
+
+// mutex_acquire: acquire the mutex. Fast path: AtomicCas(0 → 1) succeeds,
+// record owner, return. Slow path: bump waitq_count, retry CAS in a
+// busy-wait until success, decrement waitq_count, record owner.
+//
+//   m:         the Mutex to acquire.
+//   task_idx:  the calling task's index (stored in m.owner on success).
+//
+// State<T> params: 1 (m). Reads m.waitq_count (slow path). Writes m.owner,
+// m.waitq_count. Calls one IR builtin (atomic_cas) — twice (fast-path try
+// + slow-path retry loop).
+//
+// The fast path is the common case (uncontended). In the hosted single-
+// threaded self-test, ONLY the fast path is ever taken (no other CPU can
+// hold the lock). The slow path is exercised only by the bookkeeping
+// increments / decrements of m.waitq_count — which never execute in the
+// self-test because the fast path always succeeds.
+//
+// The slow path's busy-wait loop is identical in shape to K8a's
+// spinlock busy-wait — but the SEMANTICS are different. K8a's spinlock is
+// SUPPOSED to spin (it's a spinlock). K8b's mutex is NOT supposed to
+// spin — in a real kernel, the slow path would call into the scheduler
+// (sleep_on(waitq)), which would context-switch to another task. The
+// hosted-mode stub just spins because there's no scheduler yet (K9 builds
+// the scheduler). The waitq_count counter is the diagnostic that tells
+// you "this would have slept in a real kernel."
+//
+// The busy-wait loop terminates because:
+//   - In hosted mode, only one task is running (single-threaded self-
+//     test), so the slow path is never taken — the fast path's CAS
+//     succeeds immediately (locked was 0 after init, or 0 after a prior
+//     mutex_release's atomic_store(0)).
+//   - In a real SMP/preemptive kernel, the loop terminates when the
+//     holder calls mutex_release, which does atomic_store(0). At that
+//     point our CAS(0 → 1) succeeds.
+//
+// Note: NOT recursive. A second acquire by the same task while it
+// already holds the lock would deadlock (the CAS fails, the slow path
+// bumps waitq_count, the busy-wait spins forever because no one can
+// release — we're the holder, but we're stuck in the busy-wait instead
+// of calling mutex_release). See "Mutex vs. spinlock" in the file header.
+fn mutex_acquire(m: State<Mutex>, task_idx: u32) {
+    // Fast path: try AtomicCas(0 → 1).
+    //   atomic_cas(addr, expected, desired) returns the OLD value at
+    //   addr. If old == expected (0), the swap succeeded (we got the
+    //   lock). If old != expected (1), someone else holds the lock.
+    //   On x86_64 this is `LOCK CMPXCHG [R10], RCX` with RAX=expected;
+    //   the CMPXCHG stores old into RAX whether the swap succeeded or
+    //   not, so dst receives the old value.
+    let old = atomic_cas(m as Address, 0, 1);
+    if old == 0 {
+        // Got the lock — record owner and return.
+        m.owner = task_idx;
+        return;
+    }
+    // Contended: increment wait count (stub for sleep).
+    //   In a real kernel: this is where we'd call sleep_on(waitq) —
+    //   mark the current task BLOCKED, add it to the Mutex's wait
+    //   queue, and call schedule() to context-switch to another task.
+    //   The task would be woken by mutex_release's wake_one(waitq)
+    //   (which we don't have yet — K7e's waitq_wake_one exists, but
+    //   K8b's Mutex doesn't embed a full WaitQueue, just the count).
+    //   For hosted mode: just bump the counter for diagnostics, then
+    //   retry the CAS in a busy-wait loop.
+    m.waitq_count = m.waitq_count + 1;
+    // In a real kernel: sleep_on(waitq), then retry when woken.
+    // For hosted mode: just spin once and try again.
+    //   The `success` flag is 0 until the CAS returns 0 (old=0 means
+    //   the swap 0→1 succeeded — we now hold the lock).
+    let success = 0;
+    while success == 0 {
+        let old2 = atomic_cas(m as Address, 0, 1);
+        if old2 == 0 {
+            success = 1;
+        }
+        // If old2 != 0, someone else holds the lock — spin (retry).
+        // In hosted single-threaded mode, this branch is never taken
+        // because the slow path itself is never taken (the fast path
+        // always succeeds).
+    }
+    // We won the CAS — record ourselves as the owner.
+    m.owner = task_idx;
+    // Decrement wait count — we're no longer a waiter (we got the
+    // lock). The `if m.waitq_count > 0` guard is defensive (in the
+    // hosted self-test, the slow path is never taken, so this branch
+    // is never executed; but a real kernel with concurrent waiters
+    // could in principle see waitq_count == 0 here if wake_one raced
+    // and already decremented — the guard prevents underflow).
+    if m.waitq_count > 0 {
+        m.waitq_count = m.waitq_count - 1;
+    }
+}
+
+// mutex_release: release the mutex. Ownership check (silent no-op if not
+// the owner — stub error path, a real kernel would panic or log), clear
+// owner, atomic_store(0) to drop the lock word.
+//
+//   m:         the Mutex to release.
+//   task_idx:  the calling task's index (used for the ownership check).
+//
+// State<T> params: 1 (m). Reads m.owner (ownership check). Writes m.owner.
+// Calls one IR builtin (atomic_store).
+//
+// The ownership check `if m.owner != task_idx` returns silently on
+// failure (no error code). This is the K8b contract's stub error
+// behavior — a real kernel would either panic (kernel bug — releasing
+// a lock you don't hold) or return -EINVAL (user-space bug — same).
+//
+// Order of operations on release:
+//   1. m.owner = 256  (clear the owner BEFORE dropping the lock word, so
+//      a concurrent mutex_acquire on another CPU can't see locked=0 but
+//      owner still = task_idx — no race, but the transient state would
+//      be confusing for diagnostics).
+//   2. atomic_store(m as Address, 0)  (drop the lock word — writes 0 to
+//      bytes [0..7], clearing both `locked` and `_pad0`). A waiting
+//      CPU's atomic_cas(addr, 0, 1) will now succeed on its next
+//      iteration. In a real kernel: this is where we'd call
+//      wake_one(waitq) to wake exactly one waiter (avoiding thundering
+//      herd).
+//
+// The atomic_store writes 0 to bytes [0..7] (clearing `locked` AND
+// `_pad0`); the `owner` field at offset 8 is untouched by the
+// atomic_store, which is why we explicitly set m.owner = 256 BEFORE the
+// atomic_store. (Same pattern as K8a's spinlock_release.)
+fn mutex_release(m: State<Mutex>, task_idx: u32) {
+    // Ownership check. Not the owner → silent no-op (stub error).
+    if m.owner != task_idx {
+        return;
+    }
+    // Clear owner BEFORE dropping the lock word (see comment above).
+    m.owner = 256;
+    // atomic_store(addr, val): store `val` atomically to [addr].
+    // On x86_64 this is a plain MOV (already atomic for aligned
+    // accesses — no LOCK prefix needed for stores). Writes 0 to
+    // bytes [0..7], clearing `locked` and `_pad0`. A waiting CPU's
+    // atomic_cas(addr, 0, 1) will now succeed on its next iteration.
+    // In a real kernel: this is where we'd call wake_one(waitq).
+    // Here: just decrement wait count (waiters will retry) — but
+    // since the Mutex doesn't track individual waiters (only the
+    // count), and the count is bumped/decremented by the acquirer
+    // side of the contract, we don't decrement here (the acquirer
+    // decrements its own count after it wins the CAS). This matches
+    // the K8b contract exactly.
+    atomic_store(m as Address, 0);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (hosted x86_64).
+// ────────────────────────────────────────────────────────────────────────────
+
+// main: exercise the mutex end-to-end with 4 sequential checks.
+//   1. Create + init the mutex.
+//   2. Acquire as task 5 — verify locked=1, owner=5.
+//   3. Release as task 5 — verify owner=256 (no owner).
+//   4. Re-acquire as task 10 (different task) — verify owner=10.
+//   5. Release as task 10.
+// Exit 0 on all-pass, exit 1..4 on the corresponding check failure.
+//
+// The self-test runs single-threaded in hosted mode, so:
+//   - The fast path is always taken on acquire (no contention — the CAS
+//     succeeds on the first try, locked was 0 after init or after the
+//     prior release's atomic_store(0)).
+//   - The slow path is NEVER taken (no other CPU can hold the lock), so
+//     waitq_count stays at 0 throughout.
+//   - The ownership-check error path in mutex_release is NOT exercised
+//     (the test always releases as the current owner — could add a 5th
+//     check `mutex_release(m, 99); if m.owner != 256 { return 5; }` to
+//     test the no-op-on-non-owner path, but the contract specifies 4
+//     checks).
+//
+// The test exercises:
+//   - The acquire fast path (CAS succeeds, owner recorded).
+//   - The release path (owner cleared, atomic_store drops the lock word).
+//   - Re-acquire after release (different task_idx — owner updated).
+// It does NOT exercise:
+//   - The acquire slow path (would require SMP contention — K8e covers
+//     this with the SMP IPI test infrastructure).
+//   - The waitq_count increment / decrement (would require the slow path
+//     to be taken — same reason).
+//   - The ownership-check error path (would require a buggy caller —
+//     could add as a 5th check, but the contract specifies 4).
+//   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers
+//     this with the bare-metal scheduler integration tests).
+fn main() -> i32 {
+    let m = state_new(Mutex);
+    mutex_init(m);
+    // Acquire as task 5 — fast path should succeed immediately.
+    mutex_acquire(m, 5);
+    // Verify the lock is held by task 5.
+    if m.locked != 1 { return 1; }
+    if m.owner != 5 { return 2; }
+    // Release as task 5 — owner should clear to 256.
+    mutex_release(m, 5);
+    if m.owner != 256 { return 3; }
+    // Acquire again as task 10 — should succeed immediately (lock was
+    // released). This exercises the "re-acquire after release" path
+    // with a DIFFERENT task_idx, verifying that owner is correctly
+    // updated to the new task (not stuck at the old one).
+    mutex_acquire(m, 10);
+    if m.owner != 10 { return 4; }
+    // Final release — clean up.
+    mutex_release(m, 10);
+    return 0;
+}
