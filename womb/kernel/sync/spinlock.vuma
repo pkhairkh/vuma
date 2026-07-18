@@ -1,0 +1,583 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/sync/spinlock.vuma
+// VWK Sync Subsystem — Recursive Spinlock with IRQ disable (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K8a layer of the VWK kernel: the spinlock — the most
+// basic synchronization primitive. K8 (Sync) is building spinlock (this
+// file, K8a), and subsequent K8 waves will add mutex (K8b, with a wait
+// queue + sleep instead of busy-wait), semaphore (K8c, counting), rwlock
+// (K8d, reader/writer), and per-CPU primitives + IPI (K8e). K8a is the
+// first concrete object in the Sync subtree and the one that most
+// directly exercises the AtomicCas / AtomicStore IR builtins (the only
+// existing .vuma file in the kernel tree to actually invoke them — K7c's
+// futex.vuma mentions them in its header comments but does NOT use them
+// because futex operates on a *user-space* uaddr and the futex syscall
+// is pure bookkeeping; the actual atomic check on the user word would
+// happen in user space, with the kernel only getting involved on
+// contention).
+//
+// ── What K8a provides ──────────────────────────────────────────────────────
+//   spinlock_init(lock)                         — locked=0, _pad0=0,
+//                                                  holder=256, depth=0,
+//                                                  irq_state=0. Called once
+//                                                  per spinlock before any
+//                                                  acquire call.
+//   spinlock_acquire(lock, task_idx)            — acquire the lock. If the
+//                                                  caller already holds it
+//                                                  (lock.holder == task_idx),
+//                                                  just bump depth (recursive
+//                                                  case). Otherwise disable
+//                                                  IRQs, save the previous
+//                                                  IRQ state, then busy-wait
+//                                                  on AtomicCas(0 → 1) until
+//                                                  it succeeds. Set
+//                                                  holder=task_idx, depth=1.
+//   spinlock_release(lock, task_idx)            — release the lock. If the
+//                                                  caller is not the holder,
+//                                                  no-op (stub error). If
+//                                                  depth > 1, just decrement
+//                                                  (recursive unwind). If
+//                                                  depth == 1, fully release:
+//                                                  clear depth + holder,
+//                                                  AtomicStore(0) to drop
+//                                                  the lock word, restore
+//                                                  IRQs.
+//
+// ── What is a spinlock? ─────────────────────────────────────────────────────
+//   A spinlock is the simplest SMP-safe mutual-exclusion primitive: a
+//   single memory word that is 0 when unlocked and 1 when locked, plus a
+//   compare-and-swap (CAS) loop that spins (busy-waits) until it can
+//   atomically swap 0 → 1. CAS is the universal atomic primitive — every
+//   other lock-free operation (fetch-add, exchange, double-word CAS) can
+//   be built from it. On x86_64 the CAS maps to LOCK CMPXCHG, on AArch64
+//   to LDAXR/STLXR, on RISC-V to LR.D/SC.D, on PPC64 to LDARX/STDCX —
+//   every VUMA backend implements IRInstr::AtomicCas natively (see
+//   src/tests/src/regression.rs:268-590 for the per-backend CAS
+//   regression tests).
+//
+//   "Spin" means the calling task burns CPU cycles in a tight loop
+//   waiting for the holder to release — as opposed to a mutex (K8b)
+//   which would enqueue the caller on a wait queue and yield the CPU.
+//   Spinlocks are appropriate when the critical section is short enough
+//   that the cost of a context switch (μs) exceeds the cost of spinning
+//   (ns × iterations). The classic Linux rule of thumb: spinlocks guard
+//   interrupt-context data (no scheduler available), mutexes guard
+//   process-context data (scheduler can put the waiter to sleep).
+//
+//   K8a's spinlock adds two production features beyond the textbook CAS
+//   loop:
+//     (1) Recursion — the same holder can re-acquire the lock without
+//         deadlocking; depth tracks the nesting count. This is essential
+//         when a function that holds the lock calls another function
+//         that also acquires the same lock (e.g. the scheduler holds
+//         the runqueue lock and calls a stats helper that also locks
+//         the runqueue).
+//     (2) IRQ disable — the holder runs with hardware interrupts
+//         disabled, so an interrupt handler can't interrupt the holder
+//         and try to grab the same lock (which would deadlock). The
+//         previous IRQ state is saved on acquire and restored on
+//         release, so a spinlock_acquire from inside an IRQ handler
+//         (which already has IRQs disabled) doesn't accidentally re-
+//         enable IRQs on release.
+//
+// ── Layout: Spinlock ────────────────────────────────────────────────────────
+//   layout Spinlock = {
+//       locked:    u32,  // 0 = unlocked, 1 = locked (CAS target word)
+//       _pad0:     u32,  // padding — see "Why _pad0?" below
+//       holder:    u32,  // task index of the holder, or 256 = "no holder"
+//       depth:     u32,  // recursion depth (1 for the first acquire,
+//                         //                2 for the first re-acquire, ...)
+//       irq_state: u64,  // saved IRQ state from irq_disable() on acquire,
+//                         // restored via irq_restore() on release
+//   }
+//
+//   5 fields × (4 + 4 + 4 + 4 + 8) = 24 bytes. The trailing u64 is at
+//   offset 16 (8-byte aligned naturally after the four u32s).
+//
+// ── Why _pad0? ──────────────────────────────────────────────────────────────
+//   The K8a contract specifies `layout Spinlock = { locked: u32,
+//   holder: u32, depth: u32, irq_state: u64 }` with NO padding between
+//   `locked` and `holder`. The contract also says `AtomicCas(lock as
+//   Address, 0, 1)` and asserts "AtomicCas operates on the first field".
+//
+//   In the VUMA codegen reality, AtomicCas does NOT operate on just the
+//   first field — it is hardcoded to IRType::U64 (8 bytes) in
+//   src/codegen/src/scg_to_ir.rs:3782-3818 ("AtomicCas" arm of lower_call,
+//   `ty: IRType::U64`). The x86_64 backend lowers this to LOCK CMPXCHG
+//   [R10], RCX (REX.W=0x48 — 64-bit operand size; see
+//   src/codegen/src/x86_64/stack_slot_isel.rs:1616-1641). The 8-byte CAS
+//   reads bytes [offset+0..offset+7] — which in the unpadded layout is
+//   `locked | (holder << 32)`.
+//
+//   spinlock_init sets locked=0 and holder=256 (= "no holder"). After
+//   init, the 8-byte value at offset 0 is 0x0000010000000000 — NOT 0.
+//   The CAS(expected=0) fails forever, the busy-wait spins forever, and
+//   the self-test hangs.
+//
+//   Probe-confirmed:
+//     /home/z/probe/probe_cas_u32_layout.vuma  — locked=0, holder=256,
+//       atomic_cas(addr, 0, 1) returns 0x10000000000 (CAS fails) → exit 100.
+//     /home/z/probe/probe_cas_with_pad.vuma    — with `_pad0: u32` after
+//       `locked`, atomic_cas succeeds, holder is untouched → exit 0.
+//
+//   The fix: insert `_pad0: u32` between `locked` and `holder`. This
+//   pushes `holder` to offset 8 (outside the 8-byte CAS window). After
+//   init, bytes [0..7] = locked(0) + _pad0(0) = 0x0000000000000000, so
+//   CAS(0 → 1) succeeds and writes 0x0000000000000001 (locked=1,
+//   _pad0=0). The `holder` field at offset 8 is untouched by the CAS.
+//
+//   This is the same kind of layout-codegen workaround that K7a's
+//   pipe.vuma uses (`_pad1`/`_pad2` to work around the nested-layout
+//   field-offset bug that has since been fixed by K7's bridge_type_size_
+//   with_layouts patch — but the AtomicCas-U64 hardcodedness is NOT the
+//   same bug, it's an intentional design choice in scg_to_ir.rs; the IR
+//   has a `ty` field on AtomicCas that the SCG-to-IR layer simply
+//   doesn't propagate). A future compiler improvement could:
+//     (a) Make scg_to_ir.rs infer the access width from the State<T>
+//         field at the cast address (currently it always emits U64).
+//     (b) Add a width-suffixed syntax like `atomic_cas_32(addr, exp, des)`
+//         that lowers to `ty: IRType::U32`.
+//   Either would let K8a+ drop the `_pad0` field. Until then, `_pad0`
+//   is the surgical workaround.
+//
+// ── AtomicCas / AtomicStore syntax ──────────────────────────────────────────
+//   The VUMA parser recognizes the LOWERCASE keywords `atomic_load`,
+//   `atomic_store`, `atomic_cas` (src/parser/src/lexer.rs:629-631).
+//   Capitalized `AtomicLoad`/`AtomicStore`/`AtomicCas` are CallNode
+//   names synthesized by the bridge (src/pipeline.rs:8705-8747) and
+//   matched by the SCG-to-IR lowerer (src/codegen/src/scg_to_ir.rs:
+//   3731-3822) — they are NOT user-visible syntax. The K8a contract
+//   uses the capitalized forms in its prose example, which is a
+//   notational shorthand; the actual code uses the lowercase forms.
+//
+//   Argument order (verified in src/parser/src/parser.rs:3084-3116):
+//     atomic_load(addr)
+//     atomic_store(addr, val)         // addr FIRST, val SECOND
+//     atomic_cas(addr, expected, desired)
+//
+//   The K8a contract's example `AtomicStore(0, lock as Address)` has
+//   the order reversed (value first, addr second) — this is INCORRECT
+//   per the parser; the correct call is `atomic_store(lock as Address,
+//   0)`. The bridge (src/pipeline.rs:8721-8732) reorders to
+//   `[value_expr, addr_expr]` internally because the SCG-to-IR lowerer
+//   (scg_to_ir.rs:3762-3780) expects value first, but the USER SYNTAX
+//   is addr first, val second.
+//
+// ── `lock as Address` ───────────────────────────────────────────────────────
+//   `lock` is a `State<Spinlock>` parameter. In flatten_expr
+//   (src/pipeline.rs:8495-8503), `Expr::Var { name: "lock", .. }`
+//   lowers to `ScgExpr::Var("lock")` — the variable holds the State's
+//   buffer pointer (an Address-sized value). `Expr::Cast { expr,
+//   target_type: Address }` is a no-op in flatten_expr
+//   (src/pipeline.rs:8811) — it just returns the inner expression.
+//   So `lock as Address` is a type-annotation hint that documents the
+//   intent (the State<T> buffer pointer is being used as an Address
+//   for the atomic builtin) without changing the codegen. The atomic
+//   builtin receives the State<Spinlock>'s buffer pointer as its addr
+//   argument, which points at offset 0 of the Spinlock layout — the
+//   `locked` field.
+//
+//   Probe-confirmed: probe_atom_cas.vuma uses `s as Address` where
+//   `s = state_new(L)` (layout L = { v: u64 }) and atomic_cas correctly
+//   swaps 0 → 1 on the field at offset 0.
+//
+// ── IRQ disable / restore (extern "C" stubs) ────────────────────────────────
+//   extern "C" {
+//       fn irq_disable() -> u64;      // returns previous IRQ state
+//       fn irq_restore(state: u64);   // restores previous IRQ state
+//   }
+//
+//   In hosted mode both resolve to __ffi_fallback_stub (returns 0 for
+//   the u64-returning irq_disable; no-op for the void irq_restore —
+//   same stub as K3a's idt_load / K3b's vbar_load / K3c's stvec_load /
+//   K3d's pic_eoi). So in hosted mode, irq_disable() always returns 0
+//   and irq_restore(state) is a no-op. The spinlock still works
+//   correctly: lock.irq_state = 0 (the saved state), and irq_restore(0)
+//   is a no-op. The spinlock_self-test exercises the bookkeeping paths
+//   (acquire, recursive acquire, partial release, full release) without
+//   actually testing IRQ enable/disable behavior — that's a K11 (bare-
+//   metal parity) concern.
+//
+//   K11 stub bodies (asm):
+//     x86_64:   irq_disable = `pushfq; pop rax; cli; ret`
+//                              (push RFLAGS, pop into rax as the prev
+//                              state, clear interrupt flag)
+//               irq_restore = `push rdi; popfq; ret`
+//                              (push the saved state, pop into RFLAGS)
+//     aarch64:  irq_disable = `mrs x0, daif; msr daifset, #2; ret`
+//                              (read DAIF, set IRQ mask bit)
+//               irq_restore = `msr daif, x0; ret`
+//                              (restore DAIF)
+//     riscv64:  irq_disable = `csrr a0, mstatus; li t0, ~8; and t0, t0,
+//                              a0; csrw mstatus, t0; ret`
+//                              (read mstatus, clear MIE bit 3)
+//               irq_restore = `csrw mstatus, a0; ret`
+//                              (restore mstatus)
+//   The "previous IRQ state" is the entire flags/system-register value
+//   (RFLAGS on x86_64, DAIF on aarch64, MSTATUS on riscv64) — NOT just
+//   the interrupt-enable bit. This is so irq_restore can correctly
+//   unmask IRQs that were already masked at acquire time (nested
+//   spinlocks): if the outer context had IRQs disabled, the inner
+//   spinlock_acquire's irq_disable returns "IRQs already disabled",
+//   and the inner spinlock_release's irq_restore keeps IRQs disabled
+//   (doesn't accidentally re-enable them).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+//   All non-zero constants in this file use DECIMAL per the K8a
+//   contract's "Use decimal constants" rule. Decimal avoids the
+//   parser's hex-literal path (parse_int_radix width-extension
+//   subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the
+//   same rationale, and K3a's trap_trampoline.vuma for the same rule).
+//   The constants:
+//     0    = unlocked flag, "no IRQ state saved" sentinel, "first
+//            acquire sets depth to 1" base, "irq_disable stub returns 0
+//            in hosted mode" value, "CAS expected value" (unlocked
+//            word), "AtomicStore value on release" (drop the lock word).
+//     1    = locked flag, "CAS desired value" (lock word), "success
+//            flag for the busy-wait loop", "first-acquire depth".
+//     256  = "no holder" sentinel for the holder field (matches K7e's
+//            waitq.vuma head/tail sentinel — chosen because it's a
+//            round number that exceeds any reasonable task index in a
+//            small embedded kernel; the K8a self-test uses task_idx=5
+//            which is comfortably below 256).
+//     5    = the self-test's task_idx (arbitrary — just a small non-
+//            zero value distinct from the no-holder sentinel 256; 5
+//            is the same value the K8a contract's reference text uses).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+//   Every function in this file takes `lock: State<Spinlock>` as a
+//   parameter, so the state-typedness is preserved across all the
+//   helper calls (spinlock_acquire and spinlock_release are the only
+//   helpers; the self-test main calls both). The direct field reads in
+//   the callers (e.g. `if lock.locked != 1` in main) work correctly
+//   after each helper call (same pattern as K7c's futex.vuma self-test
+//   calling sys_futex then reading tbl.count — see "State-typedness
+//   note" in futex.vuma's header).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, `free`, or any pointer syntax
+//   anywhere in this file. The Spinlock is a flat struct held in a
+//   `___pmt_buffer`-backed State<Spinlock>; the CALLER allocates it
+//   via `state_new(Spinlock)` and passes it by reference to
+//   spinlock_init / spinlock_acquire / spinlock_release (init-style
+//   API — see "Why init-style?" in K4e's wait.vuma header for the
+//   codegen rationale). The two externs (irq_disable, irq_restore)
+//   are not State<T> params — they're plain function externs.
+//
+//   The atomic builtins `atomic_cas` and `atomic_store` are NOT
+//   pointer-syntax — they're VUMA IR builtins recognized by the parser
+//   as keywords (src/parser/src/lexer.rs:629-631), not function calls
+//   on `*Address`. The `lock as Address` cast is a type-annotation hint
+//   to flatten_expr, not a pointer dereference — the resulting value
+//   is the State<T> buffer pointer (which is just a u64 integer at the
+//   IR level), passed by value to the atomic builtin. No `*` or `&`
+//   anywhere in the file (verified by the awk-strip + grep audit
+//   below).
+//
+//   State<T> params: 1 per function (lock only), per the K4b contract's
+//   "1-2 per function" rule. The spinlock_* functions don't need a
+//   ProcessTable or a Task — they're manipulating only the Spinlock
+//   itself. The task_idx parameter is a plain u32 (not a State<Task>)
+//   because the spinlock only needs the task's *index*, not its full
+//   task struct.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the Spinlock layout (new
+//   to this file — no prior VWK file declares it). Two extern "C" stubs
+//   (irq_disable, irq_restore) are declared locally — no other file
+//   declares them yet (K3a's trap_trampoline.vuma declares idt_load +
+//   irq_mask + irq_unmask + pic_eoi + cr2_read; K3b's declares vbar_
+//   load + gic_*; K3c's declares stvec_load + plic_* — none of those
+//   declare IRQ enable/disable, which is a different concern: K3a/K3b/
+//   K3c's externs mask/unmask *specific IRQ lines* at the interrupt
+//   controller, while irq_disable/irq_restore mask *ALL* IRQs at the
+//   CPU's interrupt-enable flag — they're orthogonal). K8+ files that
+//   need to manipulate spinlocks (the scheduler's runqueue lock, the
+//   PMM's pool lock, the per-CPU IPI mailbox lock) will re-declare
+//   Spinlock byte-identically and call these three functions directly
+//   (VUMA's lack of `import` means each consumer file re-declares; see
+//   K1a-hosted's "no-import re-declaration rule" header note for the
+//   same pattern).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/sync/spinlock.vuma \
+//         /tmp/spinlock.bin x86_64 --verify
+//     /tmp/spinlock.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 8 self-test checks pass — acquire
+// sets locked=1/holder=5/depth=1; recursive acquire bumps depth to 2;
+// partial release decrements depth to 1 with holder still 5; full
+// release clears depth to 0 and holder to 256).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines — IRQ enable/disable (NEW in K8a).
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted: __ffi_fallback_stub (irq_disable returns 0, irq_restore no-op).
+// K11 swaps these for real asm stubs registered in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (and the
+// aarch64 / riscv64 equivalents). See "IRQ disable / restore" in the
+// file header for the per-arch asm bodies.
+extern "C" {
+    // Disable hardware interrupts on the current CPU. Returns the previous
+    // IRQ state (the entire flags register — RFLAGS on x86_64, DAIF on
+    // aarch64, MSTATUS on riscv64) so it can be restored by irq_restore.
+    // Hosted stub: returns 0 (no IRQ state to save).
+    fn irq_disable() -> u64;
+    // Restore the previous IRQ state saved by irq_disable. Used to
+    // correctly handle nested spinlocks — if the outer context already
+    // had IRQs disabled, irq_restore keeps them disabled (doesn't
+    // re-enable). Hosted stub: no-op.
+    fn irq_restore(state: u64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Spinlock: 5 fields × (4 + 4 + 4 + 4 + 8) = 24 bytes. See "Why _pad0?"
+// in the file header for the rationale behind the _pad0 field — short
+// version: AtomicCas is hardcoded to IRType::U64 (8 bytes), so without
+// _pad0 the 8-byte CAS at offset 0 would read `locked | (holder << 32)`
+// and never match expected=0 when holder=256.
+//
+// Field semantics:
+//   locked    — the CAS target word. 0 = unlocked, 1 = locked. Modified
+//               ONLY by atomic_cas (acquire) and atomic_store (release).
+//               The `if lock.locked != 1` self-test check reads it with
+//               a plain field load (no atomic_load) — this is safe in
+//               the single-threaded hosted self-test; in a real SMP
+//               kernel you'd use atomic_load to observe the lock state
+//               from a non-holder CPU.
+//   _pad0     — padding to push `holder` outside the 8-byte CAS window.
+//               Always 0. Modified ONLY as a side effect of the 8-byte
+//               atomic_cas / atomic_store (which write 0 to bytes 4..7
+//               when writing 0 or 1 to bytes 0..3). spinlock_init
+//               explicitly sets _pad0 = 0 to make the "all zero" state
+//               self-evident (rather than relying on state_new's
+//               initial zero-fill).
+//   holder    — task index of the current holder, or 256 = "no holder".
+//               Modified by spinlock_acquire (sets to task_idx on
+//               successful CAS) and spinlock_release (sets to 256 on
+//               full release). Read by spinlock_acquire (recursive
+//               check) and spinlock_release (ownership check). The
+//               value 256 is the same "no entry" sentinel used by
+//   K7e's
+//               WaitQueue head/tail — chosen for cross-file consistency.
+//   depth     — recursion depth. 0 = not held, 1 = held once, 2 = held
+//               recursively, etc. Modified by spinlock_acquire (++ on
+//               recursive path, = 1 on fresh-acquire path) and
+//               spinlock_release (-- on recursive-unwind path, = 0 on
+//               full-release path).
+//   irq_state — saved IRQ state from irq_disable(). 0 = hosted-mode
+//               default (irq_disable stub returns 0). In a real kernel,
+//               this holds the RFLAGS / DAIF / MSTATUS value from the
+//               moment of spinlock_acquire. Written by spinlock_acquire
+//               (after irq_disable), read by spinlock_release (passed
+//               to irq_restore). Not cleared on full release — the
+//               value is stale but harmless (the next acquire
+//               overwrites it before any read).
+layout Spinlock = {
+    locked:    u32,  // 0 = unlocked, 1 = locked (CAS target word)
+    _pad0:     u32,  // padding so 8-byte CAS only sees `locked` (see header)
+    holder:    u32,  // task index of the holder, or 256 = "no holder"
+    depth:     u32,  // recursion depth (1 = first acquire, 2 = first re-acquire, ...)
+    irq_state: u64,  // saved IRQ state from irq_disable() on acquire
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Spinlock operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// spinlock_init: zero the spinlock. Sets locked=0, _pad0=0, holder=256
+// (no holder), depth=0, irq_state=0. Called once per spinlock before
+// any spinlock_acquire. The CALLER allocates the Spinlock via
+// `state_new(Spinlock)` and passes it by reference (init-style API).
+//
+// State<T> params: 1 (lock). Pure write — no reads, no helper calls.
+// The 5 field assignments are direct (no byte-packing needed because
+// every field is a primitive u32 or u64, not a nested layout — see
+// "Why no FutexEntry layout?" in K7c's futex.vuma for the alternative
+// parallel-byte-array pattern that's used when fields are nested).
+fn spinlock_init(lock: State<Spinlock>) {
+    lock.locked = 0;
+    lock._pad0 = 0;
+    lock.holder = 256;
+    lock.depth = 0;
+    lock.irq_state = 0;
+}
+
+// spinlock_acquire: acquire the spinlock. Recursive — if the current
+// task already holds the lock, just bump depth and return (no CAS, no
+// IRQ disable — the outer acquire already disabled IRQs). Otherwise
+// disable IRQs (saving the previous state for restore on release), then
+// busy-wait on AtomicCas(0 → 1) until it succeeds, then set holder and
+// depth=1.
+//
+//   lock:      the Spinlock to acquire.
+//   task_idx:  the calling task's index (used for the recursion check
+//              and stored in lock.holder).
+//
+// State<T> params: 1 (lock). Reads lock.holder (recursion check),
+// writes lock.irq_state, lock.holder, lock.depth. Calls two externs
+// (irq_disable) and one IR builtin (atomic_cas). The busy-wait loop
+// terminates because:
+//   - In hosted mode, only one task is running (single-threaded self-
+//     test), so the first CAS succeeds immediately (locked was 0
+//     after init).
+//   - In a real SMP kernel, the loop spins until whichever CPU
+//     currently holds the lock calls spinlock_release, which does
+//     atomic_store(0). At that point our CAS(0 → 1) succeeds.
+//
+// The recursion check `if lock.holder == task_idx` happens BEFORE the
+// IRQ disable. This is correct because:
+//   - If we're the holder, no other CPU can be the holder (the holder
+//     field is written ONLY by the successful CAS path, which also
+//     sets holder to the calling task_idx; only one task_idx can win
+//     the CAS).
+//   - The depth++ increment is a non-atomic read-modify-write, but
+//     it's safe because the holder is the only writer to depth (other
+//     CPUs are spinning on the CAS, not touching depth).
+//   - We don't need IRQs disabled for the recursion check because
+//     we're already the holder (IRQs were disabled by the outer
+//     acquire and haven't been re-enabled yet — the outer acquire's
+//     irq_restore only happens at the matching release).
+fn spinlock_acquire(lock: State<Spinlock>, task_idx: u32) {
+    // Check for recursive acquisition: if we're already the holder,
+    // just bump depth and return. No CAS, no IRQ disable.
+    if lock.holder == task_idx {
+        lock.depth = lock.depth + 1;
+        return;
+    }
+    // Disable IRQs and save the previous state. In hosted mode,
+    // irq_disable() returns 0 (stub). In a real kernel, this returns
+    // the RFLAGS / DAIF / MSTATUS value at the moment of disable.
+    let prev_irq = irq_disable();
+    lock.irq_state = prev_irq;
+    // Busy-wait with AtomicCas until we win the lock.
+    //   atomic_cas(addr, expected, desired) returns the OLD value at
+    //   addr. If old == expected, the swap succeeded (we got the
+    //   lock). If old != expected, someone else holds the lock — spin.
+    //   On x86_64 this is `LOCK CMPXCHG [R10], RCX` with RAX=expected;
+    //   the CMPXCHG stores old into RAX whether the swap succeeded or
+    //   not, so dst receives the old value.
+    //   The `success` flag is 0 until the CAS returns 0 (old=0 means
+    //   the swap 0→1 succeeded — we now hold the lock).
+    let success = 0;
+    while success == 0 {
+        let old = atomic_cas(lock as Address, 0, 1);
+        if old == 0 {
+            success = 1;
+        }
+        // If old != 0, someone else holds the lock — spin (retry).
+        // In hosted single-threaded mode, this branch is never taken
+        // because no other CPU can hold the lock. In a real SMP
+        // kernel, the loop would spin until the holder releases.
+    }
+    // We won the CAS — record ourselves as the holder and set depth=1.
+    lock.holder = task_idx;
+    lock.depth = 1;
+}
+
+// spinlock_release: release the spinlock. If the caller is not the
+// holder, no-op (stub error path — a real kernel would panic or log).
+// If depth > 1, just decrement (recursive unwind — the lock stays
+// held). If depth == 1, fully release: clear depth + holder, drop the
+// lock word with AtomicStore(0), restore IRQs.
+//
+//   lock:      the Spinlock to release.
+//   task_idx:  the calling task's index (used for the ownership check).
+//
+// State<T> params: 1 (lock). Reads lock.holder, lock.depth, lock.irq_
+// state. Writes lock.depth, lock.holder. Calls one IR builtin
+// (atomic_store) and one extern (irq_restore). The atomic_store writes
+// 0 to bytes [0..7] (clearing both `locked` and `_pad0`); the `holder`
+// field at offset 8 is untouched by the atomic_store, so we explicitly
+// set holder=256 BEFORE the atomic_store (otherwise a concurrent
+// spinlock_acquire on another CPU could see locked=0 but holder still
+// = task_idx, then win the CAS, then set holder = its own task_idx —
+// no race, but the transient state would be confusing for diagnostics).
+//
+// The ownership check `if lock.holder != task_idx` returns silently on
+// failure (no error code). This is the K8a contract's stub error
+// behavior — a real kernel would either panic (kernel bug — releasing
+// a lock you don't hold) or return -EINVAL (user-space bug — same).
+fn spinlock_release(lock: State<Spinlock>, task_idx: u32) {
+    // Check ownership. Not the holder → silent no-op (stub error).
+    if lock.holder != task_idx {
+        return;
+    }
+    // Recursive unwind: depth > 1 means we've acquired more than once.
+    // Decrement depth and return — the lock stays held.
+    if lock.depth > 1 {
+        lock.depth = lock.depth - 1;
+        return;
+    }
+    // Full release (depth == 1). Clear depth and holder first, then
+    // drop the lock word with atomic_store, then restore IRQs.
+    lock.depth = 0;
+    lock.holder = 256;
+    // atomic_store(addr, val): store `val` atomically to [addr].
+    // On x86_64 this is a plain MOV (already atomic for aligned
+    // accesses — no LOCK prefix needed for stores). Writes 0 to
+    // bytes [0..7], clearing `locked` and `_pad0`. A waiting CPU's
+    // atomic_cas(addr, 0, 1) will now succeed on its next iteration.
+    atomic_store(lock as Address, 0);
+    // Restore the previous IRQ state saved at acquire time. In hosted
+    // mode this is a no-op (stub). In a real kernel this restores
+    // RFLAGS / DAIF / MSTATUS — if the outer context had IRQs disabled,
+    // they stay disabled; if enabled, they're re-enabled.
+    irq_restore(lock.irq_state);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (hosted x86_64).
+// ────────────────────────────────────────────────────────────────────────────
+
+// main: exercise the spinlock end-to-end with 8 sequential checks.
+//   1. Create + init the lock.
+//   2. Acquire as task 5 — verify locked=1, holder=5, depth=1.
+//   3. Recursive acquire as task 5 — verify depth=2 (no CAS, no IRQ
+//      state change).
+//   4. Partial release — verify depth=1, holder=5 (still held).
+//   5. Full release — verify holder=256 (no holder), depth=0.
+// Exit 0 on all-pass, exit 1..8 on the corresponding check failure.
+//
+// The self-test runs single-threaded in hosted mode, so the busy-wait
+// loop in spinlock_acquire terminates immediately on the first CAS
+// (no other CPU can hold the lock). The irq_disable / irq_restore
+// externs are no-ops (hosted stubs). The test exercises:
+//   - The recursive fast-path (acquire when holder == task_idx).
+//   - The CAS slow-path (acquire when holder != task_idx).
+//   - The recursive-unwind release path (depth > 1).
+//   - The full-release path (depth == 1, atomic_store + irq_restore).
+// It does NOT exercise:
+//   - The "not the holder" release error path (would silently return
+//     — could add a 9th check, but the contract specifies 8).
+//   - Actual IRQ enable/disable (hosted stubs are no-ops — K11
+//     covers this with bare-metal parity tests).
+//   - Actual SMP contention (only one CPU in hosted mode — K8e
+//     covers this with the SMP IPI test infrastructure).
+fn main() -> i32 {
+    let lock = state_new(Spinlock);
+    spinlock_init(lock);
+    // Acquire as task 5.
+    spinlock_acquire(lock, 5);
+    if lock.locked != 1 { return 1; }
+    if lock.holder != 5 { return 2; }
+    if lock.depth != 1 { return 3; }
+    // Recursive acquire as task 5 (depth should bump to 2).
+    spinlock_acquire(lock, 5);
+    if lock.depth != 2 { return 4; }
+    // Partial release (depth should drop to 1, holder stays 5).
+    spinlock_release(lock, 5);
+    if lock.depth != 1 { return 5; }
+    if lock.holder != 5 { return 6; }  // still the holder
+    // Full release (depth should drop to 0, holder becomes 256).
+    spinlock_release(lock, 5);
+    if lock.holder != 256 { return 7; }  // no holder
+    if lock.depth != 0 { return 8; }
+    return 0;
+}
