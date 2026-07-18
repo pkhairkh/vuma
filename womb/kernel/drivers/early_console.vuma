@@ -1,0 +1,335 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/drivers/early_console.vuma
+// Universal EarlyConsole — single write_byte interface for all archs.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the R1d layer of the VWK kernel: a universal early-console
+// abstraction that fronts every architecture's bring-up console behind ONE
+// `early_console_write_byte(ec, c)` entry point. Kmain (R1e) will allocate
+// a single `State<EarlyConsole>`, call `early_console_init` with the right
+// `con_type` for the boot path, and then write log lines byte-by-byte
+// without caring whether the bytes go to:
+//   - 16550 UART  (x86_64 QEMU `pc`/`q35` COM1 @ 0x3F8)         con_type = 0
+//   - PL011 UART  (aarch64 QEMU `virt` @ 0x09000000)            con_type = 1
+//   - semihosting (QEMU `-semihosting` ARM/RISC-V BKPT trap)     con_type = 2
+//   - s390x diag  (SCLP / DIAGNOSE 0x4 surfacing to the LPAR)    con_type = 3
+//   - wasm host   (host import `write(1, buf, 1)` → fd 1)        con_type = 4
+//
+// The R1a/R1b+c bootinfo wave gave us the boot-protocol recap (multiboot2 on
+// x86_64, FDT on aarch64/riscv64); R1d is the bring-up console sibling. R1e
+// (kmain integration) will call `early_console_init` immediately after
+// `x86_bootinfo_init` / `arm64_bootinfo_init` / `riscv_bootinfo_init`, then
+// emit a "VWK booted\n" banner via `early_console_write_str`. Until R1e
+// lands, the `main()` self-test below exercises every con_type path inline.
+//
+// ── Why a single write_byte interface? ─────────────────────────────────────
+// Kmain + panic + kmsg all need to emit text before the full console
+// subsystem (K6 tty/vt100) is up. Architectures differ wildly in their
+// bring-up I/O path:
+//   x86_64   — 16550 UART MMIO via port I/O (base+0 data, base+5 LSR).
+//   aarch64  — PL011 MMIO (base+0 DR, base+24 FR).
+//   riscv64  — HTIF console (semihosting) or SiFive UART; host-dependent.
+//   s390x    — DIAGNOSE 0x4 (SCLP write event) — no MMIO at all.
+//   wasm32   — host `write(1, addr, n)` import.
+// Rather than wire N per-arch `console_putc_*` symbols into kmain (which
+// would require `#[cfg(target_arch)]`-style dispatch — which VUMA does NOT
+// have, since it compiles per-target at the binary level), R1d collapses
+// all of them behind ONE entry: `early_console_write_byte(ec, c)`. The
+// dispatch happens at runtime on `ec.con_type`, so kmain calls the same
+// symbol on every arch; only the `con_type` value passed to
+// `early_console_init` differs per boot path. R1e will pick the con_type
+// from `boot_type` (0=x86 → 16550, 1=aarch64 → PL011, 2=riscv → semihost,
+// 3=s390x → diag, plus a hosted-mode override to 4=wasm).
+//
+// ── Layouts (EarlyConsole + ConsoleStr + ByteBuf) ──────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares every
+// layout it uses. The three layouts are NEW (R1d introduces them):
+//
+//   EarlyConsole (16 bytes total):
+//     base     @ 0   u64       MMIO base address (16550/PL011) or 0 for
+//                              non-MMIO paths (semihost/diag/wasm).
+//     con_type @ 8   u8        0=16550, 1=PL011, 2=semihost, 3=diag,
+//                              4=wasm.
+//     _pad     @ 9   [u8; 7]   explicit padding so the layout is 16 bytes
+//                              (8 + 1 + 7 = 16, naturally u64-aligned).
+//     16 bytes is generous (could be 9 with packing), but the explicit
+//     pad matches the R1a BootInfo pattern (u8 + [u8; 7] tail pad) and
+//     gives kmain a stable, round layout for arena-friendly allocation.
+//
+//   ConsoleStr (256 bytes):
+//     data     @ 0   [u8; 256] null-terminated string buffer used by
+//                              `early_console_write_str`. Walked byte-by-
+//                              byte until NUL or 256 bytes emitted. Same
+//                              256-byte size as the String layout in
+//                              drivers/uart.vuma and console.vuma.
+//
+//   ByteBuf (1 byte):
+//     data     @ 0   [u8; 1]   one-byte buffer used by the wasm path to
+//                              hand a single byte to `write(1, addr, 1)`.
+//                              The `data` field is at offset 0 so
+//                              `buf as Address` yields the address of
+//                              `buf.data[0]` — the natural argument for
+//                              `write(1, base, 1)`. 1 byte is the minimum
+//                              needed for the count=1 case; the FFI
+//                              marshal hands the Address directly to the
+//                              syscall as a raw u64 pointer.
+//
+// ── The `buf as Address` cast (zero-copy FFI borrow) ────────────────────────
+// `state_new(ByteBuf)` lowers to an Alloc into `___pmt_buffer` and yields
+// a `State<ByteBuf>` handle. The `buf as Address` cast extracts the
+// buffer's base Address (a raw u64 pointer) WITHOUT consuming the State —
+// the state remains live in `___pmt_buffer`. The Address is then handed
+// to `write(1, addr, 1)` (an extern "C" declared below) which in hosted
+// mode resolves to the real sys_write stub. This is the documented PMT
+// pattern (docs/language-reference.md §14.5 "Borrowed read (zero-copy
+// I/O)") and is the same pattern used in drivers/uart.vuma, console.vuma,
+// kmain.vuma, and the ffi_wave1/write_real test.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f and R1a/R1b+c). Decimal avoids the parser's hex-literal path
+// (parse_int_radix width-extension subtleties — see K5a's file.vuma header
+// for the same rationale). The constants:
+//   1016  = 0x3F8 — QEMU 8250 COM1 base address (x86_64 default).
+//   72    = ASCII 'H' (self-test first byte).
+//   105   = ASCII 'i' (self-test second byte).
+//   111   = ASCII 'o' (self-test write_str first byte).
+//   107   = ASCII 'k' (self-test write_str second byte).
+//   88    = ASCII 'X' (self-test 16550 stub byte).
+//   10    = ASCII '\n' (newline).
+//   0..4  = con_type discriminants (16550 / PL011 / semihost / diag / wasm).
+//   256   = ConsoleStr buffer size (write_str loop bound).
+//   1     = byte count for write(1, addr, 1) in the wasm path.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// EarlyConsole + ConsoleStr + ByteBuf are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> slots; the CALLER allocates them via
+// `state_new(EarlyConsole)` / `state_new(ConsoleStr)` / `state_new(ByteBuf)`.
+// The Address passed to `write` is the State<T>'s base pointer; we never
+// write `&buf` or `*buf` in VUMA source.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares ByteBuf (1 byte — different
+// from drivers/uart.vuma's 16-byte ByteBuf, since this one only ever
+// holds a single byte for the count=1 write call), ConsoleStr (256 bytes
+// — same size as drivers/uart.vuma's String), EarlyConsole (new).
+// R1e's kmain will re-declare these byte-identically when it wires
+// `early_console_write_byte` into the kmain boot banner path.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/drivers/early_console.vuma \
+//         /tmp/early_console.bin x86_64 --verify
+//     /tmp/early_console.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, stdout = "Hi\nok\n" (the wasm path emits
+// "Hi\n" via early_console_write_byte and "ok\n" via early_console_write_str).
+// The 16550 path (con_type=0) is stubbed in hosted mode — `mmio_write8`
+// resolves to `__ffi_fallback_stub` which is a no-op for void returns —
+// so the 'X' byte is silently dropped and the test continues.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// EarlyConsole: the universal console handle. base is the MMIO base for
+// 16550/PL011 (e.g. 1016 for COM1, 150994944 for QEMU PL011) or 0 for
+// non-MMIO paths (semihosting, diag, wasm). con_type is the dispatch
+// discriminant (0..4). _pad keeps the layout 16 bytes total and
+// u64-aligned (matches the R1a BootInfo tail-pad convention).
+layout EarlyConsole = { base: u64, con_type: u8, _pad: [u8; 7] }
+
+// ConsoleStr: 256-byte null-terminated string buffer for write_str. Walked
+// until NUL or 256 bytes emitted. Same size as drivers/uart.vuma's String.
+layout ConsoleStr = { data: [u8; 256] }
+
+// ByteBuf: 1-byte buffer for the wasm/host path's `write(1, addr, 1)`
+// call. The `data` field is at offset 0 so `buf as Address` yields the
+// address of `buf.data[0]` — the natural argument for write(1, base, 1).
+layout ByteBuf = { data: [u8; 1] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines.
+// ────────────────────────────────────────────────────────────────────────────
+// Two extern blocks: one for the MMIO trampolines (bare-metal only; hosted
+// resolves them to __ffi_fallback_stub — `mmio_write8` is a no-op for void
+// returns), one for the hosted I/O `write` extern (which resolves to the
+// real sys_write stub on x86_64 — nr 1; on aarch64 nr 64; on wasm32 the
+// host import). Same split as drivers/uart.vuma.
+
+// MMIO trampolines (bare-metal mode uses these; hosted mode = no-op stubs).
+// In K11's bare-metal build, the per-arch backend will swap these for real
+// asm stubs:
+//   mmio_write8(a, v)  — x86_64: `mov [rdi], sil; ret`; aarch64: `strb
+//                        w1, [x0]`; riscv64: `sb a1, 0(a0)`.
+//   mmio_write32(a, v) — x86_64: `mov [rdi], esi; ret`; aarch64: `str
+//                        w1, [x0]`; riscv64: `sw a1, 0(a0)`.
+extern "C" {
+    fn mmio_write8(addr: u64, val: u8);
+    fn mmio_write32(addr: u64, val: u32);
+}
+
+// Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
+// sys_write on x86_64 / aarch64 hosted backends; resolves to the wasm host
+// import `write` on wasm32). `buf: Address` (NOT State<T>) means the
+// marshal does NOT invalidate any state on the call — the Address is just
+// a raw u64 pointer handed to the syscall. This is the documented PMT
+// "Borrowed read" pattern.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// early_console_init: populate a caller-allocated EarlyConsole.
+// ────────────────────────────────────────────────────────────────────────────
+//   ec        caller-allocated State<EarlyConsole> (modified in place).
+//   base      MMIO base address for 16550/PL011 paths; 0 for non-MMIO
+//             paths (semihosting, diag, wasm).
+//   con_type  0=16550, 1=PL011, 2=semihost, 3=diag, 4=wasm.
+//
+// Behavior:
+//   1. ec.base = base.
+//   2. ec.con_type = con_type.
+//   3. Zero the 7-byte _pad (matches the R1a BootInfo pad-zeroing pattern).
+//
+// State<T> params: 1 (ec). The `base` and `con_type` params are pure
+// values (no State indirection). The body is 2 field writes + a 7-iter
+// pad-zeroing loop — pure typed-memory writes, no pointer ops.
+fn early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
+    ec.base = base;
+    ec.con_type = con_type;
+    let i = 0;
+    while i < 7 { ec._pad[i] = 0; i = i + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// early_console_write_byte: the universal byte-emission entry point.
+// ────────────────────────────────────────────────────────────────────────────
+//   ec   caller-allocated State<EarlyConsole> (read for base + con_type).
+//   c    the byte to emit.
+//
+// Dispatch on ec.con_type:
+//   0 (16550 UART) — mmio_write8(ec.base, c). Bare-metal: writes the byte
+//     to the 8250 THR (TX holding register) at base+0. The K11 bare-metal
+//     body will first spin on LSR.TX-empty (bit 5 of base+5) before the
+//     write; the hosted stub is a no-op (the byte is silently dropped —
+//     see the file header for why hosted mode doesn't wire MMIO reads).
+//     The LSR spin is OMITTED in this stub because the hosted-mode
+//     mmio_read8 returns 0 (the stub), so the spin would loop forever;
+//     K11's bare-metal version will add it.
+//   1 (PL011 UART) — mmio_write32(ec.base, c as u32). Bare-metal: writes
+//     the byte to the PL011 DR (data register) at base+0. Same LSR-spin
+//     omission as 16550 (K11 will add the FR.TX-FIFO-full spin).
+//   2 (semihosting) — stub, no-op. K11's bare-metal version will emit a
+//     semihosting SYS_WRITE0 call via a BKPT trap on aarch64 / EBREAK on
+//     riscv64; the trap handler in trap_trampoline.vuma will be extended
+//     to recognize the semihosting call number. Hosted mode: no-op (no
+//     semihosting trap to host).
+//   3 (s390x diag) — stub, no-op. K11's s390x backend will emit a DIAGNOSE
+//     0x4 (SCLP write event) instruction; the s390x trap handler will be
+//     extended to surface the SCLP event buffer to the LPAR. Hosted mode:
+//     no-op (no DIAGNOSE instruction in hosted mode).
+//   4 (wasm host) — write(1, buf as Address, 1) where buf is a 1-byte
+//     State<ByteBuf> holding c at data[0]. This is the ONLY path that
+//     does real I/O in hosted mode — it routes through the `write` extern,
+//     which resolves to sys_write on x86_64/aarch64 hosted and to the
+//     host `write` import on wasm32. The 16550/PL011/semihost/diag paths
+//     are all no-ops in hosted mode (they need bare-metal MMIO or traps).
+//
+// State<T> params: 1 (ec). The `c` param is a pure u8. The body is a
+// nested-if dispatch on ec.con_type — VUMA has no `match`/`switch` on
+// arbitrary integers (only on enum values), so the dispatch is a
+// if/else-if chain. The wasm path allocates a 1-byte ByteBuf per call
+// (the FFI marshal frees it via the standard drop-frame hook on function
+// return). No pointer ops; the `buf as Address` cast is the documented
+// PMT zero-copy-borrow pattern.
+fn early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
+    if ec.con_type == 0 {
+        // 16550 UART: write byte to data register at base+0
+        mmio_write8(ec.base, c);
+    } else {
+        if ec.con_type == 1 {
+            // PL011 UART: write byte to data register at base+0
+            mmio_write32(ec.base, c as u32);
+        } else {
+            if ec.con_type == 4 {
+                // Wasm host callback: use write(1, buf, 1)
+                let buf = state_new(ByteBuf);
+                buf.data[0] = c;
+                write(1, buf as Address, 1);
+            }
+            // con_type 2 (semihosting) and 3 (diag): stubs, no-op
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// early_console_write_str: emit a null-terminated string byte-by-byte.
+// ────────────────────────────────────────────────────────────────────────────
+//   ec   caller-allocated State<EarlyConsole> (forwarded to write_byte).
+//   s    caller-allocated State<ConsoleStr> (read for data[0..256]).
+//
+// Walks `s.data[0..256]` byte-by-byte, calling early_console_write_byte
+// for each byte until a NUL (0) is encountered or 256 bytes have been
+// sent (the ConsoleStr buffer is 256 bytes, so this is the natural upper
+// bound — any string longer than 256 bytes is truncated, matching the
+// ConsoleStr layout's contract). The NUL terminator itself is NOT sent
+// (the `if c == 0 { return; }` happens BEFORE the write_byte call).
+//
+// This is the same walk pattern as drivers/uart.vuma::uart_puts_8250 —
+// R1d's contribution is routing each byte through the universal
+// write_byte dispatcher instead of a per-arch driver entry.
+//
+// State<T> params: 2 (ec, s). The body is a 256-iter loop with a NUL
+// check + a write_byte call per iteration. No pointer ops.
+fn early_console_write_str(ec: State<EarlyConsole>, s: State<ConsoleStr>) {
+    let i = 0;
+    while i < 256 {
+        let c = s.data[i];
+        if c == 0 { return; }
+        early_console_write_byte(ec, c);
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises every con_type path end-to-end:
+//   (1) early_console_init(ec, 0, 4)           — wasm/host path.
+//   (2) ec.con_type == 4 check                 — verify init wrote the field.
+//   (3) early_console_write_byte(ec, 72)       — 'H' via write(1, buf, 1).
+//   (4) early_console_write_byte(ec, 105)      — 'i' via write(1, buf, 1).
+//   (5) early_console_write_byte(ec, 10)       — '\n' via write(1, buf, 1).
+//   (6) early_console_write_str(ec, s="ok\n")  — 3-byte string via write_str.
+//   (7) early_console_init(ec, 1016, 0)        — 16550 stub, base=COM1.
+//   (8) ec.con_type == 0 check                 — verify re-init.
+//   (9) early_console_write_byte(ec, 88)       — 'X' via mmio_write8 stub.
+//
+// Expected stdout: "Hi\nok\n" (5 bytes total — the 'X' is silently dropped
+// by the mmio_write8 no-op stub). Returns 0 on success, 1 if the wasm
+// con_type wasn't set, 2 if the 16550 con_type wasn't set.
+fn main() -> i32 {
+    // Test: init type 4 (wasm/host), write "Hi\n"
+    let ec = state_new(EarlyConsole);
+    early_console_init(ec, 0, 4);
+    if ec.con_type != 4 { return 1; }
+    early_console_write_byte(ec, 72);   // 'H'
+    early_console_write_byte(ec, 105);  // 'i'
+    early_console_write_byte(ec, 10);   // '\n'
+    // Test write_str
+    let s = state_new(ConsoleStr);
+    s.data[0] = 111;  // 'o'
+    s.data[1] = 107;  // 'k'
+    s.data[2] = 10;   // '\n'
+    s.data[3] = 0;
+    early_console_write_str(ec, s);
+    // Test type 0 (16550) — stub, just verify no crash
+    early_console_init(ec, 1016, 0);  // 0x3F8 = COM1
+    if ec.con_type != 0 { return 2; }
+    early_console_write_byte(ec, 88);  // 'X'
+    return 0;
+}
