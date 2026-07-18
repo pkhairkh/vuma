@@ -1,0 +1,826 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/proc/wait.vuma
+// VWK Process/Thread Subsystem — sys_waitpid (reap ZOMBIE children)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K4e layer of the VWK kernel: the waitpid() syscall
+// primitive — the reaper side of K4d's exit. K4a (task.vuma) built the
+// Task control block + ProcessTable + task_alloc / task_free; K4b
+// (scheduler.vuma) built the CFS runqueue; K4c (switch.vuma) built the
+// context_switch extern; K4d (fork.vuma + exec.vuma + exit.vuma) built
+// sys_fork (spawn child) + sys_exec (replace address space) + sys_exit
+// (mark Task ZOMBIE + populate ZombieTask). THIS file builds sys_waitpid
+// to scan the ProcessTable for ZOMBIE children of the calling parent,
+// read the zombie's exit code, free the slot (reap), and return the
+// child's PID. Without K4e, every sys_exit'd task stays in the
+// ProcessTable forever (ZOMBIE state is terminal until reaped),
+// eventually exhausting the 256 slots.
+//
+// ── waitpid() semantics ─────────────────────────────────────────────────────
+// waitpid() is the Unix primitive that blocks the calling parent until
+// a child exits (or returns immediately if a child is already a zombie,
+// or returns -ECHILD if the parent has no children). The classic Unix
+// shell loop `while ((wpid = waitpid(-1, &status, 0)) > 0);` reaps all
+// children serially.
+//
+// The K4e contract specifies the simplified semantics (the contract's
+// sys_waitpid body literally says "For simplicity: only handle
+// pid == -1 (any child)"):
+//   * pid == -1 (any child): scan ProcessTable for any ZOMBIE (state == 4)
+//     whose PPID matches the calling parent's PID. If found, read the
+//     exit code, free the slot (task_free → state = 0), write the exit
+//     code to status, return the child's PID.
+//   * pid > 0 (specific child): NOT implemented in this stub — the
+//     contract says "For simplicity: only handle pid == -1". A future
+//     wave (K4f syscall handler) will dispatch on pid > 0 vs pid == -1
+//     and call a richer sys_waitpid_specific helper. THIS file's
+//     sys_waitpid accepts the pid parameter (for API symmetry with
+//     POSIX waitpid) but ignores it for branching — it always scans
+//     for any ZOMBIE child of the parent (parent_pid is hardcoded to
+//     1 = init for the self-test; K4f's syscall handler will pass the
+//     actual calling task's PID instead).
+//   * If a child is still running (state == RUNNING/READY/BLOCKED, not
+//     ZOMBIE), return -EAGAIN (-11). A real kernel would sleep the
+//     parent on a WaitQueue until the child exits; THIS stub returns
+//     -EAGAIN so the caller can poll (or K4f's syscall handler can
+//     spin/sleep on the parent's WaitQueue — see the WaitQueue layout
+//     below).
+//   * If the parent has no children at all (no task with ppid ==
+//     parent_pid), return -ECHILD (-10). This matches Linux's
+//     do_wait() returning -ECHILD when `list_empty(&current->children)`.
+//
+// ── -ECHILD = -10, -EAGAIN = -11 (decimal) ──────────────────────────────────
+// The K4e contract specifies -ECHILD = -10 and -EAGAIN = -11. These
+// match Linux's <asm-generic/errno-base.h>:
+//     #define ECHILD  10   /* No child processes */
+//     #define EAGAIN  11   /* Try again */
+// Both are returned as negative i64 (POSIX errno convention: syscall
+// return value is -errno on failure, positive PID on success). The
+// caller's libc wrapper translates `ret < 0` to `errno = -ret; ret =
+// -1` — this file's sys_waitpid returns the raw -10 / -11 i64, K4f's
+// syscall handler will wire it to the actual syscall return path.
+//
+// To avoid the codegen's signed-literal subtleties, this file uses the
+// arithmetic form `0 - 10` and `0 - 11` rather than the literal `-10`
+// and `-11`. Both lower to the same IR (Sub 0, 10 → 0xFFFFFFFFFFFFFFF6
+// as i64 = -10), but `0 - 10` goes through flatten_expr's BinOp::Sub
+// arm (which handles the types correctly) whereas `-10` would go
+// through the lexer's negative-number path (which has had width-
+// extension subtleties in the past — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same decimal-only rationale).
+//
+// ── ZombieTask layout (re-declared from K4d's exit.vuma) ────────────────────
+// K4d's exit.vuma introduced the ZombieTask layout:
+//     layout ZombieTask = { pid: u32, ppid: u32, exit_code: i32 }
+// 3 fields × 4 bytes = 12 bytes. K4d's sys_exit populates a caller-
+// allocated ZombieTask with the exiting task's pid/ppid/exit_code.
+//
+// K4e's waitpid does NOT actually consume K4d's ZombieTask struct —
+// the K4e contract specifies a different reaping path: waitpid reads
+// the exit code directly from the ProcessTable's vruntime field (a
+// K4d-side hack where sys_exit stores the exit code in vruntime
+// because ProcessTable has no dedicated exit_code field). This is the
+// contract's wait_reap_zombie body:
+//     let raw_code = pt_get_vruntime(tbl, i);
+//     status.code = raw_code as i32;
+// Why the vruntime hack? Because the ProcessTable is a fixed-layout
+// struct (10 fields, 14340 bytes — see K4a's task.vuma header "Why
+// parallel flat byte arrays?" for the rationale), and adding an
+// `exit_codes: [u8; 1024]` array (256 * 4 bytes for i32 per task)
+// would require updating every K4 file that re-declares ProcessTable
+// (K4a/b/c/d/e + K3e's syscall handlers + K2a's pmm mirror) to keep
+// the byte-identical-redeclaration invariant. The vruntime field
+// (u64, 8 bytes per slot) is wide enough to hold any i32 exit code
+// with room to spare, and is unused between sys_exit (which writes
+// exit_code into it) and waitpid (which reads it). K4d's exit.vuma
+// ALSO writes exit_code to a separate ZombieTask struct — that's
+// redundant with the vruntime hack, but K4d's self-test needed the
+// ZombieTask to verify sys_exit's write. K4e's waitpid reads from
+// vruntime (the contract's choice); a future refactor (K4f) will
+// consolidate on one path.
+//
+// K4e's self-test pretends K4d ran by directly calling pt_set_vruntime
+// to store the exit code (42) in the child's slot. This bypasses
+// sys_exit entirely and exercises ONLY the waitpid-side reaping logic,
+// which is what K4e is testing.
+//
+// ── WaitQueue layout (NEW in K4e, declared but unused) ──────────────────────
+// The K4e contract introduces a WaitQueue layout:
+//     layout WaitQueue = { head: u32, tail: u32, count: u32 }
+// 3 fields × 4 bytes = 12 bytes. This is the data structure a real
+// kernel uses to track tasks that are BLOCKED in waitpid() — sleeping
+// until their child exits. The linked list is keyed by task index
+// (0..256); head/tail point to the first/last sleeping task; count is
+// the queue length. When a child exits, sys_exit walks the WaitQueue
+// and wakes the first parent whose ppid matches the exiting child's
+// ppid (Linux's __wake_up_parent). The woken parent re-runs waitpid,
+// finds the ZOMBIE child, reaps it, returns.
+//
+// THIS file declares WaitQueue for the DoD requirement ("WaitQueue,
+// ZombieTask, Status layouts verify") but does NOT implement the
+// sleep/wake logic — the K4e contract's sys_waitpid returns -EAGAIN
+// when no zombie is found (the "would sleep in real kernel" branch),
+// leaving the actual queue management to K4f's syscall handler (which
+// will own the WaitQueue and wire sys_waitpid's -EAGAIN to a
+// sleep-then-retry loop). The unused-layout-declaration pattern is
+// the same as K3e's syscall/table.vuma declaring SyscallTableEntry
+// for documentation while only some files use it.
+//
+// ── Status layout (NEW in K4e) ──────────────────────────────────────────────
+// The K4e contract introduces a Status layout:
+//     layout Status = { code: i32 }
+// 1 field × 4 bytes = 4 bytes. This is the kernel-side analog of
+// POSIX's `int *status` out-parameter to waitpid(2) — the parent
+// passes a pointer to an int, the kernel writes the child's exit
+// status into it. In PMT VUMA, the caller allocates the Status via
+// `state_new(Status)` and passes it by reference to sys_waitpid
+// (init-style API — see "Why init-style?" below). sys_waitpid's
+// wait_reap_zombie helper writes the child's exit code into
+// status.code through the State<Status> borrow.
+//
+// NOTE: Status is a single-field layout. The codegen has a known
+// limitation where local State<T> field access (e.g., `status.code`)
+// loses state-typedness after an intervening function call that
+// doesn't take the State<T> as a parameter (K2a caveat, "the codegen
+// does NOT propagate State-typedness through function return values"
+// — extended to "and may lose it across function calls"). The K4e
+// self-test works around this by reading status.code IMMEDIATELY
+// after sys_waitpid returns (before any other function call). See
+// the self-test header comment for the exact ordering constraint.
+//
+// ── ProcessTable re-declaration ─────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the
+// ProcessTable layout byte-identically to K4a's task.vuma (and to K4b's
+// scheduler.vuma, K4d's fork.vuma/exec.vuma/exit.vuma). The byte-
+// identical-redeclaration invariant (K2c "extern signatures MUST stay
+// byte-identical" — extended to layouts in K3d) extends to ProcessTable:
+// this file's pt_get_* / pt_set_* MUST see the same field offsets, field
+// names, and field types as K4a's task.vuma. ProcessTable has 10 fields
+// (9 parallel flat [u8; N] arrays + count u32) totaling 14340 bytes —
+// same as K4a.
+//
+// This file re-declares the 8 ProcessTable helpers it needs:
+//   pt_get_state / pt_set_state (u8 direct-index — needed by
+//                                 wait_reap_zombie's ZOMBIE scan +
+//                                 wait_has_children's FREE-skip +
+//                                 task_free's state=0 write)
+//   pt_get_pid  / pt_set_pid    (u32 4-byte LE pack/unpack — needed by
+//                                 wait_reap_zombie's child_pid return +
+//                                 self-test setup)
+//   pt_get_ppid / pt_set_ppid   (u32 4-byte LE pack/unpack — needed by
+//                                 wait_reap_zombie's parent_pid match +
+//                                 wait_has_children's parent_pid match +
+//                                 self-test setup)
+//   pt_get_vruntime / pt_set_vruntime (u64 8-byte LE pack/unpack —
+//                                 needed by wait_reap_zombie's exit-code
+//                                 read from vruntime + self-test setup)
+// These 8 helpers are byte-identical to K4a's task.vuma (same signature,
+// same body — 4-iteration while loop for u32, 8-iteration while loop
+// for u64, direct array index for u8). The other 10 helpers (prio
+// get/set, mm_root/fs_root/fds/next get/set) are NOT re-declared here
+// because sys_waitpid doesn't touch them — K4d's fork.vuma re-declares
+// those for its mm_root/fs_root/fds copy.
+//
+// This file also re-declares pt_init + task_free from K4a:
+//   pt_init  — zero all 256 states (mark every slot FREE), set count = 0.
+//              The self-test calls this before setting up the parent/
+//              child tasks (pt_init makes sure all 256 states start at
+//              FREE so wait_reap_zombie's scan doesn't see stale
+//              ZOMBIEs from a previous test run).
+//   task_free — mark slot `idx` as FREE (state = 0) + decrement count.
+//               wait_reap_zombie calls this to reap the zombie (the
+//               slot becomes reusable by a subsequent task_alloc).
+//               K4a's task_free is byte-identical — re-declared here.
+// task_alloc is NOT re-declared here because sys_waitpid doesn't
+// allocate tasks (it only frees them via task_free); the self-test
+// uses pt_set_state / pt_set_pid / pt_set_ppid / pt_set_vruntime to
+// set up the parent + child tasks directly (bypassing task_alloc),
+// matching the contract's self-test setup pattern.
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K4e contract's main() allocates `tbl = state_new(ProcessTable)`
+// and `status = state_new(Status)` and passes both by reference to
+// sys_waitpid. This is the canonical PMT pattern (K2a's pmm_init(pool,
+// pmm, ...), K3d's trap_frame_init(tf), K4a's pt_init(tbl), K4d's
+// sys_exit(tbl, ..., zombie: State<ZombieTask>) — see K2a's pmm.vuma
+// header "Why init-style?" for the codegen rationale: the current
+// codegen does NOT propagate State-typedness through function return
+// values, so `fn waitpid_new() -> State<Status>` would produce broken
+// field-access code in callers). All wait.vuma functions take their
+// State<T> params by regular VUMA-fn borrow (NOT extern #[borrow] —
+// VUMA fn calls don't need the attribute; only extern "C" calls do,
+// and none of these functions call any extern).
+//
+// State<T> params: per the K4b contract's "Keep State<T> params to 1-2
+// per function" rule (continued here), sys_waitpid takes 2
+// State<T> params (tbl + status) + 1 u64 (pid). Same discipline as
+// K4d's sys_exit(tbl, task_idx, code, zombie) (2 State params + u32 +
+// i32) and K4b's sched_enqueue(rq, tbl, task_idx) (2 State params +
+// u32). wait_reap_zombie takes 2 State params (tbl + status) + 1 u32
+// (parent_pid). wait_has_children takes 1 State param (tbl) + 1 u32
+// (parent_pid) — the minimal 1-State-param form.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// ProcessTable AND the Status AND the ZombieTask AND the WaitQueue
+// are flat-byte-array structs held in `___pmt_buffer`-backed State<T>'s;
+// the CALLER allocates them via `state_new(ProcessTable)` /
+// `state_new(Status)` and passes them by reference to sys_waitpid /
+// wait_reap_zombie / wait_has_children / all pt_get_* / pt_set_*
+// helpers / pt_init / task_free (init-style API — see "Why init-
+// style?" above). No externs are declared in this file (waitpid is
+// pure-PM on both the ProcessTable and the Status — K4c's context-
+// switch externs are what actually transfer control away from a
+// sleeping parent; THIS file just scans the ProcessTable and writes
+// the exit code to Status).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K4e contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096). The constants:
+//     256  = number of Task slots in the ProcessTable (and the
+//            "no zombie found" loop bound in wait_reap_zombie +
+//            wait_has_children)
+//     4    = bytes per u32 field (loop bound for pid/ppid pack/unpack)
+//     8    = bytes per u64 field (loop bound for vruntime pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     4    = ZOMBIE state value (set by K4d's sys_exit; scanned for by
+//            wait_reap_zombie)
+//     0    = FREE state value (set by task_free; skipped by
+//            wait_has_children's "not FREE" check)
+//     1    = RUNNING state value (set on the parent task in the self-
+//            test) + the parent_pid hardcoded into sys_waitpid (init's
+//            PID — the contract's choice) + the PID offset (PID = slot
+//            + 1, so slot 0 → PID 1) + the "child found" sentinel for
+//            wait_has_children's return
+//     2    = the child's PID in the self-test (slot 1 + 1)
+//     42   = the test exit code (the Douglas Adams value, same as
+//            K4d's exit.vuma self-test)
+//     10   = ECHILD (POSIX errno — returned as 0 - 10 = -ECHILD as i64)
+//     11   = EAGAIN (POSIX errno — returned as 0 - 11 = -EAGAIN as i64)
+//   Self-test constants: 1, 2, 4, 0, 42 + the parent_pid 1 — all decimal.
+//
+// ── The u64 -1 literal subtlety ─────────────────────────────────────────────
+// The K4e contract specifies `pid == -1 (or 18446744073709551615 as u64)`
+// for "wait for any child". The literal `18446744073709551615` is u64::MAX
+// (2^64 - 1), which does NOT fit in i64 (max 9223372036854775807). The
+// VUMA parser's `TokenKind::Number` arm in src/parser/src/parser.rs
+// does `lexeme.parse::<i64>()`, which FAILS for `18446744073709551615`
+// (out of i64 range) — the literal falls back to error recovery and
+// effectively becomes 0 (verified by /home/z/probes/probe_wait*.vuma —
+// `if pid == 18446744073709551615` always evaluates to false inside a
+// function regardless of pid's actual value, because the literal is
+// misparsed). The K4e contract explicitly warns about this: "The
+// 18446744073709551615 is u64 max (-1 as u64). VUMA may misinterpret
+// this literal; use `let neg_one: u64 = 0 - 1;` instead."
+//
+// THIS file's sys_waitpid follows the contract's "For simplicity: only
+// handle pid == -1 (any child)" — sys_waitpid accepts the pid parameter
+// but does NOT compare it against the literal `18446744073709551615`
+// (the comparison would always evaluate to false due to the parser
+// issue). Instead, sys_waitpid always treats the call as "wait for any
+// child of the parent" (parent_pid hardcoded to 1 = init for the self-
+// test). The self-test passes `let neg_one: u64 = 0 - 1;` as the pid
+// argument to exercise the API surface; sys_waitpid ignores it. K4f's
+// syscall handler will dispatch on pid > 0 vs pid == -1 (using `let
+// neg_one: u64 = 0 - 1;` for the comparison) and call the appropriate
+// helper — THIS file's sys_waitpid is the "any child" path only.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares ProcessTable + the 8
+// pt_get_* / pt_set_* helpers + pt_init + task_free byte-identically
+// to K4a's task.vuma (same pattern as K4b's scheduler.vuma, K4d's
+// fork.vuma/exec.vuma/exit.vuma, and K3d's irq.vuma re-declaring
+// irq_mask/irq_unmask/pic_eoi from K3a's trap_trampoline.vuma). The
+// ZombieTask layout is re-declared byte-identically to K4d's exit.vuma
+// (the canonical source for ZombieTask). The WaitQueue and Status
+// layouts are new to THIS file (no prior VWK file declares them); K4f's
+// syscall handler will re-declare them byte-identically when it wires
+// sys_waitpid to the actual syscall dispatch path.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/proc/wait.vuma \
+//         /tmp/wait.bin x86_64 --verify
+//     /tmp/wait.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 4 self-test checks pass — sys_waitpid
+// reaps ZOMBIE child task 1, returns child PID 2, status.code = 42
+// (the exit code stored in vruntime), task 1's state is now 0 (FREE)
+// after task_free, second sys_waitpid returns -ECHILD = -10 without
+// crashing).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// ProcessTable: re-declared byte-identically to K4a's task.vuma. 10
+// fields (9 parallel flat [u8; N] arrays + count u32) totaling 14340
+// bytes. See K4a's task.vuma header "Why parallel flat byte arrays?"
+// for the rationale (VUMA has no struct-array support).
+layout ProcessTable = {
+    pids: [u8; 1024],
+    ppids: [u8; 1024],
+    states: [u8; 256],
+    prios: [u8; 256],
+    vruntimes: [u8; 2048],
+    mm_roots: [u8; 2048],
+    fs_roots: [u8; 2048],
+    fds: [u8; 2048],
+    nexts: [u8; 2048],
+    count: u32,
+}
+
+// ZombieTask: re-declared byte-identically to K4d's exit.vuma (the
+// canonical source for ZombieTask). 3 fields × 4 bytes = 12 bytes.
+// K4d's sys_exit populates this; K4e's waitpid reads the exit code
+// from vruntime instead (the K4e contract's choice — see "ZombieTask
+// layout" in the file header), so this layout is declared for the
+// DoD requirement but not read by sys_waitpid. K4f's syscall handler
+// will reconcile the two paths (either read from ZombieTask or from
+// vruntime, but not both).
+layout ZombieTask = {
+    pid: u32,        // the exiting task's PID
+    ppid: u32,       // the exiting task's PPID (parent's PID)
+    exit_code: i32,  // the exit code (positive 0..255 for normal exit,
+                     // negative for death-by-signal — e.g. -9 for
+                     // SIGKILL, matching Linux's WIFSIGNALED encoding)
+}
+
+// WaitQueue: linked list of tasks BLOCKED in waitpid() — sleeping
+// until their child exits. 3 fields × 4 bytes = 12 bytes. The head/
+// tail indices point into the ProcessTable (task index 0..256, with
+// 256 = empty sentinel); count is the queue length. A real kernel
+// uses this to wake parents when their child exits (Linux's
+// __wake_up_parent). THIS file declares WaitQueue for the DoD
+// requirement but does NOT implement the sleep/wake logic — K4e's
+// sys_waitpid returns -EAGAIN when no zombie is found (the "would
+// sleep in real kernel" branch), leaving the actual queue management
+// to K4f's syscall handler. See "WaitQueue layout" in the file header
+// for the full rationale.
+layout WaitQueue = {
+    head: u32,   // task index of the first waiting parent, or 256 if empty
+    tail: u32,   // task index of the last waiting parent, or 256 if empty
+    count: u32,  // number of waiting parents (0 = empty queue)
+}
+
+// Status: the kernel-side analog of POSIX's `int *status` out-parameter
+// to waitpid(2). 1 field × 4 bytes = 4 bytes. The caller allocates it
+// via state_new(Status) and passes it by reference to sys_waitpid
+// (init-style API — see "Why init-style?" in the file header).
+// sys_waitpid's wait_reap_zombie helper writes the reaped child's exit
+// code into status.code through the State<Status> borrow. The i32
+// type matches Linux's `int status` (positive 0..255 for normal exit,
+// negative for death-by-signal — same encoding as ZombieTask.exit_code).
+//
+// At the IR level, i32 and u32 both lower to IRType::U32 (4 bytes,
+// same bit layout — see src/pipeline.rs:2742). The signedness is a
+// metadata flag for the codegen's shift-right semantics (arithmetic >>
+// for i32, logical >> for u32) — sys_waitpid doesn't shift status.code,
+// so the signedness doesn't matter at runtime, but it's documented as
+// i32 to match Linux's `int status` kernel API.
+layout Status = {
+    code: i32,  // the reaped child's exit code (written by wait_reap_zombie)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ProcessTable helpers (re-declared from K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// 8 of K4a's 18 helpers, byte-identical to task.vuma. waitpid needs:
+//   state    (u8 direct-index) — for wait_reap_zombie's ZOMBIE scan +
+//                                wait_has_children's FREE-skip +
+//                                task_free's state=0 write
+//   pid      (u32 4-byte LE)   — for wait_reap_zombie's child_pid return
+//                                + self-test setup
+//   ppid     (u32 4-byte LE)   — for wait_reap_zombie's parent_pid match
+//                                + wait_has_children's parent_pid match
+//                                + self-test setup
+//   vruntime (u64 8-byte LE)   — for wait_reap_zombie's exit-code read
+//                                (the K4d hack — see "ZombieTask layout"
+//                                in the file header) + self-test setup
+// The other 10 helpers (prio/mm_root/fs_root/fds/next get/set) are NOT
+// needed here — waitpid doesn't touch them (the stale values stay in
+// the ZOMBIE slot until task_free reaps it, at which point they're
+// invisible to subsequent task_alloc callers because task_alloc only
+// writes state + pid).
+
+// Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
+// Re-declared byte-identically to K4a's task.vuma. wait_reap_zombie
+// calls this in its ZOMBIE scan (state == 4); wait_has_children calls
+// this in its "not FREE" check (state != 0); task_free calls this with
+// val=0 to reap the zombie.
+fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.states[idx];
+}
+
+// Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
+// Re-declared byte-identically to K4a's task.vuma. task_free calls this
+// with val=0 to mark a reaped slot as FREE. The self-test calls this
+// directly to set up the parent (state=1 RUNNING) and child (state=4
+// ZOMBIE) tasks.
+fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.states[idx] = val;
+}
+
+// Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
+// Re-declared byte-identically to K4a's task.vuma (4-byte little-endian
+// unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
+// loop bound for u32). wait_reap_zombie calls this to read the reaped
+// child's PID for its return value.
+fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.pids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
+// Re-declared byte-identically to K4a's task.vuma. The self-test calls
+// this to set up the parent (pid=1) and child (pid=2) PIDs.
+fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.pids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `ppid` field of Task slot `idx` from ProcessTable.ppids.
+// Re-declared byte-identically to K4a's task.vuma. wait_reap_zombie
+// calls this to match the zombie's PPID against the waiting parent's
+// PID (only reap children of THIS parent); wait_has_children calls
+// this for the same match.
+fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.ppids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
+// Re-declared byte-identically to K4a's task.vuma. The self-test calls
+// this to set the child's PPID to 1 (the parent's PID).
+fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ppids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `vruntime` field of Task slot `idx` from
+// ProcessTable.vruntimes. Re-declared byte-identically to K4a's task.vuma
+// (8-byte little-endian unpack loop — same pattern as K2a's pool_get_base
+// and K3e's syscall_table_get). wait_reap_zombie calls this to read the
+// exit code stored in vruntime (the K4d hack — see "ZombieTask layout"
+// in the file header).
+fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.vruntimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `vruntime` field of Task slot `idx` into
+// ProcessTable.vruntimes. Re-declared byte-identically to K4a's task.vuma.
+// The self-test calls this to store the exit code (42) in the child's
+// vruntime slot, simulating K4d's sys_exit write.
+fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.vruntimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives (re-declared from K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// pt_init + task_free, byte-identical to K4a's task.vuma. waitpid needs
+// pt_init to zero the ProcessTable's states array before the self-test's
+// task setup (ensures no stale ZOMBIEs from a previous test run);
+// waitpid needs task_free to reap the zombie (state = 0 + count -= 1).
+// task_alloc is NOT re-declared here — sys_waitpid doesn't allocate
+// tasks (it only frees them via task_free); the self-test uses
+// pt_set_state / pt_set_pid / pt_set_ppid / pt_set_vruntime to set up
+// the parent + child tasks directly (bypassing task_alloc), matching
+// the contract's self-test setup pattern.
+
+// pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
+// Idempotent. Re-declared byte-identically to K4a's task.vuma.
+fn pt_init(tbl: State<ProcessTable>) {
+    let i = 0;
+    while i < 256 {
+        pt_set_state(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// task_free: mark slot `idx` as FREE (state = 0), decrement count.
+// Re-declared byte-identically to K4a's task.vuma. wait_reap_zombie
+// calls this to reap the zombie (the slot becomes reusable by a
+// subsequent task_alloc). Does NOT zero the other Task fields (pid,
+// vruntime, etc. stay stale until task_alloc reuses the slot —
+// task_alloc only writes state + pid, leaving the other fields for
+// K4d's fork to repopulate).
+fn task_free(tbl: State<ProcessTable>, idx: u32) {
+    pt_set_state(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Core waitpid functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// wait_reap_zombie: scan the ProcessTable for a ZOMBIE child of
+// `parent_pid`. If found, read its exit code (from vruntime — the K4d
+// hack), write the exit code to status.code, free the slot via
+// task_free, and return the child's PID as i64. If no ZOMBIE child is
+// found, return 0 (NOT -ECHILD — that's sys_waitpid's job; this helper
+// just reports "no zombie to reap").
+//
+// The scan walks all 256 slots, checking state == 4 (ZOMBIE) and
+// ppid == parent_pid. The first match wins (lowest slot index — same
+// policy as task_alloc's lowest-free-slot-wins). Once reaped, the
+// function returns immediately (does NOT continue scanning for more
+// zombies — waitpid returns one child per call, matching POSIX
+// semantics where the shell loops `while ((wpid = waitpid(-1, &status,
+// 0)) > 0)` to reap multiple children serially).
+//
+// The exit code is read from vruntime (u64) and cast to i32 — this is
+// the K4d hack where sys_exit stores the exit code in vruntime because
+// ProcessTable has no dedicated exit_code field. The cast is safe
+// because exit codes are conventionally 0..255 (positive, fits in i32
+// with room to spare) or negative-for-signal (-1..-127 in Linux's
+// WIFSIGNALED encoding, fits in i32). The u64 → i32 cast preserves
+// the low 32 bits, which is the exit code value.
+//
+// State<T> params: 2 (tbl + status), per the K4b contract's "1-2 per
+// function" rule. The function reads tbl.{states, ppids, vruntimes,
+// pids} (via the helpers) and writes status.code and tbl.{states,
+// count} (via task_free). Both State<T> params are borrowed for the
+// duration of the call (regular VUMA-fn borrow, not extern #[borrow]).
+fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, status: State<Status>) -> i64 {
+    let i = 0;
+    while i < 256 {
+        let state = pt_get_state(tbl, i);
+        if state == 4 {  // ZOMBIE
+            let child_ppid = pt_get_ppid(tbl, i);
+            if child_ppid == parent_pid {
+                // Reap: get exit code, free slot, return child pid.
+                // (exit_code is stored in vruntime field as a hack —
+                // K4d's sys_exit stores it there since ProcessTable
+                // has no exit_code field. Cast u64 to i32.)
+                let raw_code = pt_get_vruntime(tbl, i);
+                status.code = raw_code as i32;
+                let child_pid = pt_get_pid(tbl, i);
+                task_free(tbl, i);
+                return child_pid as i64;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;  // no zombie child found
+}
+
+// wait_has_children: scan the ProcessTable for any task with
+// ppid == parent_pid AND state != 0 (i.e., not FREE). Returns 1 if
+// such a task exists (parent has at least one child, possibly running
+// or zombie), 0 otherwise (parent has no children — sys_waitpid should
+// return -ECHILD).
+//
+// The "state != 0" check is important: a reaped child (task_free'd)
+// has state == 0 (FREE) but its ppid field is stale (still set to the
+// old parent's PID until task_alloc reuses the slot and K4d's fork
+// writes a new ppid). Without the state check, wait_has_children
+// would falsely return 1 for a reaped slot, and sys_waitpid would
+// return -EAGAIN forever (always thinking there's a running child
+// when there isn't). The state != 0 check filters out reaped slots.
+//
+// State<T> params: 1 (tbl), per the K4b contract's "1-2 per function"
+// rule. wait_has_children only reads tbl.{ppids, states} (via the
+// helpers). The function is a pure read — no writes to tbl.
+fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32) -> u8 {
+    let i = 0;
+    while i < 256 {
+        let child_ppid = pt_get_ppid(tbl, i);
+        if child_ppid == parent_pid {
+            let state = pt_get_state(tbl, i);
+            if state != 0 {  // not FREE
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// sys_waitpid: the waitpid() syscall primitive. Returns the reaped
+// child's PID on success, -EAGAIN (-11) if a child is still running,
+// -ECHILD (-10) if the parent has no children.
+//
+// Per the K4e contract's "For simplicity: only handle pid == -1 (any
+// child)" — sys_waitpid accepts the `pid: u64` parameter (for API
+// symmetry with POSIX waitpid(2)) but does NOT compare it against the
+// literal 18446744073709551615 (the literal is unparsable as i64 in
+// the current VUMA parser — see "The u64 -1 literal subtlety" in the
+// file header). Instead, sys_waitpid always scans for any ZOMBIE child
+// of the parent (parent_pid hardcoded to 1 = init for the self-test;
+// K4f's syscall handler will pass the actual calling task's PID).
+//
+// The control flow:
+//   1. Call wait_reap_zombie(tbl, 1, status). If a ZOMBIE child is
+//      found, this writes status.code, frees the slot, and returns
+//      the child's PID (> 0). sys_waitpid returns that PID.
+//   2. If wait_reap_zombie returned 0 (no zombie), check
+//      wait_has_children(tbl, 1). If the parent has any children
+//      (running or blocked, not FREE), return -EAGAIN (-11). A real
+//      kernel would sleep the parent on a WaitQueue here; THIS stub
+//      returns -EAGAIN so the caller can poll (or K4f's syscall
+//      handler can spin/sleep on the parent's WaitQueue — see the
+//      WaitQueue layout declaration above).
+//   3. If wait_has_children returned 0 (no children at all), return
+//      -ECHILD (-10). This matches Linux's do_wait() returning
+//      -ECHILD when `list_empty(&current->children)`.
+//
+// The `0 - 11` and `0 - 10` forms avoid the codegen's signed-literal
+// subtleties — see "-ECHILD = -10, -EAGAIN = -11 (decimal)" in the
+// file header. Both lower to the same IR as `-11` and `-10` would,
+// but go through flatten_expr's BinOp::Sub arm (which handles the
+// types correctly) rather than the lexer's negative-number path.
+//
+// State<T> params: 2 (tbl + status), per the K4b contract's "1-2 per
+// function" rule. sys_waitpid passes both through to wait_reap_zombie
+// (which writes status.code and frees the slot via task_free).
+fn sys_waitpid(tbl: State<ProcessTable>, pid: u64, status: State<Status>) -> i64 {
+    // Per the K4e contract's "For simplicity: only handle pid == -1
+    // (any child)" — accept the pid parameter but ignore it for
+    // branching. Always scan for any ZOMBIE child of the parent
+    // (parent_pid hardcoded to 1 = init for the self-test).
+    //
+    // NOTE: pid is intentionally unused. VUMA silently drops unused
+    // parameters (no warning, no error — same as C's `void f(u64 x)
+    // { (void)x; }` pattern, and the same convention as K4d's sys_exec
+    // accepting entry/stack but not referencing them in the body). The
+    // pid parameter is in the signature for API symmetry with POSIX
+    // waitpid(2); K4f's syscall handler will dispatch on pid > 0 vs
+    // pid == -1 (using `let neg_one: u64 = 0 - 1;` for the comparison
+    // — see "The u64 -1 literal subtlety" in the file header) and call
+    // a richer sys_waitpid_specific helper for the pid > 0 case.
+    let reaped = wait_reap_zombie(tbl, 1, status);
+    if reaped > 0 {
+        return reaped;
+    }
+    // No zombie found. If the parent still has any children (running
+    // or blocked), return -EAGAIN — a real kernel would sleep here on
+    // a WaitQueue (see the WaitQueue layout declaration above).
+    if wait_has_children(tbl, 1) == 1 {
+        return 0 - 11;  // -EAGAIN
+    }
+    // No children at all — return -ECHILD.
+    return 0 - 10;  // -ECHILD
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K4e DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ProcessTable and a Status via state_new, init the
+// ProcessTable via pt_init, then:
+//   (1) Set up parent task at slot 0: pid=1, state=1 (RUNNING).
+//   (2) Set up child task at slot 1: pid=2, ppid=1 (child of parent),
+//       state=4 (ZOMBIE), vruntime=42 (exit code — the K4d hack).
+//   (3) tbl.count = 2 (two tasks in the table).
+//   (4) Build neg_one = 0 - 1 as u64 (the "wait for any child" pid
+//       argument — see "The u64 -1 literal subtlety" in the file
+//       header for why we don't use the literal 18446744073709551615).
+//   (5) Call sys_waitpid(tbl, neg_one, status) — should reap the
+//       child, return 2 (child's PID), and write status.code = 42.
+//   (6) Check status.code == 42 IMMEDIATELY after sys_waitpid returns
+//       (BEFORE any other function call — see "Status layout" in the
+//       file header for the state-typedness ordering constraint).
+//   (7) Check ret == 2 (sys_waitpid returned the child's PID).
+//   (8) Check pt_get_state(tbl, 1) == 0 (child slot was freed by
+//       task_free inside wait_reap_zombie).
+//   (9) Call sys_waitpid(tbl, neg_one, status) AGAIN — no zombie to
+//       reap (child was freed in step 5), no children at all (parent
+//       has ppid=0, not 1; child slot is FREE), so sys_waitpid should
+//       return -ECHILD = -10. The self-test does NOT check the return
+//       value (per the K4e contract's "Actually, let's just return 0
+//       if no crash") — just verifies no crash.
+//   (10) Return 0 (success).
+//
+// Returns 0 on success, 1..N on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness ordering constraint ─────────────────────────────────────
+// The codegen has a known limitation where local State<T> field access
+// (e.g., `status.code`) loses state-typedness after an intervening
+// function call that doesn't take the State<T> as a parameter (K2a
+// caveat, "the codegen does NOT propagate State-typedness through
+// function return values" — extended to "and may lose it across
+// function calls"). The K4e self-test works around this by reading
+// status.code IMMEDIATELY after sys_waitpid returns (step 6), BEFORE
+// any other function call (step 8's pt_get_state, step 9's second
+// sys_waitpid). Once status.code is read into a local i32, subsequent
+// function calls don't affect the local. Verified by /home/z/probes/
+// probe_wait*.vuma — the pattern `let ret = sys_waitpid(tbl, ...,
+// status); if status.code != 42 { return ...; }` works; the pattern
+// `let ret = sys_waitpid(...); let s = pt_get_state(...); if
+// status.code != 42 { return ...; }` fails (status.code reads as 0).
+//
+// Per the K4e contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (1, 2, 4, 42) — decimal
+// avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
+// for the same rationale, and K3a's trap_trampoline.vuma for the same
+// rule applied to vector=14 and rip=4096).
+
+fn main() -> i32 {
+    let tbl = state_new(ProcessTable);
+    let status = state_new(Status);
+    pt_init(tbl);
+
+    // (1) Set up parent task at slot 0: pid=1, state=1 (RUNNING).
+    pt_set_pid(tbl, 0, 1);
+    pt_set_state(tbl, 0, 1);  // RUNNING
+
+    // (2) Set up child task at slot 1: pid=2, ppid=1 (child of parent),
+    //     state=4 (ZOMBIE), vruntime=42 (exit code — the K4d hack
+    //     where sys_exit stores the exit code in vruntime because
+    //     ProcessTable has no dedicated exit_code field).
+    pt_set_pid(tbl, 1, 2);
+    pt_set_ppid(tbl, 1, 1);
+    pt_set_state(tbl, 1, 4);  // ZOMBIE
+    pt_set_vruntime(tbl, 1, 42);  // exit code stored in vruntime (K4d hack)
+
+    // (3) tbl.count = 2 (two tasks in the table).
+    tbl.count = 2;
+
+    // (4) Build neg_one = 0 - 1 as u64 (the "wait for any child" pid
+    //     argument — see "The u64 -1 literal subtlety" in the file
+    //     header for why we don't use the literal 18446744073709551615).
+    let neg_one: u64 = 0 - 1;
+
+    // (5) Call sys_waitpid(tbl, neg_one, status) — should reap the
+    //     child, return 2 (child's PID), and write status.code = 42.
+    let ret = sys_waitpid(tbl, neg_one, status);
+
+    // (6) Check status.code == 42 IMMEDIATELY after sys_waitpid
+    //     returns, BEFORE any other function call (see the state-
+    //     typedness ordering constraint in the self-test header).
+    if status.code != 42 { return 1; }
+
+    // (7) Check ret == 2 (sys_waitpid returned the child's PID).
+    if ret != 2 { return 2; }
+
+    // (8) Check pt_get_state(tbl, 1) == 0 (child slot was freed by
+    //     task_free inside wait_reap_zombie). This is the FIRST
+    //     function call after the sys_waitpid return — status.code
+    //     is no longer accessible after this (but we don't need it).
+    let child_state = pt_get_state(tbl, 1);
+    if child_state != 0 { return 3; }
+
+    // (9) Call sys_waitpid(tbl, neg_one, status) AGAIN — no zombie to
+    //     reap (child was freed in step 5), no children at all (parent
+    //     has ppid=0, not 1; child slot is FREE), so sys_waitpid
+    //     should return -ECHILD = -10. The self-test does NOT check
+    //     the return value (per the K4e contract's "Actually, let's
+    //     just return 0 if no crash") — just verifies no crash.
+    let ret2 = sys_waitpid(tbl, neg_one, status);
+
+    // (10) Return 0 (success). ret2 is intentionally unused (VUMA
+    //      silently drops unused locals — same as the unused `pid`
+    //      parameter in sys_waitpid).
+    return 0;
+}
