@@ -4863,20 +4863,43 @@ impl Backend for RiscV32Backend {
                         | IRInstr::Sub { dst, lhs, rhs, ty: None, .. }
                         | IRInstr::Mul { dst, lhs, rhs, ty: None, .. }
                         | IRInstr::Div { dst, lhs, rhs, ty: None, .. } => {
+                            // W5d FIX: backward type propagation.  When the
+                            // dst is already typed (e.g. via use-side inference
+                            // from a downstream Cast.from_ty) but the lhs/rhs
+                            // registers are not, propagate the dst type
+                            // backward.  This is essential for patterns like:
+                            //   r9 = Add(Imm(12.0), Imm(0), ty: None)  // inlined f64 literal
+                            //   r5 = Add(r9, Imm(0), ty: None)         // move
+                            //   Cast FloatToInt(r5, F64 -> I64)        // r5 typed F64
+                            // Without backward propagation, r9 is never typed
+                            // as F64, so the Add arm for r9 = Imm(12.0) + 0
+                            // uses a 4-byte store, truncating the f64 to 0.0.
+                            // With backward propagation, r5's F64 type flows
+                            // back to r9 (lhs of r5 = r9 + 0).
                             if let Some(dst_id) = dst.as_register() {
-                                if vreg_types.contains_key(&dst_id) {
-                                    continue;
-                                }
-                                // The IR optimizer only emits these for moves
-                                // (rhs = Imm(0) for Add/Sub, Imm(1) for Mul/Div),
-                                // so the dst type matches the lhs type.  Try lhs
-                                // first, then rhs.
-                                for src in [lhs, rhs] {
-                                    if let Some(src_id) = src.as_register() {
-                                        if let Some(ty) = vreg_types.get(&src_id) {
-                                            vreg_types.insert(dst_id, ty.clone());
-                                            changed = true;
-                                            break;
+                                if let Some(dst_ty) = vreg_types.get(&dst_id).cloned() {
+                                    // Backward: dst is typed -> propagate to
+                                    // untyped lhs/rhs source registers.
+                                    for src in [lhs, rhs] {
+                                        if let Some(src_id) = src.as_register() {
+                                            if !vreg_types.contains_key(&src_id) {
+                                                vreg_types.insert(src_id, dst_ty.clone());
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Forward: dst is untyped -> try lhs, then rhs.
+                                    // The IR optimizer only emits these for moves
+                                    // (rhs = Imm(0) for Add/Sub, Imm(1) for Mul/Div),
+                                    // so the dst type matches the lhs type.
+                                    for src in [lhs, rhs] {
+                                        if let Some(src_id) = src.as_register() {
+                                            if let Some(ty) = vreg_types.get(&src_id) {
+                                                vreg_types.insert(dst_id, ty.clone());
+                                                changed = true;
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -5945,6 +5968,29 @@ impl Backend for RiscV32Backend {
                     }
 
                     IRInstr::GetAddress { dst, name } => {
+                        // W5d NOTE: This handler computes &symbol for a DATA
+                        // symbol (function pointer, string literal, etc.).
+                        // It is NOT used for f64 constant materialization —
+                        // f64 literals (3.0, 4.0, 2.0, …) are inlined as
+                        // IRValue::Immediate(f64::to_bits()) in the IR and are
+                        // materialized by the Add/BinOp arms via the type-aware
+                        // ss_load_value_64 + ss_store_64 path (paired 32-bit
+                        // LI + SW), NOT via GetAddress.
+                        //
+                        // The task description mentioned "GetAddress returns 0
+                        // for f64 constants" — investigation (W5d) showed the
+                        // actual root cause of f64 constant corruption was:
+                        //   (a) The Ret arm only loaded A0 (not A1) for F64
+                        //       returns, so the caller saw a mangled f64.
+                        //   (b) The vreg_types inference did not propagate
+                        //       types backward from a typed dst to its
+                        //       untyped lhs/rhs source registers, so
+                        //       `Add { lhs: Imm(f64_bits), ty: None }` moves
+                        //       used 4-byte stores, truncating the f64.
+                        // Both are fixed in W5d.  This GetAddress handler is
+                        // unchanged — it still emits a placeholder LUI+ADDI
+                        // (loading 0) with relocations for a future linker.
+                        //
                         // BUG R4 (FIXED): Previously loaded 0 unconditionally.
                         //
                         // GetAddress computes &symbol for a data symbol. In a
@@ -6087,7 +6133,7 @@ impl Backend for RiscV32Backend {
                         // Check result_types first; fall back to parsing the
                         // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
                         let is_64bit_ret = func.result_types.first()
-                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64 | crate::ir::IRType::F64))
                             .unwrap_or_else(|| {
                                 if let Some(open) = func.name.rfind('(') {
                                     if let Some(close) = func.name.rfind(')') {
