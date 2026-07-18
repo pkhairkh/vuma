@@ -240,21 +240,29 @@ fn kmain() -> i32 {
             // cat (99='c')
             if cmd == 99 {
                 // Find file by name in root's children
+                // The filename starts at cbuf.data[4] (after "cat ")
+                // But there might be no space if user typed "cat<file>"
+                // So check: if cbuf.data[3] == 32 (space), filename starts at 4
+                // Otherwise filename starts at 3
+                let fname_start: u32 = 4;
+                if cbuf.data[3] != 32 { fname_start = 3; }
                 let child = dentry_get_child(dentries, 0) as u32;
                 let cur = child;
                 let found_idx = 64;
                 while cur < 64 {
                     if dentry_get_used(dentries, cur) == 1 {
-                        // Compare name (bytes 1..pos from cbuf = filename after "cat ")
+                        // Compare name byte-by-byte
                         let match_ok = 1;
                         let j = 0;
-                        while j < 64 {
+                        while j < 58 {
                             let fn_c = dentry_get_name_byte(dentries, cur, j);
-                            let cmd_c = cbuf.data[j + 4];
+                            let cmd_c = cbuf.data[fname_start + j];
+                            // End of dentry name → file name must also end
                             if fn_c == 0 {
-                                if cmd_c == 0 || cmd_c == 32 { break; }
+                                if cmd_c == 0 { break; }
                                 match_ok = 0; break;
                             }
+                            // End of cmd name → dentry name must also end
                             if cmd_c == 0 { match_ok = 0; break; }
                             if fn_c != cmd_c { match_ok = 0; break; }
                             j = j + 1;
@@ -291,15 +299,25 @@ fn kmain() -> i32 {
                 // Create a new file under root
                 let new_d = dentry_alloc(dentries);
                 if new_d < 64 {
+                    // Zero the name area + 16 bytes past the name
+                    let k = 0;
+                    while k < 64 {
+                        dentry_set_name_byte(dentries, new_d, k, 0);
+                        k = k + 1;
+                    }
                     // Copy name from cbuf (skip "touch ")
                     let j = 0;
-                    while j < 58 {
+                    while j < 50 {
                         let nc = cbuf.data[j + 6];
                         if nc == 0 || nc == 32 { break; }
                         dentry_set_name_byte(dentries, new_d, j, nc);
                         j = j + 1;
                     }
+                    // Aggressive null-termination: write nulls at j, j+1, j+2, j+3
                     dentry_set_name_byte(dentries, new_d, j, 0);
+                    dentry_set_name_byte(dentries, new_d, j + 1, 0);
+                    dentry_set_name_byte(dentries, new_d, j + 2, 0);
+                    dentry_set_name_byte(dentries, new_d, j + 3, 0);
                     dentry_set_used(dentries, new_d, 1);
                     dentry_set_parent(dentries, new_d, 0);
                     // Create inode
@@ -322,27 +340,38 @@ fn kmain() -> i32 {
 
             // mkdir (109='m')
             if cmd == 109 {
-                let new_d = dentry_alloc(dentries);
-                if new_d < 64 {
-                    let j = 0;
-                    while j < 58 {
-                        let nc = cbuf.data[j + 6];
-                        if nc == 0 || nc == 32 { break; }
-                        dentry_set_name_byte(dentries, new_d, j, nc);
-                        j = j + 1;
+                // Check it's "mkdir" not "memstat" — second byte 'k' = 107
+                if pos > 1 {
+                    if cbuf.data[1] == 107 {
+                        let new_d = dentry_alloc(dentries);
+                        if new_d < 64 {
+                            // Zero the name area first
+                            let k = 0;
+                            while k < 64 {
+                                dentry_set_name_byte(dentries, new_d, k, 0);
+                                k = k + 1;
+                            }
+                            let j = 0;
+                            while j < 58 {
+                                let nc = cbuf.data[j + 6];
+                                if nc == 0 || nc == 32 { break; }
+                                dentry_set_name_byte(dentries, new_d, j, nc);
+                                j = j + 1;
+                            }
+                            dentry_set_name_byte(dentries, new_d, j, 0);
+                            dentry_set_used(dentries, new_d, 1);
+                            dentry_set_parent(dentries, new_d, 0);
+                            let new_ino = inode_alloc(inodes);
+                            inode_set_mode(inodes, new_ino, 16384);  // S_IFDIR
+                            dentry_set_inode(dentries, new_d, new_ino as u64);
+                            let old_child = dentry_get_child(dentries, 0);
+                            dentry_set_next(dentries, new_d, old_child);
+                            dentry_set_child(dentries, 0, new_d as u64);
+                            kputs_ok(ec);
+                        } else {
+                            kputs_err(ec);
+                        }
                     }
-                    dentry_set_name_byte(dentries, new_d, j, 0);
-                    dentry_set_used(dentries, new_d, 1);
-                    dentry_set_parent(dentries, new_d, 0);
-                    let new_ino = inode_alloc(inodes);
-                    inode_set_mode(inodes, new_ino, 16384);  // S_IFDIR
-                    dentry_set_inode(dentries, new_d, new_ino as u64);
-                    let old_child = dentry_get_child(dentries, 0);
-                    dentry_set_next(dentries, new_d, old_child);
-                    dentry_set_child(dentries, 0, new_d as u64);
-                    kputs_ok(ec);
-                } else {
-                    kputs_err(ec);
                 }
             }
 
