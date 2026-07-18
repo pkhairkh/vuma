@@ -1,9 +1,0 @@
-VUMA Test Failures — 2026-07-18 10:09:56 UTC
-Total: 9 failures across 5 tests
-Skipped: 0 (architecturally unavailable on target)
-
-  arena_wave0          arena_alloc_parse.vuma                        exp=   0 [('alpha', -4, 'CR'), ('wasm32', 1, 'MM')]
-  arena_wave1          arena_basic.vuma                              exp=  42 [('alpha', -4, 'CR'), ('wasm32', 1, 'MM')]
-  arena_wave1          arena_multiple.vuma                           exp=   0 [('alpha', -4, 'CR'), ('wasm32', 1, 'MM')]
-  arena_wave1          arena_overflow.vuma                           exp=   1 [('alpha', -4, 'CR')]
-  arena_wave2          mixed_static_arena.vuma                       exp=   0 [('alpha', -4, 'CR'), ('wasm32', 1, 'MM')]
