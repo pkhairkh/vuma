@@ -1096,7 +1096,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     }
                     IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         if let Some(IRType::F32) | Some(IRType::F64) = ty {
-                            emit_hppa_fp_binop(op, dst, lhs, rhs, ty, &vreg_stack_slots, code);
+                            emit_hppa_fp_binop(op, dst, lhs, rhs, ty, &vreg_stack_slots, &mut code);
                         } else {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));

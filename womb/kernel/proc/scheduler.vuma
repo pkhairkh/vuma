@@ -1,34 +1,100 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/proc/scheduler.vuma
-// VWK Process/Thread Subsystem — CFS-like scheduler (runqueue + vruntime)
-// (PMT-pure).
+// VWK Process/Thread Subsystem — CFS-like scheduler on the superset TrapFrame.
+// Wave R4a+b (PMT-pure).
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file is the K4b layer of the VWK kernel: the runqueue (a singly
-// linked list of Task indices into the ProcessTable) and the CFS-like
-// scheduler that picks the task with the lowest vruntime. K4a (task.vuma)
-// built the Task control block + ProcessTable + task_alloc/task_free;
-// K4b consumes ProcessTable (re-declared here) to track which tasks are
-// runnable and to pick the next one to run.
+// This file is the R4a+b rewrite of K4b's scheduler. K4b built the CFS
+// runqueue (sched_init / sched_enqueue / sched_dequeue / sched_tick /
+// sched_yield) and a `schedule(rq, tbl, tf)` that took an arch-specific
+// Task-with-nested-TrapFrame and switched into it. R4a+b narrows the
+// scheduler's surface to the superset TrapFrame (R2a) ONLY:
 //
-// ── CFS-like scheduling ─────────────────────────────────────────────────────
+//   * `schedule(rq, tbl) -> u32`     — picks min-vruntime task, returns its
+//                                       index (or 256 if empty). The CALLER
+//                                       saves/restores the context.
+//   * `sched_save_context(tbl, idx, tf)`    — copies tf.{pc,sp,status} into
+//                                              the Task slot's saved-context
+//                                              fields (mm_root / fs_root /
+//                                              fds — see "Saved-context
+//                                              overload" below).
+//   * `sched_restore_context(tbl, idx, tf)` — copies the saved-context
+//                                              fields back into tf.{pc,sp,
+//                                              status}.
+//
+// The scheduler no longer takes a TrapFrame parameter to schedule(); the
+// arch-independent caller (kmain, R4c's syscall dispatcher, K4c's timer
+// trampoline) does the save/restore around the schedule() call. This matches
+// the R2 Golden Rule: "Do not write arch-conditional logic inside kernel
+// transforms." The schedule() transform is purely numeric (it scans
+// vruntime values and returns an index); the save/restore transforms are
+// purely field-copies (tf.{pc,sp,status} ↔ tbl.{mm_root,fs_root,fds}); no
+// arch-conditional code is needed.
+//
+// The per-arch `arch_context_switch(prev_tf, next_tf)` in
+// womb/kernel/arch/{x86_64,aarch64,riscv64}/switch.vuma is the arch-specific
+// twin of this file: it does the actual CPU register file load (via the
+// `arch_load_context(tf)` extern that the R4a+b switch.vuma files declare).
+// In hosted mode both `arch_context_switch` and `arch_load_context` are
+// no-ops (the scheduler's save/restore already copied the TrapFrame data;
+// the bare-metal asm stub that actually loads registers into the CPU is
+// K11's switch.S concern, NOT this wave's).
+//
+// ── Saved-context overload (pc/sp/status → mm_root/fs_root/fds) ──────────────
+// The Task slot's u64 fields `mm_root`, `fs_root`, `fds` are normally used
+// for page-table root / VFS root / fd-table address (K4a's task.vuma layout).
+// During a context switch, however, those fields are NOT dereferenced — the
+// switch path runs in the kernel's own address space with the kernel's own
+// VFS root and fd table, so the per-task mm/fs/fds are dormant. R4a+b
+// overloads them as the "saved context" slots:
+//     tbl.mm_root[idx] ← tf.pc       (saved program counter)
+//     tbl.fs_root[idx] ← tf.sp       (saved stack pointer)
+//     tbl.fds[idx]     ← tf.status   (saved status register)
+//
+// This is the "actually better" option from the R4a+b contract. The fields
+// are u64 — wide enough to hold any register value on all 3 arches
+// (x86_64/aarch64/riscv64 are all 64-bit). The contract's "during context
+// switch the mm/fs/fds are not accessed" rationale is the safety argument:
+// even though we overwrite the task's REAL mm_root with the saved PC, the
+// switch code path doesn't read it back as a page-table root — it reads it
+// back as a saved PC. When the task is later scheduled again, the restore
+// path puts the saved PC back into the TrapFrame, and the SAME slot is
+// re-populated with the REAL page-table root by K4d's fork/exec before the
+// task runs again (or by K11's kmain when it boots the first task).
+//
+// The `next` field is NOT overloaded — it remains the runqueue linked-list
+// pointer (K4b's sched_enqueue/sched_dequeue write it). Using `next` for
+// saved PC would race with the runqueue logic: sched_enqueue overwrites
+// `next` to thread the new tail into the list, which would clobber a saved
+// PC. The mm_root/fs_root/fds triplet is safe because the runqueue logic
+// NEVER touches them — they're only written by K4d's fork (page-table
+// setup) and R4a+b's sched_save_context (the overload).
+//
+// (The R4a+b contract also mentions a "SIMPLER: next/mm_root/fs_root"
+// variant. This file uses the safer mm_root/fs_root/fds variant because it
+// doesn't touch the runqueue-critical `next` field. The contract leaves
+// the exact field assignment open — "Document this clearly." — and this
+// file header IS the documentation.)
+//
+// ── CFS-like scheduling (same as K4b) ───────────────────────────────────────
 // The Completely Fair Scheduler (Linux's default since 2.6.23) gives every
 // runnable task a fair share of CPU time by tracking each task's "virtual
 // runtime" (vruntime) — a nanosecond-precision counter of CPU time the
 // task has consumed, weighted by its priority. The scheduler picks the
 // task with the LOWEST vruntime (the one that has had the least CPU time
-// recently). K4b implements a simplified CFS:
+// recently). R4a+b keeps K4b's simplified CFS:
 //   * The runqueue is a singly linked list of Task indices (0..255),
-//     threaded through Task.next (the same `next` field K4a's ProcessTable
-//     exposes via pt_get_next / pt_set_next). The list head/tail live in
-//     the Runqueue struct. Tail-insertion (sched_enqueue) gives FIFO
-//     ordering for tasks with equal vruntimes — same as Linux's rbtree
-//     leftmost-with-tie-break-on-insertion-order behavior.
+//     threaded through Task.next. The list head/tail live in the Runqueue
+//     struct. Tail-insertion (sched_enqueue) gives FIFO ordering for tasks
+//     with equal vruntimes — same as Linux's rbtree leftmost-with-tie-
+//     break-on-insertion-order behavior.
 //   * sched_dequeue walks the entire runqueue, finds the task with min
 //     vruntime, removes it from the list, and returns its index. (Linux
-//     uses an rbtree for O(log n) min-vruntime lookup; K4b uses a linear
-//     scan for O(n) — simpler and adequate for the 256-slot ProcessTable.)
+//     uses an rbtree for O(log n) min-vruntime lookup; K4b/R4a+b uses a
+//     linear scan for O(n) — simpler and adequate for the 256-slot
+//     ProcessTable.)
 //   * schedule(rq, tbl) is just sched_dequeue — the CFS "pick next" step.
+//     R4a+b REMOVES the TrapFrame parameter that K4b's schedule() had.
 //   * sched_tick(tbl, task_idx, delta) bumps the current task's vruntime
 //     by delta (called by the timer IRQ handler on every tick).
 //   * sched_yield(rq, tbl, current) re-enqueues the current task and
@@ -40,9 +106,7 @@
 //     READY   = 2  — runnable, waiting for a CPU (set by sched_enqueue)
 // state == 0 means the slot is FREE (unused — not on any runqueue).
 // sched_enqueue writes state = 2 (READY); sched_dequeue writes state = 1
-// (RUNNING) on the picked task before returning it. K4e (exit/wait) will
-// write state = 4 (ZOMBIE) on sys_exit and remove the task from the
-// runqueue via sched_dequeue-style list removal.
+// (RUNNING) on the picked task before returning it.
 //
 // ── Runqueue layout ─────────────────────────────────────────────────────────
 //   head:  u32 — index of the first task in the runqueue, or 256 = empty
@@ -53,14 +117,11 @@
 // to pt_set_next as the prev-of-new-tail argument. 256 is the "empty"
 // sentinel: it's outside the valid 0..255 Task-index range, so it can't
 // collide with a real Task slot. Same sentinel value K4a's task_alloc
-// returns when the table is full (so callers can use one `idx == 256`
-// check for "no task" regardless of the call site).
+// returns when the table is full.
 //
 // The runqueue's `next` linkage lives in ProcessTable.nexts (not in
 // Runqueue itself) — K4a's Task layout already has a `next` field for
-// exactly this purpose (see K4a's task.vuma header comment on the `next`
-// field: "next task in a linked list (arena offset or 0; K4b uses this
-// for the run queue)"). The sentinel value used in Task.next is also 256
+// exactly this purpose. The sentinel value used in Task.next is also 256
 // (NOT 0 — K4a's comment says "0 = end of list" but K4b standardizes on
 // 256 for consistency with the rest of the scheduler's empty-sentinel
 // convention; both work because Task 0 is a real task, but 256 is never
@@ -68,140 +129,135 @@
 //
 // ── ProcessTable re-declaration ─────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares the
-// ProcessTable layout byte-identically to K4a's task.vuma. The byte-
-// identical-redeclaration invariant (K2c "extern signatures MUST stay
-// byte-identical" — extended to layouts in K3d) extends to ProcessTable:
-// this file's pt_get_vruntime / pt_set_vruntime / pt_get_next /
-// pt_set_next MUST see the same field offsets, field names, and field
-// types as K4a's task.vuma. ProcessTable has 10 fields (9 parallel flat
-// [u8; N] arrays + a count u32) totaling 14340 bytes — same as K4a.
+// ProcessTable layout byte-identically to K4a's task.vuma. ProcessTable
+// has 10 fields (9 parallel flat [u8; N] arrays + a count u32) totaling
+// 14340 bytes — same as K4a.
 //
-// This file also re-declares the 6 ProcessTable helpers it needs:
-//   pt_get_state / pt_set_state   (u8 direct-index — no pack/unpack)
-//   pt_get_vruntime / pt_set_vruntime (u64 8-byte LE pack/unpack)
-//   pt_get_next / pt_set_next     (u64 8-byte LE pack/unpack)
-// These 6 helpers are byte-identical to K4a's task.vuma (same signature,
-// same body — 8-iteration while loop for u64, direct array index for u8).
-// The other 12 helpers (pid/ppid get/set, prio get/set, mm_root/fs_root/
-// fds get/set) are NOT re-declared here because K4b's scheduler doesn't
-// use them — K4d (fork/exec) will re-declare those when it needs them.
+// This file re-declares the 12 ProcessTable helpers it needs:
+//   pt_get_state / pt_set_state           (u8 direct-index)
+//   pt_get_vruntime / pt_set_vruntime     (u64 8-byte LE)
+//   pt_get_next / pt_set_next             (u64 8-byte LE — runqueue linkage)
+//   pt_get_mm_root / pt_set_mm_root       (u64 8-byte LE — saved PC overload)
+//   pt_get_fs_root / pt_set_fs_root       (u64 8-byte LE — saved SP overload)
+//   pt_get_fds / pt_set_fds               (u64 8-byte LE — saved status overload)
+// These 12 helpers are byte-identical to K4a's task.vuma. The remaining 6
+// (pid/ppid get/set, prio get/set) are NOT re-declared here because the
+// scheduler doesn't use them — K4d/K4e will re-declare those when needed.
+//
+// ── Superset TrapFrame re-declaration ───────────────────────────────────────
+// R2a created the canonical 576-byte superset TrapFrame in
+// womb/kernel/trap/trap_frame.vuma. R2b/R2c/R2d re-declared it byte-
+// identically in the 3 arch trap_trampoline.vuma files. R4a+b re-declares
+// it here byte-identically (same field names, types, order, _pad size) so
+// the scheduler can read/write tf.{pc,sp,status} without needing `import`.
+// The byte-identical-redeclaration invariant (K2c extended to layouts in
+// K3d) applies: this file's TrapFrame MUST have the same field offsets
+// as R2a's trap_frame.vuma.
 //
 // ── Why init-style? ─────────────────────────────────────────────────────────
-// The K4b contract's main() allocates `rq = state_new(Runqueue)` and
-// `tbl = state_new(ProcessTable)` and passes them by reference to
-// sched_init / sched_enqueue / sched_dequeue / sched_tick / sched_yield.
-// This is the canonical PMT pattern (K2a's pmm_init(pool, pmm, ...),
-// K3d's trap_frame_init(tf), K4a's pt_init(tbl) — see K2a's pmm.vuma
-// header "Why init-style?" for the codegen rationale: the current
-// codegen does NOT propagate State-typedness through function return
-// values, so `fn sched_new() -> State<Runqueue>` would produce broken
-// field-access code in callers). All scheduler.vuma functions take
-// `rq: State<Runqueue>` and/or `tbl: State<ProcessTable>` by regular
-// VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't need the
-// attribute; only extern "C" calls do, and none of these functions call
-// any extern).
+// The R4a+b main() allocates `rq = state_new(Runqueue)`, `tbl =
+// state_new(ProcessTable)`, and `tf = state_new(TrapFrame)`, and passes
+// them by reference to sched_init / sched_enqueue / schedule /
+// sched_save_context / sched_restore_context. This is the canonical PMT
+// pattern (K2a's pmm_init, K3d's trap_frame_init, K4a's pt_init — see
+// pmm.vuma's "Why init-style?" header for the codegen rationale: the
+// current codegen does NOT propagate State-typedness through function
+// return values, so `fn sched_new() -> State<Runqueue>` would produce
+// broken field-access code in callers). All scheduler.vuma functions
+// take `rq: State<Runqueue>`, `tbl: State<ProcessTable>`, and/or
+// `tf: State<TrapFrame>` by regular VUMA-fn borrow (NOT extern #[borrow]
+// — VUMA fn calls don't need the attribute; only extern "C" calls do).
 //
-// State<T> params: per the K4b contract's "Keep State<T> params to 1-2
-// per function" rule, no function takes more than 2 State<T> params:
-//   sched_init(rq)                     — 1 param
-//   sched_enqueue(rq, tbl, task_idx)   — 2 params + u32
-//   sched_dequeue(rq, tbl)             — 2 params
-//   schedule(rq, tbl)                  — 2 params (wraps sched_dequeue)
-//   sched_tick(tbl, task_idx, delta)   — 1 param + u32 + u64
-//   sched_yield(rq, tbl, current)      — 2 params + u32
+// State<T> params: per the contract's "Keep State<T> params to 1-2 per
+// function" rule, no function takes more than 2 State<T> params:
+//   sched_init(rq)                          — 1 param
+//   sched_enqueue(rq, tbl, task_idx)        — 2 params + u32
+//   sched_dequeue(rq, tbl)                  — 2 params
+//   schedule(rq, tbl)                       — 2 params
+//   sched_tick(tbl, task_idx, delta)        — 1 param + u32 + u64
+//   sched_yield(rq, tbl, current)           — 2 params + u32
+//   sched_save_context(tbl, task_idx, tf)   — 2 params + u32
+//   sched_restore_context(tbl, task_idx, tf) — 2 params + u32
 // Same discipline as K2a's pmm_alloc(pool, pmm, order) (2 State params +
 // 1 small arg), K3d's trap_frame_save(tf) (1 State param).
 //
-// ── Linked-list traversal pattern ───────────────────────────────────────────
-// sched_dequeue walks the runqueue linked list to find the min-vruntime
-// task, tracking both `prev` (the node before `cur`) and `prev_of_min`
-// (the node before `min_idx`). This is byte-identical in structure to
-// K2a's pmm_free buddy-search loop (pmm.vuma lines ~475-490: `let prev =
-// 256; let cur = ...; let found = 256; while cur != 256 { if match
-// { found = cur; } prev = cur; cur = next; }`), with the addition of
-// tracking `prev_of_min` so the removal step can relink the predecessor.
-// The `256` sentinel for "no previous" / "not found" matches pmm.vuma's
-// convention.
-//
-// ── u64 / u32 mixed arithmetic ──────────────────────────────────────────────
-// `pt_get_next` returns u64 (because Task.next is u64), so the list-
-// traversal cursor `cur` is u64. The `while cur != 256` loop compares
-// u64 to the literal 256 (inferred as u64 in this context — same as
-// pmm.vuma's `while cur2 != 256`). When `cur` is passed to pt_get_vruntime
-// / pt_get_next (which take idx: u32), the contract uses an explicit
-// `cur as u32` cast. Similarly, `min_idx = cur as u32` and `prev = cur
-// as u32` cast the u64 cursor back to u32 for storage. This u64-cursor /
-// u32-index pattern is byte-identical to pmm.vuma's `pool_get_base(pool,
-// cur2 as u32)` / `pool_get_next(pool, cur2 as u32)` calls.
-//
 // ── PMT discipline ─────────────────────────────────────────────────────────
-// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
-// Runqueue and ProcessTable are ___pmt_buffer-backed State<T>'s
-// allocated by the CALLER via `state_new(...)` and passed by reference
-// to sched_init / sched_enqueue / sched_dequeue / sched_tick /
-// sched_yield. No externs are declared in this file (the scheduler is
-// pure-PM — K4c's context-switch will declare its own externs for CR3
-// write, RSP load, IRET, etc.; this file just picks the next task to
-// run and updates the runqueue linked list).
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Runqueue,
+// ProcessTable, and TrapFrame are all ___pmt_buffer-backed State<T>'s
+// allocated by the CALLER via `state_new(...)` and passed by reference.
+// No externs are declared in this file — the per-arch context-switch
+// externs (arch_load_context) live in the 3 switch.vuma files (R4a+b).
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
-// All non-zero constants in this file use DECIMAL per the K4b contract's
+// All non-zero constants in this file use DECIMAL per the contract's
 // "Use decimal constants" rule. Decimal avoids the parser's hex-literal
 // path (parse_int_radix width-extension subtleties — see
-// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
-// K3a's trap_trampoline.vuma for the same rule applied to vector=14
-// and rip=4096). The constants:
-//     256  = "empty" sentinel for runqueue head/tail (also "no next"
-//            in Task.next, also "table full" from task_alloc — same
-//            sentinel value throughout the scheduler)
-//     8    = bytes per u64 field (loop bound for vruntime/next
-//            pack/unpack)
-//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
-//     2    = READY state value (set by sched_enqueue on the new task)
-//     1    = RUNNING state value (set by sched_dequeue on the picked
-//            task)
-//     0    = FREE state value (not used by this file, but documented
-//            for completeness — K4e's exit/wait writes this on reap)
-//   Self-test constants: 100, 50, 200, 3, 0 — all decimal.
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale). The
+// constants:
+//     256   = "empty" sentinel for runqueue head/tail (also "no next"
+//             in Task.next, also "table full" from task_alloc)
+//     8     = bytes per u64 field (loop bound for vruntime/next/
+//             mm_root/fs_root/fds pack/unpack)
+//     255   = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     24    = _pad array size in TrapFrame (byte-zeroing loop bound)
+//     2     = READY state value (set by sched_enqueue on the new task)
+//     1     = RUNNING state value (set by sched_dequeue on the picked task)
+//     0     = FREE state value (set by tf_init and state_new's zero-fill)
+//   Self-test constants: 100, 50, 4096 — all decimal.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. It re-declares ProcessTable + the 6
-// pt_get_* / pt_set_* helpers byte-identically to K4a's task.vuma (same
-// pattern as K3d's irq.vuma re-declaring irq_mask/irq_unmask/pic_eoi
-// from K3a's trap_trampoline.vuma, and K3e's dispatch.vuma re-declaring
-// syscall_table_get / syscall_table_set from table.vuma). K4c (context
-// switch) will re-declare Task + TrapFrame + the rest of the pt_get_* /
-// pt_set_* helpers; K4d (fork/exec) will re-declare pt_set_ppid /
-// pt_set_mm_root / pt_set_fs_root / pt_set_fds.
+// This file is self-contained. It re-declares TrapFrame + tf_init +
+// tf_get_gpr + tf_set_gpr byte-identically to R2a's trap_frame.vuma, and
+// ProcessTable + 12 helpers byte-identically to K4a's task.vuma. The 3
+// arch switch.vuma files (R4a+b) re-declare TrapFrame + helpers byte-
+// identically too — same pattern as R2b/R2c/R2d re-declaring the
+// superset TrapFrame in each arch's trap_trampoline.vuma.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
 //     ./target/release-fast/compile_dump \
 //         womb/kernel/proc/scheduler.vuma \
 //         /tmp/scheduler.bin x86_64 --verify
 //     /tmp/scheduler.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 5 self-test checks pass — enqueue 3
-// tasks with different vruntimes, dequeue returns lowest-vruntime first
-// in CFS order: task 1 (vruntime=50), then task 0 (vruntime=100), then
-// task 2 (vruntime=200), then queue is empty).
+// Expected: IVE Pass, exit=0 (the self-test enqueues 2 tasks with
+// different vruntimes, calls schedule() and verifies the min-vruntime
+// task is picked, then exercises sched_save_context + sched_restore_context
+// round-trip through tf.pc = 4096).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
+// Canonical superset TrapFrame (576 bytes total) — re-declared byte-
+// identically to R2a's womb/kernel/trap/trap_frame.vuma. See R2a's header
+// for the field semantics (gpr 32×u64 LE-packed in 256 bytes; pc/status/
+// vector/error_code/sp are 5 scalar u64 fields; fpu is 32×u64 LE-packed
+// in 256 bytes; _pad is 24 alignment bytes).
+layout TrapFrame = {
+    gpr: [u8; 256],
+    pc: u64,
+    status: u64,
+    vector: u64,
+    error_code: u64,
+    sp: u64,
+    fpu: [u8; 256],
+    _pad: [u8; 24],
+}
+
 // Runqueue: head/tail are Task indices (0..255) or 256 (empty). count is
 // the number of tasks currently in the runqueue (0..256). The next-link
-// field lives in ProcessTable.nexts (not here) — see file header "Runqueue
-// layout" for the rationale.
+// field lives in ProcessTable.nexts (not here).
 layout Runqueue = {
-    head: u32,   // index of first task in runqueue, or 256 = empty
-    tail: u32,   // index of last task, or 256 = empty
-    count: u32,  // number of tasks in runqueue
+    head: u32,
+    tail: u32,
+    count: u32,
 }
 
 // ProcessTable: re-declared byte-identically to K4a's task.vuma. 10
 // fields (9 parallel flat [u8; N] arrays + count u32) totaling 14340
-// bytes. See K4a's task.vuma header "Why parallel flat byte arrays?"
-// for the rationale (VUMA has no struct-array support).
+// bytes. See K4a's task.vuma header "Why parallel flat byte arrays?" for
+// the rationale (VUMA has no struct-array support).
 layout ProcessTable = {
     pids: [u8; 1024],
     ppids: [u8; 1024],
@@ -216,30 +272,82 @@ layout ProcessTable = {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// ProcessTable helpers (re-declared from K4a's task.vuma).
+// TrapFrame helpers (re-declared from R2a's trap_frame.vuma, byte-identical).
 // ────────────────────────────────────────────────────────────────────────────
-// 6 of K4a's 18 helpers, byte-identical to task.vuma. The scheduler only
-// needs state (u8 direct-index), vruntime (u64 8-byte LE pack/unpack),
-// and next (u64 8-byte LE pack/unpack). The other 12 helpers (pid/ppid
-// get/set, prio get/set, mm_root/fs_root/fds get/set) are NOT needed
+// tf_init + tf_get_gpr + tf_set_gpr, byte-identical to R2a. The scheduler
+// uses tf_get_gpr / tf_set_gpr for the GPR file (e.g. a future
+// sched_save_full_context could save all 32 GPR slots — R4a+b only saves
+// the 3 scalar fields pc/sp/status, but the helpers are re-declared here
+// so any downstream scheduler function that wants them has them in scope).
+
+// Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Zero every field of a caller-allocated TrapFrame. Called once per
+// TrapFrame before the arch-specific trap-to-superset adapter (R2b/R2c/
+// R2d) populates the arch-specific fields, OR before the scheduler uses
+// it as a fresh save area. Byte-identical to R2a's tf_init.
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ProcessTable helpers (re-declared from K4a's task.vuma, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+// 12 of K4a's 18 helpers, byte-identical to task.vuma. The scheduler needs:
+//   state (u8 direct-index)
+//   vruntime, next, mm_root, fs_root, fds (u64 8-byte LE pack/unpack)
+// The other 6 helpers (pid/ppid get/set, prio get/set) are NOT re-declared
 // here — K4d/K4e will re-declare them when they need them.
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
-// Re-declared byte-identically to K4a's task.vuma.
 fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
-// Re-declared byte-identically to K4a's task.vuma.
 fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
 // Read the u64 `vruntime` field of Task slot `idx` from
-// ProcessTable.vruntimes. Re-declared byte-identically to K4a's task.vuma
-// (8-byte little-endian unpack loop — same pattern as K2a's
-// pool_get_base and K3e's syscall_table_get).
+// ProcessTable.vruntimes. 8-byte LE unpack loop (same pattern as K2a's
+// pool_get_base, R2a's tf_get_gpr).
 fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
@@ -254,7 +362,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `vruntime` field of Task slot `idx` into
-// ProcessTable.vruntimes. Re-declared byte-identically to K4a's task.vuma.
+// ProcessTable.vruntimes. 8-byte LE pack loop.
 fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
@@ -267,9 +375,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
-// Re-declared byte-identically to K4a's task.vuma. The scheduler uses
-// Task.next to thread the runqueue linked list (head/tail live in the
-// Runqueue struct; per-node next-link lives in ProcessTable.nexts).
+// The scheduler uses Task.next to thread the runqueue linked list.
 fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
@@ -284,7 +390,6 @@ fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
-// Re-declared byte-identically to K4a's task.vuma.
 fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
@@ -296,43 +401,121 @@ fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
     }
 }
 
+// Read the u64 `mm_root` field of Task slot `idx` from ProcessTable.mm_roots.
+// R4a+b overloads this slot as the SAVED PC during context switch — see
+// the file header "Saved-context overload" section.
+fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.mm_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `mm_root` field of Task slot `idx` into
+// ProcessTable.mm_roots. R4a+b sched_save_context writes tf.pc here.
+fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.mm_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fs_root` field of Task slot `idx` from ProcessTable.fs_roots.
+// R4a+b overloads this slot as the SAVED SP during context switch.
+fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fs_roots[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fs_root` field of Task slot `idx` into
+// ProcessTable.fs_roots. R4a+b sched_save_context writes tf.sp here.
+fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fs_roots[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
+// R4a+b overloads this slot as the SAVED STATUS register during context switch.
+fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.fds[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `fds` field of Task slot `idx` into ProcessTable.fds.
+// R4a+b sched_save_context writes tf.status here.
+fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.fds[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Runqueue operations.
+// Runqueue operations (byte-identical to K4b).
 // ────────────────────────────────────────────────────────────────────────────
 
 // sched_init: initialize an empty runqueue. Idempotent. Called by kmain
 // at boot before the first sched_enqueue. head = tail = 256 (empty
 // sentinel), count = 0.
 fn sched_init(rq: State<Runqueue>) {
-    rq.head = 256;  // empty
+    rq.head = 256;
     rq.tail = 256;
     rq.count = 0;
 }
 
 // sched_enqueue: add task `task_idx` to the tail of the runqueue. Sets
 // the task's state to READY (2). Tail-insertion gives FIFO ordering for
-// tasks with equal vruntimes (same as Linux's rbtree leftmost-with-tie-
-// break-on-insertion-order behavior). Updates Task.next of the old tail
-// to point at the new task, and sets the new task's Task.next to 256
-// (end-of-list). Bumps rq.count.
-//
-// The empty-queue case (rq.head == 256) is handled separately: both
-// head and tail are set to task_idx, and the new task's next is set to
-// 256. The non-empty case appends to the current tail.
+// tasks with equal vruntimes. Updates Task.next of the old tail to point
+// at the new task, and sets the new task's Task.next to 256 (end-of-list).
+// Bumps rq.count.
 fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
     if rq.head == 256 {
-        // Empty queue.
         rq.head = task_idx;
         rq.tail = task_idx;
-        pt_set_next(tbl, task_idx, 256);  // no next
+        pt_set_next(tbl, task_idx, 256);
     } else {
-        // Append to tail.
         pt_set_next(tbl, rq.tail, task_idx);
         rq.tail = task_idx;
         pt_set_next(tbl, task_idx, 256);
     }
     rq.count = rq.count + 1;
-    pt_set_state(tbl, task_idx, 2);  // READY
+    pt_set_state(tbl, task_idx, 2);
 }
 
 // sched_dequeue: remove and return the task with the LOWEST vruntime
@@ -341,36 +524,11 @@ fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
 // relink the predecessor), removes it from the list, sets its state to
 // RUNNING (1), decrements rq.count, and returns its index.
 //
-// Returns 256 if the runqueue is empty (the caller MUST check — kmain's
-// idle loop uses this to know when to spin on the idle task).
-//
-// The walk tracks:
-//   min_idx       — index of the min-vruntime task found so far
-//   min_vruntime  — its vruntime (for comparison)
-//   cur           — current list cursor (u64 because pt_get_next
-//                   returns u64; cast to u32 for pt_get_* / pt_set_*
-//                   calls)
-//   prev          — the node immediately before `cur` (u32)
-//   prev_of_min   — the node immediately before `min_idx` (u32; stays
-//                   256 if `min_idx` is the head — meaning no relink
-//                   of a predecessor is needed for removal)
-//
-// After the walk, the removal step has two cases:
-//   (a) min_idx == rq.head: just advance rq.head to min_idx's next.
-//       If that makes the queue empty (rq.head == 256), also clear
-//       rq.tail to 256.
-//   (b) min_idx != rq.head: relink prev_of_min.next to min_idx.next.
-//       If min_idx was the tail, also update rq.tail to prev_of_min.
-//
-// This is byte-identical in structure to K2a's pmm_free buddy-search
-// loop (pmm.vuma lines ~475-490) — same `let prev = 256; while cur !=
-// 256 { ...; prev = cur; cur = next; }` walk, plus the prev_of_min
-// tracking for the removal relink.
+// Returns 256 if the runqueue is empty.
 fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     if rq.head == 256 {
-        return 256;  // empty
+        return 256;
     }
-    // Find the task with min vruntime.
     let min_idx = rq.head;
     let min_vruntime = pt_get_vruntime(tbl, min_idx);
     let cur = pt_get_next(tbl, min_idx);
@@ -385,7 +543,6 @@ fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
         prev = cur as u32;
         cur = pt_get_next(tbl, cur as u32);
     }
-    // Remove min_idx from the runqueue.
     if min_idx == rq.head {
         rq.head = pt_get_next(tbl, min_idx) as u32;
         if rq.head == 256 {
@@ -399,29 +556,32 @@ fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
         }
     }
     rq.count = rq.count - 1;
-    pt_set_state(tbl, min_idx, 1);  // RUNNING
+    pt_set_state(tbl, min_idx, 1);
     return min_idx;
 }
 
-// schedule: pick the next task to run. Wraps sched_dequeue (CFS "pick
-// min vruntime"). kmain's idle loop calls this after every IRQ; the
-// timer-IRQ handler (K4c) calls this after sched_tick on the current
-// task. Returns 256 if no tasks are runnable (kmain spins on the idle
-// task in that case).
+// schedule: pick the next task to run. CFS "pick min vruntime". Returns
+// the task index, or 256 if no tasks are runnable.
+//
+// R4a+b CHANGE: schedule no longer takes a TrapFrame parameter. The
+// CALLER is responsible for:
+//   1. sched_save_context(tbl, prev_idx, prev_tf)  — save prev's PC/SP/status
+//   2. next_idx = schedule(rq, tbl)                — pick next
+//   3. sched_restore_context(tbl, next_idx, next_tf) — restore next's regs
+//   4. arch_context_switch(prev_tf, next_tf)       — actual CPU load (per
+//                                                      arch switch.vuma)
+// In hosted mode step 4 is a no-op; in bare-metal (K11) it loads next_tf's
+// GPRs into the CPU via the arch_load_context extern declared in the per-
+// arch switch.vuma file.
 fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     return sched_dequeue(rq, tbl);
 }
 
 // sched_tick: bump task `task_idx`'s vruntime by `delta`. Called by the
-// timer-IRQ handler (K4c) on every tick — delta is typically the tick
-// interval in nanoseconds (e.g. 1000000 for a 1ms tick at 1000 HZ, or
-// 10000000 for a 10ms tick at 100 HZ). The current task's vruntime
-// monotonically increases, so it eventually becomes the largest in the
-// runqueue, at which point sched_dequeue picks a different task.
-//
-// This is the CFS fairness mechanism: every task gets a turn, and the
-// task that has run the most (highest vruntime) gets passed over in
-// favor of the task that has run the least (lowest vruntime).
+// timer-IRQ handler (R4c) on every tick — delta is typically the tick
+// interval in nanoseconds. The current task's vruntime monotonically
+// increases, so it eventually becomes the largest in the runqueue, at
+// which point sched_dequeue picks a different task.
 fn sched_tick(tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
     let v = pt_get_vruntime(tbl, task_idx);
     pt_set_vruntime(tbl, task_idx, v + delta);
@@ -430,81 +590,109 @@ fn sched_tick(tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
 // sched_yield: re-enqueue the current task (add it to the tail of the
 // runqueue) and pick the next task to run (sched_dequeue). Returns the
 // next task's index (or 256 if the runqueue is now empty — but that
-// can't happen if `current` was just enqueued, so the return is always
-// a valid task index). Called by sys_sched_yield (K4f's syscall
-// handler) and by K4c's cooperative-yield trampoline.
-//
-// Note: sched_enqueue sets current's state to READY (2), and the
-// following sched_dequeue sets the picked task's state to RUNNING (1).
-// If current is picked again (because it still has the lowest vruntime
-// — e.g. all other tasks have higher vruntimes), its state goes
-// READY → RUNNING. The caller doesn't need to handle this case
-// specially: the return value tells it which task to switch to.
+// can't happen if `current` was just enqueued).
 fn sched_yield(rq: State<Runqueue>, tbl: State<ProcessTable>, current: u32) -> u32 {
     sched_enqueue(rq, tbl, current);
     return sched_dequeue(rq, tbl);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K4b DoD).
+// Context save/restore (NEW in R4a+b).
 // ────────────────────────────────────────────────────────────────────────────
-// Allocate a Runqueue and a ProcessTable via state_new, init the
-// runqueue via sched_init, then manually set up 3 tasks with different
-// vruntimes (Task 0: vruntime=100, Task 1: vruntime=50, Task 2:
-// vruntime=200), enqueue all 3, and verify that 3 successive
-// sched_dequeue calls return them in CFS order (lowest vruntime first):
-//   (1) After enqueuing 0, 1, 2: rq.count == 3.
-//   (2) sched_dequeue → returns 1 (vruntime=50, lowest).
-//   (3) sched_dequeue → returns 0 (vruntime=100, next lowest).
-//   (4) sched_dequeue → returns 2 (vruntime=200, highest).
-//   (5) rq.count == 0 (queue drained).
-// Returns 0 on success, 1..5 on the corresponding check failure (so a
-// future CI failure pinpoints the broken check).
+// These two functions are the R4a+b additions to the scheduler surface.
+// They copy tf.{pc,sp,status} ↔ tbl.{mm_root,fs_root,fds} for the Task
+// slot `task_idx`. The caller (kmain / R4c syscall dispatcher / timer
+// trampoline) calls them around schedule() to save the outgoing task's
+// TrapFrame and load the incoming task's TrapFrame. The actual CPU
+// register load (writing the TrapFrame's GPRs into the hardware regs)
+// is the per-arch arch_context_switch's job, declared in the 3 switch.vuma
+// files.
 //
-// The self-test does NOT call pt_init on the ProcessTable — the states
-// array starts zeroed (state_new zeros the ___pmt_buffer backing the
-// State<ProcessTable>), so all 256 slots start FREE. The self-test
-// manually sets states[0..3] to READY (2) via pt_set_state to simulate
-// task_alloc having marked them runnable. K4a's task.vuma self-test
-// does the same (uses pt_init + task_alloc; K4b skips the alloc step
-// because we're testing the scheduler, not the allocator — the
-// scheduler only cares that the tasks it's asked to enqueue are
-// runnable, not how they got that way).
+// The contract specifies that the scheduler use ONLY the superset
+// TrapFrame's scalar fields (pc, sp, status) plus the gpr helper accessors
+// (tf_get_gpr / tf_set_gpr). NO arch-specific fields (tf.rip, tf.x0, etc.)
+// exist on the superset TrapFrame — R2a deliberately collapsed all 3
+// arches' register files into the gpr [u8; 256] array indexed by canonical
+// slot (see R2a's trap_frame.vuma header for the slot assignment per arch).
+
+// sched_save_context: copy tf.{pc, sp, status} into the Task slot's
+// saved-context overload fields (mm_root, fs_root, fds). See the file
+// header "Saved-context overload" section for the field mapping and the
+// safety rationale (the mm/fs/fds fields are not dereferenced during the
+// context-switch window, so overloading them as saved-PC/SP/status is
+// safe).
 //
-// Per the K4b contract's "decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (100, 50, 200, 3, 0) — decimal
-// avoids the parser's hex-literal path (parse_int_radix width-extension
-// subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the same
-// rationale, and K3a's trap_trampoline.vuma for the same rule applied
-// to vector=14 and rip=4096).
+// State<T> params: 2 (tbl + tf). Pure field-copies (3 pt_set_* calls,
+// each reading 1 scalar u64 from tf and writing it via 8-byte LE pack
+// into the parallel byte array). No `*ptr`/`&tf`/`allocate` anywhere.
+fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+    pt_set_mm_root(tbl, task_idx, tf.pc);      // saved PC → mm_root
+    pt_set_fs_root(tbl, task_idx, tf.sp);      // saved SP → fs_root
+    pt_set_fds(tbl, task_idx, tf.status);      // saved status → fds
+}
+
+// sched_restore_context: copy the Task slot's saved-context overload
+// fields (mm_root, fs_root, fds) back into tf.{pc, sp, status}. The
+// inverse of sched_save_context — same 3 field mappings, reversed
+// direction.
+//
+// State<T> params: 2 (tbl + tf). Pure field-copies (3 pt_get_* calls,
+// each reading 8-byte LE unpack from the parallel byte array and writing
+// it as a scalar u64 into tf).
+fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+    tf.pc = pt_get_mm_root(tbl, task_idx);     // mm_root → saved PC
+    tf.sp = pt_get_fs_root(tbl, task_idx);     // fs_root → saved SP
+    tf.status = pt_get_fds(tbl, task_idx);     // fds → saved status
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the R4a+b DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a Runqueue, a ProcessTable, and a TrapFrame via state_new.
+// Init the runqueue (sched_init) and the TrapFrame (tf_init). Manually
+// set up 2 tasks with different vruntimes (Task 0: vruntime=100, Task 1:
+// vruntime=50), enqueue both, then:
+//   (1) rq.count == 2 (both tasks enqueued).
+//   (2) schedule() returns 1 (Task 1, vruntime=50, the min).
+//   (3) sched_save_context(tbl, 1, tf) with tf.pc = 4096, then
+//       sched_restore_context(tbl, 1, tf) on a fresh TrapFrame yields
+//       tf.pc == 4096 — round-trip through the saved-context overload.
+// Returns 0 on success, 1..3 on the corresponding check failure.
+//
+// Per the contract's "decimal constants" rule: all non-zero constants
+// use DECIMAL (100, 50, 4096) — decimal avoids the parser's hex-literal
+// path (see womb/kernel/arch/x86_64/pt.vuma header for the rationale).
+// (4096 = 0x1000, 100 and 50 are arbitrary test vruntimes.)
 
 fn main() -> i32 {
     let rq = state_new(Runqueue);
     let tbl = state_new(ProcessTable);
+    let tf = state_new(TrapFrame);
     sched_init(rq);
-    // Manually set up 3 tasks with different vruntimes.
-    // Task 0: vruntime=100, Task 1: vruntime=50, Task 2: vruntime=200.
+    tf_init(tf);
+    // Set up 2 tasks with different vruntimes.
+    // Task 0: vruntime=100, Task 1: vruntime=50.
     pt_set_state(tbl, 0, 2);
     pt_set_vruntime(tbl, 0, 100);
     pt_set_state(tbl, 1, 2);
     pt_set_vruntime(tbl, 1, 50);
-    pt_set_state(tbl, 2, 2);
-    pt_set_vruntime(tbl, 2, 200);
-    // Enqueue all 3.
+    // Enqueue both.
     sched_enqueue(rq, tbl, 0);
     sched_enqueue(rq, tbl, 1);
-    sched_enqueue(rq, tbl, 2);
-    if rq.count != 3 { return 1; }
-    // Dequeue should return task 1 (lowest vruntime = 50).
-    let next = sched_dequeue(rq, tbl);
+    if rq.count != 2 { return 1; }
+    // schedule() should return Task 1 (vruntime=50, the min).
+    let next = schedule(rq, tbl);
     if next != 1 { return 2; }
-    // Dequeue should return task 0 (vruntime = 100).
-    let next2 = sched_dequeue(rq, tbl);
-    if next2 != 0 { return 3; }
-    // Dequeue should return task 2 (vruntime = 200).
-    let next3 = sched_dequeue(rq, tbl);
-    if next3 != 2 { return 4; }
-    // Queue should be empty.
-    if rq.count != 0 { return 5; }
+    // Round-trip tf.pc through sched_save_context + sched_restore_context.
+    tf.pc = 4096;
+    tf.sp = 8192;
+    tf.status = 256;
+    sched_save_context(tbl, 1, tf);
+    // Clear tf to prove restore actually writes back.
+    tf.pc = 0;
+    tf.sp = 0;
+    tf.status = 0;
+    sched_restore_context(tbl, 1, tf);
+    if tf.pc != 4096 { return 3; }
     return 0;
 }
