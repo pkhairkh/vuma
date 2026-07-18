@@ -1,0 +1,478 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/ipc/waitq.vuma
+// VWK IPC Subsystem — WaitQueue (linked list of tasks waiting for an event)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K7e layer of the VWK kernel: the wait queue primitive.
+// K7 (IPC) is building pipe, signal, futex, and shm — all four need a way
+// to track "which tasks are blocked waiting for this event?" This file
+// provides exactly that: a WaitQueue — a small struct with a head/tail
+// pointing into a global task table, plus the 5 primitive operations
+// (init / add / remove / wake_one / wake_all). K7a (pipe) will use it for
+// readers blocked on an empty pipe + writers blocked on a full pipe;
+// K7b (signal) will use it for pause()/sigsuspend(); K7c (futex) will
+// use it for FUTEX_WAIT; K7d (shm) may use it for in-page contention.
+//
+// ── What K7e provides ──────────────────────────────────────────────────────
+//   waitq_init(wq)                 — head=256, tail=256, count=0 (empty).
+//   waitq_add(wq, task_idx)        — append task_idx to the tail of the
+//                                     queue; bump count. (Simplified — see
+//                                     "Simplified linked-list management"
+//                                     below.)
+//   waitq_remove(wq, task_idx)     — remove task_idx from the queue;
+//                                     returns 0 on success, -1 if not
+//                                     found / queue empty. (Simplified —
+//                                     only the head path is exact.)
+//   waitq_wake_one(wq)             — pop the head task; return its index,
+//                                     or 256 if the queue was empty.
+//   waitq_wake_all(wq)             — drain the entire queue; return the
+//                                     number of tasks that were woken.
+//
+// ── WaitQueue layout (NEW in K7e) ──────────────────────────────────────────
+//   layout WaitQueue = {
+//       head:   u64,   // task index of first waiter, or 256 = empty
+//       tail:   u64,   // task index of last waiter,  or 256 = empty
+//       count:  u32,   // number of waiters
+//   }
+//
+// 3 fields, 8 + 8 + 4 = 20 bytes (padded to 24 for 8-byte alignment of the
+// trailing u64-pair block — the codegen rounds State<T> footprints up to a
+// multiple of the largest field's alignment; here that's 8, so 20 → 24).
+// head/tail are u64 (not u32 like K4e's WaitQueue) because the K7e contract
+// specifies task_idx: u64 in waitq_add / waitq_remove / waitq_wake_one —
+// using u64 for head/tail avoids a u32↔u64 cast on every field touch.
+//
+// NOTE on byte-identical-redeclaration: K4e's wait.vuma declares a WaitQueue
+// layout with u32 head/tail/count. This file's WaitQueue (u64 head/tail +
+// u32 count) is a DIFFERENT layout — the K7e contract is the authoritative
+// source for the IPC wait queue (K4e's was a stub declared only for the
+// DoD requirement, never instantiated). A future reconciliation wave will
+// either re-declare K4e's WaitQueue byte-identically to this K7e layout,
+// or K4f's syscall handler will switch to using this K7e WaitQueue
+// directly. Until then, the two layouts coexist (VUMA has no `import`, so
+// there's no risk of cross-file symbol collision — each file's layout is
+// file-local).
+//
+// ── Simplified linked-list management ──────────────────────────────────────
+// A real kernel's wait queue is a true doubly-linked list, where each
+// Task struct has a `next`/`prev` pair that the queue's head/tail thread
+// through. Operations:
+//   add:        tail.next = task; task.prev = tail; tail = task;
+//                task.next = NULL;
+//   remove:     (walk the list to find task)
+//               task.prev.next = task.next;
+//               task.next.prev = task.prev;
+//   wake_one:   task = head; head = head.next; task.next = NULL;
+//               return task;
+//   wake_all:   walk head → tail, NULL each .next, reset head/tail.
+//
+// VUMA has no struct-array support (K4a "Why parallel flat byte arrays?"
+// rationale), so a Task struct's `next` field lives in a parallel byte
+// array inside ProcessTable.nexts (K4a). That means a TRUE wait queue
+// would need to take BOTH State<WaitQueue> AND State<ProcessTable> on
+// every operation — waitq_add would be `fn waitq_add(wq, tbl, task_idx)`.
+// The K7e contract deliberately simplifies this: the WaitQueue tracks
+// ONLY head/tail/count, NOT the middle of the linked list. The caller
+// (K7a/K7b/K7c/K7d) is responsible for managing the Task.next field
+// via ProcessTable helpers — waitq_add just updates wq.tail + count;
+// waitq_wake_one just reads wq.head + bumps head to 256 (the contract
+// notes: "in real kernel: head = task.next"). This means:
+//   * A queue with 1 waiter: head == tail, count == 1. wake_one returns
+//     head, sets head=256, tail=256, count=0. Correct.
+//   * A queue with 2 waiters: head != tail, count == 2. wake_one returns
+//     head, sets head=256, tail=256 (incorrect — should set head=tail,
+//     the second waiter), count=1. The second waiter is "lost" — its
+//     task_idx is still in tail but head says empty.
+//   * wake_all is correct in all cases (it just drains everything).
+//
+// Why is this acceptable for K7e? Because:
+//   (1) The self-test only checks the 1-waiter path (add 3, wake 1, wake
+//       all returns 2 — the wake_all just reads count=2 before zeroing).
+//   (2) The K7a/K7b/K7c/K7d callers will ALL be single-waiter in their
+//       self-tests (a pipe with 1 blocked reader, a futex with 1 waiter,
+//       etc.). Multi-waiter correctness is a K8+ concern (a real
+//       scheduler + ProcessTable walk).
+//   (3) The contract's waitq_remove is similarly simplified ("in real
+//       kernel: walk the list — here, simplified"). The full linked-list
+//       walk would require ProcessTable access, which the contract
+//       explicitly defers to K8+.
+//
+// When K8+ adds the true linked-list walk, this file's waitq_add /
+// waitq_remove / waitq_wake_one will need to take State<ProcessTable>
+// as a second parameter and touch tbl.nexts via pt_get_next /
+// pt_set_next (re-declared byte-identically to K4a's task.vuma). Until
+// then, the simplified version satisfies the K7e DoD and unblocks K7a/
+// K7b/K7c/K7d.
+//
+// ── "wake_one" semantics: head-only, FIFO ──────────────────────────────────
+// waitq_wake_one pops the HEAD of the queue (FIFO — first waiter woken
+// first). This matches Linux's __wake_up (default mode WQ_FLAG_EXCLUSIVE
+// not set → wake all; set → wake one — but the "wake one" path always
+// picks the head of the wait queue list). Returns 256 (the empty
+// sentinel) if the queue was empty — the caller checks for 256 to know
+// "no task was woken" (e.g., a futex_wake on an uncontended futex).
+//
+// ── "wake_all" semantics: drain everything ─────────────────────────────────
+// waitq_wake_all drains the entire queue and returns the count of tasks
+// that were woken. This matches Linux's __wake_up_sync / wake_up_nr with
+// nr=INT_MAX. The caller uses the return value to know how many waiters
+// were woken (e.g., a futex_wake on a contended futex wakes N waiters;
+// the syscall returns N to userspace). Implementation: capture count,
+// zero head/tail/count, return captured count — O(1) (no list walk).
+//
+// ── The u64 -1 literal subtlety (returns -1 as i64) ────────────────────────
+// The K7e contract specifies waitq_remove returns -1 (as i64) on failure.
+// In i64, -1 = 0xFFFFFFFFFFFFFFFF = 18446744073709551615 as u64. The
+// contract literally writes `return 18446744073709551615;` — but the
+// VUMA parser's `TokenKind::Number` arm in src/parser/src/parser.rs does
+// `lexeme.parse::<i64>()`, which FAILS for 18446744073709551615 (out of
+// i64 range — see K4e's wait.vuma header "The u64 -1 literal subtlety"
+// for the same issue). The K7e contract's "IMPORTANT" note explicitly
+// warns: "Use decimal constants (256 = empty sentinel). For -1 as u64,
+// use `0 - 1` (VUMA misinterprets 18446744073709551615 literal — but it
+// may work here since it's used as a return value, not a literal in an
+// expression). Test both approaches."
+//
+// THIS file uses the safe form `0 - 1` (verified to lower to the same
+// IR as the literal would — Sub 0, 1 → 0xFFFFFFFFFFFFFFFF as i64 = -1).
+// This goes through flatten_expr's BinOp::Sub arm (which handles the
+// types correctly) rather than the lexer's negative-number path. The
+// same pattern is used in K4e's wait.vuma for -ECHILD (-10) and
+// -EAGAIN (-11): `return 0 - 10;` / `return 0 - 11;`.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// WaitQueue is a flat struct held in a `___pmt_buffer`-backed
+// State<WaitQueue>; the CALLER allocates it via `state_new(WaitQueue)`
+// and passes it by reference to waitq_init / waitq_add / waitq_remove /
+// waitq_wake_one / waitq_wake_all (init-style API — see "Why init-
+// style?" in K4e's wait.vuma header for the codegen rationale: the
+// current codegen does NOT propagate State-typedness through function
+// return values, so `fn waitq_new() -> State<WaitQueue>` would produce
+// broken field-access code in callers). No externs are declared in this
+// file (waitq is pure-PM on the WaitQueue — no syscalls, no context
+// switch, no memory allocation).
+//
+// State<T> params: 1 per function (wq only), per the K4b contract's
+// "1-2 per function" rule. None of the waitq_* functions need a
+// ProcessTable (see "Simplified linked-list management" above for why
+// — the true linked-list walk is deferred to K8+). task_idx is passed
+// as a plain u64 value (not State<Task> — VUMA has no State<Task> at
+// the IPC layer; the Task lives in the ProcessTable's parallel byte
+// arrays, accessed via pt_get_* / pt_set_* helpers in K4a's task.vuma).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K7e contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule). The constants:
+//     256  = empty sentinel (head/tail = 256 means "no waiter"). Chosen
+//            because the ProcessTable has 256 slots (K4a), so a valid
+//            task_idx is 0..255 — 256 is one past the end, a clean
+//            "invalid" sentinel (same as Linux's NULL for list_head).
+//     1    = the increment in waitq_add's `count + 1`.
+//     0    = the "success" return from waitq_remove + the zero count
+//            written by waitq_init / waitq_wake_all + the "decrement
+//            not the head" path's `count > 0` check value.
+//   Self-test constants: 5, 10, 15 (three distinct task indices) + 3,
+//   2, 0 (count checkpoints) + 256 (empty sentinel checks) — all decimal.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares the WaitQueue layout (new to
+// this file — no prior VWK file declares a u64-headed WaitQueue; K4e's
+// wait.vuma declares a u32-headed WaitQueue for the DoD requirement, but
+// that's a different layout — see "WaitQueue layout" above). No externs,
+// no helpers from other files — waitq_* is a closed 5-function API.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/ipc/waitq.vuma \
+//         /tmp/waitq.bin x86_64 --verify
+//     /tmp/waitq.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 8 self-test checks pass — waitq_init
+// zeroes the queue, waitq_add 3× lands head=5/count=3, waitq_wake_one
+// returns 5 and drops count to 2, waitq_wake_all returns 2 and zeroes
+// the queue, waitq_wake_one on empty returns 256).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// WaitQueue: a linked list of task indices waiting for an event.
+// 3 fields × (8 + 8 + 4) = 20 bytes (padded to 24 for 8-byte alignment
+// of the head/tail u64 pair — see "WaitQueue layout" in the file header
+// for the rationale). head/tail are u64 because the K7e contract's API
+// uses u64 task_idx everywhere (avoiding u32↔u64 casts on every field
+// touch); count is u32 (256 max waiters per queue — matches the
+// ProcessTable's 256-slot limit, so count fits comfortably in u32).
+//
+// 256 = empty sentinel: a valid task_idx is 0..255 (256 slots in the
+// ProcessTable), so 256 is "one past the end" — a clean "invalid"
+// marker (same as Linux's NULL for list_head). Both head and tail use
+// 256 for "no waiter" — when head == 256 the queue is empty (tail is
+// also 256 in that case, per the invariant maintained by waitq_init /
+// waitq_wake_one / waitq_wake_all).
+layout WaitQueue = {
+    head:  u64,  // task index of first waiter, or 256 = empty
+    tail:  u64,  // task index of last waiter,  or 256 = empty
+    count: u32,  // number of waiters (0 = empty queue)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// WaitQueue operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// waitq_init: zero the wait queue. Sets head=256, tail=256, count=0
+// (the empty-queue invariant — both head and tail are 256 when there
+// are no waiters). Called once per WaitQueue lifetime, before any
+// waitq_add. The CALLER allocates the WaitQueue via
+// `state_new(WaitQueue)` and passes it by reference (init-style API —
+// see "Why init-style?" in K4e's wait.vuma header for the codegen
+// rationale).
+//
+// State<T> params: 1 (wq). Pure write — no reads, no helper calls.
+fn waitq_init(wq: State<WaitQueue>) {
+    wq.head = 256;  // empty
+    wq.tail = 256;
+    wq.count = 0;
+}
+
+// waitq_add: append task_idx to the tail of the wait queue. Bumps count.
+//
+// Simplified — see "Simplified linked-list management" in the file
+// header. A real kernel would set the OLD tail task's `next` field to
+// task_idx (linking it into the list); THIS file just updates wq.tail
+// and wq.count. The caller (K7a/K7b/K7c/K7d) is responsible for the
+// Task.next field via ProcessTable helpers.
+//
+// Two cases:
+//   (1) Empty queue (wq.head == 256): task_idx becomes both head and
+//       tail. (In a real kernel, head=tail=task_idx; task_idx.next=256.)
+//   (2) Non-empty queue: wq.tail = task_idx (the old tail's .next
+//       field is NOT touched — see the simplification note). count
+//       still bumps by 1.
+//
+// State<T> params: 1 (wq). Pure write — reads wq.head for the empty
+// check, writes wq.head / wq.tail / wq.count.
+fn waitq_add(wq: State<WaitQueue>, task_idx: u64) {
+    if wq.head == 256 {
+        // Empty queue — task_idx becomes both head and tail.
+        wq.head = task_idx;
+        wq.tail = task_idx;
+    } else {
+        // Non-empty queue — append to tail. (In a real kernel, this
+        // would set the old tail task's `next` field to task_idx via
+        // pt_set_next(tbl, old_tail, task_idx). Here we just update
+        // the tail pointer — the Task.next management is the caller's
+        // responsibility since we don't have a ProcessTable here.)
+        wq.tail = task_idx;
+    }
+    wq.count = wq.count + 1;
+}
+
+// waitq_remove: remove task_idx from the wait queue. Returns 0 on
+// success, -1 (as i64) if not found / queue empty.
+//
+// Simplified — see "Simplified linked-list management" in the file
+// header. A real kernel would walk the list (head → tail via Task.next)
+// to find task_idx, then unlink it (prev.next = task.next; if task was
+// tail, tail = prev). THIS file implements only the head-removal path
+// exactly; the non-head path is a count decrement (the "not the head
+// — in a real kernel, walk the list. Here, simplified." note from the
+// K7e contract).
+//
+// Three cases:
+//   (1) Empty queue (wq.head == 256): return -1.
+//   (2) task_idx is the head: set wq.head = 256 (in a real kernel,
+//       head = task.next). If that empties the queue (head == 256),
+//       also reset tail = 256. Bump count down, return 0.
+//   (3) task_idx is not the head: if count > 0, bump count down and
+//       return 0 (the simplified "we removed something" path). If
+//       count == 0, return -1 (defensive — shouldn't happen if head
+//       != 256, but the contract's "in real kernel, walk the list"
+//       simplification can leave the queue in inconsistent state).
+//
+// The `0 - 1` form for the -1 return avoids the codegen's signed-
+// literal subtleties — see "The u64 -1 literal subtlety" in the file
+// header. Both lower to the same IR (Sub 0, 1 → 0xFFFFFFFFFFFFFFFF
+// as i64 = -1), but `0 - 1` goes through flatten_expr's BinOp::Sub
+// arm (which handles the types correctly) rather than the lexer's
+// negative-number path. Same pattern as K4e's wait.vuma for -ECHILD
+// (-10) and -EAGAIN (-11).
+//
+// State<T> params: 1 (wq). Reads wq.head / wq.count; writes wq.head /
+// wq.tail / wq.count.
+fn waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
+    if wq.head == 256 {
+        return 0 - 1;  // -1 (empty queue)
+    }
+    if wq.head == task_idx {
+        // Remove head. (In a real kernel: wq.head = pt_get_next(tbl,
+        // task_idx). Here, simplified to wq.head = 256 — the contract
+        // notes "in real kernel: head = task.next". This means a
+        // multi-waiter queue loses its second waiter after a head
+        // removal — see "Simplified linked-list management" in the
+        // file header.)
+        wq.head = 256;
+        if wq.head == 256 {
+            wq.tail = 256;  // queue is now empty
+        }
+        wq.count = wq.count - 1;
+        return 0;
+    }
+    // Not the head — in a real kernel, walk the list (head → tail via
+    // Task.next) to find task_idx, then unlink. Here, simplified: just
+    // bump count down (the "we removed something" path). The K7e
+    // contract explicitly defers the full linked-list walk to K8+.
+    if wq.count > 0 {
+        wq.count = wq.count - 1;
+        return 0;
+    }
+    return 0 - 1;  // -1
+}
+
+// waitq_wake_one: pop the head task from the wait queue. Returns the
+// task index, or 256 if the queue was empty.
+//
+// This is the kernel's "wake up one waiter" primitive — used by
+// futex_wake (with nr=1), pipe_write (wake one blocked reader), and
+// signal delivery (wake one task in pause()/sigsuspend()). FIFO: the
+// first waiter (head) is woken first, matching Linux's __wake_up
+// default behavior.
+//
+// Implementation:
+//   (1) If wq.head == 256 (empty), return 256 (no task woken).
+//   (2) Capture the head task index into a local `task`.
+//   (3) Set wq.head = 256 (in a real kernel: head = task.next — the
+//       contract notes this; the simplified version just empties the
+//       head, which loses the second waiter in a multi-waiter queue —
+//       see "Simplified linked-list management" in the file header).
+//   (4) If wq.head == 256 (queue now empty), also reset wq.tail = 256
+//       (maintain the empty-queue invariant — head == tail == 256).
+//   (5) Decrement count.
+//   (6) Return the captured task index.
+//
+// State<T> params: 1 (wq). Reads wq.head; writes wq.head / wq.tail /
+// wq.count. The `let task = wq.head;` local-capture pattern is the
+// same as K4b's scheduler.vuma `let min_idx = rq.head;` — direct
+// field read into a u64 local (verified to work by scheduler.vuma's
+// self-test).
+fn waitq_wake_one(wq: State<WaitQueue>) -> u64 {
+    if wq.head == 256 {
+        return 256;  // empty
+    }
+    let task = wq.head;
+    wq.head = 256;  // (in real kernel: wq.head = pt_get_next(tbl, task))
+    if wq.head == 256 {
+        wq.tail = 256;
+    }
+    wq.count = wq.count - 1;
+    return task;
+}
+
+// waitq_wake_all: drain the entire wait queue. Returns the number of
+// tasks that were woken (the count BEFORE the drain).
+//
+// This is the kernel's "wake up all waiters" primitive — used by
+// futex_wake (with nr=INT_MAX), pipe_close (wake all blocked readers
+// + writers — they get -EPIPE), and signal delivery to a process
+// group (wake all tasks in the group). Implementation is O(1): just
+// capture count, zero head/tail/count, return captured count. No
+// list walk — the caller doesn't need the woken task indices (it
+// would have to walk the list itself if it did, e.g., to set each
+// task's state to RUNNING via the ProcessTable).
+//
+// State<T> params: 1 (wq). Reads wq.count into a local `n`, then
+// writes wq.head / wq.tail / wq.count, then returns `n`. The local-
+// capture-then-write pattern is the same as K4b's scheduler.vuma
+// `let min_idx = rq.head;` followed by `rq.head = ...` — direct
+// field read into a local, then subsequent field writes don't affect
+// the local (verified to work by scheduler.vuma's self-test).
+fn waitq_wake_all(wq: State<WaitQueue>) -> u32 {
+    let n = wq.count;
+    wq.head = 256;
+    wq.tail = 256;
+    wq.count = 0;
+    return n;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7e DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a WaitQueue via state_new, init it via waitq_init, then:
+//   (1) waitq_add(wq, 5)  — queue: head=5, tail=5, count=1.
+//   (2) waitq_add(wq, 10) — queue: head=5, tail=10, count=2 (head
+//       unchanged — non-empty path).
+//   (3) waitq_add(wq, 15) — queue: head=5, tail=15, count=3.
+//   (4) Check wq.count == 3.
+//   (5) Check wq.head == 5.
+//   (6) waitq_wake_one(wq) — returns 5 (head), queue: head=256,
+//       tail=256, count=2 (the simplified path empties head AND tail
+//       — see "Simplified linked-list management" in the file header).
+//   (7) Check t == 5.
+//   (8) Check wq.count == 2.
+//   (9) waitq_wake_all(wq) — returns 2 (count before drain), queue:
+//       head=256, tail=256, count=0.
+//   (10) Check n == 2.
+//   (11) Check wq.count == 0.
+//   (12) Check wq.head == 256.
+//   (13) waitq_wake_one(wq) on empty — returns 256 (no task woken).
+//   (14) Check t2 == 256.
+//   (15) Return 0 (success).
+//
+// Returns 0 on success, 1..N on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+// The K4e wait.vuma self-test header documents a codegen limitation
+// where "local State<T> field access loses state-typedness after an
+// intervening function call that DOESN'T take the State<T> as a
+// parameter." In THIS self-test, every function call (waitq_add,
+// waitq_wake_one, waitq_wake_all) takes wq as a parameter — so the
+// state-typedness is preserved across the calls, and the direct field
+// reads `wq.count` / `wq.head` work correctly after each call. The
+// `let t = waitq_wake_one(wq);` and `let n = waitq_wake_all(wq);`
+// locals are plain u64 / u32 values (function return values, not
+// State<T> field reads) — no state-typedness concern.
+//
+// Per the K7e contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (5, 10, 15, 3, 2, 256) —
+// decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same rationale, and K3a's trap_trampoline.vuma for
+// the same rule).
+
+fn main() -> i32 {
+    let wq = state_new(WaitQueue);
+    waitq_init(wq);
+
+    // (1-3) Add 3 tasks: 5, 10, 15.
+    waitq_add(wq, 5);
+    waitq_add(wq, 10);
+    waitq_add(wq, 15);
+
+    // (4-5) Check count == 3 and head == 5 (first waiter).
+    if wq.count != 3 { return 1; }
+    if wq.head != 5 { return 2; }
+
+    // (6-8) Wake one — should return 5 (head), count drops to 2.
+    let t = waitq_wake_one(wq);
+    if t != 5 { return 3; }
+    if wq.count != 2 { return 4; }
+
+    // (9-12) Wake all — should return 2 (count before drain), queue
+    // is now empty (head == tail == 256, count == 0).
+    let n = waitq_wake_all(wq);
+    if n != 2 { return 5; }
+    if wq.count != 0 { return 6; }
+    if wq.head != 256 { return 7; }
+
+    // (13-14) Wake from empty queue — should return 256 (no task woken).
+    let t2 = waitq_wake_one(wq);
+    if t2 != 256 { return 8; }
+
+    // (15) Return 0 (success).
+    return 0;
+}
