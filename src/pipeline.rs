@@ -9794,6 +9794,12 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
             // General case: flatten the expression and assign to dst
             let result = flatten_expr(&let_stmt.value, &mut stmts, ctx);
+            // G7: if the last statement is a CallNode, set its reassigns to
+            // the let-binding's name so lower_call can look up the dst type
+            // in fn_var_types (critical for floattofloat widen/narrow).
+            if let Some(ScgStatement::Call(call_node)) = stmts.last_mut() {
+                call_node.reassigns = Some(let_stmt.name.clone());
+            }
             match &result {
                 ScgExpr::Var(name) if name == &let_stmt.name => {}
                 _ => {
