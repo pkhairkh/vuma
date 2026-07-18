@@ -291,6 +291,33 @@ fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     return v;
 }
 
+// pt_get_vruntime / pt_set_vruntime (u64 8-byte LE pack/unpack).
+// Used by sys_exit to store the exit code in the vruntime field
+// (the canonical exit-code storage location — see sys_exit comments).
+fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.vruntimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.vruntimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Lifecycle primitives (re-declared from K4a's task.vuma).
 // ────────────────────────────────────────────────────────────────────────────
@@ -365,6 +392,13 @@ fn sys_exit(tbl: State<ProcessTable>, task_idx: u32, code: i32, zombie: State<Zo
     // Mark the task as ZOMBIE (state = 4). The task stays in the
     // ProcessTable until K4e's waitpid reaps it (task_free → state = 0).
     pt_set_state(tbl, task_idx, 4);
+    // Store the exit code in the ProcessTable's vruntime field so
+    // wait_reap_zombie (K4e) can read it. This is the canonical
+    // exit-code storage location — the ZombieTask struct is a
+    // secondary copy for callers that want a typed result.
+    // Cast i32 → u64 for vruntime storage (sign-extends for negative
+    // codes like -9 for SIGKILL; wait_reap_zombie casts back to i32).
+    pt_set_vruntime(tbl, task_idx, code as u64);
     // Populate the ZombieTask struct with the exit info. The parent's
     // waitpid will read these fields to return the exit status.
     zombie.pid = pt_get_pid(tbl, task_idx);
