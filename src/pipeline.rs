@@ -8188,6 +8188,39 @@ fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
     }
 }
 
+/// PMT: compute the byte size of a parser `Type`, looking up user-defined
+/// layout names in the provided `layout_sizes` map. This fixes the nested-
+/// layout bug where `bridge_type_size` returned 8 for any user-defined
+/// layout name (e.g. `WaitQueue` inside a `Pipe` layout), causing field
+/// offset corruption.
+fn bridge_type_size_with_layouts(
+    ty: &vuma_parser::ast::Type,
+    layout_sizes: &HashMap<String, u64>,
+) -> u64 {
+    use vuma_parser::ast::Type;
+    match ty {
+        Type::BDBase(name) => match name.as_str() {
+            "i8" | "u8" | "bool" => 1,
+            "i16" | "u16" => 2,
+            "i32" | "u32" | "f32" => 4,
+            "i64" | "u64" | "f64" => 8,
+            _ => {
+                // User-defined layout name — look up real size.
+                if let Some(&size) = layout_sizes.get(name) {
+                    size
+                } else {
+                    8  // fallback (forward reference not yet resolved)
+                }
+            }
+        },
+        Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        Type::Array { element, size } => {
+            bridge_type_size_with_layouts(element, layout_sizes) * (*size as u64)
+        }
+        _ => 8,
+    }
+}
+
 /// PMT (Wave 2): compute the byte alignment of a parser `Type` for layout
 /// field offset computation.
 fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
@@ -8222,37 +8255,77 @@ fn extract_state_layout_name_from_ast(ty: &vuma_parser::ast::Type) -> Option<Str
 /// offsets are computed sequentially with alignment padding (mirroring
 /// vuma-bd's `LayoutRegistry::register`).
 fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)> {
-    let mut layouts = HashMap::new();
+    // Multi-pass: first compute all layout sizes (resolving nested layout
+    // references), then compute field offsets using the real sizes.
+    // This fixes the nested-layout bug where user-defined layout names
+    // (e.g. WaitQueue inside Pipe) were treated as size 8.
+
+    // Pass 1: collect all layout definitions.
+    let mut layout_defs: Vec<(&str, &Vec<(String, vuma_parser::ast::Type)>)> = Vec::new();
     for item in &program.items {
         if let Item::LayoutDef(ld) = item {
-            let mut offset: u64 = 0;
+            layout_defs.push((ld.name.as_str(), &ld.fields));
+        }
+    }
+
+    // Pass 2: iteratively compute layout sizes. Repeat until no changes
+    // (handles forward references and nested layouts).
+    let mut layout_sizes: HashMap<String, u64> = HashMap::new();
+    let mut changed = true;
+    let mut iterations = 0;
+    while changed && iterations < 10 {
+        changed = false;
+        iterations += 1;
+        for (name, fields) in &layout_defs {
+            let mut size: u64 = 0;
             let mut max_align: u64 = 1;
-            let mut fields: Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)> = Vec::new();
-            for (fname, ftype) in &ld.fields {
+            for (_fname, ftype) in *fields {
                 let falign = bridge_type_align(ftype).max(1);
-                let fsize = bridge_type_size(ftype);
-                if falign > 1 && offset % falign != 0 {
-                    offset = (offset + falign - 1) & !(falign - 1);
+                let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
+                if falign > 1 && size % falign != 0 {
+                    size = (size + falign - 1) & !(falign - 1);
                 }
                 max_align = max_align.max(falign);
-                let ir_ty = bridge_type_to_ir_type(ftype);
-                // Store the field's declared type as a string for nested
-                // layout descent. For `Type::BDBase(name)` this is `name`;
-                // for other types it's the Display form (not a layout name,
-                // so descent stops here).
-                let type_name = match ftype {
-                    vuma_parser::ast::Type::BDBase(n) => n.clone(),
-                    other => other.to_string(),
-                };
-                fields.push((fname.clone(), ir_ty, offset, fsize, type_name));
-                offset += fsize;
+                size += fsize;
             }
             let alignment = max_align.max(1);
-            if offset > 0 && offset % alignment != 0 {
-                offset = (offset + alignment - 1) & !(alignment - 1);
+            if size > 0 && size % alignment != 0 {
+                size = (size + alignment - 1) & !(alignment - 1);
             }
-            layouts.insert(ld.name.clone(), (offset, fields));
+            let prev = layout_sizes.get(*name).copied();
+            if prev != Some(size) {
+                layout_sizes.insert((*name).to_string(), size);
+                changed = true;
+            }
         }
+    }
+
+    // Pass 3: compute field offsets using the resolved layout sizes.
+    let mut layouts = HashMap::new();
+    for (name, fields) in &layout_defs {
+        let mut offset: u64 = 0;
+        let mut max_align: u64 = 1;
+        let mut field_list: Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)> = Vec::new();
+        for (fname, ftype) in *fields {
+            let falign = bridge_type_align(ftype).max(1);
+            let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
+            if falign > 1 && offset % falign != 0 {
+                offset = (offset + falign - 1) & !(falign - 1);
+            }
+            max_align = max_align.max(falign);
+            let ir_ty = bridge_type_to_ir_type(ftype);
+            let type_name = match ftype {
+                vuma_parser::ast::Type::BDBase(n) => n.clone(),
+                other => other.to_string(),
+            };
+            field_list.push((fname.clone(), ir_ty, offset, fsize, type_name));
+            offset += fsize;
+        }
+        let alignment = max_align.max(1);
+        if offset > 0 && offset % alignment != 0 {
+            offset = (offset + alignment - 1) & !(alignment - 1);
+        }
+        layouts.insert((*name).to_string(), (offset, field_list));
     }
     layouts
 }
