@@ -2511,13 +2511,23 @@ fn emit_s390x_fp_binop(
     let is_f64 = matches!(ty, Some(IRType::F64));
 
     // Load operands into FPRs FA (lhs) and FB (rhs) via the GPR file.
-    // ss_load_value gives us the operand's bit pattern in a GPR (LG for vregs,
-    // LGHI/LGFI/LLILF for immediates).  LDGR bit-copies the GPR's 64 bits into
-    // the FPR, preserving the float's bit representation.
+    // For F32: the IR stores float literals as f64 bits in i64 immediates.
+    // ss_load_value returns these f64 bits in a GPR. LDGR copies them to FPR.
+    // Then we narrow F64→F32 via LEDBR (op2=0x44) so the FPR holds the
+    // correct f32 value in the high 32 bits (where F32 ops expect it).
+    // For register operands (already stored as f64 bits in stack slots),
+    // the same approach works — LDGR + LEDBR narrows to f32.
     code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
     code.extend_from_slice(&encode_ldgr(FA, S0));
+    if !is_f64 {
+        // LEDBR FA, FA: narrow F64 → F32 (round to nearest, high 32 bits)
+        code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FA, FA, 0, 0));
+    }
     code.extend(ss_load_value(rhs, vreg_stack_slots, S0));
     code.extend_from_slice(&encode_ldgr(FB, S0));
+    if !is_f64 {
+        code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FB, FB, 0, 0));
+    }
 
     match op {
         BinOpKind::Add => {
@@ -2627,7 +2637,12 @@ fn emit_s390x_fp_binop(
     if is_f64 {
         code.extend_from_slice(&encode_std(FA, FP, dst_off));
     } else {
-        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+        // For f32 results: widen f32→f64 (LDEBR) then store as f64 (STD).
+        // This keeps the slot as a full 8-byte f64 value, which ss_load_value
+        // (LG) + LDGR retrieves correctly. The LEDBR in the BinOp load path
+        // narrows it back to f32 for AEBR/etc.
+        code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA)); // LDEBR: f32→f64
+        code.extend_from_slice(&encode_std(FA, FP, dst_off)); // STD: store as f64
     }
 }
 
