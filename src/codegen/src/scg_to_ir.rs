@@ -3459,6 +3459,14 @@ impl IRBuilder {
         let op_ty = lhs_val.as_register()
             .and_then(|id| self.vreg_types.get(&id).cloned())
             .or_else(|| {
+                // Also check RHS vreg type (e.g., val is F64 from array load).
+                // Critical for `total = total + val` where total's phi vreg
+                // doesn't have a type, but val does.
+                rhs_val.as_register()
+                    .and_then(|id| self.vreg_types.get(&id).cloned())
+                    .filter(|ty| matches!(ty, IRType::F32 | IRType::F64))
+            })
+            .or_else(|| {
                 if let Some(ref name) = comp.reassigns {
                     self.param_types.get(name).cloned()
                 } else {
