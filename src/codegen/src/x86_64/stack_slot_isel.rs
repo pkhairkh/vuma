@@ -85,6 +85,192 @@ use super::{
 };
 
 // =============================================================================
+// FP type inference — pre-pass
+// =============================================================================
+
+/// Infer which virtual registers hold floating-point (F32/F64) values.
+///
+/// VUMA's `scg_to_ir` lowering hardcodes `ty: None` on every `Add`/`Sub`/
+/// `Mul`/`Div` (arithmetic is type-tag-polymorphic in the IR but the type
+/// tag is dropped before backend lowering).  As a result, the x86_64 backend
+/// cannot dispatch to the SSE/SSE2 path by inspecting `ty` alone.  This
+/// pre-pass walks the IR forward to fixed-point and recovers FP-ness from:
+///
+///   * function parameters with declared F32/F64 type,
+///   * `Cast { IntToFloat | UIntToFloat | FloatToFloat }` outputs,
+///   * `Call` to the runtime float-conversion builtins `inttofloat` /
+///     `uinttofloat` (which the IR builder emits as ordinary calls rather
+///     than `Cast`s — see `lower_call` in `scg_to_ir.rs`),
+///   * `Load` with F32/F64 type,
+///   * `Add`/`Sub`/`Mul`/`Div`/`BinOp`/`Phi`/`Select` whose operands (or
+///     any incoming, for `Phi`) are already known-FP,
+///   * the IEEE-754 NaN-producing pattern `0 / 0` (both operands provably
+///     zero with no type tag): integer `0 / 0` is undefined (SIGFPE on
+///     x86), so reclassifying it as FP division (which produces NaN) is
+///     strictly safer and is the only way to recover the FP type when the
+///     IR has dropped it (e.g. `nan: f64 = 0.0 / 0.0`).
+///
+/// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
+/// match arms below to decide between the integer and SSE codegen paths.
+fn infer_fp_vregs(func: &IRFunction) -> std::collections::HashSet<u32> {
+    use std::collections::HashSet;
+    let mut fp: HashSet<u32> = HashSet::new();
+    // Track vregs that provably hold the integer/float bit-pattern 0
+    // (used to recognise the `0.0 / 0.0` NaN pattern when `ty` is None).
+    let mut zero: HashSet<u32> = HashSet::new();
+
+    let is_zero = |v: &IRValue, zero: &HashSet<u32>| -> bool {
+        match v {
+            IRValue::Immediate(0) => true,
+            IRValue::Register(id) => zero.contains(id),
+            _ => false,
+        }
+    };
+    let is_fp = |v: &IRValue, fp: &HashSet<u32>| -> bool {
+        match v {
+            IRValue::Register(id) => fp.contains(id),
+            _ => false,
+        }
+    };
+
+    // Seed: function parameters with FP types.
+    for (param, ty) in func.params.iter().zip(func.param_types.iter()) {
+        if matches!(ty, IRType::F32 | IRType::F64) {
+            if let Some(id) = param.as_register() {
+                fp.insert(id);
+            }
+        }
+    }
+
+    // Iterate to fixed point (Phis / loops may need multiple passes).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::Cast { kind, dst, src, .. } => {
+                        if matches!(kind, CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat) {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        // Zero propagates through int<->int casts.
+                        if matches!(kind, CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast)
+                            && is_zero(src, &zero)
+                        {
+                            if let Some(id) = dst.as_register() {
+                                if zero.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Call { dst, func: fname, .. } => {
+                        if fname == "inttofloat" || fname == "uinttofloat" {
+                            if let Some(d) = dst {
+                                if let Some(id) = d.as_register() {
+                                    if fp.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::Load { dst, ty, .. } => {
+                        if matches!(ty, IRType::F32 | IRType::F64) {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Add { dst, lhs, rhs, ty }
+                    | IRInstr::Sub { dst, lhs, rhs, ty }
+                    | IRInstr::Mul { dst, lhs, rhs, ty }
+                    | IRInstr::Div { dst, lhs, rhs, ty } => {
+                        let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        // `0 / 0` with no type tag: classify as FP (NaN).
+                        let zero_div_zero = matches!(instr, IRInstr::Div { .. })
+                            && ty.is_none()
+                            && is_zero(lhs, &zero)
+                            && is_zero(rhs, &zero);
+                        if op_fp || zero_div_zero {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        // Zero propagation (only meaningful for integer ops).
+                        if !op_fp {
+                            let result_zero = match instr {
+                                IRInstr::Add { .. } => is_zero(lhs, &zero) && is_zero(rhs, &zero),
+                                IRInstr::Sub { .. } => match (lhs, rhs) {
+                                    (IRValue::Register(a), IRValue::Register(b)) if a == b => true,
+                                    _ => is_zero(lhs, &zero) && is_zero(rhs, &zero),
+                                },
+                                IRInstr::Mul { .. } => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                _ => false,
+                            };
+                            if result_zero {
+                                if let Some(id) = dst.as_register() {
+                                    if zero.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty, .. } => {
+                        let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        if !op_fp {
+                            let result_zero = match op {
+                                BinOpKind::And => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                BinOpKind::Xor => {
+                                    lhs == rhs || (is_zero(lhs, &zero) && is_zero(rhs, &zero))
+                                }
+                                BinOpKind::Mul => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                _ => false,
+                            };
+                            if result_zero {
+                                if let Some(id) = dst.as_register() {
+                                    if zero.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::Phi { dst, incoming } => {
+                        let op_fp = incoming.iter().any(|(v, _)| is_fp(v, &fp));
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        if incoming.iter().all(|(v, _)| is_zero(v, &zero)) {
+                            if let Some(id) = dst.as_register() {
+                                if zero.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Select { dst, true_val, false_val, ty, .. } => {
+                        let op_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                            || is_fp(true_val, &fp)
+                            || is_fp(false_val, &fp);
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fp
+}
+
+// =============================================================================
 // allocate_registers — Stack-Slot Code Generation
 // =============================================================================
 
@@ -106,6 +292,13 @@ use super::{
 /// Callee-save: RBX, R12–R15 are pushed in prologue, popped in epilogue.
 pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     let func_name = func.name.clone();
+
+    // ── Phase 0: FP type inference ──
+    // VUMA's IR drops the type tag on arithmetic ops (Add/Sub/Mul/Div).
+    // Recover FP-ness from Casts, float-builtin Calls, param types, and
+    // operand propagation so the Add/Sub/Mul/Div/Cmp arms below can pick
+    // the SSE path. See `infer_fp_vregs` above for the full rule set.
+    let fp_vregs = infer_fp_vregs(func);
 
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
@@ -341,75 +534,201 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
             let encoded = match instr {
                 // ── Add ──
-                IRInstr::Add { dst, lhs, rhs, .. } => {
+                IRInstr::Add { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load lhs into RAX
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    // Add rhs (immediate or from stack)
-                    if let IRValue::Immediate(imm) = rhs {
-                        let imm = *imm;
-                        if (-2147483648..=2147483647).contains(&imm) {
-                            code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                    // FP dispatch: if the dst vreg is known-FP (or ty says so),
+                    // use SSE ADDSD/ADDSS instead of the integer ADD.
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        code.extend(load_value(rhs, Gpr::R10));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        }
+                        if is_f64 {
+                            code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        } else {
+                            code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        if is_f64 {
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        } else {
+                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        instr_opcode = Some(if is_f64 { "addsd" } else { "addss" }.to_string());
+                        code
+                    } else {
+                        // Load lhs into RAX
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        // Add rhs (immediate or from stack)
+                        if let IRValue::Immediate(imm) = rhs {
+                            let imm = *imm;
+                            if (-2147483648..=2147483647).contains(&imm) {
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                            } else {
+                                code.extend(load_value(rhs, Gpr::Rcx));
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
                         } else {
                             code.extend(load_value(rhs, Gpr::Rcx));
                             code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
                         }
-                    } else {
-                        code.extend(load_value(rhs, Gpr::Rcx));
-                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        // Store result to dst stack slot
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
                     }
-                    // Store result to dst stack slot
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
                 }
 
                 // ── Sub ──
-                IRInstr::Sub { dst, lhs, rhs, .. } => {
+                IRInstr::Sub { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    if let IRValue::Immediate(imm) = rhs {
-                        let imm = *imm;
-                        if (-2147483648..=2147483647).contains(&imm) {
-                            code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        code.extend(load_value(rhs, Gpr::R10));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        }
+                        if is_f64 {
+                            code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        } else {
+                            code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        if is_f64 {
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        } else {
+                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        instr_opcode = Some(if is_f64 { "subsd" } else { "subss" }.to_string());
+                        code
+                    } else {
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if let IRValue::Immediate(imm) = rhs {
+                            let imm = *imm;
+                            if (-2147483648..=2147483647).contains(&imm) {
+                                code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                            } else {
+                                code.extend(load_value(rhs, Gpr::Rcx));
+                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
                         } else {
                             code.extend(load_value(rhs, Gpr::Rcx));
                             code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
                         }
-                    } else {
-                        code.extend(load_value(rhs, Gpr::Rcx));
-                        code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
                     }
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
                 }
 
                 // ── Mul ──
-                IRInstr::Mul { dst, lhs, rhs, .. } => {
+                IRInstr::Mul { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    code.extend(load_value(rhs, Gpr::Rcx));
-                    code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        code.extend(load_value(rhs, Gpr::R10));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        }
+                        if is_f64 {
+                            code.extend(encode_mulsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        } else {
+                            code.extend(encode_mulss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        if is_f64 {
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        } else {
+                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        instr_opcode = Some(if is_f64 { "mulsd" } else { "mulss" }.to_string());
+                        code
+                    } else {
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        code.extend(load_value(rhs, Gpr::Rcx));
+                        code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
+                    }
                 }
 
                 // ── Div ──
-                IRInstr::Div { dst, lhs, rhs, .. } => {
+                IRInstr::Div { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load lhs into RAX
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    // Sign-extend RAX into RDX:RAX
-                    code.extend(encode_cqo());
-                    // Load rhs into RCX, then IDIV RCX
-                    code.extend(load_value(rhs, Gpr::Rcx));
-                    code.extend(encode_idiv_reg(Gpr::Rcx));
-                    // Quotient in RAX, store to dst
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        code.extend(load_value(rhs, Gpr::R10));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                        }
+                        if is_f64 {
+                            code.extend(encode_divsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        } else {
+                            code.extend(encode_divss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        if is_f64 {
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        } else {
+                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        instr_opcode = Some(if is_f64 { "divsd" } else { "divss" }.to_string());
+                        code
+                    } else {
+                        // Load lhs into RAX
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        // Sign-extend RAX into RDX:RAX
+                        code.extend(encode_cqo());
+                        // Load rhs into RCX, then IDIV RCX
+                        code.extend(load_value(rhs, Gpr::Rcx));
+                        code.extend(encode_idiv_reg(Gpr::Rcx));
+                        // Quotient in RAX, store to dst
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
+                    }
                 }
 
                 // ── BinOp (generic) ──
@@ -418,14 +737,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let dst_id = dst.as_register().unwrap_or(0);
 
                     // ── FP dispatch ──
-                    // When the BinOp's result type is F32 or F64, we must use
+                    // When the BinOp's result type is F32 or F64 (or the dst
+                    // vreg was inferred FP by `infer_fp_vregs`), we must use
                     // the SSE/SSE2 scalar arithmetic encodings (ADDSD/ADDSS,
                     // SUBSD/SUBSS, MULSD/MULSS, DIVSD/DIVSS) instead of the
                     // integer ALU.  Operands are ferried through GPRs (since
                     // our stack-slot ISel loads every value into a GPR) and
                     // then moved into XMM0/XMM1 via MOVQ/MOVD.
-                    if let Some(IRType::F32) | Some(IRType::F64) = ty {
-                        let is_f64 = matches!(ty, Some(IRType::F64));
+                    let lhs_fp = lhs.as_register().map(|id| fp_vregs.contains(&id)).unwrap_or(false);
+                    let rhs_fp = rhs.as_register().map(|id| fp_vregs.contains(&id)).unwrap_or(false);
+                    let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                    if ty_fp || lhs_fp || rhs_fp || fp_vregs.contains(&dst_id) {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
                         // Load lhs into RAX and move to XMM0.
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
@@ -770,10 +1093,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let cc = cmp_kind_to_cc(kind);
 
                     // ── FP comparison dispatch ──
-                    // For F32/F64 operands, use UCOMISD/UCOMISS to set
+                    // For F32/F64 operands (declared via `ty` OR recovered
+                    // by `infer_fp_vregs`), use UCOMISD/UCOMISS to set
                     // EFLAGS, then SETcc to extract the boolean result.
-                    if let Some(IRType::F32) | Some(IRType::F64) = ty {
-                        let is_f64 = matches!(ty, Some(IRType::F64));
+                    // IEEE 754 NaN handling: UCOMISD sets PF=1 when either
+                    // operand is NaN (the "unordered" case).  For Ne this
+                    // must return true (NaN != NaN); for Eq/Lt/Le it must
+                    // return false.  UGt/UGe already return false for
+                    // unordered (CF=1 after UCOMISD), so no fix-up needed.
+                    let lhs_fp = lhs.as_register().map(|id| fp_vregs.contains(&id)).unwrap_or(false);
+                    let rhs_fp = rhs.as_register().map(|id| fp_vregs.contains(&id)).unwrap_or(false);
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || lhs_fp || rhs_fp;
+                    if is_fp {
+                        let is_f64 = !matches!(ty, Some(IRType::F32));
                         // Load lhs into RAX and move to XMM0.
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
@@ -794,7 +1127,30 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         } else {
                             code.extend(encode_ucomiss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                         }
-                        code.extend(encode_setcc(cc, Gpr::Rax));
+                        // SETcc + NaN fix-up.  For Ne: result = SETNE OR SETP
+                        // (true if not-equal OR unordered).  For Eq/Lt/ULt/Le/
+                        // ULe: result = SETcc AND SETNP (false if unordered).
+                        // For UGt/UGe: SETA/SETAE already correct (NaN→CF=1).
+                        match kind {
+                            crate::ir::CmpKind::Ne => {
+                                code.extend(encode_setcc(Cc::NotEqual, Gpr::Rax));
+                                code.extend(encode_setcc(Cc::Parity, Gpr::Rcx));
+                                code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
+                            crate::ir::CmpKind::Eq
+                            | crate::ir::CmpKind::SLt | crate::ir::CmpKind::ULt
+                            | crate::ir::CmpKind::SLe | crate::ir::CmpKind::ULe => {
+                                code.extend(encode_setcc(cc, Gpr::Rax));
+                                code.extend(encode_setcc(Cc::NotParity, Gpr::Rcx));
+                                code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
+                            // SGt/SGe fall through to UGt/UGe encoding (FP
+                            // compares are sign-agnostic; the signed/unsigned
+                            // distinction is meaningless on bit patterns).
+                            _ => {
+                                code.extend(encode_setcc(cc, Gpr::Rax));
+                            }
+                        }
                         code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
                         code.extend(store_vreg(dst_id, Gpr::Rax));
                         code
@@ -1523,62 +1879,153 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Call ──
                 IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
                     let mut code = Vec::new();
-                    // Load arguments from stack into SystemV arg registers
-                    let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
-                    // SysV ABI: args 7+ go on the stack (pushed in reverse order).
-                    // Stack must be 16-byte aligned at the CALL instruction.
-                    let num_reg_args = args.len().min(call_arg_regs.len());
-                    let stack_args: Vec<&IRValue> = if args.len() > num_reg_args {
-                        args[num_reg_args..].iter().collect()
-                    } else {
-                        Vec::new()
-                    };
-                    // Calculate stack adjustment: each stack arg is 8 bytes,
-                    // plus padding to ensure 16-byte alignment at CALL.
-                    // After the 8-byte return address is pushed by CALL, ESP must
-                    // be 16-byte aligned. So before CALL, ESP must be 16-aligned.
-                    // We push args in reverse order, then align.
-                    let stack_bytes = stack_args.len() * 8;
-                    // Align to 16 bytes (pad up if needed)
-                    let aligned_bytes = (stack_bytes + 15) & !15;
-                    if aligned_bytes > 0 {
-                        // SUB RSP, aligned_bytes
-                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
+
+                    // ── Float-conversion builtins ──
+                    // The IR builder emits `inttofloat` / `uinttofloat` /
+                    // `floattoint` / `floattouint` as ordinary `Call`
+                    // instructions (see `lower_call` in `scg_to_ir.rs`).
+                    // These are NOT real runtime functions — the linker
+                    // would fall back to `__ffi_fallback_stub` (xor rax,rax;
+                    // ret) and silently return 0, breaking every float
+                    // program.  Intercept them here and emit the proper
+                    // SSE2 conversion inline.  Each takes exactly 1 argument
+                    // and returns an i64-sized result (f64 bit pattern or
+                    // truncated integer).
+                    let mut float_builtin_matched = false;
+                    if args.len() == 1 {
+                        if let Some(d) = dst {
+                            if let Some(dst_id) = d.as_register() {
+                                let arg = &args[0];
+                                match call_target.as_str() {
+                                    "inttofloat" => {
+                                        // i64 → f64: CVTSI2SD xmm, r64; MOVQ r64, xmm
+                                        code.extend(load_value(arg, Gpr::Rax));
+                                        code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                        code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                        instr_opcode = Some("inttofloat".to_string());
+                                        float_builtin_matched = true;
+                                    }
+                                    "uinttofloat" => {
+                                        // u64 → f64: x86_64 has no direct
+                                        // unsigned conversion.  Strategy:
+                                        //   1. R11 = RAX (save original)
+                                        //   2. SHR RAX, 1 (halve; fits in i63)
+                                        //   3. CVTSI2SD XMM0, RAX
+                                        //   4. ADDSD XMM0, XMM0 (double)
+                                        //   5. AND R11, 1 (isolate bit 0)
+                                        //   6. CVTSI2SD XMM1, R11 (0.0 or 1.0)
+                                        //   7. ADDSD XMM0, XMM1 (1-ULP fix-up)
+                                        code.extend(load_value(arg, Gpr::Rax));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));      // CL = 1
+                                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax));  // save original
+                                        code.extend(encode_shr_reg_cl(Gpr::Rax));             // RAX >>= 1
+                                        code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                        code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                        code.extend(encode_and_reg_imm32(Gpr::R11, 1));
+                                        code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm1, Gpr::R11));
+                                        code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                        code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                        instr_opcode = Some("uinttofloat".to_string());
+                                        float_builtin_matched = true;
+                                    }
+                                    "floattoint" => {
+                                        // f64 → i64 (truncate toward zero):
+                                        // MOVQ xmm, r64; CVTTSD2SI r64, xmm
+                                        code.extend(load_value(arg, Gpr::Rax));
+                                        code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                        code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                        instr_opcode = Some("floattoint".to_string());
+                                        float_builtin_matched = true;
+                                    }
+                                    "floattouint" => {
+                                        // f64 → u64: x86_64 has no direct
+                                        // FP→unsigned conversion.  Use the
+                                        // subtract-2^63 / convert / XOR-2^63
+                                        // trick:
+                                        //   1. XMM0 = input
+                                        //   2. XMM1 = 2^63 (0x43E0...)
+                                        //   3. XMM0 -= XMM1   (now in signed range)
+                                        //   4. RAX = CVTTSD2SI XMM0
+                                        //   5. RAX ^= 0x8000... (add 2^63 back)
+                                        code.extend(load_value(arg, Gpr::Rax));
+                                        code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                        code.extend(encode_mov_reg_imm64(Gpr::R10, 0x43E0000000000000));
+                                        code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                                        code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                        code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                        code.extend(encode_mov_reg_imm64(Gpr::R10, 0x8000000000000000));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R10));
+                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                        instr_opcode = Some("floattouint".to_string());
+                                        float_builtin_matched = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
-                    // Push stack args in reverse order (last arg first)
-                    // so that arg[6] ends up at [RSP], arg[7] at [RSP+8], etc.
-                    for (i, arg) in stack_args.iter().enumerate().rev() {
-                        code.extend(load_value(arg, Gpr::Rax));
-                        // MOV [RSP + i*8], RAX
-                        code.push(0x48); // REX.W
-                        code.push(0x89);
-                        code.push(0x44); // ModRM: [RSP + disp8], RAX
-                        code.push(0xE4); // SIB: base=RSP, no index
-                        code.push((i as u8) * 8); // disp8
-                    }
-                    // Load register args (after stack setup to avoid clobbering)
-                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                        code.extend(load_value(arg, call_arg_regs[i]));
-                    }
-                    // For variadic functions, AL should contain the number of
-                    // XMM registers used (0 for integer-only calls).
-                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // AL = 0
-                    // CALL rel32
-                    code.extend(encode_call_rel32(0));
-                    let call_rel32_offset = byte_offset + code.len() - 4;
-                    relocations.push(RelocationEntry {
-                        offset: call_rel32_offset as u64,
-                        symbol: call_target.clone(),
-                        reloc_type: R_X86_64_PLT32.to_string(),
-                    });
-                    // Store return value (RAX) to dst's stack slot
-                    if let Some(d) = dst {
-                        let dst_id = d.as_register().unwrap_or(0);
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
-                    }
-                    // Clean up stack args (restore RSP)
-                    if aligned_bytes > 0 {
-                        code.extend(encode_add_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
+
+                    if !float_builtin_matched {
+                        // Load arguments from stack into SystemV arg registers
+                        let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+                        // SysV ABI: args 7+ go on the stack (pushed in reverse order).
+                        // Stack must be 16-byte aligned at the CALL instruction.
+                        let num_reg_args = args.len().min(call_arg_regs.len());
+                        let stack_args: Vec<&IRValue> = if args.len() > num_reg_args {
+                            args[num_reg_args..].iter().collect()
+                        } else {
+                            Vec::new()
+                        };
+                        // Calculate stack adjustment: each stack arg is 8 bytes,
+                        // plus padding to ensure 16-byte alignment at CALL.
+                        // After the 8-byte return address is pushed by CALL, ESP must
+                        // be 16-byte aligned. So before CALL, ESP must be 16-aligned.
+                        // We push args in reverse order, then align.
+                        let stack_bytes = stack_args.len() * 8;
+                        // Align to 16 bytes (pad up if needed)
+                        let aligned_bytes = (stack_bytes + 15) & !15;
+                        if aligned_bytes > 0 {
+                            // SUB RSP, aligned_bytes
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
+                        }
+                        // Push stack args in reverse order (last arg first)
+                        // so that arg[6] ends up at [RSP], arg[7] at [RSP+8], etc.
+                        for (i, arg) in stack_args.iter().enumerate().rev() {
+                            code.extend(load_value(arg, Gpr::Rax));
+                            // MOV [RSP + i*8], RAX
+                            code.push(0x48); // REX.W
+                            code.push(0x89);
+                            code.push(0x44); // ModRM: [RSP + disp8], RAX
+                            code.push(0xE4); // SIB: base=RSP, no index
+                            code.push((i as u8) * 8); // disp8
+                        }
+                        // Load register args (after stack setup to avoid clobbering)
+                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                            code.extend(load_value(arg, call_arg_regs[i]));
+                        }
+                        // For variadic functions, AL should contain the number of
+                        // XMM registers used (0 for integer-only calls).
+                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // AL = 0
+                        // CALL rel32
+                        code.extend(encode_call_rel32(0));
+                        let call_rel32_offset = byte_offset + code.len() - 4;
+                        relocations.push(RelocationEntry {
+                            offset: call_rel32_offset as u64,
+                            symbol: call_target.clone(),
+                            reloc_type: R_X86_64_PLT32.to_string(),
+                        });
+                        // Store return value (RAX) to dst's stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                        // Clean up stack args (restore RSP)
+                        if aligned_bytes > 0 {
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
+                        }
                     }
                     code
                 }

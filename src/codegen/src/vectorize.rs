@@ -358,22 +358,80 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
         return None;
     }
 
-    // TODO(wave4-triage): IV-unit soundness bug. The lane offset
-    // (`i + l*elem_size`) and IV step (`i + vf*elem_size`) below are in
-    // BYTE units. This is only correct when the matched IV (`i + 1`) is a
-    // BYTE-offset IV with stride 1 AND elem_size == 1 (byte access) — the
-    // only case where IV stride (1) equals elem_size. For the common case
-    // of an element-index IV (where `i + 1` means +1 element and the body
-    // multiplies `i` by elem_size to get the byte offset), the formula is
-    // elem_size× too large: lanes access non-adjacent elements and the
-    // loop processes vf*elem_size times fewer iterations than intended,
-    // miscompiling. The bug is latent in practice because the
-    // preconditions (single-block self-loop, ≤24 instrs, no Calls/Atomics/
-    // Free, no IV clobber) are strict enough that no current test triggers
-    // the vectorizer after loop_unroll + inlining. A proper fix requires
-    // IV stride analysis (detect element-index vs byte-offset IVs and
-    // adjust the lane/step formula accordingly) — deferred to a later wave.
-    let iv_step = vf * elem_size; // The fix: was 1, now vf*elem_size.
+    // ── IV-stride analysis (fix for the wave4-triage IV-unit soundness bug) ──
+    //
+    // The matched IV has stride +1 (`i_next = i + 1`). The unit of that
+    // stride — 1 byte or 1 element — determines the correct lane-offset
+    // and IV-step formula:
+    //
+    //   • Element-index IV (COMMON case): `i` is an element index. The
+    //     body multiplies `i` by `elem_size` (via `Mul` or strength-reduced
+    //     `Shl`) to compute the byte address `base + i*elem_size`. Lane `l`
+    //     must access element `i+l`, so the lane-offset vreg is `i + l`
+    //     (element units) and the IV step is `i + vf` (advance vf elements).
+    //
+    //   • Byte-offset IV (rare): `i` is a byte offset used directly as
+    //     `base + i`. Lane `l` must access byte `i + l*elem_size`, so the
+    //     lane-offset vreg is `i + l*elem_size` and the IV step is
+    //     `i + vf*elem_size`. This is only semantically correct when
+    //     elem_size == 1 (byte access with stride-1 byte IV) — for
+    //     elem_size > 1 the original loop would access overlapping windows,
+    //     which the vectorizer's non-overlapping lane layout would change,
+    //     so we bail.
+    //
+    // The old code unconditionally used the byte-offset formula
+    // (`i + l*elem_size`, `i + vf*elem_size`), which miscompiled the common
+    // element-index-IV case: lanes accessed non-adjacent elements and the
+    // loop ran `vf*elem_size` times fewer iterations than intended.
+    //
+    // Detection: scan the body for `phi_vreg * elem_size` (Mul) or
+    // `phi_vreg << log2(elem_size)` (Shl). If found → element-index IV.
+    let log2_elem = elem_size.trailing_zeros() as i64;
+    let mut is_element_index_iv = false;
+    for instr in body {
+        if let IRInstr::BinOp { op, lhs, rhs, .. } = instr {
+            let phi_lhs = matches!(lhs, IRValue::Register(r) if *r == phi_vreg);
+            let phi_rhs = matches!(rhs, IRValue::Register(r) if *r == phi_vreg);
+            match op {
+                BinOpKind::Mul => {
+                    let imm_is_elem = matches!(rhs, IRValue::Immediate(v) if *v == elem_size as i64)
+                        || matches!(lhs, IRValue::Immediate(v) if *v == elem_size as i64);
+                    if (phi_lhs || phi_rhs) && imm_is_elem {
+                        is_element_index_iv = true;
+                        break;
+                    }
+                }
+                BinOpKind::Shl => {
+                    // Strength-reduced form: `i << log2(elem_size)`.
+                    let imm_is_log2 = matches!(rhs, IRValue::Immediate(v) if *v == log2_elem);
+                    if phi_lhs && imm_is_log2 {
+                        is_element_index_iv = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Compute lane_unit (bytes added per lane to the IV vreg) and iv_step
+    // (bytes added to the IV each vector iteration).
+    //
+    // For element-index IVs: lane_unit = 1 (element), iv_step = vf (elements).
+    //   The body's `* elem_size` scales the element-unit lane offset to
+    //   bytes after substitution, yielding correct adjacent byte addresses.
+    // For byte-offset IVs with elem_size == 1: lane_unit = 1, iv_step = vf
+    //   (coincides with the element-index formula since elem_size == 1).
+    // For byte-offset IVs with elem_size > 1: BAIL — the vectorizer's
+    //   non-overlapping lane layout would change the loop's semantics
+    //   (original loop accesses overlapping windows). Soundness over opt.
+    let (lane_unit, iv_step): (i64, i64) = if is_element_index_iv || elem_size == 1 {
+        (1, vf as i64)
+    } else {
+        // Ambiguous / byte-offset IV with elem_size > 1: cannot prove
+        // vectorization is sound. Bail rather than risk miscompilation.
+        return None;
+    };
 
     // ── Build the new vector-loop block ───────────────────────────────
     let mut new_instrs: Vec<IRInstr> = Vec::with_capacity(instrs.len() * vf as usize);
@@ -393,7 +451,7 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
             op: BinOpKind::Add,
             dst: IRValue::Register(i_l),
             lhs: IRValue::Register(phi_vreg),
-            rhs: IRValue::Immediate((l as i64) * (elem_size as i64)),
+            rhs: IRValue::Immediate((l as i64) * lane_unit),
             ty: None,
         });
         for instr in body {
@@ -404,12 +462,13 @@ fn try_vectorize_self_loop(block: &IRBlock) -> Option<(IRBlock, VectorizationPla
         }
     }
 
-    // IV step fix: i_next = phi_vreg + vf*elem_size.
+    // IV step: i_next = phi_vreg + iv_step (vf elements for element-index
+    // IVs, vf bytes for byte-offset IVs with elem_size == 1).
     new_instrs.push(IRInstr::BinOp {
         op: BinOpKind::Add,
         dst: IRValue::Register(i_new_vreg),
         lhs: IRValue::Register(phi_vreg),
-        rhs: IRValue::Immediate(iv_step as i64),
+        rhs: IRValue::Immediate(iv_step),
         ty: None,
     });
 
@@ -981,8 +1040,15 @@ mod tests {
 
     #[test]
     fn test_loop_vectorization_iv_step_fix() {
-        // The CRITICAL test: the stub left the IV step at +1; the rewrite
-        // must change it to +vf*elem_size (= +16 for i32 with vf=4).
+        // The CRITICAL test: the stub left the IV step at +1. The correct
+        // step depends on the IV stride unit.
+        //
+        // `build_add_loop_function` uses an ELEMENT-INDEX IV: the body
+        // multiplies `i` by `elem_size` (v5 = v4 * 4) to compute the byte
+        // address. For an element-index IV, the vector loop must advance
+        // the IV by `vf` ELEMENTS (not vf*elem_size bytes), so the loop
+        // runs N/vf iterations doing vf elements of work each = N total.
+        // IV step = vf = 4 for i32 with vf=4.
         let func = build_add_loop_function();
         let (new_func, plan) = vectorize_function_with_plan(func);
 
@@ -992,7 +1058,9 @@ mod tests {
             .find(|b| b.label == "loop")
             .expect("vector loop block must exist");
 
-        // The IV increment must now be `+16` (vf=4, elem_size=4), not `+1`.
+        // The IV increment must be `+4` (vf elements), not `+1` and not
+        // `+16` (the old buggy byte-unit formula that was elem_size× too
+        // large for element-index IVs).
         let iv_step = vec_blk.instructions.iter().find_map(|instr| {
             if let IRInstr::BinOp {
                 op: BinOpKind::Add,
@@ -1009,8 +1077,8 @@ mod tests {
         });
         assert_eq!(
             iv_step,
-            Some(16),
-            "IV step must be vf*elem_size = 4*4 = 16, got {:?}",
+            Some(4),
+            "IV step must be vf = 4 (element-index IV advances by vf elements), got {:?}",
             iv_step
         );
 
@@ -1052,8 +1120,12 @@ mod tests {
 
     #[test]
     fn test_loop_vectorization_lane_offsets() {
-        // The vectorized body must contain lane-offset vregs `i + 4`, `i + 8`,
-        // `i + 12` (lanes 1, 2, 3 for vf=4, elem_size=4).
+        // For an element-index IV (the body multiplies `i` by elem_size),
+        // lane `l` must access element `i+l`, so the lane-offset vreg is
+        // `i + l` (element units: 1, 2, 3 for lanes 1..3) and the IV step
+        // is `i + vf` (= i+4). The body's `* elem_size` scales the
+        // element-unit offset to bytes after substitution, yielding the
+        // correct adjacent byte addresses (i*4, (i+1)*4, (i+2)*4, ...).
         let func = build_add_loop_function();
         let (new_func, _) = vectorize_function_with_plan(func);
 
@@ -1081,23 +1153,23 @@ mod tests {
             })
             .collect();
         assert!(
+            lane_offsets.contains(&1),
+            "lane 1 offset (i+1, element units) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
+            lane_offsets.contains(&2),
+            "lane 2 offset (i+2, element units) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
+            lane_offsets.contains(&3),
+            "lane 3 offset (i+3, element units) missing: {:?}",
+            lane_offsets
+        );
+        assert!(
             lane_offsets.contains(&4),
-            "lane 1 offset (i+4) missing: {:?}",
-            lane_offsets
-        );
-        assert!(
-            lane_offsets.contains(&8),
-            "lane 2 offset (i+8) missing: {:?}",
-            lane_offsets
-        );
-        assert!(
-            lane_offsets.contains(&12),
-            "lane 3 offset (i+12) missing: {:?}",
-            lane_offsets
-        );
-        assert!(
-            lane_offsets.contains(&16),
-            "IV step (i+16) missing: {:?}",
+            "IV step (i+4 = i+vf elements) missing: {:?}",
             lane_offsets
         );
     }
@@ -1107,7 +1179,9 @@ mod tests {
         // The stub duplicated the body 4× WITHOUT changing the IV step (4N
         // work). The rewrite must run N/vf iterations with vf work each = N
         // total. We verify the body is duplicated vf=4 times AND the IV step
-        // is vf*elem_size (so the loop runs N/vf times, not N times).
+        // is vf (for an element-index IV, the loop advances by vf elements
+        // per vector iteration, so it runs N/vf times — not N times and not
+        // N/(vf*elem_size) times).
         let func = build_add_loop_function();
         let (new_func, plan) = vectorize_function_with_plan(func);
 
@@ -1142,7 +1216,11 @@ mod tests {
                 None
             }
         });
-        assert_eq!(iv_step, Some(16));
+        assert_eq!(
+            iv_step, Some(4),
+            "IV step must be vf=4 (element-index IV), got {:?}",
+            iv_step
+        );
         assert_eq!(plan.vf, 4);
     }
 
