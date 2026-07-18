@@ -444,7 +444,7 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // task_struct has both `real_parent` and `parent` (the latter can
 // differ if a tracer has ptrace'd the child); THIS file's ppid is the
 // simplified `real_parent` field.
-fn sys_fork(tbl: State<ProcessTable>, parent_idx: u32) -> u32 {
+transform sys_fork(tbl: State<ProcessTable>, parent_idx: u32) -> u32 {
     // Allocate a child slot. task_alloc marks it READY (state=2) and
     // assigns PID = child_slot + 1.
     let child_idx = task_alloc(tbl);

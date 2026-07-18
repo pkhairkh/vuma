@@ -81,19 +81,19 @@
 // array, with pack/unpack helpers (same pattern as K2a's pool_get_base /
 // pool_set_base).
 //
-// ── Deviation: regular `fn`, not `transform` ────────────────────────────────
-// The K2f contract specifies:
-//     transform sys_mmap(regions: State<RegionTable>, addr: u64, len: u64,
-//                        prot: u64, flags: u64) -> State<RegionTable>
-// But `transform` is parser-restricted to a SINGLE State<T> parameter
-// (src/parser/src/parser.rs::parse_transform_def — verified during K2b).
-// sys_mmap needs at least (regions, addr, len, prot, flags) — 5 params —
-// plus the PMM/VMM state (pmm_pool, pmm, pt) for the actual physical-page
-// allocation and page-table mapping. So sys_mmap cannot be declared
-// `transform`; it's a regular `fn` (init-style — same deviation as K2b's
-// vmm_map / vmm_unmap). The deviation is documented here and in the
-// worklog; when the codegen gains multi-param transforms, this file can
-// collapse back to the contract's signature.
+// ── sys_mmap as a transform (Fix 6) ─────────────────────────────────────────
+// sys_mmap is declared `transform` (not `fn`). Fix 1 (commit b183ecac) lifted
+// the parser's old 1-State-param restriction on `transform`, so multi-param
+// transforms now lower to real codegen (same path as `fn`). The transform
+// keyword enables:
+//   - StateTransform verifier on the body
+//   - state_transform_elision if the transform is identity
+//   - Linear ownership semantics (the State<T> params are "consumed" by the
+//     transform — use-after-exit becomes a compile-time concept)
+// sys_mmap's signature is unchanged from the K2f `fn` form (same params, same
+// return type u64); only the leading `fn` keyword became `transform`. The
+// caller (self-test) calls it the same way — transforms are callable like
+// regular functions from the caller's perspective.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. If a future kmain.vuma wants to call
@@ -380,7 +380,7 @@ fn rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
 // Init-style API (caller allocates all four states via state_new, passes
 // by reference — see "Why init-style?" in womb/kernel/mm/pmm.vuma).
 
-fn sys_mmap(
+transform sys_mmap(
     regions: State<RegionTable>,
     pmm_pool: State<FlatPool>,
     pmm: State<PmmState>,
