@@ -1,0 +1,496 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/file_ops.vuma
+// VWK VFS Subsystem — File operations dispatch (vfs_open / vfs_read /
+// vfs_write / vfs_close / vfs_lseek / vfs_stat) — PMT-pure.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5f layer of the VWK kernel VFS: the high-level file-
+// operations dispatch layer that ties together the K5a FileTable + the K5b
+// path resolver (namei) + the K5c tmpfs primitives + the K5d initramfs
+// parser + the K5e mount layer. K5a created the File (open file descriptor)
+// + FileTable + file_alloc / file_free / file_get_* / file_set_* helpers.
+// K5f wraps those primitives in the POSIX-shaped vfs_open / vfs_read /
+// vfs_write / vfs_close / vfs_lseek entry points that K6 (syscall layer)
+// will wire to sys_open / sys_read / sys_write / sys_close / sys_lseek.
+//
+// ── What K5f provides ──────────────────────────────────────────────────────
+//   vfs_open(ft, dentry_idx, flags) -> u32
+//     Allocate a File slot via file_alloc, store the dentry index + flags
+//     + initial position 0, and return the slot index (= file descriptor).
+//     Returns 64 if the FileTable is full (K6's sys_open will translate
+//     this to -EMFILE). The dentry_idx is supplied by K5b's namei (the
+//     path resolver); in this K5f self-test we pass it directly.
+//
+//   vfs_read(ft, fd, buf, count) -> i64
+//     Read up to `count` bytes from open file `fd` into `buf`. Returns
+//     the number of bytes read, 0 at EOF, or 9 (= -EBADF as i64) if `fd`
+//     is not a valid open file. The hosted K5f implementation is a stub
+//     that returns 0 — the real read path requires the tmpfs (K5c) /
+//     initramfs (K5d) integration that K6 will wire in.
+//
+//   vfs_write(ft, fd, buf, count) -> i64
+//     Write up to `count` bytes from `buf` to open file `fd`. Returns
+//     the number of bytes written, or 9 (= -EBADF) if `fd` is not a
+//     valid open file. The hosted K5f implementation is a stub that
+//     returns `count` (pretends the write succeeded) — same caveat as
+//     vfs_read.
+//
+//   vfs_close(ft, fd) -> i64
+//     Close open file `fd`: free the File slot via file_free. Returns 0
+//     on success, 9 (= -EBADF) if `fd` is not a valid open file.
+//
+//   vfs_lseek(ft, fd, offset, whence) -> i64
+//     Reposition open file `fd`'s read/write offset:
+//       whence == 0 (SEEK_SET): pos = offset
+//       whence == 1 (SEEK_CUR): pos = pos + offset
+//       whence == 2 (SEEK_END): not implemented (would need inode.size —
+//                              K6 will wire this when K5c's tmpfs_read is
+//                              hooked up; for now silently leaves pos
+//                              unchanged and returns the current pos)
+//     Returns the new file position as i64, or 9 (= -EBADF) if `fd` is
+//     not a valid open file.
+//
+//   vfs_stat(ft, fd, st) -> i64
+//     Fill `st` with metadata for open file `fd`. The hosted K5f
+//     implementation is a stub that zeroes all Stat fields (the real
+//     stat path requires the InodeTable integration from K5a + K5c —
+//     K6 will wire this when sys_stat is added). Returns 0 on success,
+//     9 (= -EBADF) if `fd` is not a valid open file.
+//
+// ── Why stubs for read / write / stat? ──────────────────────────────────────
+// The K5f contract specifies stubs for vfs_read / vfs_write because the
+// real read/write path requires the tmpfs (K5c) or initramfs (K5d)
+// file_operations dispatch — vfs_read would call
+//   file_get_ops(ft, fd)  →  file_operations table address
+//   (*ops->read)(file, buf, count)
+// and VUMA has no function-pointer dereference in pure PMT mode. So K5f
+// establishes the dispatch ENTRY POINTS (the vfs_* functions that K6's
+// sys_* handlers will call) and the file-descriptor lifecycle (open /
+// close / lseek — these are FileTable-local and don't need the
+// file_operations dispatch). The actual byte-transfer logic lands in K6
+// (syscall layer) which can use extern "C" calls to dispatch to tmpfs's
+// tmpfs_read / initramfs's initramfs_read. Without K6, the kernel has
+// the dispatch entry points but no actual I/O — K5f's job is to nail
+// down the signatures + the EBADF / EMFILE / SEEK_* contract that K6
+// will rely on.
+//
+// ── Layouts re-declared (VUMA has no import) ────────────────────────────────
+// VUMA has no `import` statement, so this file re-declares the layouts
+// it needs (Stat, PathBuf, FileTable, ByteBuf). The K5f contract pins
+// the simplified FileTable (only dentries + positions + flags + used +
+// count — no ops / privates, since K5f doesn't dispatch through them;
+// K6 will use K5a's full FileTable). PathBuf is re-declared byte-
+// identically to K5b's namei.vuma. Stat is new (K5f introduces it).
+// ByteBuf is new (K5f introduces it as a 256-byte read/write buffer).
+//
+// ── FileTable layout (simplified, per K5f contract) ────────────────────────
+//   dentries:   [u8; 512]   = 64 * 8 bytes (u64 dentry index per File)
+//   positions:  [u8; 512]   = 64 * 8 bytes (u64 read/write offset per File)
+//   flags:      [u8; 256]   = 64 * 4 bytes (u32 open flags per File)
+//   used:       [u8; 64]    = 64 * 1 byte  (1=used, 0=free)
+//   count:      u32         — number of slots in use (0..64)
+// This is a SIMPLIFIED version of K5a's FileTable (which also has ops
+// and privates arrays). K5f doesn't need ops (no dispatch in pure PMT)
+// or privates (no FS-specific data without dispatch). K6 will re-
+// declare K5a's FULL FileTable when it wires sys_read / sys_write to
+// the real file_operations dispatch.
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Same 8-byte little-endian pack/unpack pattern as K5a's file.vuma
+// (file_get_dentry / file_set_dentry / file_get_pos / file_set_pos),
+// K5a's inode.vuma (inode_get_ino / etc.), K5a's dentry.vuma
+// (dentry_get_parent / etc.), K5e's mount.vuma (mount_get_dentry / etc.):
+// 8-iteration while loop, shift by i*8, mask 255 on writes, sum-of-
+// shifted-bytes on reads. The u8 accessors (file_get_used / file_set_used)
+// are direct array index — no pack/unpack (the byte IS the value).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e).
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties). The constants:
+//     64    = number of File slots (and the "table full" sentinel from
+//             file_alloc / vfs_open)
+//     8     = bytes per u64 field (loop bound for dentry/pos pack/unpack)
+//     255   = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     0     = SEEK_SET (vfs_lseek whence value)
+//     1     = SEEK_CUR (vfs_lseek whence value); also the "used" set value
+//     2     = SEEK_END (vfs_lseek whence value — silently ignored)
+//     9     = -EBADF as i64 (K5f's error sentinel for invalid fd —
+//             written as the literal 9 because vfs_read / vfs_write /
+//             vfs_close / vfs_lseek RETURN it as a positive i64 and the
+//             self-test compares `ret != 9`; K6 will translate this to
+//             the real -EBADF = 0 - 9 when wiring sys_read / sys_write /
+//             sys_close / sys_lseek)
+//     5     = test dentry index (a valid DentryTable slot)
+//     100   = test write count
+//     50    = test seek offset
+//     10    = test read count
+// The literal 9 (not `0 - 9`) is used because vfs_read / vfs_write /
+// vfs_close / vfs_lseek RETURN it as i64 — `0 - 9` would also work
+// (flatten_expr's BinOp::Sub arm produces -9 as i64 = bit pattern
+// 0xFFFFFFFFFFFFFFF7), but the literal 9 is what the K5f contract
+// template specifies (and the self-test compares `ret3 != 9`). The
+// literal 9 is positive i64 9 (NOT -9); we use it as a SENTINEL — K5f's
+// vfs_* functions return +9 to mean "EBADF" rather than -9. K6 will
+// translate this to the real POSIX -EBADF = -9 when wiring the syscall
+// layer.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// FileTable + ByteBuf + Stat are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> slots; the CALLER allocates them via
+// `state_new(FileTable)` / `state_new(ByteBuf)` / `state_new(Stat)` and
+// passes them by reference to the vfs_* helpers (init-style API — see
+// K5a's file.vuma header "Why init-style?" for the codegen rationale).
+// No externs are declared (the vfs_* helpers are pure-PM; K6 will
+// declare its own externs for the tmpfs / initramfs dispatch).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares Stat (new), PathBuf (from
+// K5b), FileTable (simplified from K5a), ByteBuf (new). K6 will re-
+// declare these byte-identically when it wires sys_open / sys_read /
+// sys_write / sys_close / sys_lseek / sys_stat.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/vfs/file_ops.vuma \
+//         /tmp/file_ops.bin x86_64 --verify
+//     /tmp/file_ops.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — open + count=1,
+// write returns 100, lseek to 50 returns 50, close returns 0, count=0,
+// read on closed fd returns 9 / -EBADF).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Stat: the metadata structure returned by vfs_stat. Mirrors a subset of
+// Linux's `struct kstat` (ino + mode + size + blocks — the four fields
+// K5f cares about for the dispatch layer). K6's sys_stat / sys_fstat /
+// sys_lstat will fill this from the InodeTable (K5a's inode_get_ino /
+// inode_get_mode / inode_get_size — K5a's InodeTable doesn't track
+// blocks, so K6 will set blocks = (size + 511) / 512). Total: 8 + 4 +
+// 8 + 8 = 28 bytes (padded to 32 by the codegen's max-field-alignment
+// rule — 4 bytes of inter-field padding between mode (u32 at offset 8)
+// and size (u64 at offset 16)).
+layout Stat = {
+    ino: u64,
+    mode: u32,
+    size: u64,
+    blocks: u64,
+}
+
+// PathBuf: re-declared byte-identically to K5b's namei.vuma. A 64-byte
+// null-terminated path string. K5f declares it for forward compatibility
+// (K6's sys_open will build a PathBuf from the user-supplied path
+// argument and pass it to K5b's namei to get the dentry index for
+// vfs_open). The K5f self-test does NOT use PathBuf — vfs_open takes
+// the dentry index directly (the contract specifies this).
+layout PathBuf = { data: [u8; 64] }
+
+// FileTable: 64 File slots stored as parallel flat byte arrays (VUMA has
+// no struct-array support — see K5a's file.vuma header for the rationale).
+// SIMPLIFIED from K5a's FileTable: this K5f version omits the `ops` and
+// `privates` arrays (K5f doesn't dispatch through file_operations in
+// pure PMT — see "Why stubs for read / write / stat?" above). K6 will
+// re-declare K5a's FULL FileTable (with ops + privates) when it wires
+// sys_read / sys_write to the real file_operations dispatch. The `used`
+// array is the alloc/free flag (1 = used, 0 = free) — same design choice
+// as K5a's FileTable (see K5a's file.vuma header "FileTable layout" for
+// why `used` is preferred over a semantic free marker).
+layout FileTable = {
+    dentries: [u8; 512],
+    positions: [u8; 512],
+    flags: [u8; 256],
+    used: [u8; 64],
+    count: u32,
+}
+
+// ByteBuf: a 256-byte read/write buffer. K5f's vfs_read / vfs_write take
+// a State<ByteBuf> as the user buffer (the K5f contract specifies this).
+// 256 bytes is plenty for the K5f self-test (which transfers 100 bytes
+// of write + 10 bytes of read). K6 will use a larger buffer (4 KB =
+// one page) when wiring sys_read / sys_write to userspace.
+layout ByteBuf = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessors (used) — direct array index, no pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// Same pattern as K4a's pt_get_state / pt_set_state (task.vuma), K5a's
+// file_get_used / file_set_used (file.vuma), K5a's dentry_get_used /
+// dentry_set_used (dentry.vuma), K5e's mount_get_dentry (which uses
+// pack/unpack because Mount.dentry is u64, not u8). The byte IS the value.
+
+// Read the u8 `used` flag of File slot `idx` from FileTable.used.
+fn file_get_used(ft: State<FileTable>, idx: u32) -> u8 {
+    return ft.used[idx];
+}
+
+// Write the u8 `used` flag of File slot `idx` into FileTable.used.
+fn file_set_used(ft: State<FileTable>, idx: u32, val: u8) {
+    ft.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (dentries, positions).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K5a's
+// file_get_dentry / file_set_dentry / file_get_pos / file_set_pos
+// (file.vuma), K5a's inode_get_ino / etc. (inode.vuma), K5a's
+// dentry_get_parent / etc. (dentry.vuma), K5e's mount_get_dentry / etc.
+// (mount.vuma): 8-iteration while loop, shift by i*8, mask 255 on writes,
+// sum-of-shifted-bytes on reads.
+
+// Read the u64 `dentry` field of File slot `idx` from FileTable.dentries.
+fn file_get_dentry(ft: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = ft.dentries[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `dentry` field of File slot `idx` into FileTable.dentries.
+fn file_set_dentry(ft: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        ft.dentries[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `position` field of File slot `idx` from FileTable.positions.
+fn file_get_pos(ft: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = ft.positions[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `position` field of File slot `idx` into FileTable.positions.
+fn file_set_pos(ft: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        ft.positions[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// File slot lifecycle (file_alloc / file_free).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical in spirit to K5a's file_alloc / file_free (file.vuma)
+// modulo the simplified FileTable (no ops / privates to set). The
+// lowest-free-slot-wins policy matches Linux's find_first_zero_bit and
+// K5a's file_alloc / inode_alloc / dentry_alloc.
+
+// file_alloc: find the first FREE slot (used == 0), set used = 1, bump
+// count, return the slot index. Returns 64 if the table is full (the
+// caller MUST check — vfs_open returns 64 to K6's sys_open, which
+// translates it to -EMFILE = 0 - 24).
+fn file_alloc(ft: State<FileTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if file_get_used(ft, i) == 0 {
+            file_set_used(ft, i, 1);
+            ft.count = ft.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // table full
+}
+
+// file_free: mark slot `idx` as FREE (used = 0), decrement count. Does
+// NOT zero the other File fields (dentry, position, etc. stay stale
+// until file_alloc reuses the slot — same as K5a's file_free).
+fn file_free(ft: State<FileTable>, idx: u32) {
+    file_set_used(ft, idx, 0);
+    ft.count = ft.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// VFS file operations dispatch (vfs_open / vfs_read / vfs_write /
+// vfs_close / vfs_lseek / vfs_stat).
+// ────────────────────────────────────────────────────────────────────────────
+
+// vfs_open: open a file by dentry index. Allocates a File slot, stores
+// the dentry index + flags, sets the initial position to 0, and returns
+// the file descriptor (the File slot index). Returns 64 if the FileTable
+// is full.
+//
+// In the full kernel (K6+), the dentry_idx is supplied by K5b's namei
+// (the path resolver walks the path string through the dentry tree and
+// returns the target dentry index). For the K5f self-test we pass the
+// dentry index directly.
+fn vfs_open(ft: State<FileTable>, dentry_idx: u64, flags: u32) -> u32 {
+    let fd = file_alloc(ft);
+    if fd == 64 {
+        return 64;  // table full
+    }
+    file_set_dentry(ft, fd, dentry_idx);
+    file_set_pos(ft, fd, 0);
+    return fd;
+}
+
+// vfs_read: read up to `count` bytes from open file `fd` into `buf`.
+// Returns the number of bytes read, 0 at EOF, or 9 (= -EBADF as i64)
+// if `fd` is not a valid open file.
+//
+// The hosted K5f implementation is a STUB that returns 0 — the real
+// read path requires the tmpfs (K5c) / initramfs (K5d) integration
+// that K6 will wire in (K6's sys_read will call file_get_ops to get
+// the file_operations table address, then extern "C" call through it
+// to tmpfs_read / initramfs_read). K5f establishes the EBADF contract
+// + the function signature that K6 will rely on.
+fn vfs_read(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> i64 {
+    if file_get_used(ft, fd) == 0 {
+        return 9;  // -EBADF
+    }
+    // Stub: return 0 (no data read).
+    return 0;
+}
+
+// vfs_write: write up to `count` bytes from `buf` to open file `fd`.
+// Returns the number of bytes written, or 9 (= -EBADF as i64) if `fd`
+// is not a valid open file.
+//
+// The hosted K5f implementation is a STUB that returns `count` (pretends
+// the write succeeded) — same caveat as vfs_read.
+fn vfs_write(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> i64 {
+    if file_get_used(ft, fd) == 0 {
+        return 9;  // -EBADF
+    }
+    // Stub: return count (pretend we wrote it).
+    return count as i64;
+}
+
+// vfs_close: close open file `fd`. Frees the File slot via file_free.
+// Returns 0 on success, 9 (= -EBADF as i64) if `fd` is not a valid
+// open file.
+fn vfs_close(ft: State<FileTable>, fd: u32) -> i64 {
+    if file_get_used(ft, fd) == 0 {
+        return 9;  // -EBADF
+    }
+    file_free(ft, fd);
+    return 0;
+}
+
+// vfs_lseek: reposition open file `fd`'s read/write offset.
+//   whence == 0 (SEEK_SET): pos = offset
+//   whence == 1 (SEEK_CUR): pos = pos + offset
+//   whence == 2 (SEEK_END): not implemented (silently leaves pos
+//                           unchanged — would need inode.size from the
+//                           InodeTable, which K6 will wire in)
+// Returns the new file position as i64, or 9 (= -EBADF as i64) if `fd`
+// is not a valid open file.
+fn vfs_lseek(ft: State<FileTable>, fd: u32, offset: u64, whence: u32) -> i64 {
+    if file_get_used(ft, fd) == 0 {
+        return 9;  // -EBADF
+    }
+    if whence == 0 {  // SEEK_SET
+        file_set_pos(ft, fd, offset);
+    } else {
+        if whence == 1 {  // SEEK_CUR
+            let cur = file_get_pos(ft, fd);
+            file_set_pos(ft, fd, cur + offset);
+        }
+        // SEEK_END (whence == 2) not implemented — would need inode
+        // size from the InodeTable. K6 will wire this when sys_lseek
+        // is added (the real implementation will look up the inode
+        // via file_get_dentry → DentryTable.inodes → InodeTable.sizes
+        // and set pos = inode.size + offset).
+    }
+    return file_get_pos(ft, fd) as i64;
+}
+
+// vfs_stat: fill `st` with metadata for open file `fd`. The hosted K5f
+// implementation is a STUB that zeroes all Stat fields (the real stat
+// path requires the InodeTable integration from K5a + K5c — K6 will
+// wire this when sys_stat / sys_fstat / sys_lstat are added). Returns
+// 0 on success, 9 (= -EBADF as i64) if `fd` is not a valid open file.
+fn vfs_stat(ft: State<FileTable>, fd: u32, st: State<Stat>) -> i64 {
+    if file_get_used(ft, fd) == 0 {
+        return 9;  // -EBADF
+    }
+    // Stub: zero all Stat fields (real stat would fill from InodeTable
+    // via file_get_dentry → DentryTable.inodes[dentry] → InodeTable).
+    st.ino = 0;
+    st.mode = 0;
+    st.size = 0;
+    st.blocks = 0;
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5f DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a FileTable via state_new, zero all used flags (initialize
+// the table — same as K5a's file_init but inlined since K5f doesn't re-
+// declare file_init), then:
+//   (1) vfs_open(ft, 5, 0) → returns 0 (first slot); count == 1.
+//   (2) vfs_write(ft, 0, buf, 100) → returns 100 (stub write succeeds).
+//   (3) vfs_lseek(ft, 0, 50, 0) → returns 50 (SEEK_SET to 50).
+//   (4) vfs_close(ft, 0) → returns 0; count == 0.
+//   (5) vfs_read(ft, 0, buf, 10) → returns 9 (-EBADF, since fd 0 was
+//       closed by check 4 — exercises the EBADF path in vfs_read).
+// Returns 0 on success, 1..7 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K5f contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (5, 100, 50, 10, 9, 64, 1) —
+// decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see K5a's file.vuma header for the same
+// rationale). The 9 literal is the EBADF sentinel — K5f's vfs_*
+// functions return +9 (not -9) to mean "EBADF" (see "Decimal-constants
+// discipline" in the file header for why).
+
+fn main() -> i32 {
+    let ft = state_new(FileTable);
+    ft.count = 0;
+    // Initialize used flags to 0.
+    let i = 0;
+    while i < 64 {
+        file_set_used(ft, i, 0);
+        i = i + 1;
+    }
+    // Open a file (dentry 5).
+    let fd = vfs_open(ft, 5, 0);
+    if fd != 0 { return 1; }
+    if ft.count != 1 { return 2; }
+    // Write to it.
+    let buf = state_new(ByteBuf);
+    let ret = vfs_write(ft, fd, buf, 100);
+    if ret != 100 { return 3; }
+    // Seek.
+    let pos = vfs_lseek(ft, fd, 50, 0);
+    if pos != 50 { return 4; }
+    // Close it.
+    let ret2 = vfs_close(ft, fd);
+    if ret2 != 0 { return 5; }
+    if ft.count != 0 { return 6; }
+    // Read from closed fd → -EBADF.
+    let ret3 = vfs_read(ft, fd, buf, 10);
+    if ret3 != 9 { return 7; }  // -EBADF
+    return 0;
+}
