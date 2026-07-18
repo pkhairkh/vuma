@@ -3908,8 +3908,9 @@ impl IRBuilder {
                         } else {
                             false
                         };
-                        // Check if dst is f32 (from fn_var_types or the call's dst name)
-                        let dst_f32 = match &call.dst {
+                        // Check if dst is f32 (from fn_var_types via reassigns or dst)
+                        let dst_name = call.reassigns.as_ref().or(call.dst.as_ref());
+                        let dst_f32 = match dst_name {
                             Some(name) => self.fn_var_types.get(name) == Some(&ScgType::F32),
                             None => false,
                         };
