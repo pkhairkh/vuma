@@ -49,6 +49,8 @@ const S0: Gpr = Gpr::A0; // $r4 — primary scratch / return value
 const S1: Gpr = Gpr::A1; // $r5 — secondary operand
 const S2: Gpr = Gpr::T0; // $r12 — tertiary scratch
 const S3: Gpr = Gpr::T1; // $r13 — quaternary scratch
+const S4: Gpr = Gpr::S4; // $r27 — quinary scratch (for FloatToUInt)
+const FS2: Fpr = Fpr::F2; // $f2 — tertiary FPR scratch
 
 /// Scratch register used *only* in function prologues.
 ///
@@ -1575,20 +1577,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
 
                             if dst_is_64 {
+                                // For values < 2^63, FCTIDZ directly gives correct result.
+                                // For values >= 2^63, use subtract-2^63 + FCTIDZ + XOR.
+                                // The old approach ALWAYS subtracted 2^63, which loses small
+                                // values in f64 rounding (2.0 - 2^63 = -2^63 exactly).
+                                
                                 // Promote f32 to f64 for consistent handling
                                 if src_is_f32 {
                                     code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
                                 }
 
+                                // Direct conversion (correct for < 2^63)
+                                code.extend_from_slice(&Instruction::FtintLD { fd: FS2, fj: FS0 }.encode());
+                                code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S2, fj: FS2 }.encode()); // S2 = direct
+
+                                // Corrected conversion (correct for >= 2^63)
                                 // Load 2^63 as f64 (bit pattern 0x43E0_0000_0000_0000)
-                                // into FS1 via GPR S1.
                                 code.extend(encode_load_imm(S1, 0x43E0_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
 
-                                // FS0 = FS0 - 2^63   (now in [-2^63, 2^63))
+                                // FS0 = FS0 - 2^63
                                 code.extend_from_slice(&Instruction::FsubD { fd: FS0, fj: FS0, fk: FS1 }.encode());
 
-                                // FS0 = (i64)(FS0)  via signed ftint.d.l
+                                // FS0 = (i64)(FS0) via signed ftint.d.l
                                 code.extend_from_slice(&Instruction::FtintLD { fd: FS0, fj: FS0 }.encode());
 
                                 // Move FPR → GPR
@@ -1597,6 +1608,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // XOR with 0x8000000000000000 (add 2^63 back as unsigned)
                                 code.extend(encode_load_imm(S1, 0x8000_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S1 }.encode());
+
+                                // Select: if S2 (direct) < 0 (saturated), use S0 (corrected); else use S2
+                                // S2 < 0 means bit 63 is set (FCTIDZ saturates to 0x8000000000000000 for >= 2^63)
+                                code.extend_from_slice(&Instruction::Slti { rd: S3, rj: S2, imm12: 0 }.encode());
+                                // mask = S3 ? -1 : 0; S0 = (S0 & mask) | (S2 & ~mask)
+                                code.extend_from_slice(&Instruction::Masknez { rd: S4, rj: S2, rk: S3 }.encode());
+                                code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S0, rk: S3 }.encode());
+                                code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S4 }.encode());
                             } else {
                                 // f32/f64 → u32: use signed ftint, then zero-extend
                                 if src_is_f32 {
