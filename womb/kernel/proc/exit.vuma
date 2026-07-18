@@ -388,7 +388,7 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // — the encoding/decoding is K4e's waitpid concern (waitpid's WIFEXITED
 // / WIFSIGNALED / WEXITSTATUS / WTERMSIG macros decode the stored value
 // for the parent).
-fn sys_exit(tbl: State<ProcessTable>, task_idx: u32, code: i32, zombie: State<ZombieTask>) {
+transform sys_exit(tbl: State<ProcessTable>, task_idx: u32, code: i32, zombie: State<ZombieTask>) -> State<ZombieTask> {
     // Mark the task as ZOMBIE (state = 4). The task stays in the
     // ProcessTable until K4e's waitpid reaps it (task_free → state = 0).
     pt_set_state(tbl, task_idx, 4);
@@ -404,6 +404,9 @@ fn sys_exit(tbl: State<ProcessTable>, task_idx: u32, code: i32, zombie: State<Zo
     zombie.pid = pt_get_pid(tbl, task_idx);
     zombie.ppid = pt_get_ppid(tbl, task_idx);
     zombie.exit_code = code;
+    // Return the zombie — the transform "produces" it (linear ownership
+    // semantics: the State<ZombieTask> is consumed by the transform).
+    return zombie;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

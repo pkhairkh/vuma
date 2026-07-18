@@ -374,7 +374,7 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // it's void. K4f's syscall handler will check for ELF parse failures
 // BEFORE calling sys_exec (so sys_exec is only called on the success
 // path).
-fn sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack: u64) {
+transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack: u64) -> State<ProcessTable> {
     // Overwrite the task's mm_root with the stub sentinel 57005 (0xDEAD).
     // In a real kernel, this would be the new program's PGD physical
     // address (the ELF loader's output).
@@ -399,6 +399,10 @@ fn sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack: u64) {
     // follows the same convention (the cr3_write extern is declared
     // but never called from the self-test).
     pt_set_mm_root(tbl, task_idx, 57005);
+    // Return the mutated ProcessTable — the transform "produces" it
+    // (linear ownership semantics: the State<ProcessTable> is consumed
+    // by the transform and returned to the caller).
+    return tbl;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
