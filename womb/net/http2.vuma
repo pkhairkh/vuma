@@ -1,4 +1,4 @@
-// womb/lib/http2.vuma — HTTP/2 Frame Parser and Builder (RFC 9113)
+// womb/net/http2.vuma — HTTP/2 Frame Parser and Builder (RFC 9113)
 // No main() — importable library module.
 //
 // Task ID: W4.1

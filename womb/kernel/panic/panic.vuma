@@ -46,7 +46,7 @@
 //   The `banner as Address` / `msg as Address` casts inside panic() are
 //   pure-arena-address extractions (no pointer arithmetic, no heap
 //   allocation) — the same PMT pattern used by console_flush
-//   (`c as Address` in womb/kernel/console.vuma:114) and hw_aes_encrypt
+//   (`c as Address` in womb/kernel/tty/console.vuma:114) and hw_aes_encrypt
 //   (`key as Address` in womb/kernel/crypto/hw_trampoline.vuma:220). The
 //   cast yields the State<T>'s u64-aligned offset within
 //   `___pmt_buffer`, which is the value passed to write (the write stub
@@ -115,7 +115,7 @@ extern "C" {
 // at offset 0 so that `msg as Address` (cast of the State<PanicMsg> base
 // pointer) yields the address of the first message byte — the natural
 // argument for `write(1, base, msg.len)`. (Same offset-0-buf pattern as
-// K1a's Console layout in womb/kernel/console.vuma:55.)
+// K1a's Console layout in womb/kernel/tty/console.vuma:55.)
 //
 // 128 bytes is large enough for short diagnostic strings like "pmm_alloc:
 // out of memory" or "scheduler: no runnable task" — K13+ may grow this
@@ -152,7 +152,7 @@ layout PanicMsg = {
 // PMT field access (`banner.data[0]`, `msg.len`) is typed and endian-safe
 // by construction; no `*(addr + i)` pointer arithmetic anywhere. The
 // `banner as Address` cast is the same pattern as K1a's console_flush
-// (`c as Address` in womb/kernel/console.vuma:114) — a pure arena-offset
+// (`c as Address` in womb/kernel/tty/console.vuma:114) — a pure arena-offset
 // extraction, not a pointer dereference.
 //
 // State<T> params: 1 (msg). State<T> locals: 1 (banner). The function

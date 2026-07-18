@@ -89,7 +89,7 @@
 //   The `out as Address` cast inside dmesg is a pure-arena-address
 //   extraction (no pointer arithmetic, no heap allocation) — the same
 //   PMT pattern used by console_flush (`c as Address` in
-//   womb/kernel/console.vuma:114) and K12a's panic (`msg as Address` in
+//   womb/kernel/tty/console.vuma:114) and K12a's panic (`msg as Address` in
 //   womb/kernel/panic/panic.vuma).
 //
 // ── Extern ABI ──────────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ extern "C" {
 //     then writes it to fd 1. The `data` field is at offset 0 so that
 //     `out as Address` yields the address of out.data[0] — the natural
 //     argument for `write(1, base, count)`. (Same offset-0-buf pattern
-//     as K1a's Console layout in womb/kernel/console.vuma:55 and K12a's
+//     as K1a's Console layout in womb/kernel/tty/console.vuma:55 and K12a's
 //     PanicMsg layout in womb/kernel/panic/panic.vuma.)
 //
 // Declared BEFORE KmsgBuf because kmsg_write's signature references
@@ -272,7 +272,7 @@ fn kmsg_write(kmsg: State<KmsgBuf>, msg: State<KmsgMsg>, len: u32) {
 // PMT field access (`kmsg.buf[idx]`, `out.data[i]`) is typed and endian-
 // safe by construction; no `*(addr + i)` pointer arithmetic anywhere.
 // The `out as Address` cast is the same pattern as K1a's console_flush
-// (`c as Address` in womb/kernel/console.vuma:114) — a pure arena-offset
+// (`c as Address` in womb/kernel/tty/console.vuma:114) — a pure arena-offset
 // extraction.
 //
 // State<T> params: 1 (kmsg). State<T> locals: 1 (out — the scratch

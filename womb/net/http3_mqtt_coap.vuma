@@ -1,4 +1,4 @@
-// womb/lib/app_protocols.vuma — HTTP/3, QPACK, MQTT 3.1.1, CoAP
+// womb/net/http3_mqtt_coap.vuma — HTTP/3, QPACK, MQTT 3.1.1, CoAP
 // No main() — importable library module.
 //
 // Implements four application-layer protocols over byte buffers:

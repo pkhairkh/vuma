@@ -1,4 +1,4 @@
-// womb/lib/websocket.vuma — WebSocket Protocol (RFC 6455)
+// womb/net/websocket.vuma — WebSocket Protocol (RFC 6455)
 // No main() — importable library module.
 //
 // Task ID: W4.1

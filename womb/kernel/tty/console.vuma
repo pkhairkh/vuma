@@ -19,7 +19,7 @@
 // with a matching `read` path that pulls bytes from the UART (hosted: stdin
 // via `read`; bare-metal K11: uart_getc_8250 / uart_getc_pl011).
 //
-// This file REPLACES the K1a stub at womb/kernel/console.vuma (which has a
+// This file REPLACES the K1a stub at womb/kernel/tty/console.vuma (which has a
 // simpler Console layout — `buf: [u8; 256]` at offset 0 + `len: u32` at
 // offset 256 — and no read path). K6e introduces the full Console layout
 // (uart_base + buf + len + rows + cols) so K7+ can wire the TTY discipline
@@ -27,7 +27,7 @@
 // room for that future extension — the rows/cols fields are the
 // VT100-derived terminal dimensions; K7+ adds `tty: State<TtyLine>` and
 // `vt: State<Vt100State>` fields between cols and the end of the layout).
-// The K1 stub at womb/kernel/console.vuma stays in place for now (kernel.vuma
+// The K1 stub at womb/kernel/tty/console.vuma stays in place for now (kernel.vuma
 // / kmain.vuma still call its simpler console_init/console_putc/console_flush
 // API); K7+ will rewire kernel.vuma / kmain.vuma to import (well, re-declare
 // — VUMA has no `import` yet) the K6e API byte-identically and delete the
@@ -82,7 +82,7 @@
 // ── Layouts (Console + ConsoleStr) ─────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares every
 // layout it uses. The two layouts are NEW (K6e introduces them — the K1
-// stub's Console / String layouts at womb/kernel/console.vuma have
+// stub's Console / String layouts at womb/kernel/tty/console.vuma have
 // different field orders / names, so K6e can't reuse them):
 //
 //   Console (276 bytes total, padded to 280 for u64 alignment):
@@ -250,7 +250,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 // Hosted-mode I/O (uses the pre-registered `write` + `read` externs —
 // resolve to sys_write / sys_read on x86_64 / aarch64 hosted backends).
-// Same declarations as womb/kernel/console.vuma (K1 stub, for `write`),
+// Same declarations as womb/kernel/tty/console.vuma (K1 stub, for `write`),
 // womb/kernel/drivers/uart.vuma (K6a, for `write`), womb/kernel/hosted/
 // host.vuma, and womb/kernel/arch/x86_64/trampoline.vuma. `buf: Address`
 // (NOT State<T>) means the marshal does NOT invalidate any state on the
