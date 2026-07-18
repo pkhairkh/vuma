@@ -1,5 +1,31 @@
 # VUMA Womb Kernel (VWK) — Wave-Based Engineering Spec
 
+> **STATUS: ALL 13 WAVES COMPLETE (K0–K12) ✅**
+>
+> | Wave | Status | Commit |
+> |------|--------|--------|
+> | K0 — Arena State Model | ✅ Complete | 2038cb17 |
+> | K1 — Kernel Scaffold + Boot | ✅ Complete | 334781b1 |
+> | K2 — Memory Management | ✅ Complete | bc184767 |
+> | K3 — Traps, IRQs, Syscall Dispatch | ✅ Complete | 6c8acce1 |
+> | K4 — Process / Scheduler / Context Switch | ✅ Complete | ecccb330 |
+> | K5 — VFS + tmpfs + initramfs | ✅ Complete | 018f352e |
+> | K6 — TTY + Console + Char Devices + Shell | ✅ Complete | 87c7487c |
+> | K7 — IPC: Pipe, Signal, Futex, SHM | ✅ Complete | 0cca1145 |
+> | K8 — Sync Primitives + SMP IPI | ✅ Complete | 974addeb |
+> | K9 — Network Stack | ✅ Complete | 89821141 |
+> | K10 — Crypto Subsystem | ✅ Complete | 06c29667 |
+> | K11 — Multi-Backend Parity Sweep | ✅ Complete (ALL 19 BACKENDS PASS) | ef1f0d15 |
+> | K12 — Docs, Panic, kmsg, Power | ✅ Complete | b2d0da40 |
+>
+> **Results:** 75 PMT-pure kernel .vuma files · 190/190 gold tests pass ·
+> 76/76 kernel module compiles pass · 19/19 backends pass · 3 compiler
+> bugs fixed (if-expressions, nested layouts, arena bounds check) ·
+> exit-code contract bug fixed · dead code cleaned · docs expanded
+> from 34K to 69K words across 14 markdown files.
+
+---
+
 > **One-sentence pitch:** Build one VUMA source tree (`womb/kernel/**`) that compiles via `compile_dump kernel.vuma kernel.bin <backend>` into a bootable kernel for every supported backend, with all major kernel features expressed as PMT state transforms over `___pmt_buffer` and arena states, and raw-hardware concerns isolated behind typed `extern "C"` trampolines.
 
 This spec is organized into **13 waves** (K0–K12). Each wave is **domain-scoped** and **code-specific** so multiple subagents can work in parallel (max 6 per wave). Every sub-task has a surgical contract, a checkable DoD, and a paste-ready dispatch prompt.
