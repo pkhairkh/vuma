@@ -381,66 +381,32 @@ fn hash_init(ctx: State<HashCtx>, algo: u32) {
     ctx.algo = algo;
     ctx.len = 0;
     ctx.total = 0;
-    // Zero the 64-byte hash state (8 × u64 = 64 byte-cells — VUMA's
-    // byte-granular indexing means `ctx.state[i]` accesses byte i).
+    // Zero the 8 u64 hash state words.
+    // After Fix 2 (typed-array index scaling), state[i] on [u64; 8]
+    // correctly accesses offset i*8 with a u64 load/store.
     let i = 0;
-    while i < 64 {
+    while i < 8 {
         ctx.state[i] = 0;
         i = i + 1;
     }
-    // Zero the 128-byte buffer.
+    // Zero the 128-byte buffer ([u8; 128] — byte-granular, no scaling needed).
     let j = 0;
     while j < 128 {
         ctx.buf[j] = 0;
         j = j + 1;
     }
-    // Seed the SHA-256 IVs for algo == 2. Each 32-bit IV is written
-    // as 4 little-endian bytes into the first 4 bytes of the
-    // corresponding 8-byte word slot. The decimal values shown in
-    // the comments are the FULL IV values (1779033703 = 0x6a09e667,
-    // etc.); the byte literals emitted (103, 230, 9, 106) are the
-    // little-endian decomposition of those values.
+    // Seed the SHA-256 IVs for algo == 2.
+    // Now that Fix 2 provides proper u64 array indexing, we can write
+    // the full 64-bit IV values directly (no byte-by-byte decomposition).
     if algo == 2 {
-        // Word 0: 0x6a09e667 = 1779033703 → LE bytes 67 e6 09 6a.
-        ctx.state[0] = 103;   // 0x67 (low byte of 0x6a09e667)
-        ctx.state[1] = 230;   // 0xe6
-        ctx.state[2] = 9;     // 0x09
-        ctx.state[3] = 106;   // 0x6a (high byte)
-        // Word 1: 0xbb67ae85 = 3144134277 → LE bytes 85 ae 67 bb.
-        ctx.state[8]  = 133;  // 0x85
-        ctx.state[9]  = 174;  // 0xae
-        ctx.state[10] = 103;  // 0x67
-        ctx.state[11] = 187;  // 0xbb
-        // Word 2: 0x3c6ef372 = 1013904242 → LE bytes 72 f3 6e 3c.
-        ctx.state[16] = 114;  // 0x72
-        ctx.state[17] = 243;  // 0xf3
-        ctx.state[18] = 110;  // 0x6e
-        ctx.state[19] = 60;   // 0x3c
-        // Word 3: 0xa54ff53a = 2773480762 → LE bytes 3a f5 4f a5.
-        ctx.state[24] = 58;   // 0x3a
-        ctx.state[25] = 245;  // 0xf5
-        ctx.state[26] = 79;   // 0x4f
-        ctx.state[27] = 165;  // 0xa5
-        // Word 4: 0x510e527f = 1359893119 → LE bytes 7f 52 0e 51.
-        ctx.state[32] = 127;  // 0x7f
-        ctx.state[33] = 82;   // 0x52
-        ctx.state[34] = 14;   // 0x0e
-        ctx.state[35] = 81;   // 0x51
-        // Word 5: 0x9b05688c = 2600822924 → LE bytes 8c 68 05 9b.
-        ctx.state[40] = 140;  // 0x8c
-        ctx.state[41] = 104;  // 0x68
-        ctx.state[42] = 5;    // 0x05
-        ctx.state[43] = 155;  // 0x9b
-        // Word 6: 0x1f83d9ab = 528734635 → LE bytes ab d9 83 1f.
-        ctx.state[48] = 171;  // 0xab
-        ctx.state[49] = 217;  // 0xd9
-        ctx.state[50] = 131;  // 0x83
-        ctx.state[51] = 31;   // 0x1f
-        // Word 7: 0x5be0cd19 = 1541459225 → LE bytes 19 cd e0 5b.
-        ctx.state[56] = 25;   // 0x19
-        ctx.state[57] = 205;  // 0xcd
-        ctx.state[58] = 224;  // 0xe0
-        ctx.state[59] = 91;   // 0x5b
+        ctx.state[0] = 1779033703;   // 0x6a09e667
+        ctx.state[1] = 3144134277;   // 0xbb67ae85
+        ctx.state[2] = 1013904242;   // 0x3c6ef372
+        ctx.state[3] = 2773480762;   // 0xa54ff53a
+        ctx.state[4] = 1359893119;   // 0x510e527f
+        ctx.state[5] = 2600822924;   // 0x9b05688c
+        ctx.state[6] = 528734635;    // 0x1f83d9ab
+        ctx.state[7] = 1541459225;   // 0x5be0cd19
     }
 }
 
@@ -536,18 +502,19 @@ fn main() -> i32 {
     let hctx = state_new(HashCtx);
     hash_init(hctx, 2);  // SHA-256
     if hctx.algo != 2 { return 6; }
-    // Verify SHA-256 IV word 0's low byte landed in state[0]
-    // (= 103 = 0x67 = low byte of 0x6a09e667 = 1779033703).
-    // See "Why state[0] == 103 instead of 1779033703?" above for
-    // the VUMA-byte-granular-indexing rationale.
-    if hctx.state[0] != 103 { return 7; }
+    // Verify SHA-256 IV word 0 = 0x6a09e667 = 1779033703.
+    // After Fix 2 (typed-array index scaling), state[0] on [u64; 8]
+    // reads the full 64-bit word at offset 0.
+    if hctx.state[0] != 1779033703 { return 7; }
+    if hctx.state[1] != 3144134277 { return 8; }
+    if hctx.state[7] != 1541459225 { return 9; }
     // Update + final (stubs: only total accounting + zero-digest).
     let data = state_new(CryptoBuf);
     hash_update(hctx, data, 10);
-    if hctx.total != 10 { return 8; }
+    if hctx.total != 10 { return 10; }
     let digest = state_new(CryptoBuf);
     hash_final(hctx, digest);
-    if digest.data[0] != 0 { return 9; }    // stub: zero digest
-    if digest.data[31] != 0 { return 10; }  // stub: zero digest
+    if digest.data[0] != 0 { return 11; }    // stub: zero digest
+    if digest.data[31] != 0 { return 12; }   // stub: zero digest
     return 0;
 }
