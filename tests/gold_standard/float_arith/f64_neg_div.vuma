@@ -1,0 +1,12 @@
+// f64_neg_div — -6.0 / 2.0 = -3.0 -> floattoint = -3
+// Expected exit code: 253
+//
+// floattoint(-3.0) = -3.  main returns i32; -3 as u8 exit code = 253.
+
+fn main() -> i32 {
+    a: f64 = -6.0;
+    b: f64 = 2.0;
+    quot: f64 = a / b;
+    result: i64 = floattoint(quot);
+    return result;
+}

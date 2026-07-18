@@ -1,0 +1,10 @@
+// f64_to_f32_narrow — narrow 10.0 (f64) to f32, widen back, -> 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    x: f64 = 10.0;
+    x_narrow: f32 = floattofloat(x);  // f64 -> f32
+    x_back: f64 = floattofloat(x_narrow); // f32 -> f64
+    result: i64 = floattoint(x_back);
+    return result;
+}

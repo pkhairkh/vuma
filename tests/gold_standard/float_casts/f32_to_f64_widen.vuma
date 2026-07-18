@@ -1,0 +1,11 @@
+// f32_to_f64_widen — widen 3.0 (f32) to f64, add 7.0, -> 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    x: f32 = 3.0;
+    x_wide: f64 = floattofloat(x);   // f32 -> f64
+    b: f64 = 7.0;
+    sum: f64 = x_wide + b;            // 10.0
+    result: i64 = floattoint(sum);
+    return result;
+}

@@ -1,0 +1,16 @@
+// f32_arith — f32 arithmetic chain: (3.0 + 2.0) * 4.0 / 2.0 = 10.0
+// Expected exit code: 10
+
+fn main() -> i32 {
+    a: f32 = 3.0;
+    b: f32 = 2.0;
+    sum: f32 = a + b;       // 5.0
+    c: f32 = 4.0;
+    prod: f32 = sum * c;    // 20.0
+    d: f32 = 2.0;
+    quot: f32 = prod / d;   // 10.0
+    // Widen to f64 for floattoint (f32 -> f64 -> i64).
+    quot_f64: f64 = floattofloat(quot);
+    result: i64 = floattoint(quot_f64);
+    return result;
+}

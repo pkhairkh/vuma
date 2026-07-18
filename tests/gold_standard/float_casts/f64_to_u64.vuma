@@ -1,0 +1,8 @@
+// f64_to_u64 — floattouint(2.9) truncates to 2
+// Expected exit code: 2
+
+fn main() -> i32 {
+    a: f64 = 2.9;
+    result: i64 = floattouint(a);
+    return result;
+}

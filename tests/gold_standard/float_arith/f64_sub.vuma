@@ -1,0 +1,10 @@
+// f64_sub — f64 subtraction: 10.0 - 3.5 = 6.5 -> floattoint = 6
+// Expected exit code: 6
+
+fn main() -> i32 {
+    a: f64 = 10.0;
+    b: f64 = 3.5;
+    diff: f64 = a - b;
+    result: i64 = floattoint(diff);
+    return result;
+}
