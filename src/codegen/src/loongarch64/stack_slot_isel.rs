@@ -1056,7 +1056,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 } else {
                                     code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
                                 }
-                                let movcf2gr_word: u32 = 0x01150000u32 | ((S0.encoding() as u32) & 0x1F);
+                                let movcf2gr_word: u32 = 0x0114DC00u32 | ((S0.encoding() as u32) & 0x1F);
                                 code.extend_from_slice(&movcf2gr_word.to_le_bytes());
                             } else {
                                 code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
@@ -1129,9 +1129,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
                         }
                         // MOVCF2GR rd, fcc0 — moves condition flag (0 or 1) to GPR.
-                        // Encoding: 0000000001 01 cd(3:0) 000000 rd(4:0) 00000
-                        // For cd=0 (fcc0): 0x01150000 | rd
-                        let movcf2gr_word: u32 = 0x01150000u32 | ((S0.encoding() as u32) & 0x1F);
+                        // Encoding (verified via QEMU 7.2 disasm):
+                        //   0000 0001 0001 0100 1101 11 cj(4:0) rd(4:0)
+                        //   bits[31:10] = 0x004537 ; cj in bits[9:5] ; rd in bits[4:0]
+                        // For cd=0 (fcc0): 0x0114DC00 | rd
+                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((S0.encoding() as u32) & 0x1F);
                         code.extend_from_slice(&movcf2gr_word.to_le_bytes());
                     } else {
                         code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
@@ -1604,19 +1606,32 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                         // ── FloatToFloat (f32↔f64) ───────────────────────────
                         CastKind::FloatToFloat => {
-                            let src_is_f32 = from_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
+                            // Determine conversion direction. The front-end
+                            // constant-folding pass sometimes collapses
+                            // f64→f32→f64 round-trips into f64→f64 (setting
+                            // both from_ty and to_ty to F64). When the types
+                            // match, treat as a no-op (pass through unchanged)
+                            // rather than emitting a spurious FCVT that would
+                            // misinterpret the bit pattern.
+                            let from_f32 = matches!(from_ty.as_ref(), Some(IRType::F32));
+                            let to_f32   = matches!(to_ty.as_ref(),   Some(IRType::F32));
+                            let from_known = from_ty.is_some();
+                            let to_known   = to_ty.is_some();
+                            let is_noop = from_known && to_known && (from_f32 == to_f32);
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
 
                             // Move GPR → FPR
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
 
-                            if src_is_f32 {
-                                // f32 → f64: fcvt.d.s
-                                code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
-                            } else {
+                            if is_noop {
+                                // Same type on both sides: no conversion needed.
+                            } else if to_f32 {
                                 // f64 → f32: fcvt.s.d
                                 code.extend_from_slice(&Instruction::FcvtSD { fd: FS0, fj: FS0 }.encode());
+                            } else {
+                                // f32 → f64: fcvt.d.s
+                                code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
                             }
 
                             // Move FPR → GPR
