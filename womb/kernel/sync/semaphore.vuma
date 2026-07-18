@@ -1,0 +1,582 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/sync/semaphore.vuma
+// VWK Sync Subsystem — Counting Semaphore (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K8c layer of the VWK kernel: the counting semaphore.
+// K8 (Sync) is building spinlock (K8a, busy-wait + IRQ disable), mutex
+// (K8b, sleep-on-contention + wait queue), semaphore (this file, K8c,
+// counting), rwlock (K8d, reader/writer), and per-CPU primitives + IPI
+// (K8e). K8c is the third sync primitive and the first that allows MORE
+// THAN ONE concurrent holder — the spinlock (K8a) and mutex (K8b) are
+// both exclusive (one holder at a time), while the semaphore allows up
+// to `count` concurrent holders. This makes it the natural primitive
+// for resource pools (N identical buffers, M worker slots, etc.) and
+// for producer/consumer signaling (sema_up posts, sema_down waits).
+//
+// ── What K8c provides ──────────────────────────────────────────────────────
+//   sema_init(s, initial)   — initialize the semaphore with `initial`
+//                              available units. count = initial,
+//                              _pad0 = 0, waitq_count = 0. Called once
+//                              per semaphore before any sema_down / sema_up.
+//   sema_down(s)            — acquire one unit. Atomically decrement
+//                              count if count > 0; if count == 0, bump
+//                              waitq_count and busy-wait (in a real
+//                              kernel: sleep_on(waitq)) until count > 0,
+//                              then retry. Always returns with count
+//                              decremented by exactly 1.
+//   sema_up(s)              — release one unit. Atomically increment
+//                              count via CAS loop. (In a real kernel:
+//                              wake_one(waitq) to release a waiter.)
+//
+// ── What is a counting semaphore? ──────────────────────────────────────────
+// A counting semaphore is the oldest synchronization primitive in
+// computing — Dijkstra introduced it in 1965 with the PV (P = "prolaag",
+// V = "verhoog") operations. P (sema_down) decrements the count and
+// blocks if it would go negative; V (sema_up) increments the count and
+// wakes one waiter. The classic use cases are:
+//
+//   1. Resource pool (count = N): N identical resources (buffers,
+//      worker slots, disk blocks, etc.). sema_down acquires one
+//      resource; sema_up returns it. If all N are in use, sema_down
+//      blocks until one is returned. This is the simplest way to
+//      enforce a maximum-concurrency limit.
+//
+//   2. Producer/consumer signaling (count = 0 initially): the producer
+//      calls sema_up to post "an item is ready"; the consumer calls
+//      sema_down to wait for an item. The count is the number of
+//      uncollected items. count = 0 means "no items ready, consumer
+//      blocks". count = N means "N items ready, no consumer blocking".
+//
+//   3. Event signaling (count = 0, sema_up once per event): a single-
+//      shot event flag. sema_down blocks until someone calls sema_up.
+//
+//   4. Initialization ordering (count = 0): subsystem B blocks on
+//      sema_down until subsystem A finishes init and calls sema_up.
+//
+// When count is constrained to 0 or 1, the semaphore degenerates into
+// a "binary semaphore" — functionally equivalent to a mutex. The
+// difference is purely semantic: a binary semaphore has no concept of
+// "owner" (any task can sema_up), while a mutex has an owner (only the
+// owner can release — see K8b's ownership check). Use a mutex when
+// the acquire/release pairing is by the same task; use a semaphore
+// when the pairing is by DIFFERENT tasks (producer/consumer).
+//
+// Linux has two flavors of counting semaphore in its kernel:
+//   - struct semaphore (include/linux/semaphore.h) — the classic
+//     counting semaphore with a wait queue. This is what K8c mirrors.
+//   - struct rw_semaphore (include/linux/rwsem.h) — an rwlock-style
+//     semaphore that allows multiple readers or one writer. K8d's
+//     rwlock will mirror this.
+// Linux's struct semaphore uses an atomic_t for `count` and a
+// struct list_head for the wait queue; K8c uses an atomic_cas loop
+// on `count` (the same pattern as K8a/K8b) and a simplified
+// `waitq_count: u32` counter (the same simplification K8b made —
+// the full WaitQueue from K7e is not embedded, just the count).
+//
+// ── Layout: Semaphore ──────────────────────────────────────────────────────
+//   count:        u32  // offset 0  — available count (CAS target word)
+//   _pad0:        u32  // offset 4  — padding (see "Why _pad0?" below)
+//   waitq_count:  u32  // offset 8  — number of waiters (simplified WaitQueue)
+//   Total: 12 bytes.
+//
+//   The 8-byte atomic_load / atomic_cas window at offset 0 spans
+//   bytes [0..7] = (count | (_pad0 << 32)). After init, count =
+//   initial and _pad0 = 0, so the 8-byte atomic_load returns
+//   exactly `initial`. waitq_count at offset 8 is OUTSIDE the
+//   8-byte CAS window — modifications to it never race with the
+//   CAS on count. (Same offset discipline as K8b's Mutex, which
+//   has the same `count` + `_pad0` + `waitq_count` field order.)
+//
+// ── Why _pad0? ─────────────────────────────────────────────────────────────
+// _pad0 is the SAME workaround K8a (spinlock) and K8b (mutex) use.
+// AtomicCas is hardcoded to IRType::U64 (8 bytes) in
+// /home/z/vuma/src/codegen/src/scg_to_ir.rs:3782-3818 — the IR has a
+// `ty` field on AtomicCas that the SCG-to-IR layer simply doesn't
+// propagate. This means every atomic_cas / atomic_load / atomic_store
+// operates on an 8-byte window at the given address, regardless of the
+// actual field width.
+//
+// For K8c, the consequence: if the layout were `{ count: u32,
+// waitq_count: u32 }` (no _pad0), the 8-byte atomic_cas at offset 0
+// would read `count | (waitq_count << 32)`. After init with count=2
+// and waitq_count=0, that's just 2 — fine. But the moment the slow
+// path bumps waitq_count to 1 (count=0), the 8-byte value becomes
+// 0x0000000100000000 — non-zero, so any subsequent `cur > 0` check
+// in sema_down would be true (cur = 0x0000000100000000 > 0), and the
+// CAS(cur, cur-1) would write 0x00000000FFFFFFFF, corrupting BOTH
+// count (now 0xFFFFFFFF) AND waitq_count (now 0). The semaphore
+// would be permanently broken.
+//
+// With _pad0 inserted between count and waitq_count, the 8-byte CAS
+// window covers count + _pad0 (always 0), so the loaded value is
+// exactly `count`. waitq_count lives at offset 8 (outside the CAS
+// window) and is modified only by plain field writes (no atomic
+// contention with the CAS). Probe-confirmed in K8a
+// (/home/z/probe/probe_cas_with_pad.vuma → exit 0) and re-confirmed
+// for K8c's 3-field layout in /home/z/probe/probe_sema.vuma → exit 0.
+//
+// A future compiler improvement could:
+//   (a) Make scg_to_ir.rs infer the access width from the State<T>
+//       field at the cast address.
+//   (b) Add a width-suffixed syntax like `atomic_cas_32(addr, exp,
+//       des)` that lowers to `ty: IRType::U32`.
+// Either would let K8c+ drop the _pad0 field. Same fix would benefit
+// K8a (spinlock), K8b (mutex), and K8d (rwlock). See the "Note for a
+// future compiler improvement" section at the bottom of this file.
+//
+// ── atomic_load / atomic_cas / atomic_store syntax ─────────────────────────
+// All three are VUMA IR builtins, lowercase, addr-first:
+//   atomic_load(addr)                  → u64  (reads 8 bytes at addr)
+//   atomic_cas(addr, expected, desired) → u64  (returns OLD value at
+//                                              addr; if old == expected,
+//                                              writes `desired`)
+//   atomic_store(addr, val)            → void (writes val to 8 bytes
+//                                              at addr)
+//
+// The lowercase forms are what the parser recognizes
+// (src/parser/src/lexer.rs:629-631 maps `atomic_load` /
+// `atomic_store` / `atomic_cas` lowercase to TokenKind::AtomicLoad /
+// AtomicStore / AtomicCas). The capitalized `AtomicLoad` /
+// `AtomicStore` / `AtomicCas` are CallNode names synthesized
+// internally by the bridge (src/pipeline.rs:8705-8747) — they are
+// NOT user-visible syntax.
+//
+// The parser's argument order is addr-first for all three
+// (src/parser/src/parser.rs:3084-3116). The bridge
+// (src/pipeline.rs:8721-8732) reorders atomic_store's args internally
+// to [value, addr] because the SCG-to-IR lowerer (scg_to_ir.rs:
+// 3762-3780) expects value first for AtomicStore specifically — but
+// the USER SYNTAX is always addr-first.
+//
+// `s as Address` is a Cast node that is a no-op in flatten_expr
+// (src/pipeline.rs:8811) — it just returns the inner ScgExpr::Var(s),
+// which holds the State<Semaphore> buffer pointer. The cast is a
+// type-annotation hint that documents the intent (use the State<T>
+// buffer pointer as an atomic addr) without changing the codegen.
+// Probe-confirmed in K8a (/home/z/probe/probe_atom_cas.vuma →
+// exit 0 — `s as Address` works as the atomic builtin's addr arg).
+//
+// ── Wait queue (simplified) ────────────────────────────────────────────────
+// K8c uses a simplified `waitq_count: u32` counter (same as K8b's
+// Mutex) instead of the full WaitQueue from K7e (womb/kernel/ipc/
+// waitq.vuma, which has head/tail/count). The counter is bumped by
+// sema_down on the slow path (before the busy-wait) and decremented
+// after the slow path's CAS succeeds. In the hosted single-threaded
+// self-test, the slow path is never taken (no contention — the first
+// CAS always succeeds because count > 0 after init or sema_up), so
+// waitq_count stays at 0 throughout.
+//
+// A real kernel would:
+//   - Embed a full WaitQueue (K7e) instead of just the count.
+//   - On the slow path: sleep_on(waitq) — mark the current task
+//     BLOCKED, add it to the queue, call schedule() to context-switch.
+//   - On sema_up: wake_one(waitq) — wake exactly one waiter (avoiding
+//     thundering herd). The woken waiter's sema_down retries its CAS.
+//
+// The simplified count is enough for K8c's purpose (demonstrate the
+// semaphore semantics + leave a diagnostic that a real kernel would
+// use). K11 (bare-metal parity) will replace the count with a real
+// WaitQueue and wire sleep_on / wake_one to the K9 scheduler.
+//
+// ── Decimal-constants discipline ───────────────────────────────────────────
+// All numeric literals in this file are decimal (no 0x prefixes, no
+// binary, no underscores). This matches the K8a/K8b/K7c convention —
+// the parser accepts hex/binary literals, but the kernel source
+// convention is decimal for clarity (256 = "no entry" sentinel is
+// more recognizable than 0x100; 2 = "two units" is more recognizable
+// than 0x2). Hex literals appear ONLY in this file's comment blocks
+// (e.g., 0x0000000100000000 above, in the _pad0 rationale — but the
+// actual code uses decimal throughout).
+//
+// ── State-typedness note ───────────────────────────────────────────────────
+// sema_init, sema_down, sema_up all take `s: State<Semaphore>` as
+// their first parameter. State<T> is the VUMA primitive-memory type
+// (PMT) — a fat pointer that combines a buffer pointer + a layout
+// descriptor + (in the future) an arena bounds descriptor. The
+// caller allocates the Semaphore via `state_new(Semaphore)` and
+// passes it by reference (init-style API — same as K8a/K8b/K7c).
+// State<T> params are 1 per function (matches the K8a/K8b convention
+// of 1 State<T> param per sync function — keeps the verifier's
+// linearity tracking simple).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// This file uses ONLY PMT primitives:
+//   - state_new(Semaphore)              — allocate the semaphore.
+//   - s.field = value                   — direct field write.
+//   - s.field                            — direct field read.
+//   - atomic_load(s as Address)         — 8-byte atomic read.
+//   - atomic_cas(s as Address, e, d)    — 8-byte atomic CAS.
+//   - atomic_store(s as Address, v)     — 8-byte atomic store (NOT
+//                                         used by K8c — sema_up uses
+//                                         atomic_cas to increment,
+//                                         avoiding a torn load/store).
+//
+// NO pointer arithmetic, NO `allocate` / `free` (state_new is the
+// only allocator, and the kernel runtime garbage-collects on exit —
+// no manual free needed), NO `*ptr` dereference, NO `&identifier`
+// address-of. The `as Address` casts are no-op type annotations,
+// not pointer conversions. Verified by awk-strip + grep audit at
+// the bottom of the worklog entry.
+//
+// ── VUMA has no import ─────────────────────────────────────────────────────
+// VUMA does not have an `import` statement. Each consumer file re-
+// declares any layout it consumes (byte-identically). This file
+// declares only `Semaphore` — it does NOT re-declare Spinlock (K8a)
+// or Mutex (K8b) because it doesn't use them. (K8d's rwlock will re-
+// declare Spinlock byte-identically with _pad0 to guard its internal
+// state — see the K8b worklog entry for the divergence note.)
+//
+// ── Build & verify ─────────────────────────────────────────────────────────
+//   . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//       cargo build --profile release-fast --bin compile_dump
+//   ./target/release-fast/compile_dump \
+//       womb/kernel/sync/semaphore.vuma /tmp/semaphore.bin x86_64 --verify
+//   /tmp/semaphore.bin ; echo "exit=$?"
+//   → IVE: Pass passed=1 failed=0 total=1
+//   → Wrote NNNN bytes to /tmp/semaphore.bin
+//   → exit=0
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// Layout.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Semaphore — counting semaphore. 3 fields, 12 bytes total.
+//
+// The 8-byte atomic_load / atomic_cas window at offset 0 covers only
+// `count` (offset 0..3) and `_pad0` (offset 4..7). After init,
+// _pad0 = 0, so atomic_load returns exactly `count`. The CAS window
+// never touches `waitq_count` (offset 8..11), which is modified only
+// by plain field writes (no atomic contention with the CAS).
+//
+// Field semantics:
+//   count       — the CAS target word AND the available-units count.
+//                 0 = no units available (sema_down would block);
+//                 N > 0 = N units available. Modified ONLY by
+//                 atomic_cas (sema_down's decrement + sema_up's
+//                 increment — both via CAS loop, never by plain
+//                 field write). The contract's `if atomic_load(s as
+//                 Address) != 0` self-test check reads it with
+//                 atomic_load (NOT a plain field read) — this is
+//                 deliberate, to verify the CAS window's value
+//                 (count + _pad0) instead of just `count` alone.
+//                 Safe in the single-threaded hosted self-test; in a
+//                 real SMP kernel, atomic_load is the correct way to
+//                 observe the count from a non-holder CPU.
+//   _pad0       — padding to make the 8-byte CAS window exactly cover
+//                 `count + _pad0` (both 0 after init). Always 0.
+//                 Modified ONLY as a side effect of the 8-byte
+//                 atomic_cas (which writes 0 to bytes 4..7 when the
+//                 desired value is small — its high 4 bytes are 0).
+//                 sema_init explicitly sets _pad0 = 0 to make the
+//                 "all zero" state self-evident (rather than relying
+//                 on state_new's initial zero-fill).
+//   waitq_count — number of waiters (simplified WaitQueue — see
+//                 "Wait queue (simplified)" in the file header).
+//                 Modified by sema_down (incremented on the slow
+//                 path before the busy-wait, decremented after the
+//                 CAS succeeds). NOT modified by sema_up (the
+//                 contract specifies sema_up as a pure CAS-loop
+//                 increment — wake_one would happen in a real
+//                 kernel, but the count is the woken-waiter's
+//                 responsibility to decrement). Read by no one in
+//                 the hosted single-threaded self-test (no direct
+//                 check in main — the field is touched only on the
+//                 slow path, which is never taken). The increment /
+//                 decrement logic is present and correct so a real
+//                 kernel that does encounter contention will see
+//                 accurate counts.
+layout Semaphore = {
+    count:       u32,  // available count (0 = would block); CAS target word
+    _pad0:       u32,  // padding so 8-byte CAS only sees count + _pad0
+    waitq_count: u32,  // number of waiters (simplified WaitQueue)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Semaphore operations.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// sema_init: initialize the semaphore with `initial` available units.
+// Sets count = initial, _pad0 = 0, waitq_count = 0. Called once per
+// semaphore before any sema_down / sema_up. The CALLER allocates the
+// Semaphore via `state_new(Semaphore)` and passes it by reference
+// (init-style API — same as K8a/K8b/K7c).
+//
+//   s:       the Semaphore to initialize.
+//   initial: the initial count (number of available units). 0 means
+//            "no units available — the first sema_down will block"
+//            (used for producer/consumer signaling, where the producer
+//            hasn't posted anything yet). N > 0 means "N units
+//            available" (used for resource pools with N resources).
+//
+// State<T> params: 1 (s). Pure write — no reads, no helper calls, no
+// atomics. The 3 field assignments are direct (no byte-packing needed
+// because every field is a primitive u32, not a nested layout).
+//
+// _pad0 is explicitly set to 0 even though state_new zero-fills —
+// this matches the K8a/K8b convention of making the "all zero" state
+// self-evident. (If state_new ever stops zero-filling — e.g., a
+// future arena-recycling change — sema_init's explicit zero would
+// still produce correct behavior.)
+fn sema_init(s: State<Semaphore>, initial: u32) {
+    s.count = initial;
+    s._pad0 = 0;
+    s.waitq_count = 0;
+}
+
+// sema_down: acquire one unit. Atomically decrement count if count > 0;
+// if count == 0, bump waitq_count and busy-wait (in a real kernel:
+// sleep_on(waitq)) until count > 0, then retry. Always returns with
+// count decremented by exactly 1.
+//
+//   s: the Semaphore to acquire from.
+//
+// State<T> params: 1 (s). Reads s.waitq_count (slow path). Writes
+// s.waitq_count. Calls two IR builtins (atomic_load, atomic_cas).
+//
+// The fast path is the common case (count > 0). In the hosted single-
+// threaded self-test, ONLY the fast path is ever taken (count > 0
+// after init=2, after the first sema_down leaves count=1, after the
+// sema_up leaves count=1). The slow path is exercised only by the
+// bookkeeping increments / decrements of s.waitq_count — which never
+// execute in the self-test because the fast path always succeeds.
+//
+// The slow path's busy-wait loop is identical in shape to K8a's
+// spinlock busy-wait and K8b's mutex slow-path busy-wait — but the
+// SEMANTICS are different. K8a's spinlock is SUPPOSED to spin (it's
+// a spinlock). K8b's mutex and K8c's semaphore are NOT supposed to
+// spin — in a real kernel, the slow path would call into the
+// scheduler (sleep_on(waitq)), which would context-switch to another
+// task. The hosted-mode stub just spins because there's no scheduler
+// yet (K9 builds the scheduler). The waitq_count counter is the
+// diagnostic that tells you "this would have slept in a real kernel."
+//
+// The slow path's inner busy-wait loop (`while atomic_load(s as
+// Address) == 0`) terminates because:
+//   - In hosted mode, only one task is running (single-threaded self-
+//     test), so the slow path is never taken — the fast path's CAS
+//     succeeds immediately (count was > 0 after init or after a prior
+//     sema_up).
+//   - In a real SMP/preemptive kernel, the loop terminates when some
+//     other task calls sema_up, which increments count via CAS. At
+//     that point our outer loop's next iteration sees count > 0 and
+//     proceeds with the decrement CAS.
+//
+// Note: sema_down does NOT take a task_idx parameter (unlike K8b's
+// mutex_acquire). This is because the semaphore has no concept of
+// "owner" — any task can sema_up a unit it didn't sema_down. This is
+// the key semantic difference between a semaphore and a mutex: a
+// mutex pairs acquire/release by the same task (ownership); a
+// semaphore allows acquire by one task and release by another
+// (producer/consumer). See "What is a counting semaphore?" in the
+// file header.
+//
+// Note: the CAS in the fast path uses `cur - 1` as the desired value,
+// NOT a constant. This is because the CAS window covers 8 bytes
+// (count + _pad0), and the desired value must include _pad0's high 4
+// bytes (always 0). Using `cur - 1` preserves the high 4 bytes of
+// `cur` (which are 0, since _pad0 = 0) while decrementing the low 4
+// bytes (count). A constant desired value like `0` would only work
+// when count == 1 — for count == 2 it would write 0 instead of 1
+// (decrementing by 2 instead of 1, corrupting the count). The
+// `cur - 1` form correctly handles any count > 0.
+fn sema_down(s: State<Semaphore>) {
+    // Loop until we successfully decrement count.
+    //   `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur).
+    let success = 0;
+    while success == 0 {
+        // atomic_load(addr) returns the 8-byte value at addr.
+        //   After init: returns `initial` (count = initial, _pad0 = 0).
+        //   After one sema_down: returns `initial - 1`.
+        //   After count reaches 0: returns 0 → enter the slow path.
+        let cur = atomic_load(s as Address);
+        if cur > 0 {
+            // Fast path: count > 0, try to decrement via CAS.
+            //   atomic_cas(addr, expected, desired) returns the OLD
+            //   value at addr. If old == expected (cur), the swap
+            //   succeeded (we decremented count). If old != expected
+            //   (some other CPU changed count between our load and
+            //   our CAS), we retry the outer loop.
+            //   On x86_64 this is `LOCK CMPXCHG [R10], RCX` with
+            //   RAX=expected=cur, RCX=desired=cur-1; CMPXCHG stores
+            //   old into RAX whether the swap succeeded or not, so
+            //   dst receives the old value.
+            //   The desired value `cur - 1` preserves _pad0's high 4
+            //   bytes (which are 0 in `cur`) while decrementing count.
+            let old = atomic_cas(s as Address, cur, cur - 1);
+            if old == cur {
+                success = 1;
+            }
+            // If old != cur, someone else changed count between our
+            // load and our CAS — retry the outer loop (re-load cur).
+            // In hosted single-threaded mode, this branch is never
+            // taken because no other CPU can change count between
+            // our load and our CAS.
+        } else {
+            // Slow path: count == 0 — would block. Increment wait
+            // count (stub for sleep_on(waitq)).
+            //   In a real kernel: this is where we'd call
+            //   sleep_on(waitq) — mark the current task BLOCKED, add
+            //   it to the Semaphore's wait queue, and call schedule()
+            //   to context-switch to another task. The task would be
+            //   woken by sema_up's wake_one(waitq) (which we don't
+            //   have yet — K7e's waitq_wake_one exists, but K8c's
+            //   Semaphore doesn't embed a full WaitQueue, just the
+            //   count). For hosted mode: just bump the counter for
+            //   diagnostics, then busy-wait until count > 0.
+            s.waitq_count = s.waitq_count + 1;
+            // Busy-wait until count > 0 (in real kernel: sleep).
+            //   `atomic_load(s as Address) == 0` means count is still
+            //   0 — keep spinning. The moment some other task calls
+            //   sema_up, count becomes 1, the load returns 1, and we
+            //   exit the inner loop. Then we decrement waitq_count
+            //   (we're no longer a waiter — about to retry the outer
+            //   loop's CAS) and fall through to the outer loop's
+            //   re-iteration, which re-loads cur (now 1) and tries
+            //   the CAS(1 → 0). If that CAS succeeds, success = 1
+            //   and we exit the outer loop with count decremented.
+            //   In hosted single-threaded mode, this inner loop is
+            //   never entered (the slow path itself is never taken).
+            while atomic_load(s as Address) == 0 {
+                // spin — no body needed (the loop condition does the
+                // load). A real kernel would call schedule() here to
+                // yield the CPU instead of busy-waiting.
+            }
+            // We're no longer a waiter (we're about to retry the
+            // outer loop's CAS). Decrement wait count.
+            s.waitq_count = s.waitq_count - 1;
+        }
+    }
+}
+
+// sema_up: release one unit. Atomically increment count via CAS loop.
+// (In a real kernel: wake_one(waitq) to release a waiter — the woken
+// waiter's sema_down retries its CAS and succeeds.)
+//
+//   s: the Semaphore to release to.
+//
+// State<T> params: 1 (s). No reads, no writes to plain fields. Calls
+// two IR builtins (atomic_load, atomic_cas).
+//
+// The CAS loop here is the canonical "atomic increment via CAS" pattern:
+//   1. Load the current value (cur).
+//   2. Try to CAS(cur → cur + 1).
+//   3. If old == cur, the increment succeeded — exit.
+//   4. If old != cur, someone else changed count between our load
+//      and our CAS — retry (re-load cur).
+//
+// This is REQUIRED because there's no atomic_add builtin in VUMA IR
+// (the only atomic mutation primitives are atomic_cas and atomic_store).
+// atomic_store would NOT work here because it's a non-conditional
+// store — if two CPUs both load count=5 and both store count=6, one
+// increment is lost. The CAS loop avoids this lost-update problem by
+// retrying until the CAS succeeds.
+//
+// The desired value `cur + 1` preserves _pad0's high 4 bytes (which
+// are 0 in `cur`) while incrementing count. A constant desired value
+// like `cur + 1` is correct for any count — same rationale as
+// sema_down's `cur - 1` (see comment in sema_down).
+//
+// Note: sema_up does NOT take a task_idx parameter — any task can
+// sema_up, even one that didn't sema_down. This is the producer/
+// consumer semantic (see "What is a counting semaphore?" in the
+// file header).
+//
+// Note: sema_up does NOT decrement waitq_count. The woken waiter's
+// sema_down is responsible for decrementing its own waitq_count
+// after its CAS succeeds (see the slow path in sema_down). This
+// matches the K8b mutex pattern (mutex_release's atomic_store(0)
+// doesn't decrement waitq_count — the woken acquirer's mutex_acquire
+// does). It also matches Linux's struct semaphore's up() — up()
+// wakes one waiter but doesn't directly manipulate the wait queue;
+// the woken __down() removes itself from the queue.
+fn sema_up(s: State<Semaphore>) {
+    // Loop until we successfully increment count.
+    //   `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
+    let success = 0;
+    while success == 0 {
+        // atomic_load(addr) returns the 8-byte value at addr.
+        //   After init: returns `initial`.
+        //   After all sema_downs: returns 0 (or whatever count is).
+        let cur = atomic_load(s as Address);
+        // Try to increment via CAS.
+        //   On x86_64: `LOCK CMPXCHG [R10], RCX` with RAX=cur,
+        //   RCX=cur+1. If [R10] == RAX (cur), store RCX (cur+1) and
+        //   set ZF=1 (we use `old == cur` to detect success). Else
+        //   load [R10] into RAX (old), clear ZF, retry.
+        let old = atomic_cas(s as Address, cur, cur + 1);
+        if old == cur {
+            success = 1;
+        }
+        // If old != cur, someone else changed count between our
+        // load and our CAS — retry the loop (re-load cur). In
+        // hosted single-threaded mode, this branch is never taken.
+    }
+    // In a real kernel: wake_one(waitq) here — wake exactly one
+    // waiter (avoiding thundering herd). The woken waiter's sema_down
+    // retries its CAS; if count > 0 (which it now is, because we just
+    // incremented), the CAS succeeds and the waiter exits its slow
+    // path. We don't have wake_one yet (K7e's waitq_wake_one exists,
+    // but K8c doesn't embed a full WaitQueue, just the count) — the
+    // woken waiter's busy-wait loop in sema_down will see count > 0
+    // on its next atomic_load iteration and proceed.
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Self-test (hosted x86_64).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// main: exercise the semaphore end-to-end with 3 sequential checks.
+//   1. Create + init the semaphore with count=2.
+//   2. sema_down twice — count should be 0 after both.
+//   3. sema_up once — count should be 1.
+//   4. sema_down once — count should be 0.
+// Exit 0 on all-pass, exit 1..3 on the corresponding check failure.
+//
+// The self-test runs single-threaded in hosted mode, so:
+//   - The fast path is always taken on sema_down (count > 0 after
+//     init=2, after the first sema_down leaves count=1, after the
+//     sema_up leaves count=1).
+//   - The slow path is NEVER taken (count is never 0 when sema_down
+//     is called), so waitq_count stays at 0 throughout.
+//   - The CAS retry loops (old != cur) are NEVER taken (no other CPU
+//     can change count between our load and our CAS in single-
+//     threaded mode).
+//
+// The test exercises:
+//   - The sema_down fast path (count > 0, CAS(cur → cur-1) succeeds).
+//   - The sema_up CAS loop (CAS(cur → cur+1) succeeds on first try).
+//   - The `atomic_load(s as Address)` self-test check (verifies the
+//     8-byte CAS window's value = count, since _pad0 is always 0).
+// It does NOT exercise:
+//   - The sema_down slow path (would require count == 0 at sema_down
+//     entry — K8e covers this with the SMP contention test
+//     infrastructure).
+//   - The waitq_count increment / decrement (would require the slow
+//     path to be taken — same reason).
+//   - The CAS retry loop (would require SMP contention — K8e covers).
+//   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers
+//     this with the bare-metal scheduler integration tests).
+fn main() -> i32 {
+    let s = state_new(Semaphore);
+    // Init with count=2 — two units available.
+    sema_init(s, 2);
+    // Down twice — should succeed immediately (fast path: count > 0).
+    //   After first sema_down: count = 2 → 1 (CAS(2 → 1) succeeds).
+    //   After second sema_down: count = 1 → 0 (CAS(1 → 0) succeeds).
+    sema_down(s);
+    sema_down(s);
+    // Count should be 0 now. atomic_load returns the 8-byte value at
+    // s = count | (_pad0 << 32) = 0 | 0 = 0.
+    if atomic_load(s as Address) != 0 { return 1; }
+    // Up once — should succeed immediately (CAS(0 → 1) succeeds).
+    sema_up(s);
+    // Count should be 1 now.
+    if atomic_load(s as Address) != 1 { return 2; }
+    // Down once — should succeed immediately (fast path: count = 1 > 0,
+    // CAS(1 → 0) succeeds).
+    sema_down(s);
+    // Count should be 0 now.
+    if atomic_load(s as Address) != 0 { return 3; }
+    return 0;
+}
