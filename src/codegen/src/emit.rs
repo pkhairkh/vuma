@@ -3644,18 +3644,18 @@ impl Emitter {
                         self.ss_load_value_with_width(&args[0], Register::X9, slots, RegWidth::X64)?;
                         match builtin {
                             "inttofloat" => {
-                                // SCVTF D0, X9; then STUR D0 + LDR X9 (FMOV_XD not supported)
+                                // SCVTF D0, X9; then STUR D0 to dst slot + LDR X9.
+                                // (FMOV_XD not supported on QEMU 7.2; previous
+                                // scratch -16 corrupted vreg slot 16.)
                                 self.emit_instruction(Instruction::SCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
-                                self.emit_load_immediate(Register::X16, -16)?;
-                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.ss_emit_slot_addr(Register::X16, dst_offset)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC000200, mnemonic: "stur" })?;  // STUR D0, [X16]
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
                             "uinttofloat" => {
                                 self.emit_instruction(Instruction::UCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
-                                self.emit_load_immediate(Register::X16, -16)?;
-                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.ss_emit_slot_addr(Register::X16, dst_offset)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC000200, mnemonic: "stur" })?;  // STUR D0, [X16]
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
                             "floattoint" => {
@@ -3668,9 +3668,8 @@ impl Emitter {
                             }
                             "floattofloat" => {
                                 self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
-                                self.emit_load_immediate(Register::X16, -16)?;
-                                self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                                self.ss_emit_slot_addr(Register::X16, dst_offset)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC000200, mnemonic: "stur" })?;  // STUR D0, [X16]
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
                             _ => unreachable!(),
@@ -4385,16 +4384,14 @@ impl Emitter {
                         };
                         self.emit_instruction(fp_instr)?;
 
-                        // FP → GPR: store D0 to scratch via STUR, then LDR into X9.
-                        // (FMOV_XD encoding not supported in QEMU 7.2.)
-                        // STUR D0, [X29, #-16]: 0xFC1F03A0
-                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;
-                        self.emit_load_immediate(Register::X16, -16)?;
-                        self.emit_instruction(Instruction::ADD {
-                            rd: Register::X16,
-                            rn: Register::X29,
-                            rm: Operand::Reg { reg: Register::X16, shift: None },
-                        })?;
+                        // FP → GPR: STUR D0 directly to dst slot, then LDR into X9.
+                        // (FMOV_XD encoding not supported on QEMU 7.2; the previous
+                        // workaround used a fixed scratch at [X29, #-16] which
+                        // corrupted vreg slot 16 when the dst was a later vreg.)
+                        // Compute X16 = X29 - dst_offset (handles any offset size).
+                        self.ss_emit_slot_addr(Register::X16, dst_offset)?;
+                        // STUR D0, [X16, #0]: 0xFC000000 | (imm9=0 << 12) | (Rn=16 << 5) | (Rt=0)
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC000200, mnemonic: "stur" })?;
                         self.emit_instruction(Instruction::LDR {
                             rt: Register::X9,
                             rn: Register::X16,

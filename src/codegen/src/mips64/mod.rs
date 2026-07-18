@@ -122,6 +122,14 @@ const FN_CVT_D_L: u32 = 0x21; // cvt.d.l
 const FN_CVT_L_S: u32 = 0x25; // cvt.l.s
 const FN_CVT_L_D: u32 = 0x25; // cvt.l.d
 
+// COP1 function codes for FP->fixed-point with explicit rounding toward
+// zero (truncation). Unlike CVT.* which honour the FCSR rounding mode
+// (default round-to-nearest-even, WRONG for `floattoint`), TRUNC.* always
+// truncate toward zero, matching IEEE-754 trunc() semantics required by
+// the FloatToInt / FloatToUInt casts.
+const FN_TRUNC_L_D: u32 = 0x09; // trunc.l.d  (f64 -> i64, round toward zero)
+const FN_TRUNC_W_D: u32 = 0x0D; // trunc.w.d  (f64 -> i32, round toward zero)
+
 // COP1 function code for FP arithmetic (sub.d)
 const FN_SUB_D: u32 = 0x01; // sub.d
 const FN_ADD_D: u32 = 0x00; // add.d
@@ -772,6 +780,14 @@ pub enum Instruction {
     CvtLS { fd: Fpr, fs: Fpr },
     /// Convert Double to Long: `cvt.l.d fd, fs` (fmt=D, func=0x25)
     CvtLD { fd: Fpr, fs: Fpr },
+    /// Truncate Double to Long: `trunc.l.d fd, fs` (fmt=D, func=0x09)
+    /// Round toward zero (ignore FCSR rounding mode).  Use this for
+    /// FloatToInt / FloatToUInt casts where IEEE-754 trunc() semantics
+    /// are required.
+    TruncLD { fd: Fpr, fs: Fpr },
+    /// Truncate Double to Word: `trunc.w.d fd, fs` (fmt=D, func=0x0D)
+    /// Round toward zero, 32-bit result.
+    TruncWD { fd: Fpr, fs: Fpr },
 
     // ── Coprocessor 1: FP Arithmetic ───────────────────────────────────
     /// FP Add Double: `add.d fd, fs, ft` (fmt=D, func=0x00)
@@ -1336,6 +1352,12 @@ impl Instruction {
             Instruction::CvtLD { fd, fs } => {
                 encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_L_D)
             }
+            Instruction::TruncLD { fd, fs } => {
+                encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_TRUNC_L_D)
+            }
+            Instruction::TruncWD { fd, fs } => {
+                encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_TRUNC_W_D)
+            }
 
             // ── Coprocessor 1: FP Arithmetic ──────────────────────────
             Instruction::AddD { fd, fs, ft } => {
@@ -1494,6 +1516,8 @@ impl Instruction {
             Instruction::CvtDL { .. } => "cvt.d.l",
             Instruction::CvtLS { .. } => "cvt.l.s",
             Instruction::CvtLD { .. } => "cvt.l.d",
+            Instruction::TruncLD { .. } => "trunc.l.d",
+            Instruction::TruncWD { .. } => "trunc.w.d",
             Instruction::AddD { .. } => "add.d",
             Instruction::SubD { .. } => "sub.d",
             Instruction::MulD { .. } => "mul.d",
@@ -1607,6 +1631,8 @@ impl fmt::Display for Instruction {
             Instruction::CvtDL { fd, fs } => write!(f, "cvt.d.l {}, {}", fd, fs),
             Instruction::CvtLS { fd, fs } => write!(f, "cvt.l.s {}, {}", fd, fs),
             Instruction::CvtLD { fd, fs } => write!(f, "cvt.l.d {}, {}", fd, fs),
+            Instruction::TruncLD { fd, fs } => write!(f, "trunc.l.d {}, {}", fd, fs),
+            Instruction::TruncWD { fd, fs } => write!(f, "trunc.w.d {}, {}", fd, fs),
             Instruction::AddD { fd, fs, ft } => write!(f, "add.d {}, {}, {}", fd, fs, ft),
             Instruction::SubD { fd, fs, ft } => write!(f, "sub.d {}, {}, {}", fd, fs, ft),
             Instruction::MulD { fd, fs, ft } => write!(f, "mul.d {}, {}, {}", fd, fs, ft),
@@ -1656,7 +1682,9 @@ impl Instruction {
             | Instruction::CvtSL { fd, fs }
             | Instruction::CvtDL { fd, fs }
             | Instruction::CvtLS { fd, fs }
-            | Instruction::CvtLD { fd, fs } => (vec![fpr(*fs)], vec![fpr(*fd)]),
+            | Instruction::CvtLD { fd, fs }
+            | Instruction::TruncLD { fd, fs }
+            | Instruction::TruncWD { fd, fs } => (vec![fpr(*fs)], vec![fpr(*fd)]),
             // FP arithmetic: read source FPRs, write destination FPR.
             Instruction::SubD { fd, fs, ft } => {
                 (vec![fpr(*fs), fpr(*ft)], vec![fpr(*fd)])
@@ -2628,78 +2656,139 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                             }
                         }
                         CastKind::IntToFloat => {
-                            // Signed i32 → f64: MTC1 T0→F0, CVT.D.W F0,F0, DMFC1 T0←F0
-                            code.extend_from_slice(&Instruction::Mtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            // Signed i64 → f64 (IR sets from_ty = I64).
+                            // DMTC1 T0→F0, CVT.D.L F0,F0, DMFC1 T0←F0
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtDL { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         CastKind::UIntToFloat => {
-                            // Unsigned i32 → f64: zero-extend to 64-bit, DMTC1 T0→F0, CVT.D.L F0,F0, DMFC1 T0←F0
-                            // Zero-extend: DSLL 32 + DSRL 32
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                            // Unsigned u64 → f64 (IR sets from_ty = I64).
+                            // Strategy: convert as signed i64 via CVT.D.L, then
+                            // conditionally add 2^64 (as f64, bits 0x43F0_0000_0000_0000)
+                            // if the original value had its sign bit set (i.e. was
+                            // >= 2^63 as unsigned).  Branch-free:
+                            //   T1 = T0                       (save original)
+                            //   F0 = signed_i64_to_f64(T0)    (via DMTC1 + CVT.D.L)
+                            //   T3 = T1 >>a 63                 (0 if >=0, -1 if <0)
+                            //   T2 = 0x43F0_0000_0000_0000     (2^64 as f64)
+                            //   T2 = T2 & T3                   (0 or 2^64)
+                            //   F2 = T2                        (via DMTC1)
+                            //   F0 = F0 + F2                   (add 2^64 if negative)
+                            //   T0 = F0                        (via DMFC1)
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T1, rs: Gpr::T0, rt: Gpr::Zero }.encode()); // T1 = T0
+                            code.extend_from_slice(&encode_nop());
+                            // T3 = T1 >>a 63 (arithmetic shift right; 0 if T1>=0, -1 if T1<0)
+                            // DSRA only supports sa 0-31, so use DSRAV with T4=63.
+                            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 63 }.encode()); // T4 = 63
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsrav { rd: Gpr::T3, rt: Gpr::T1, rs: Gpr::T4 }.encode()); // T3 = T1 >>a 63
+                            code.extend_from_slice(&encode_nop());
+                            // DMTC1 T0 → F0, CVT.D.L F0, F0
                             code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::CvtDL { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            // Load 2^64 as f64 bits (0x43F0_0000_0000_0000) into T2
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T2, imm: 0x43F0 }.encode()); // T2 = 0x0000_0000_43F0_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T2, rt: Gpr::T2, sa: 32 }.encode()); // T2 = 0x43F0_0000_0000_0000
+                            code.extend_from_slice(&encode_nop());
+                            // T2 = T2 & T3 (mask: 0 if T1 >= 0, 2^64-bits if T1 < 0)
+                            code.extend_from_slice(&Instruction::And { rd: Gpr::T2, rs: Gpr::T2, rt: Gpr::T3 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            // DMTC1 T2 → F2, ADD.D F0, F0, F2
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T2, fs: Fpr::F2 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::AddD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            // DMFC1 T0 ← F0
                             code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         CastKind::FloatToInt => {
-                            // f64 → signed i32: DMTC1 T0→F0, CVT.W.D F0,F0, MFC1 T0←F0
+                            // f64 → signed i64 (IR sets to_ty = I64), truncate toward zero.
+                            // Use TRUNC.L.D (func 0x09) which ALWAYS rounds toward zero,
+                            // unlike CVT.L.D which honours FCSR (default round-to-nearest).
+                            // DMTC1 T0→F0, TRUNC.L.D F0,F0, DMFC1 T0←F0
                             code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::TruncLD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         CastKind::FloatToUInt => {
-                            // f64 → unsigned i32: use the subtract-convert-XOR technique
-                            // (same as x86_64). MIPS `cvt.w.d` is signed-only, so for
-                            // values >= 2^31 the conversion would overflow. We instead:
-                            //   1. Load 2^31 as double (0x41E0_0000_0000_0000) into F2
-                            //   2. F0 = input - 2^31   (sub.d)
-                            //   3. signed cvt.w.d F0 → F0
-                            //   4. MFC1 T0 ← F0 (sign-extended to 64-bit)
-                            //   5. Zero-extend T0 to 32 bits (DSLL 32 + DSRL 32)
-                            //   6. XOR T0 with 0x8000_0000 to add 2^31 back.
-                            // For inputs < 2^31, the XOR clears the sign bit that
-                            // cvt.w.d set, giving the original value. For inputs
-                            // >= 2^31, the XOR sets the high bit, reconstructing
-                            // the unsigned value.
+                            // f64 → unsigned u64 (IR sets to_ty = I64), truncate toward zero.
+                            // MIPS has no direct f64→u64 instruction. Use a dual-path
+                            // strategy and select based on whether value >= 2^63:
+                            //   - Direct:  TRUNC.L.D(value) → correct for 0 <= value < 2^63
+                            //   - Corr:    TRUNC.L.D(value - 2^63) XOR 0x8000_0000_0000_0000
+                            //              → correct for 2^63 <= value < 2^64
+                            // The subtract path loses precision for small values
+                            // (f64 cannot represent 2^63 + small), so we MUST select.
 
-                            // T0 currently holds the f64 bit-pattern (input).
-                            // Step 1: Load 2^31 as double into T1.
-                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0x41E0 }.encode()); // T1 = 0x0000_0000_41E0_0000
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x41E0_0000_0000_0000 (= 2^31 as f64)
+                            // T1 = T0 (save input bit-pattern)
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T1, rs: Gpr::T0, rt: Gpr::Zero }.encode());
                             code.extend_from_slice(&encode_nop());
 
-                            // Step 2: Move input to F0, magic to F2, then F0 = F0 - F2.
-                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); // F0 = input double
+                            // ── Direct path ──
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F2 }.encode()); // F2 = 2^31 as double
+                            code.extend_from_slice(&Instruction::TruncLD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::SubD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); // F0 = input - 2^31
-                            code.extend_from_slice(&encode_nop());
-
-                            // Step 3: Signed convert to 32-bit int.
-                            code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T2, fs: Fpr::F0 }.encode()); // T2 = direct result
                             code.extend_from_slice(&encode_nop());
 
-                            // Step 4: Move to GPR (sign-extended to 64 bits).
-                            code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            // ── Corrected path ──
+                            // Load 2^63 as f64 (0x43E0_0000_0000_0000) into T5 → F2
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T5, imm: 0x43E0 }.encode()); // T5 = 0x0000_0000_43E0_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T5, rt: Gpr::T5, sa: 32 }.encode()); // T5 = 0x43E0_0000_0000_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T5, fs: Fpr::F2 }.encode()); // F2 = 2^63
+                            code.extend_from_slice(&encode_nop());
+                            // F0 = value - 2^63
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F0 }.encode()); // reload value
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::SubD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::TruncLD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T3, fs: Fpr::F0 }.encode()); // T3 = (value-2^63) truncated
+                            code.extend_from_slice(&encode_nop());
+                            // T3 ^= 0x8000_0000_0000_0000  (toggle high bit = add 2^63 back)
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T5, imm: 0x8000 }.encode()); // T5 = 0xFFFF_FFFF_8000_0000 (sign-extended)
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T5, rt: Gpr::T5, sa: 32 }.encode()); // T5 = 0x8000_0000_0000_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Xor { rd: Gpr::T3, rs: Gpr::T3, rt: Gpr::T5 }.encode()); // T3 = corrected
                             code.extend_from_slice(&encode_nop());
 
-                            // Step 5: Zero-extend to 32 bits (clears upper sign-extension).
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            // ── Select ──
+                            // Compare value (T1) with 2^63 (F2): C.LT.D sets FCC0=1 if value < 2^63
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F0 }.encode()); // F0 = value
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&Instruction::CCondD { fs: Fpr::F0, ft: Fpr::F2, cond: 0x3C }.encode()); // c.lt.d F0, F2
                             code.extend_from_slice(&encode_nop());
-
-                            // Step 6: Load 0x8000_0000 into T1 and XOR with T0.
-                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0x8000 }.encode()); // T1 = 0xFFFF_FFFF_8000_0000 (sign-extended)
+                            // Read FCC0 via CFC1 T4, $25
+                            let cfc1_word: u32 = 0x44400000 | (Gpr::T4.encoding() as u32) << 16 | (25u32 << 11);
+                            code.extend_from_slice(&cfc1_word.to_le_bytes());
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x8000_0000_0000_0000
+                            // T4 = T4 & 1  (1 if value < 2^63, 0 if value >= 2^63)
+                            code.extend_from_slice(&Instruction::Andi { rt: Gpr::T4, rs: Gpr::T4, imm: 1 }.encode());
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x0000_0000_8000_0000
+                            // Invert: T4 = 1 if value >= 2^63
+                            code.extend_from_slice(&Instruction::Xori { rt: Gpr::T4, rs: Gpr::T4, imm: 1 }.encode());
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); // T0 ^= 0x8000_0000
+                            // T0 = T2 (direct)
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::Zero }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            // MOVN T0, T3, T4 → if T4 != 0 (value >= 2^63), T0 = T3 (corrected)
+                            code.extend_from_slice(&Instruction::Movn { rd: Gpr::T0, rs: Gpr::T3, rt: Gpr::T4 }.encode());
                             code.extend_from_slice(&encode_nop());
                         }
                         CastKind::FloatToFloat => {

@@ -1872,8 +1872,11 @@ impl Instruction {
                 | (rn.encoding() << 5)),
 
             // ---- CSEL ----
-            // CSEL: 1 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
-            Instruction::CSEL { rd, rn, rm, cond } => Ok((0x1A800000u64
+            // CSEL: sf 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
+            // 64-bit base = 0x9A800000 (sf=1).  The no-width `encode()`
+            // defaults to 64-bit to match ADD/SUB/CMP/etc.  Use
+            // `encode_with_width(W32)` for 32-bit (W reg) CSEL.
+            Instruction::CSEL { rd, rn, rm, cond } => Ok((0x9A800000u64
                 | (rm.encoding() as u64) << 16
                 | (cond.encoding() as u64) << 12
                 | (rn.encoding() as u64) << 5
@@ -1881,10 +1884,15 @@ impl Instruction {
                 as u32),
 
             // ---- CSET (alias for CSINC Rd, XZR, XZR, invert(cond)) ----
-            // CSINC: 1 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
+            // CSINC: sf 0 0 1 1 0 1 0 1 0 Rm 0000 0 cond Rn Rd
+            // 64-bit CSINC base = 0x9A800400 (sf=1, op2=01 for CSINC).
             // CSET Rd, cond = CSINC Rd, XZR, XZR, invert(cond)
+            // NOTE: the no-width `encode()` defaults to 64-bit (X reg) to match
+            // the convention used by ADD/SUB/CMP/etc.  Callers needing 32-bit
+            // (W reg) CSET must use `encode_with_width(W32)` via
+            // `emit_instruction_with_width`.
             Instruction::CSET { rd, cond } => {
-                Ok(0x1A800000u32
+                Ok(0x9A800400u32
                     | (Register::XZR.encoding() << 16)  // Rm = XZR
                     | (cond.invert().encoding() << 12)    // invert(cond)
                     | (Register::XZR.encoding() << 5)     // Rn = XZR
@@ -2018,18 +2026,22 @@ impl Instruction {
             }
 
             // ---- FCVT (convert between single and double) ----
-            // Encoding format (Floating-point data-processing 1-source):
-            //   FCVT Dd, Sn (f32→f64): M=0, S=0 → base 0x1EE20000, Rn [9:5] Rd [4:0]
-            //   FCVT Sd, Dn (f64→f32): M=1, S=0 → base 0x1EE60000, Rn [9:5] Rd [4:0]
+            // Encoding (Floating-point data-processing 1-source):
+            //   sz 111100 type 1 opc 1 0000 Rn Rd
+            //   FCVT Dd, Sn (f32→f64): sz=0, type=00(single), opc=000101 → 0x1E22C000
+            //   FCVT Sd, Dn (f64→f32): sz=0, type=01(double), opc=000100 → 0x1E624000
+            // (Previous encodings 0x1EE20000/0x1EE60000 used type=11 half-precision
+            //  and missed the required bit-14 constant, producing wrong results on
+            //  QEMU 7.2.  Verified against binutils aarch64-opc.c.)
             Instruction::FCVT {
                 rd,
                 rn,
                 to_double,
             } => {
                 let base = if *to_double {
-                    0x1EE20000u32 // FCVT Dd, Sn
+                    0x1E22C000u32 // FCVT Dd, Sn (f32→f64)
                 } else {
-                    0x1EE60000u32 // FCVT Sd, Dn
+                    0x1E624000u32 // FCVT Sd, Dn (f64→f32)
                 };
                 Ok(base | (rn.encoding() << 5) | rd.encoding())
             }
