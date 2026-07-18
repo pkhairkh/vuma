@@ -618,7 +618,7 @@ def run_one(args):
             # riscv32: QEMU's default rv32 CPU lacks the D extension.
             # Enable D explicitly via CPU properties.
             if backend == "riscv32":
-                cmd += ["-cpu", "rv32,d=true"]
+                cmd += ["-cpu", "max"]
             cmd.append(out)
 
         try:
