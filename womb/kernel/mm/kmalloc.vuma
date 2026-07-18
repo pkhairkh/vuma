@@ -25,6 +25,27 @@
 //     /tmp/kmalloc.bin ; echo "exit=$?"
 // Expected exit: 0
 //
+// ── Arch-independence (R3c audit) ───────────────────────────────────────────
+// kmalloc is 100% arch-independent.
+//
+// Verified R3c: zero `if arch == ...`, zero arch-conditional code, zero
+// arch-specific constants. The slab allocator (9 power-of-2 size classes,
+// per-class free-stack, lazy slab_init) is a pure PMT transform over
+// State<SlabState> — it tracks slot indices and base addresses as opaque
+// u64 values and never inspects arch-specific page-table or PTE format.
+// Compiles identically for all 19 backends.
+//
+// NOTE on the mmap/munmap extern block below: those are HOST-OS syscalls
+// (Linux mmap=9 / munmap=11), NOT CPU-arch-specific calls. The same extern
+// signature works on every backend's hosted mode (the linker resolves
+// unresolved externs to __ffi_fallback_stub on backends that don't
+// pre-register mmap/munmap). In K11 bare-metal mode, mmap/munmap are
+// replaced by pmm_alloc/pmm_free (also arch-independent — see
+// womb/kernel/mm/pmm.vuma's R3a audit). The slab allocator never branches
+// on arch; the R3b VMM (womb/kernel/mm/vmm.vuma) is the ONLY mm/ file
+// that branches on arch (via VmmSpace.arch → x86/arm/riscv walker
+// dispatch — the HAL boundary).
+//
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:

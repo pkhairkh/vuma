@@ -13,6 +13,22 @@
 //     /tmp/pmm.bin ; echo "exit=$?"
 // Expected exit: 0
 //
+// ── Arch-independence (R3a audit) ───────────────────────────────────────────
+// PMM is 100% arch-independent. No externs, no arch-conditional code. Compiles
+// identically for all 19 backends.
+//
+// Verified R3a: zero `if arch == ...`, zero `extern` blocks, zero arch-
+// specific constants. The buddy allocator is a pure PMT transform over
+// State<FlatPool> + State<PmmState> — it tracks physical page frames as
+// opaque u64 addresses and never inspects their content or layout. Every
+// arch (x86_64, aarch64, riscv64, and the 16 other backends) sees the
+// same PMM source byte-for-byte; the only arch-specific concern (where
+// the PMM gets its initial physical-memory map from) is handled by the
+// caller (bootinfo_init in K1), not by this file. The R3b VMM is the
+// ONLY mm/ file that branches on arch (via VmmSpace.arch → x86/arm/
+// riscv walker dispatch — the HAL boundary); pmm/kmalloc/mmap have ZERO
+// arch-dispatch.
+//
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:
