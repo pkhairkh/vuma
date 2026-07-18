@@ -1,117 +1,250 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/console.vuma
-// VWK kernel console subsystem — PMT-pure line-buffered output.
+// VWK kernel console subsystem — R1e EarlyConsole adapter.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// The kernel console is a thin line-buffered output channel over State<T>.
-// In hosted mode (K1a) the buffer is flushed to host fd 1 via the
-// `write` extern from womb/kernel/arch/x86_64/trampoline.vuma (which in
-// turn resolves to the pre-registered sys_write stub in
-// `src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs`).
+// This file is the canonical home of the kernel's `console_*` API. R1e
+// reworks it from the K1a line-buffered Console path (a 256-byte State<Console>
+// buffer drained via `write(1, base, len)` at flush time) to a thin adapter
+// over the R1d universal `early_console_*` API. The public `console_init` /
+// `console_putc` / `console_flush` symbols stay (so existing call sites in
+// kmain.vuma / kernel.vuma keep working), but the bodies now:
 //
-// In bare-metal mode (Wave K11) this module's API stays byte-identical;
-// only the `extern "C" { fn write(...) }` re-declaration below gets
-// swapped for an MMIO-based UART trampoline. Higher-level kernel code
-// (kmain.vuma, kernel.vuma) is unchanged between hosted and bare-metal.
+//   console_init(ec)  →  early_console_init(ec, 0, 4)
+//                        (hosted mode: con_type=4=wasm host callback)
+//   console_putc(ec, ch)  →  early_console_write_byte(ec, ch)
+//                            (one byte per call, no buffering)
+//   console_flush(ec)     →  { /* no-op */ }
+//                            (EarlyConsole writes immediately, no buffer
+//                            to drain)
 //
-// PMT discipline: NO `*ptr`, `&x`, `allocate`, or `free` syntax in this
-// file. The Console state is allocated via `state_new(Console)` (which
-// lowers to an Alloc into `___pmt_buffer`), and its address is passed to
-// `write` via the documented `c as Address` cast (see
-// docs/language-reference.md §14.5 — "Borrowed read (zero-copy I/O)").
-// The `buf` field is at offset 0 in the Console layout, so the Address
-// passed to `write(1, base, c.len)` points at the first buffered byte.
+// Why the switch? Kmain's banner path used to require both `console_putc`
+// AND `console_flush` — putc staged bytes into a 256-byte buffer, then
+// flush issued the actual syscall. R1d's EarlyConsole has no buffer: each
+// `early_console_write_byte` call emits the byte immediately (via the wasm
+// `write(1, buf, 1)` path in hosted mode, or via MMIO / semihosting / diag
+// in bare-metal K11). That makes `console_flush` a no-op — but we keep the
+// symbol so callers that do `console_putc(...); console_flush(...);` (e.g.
+// panic.vuma, kmsg.vuma) keep compiling unchanged.
 //
-// Why a line buffer?
-//   - Avoids one syscall per byte (only one `write` per `console_flush`).
-//   - Lets later waves add `console_puti` / `console_putu` / `console_putx`
-//     without each having to know about the host write ABI.
-//   - The 256-byte buffer is large enough for boot banners and short
-//     panic/diagnostic messages; later waves can grow it via an arena.
+// ── Init-style API (state passed in, not returned) ─────────────────────────
+// VUMA's State<T> model does not propagate State values through function
+// returns across all backends (see K0a arena-state model — a returned
+// State<T> handle's lifetime is not extended across the call frame). So
+// `console_init` is init-style: the caller allocates the State<EarlyConsole>
+// via `state_new(EarlyConsole)`, passes it to `console_init(ec)`, which
+// populates it in place. Same convention as K2a pmm_init, K4a pt_init, K8a
+// spinlock_init, R1a bootinfo_init, R1d early_console_init.
 //
-// VUMA has NO `import` statement yet (Open Work §7). Each kernel module
-// that calls `write` MUST re-declare the extern locally. Keep the
-// declaration byte-identical to the canonical one in
-// womb/kernel/arch/x86_64/trampoline.vuma — same arg types, same order.
-// A mismatch would silently produce different ABI at the call site.
+// ── Why a console_flush no-op? ─────────────────────────────────────────────
+// Two reasons:
+//   1. EarlyConsole has no buffer — every byte is emitted at putc time, so
+//      there's nothing to drain at flush time.
+//   2. Keeping the symbol preserves source compatibility with callers that
+//      pair `console_putc(...); console_flush(...);`. Removing it would
+//      force a sweep of panic.vuma / kmsg.vuma / shell.vuma — out of scope
+//      for R1e (those callers will be swept in a later wave that migrates
+//      them off the Console API entirely and onto early_console_write_str
+//      directly, which is the long-term direction per R1d's design notes).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// VUMA has no `import` statement yet (Open Work §7). This file re-declares
+// the EarlyConsole + ConsoleStr + ByteBuf layouts and the externs + the two
+// early_console_* functions it adapts (early_console_init,
+// early_console_write_byte) byte-identically to
+// womb/kernel/drivers/early_console.vuma. The byte-identical invariant is
+// the project-wide convention (kernel-developer-guide.md §9) — a mismatch
+// in field order or function signature would silently produce different
+// ABI at the call site. When VUMA gains `import`, this file collapses to
+// a thin wrapper:
+//
+//     import early_console;
+//     fn console_init(ec: State<EarlyConsole>) { early_console_init(ec, 0, 4); }
+//     fn console_putc(ec: State<EarlyConsole>, ch: u8) { early_console_write_byte(ec, ch); }
+//     fn console_flush(_ec: State<EarlyConsole>) { /* no-op */ }
+//     fn main() -> i32 { return 0; }
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero numeric literals are DECIMAL per the project-wide convention
+// (K5a → K5f → R1a → R1d carried forward). Decimal avoids the parser's
+// hex-literal path; hex values appear in comments only. The constants here:
+//   0  = base (no MMIO in hosted wasm path)
+//   4  = con_type discriminant for the wasm host callback path
+//   1  = byte count for write(1, addr, 1) in the wasm path
+//   7  = EarlyConsole._pad length (pad-zeroing loop bound)
+//   256 = ConsoleStr buffer size (write_str loop bound, present in the
+//         re-declared early_console functions for byte-identical parity)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// EarlyConsole + ConsoleStr + ByteBuf are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> slots; the caller allocates them via
+// `state_new(EarlyConsole)`. The Address passed to `write` is the
+// State<T>'s base pointer extracted via the `buf as Address` cast (docs
+// §14.5 "Borrowed read (zero-copy I/O)").
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/console.vuma /tmp/console.bin x86_64 --verify
+//     /tmp/console.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0, no stdout (this file's main() is a stub that
+// returns 0; the canonical entry point is womb/kernel/kernel.vuma).
 
-// ── Trampoline extern (mirror of trampoline.vuma — write only) ──────────────
-// Hosted mode: `write(fd, buf, count)` is sys_write (nr 1 on x86_64).
-// SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three args already match
-// the syscall ABI, so the stub is "mov eax,#1; syscall; ret". Returns
-// the byte count written (or a negative errno on failure).
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (byte-identical to womb/kernel/drivers/early_console.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// EarlyConsole: the universal console handle. base is the MMIO base for
+// 16550/PL011 (e.g. 1016 for COM1, 150994944 for QEMU PL011) or 0 for
+// non-MMIO paths (semihosting, diag, wasm). con_type is the dispatch
+// discriminant (0..4). _pad keeps the layout 16 bytes total and u64-aligned
+// (matches the R1a BootInfo tail-pad convention).
+layout EarlyConsole = { base: u64, con_type: u8, _pad: [u8; 7] }
+
+// ConsoleStr: 256-byte null-terminated string buffer for write_str. Re-
+// declared here byte-identically to early_console.vuma for the
+// byte-identical re-declaration invariant (kernel-developer-guide.md §9).
+// This file does not directly use ConsoleStr, but the invariant requires
+// every re-declaration to mirror the canonical layout exactly so a future
+// `import` migration is a pure deletion.
+layout ConsoleStr = { data: [u8; 256] }
+
+// ByteBuf: 1-byte buffer for the wasm/host path's `write(1, addr, 1)` call.
+// The `data` field is at offset 0 so `buf as Address` yields the address of
+// `buf.data[0]` — the natural argument for write(1, base, 1). Used by the
+// re-declared early_console_write_byte below.
+layout ByteBuf = { data: [u8; 1] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampolines (byte-identical to early_console.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Two extern blocks: one for the MMIO trampolines (bare-metal only; hosted
+// resolves them to __ffi_fallback_stub — `mmio_write8` is a no-op for void
+// returns), one for the hosted I/O `write` extern (which resolves to the
+// real sys_write stub on x86_64 — nr 1; on aarch64 nr 64; on wasm32 the host
+// import). Same split as drivers/uart.vuma.
+
+// MMIO trampolines (bare-metal mode uses these; hosted mode = no-op stubs).
+extern "C" {
+    fn mmio_write8(addr: u64, val: u8);
+    fn mmio_write32(addr: u64, val: u32);
+}
+
+// Hosted-mode I/O (resolves to sys_write on x86_64/aarch64 hosted backends;
+// resolves to the wasm host import `write` on wasm32). `buf: Address` (NOT
+// State<T>) means the marshal does NOT invalidate any state on the call —
+// the Address is just a raw u64 pointer handed to the syscall. This is the
+// documented PMT "Borrowed read" pattern.
 extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-// ── Console layout ─────────────────────────────────────────────────────────
-// A 256-byte line buffer + current length. The `buf` field is at offset 0
-// so that `c as Address` (cast of the State<Console> base pointer) yields
-// the address of the first buffered byte — the natural argument for
-// `write(1, base, c.len)`.
-//
-// Field order matters: `buf` MUST precede `len` so the buffer is at
-// offset 0. (Mirror the layout in kernel.vuma exactly.)
-layout Console = {
-    buf: [u8; 256],
-    len: u32,
+// ────────────────────────────────────────────────────────────────────────────
+// early_console_init (byte-identical to early_console.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Populate a caller-allocated EarlyConsole with (base, con_type) and zero
+// the 7-byte _pad. Pure typed-memory writes; no pointer ops. Inlined here
+// so console_init below can call it without a VUMA `import` (which does not
+// exist yet — Open Work §7).
+fn early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
+    ec.base = base;
+    ec.con_type = con_type;
+    let i = 0;
+    while i < 7 { ec._pad[i] = 0; i = i + 1; }
 }
 
-// ── console_init ───────────────────────────────────────────────────────────
-// Allocate a fresh Console state and zero its length. The buffer contents
-// are unspecified until console_putc writes them — callers must NOT read
-// `c.buf[i]` for `i >= c.len` (the bytes are stale `___pmt_buffer`
-// contents). Returns a State<Console> ready for putc/flush.
-
-fn console_init() -> State<Console> {
-    let c = state_new(Console);
-    c.len = 0;
-    return c;
-}
-
-// ── console_putc ───────────────────────────────────────────────────────────
-// Append one byte to the console buffer. If the buffer is full (len >= 256),
-// the byte is silently dropped — later waves may add an auto-flush on
-// overflow. PMT field access (`c.len`, `c.buf[idx]`) is typed and
-// endian-safe by construction; no `*(addr + i)` pointer arithmetic.
-
-fn console_putc(c: State<Console>, ch: u8) {
-    let idx = c.len;
-    if idx < 256 {
-        c.buf[idx] = ch;
-        c.len = idx + 1;
+// ────────────────────────────────────────────────────────────────────────────
+// early_console_write_byte (byte-identical to early_console.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// The universal byte-emission entry point. Dispatch on ec.con_type:
+//   0 (16550 UART)   — mmio_write8(ec.base, c). Hosted: no-op stub.
+//   1 (PL011 UART)   — mmio_write32(ec.base, c as u32). Hosted: no-op stub.
+//   2 (semihosting)  — stub, no-op. K11 will emit BKPT/EBREAK SYS_WRITE0.
+//   3 (s390x diag)   — stub, no-op. K11 will emit DIAGNOSE 0x4 (SCLP).
+//   4 (wasm host)    — write(1, buf as Address, 1). Real I/O in hosted mode.
+// Inlined here so console_putc below can call it without a VUMA `import`.
+fn early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
+    if ec.con_type == 0 {
+        // 16550 UART: write byte to data register at base+0
+        mmio_write8(ec.base, c);
+    } else {
+        if ec.con_type == 1 {
+            // PL011 UART: write byte to data register at base+0
+            mmio_write32(ec.base, c as u32);
+        } else {
+            if ec.con_type == 4 {
+                // Wasm host callback: use write(1, buf, 1)
+                let buf = state_new(ByteBuf);
+                buf.data[0] = c;
+                write(1, buf as Address, 1);
+            }
+            // con_type 2 (semihosting) and 3 (diag): stubs, no-op
+        }
     }
 }
 
-// ── console_flush ──────────────────────────────────────────────────────────
-// Drain the line buffer to the host: write(1, base, len) where base is the
-// address of `c.buf[0]` (offset 0 in the Console layout, so `c as Address`
-// is correct — no manual offset needed). After a successful flush the
-// buffer is reset to length 0 so subsequent putc calls start fresh.
+// ────────────────────────────────────────────────────────────────────────────
+// console_init — init-style wrapper over early_console_init.
+// ────────────────────────────────────────────────────────────────────────────
+// Caller allocates the State<EarlyConsole> via `state_new(EarlyConsole)`,
+// then passes it here to be populated. Hosted-mode default: base=0 (no
+// MMIO), con_type=4 (wasm host callback — routes every write_byte through
+// `write(1, buf, 1)`, which in hosted mode resolves to sys_write nr 1).
 //
-// The `c as Address` cast is the documented PMT pattern for handing a
-// State<T> to an FFI callee that takes a raw buffer pointer (see
-// docs/language-reference.md §14.5, "Borrowed read"). The cast does NOT
-// consume `c` — the state remains live in `___pmt_buffer` and the
-// subsequent `c.len = 0` store is well-defined.
+// Init-style (rather than `fn console_init() -> State<EarlyConsole>`)
+// because VUMA's State<T> model does not propagate State values through
+// function returns across all backends (K0a arena-state model — a returned
+// State<T> handle's lifetime is not extended across the call frame). Same
+// convention as K2a pmm_init, K4a pt_init, K8a spinlock_init, R1a
+// bootinfo_init, R1d early_console_init.
 //
-// Return value of `write` is currently ignored — a later wave may add
-// error reporting (e.g. retry on EINTR, panic on EBADF).
-
-fn console_flush(c: State<Console>) {
-    if c.len > 0 {
-        let base = c as Address;
-        let _n = write(1, base, c.len as i64);
-        c.len = 0;
-    }
+// State<T> params: 1 (ec). Pure delegation to early_console_init.
+fn console_init(ec: State<EarlyConsole>) {
+    early_console_init(ec, 0, 4);
 }
 
-// ── main entry stub ──────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// console_putc — thin adapter over early_console_write_byte.
+// ────────────────────────────────────────────────────────────────────────────
+// Emit one byte via the universal dispatcher. R1e change: previously this
+// staged the byte into a 256-byte State<Console> line buffer (K1a path);
+// now it forwards directly to early_console_write_byte, which emits the
+// byte immediately (no buffering). The console_putc → console_flush pair
+// still works — the putc emits, the flush is a no-op.
+//
+// State<T> params: 1 (ec). Pure delegation to early_console_write_byte.
+fn console_putc(ec: State<EarlyConsole>, ch: u8) {
+    early_console_write_byte(ec, ch);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// console_flush — no-op (EarlyConsole writes immediately).
+// ────────────────────────────────────────────────────────────────────────────
+// In the K1a Console path, flush drained the 256-byte line buffer to the
+// host via `write(1, base, len)`. R1e's EarlyConsole has no buffer — every
+// byte is emitted at putc time — so flush has nothing to do. Kept as a
+// no-op (rather than removed) to preserve source compatibility with callers
+// that pair `console_putc(...); console_flush(...);` (panic.vuma, kmsg.vuma,
+// shell.vuma). A later wave will migrate those callers off the Console API
+// entirely and onto early_console_write_str directly, at which point
+// console_flush can be deleted.
+//
+// State<T> params: 1 (ec). Underscore-prefixed in the comment to document
+// intentional non-use, but VUMA's param naming doesn't support leading-
+// underscore "intentionally unused" (the param is just named `ec`); the
+// body is empty so the verifier accepts it.
+fn console_flush(ec: State<EarlyConsole>) {
+    // EarlyConsole writes immediately — nothing to drain.
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// main entry stub.
+// ────────────────────────────────────────────────────────────────────────────
 // This file is a library module (no top-level execution). The compiler
 // requires a `fn main()` to compile as a standalone program; the real
 // kernel entry lives in womb/kernel/kernel.vuma, which inlines the full
-// console + kmain source (no `import` in VUMA yet) and calls kmain().
-
+// early_console + kmain source (no `import` in VUMA yet) and calls kmain().
 fn main() -> i32 {
     return 0;
 }
