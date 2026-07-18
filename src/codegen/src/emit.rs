@@ -3799,25 +3799,64 @@ impl Emitter {
             IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                let width = RegWidth::from_ir_type(ty.as_ref());
-                self.ss_load_value_with_width(lhs, Register::X9, slots, width)?;
-                self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
-                self.emit_instruction_with_width(
-                    Instruction::CMP {
-                        rn: Register::X9,
-                        rm: Operand::Reg {
-                            reg: Register::X10,
-                            shift: None,
+
+                // ── FP comparison dispatch ──
+                // When the operand type is F32/F64, use FCMP + CSET instead of
+                // integer CMP (integer CMP on raw FP bits gives silently wrong
+                // results for negatives/NaN).  Mirrors the BinOp arm's FP path
+                // (see `ss_emit_binop` above).
+                if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
+                    let is_double = matches!(ty, Some(IRType::F64));
+                    let binop_kind = match kind {
+                        CmpKind::Eq => BinOpKind::Eq,
+                        CmpKind::Ne => BinOpKind::Ne,
+                        CmpKind::SLt => BinOpKind::SLt,
+                        CmpKind::SLe => BinOpKind::SLe,
+                        CmpKind::SGt => BinOpKind::SGt,
+                        CmpKind::SGe => BinOpKind::SGe,
+                        CmpKind::ULt => BinOpKind::ULt,
+                        CmpKind::ULe => BinOpKind::ULe,
+                        CmpKind::UGt => BinOpKind::UGt,
+                        CmpKind::UGe => BinOpKind::UGe,
+                    };
+                    // Load operands' bit patterns into X9/X10 (64-bit, since
+                    // both f32 and f64 fit in a 64-bit GPR slot).
+                    self.ss_load_value_with_width(lhs, Register::X9, slots, RegWidth::X64)?;
+                    self.ss_load_value_with_width(rhs, Register::X10, slots, RegWidth::X64)?;
+                    // GPR → FP: FMOV D0, X9 ; FMOV D1, X10
+                    self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                    self.emit_instruction(Instruction::FMOV_DX { vd: 1, rn: Register::X10 })?;
+                    // FCMP D0, D1 (sets NZCV flags). For FP, signed and
+                    // unsigned comparisons are equivalent.
+                    self.emit_instruction(Instruction::Fcmp {
+                        rn: Register::X0, rm: Register::X1, double: is_double,
+                    })?;
+                    // CSET X9, cond
+                    let cond = binop_kind_to_condition(&binop_kind);
+                    self.emit_instruction(Instruction::CSET { rd: Register::X9, cond })?;
+                    self.ss_store_to_slot(Register::X9, dst_offset)?;
+                } else {
+                    // Integer comparison path (unchanged).
+                    let width = RegWidth::from_ir_type(ty.as_ref());
+                    self.ss_load_value_with_width(lhs, Register::X9, slots, width)?;
+                    self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                    self.emit_instruction_with_width(
+                        Instruction::CMP {
+                            rn: Register::X9,
+                            rm: Operand::Reg {
+                                reg: Register::X10,
+                                shift: None,
+                            },
                         },
-                    },
-                    width,
-                )?;
-                let cond = cmp_kind_to_condition(kind);
-                self.emit_instruction_with_width(
-                    Instruction::CSET { rd: Register::X9, cond },
-                    width,
-                )?;
-                self.ss_store_to_slot(Register::X9, dst_offset)?;
+                        width,
+                    )?;
+                    let cond = cmp_kind_to_condition(kind);
+                    self.emit_instruction_with_width(
+                        Instruction::CSET { rd: Register::X9, cond },
+                        width,
+                    )?;
+                    self.ss_store_to_slot(Register::X9, dst_offset)?;
+                }
             }
 
             // ── Ret (instruction-level) ──

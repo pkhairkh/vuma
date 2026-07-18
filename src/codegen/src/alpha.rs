@@ -994,7 +994,7 @@ fn emit_instr(
                 emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
             }
         }
-        IRInstr::Cmp { kind, dst, lhs, rhs, ty: _ } => {
+        IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
             let binop_kind = match kind {
                 CmpKind::Eq => BinOpKind::Eq,
                 CmpKind::Ne => BinOpKind::Ne,
@@ -1007,7 +1007,16 @@ fn emit_instr(
                 CmpKind::UGt => BinOpKind::UGt,
                 CmpKind::UGe => BinOpKind::UGe,
             };
-            emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
+            // FP dispatch: when the operand type is F32 or F64, emit native
+            // Alpha FP comparisons (CMPTEQ/CMPTLT/CMPTLE/CMPTUN) via
+            // `emit_fp_binop` instead of the integer path.  Integer CMP on
+            // raw FP bits gives silently wrong results for negatives/NaN.
+            // Mirrors the BinOp arm at line 986.
+            if let Some(IRType::F32) | Some(IRType::F64) = ty {
+                emit_fp_binop(&binop_kind, dst, lhs, rhs, ty, vreg_stack_slots, code);
+            } else {
+                emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
+            }
         }
         IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
@@ -1173,14 +1182,61 @@ fn emit_instr(
                     }
                 }
                 CastKind::UIntToFloat => {
-                    // Unsigned int -> float.  Alpha CVTQT treats the source
-                    // as SIGNED; values > i64::MAX would need a 2^64
-                    // correction (load 2^64 as f64 and add).  We emit CVTQT
-                    // and document the limitation -- the IR verifier (F2a)
-                    // should guard against out-of-i64-range unsigned inputs.
-                    // TODO F1a: full unsigned correction for values > i64::MAX.
-                    code.extend(fp_ldt(FA, FP, src_off as i16));
+                    // G5b: Unsigned int -> float with full u64 range.
+                    // Alpha CVTQT treats the source as SIGNED.  For values
+                    // with the high bit set (> i64::MAX), use the shift trick:
+                    //   x' = x >> 1;  f = CVTQT(x');  f = f + f  (= x, modulo
+                    // rounding for the dropped low bit — exact for even x,
+                    // off by < 1 ulp for odd x with f64 mantissa).
+                    // For values with the high bit clear, CVTQT is exact.
+                    // Load the int, test the high bit, branch.
+                    code.extend(ss_ld(S0, src_off));              // S0 = x (int bits)
+                    // S1 = x >> 63 (high bit).
+                    code.extend(ss_load_imm(S1, 63));
+                    // SRAQ (arithmetic shift right quad) S0, S1, S1.
+                    // Alpha SRAQ: opcode 0x10, function 0x7C.  Use op_reg.
+                    code.extend_from_slice(&op_reg(0x10, S0, S1, S1, 0x7C).to_le_bytes());
+                    // S1 = 0 if high bit clear, -1 (all 1s) if set.
+                    // If S1 == 0: fast path (CVTQT direct).  Else: shift path.
+                    // BEQ S1, +offset (branch if S1 == 0).  Alpha BEQ: op_br(0x39, S1, disp).
+                    // We'll emit both paths with a branch over the shift path.
+                    // Layout:
+                    //   BEQ S1, fast_path   (branch forward past the shift path)
+                    //   -- shift path (high bit set) --
+                    //   S2 = S0 >> 1;  CVTQT(S2) -> FA;  FA = FA + FA;  jump store
+                    //   -- fast path --
+                    //   CVTQT(S0) -> FA
+                    //   -- store --
+                    let beq_off = code.len();
+                    code.extend_from_slice(&op_br(0x39, S1, 0).to_le_bytes());  // BEQ S1, +0 (patch later)
+                    // Shift path: S2 = S0 >> 1 (logical, SRLQ function 0x34).
+                    code.extend(ss_load_imm(S1, 1));
+                    code.extend_from_slice(&op_reg(0x10, S0, S1, S2, 0x34).to_le_bytes());  // SRLQ S0, S1, S2
+                    // Store S2 to a temp slot, LDT into FA, CVTQT.
+                    code.extend(ss_st(S2, dst_off));              // spill S2
+                    code.extend(fp_ldt(FA, FP, dst_off as i16));
+                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));     // FA = (float)(x>>1)
+                    code.extend(fp_op(FP_ADDT, FA, FA, FA));      // FA = FA + FA = 2*(x>>1) ≈ x
+                    // Branch to store (unconditional, BR zero, +offset).
+                    let br_to_store = code.len();
+                    code.extend_from_slice(&op_br(0x30, ZERO, 0).to_le_bytes());  // BR zero, +0 (patch)
+                    // Fast path: CVTQT(S0) -> FA.
+                    let fast_off = code.len();
+                    code.extend(ss_st(S0, dst_off));              // spill S0
+                    code.extend(fp_ldt(FA, FP, dst_off as i16));
                     code.extend(fp_op(FP_CVTQT, FA, FA, FA));
+                    // Patch BEQ to jump to fast_off.
+                    let beq_disp = ((fast_off as i32 - beq_off as i32) / 4) - 1;
+                    let beq_word = u32::from_le_bytes(code[beq_off..beq_off+4].try_into().unwrap());
+                    let beq_patched = (beq_word & !0x1FFFFF) | (beq_disp as u32 & 0x1FFFFF);
+                    code[beq_off..beq_off+4].copy_from_slice(&beq_patched.to_le_bytes());
+                    // Store path: write FA to dst (f64 or narrowed f32).
+                    let store_off = code.len();
+                    // Patch the BR to jump here.
+                    let br_disp = ((store_off as i32 - br_to_store as i32) / 4) - 1;
+                    let br_word = u32::from_le_bytes(code[br_to_store..br_to_store+4].try_into().unwrap());
+                    let br_patched = (br_word & !0x1FFFFF) | (br_disp as u32 & 0x1FFFFF);
+                    code[br_to_store..br_to_store+4].copy_from_slice(&br_patched.to_le_bytes());
                     if matches!(to_ty, Some(IRType::F64)) {
                         code.extend(fp_stt(FA, FP, dst_off as i16));
                     } else {
@@ -1203,21 +1259,61 @@ fn emit_instr(
                     code.extend(ss_st(S0, dst_off));
                 }
                 CastKind::FloatToUInt => {
-                    // f64 -> unsigned int.  Approximation: CVTTQ (signed
-                    // truncation) then store as-is.  Negative float inputs
-                    // would produce negative int bits which, reinterpreted
-                    // as unsigned, are wrong -- needs the subtract-2^N trick.
-                    // TODO F1a: unsigned correction for negative float inputs.
+                    // G5b: f64 -> unsigned int with negative clamping.
+                    // If the float is < 0.0, clamp to 0 (negative values are
+                    // out of u64 range).  Otherwise, CVTTQ (signed truncation)
+                    // and store the bits — correct for 0 <= f < 2^63.
+                    // TODO G5b: for f >= 2^63, subtract 2^63, CVTTQ, then OR
+                    // the high bit back (the full-range unsigned correction).
+                    // The negative-clamp path handles the most common real bug
+                    // (negative float -> huge unsigned via bit reinterpretation).
                     if matches!(from_ty, Some(IRType::F64)) {
                         code.extend(fp_ldt(FA, FP, src_off as i16));
                     } else {
                         code.extend(fp_lds(FA, FP, src_off as i16));
-                        code.extend(fp_op(FP_CVTST, FA, FA, FA));
+                        code.extend(fp_op(FP_CVTST, FA, FA, FA));  // widen f32 -> f64
                     }
+                    // Compare FA to 0.0.  We need 0.0 in an FPR: store 0 to
+                    // a temp slot, LDT into FB.
+                    code.extend(ss_load_imm(S0, 0));
+                    code.extend(ss_st(S0, dst_off));  // dst_off as temp
+                    code.extend(fp_ldt(FB, FP, dst_off as i16));  // FB = 0.0
+                    // CMPTLT FA, FB, FC → FC = 1.0 if FA < 0.0 else 0.0.
+                    code.extend(fp_op(FP_CMPTLT, FA, FB, FC));
+                    // Store FC to a temp, reload as int, test.
+                    code.extend(ss_load_imm(S0, 0));  // temp slot for FC
+                    // We need a temp slot distinct from dst_off.  Use src_off
+                    // (already consumed).  Store FC to src_off as f64.
+                    code.extend(fp_stt(FC, FP, src_off as i16));
+                    code.extend(ss_ld(S0, src_off));  // S0 = FC bits (0 or 1 as float)
+                    // If S0 != 0 (FA < 0), result = 0.  Else, CVTTQ.
+                    // BLBC S0, nonzero_path (branch if low bit clear, i.e. == 0).
+                    // Alpha BLBC: op_br(0x38, reg, disp).
+                    let blbc_off = code.len();
+                    code.extend_from_slice(&op_br(0x38, S0, 0).to_le_bytes());  // BLBC S0, +0 (patch)
+                    // Negative path: result = 0.
+                    code.extend(ss_load_imm(S0, 0));
+                    code.extend(ss_st(S0, dst_off));
+                    // Branch to end.
+                    let br_end = code.len();
+                    code.extend_from_slice(&op_br(0x30, ZERO, 0).to_le_bytes());  // BR zero, +0 (patch)
+                    // Nonzero path: CVTTQ and store.
+                    let nz_off = code.len();
+                    // Patch BLBC to jump here.
+                    let blbc_disp = ((nz_off as i32 - blbc_off as i32) / 4) - 1;
+                    let blbc_word = u32::from_le_bytes(code[blbc_off..blbc_off+4].try_into().unwrap());
+                    let blbc_patched = (blbc_word & !0x1FFFFF) | (blbc_disp as u32 & 0x1FFFFF);
+                    code[blbc_off..blbc_off+4].copy_from_slice(&blbc_patched.to_le_bytes());
                     code.extend(fp_op(FP_CVTTQ, FA, FA, FA));
                     code.extend(fp_stt(FA, FP, dst_off as i16));
                     code.extend(ss_ld(S0, dst_off));
                     code.extend(ss_st(S0, dst_off));
+                    // Patch BR to jump to end (here).
+                    let end_off = code.len();
+                    let br_disp = ((end_off as i32 - br_end as i32) / 4) - 1;
+                    let br_word = u32::from_le_bytes(code[br_end..br_end+4].try_into().unwrap());
+                    let br_patched = (br_word & !0x1FFFFF) | (br_disp as u32 & 0x1FFFFF);
+                    code[br_end..br_end+4].copy_from_slice(&br_patched.to_le_bytes());
                 }
                 CastKind::FloatToFloat => {
                     // f32 <-> f64.  Widen (f32 -> f64) or narrow (f64 -> f32).
