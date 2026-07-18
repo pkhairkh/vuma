@@ -1,0 +1,253 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/arch/riscv64/bootinfo.vuma
+// riscv64 bootinfo — populates the canonical superset BootInfo from SBI/DTB.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the riscv64 arch-side companion to womb/kernel/bootinfo.vuma
+// (the canonical superset). It re-declares the superset BootInfo layout
+// byte-identically (VUMA has no `import` — see kernel-developer-guide.md §9
+// "Byte-identical re-declaration invariant"), then provides:
+//
+//   bootinfo_init(bi)
+//       The same zero-all-fields helper as the canonical file. Re-declared
+//       here so this file compiles standalone.
+//
+//   riscv_bootinfo_init(bi, hartid, dtb_addr, mem_start, mem_size)
+//       riscv64-specific init: calls bootinfo_init first (clean slate),
+//       then sets boot_type=2 (sbi — the RISC-V supervisor binary
+//       interface), and records the device tree blob address plus the
+//       usable-RAM window in mem_start/mem_size.
+//
+//       The DTB parser is stubbed for hosted mode: the caller passes the
+//       dtb_addr (a0 at kernel entry, per the RISC-V boot protocol —
+//       RISC-V boot protocol spec §3 / Documentation/riscv/boot.rst) and
+//       the RAM window directly. K13+ will replace the stub with a real
+//       flat device-tree walker (same FDT format as aarch64 — parse the
+//       DTB magic 0xd00dfeed, walk /memory@n/reg, /chosen/bootargs,
+//       /chosen/framebuffer, all PMT-pure typed-memory views).
+//
+//       Note on `hartid`: the RISC-V boot protocol leaves the hart ID
+//       (hardware thread ID) in a0 at kernel entry when a DTB is present
+//       in a1 — but Linux/riscv currently passes the DTB in a1 and hartid
+//       in a0 (the older protocol put DTB in a1, hartid in a0; the newer
+//       EFI-stub protocol puts the FDT in a1, hartid in a0 — same as
+//       before). The current R1c stub accepts hartid as a parameter (for
+//       signature compatibility with the boot stub that will call this
+//       function) but does NOT store it in the superset BootInfo — there
+//       is no hartid field in the canonical superset (the boot CPU's
+//       hartid is not interesting to kmain; only secondary-CPU bringup in
+//       Wave K6 cares, and that walks the DTB's /cpus node directly).
+//       The hartid parameter is therefore intentionally unused in the
+//       stub — same VUMA-calling-convention pattern as x86_bootinfo_init's
+//       unused `mbi_addr` and sys_exec's `_entry`/`_stack` (commit
+//       d25d68ca). K13+ may revisit if a use case emerges.
+//
+// ── RISC-V boot protocol recap (for K13+ implementer) ───────────────────────
+//   At kernel entry on riscv64 (M-mode firmware jumps to S-mode kernel via
+//   SBI), the CPU registers contain:
+//     a0 = hartid   (the hart ID of the boot hart — u64).
+//     a1 = dtb_addr (physical address of the device tree blob — u64).
+//   The DTB is the same flat device-tree format as aarch64 (Devicetree
+//   Spec v0.4 §5) — see womb/kernel/arch/aarch64/bootinfo.vuma for the
+//   FDT header + token-format recap.
+//
+//   The K13+ real implementation:
+//     1. Verify DTB magic at dtb_addr == 3735905741 (0xd00dfeed).
+//     2. Walk the structure block — for each node:
+//          /memory@n with property "reg" — read u64 base + u64 size (the
+//            riscv default is #address-cells=2, #size-cells=2 on RV64),
+//            pick the largest RAM region, set mem_start/mem_size.
+//          /chosen with property "bootargs" — set bi.cmdline = prop_data_addr.
+//          /chosen with property "linux,initrd-start"/"linux,initrd-end" —
+//            record initramfs location (K13+).
+//          /chosen/framebuffer (or /framebuffer) with properties "width",
+//            "height", "reg" — set bi.framebuffer / fb_width / fb_height.
+//          /cpus/cpu@n with property "reg" — list of hart IDs (for K6
+//            secondary-CPU bringup — out of scope for R1c).
+//     3. Set bi.boot_type = 2 (sbi).
+//
+//   For now (hosted mode / Wave R1c), the stub just stores the caller-
+//   supplied dtb_addr / mem_start / mem_size unchanged and leaves
+//   cmdline/framebuffer at 0. The stub is sufficient for kmain's hosted-
+//   mode smoke tests (which only read boot_type/mem_start/mem_size/dtb_addr).
+//
+// ── PMT discipline ──────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   BootInfo is a flat typed-memory record; the caller allocates it via
+//   `state_new(BootInfo)` and passes it by reference to
+//   riscv_bootinfo_init (init-style API — same convention as the canonical
+//   file).
+//
+//   In particular, the K13+ DTB parser will NOT use raw pointer arithmetic
+//   to walk the DTB — it will construct `layout FdtHeader = { magic: u32,
+//   totalsize: u32, ... }` and `layout FdtProp = { len: u32, nameoff: u32 }`
+//   views over the dtb_addr region and use typed field access. (This is the
+//   same PMT pattern K9a uses for sk_buff views: define a layout, cast the
+//   State to it, read fields by name.)
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All numeric literals in this file are decimal (per the project-wide
+//   convention). Hex values are documented in comments only.
+//     2149580800  = 0x80200000     (typical riscv64 kernel-entry physical
+//                                    address — QEMU `-M virt` loads the
+//                                    S-mode kernel at 0x80200000, after
+//                                    the SBI firmware at 0x80000000; used
+//                                    as the self-test's mem_start)
+//     2181038080  = 0x82200000     (32 MB above 0x80200000 — used as the
+//                                    self-test's dtb_addr; QEMU's `-M virt`
+//                                    places the fw-cfg DTB somewhere in
+//                                    this vicinity)
+//     268435456   = 0x10000000     (256 MB — self-test mem_size)
+//     3735905741  = 0xd00dfeed     (DTB magic — K13+ parser checks this)
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/riscv64/bootinfo.vuma \
+//         /tmp/riscv_bootinfo.bin x86_64 --verify
+//     /tmp/riscv_bootinfo.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (riscv_bootinfo_init sets boot_type=2,
+// dtb_addr=2181038080, mem_start=2149580800, mem_size=268435456; the 4
+// self-test checks pass).
+//
+// Cross-arch sanity (the file should also IVE-verify on riscv64 itself —
+// the superset layout is genuinely arch-independent):
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/arch/riscv64/bootinfo.vuma \
+//         /tmp/riscv_bootinfo_native.bin riscv64 --verify
+// (Binary can't EXEC on this x86 host — exit 126 "Exec format error" — but
+// the IVE verification step is what matters for arch-independence.)
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout — Canonical superset BootInfo (byte-identical re-declaration).
+// ────────────────────────────────────────────────────────────────────────────
+// MUST match womb/kernel/bootinfo.vuma byte-for-byte (same field order,
+// same types, same names). Any drift would silently produce different
+// field offsets at the call site — see kernel-developer-guide.md §9.
+layout BootInfo = {
+    mem_start: u64,
+    mem_size: u64,
+    cmdline: u64,
+    dtb_addr: u64,
+    multiboot_magic: u64,
+    framebuffer: u64,
+    fb_width: u32,
+    fb_height: u32,
+    boot_type: u8,
+    _pad: [u8; 7],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// bootinfo_init: zero every field of a caller-allocated BootInfo.
+// ────────────────────────────────────────────────────────────────────────────
+// Same as the canonical womb/kernel/bootinfo.vuma::bootinfo_init —
+// re-declared here so this file compiles standalone. riscv_bootinfo_init
+// calls this first to get a clean slate before populating riscv64-specific
+// fields.
+fn bootinfo_init(bi: State<BootInfo>) {
+    bi.mem_start = 0;
+    bi.mem_size = 0;
+    bi.cmdline = 0;
+    bi.dtb_addr = 0;
+    bi.multiboot_magic = 0;
+    bi.framebuffer = 0;
+    bi.fb_width = 0;
+    bi.fb_height = 0;
+    bi.boot_type = 0;
+    let i = 0;
+    while i < 7 {
+        bi._pad[i] = 0;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// riscv_bootinfo_init: populate the superset BootInfo from RISC-V boot regs.
+// ────────────────────────────────────────────────────────────────────────────
+//   bi         caller-allocated State<BootInfo> (modified in place).
+//   hartid     the boot hart ID (a0 at kernel entry per the RISC-V boot
+//              protocol). NOT stored in the superset BootInfo — there is
+//              no hartid field in the canonical layout (the boot CPU's
+//              hartid is not interesting to kmain; only secondary-CPU
+//              bringup in Wave K6 cares, and that walks the DTB's /cpus
+//              node directly). Accepted as a parameter for signature
+//              compatibility with the boot stub that will call this
+//              function; intentionally unused in the stub. Per the VUMA
+//              calling convention, unused parameters are silently dropped
+//              (no warning, no error) — same pattern as x86_bootinfo_init's
+//              unused `mbi_addr` and sys_exec's `_entry`/`_stack` in
+//              womb/kernel/proc/exec.vuma (commit d25d68ca).
+//   dtb_addr   physical address of the device tree blob (a1 at kernel
+//              entry per the RISC-V boot protocol). Stored unchanged in
+//              bi.dtb_addr so kmain can later pass it to the DTB parser
+//              (K13+).
+//   mem_start  start of usable RAM (physical byte address). On riscv64
+//              QEMU `-M virt` the S-mode kernel is loaded at 0x80200000
+//              (= 2149580800); the RAM window above the SBI firmware at
+//              0x80000000 starts there.
+//   mem_size   size of usable RAM in bytes. Stored unchanged in bi.mem_size.
+//
+// Behavior:
+//   1. bootinfo_init(bi)    — zero everything (clean slate).
+//   2. bi.boot_type = 2     — sbi (riscv64).
+//   3. bi.dtb_addr = dtb_addr.
+//   4. bi.mem_start = mem_start.
+//   5. bi.mem_size  = mem_size.
+//   6. (K13+) Parse DTB at dtb_addr → cmdline (from /chosen/bootargs),
+//      framebuffer / fb_width / fb_height (from /chosen/framebuffer or
+//      /framebuffer), refine mem_start/mem_size from /memory@n/reg.
+//
+// State<T> params: 1 (bi). The hartid / dtb_addr / mem_start / mem_size
+// params are pure u64 values (no State indirection). The body is 4 field
+// writes after the bootinfo_init call — pure typed-memory writes, no
+// pointer ops.
+fn riscv_bootinfo_init(bi: State<BootInfo>, hartid: u64, dtb_addr: u64, mem_start: u64, mem_size: u64) {
+    bootinfo_init(bi);
+    bi.boot_type = 2;            // sbi (riscv64)
+    bi.dtb_addr = dtb_addr;
+    bi.mem_start = mem_start;
+    bi.mem_size = mem_size;
+    // hartid is intentionally unused — see the doc comment above (the
+    // canonical superset BootInfo has no hartid field; K6 secondary-CPU
+    // bringup walks the DTB /cpus node directly). Recorded in the
+    // signature for compatibility with the boot stub that calls this
+    // function (the boot stub has a0=hartid, a1=dtb_addr in registers
+    // and passes both to us). Same "unused param silently dropped"
+    // pattern as x86_bootinfo_init's mbi_addr.
+    //
+    // Stub: the K13+ real implementation will walk the DTB at dtb_addr to
+    // extract cmdline (from /chosen/bootargs), framebuffer info, and
+    // refine mem_start/mem_size from /memory@n/reg. For now the caller
+    // passes mem_start/mem_size directly — sufficient for hosted mode.
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the riscv_bootinfo_init API end-to-end:
+//   1. Allocate a fresh BootInfo.
+//   2. riscv_bootinfo_init(bi, 0, 2181038080, 2149580800, 268435456)
+//        hartid     = 0           (boot hart)
+//        dtb_addr   = 0x82200000 = 2181038080  (QEMU `-M virt` DTB area)
+//        mem_start  = 0x80200000 = 2149580800  (QEMU `-M virt` kernel base)
+//        mem_size   = 0x10000000 = 268435456   (256 MB)
+//   3. Check boot_type  == 2          (sbi).
+//   4. Check dtb_addr   == 2181038080 (0x82200000).
+//   5. Check mem_start  == 2149580800 (0x80200000).
+//   6. Check mem_size   == 268435456  (0x10000000).
+//
+// Returns 0 on success, 1..4 on the 4 individual check failures:
+//   1: boot_type != 2
+//   2: dtb_addr  != 2181038080
+//   3: mem_start != 2149580800
+//   4: mem_size  != 268435456
+fn main() -> i32 {
+    let bi = state_new(BootInfo);
+    riscv_bootinfo_init(bi, 0, 2181038080, 2149580800, 268435456);
+    if bi.boot_type != 2 { return 1; }
+    if bi.dtb_addr != 2181038080 { return 2; }
+    if bi.mem_start != 2149580800 { return 3; }
+    if bi.mem_size != 268435456 { return 4; }
+    return 0;
+}
