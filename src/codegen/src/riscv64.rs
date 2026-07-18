@@ -56,6 +56,10 @@ const OP_REG32: u32 = 0b0111011;
 const OP_SYSTEM: u32 = 0b1110011;
 const OP_MISC_MEM: u32 = 0b0001111;
 const OP_FP: u32 = 0b1010011;
+// FP load/store opcodes (RISC-V F/D extensions): distinct from integer
+// LOAD/STORE. Per the spec, LOAD-FP=0b0000111 and STORE-FP=0b0100111.
+const OP_LOAD_FP: u32 = 0b0000111;
+const OP_STORE_FP: u32 = 0b0100111;
 
 // ===========================================================================
 // General-Purpose Registers
@@ -1262,33 +1266,37 @@ impl Instruction {
             ),
 
             // ── F/D Extension: Load/Store ───────────────────────────
+            // Per the RISC-V spec, FP loads use opcode LOAD-FP=0b0000111 and
+            // FP stores use opcode STORE-FP=0b0100111 (NOT the integer
+            // LOAD/STORE opcodes). funct3 selects the width: 0b010=32-bit
+            // (FLW/FSW), 0b011=64-bit (FLD/FSD).
             Instruction::Flw { rd, rs1, imm } => encode_i_type(
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
                 0b010,
                 rd.encoding(),
-                OP_LOAD,
+                OP_LOAD_FP,
             ),
             Instruction::Fld { rd, rs1, imm } => encode_i_type(
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
                 0b011,
                 rd.encoding(),
-                OP_LOAD,
+                OP_LOAD_FP,
             ),
             Instruction::Fsw { rs1, rs2, imm } => encode_s_type(
                 (*imm as u32) & 0xFFF,
                 rs2.encoding(),
                 rs1.encoding(),
                 0b010,
-                OP_STORE,
+                OP_STORE_FP,
             ),
             Instruction::Fsd { rs1, rs2, imm } => encode_s_type(
                 (*imm as u32) & 0xFFF,
                 rs2.encoding(),
                 rs1.encoding(),
                 0b011,
-                OP_STORE,
+                OP_STORE_FP,
             ),
 
             // ── F/D Extension: Arithmetic ───────────────────────────
@@ -1503,7 +1511,7 @@ impl Instruction {
                 0b1010001,
                 rs2.encoding(),
                 rs1.encoding(),
-                0b011,
+                0b001,
                 rd.encoding(),
                 OP_FP,
             ),
@@ -1511,7 +1519,7 @@ impl Instruction {
                 0b1010001,
                 rs2.encoding(),
                 rs1.encoding(),
-                0b100,
+                0b000,
                 rd.encoding(),
                 OP_FP,
             ),
@@ -1527,7 +1535,7 @@ impl Instruction {
                 0b1010000,
                 rs2.encoding(),
                 rs1.encoding(),
-                0b011,
+                0b001,
                 rd.encoding(),
                 OP_FP,
             ),
@@ -1535,7 +1543,7 @@ impl Instruction {
                 0b1010000,
                 rs2.encoding(),
                 rs1.encoding(),
-                0b100,
+                0b000,
                 rd.encoding(),
                 OP_FP,
             ),
@@ -1554,18 +1562,20 @@ impl Instruction {
             Instruction::FcvtSLU { rd, rs1 } => {
                 encode_r_type(0b1101000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
-            // FCVT.D.W: funct7=1100001, rs2=00000
+            // FCVT.D.W: funct7=1101001, rs2=00000 (signed int32 → double)
+            // NOTE: per the RISC-V spec, FCVT.D.* (int → double) uses
+            // funct7=0b1101001, NOT 0b1100001 (which is FCVT.*.D, double → int).
             Instruction::FcvtDW { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDWU { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDL { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDLU { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             // FCVT.W.S: funct7=1100000, rs2=00000
             Instruction::FcvtWS { rd, rs1 } => {
@@ -1575,10 +1585,10 @@ impl Instruction {
                 encode_r_type(0b1100000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
             }
             Instruction::FcvtLUS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
             }
             // FCVT.W.D: funct7=1100001, rs2=00000
             Instruction::FcvtWD { rd, rs1 } => {
@@ -1588,10 +1598,10 @@ impl Instruction {
                 encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
             }
             Instruction::FcvtLUD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
             }
             // FCVT.D.S: funct7=0100001, rs2=00000
             Instruction::FcvtDS { rd, rs1 } => {
@@ -2079,6 +2089,51 @@ impl Instruction {
                 }
             }
 
+            // ── LOAD-FP (opcode=0b0000111, RISC-V F/D) ────────────
+            // FLW (funct3=0b010, 32-bit) / FLD (funct3=0b011, 64-bit)
+            0b0000111 => {
+                let rd_fpr = Fpr::from_encoding(rd)?;
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let imm = (((word >> 20) as i32) << 20) >> 20;
+                match funct3 {
+                    0b010 => Some(Instruction::Flw {
+                        rd: rd_fpr,
+                        rs1: rs1_reg,
+                        imm,
+                    }),
+                    0b011 => Some(Instruction::Fld {
+                        rd: rd_fpr,
+                        rs1: rs1_reg,
+                        imm,
+                    }),
+                    _ => None,
+                }
+            }
+
+            // ── STORE-FP (opcode=0b0100111, RISC-V F/D) ───────────
+            // FSW (funct3=0b010, 32-bit) / FSD (funct3=0b011, 64-bit)
+            0b0100111 => {
+                let rs1_reg = Gpr::from_encoding(rs1)?;
+                let rs2_fpr = Fpr::from_encoding(rs2)?;
+                let imm_lo = (word >> 7) & 0x1F;
+                let imm_hi = (word >> 25) & 0x7F;
+                let imm_raw = (imm_hi << 5) | imm_lo;
+                let imm = ((imm_raw as i32) << 20) >> 20;
+                match funct3 {
+                    0b010 => Some(Instruction::Fsw {
+                        rs1: rs1_reg,
+                        rs2: rs2_fpr,
+                        imm,
+                    }),
+                    0b011 => Some(Instruction::Fsd {
+                        rs1: rs1_reg,
+                        rs2: rs2_fpr,
+                        imm,
+                    }),
+                    _ => None,
+                }
+            }
+
             // ── OP-IMM (RV64I) ─────────────────────────────────────
             0b0010011 => {
                 let _rd_reg = Gpr::from_encoding(rd)?;
@@ -2407,28 +2462,28 @@ impl Instruction {
                         let rs1_g = Gpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtSLU { rd: rd_f, rs1: rs1_g })
                     }
-                    // FCVT.D.W / WU / L / LU (int -> double)
-                    (0b1100001, 0b00000, 0b111) => {
+                    // FCVT.D.W / WU / L / LU (int -> double): funct7=0b1101001
+                    (0b1101001, 0b00000, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtDW { rd: rd_f, rs1: rs1_g })
                     }
-                    (0b1100001, 0b00001, 0b111) => {
+                    (0b1101001, 0b00001, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtDWU { rd: rd_f, rs1: rs1_g })
                     }
-                    (0b1100001, 0b00010, 0b111) => {
+                    (0b1101001, 0b00010, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtDL { rd: rd_f, rs1: rs1_g })
                     }
-                    (0b1100001, 0b00011, 0b111) => {
+                    (0b1101001, 0b00011, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtDLU { rd: rd_f, rs1: rs1_g })
                     }
-                    // FCVT.W.S / WU.S / L.S / LU.S (single -> int)
+                    // FCVT.W.S / WU.S / L.S / LU.S (single -> int): funct7=0b1100000
                     (0b1100000, 0b00000, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
@@ -2448,6 +2503,27 @@ impl Instruction {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
                         Some(Instruction::FcvtLUS { rd: rd_g, rs1: rs1_f })
+                    }
+                    // FCVT.W.D / WU.D / L.D / LU.D (double -> int): funct7=0b1100001
+                    (0b1100001, 0b00000, 0b111) => {
+                        let rd_g = Gpr::from_encoding(rd)?;
+                        let rs1_f = Fpr::from_encoding(rs1)?;
+                        Some(Instruction::FcvtWD { rd: rd_g, rs1: rs1_f })
+                    }
+                    (0b1100001, 0b00001, 0b111) => {
+                        let rd_g = Gpr::from_encoding(rd)?;
+                        let rs1_f = Fpr::from_encoding(rs1)?;
+                        Some(Instruction::FcvtWUD { rd: rd_g, rs1: rs1_f })
+                    }
+                    (0b1100001, 0b00010, 0b111) => {
+                        let rd_g = Gpr::from_encoding(rd)?;
+                        let rs1_f = Fpr::from_encoding(rs1)?;
+                        Some(Instruction::FcvtLD { rd: rd_g, rs1: rs1_f })
+                    }
+                    (0b1100001, 0b00011, 0b111) => {
+                        let rd_g = Gpr::from_encoding(rd)?;
+                        let rs1_f = Fpr::from_encoding(rs1)?;
+                        Some(Instruction::FcvtLUD { rd: rd_g, rs1: rs1_f })
                     }
                     // FCVT.D.S (single -> double) / FCVT.S.D (double -> single)
                     (0b0100001, 0b00000, 0b000) => {
@@ -2753,9 +2829,13 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
-    // e_flags: RISC-V float ABI = double (0x5), RVC = 0
-    // EF_RISCV_FLOAT_ABI_DOUBLE = 0x5 << 5 = 0xA0
-    elf.extend_from_slice(&0xA0u32.to_le_bytes()); // e_flags (LP64D ABI)
+    // e_flags: 0 = soft-float ABI (EF_RISCV_FLOAT_ABI_SOFT).
+    // Our codegen passes FP values in GPRs via FMV.D.X/FMV.X.D (soft-float
+    // calling convention), NOT in FP registers. Setting the ABI to DOUBLE
+    // (0xA0) causes QEMU user-mode to reject FP compare instructions
+    // (FEQ.D/FLT.D/FLE.D) as illegal. Use soft-float ABI to match the
+    // actual codegen.
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags (soft-float ABI)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2

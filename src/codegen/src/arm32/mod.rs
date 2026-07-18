@@ -3949,14 +3949,13 @@ impl Backend for Arm32Backend {
                             | BinOpKind::SDiv | BinOpKind::UDiv
                         );
                         if fp_arith {
-                            // Load lhs bit pattern into R0, store to dst slot, VLDR D0 from dst.
-                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-                            code.extend_from_slice(&encode_vldr_d(0, Gpr::R11.encoding() as u8, dst_offset));
-                            // Load rhs bit pattern into R0, store to dst slot, VLDR D1 from dst.
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R0));
-                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-                            code.extend_from_slice(&encode_vldr_d(1, Gpr::R11.encoding() as u8, dst_offset));
+                            // FP BinOp using VFP D0/D1.
+                            // Load 64-bit lhs into R0:R2, move to D0 via VMOV.
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                            // Load 64-bit rhs into R1:R3, move to D1 via VMOV.
+                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_vmov_dm_rt_rt2(1, Gpr::R1.encoding() as u8, Gpr::R3.encoding() as u8));
                             // VFP arithmetic: D0 = D0 <op> D1
                             match op {
                                 BinOpKind::Add => code.extend_from_slice(&encode_vadd_f64(0, 0, 1)),
@@ -3965,8 +3964,10 @@ impl Backend for Arm32Backend {
                                 BinOpKind::SDiv | BinOpKind::UDiv => code.extend_from_slice(&encode_vdiv_f64(0, 0, 1)),
                                 _ => unreachable!(),
                             }
-                            // VSTR D0 to dst slot (stores 64-bit double into the 8-byte slot).
-                            code.extend_from_slice(&encode_vstr_d(0, Gpr::R11.encoding() as u8, dst_offset));
+                            // Move D0 to R0:R2 via VMOV, then store via ss_store_64
+                            // (which uses the same reversed layout as ss_load_value_64).
+                            code.extend_from_slice(&encode_vmov_rt_rt2_dm(Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8, 0));
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                         }
 
                         if !fp_arith {
@@ -5163,14 +5164,12 @@ impl Backend for Arm32Backend {
                                 CmpKind::SGt | CmpKind::UGt => Condition::Gt,
                                 CmpKind::SGe | CmpKind::UGe => Condition::Ge,
                             };
-                            // Load lhs bit pattern into R0, store to dst slot, VLDR D0.
-                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-                            code.extend_from_slice(&encode_vldr_d(0, Gpr::R11.encoding() as u8, dst_offset));
-                            // Load rhs bit pattern into R0, store to dst slot, VLDR D1.
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R0));
-                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-                            code.extend_from_slice(&encode_vldr_d(1, Gpr::R11.encoding() as u8, dst_offset));
+                            // Load 64-bit lhs into R0:R2, move to D0 via VMOV.
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                            // Load 64-bit rhs into R1:R3, move to D1 via VMOV.
+                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_vmov_dm_rt_rt2(1, Gpr::R1.encoding() as u8, Gpr::R3.encoding() as u8));
                             // VCMP.F64 D0, D1 — sets FPSCR.NZCV
                             code.extend_from_slice(&encode_vcmp_f64(0, 1));
                             // FMSTAT (VMRS APSR_nzcv, FPSCR) — transfer FP flags to ARM NZCV
@@ -5883,6 +5882,10 @@ impl Backend for Arm32Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
+                        // FP cast kinds handle their own dst slot storage and set
+                        // this flag to skip the final ss_store_32_zero (which
+                        // would overwrite the FP result with the stale R0).
+                        let mut fp_cast_done = false;
                         match kind {
                             CastKind::ZExt => {
                                 // Zero-extend based on source type. The value
@@ -5962,143 +5965,58 @@ impl Backend for Arm32Backend {
                             }
                             CastKind::BitCast => {
                                 // No conversion needed for bitcasts.
+                                // Fall through to the final ss_store_32_zero below.
                             }
                             CastKind::IntToFloat => {
-                                // VCVT.F32.S32 S0, S0 — convert signed int to f32
-                                // Move int bits from R0 to S0 via STR → VLDR,
-                                // convert, then VSTR → LDR back.
-                                let temp_off = -(fs + 4);
-                                // Store R0 to temp
-                                if (-temp_off) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
-                                // VLDR S0, [R11, #temp_off]
-                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
-                                // VCVT.F32.S32 S0, S0 (signed int → single float)
-                                code.extend_from_slice(&encode_vcvt_f32_s32(0, 0));
-                                // VSTR S0, [R11, #dst_offset]
-                                let neg_dst = -dst_offset;
-                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
-                                // Load result bits back to R0
-                                if (-neg_dst) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, false, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
+                                // Convert signed int (low 32 bits of src) to f64.
+                                // R0 already holds the low 32 bits of src (from ss_load_value above).
+                                // VMOV S0, R0; VCVT.F64.S32 D0, S0; VMOV R0:R2, D0; ss_store_64.
+                                code.extend_from_slice(&encode_vmov_sn_rt(0, Gpr::R0.encoding() as u8));
+                                code.extend_from_slice(&encode_vcvt_f64_s32(0, 0));
+                                code.extend_from_slice(&encode_vmov_rt_rt2_dm(Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8, 0));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                                fp_cast_done = true;
                             }
                             CastKind::UIntToFloat => {
-                                // VCVT.F32.U32 S0, S0 — convert unsigned int to f32
-                                let temp_off = -(fs + 4);
-                                // Store R0 to temp
-                                if (-temp_off) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
-                                // VLDR S0, [R11, #temp_off]
-                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
-                                // VCVT.F32.U32 S0, S0 (unsigned int → single float)
-                                code.extend_from_slice(&encode_vcvt_f32_u32(0, 0));
-                                // VSTR S0, [R11, #dst_offset]
-                                let neg_dst = -dst_offset;
-                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
-                                // Load result bits back to R0
-                                if (-neg_dst) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, false, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
+                                // Convert unsigned int (low 32 bits of src) to f64.
+                                code.extend_from_slice(&encode_vmov_sn_rt(0, Gpr::R0.encoding() as u8));
+                                code.extend_from_slice(&encode_vcvt_f64_u32(0, 0));
+                                code.extend_from_slice(&encode_vmov_rt_rt2_dm(Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8, 0));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                                fp_cast_done = true;
                             }
                             CastKind::FloatToInt => {
-                                // VCVT.S32.F32 S0, S0 — convert f32 to signed int
-                                // Move float bits from R0 to S0 via STR → VLDR,
-                                // convert, then VSTR → LDR back.
-                                let temp_off = -(fs + 4);
-                                if (-temp_off) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
-                                // VLDR S0, [R11, #temp_off]
-                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
-                                // VCVT.S32.F32 S0, S0
-                                code.extend_from_slice(&encode_vcvt_s32_f32(0, 0));
-                                // VSTR S0, [R11, #dst_offset]
-                                let neg_dst = -dst_offset;
-                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
-                                // Load result bits back to R0
-                                if (-neg_dst) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, false, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
+                                // Convert f64 to signed int (i64, sign-extended from 32-bit VCVT result).
+                                // Load full 64-bit f64 bits into R0:R2, VMOV D0, R0, R2,
+                                // VCVT.S32.F64 S0, D0, VMOV R0, S0, sign-extend to R1,
+                                // then store R0:R1 to dst slot.
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                                code.extend_from_slice(&encode_vcvt_s32_f64(0, 0));
+                                code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R0.encoding() as u8, 0));
+                                // Sign-extend low word into R1 (MOV R1, R0, ASR #31).
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), 2 /*ASR*/, 31, Gpr::R0.encoding(),
+                                ));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                                fp_cast_done = true;
                             }
                             CastKind::FloatToUInt => {
-                                // VCVT.U32.F32 S0, S0 — convert f32 to unsigned int
-                                let temp_off = -(fs + 4);
-                                if (-temp_off) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
-                                // VLDR S0, [R11, #temp_off]
-                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
-                                // VCVT.U32.F32 S0, S0
-                                code.extend_from_slice(&encode_vcvt_u32_f32(0, 0));
-                                // VSTR S0, [R11, #dst_offset]
-                                let neg_dst = -dst_offset;
-                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
-                                // Load result bits back to R0
-                                if (-neg_dst) <= 4095 {
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, false, false, false, false,
-                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                    ));
-                                } else {
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                }
+                                // Convert f64 to unsigned int (u64, zero-extended).
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                                code.extend_from_slice(&encode_vcvt_u32_f64(0, 0));
+                                code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R0.encoding() as u8, 0));
+                                // Zero high word: MOV R1, #0.
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                ));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                                fp_cast_done = true;
                             }
                             CastKind::FloatToFloat => {
-                                // f32 ↔ f64 conversion on ARM32
+                                // f32 <-> f64 conversion on ARM32.
                                 let is_f32_to_f64 = matches!(
                                     (from_ty.as_ref(), to_ty.as_ref()),
                                     (Some(crate::ir::IRType::F32), Some(crate::ir::IRType::F64))
@@ -6109,73 +6027,31 @@ impl Backend for Arm32Backend {
                                 );
 
                                 if is_f32_to_f64 {
-                                    // VCVT.F64.F32 D0, S0 — promote f32 to f64
-                                    // Move f32 bits from R0 to S0 via STR → VLDR,
-                                    // convert to f64 in D0, then VSTR → LDR back.
-                                    // Note: f64 result occupies two stack slots; we store
-                                    // the low word of D0 only (hi word at +4).
-                                    let temp_off = -(fs + 4);
-                                    // Store R0 to temp
-                                    if (-temp_off) <= 4095 {
-                                        code.extend_from_slice(&encode_ls_imm(
-                                            Condition::Al, true, true, false, false, false,
-                                            Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
-                                        ));
-                                    } else {
-                                        code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
-                                        code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                        code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                    }
-                                    // VLDR S0, [R11, #temp_off]
-                                    code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
-                                    // VCVT.F64.F32 D0, S0
+                                    // Promote f32 to f64. R0 holds the f32 bits (low 32 bits of src).
+                                    // VMOV S0, R0; VCVT.F64.F32 D0, S0; VMOV R0:R2, D0; ss_store_64.
+                                    code.extend_from_slice(&encode_vmov_sn_rt(0, Gpr::R0.encoding() as u8));
                                     code.extend_from_slice(&encode_vcvt_f64_f32(0, 0));
-                                    // VSTR D0, [R11, #dst_offset]  (stores low word at dst, hi at dst+4)
-                                    let neg_dst = -dst_offset;
-                                    code.extend_from_slice(&encode_vstr_d(0, Gpr::R11.encoding() as u8, neg_dst));
-                                    // Load low word of D0 result back to R0
-                                    if (-neg_dst) <= 4095 {
-                                        code.extend_from_slice(&encode_ls_imm(
-                                            Condition::Al, true, false, false, false, false,
-                                            Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                        ));
-                                    } else {
-                                        code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                        code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                        code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                    }
+                                    code.extend_from_slice(&encode_vmov_rt_rt2_dm(Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8, 0));
+                                    code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                                    fp_cast_done = true;
                                 } else if is_f64_to_f32 {
-                                    // VCVT.F32.F64 S0, D0 — demote f64 to f32
-                                    // Load f64 bits from stack into D0 via VLDR D0,
-                                    // convert to f32 in S0, then VSTR S0 → LDR back.
-                                    let neg_src = match src.as_register() {
-                                        Some(sid) => -(vreg_stack_slots.get(&sid).copied().unwrap_or(0) as i32),
-                                        None => 0,
-                                    };
-                                    // VLDR D0, [R11, #neg_src]  (loads 64-bit D0 from two stack slots)
-                                    code.extend_from_slice(&encode_vldr_d(0, Gpr::R11.encoding() as u8, neg_src));
-                                    // VCVT.F32.F64 S0, D0
+                                    // Demote f64 to f32. Load full 64-bit f64 bits into R0:R2,
+                                    // VMOV D0, R0, R2, VCVT.F32.F64 S0, D0, VMOV R0, S0,
+                                    // then fall through to ss_store_32_zero (stores low word, zeros high).
+                                    code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                    code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
                                     code.extend_from_slice(&encode_vcvt_f32_f64(0, 0));
-                                    // VSTR S0, [R11, #dst_offset]
-                                    let neg_dst = -dst_offset;
-                                    code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
-                                    // Load f32 result bits back to R0
-                                    if (-neg_dst) <= 4095 {
-                                        code.extend_from_slice(&encode_ls_imm(
-                                            Condition::Al, true, false, false, false, false,
-                                            Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
-                                        ));
-                                    } else {
-                                        code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
-                                        code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
-                                        code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
-                                    }
+                                    code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R0.encoding() as u8, 0));
+                                    // Fall through to ss_store_32_zero below.
                                 } else {
-                                    // Same-precision float (f32 → f32) or unknown types: no-op
+                                    // Same-precision float (f32 -> f32 or f64 -> f64): no-op.
+                                    // Fall through to ss_store_32_zero below.
                                 }
                             }
                         }
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        if !fp_cast_done {
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
 
@@ -8793,6 +8669,7 @@ fn encode_vdiv_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
     let vm = (dm & 0xF) as u32;
     let word = ((((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
+        | (1 << 23)       // VDIV needs bit 23 = 1 (cond 1110 1D00 ...)
         | (d_bit << 22))
         | (vn << 16)
         | (vd << 12)
@@ -8816,6 +8693,7 @@ fn encode_vcmp_f64(dd: u8, dm: u8) -> [u8; 4] {
     let vm = (dm & 0xF) as u32;
     let word = ((Condition::Al.encoding() as u32) << 28
         | 0b1110 << 24
+        | (1 << 23)       // VCMP needs bit 23 = 1 (cond 1110 1D11 0100 ...)
         | (d_bit << 22)
         | 0b11 << 20
         | 0b0100 << 16
@@ -8835,6 +8713,122 @@ fn encode_vcmp_f64(dd: u8, dm: u8) -> [u8; 4] {
 /// Encoding: cond 1110 1110 1000 1111 1000 0001 0000 = 0xEEF1FA10
 fn encode_fmstat() -> [u8; 4] {
     0xEEF1FA10u32.to_le_bytes()
+}
+
+// ===========================================================================
+// VMOV (between ARM core register and VFP register)
+// ===========================================================================
+
+/// Encode VMOV Sn, Rt — move ARM core register Rt to single-precision VFP
+/// register Sn (GPR -> FPR, 32-bit).
+fn encode_vmov_sn_rt(sn: u8, rt: u8) -> [u8; 4] {
+    let n_bit = ((sn >> 4) & 1) as u32;
+    let vn = (sn & 0xF) as u32;
+    let word = 0xEE000A10u32
+        | (vn << 16)
+        | ((rt as u32 & 0xF) << 12)
+        | (n_bit << 7);
+    word.to_le_bytes()
+}
+
+/// Encode VMOV Rt, Sn — move single-precision VFP register Sn to ARM core
+/// register Rt (FPR -> GPR, 32-bit).
+fn encode_vmov_rt_sn(rt: u8, sn: u8) -> [u8; 4] {
+    let n_bit = ((sn >> 4) & 1) as u32;
+    let vn = (sn & 0xF) as u32;
+    let word = 0xEE100A10u32
+        | (vn << 16)
+        | ((rt as u32 & 0xF) << 12)
+        | (n_bit << 7);
+    word.to_le_bytes()
+}
+
+/// Encode VMOV Dm, Rt, Rt2 — move two ARM core registers (Rt=low, Rt2=high)
+/// to a doubleword VFP register Dm (2 GPR -> FPR, 64-bit).
+fn encode_vmov_dm_rt_rt2(dm: u8, rt: u8, rt2: u8) -> [u8; 4] {
+    let dm_high = ((dm >> 4) & 1) as u32;
+    let dm_low = (dm & 0xF) as u32;
+    let word = 0xEC400B10u32
+        | ((rt2 as u32 & 0xF) << 16)
+        | ((rt as u32 & 0xF) << 12)
+        | (dm_high << 7)
+        | dm_low;
+    word.to_le_bytes()
+}
+
+/// Encode VMOV Rt, Rt2, Dm — move a doubleword VFP register Dm to two ARM
+/// core registers (Rt=low, Rt2=high) (FPR -> 2 GPR, 64-bit).
+fn encode_vmov_rt_rt2_dm(rt: u8, rt2: u8, dm: u8) -> [u8; 4] {
+    let dm_high = ((dm >> 4) & 1) as u32;
+    let dm_low = (dm & 0xF) as u32;
+    let word = 0xEC500B10u32
+        | ((rt2 as u32 & 0xF) << 16)
+        | ((rt as u32 & 0xF) << 12)
+        | (dm_high << 7)
+        | dm_low;
+    word.to_le_bytes()
+}
+
+// ===========================================================================
+// VCVT (between f64 and 32-bit integer)
+// ===========================================================================
+
+/// Encode VCVT.F64.S32 Dd, Sm — convert signed int32 (in Sm) to f64 (in Dd).
+fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((sm >> 4) & 1) as u32;
+    let vm = (sm & 0xF) as u32;
+    let word = 0xEEB80B40u32
+        | (d_bit << 22)
+        | (vd << 12)
+        | (m_bit << 5)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.F64.U32 Dd, Sm — convert unsigned int32 (in Sm) to f64 (in Dd).
+fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((sm >> 4) & 1) as u32;
+    let vm = (sm & 0xF) as u32;
+    let word = 0xEEB80BC0u32
+        | (d_bit << 22)
+        | (vd << 12)
+        | (m_bit << 5)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.S32.F64 Sd, Dm — convert f64 (in Dm) to signed int32 (in Sd),
+/// rounding toward zero (truncate).
+fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = 0xEEBD0B40u32
+        | (d_bit << 22)
+        | (vd << 12)
+        | (m_bit << 5)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.U32.F64 Sd, Dm — convert f64 (in Dm) to unsigned int32 (in Sd),
+/// rounding toward zero (truncate).
+fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = 0xEEBD0BC0u32
+        | (d_bit << 22)
+        | (vd << 12)
+        | (m_bit << 5)
+        | vm;
+    word.to_le_bytes()
 }
 
 pub mod disasm;

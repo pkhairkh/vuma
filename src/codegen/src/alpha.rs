@@ -114,8 +114,12 @@ impl fmt::Display for Gpr {
 
 /// Alpha floating-point register (F0-F31).  Alpha has 32 FP registers,
 /// separate from the integer register file.  R31 is hardwired zero in the
-/// integer file; F31 is a normal FP register (NOT zero -- Alpha has no
-/// hardwired-zero FPR).
+/// integer file.  F31 is a *normal* FP register for arithmetic (ADDT/SUBT/
+/// MULT/DIVT/CMPTEQ/CMPTLT/CMPTLE/CMPTUN -- it is NOT hardwired-zero), but
+/// the encoding for unary CVT* instructions (CVTQT/CVTTQ/CVTST/CVTTS)
+/// REQUIRES the FA field to be 31 -- the hardware ignores FA for these
+/// ops, but QEMU-alpha raises SIGILL if FA != 31 (matching libopcodes'
+/// ARG_FPZ1 operand constraint).  See `fp_cvt` below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Fpr {
@@ -448,41 +452,62 @@ const ZERO: Gpr = Gpr::R31;
 
 /// Load a 64-bit immediate into a register.
 ///
-/// Uses LDA for 16-bit signed immediates, or LDA + ZAP for larger values.
-/// For simplicity, we use a 4-instruction sequence for 32-bit values:
-///   LDA rc, lo16(ZERO)
-///   LDAH rc, hi16(rc)  (load upper 16 bits, with adjustment)
-/// For values that fit in 16-bit signed, just LDA.
+/// Uses LDA for 16-bit signed immediates, or LDA + LDAH + ZAPNOT for 32-bit
+/// values, or LDA + LDAH + ZAPNOT + (S2-based high-32 load + SLL + BIS) for
+/// full 64-bit values (needed for f64 bit-pattern constants like 2.0 =
+/// 0x4000000000000000).  The 64-bit path uses S2 as an internal scratch;
+/// callers that pass dst=S2 with a 64-bit value would clobber themselves
+/// (and ss_ld/ss_st only call this with 32-bit offsets, so this is safe).
 fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     let v = val as i64;
     if (-32768..=32767).contains(&v) {
         // LDA dst, lo16(ZERO): dst = sign_extend(lo16).
         Instruction::Lda { ra: dst, disp: v as i16, rb: ZERO }.encode()
     } else {
-        // Full 32-bit value: LDA + LDAH + ZAPNOT.
-        // LDA sign-extends lo16 to 64 bits, and LDAH adds hi16 << 16.
-        // The result has the correct low 32 bits, but the upper 32 bits
-        // may be wrong (sign-extended from lo16).  ZAPNOT zero-extends
-        // the 32-bit result to 64 bits by keeping only bytes 0-3.
-        let v32 = v as u32;
-        let lo16 = (v32 & 0xFFFF) as i16 as i32;
-        let mut hi16 = ((v32 >> 16) & 0xFFFF) as i32;
-        if lo16 < 0 {
-            hi16 += 1;
+        let v64 = v as u64;
+        let lo32 = (v64 & 0xFFFF_FFFF) as u32;
+        let hi32 = ((v64 >> 32) & 0xFFFF_FFFF) as u32;
+        // Load low 32 bits (zero-extended to 64) into dst.
+        let lo_lo16 = (lo32 & 0xFFFF) as i16 as i32;
+        let mut lo_hi16 = ((lo32 >> 16) & 0xFFFF) as i32;
+        if lo_lo16 < 0 {
+            lo_hi16 += 1;
         }
         let mut code = Vec::new();
         // LDA dst, lo16(ZERO)
-        code.extend(Instruction::Lda { ra: dst, disp: lo16 as i16, rb: ZERO }.encode());
+        code.extend(Instruction::Lda { ra: dst, disp: lo_lo16 as i16, rb: ZERO }.encode());
         // LDAH dst, hi16(dst)
         let word: u32 = (0x09u32 << 26)
             | ((dst.encoding() as u32) << 21)
             | ((dst.encoding() as u32) << 16)
-            | (hi16 as u32 & 0xFFFF);
+            | (lo_hi16 as u32 & 0xFFFF);
         code.extend_from_slice(&word.to_le_bytes());
         // ZAPNOT dst, 0x0F, dst — keep bytes 0-3, zero bytes 4-7.
         // This zero-extends the 32-bit result to 64 bits.
-        // ZAPNOT = opcode 0x12, function 0x31, literal form.
         code.extend_from_slice(&op_lit(0x12, dst, 0x0F, dst, 0x31).to_le_bytes());
+        if hi32 != 0 {
+            // 64-bit value: load high 32 bits into S2, shift left by 32,
+            // then OR into dst.
+            let hi_lo16 = (hi32 & 0xFFFF) as i16 as i32;
+            let mut hi_hi16 = ((hi32 >> 16) & 0xFFFF) as i32;
+            if hi_lo16 < 0 {
+                hi_hi16 += 1;
+            }
+            // LDA S2, hi_lo16(ZERO)
+            code.extend(Instruction::Lda { ra: S2, disp: hi_lo16 as i16, rb: ZERO }.encode());
+            // LDAH S2, hi_hi16(S2)
+            let word2: u32 = (0x09u32 << 26)
+                | ((S2.encoding() as u32) << 21)
+                | ((S2.encoding() as u32) << 16)
+                | (hi_hi16 as u32 & 0xFFFF);
+            code.extend_from_slice(&word2.to_le_bytes());
+            // ZAPNOT S2, 0x0F, S2 — zero-extend high 32 bits.
+            code.extend_from_slice(&op_lit(0x12, S2, 0x0F, S2, 0x31).to_le_bytes());
+            // SLL S2, 32, S2 — shift left by 32 (high bits now in upper half).
+            code.extend_from_slice(&op_lit(0x12, S2, 32, S2, 0x39).to_le_bytes());
+            // BIS dst, S2, dst — OR high bits into dst.
+            code.extend_from_slice(&op_reg(0x11, dst, S2, dst, 0x20).to_le_bytes());
+        }
         code
     }
 }
@@ -1174,11 +1199,11 @@ fn emit_instr(
                     // LDT (memory already holds the int as 64 bits), then
                     // CVTQT (int64 -> f64).  Narrow to f32 if needed.
                     code.extend(fp_ldt(FA, FP, src_off as i16));
-                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));
+                    code.extend(fp_cvt(FP_CVTQT, FA, FA));
                     if matches!(to_ty, Some(IRType::F64)) {
                         code.extend(fp_stt(FA, FP, dst_off as i16));
                     } else {
-                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_cvt(FP_CVTTS, FA, FA));
                         code.extend(fp_sts(FA, FP, dst_off as i16));
                     }
                 }
@@ -1194,9 +1219,10 @@ fn emit_instr(
                     code.extend(ss_ld(S0, src_off));              // S0 = x (int bits)
                     // S1 = x >> 63 (high bit).
                     code.extend(ss_load_imm(S1, 63));
-                    // SRAQ (arithmetic shift right quad) S0, S1, S1.
-                    // Alpha SRAQ: opcode 0x10, function 0x7C.  Use op_reg.
-                    code.extend_from_slice(&op_reg(0x10, S0, S1, S1, 0x7C).to_le_bytes());
+                    // SRA (arithmetic shift right) S0, S1, S1.
+                    // Alpha SRA: opcode 0x12, function 0x3C.  Use op_reg.
+                    // (Alpha has no separate quadword shift; SLL/SRL/SRA are 64-bit.)
+                    code.extend_from_slice(&op_reg(0x12, S0, S1, S1, 0x3C).to_le_bytes());
                     // S1 = 0 if high bit clear, -1 (all 1s) if set.
                     // If S1 == 0: fast path (CVTQT direct).  Else: shift path.
                     // BEQ S1, +offset (branch if S1 == 0).  Alpha BEQ: op_br(0x39, S1, disp).
@@ -1212,11 +1238,11 @@ fn emit_instr(
                     code.extend_from_slice(&op_br(0x39, S1, 0).to_le_bytes());  // BEQ S1, +0 (patch later)
                     // Shift path: S2 = S0 >> 1 (logical, SRLQ function 0x34).
                     code.extend(ss_load_imm(S1, 1));
-                    code.extend_from_slice(&op_reg(0x10, S0, S1, S2, 0x34).to_le_bytes());  // SRLQ S0, S1, S2
+                    code.extend_from_slice(&op_reg(0x12, S0, S1, S2, 0x34).to_le_bytes());  // SRL S0, S1, S2
                     // Store S2 to a temp slot, LDT into FA, CVTQT.
                     code.extend(ss_st(S2, dst_off));              // spill S2
                     code.extend(fp_ldt(FA, FP, dst_off as i16));
-                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));     // FA = (float)(x>>1)
+                    code.extend(fp_cvt(FP_CVTQT, FA, FA));     // FA = (float)(x>>1)
                     code.extend(fp_op(FP_ADDT, FA, FA, FA));      // FA = FA + FA = 2*(x>>1) ≈ x
                     // Branch to store (unconditional, BR zero, +offset).
                     let br_to_store = code.len();
@@ -1225,7 +1251,7 @@ fn emit_instr(
                     let fast_off = code.len();
                     code.extend(ss_st(S0, dst_off));              // spill S0
                     code.extend(fp_ldt(FA, FP, dst_off as i16));
-                    code.extend(fp_op(FP_CVTQT, FA, FA, FA));
+                    code.extend(fp_cvt(FP_CVTQT, FA, FA));
                     // Patch BEQ to jump to fast_off.
                     let beq_disp = ((fast_off as i32 - beq_off as i32) / 4) - 1;
                     let beq_word = u32::from_le_bytes(code[beq_off..beq_off+4].try_into().unwrap());
@@ -1241,7 +1267,7 @@ fn emit_instr(
                     if matches!(to_ty, Some(IRType::F64)) {
                         code.extend(fp_stt(FA, FP, dst_off as i16));
                     } else {
-                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_cvt(FP_CVTTS, FA, FA));
                         code.extend(fp_sts(FA, FP, dst_off as i16));
                     }
                 }
@@ -1252,9 +1278,9 @@ fn emit_instr(
                         code.extend(fp_ldt(FA, FP, src_off as i16));
                     } else {
                         code.extend(fp_lds(FA, FP, src_off as i16));
-                        code.extend(fp_op(FP_CVTST, FA, FA, FA)); // widen f32 -> f64
+                        code.extend(fp_cvt(FP_CVTST, FA, FA)); // widen f32 -> f64
                     }
-                    code.extend(fp_op(FP_CVTTQ, FA, FA, FA)); // f64 -> i64 (bits in FPR)
+                    code.extend(fp_cvt(FP_CVTTQ, FA, FA)); // f64 -> i64 (bits in FPR)
                     code.extend(fp_stt(FA, FP, dst_off as i16)); // store 64-bit int bits
                     code.extend(ss_ld(S0, dst_off)); // reload as int
                     code.extend(ss_st(S0, dst_off));
@@ -1272,7 +1298,7 @@ fn emit_instr(
                         code.extend(fp_ldt(FA, FP, src_off as i16));
                     } else {
                         code.extend(fp_lds(FA, FP, src_off as i16));
-                        code.extend(fp_op(FP_CVTST, FA, FA, FA));  // widen f32 -> f64
+                        code.extend(fp_cvt(FP_CVTST, FA, FA));  // widen f32 -> f64
                     }
                     // Compare FA to 0.0.  We need 0.0 in an FPR: store 0 to
                     // a temp slot, LDT into FB.
@@ -1305,7 +1331,7 @@ fn emit_instr(
                     let blbc_word = u32::from_le_bytes(code[blbc_off..blbc_off+4].try_into().unwrap());
                     let blbc_patched = (blbc_word & !0x1FFFFF) | (blbc_disp as u32 & 0x1FFFFF);
                     code[blbc_off..blbc_off+4].copy_from_slice(&blbc_patched.to_le_bytes());
-                    code.extend(fp_op(FP_CVTTQ, FA, FA, FA));
+                    code.extend(fp_cvt(FP_CVTTQ, FA, FA));
                     code.extend(fp_stt(FA, FP, dst_off as i16));
                     code.extend(ss_ld(S0, dst_off));
                     code.extend(ss_st(S0, dst_off));
@@ -1321,12 +1347,12 @@ fn emit_instr(
                     if matches!(from_ty, Some(IRType::F64)) {
                         // f64 -> f32
                         code.extend(fp_ldt(FA, FP, src_off as i16));
-                        code.extend(fp_op(FP_CVTTS, FA, FA, FA));
+                        code.extend(fp_cvt(FP_CVTTS, FA, FA));
                         code.extend(fp_sts(FA, FP, dst_off as i16));
                     } else {
                         // f32 -> f64
                         code.extend(fp_lds(FA, FP, src_off as i16));
-                        code.extend(fp_op(FP_CVTST, FA, FA, FA));
+                        code.extend(fp_cvt(FP_CVTST, FA, FA));
                         code.extend(fp_stt(FA, FP, dst_off as i16));
                     }
                 }
@@ -1541,6 +1567,22 @@ fn fp_op(fn_code: u32, fa: Fpr, fb: Fpr, fc: Fpr) -> Vec<u8> {
     word.to_le_bytes().to_vec()
 }
 
+/// Encode a unary FP convert instruction (CVTQT/CVTTQ/CVTST/CVTTS).
+///
+/// Alpha's CVT* family is unary: the source is FB, the destination is FC.
+/// The FA field is IGNORED by the hardware, BUT the instruction encoding
+/// REQUIRES FA = 31 (the libopcodes `ARG_FPZ1` constraint).  QEMU-alpha
+/// raises SIGILL if FA != 31 for these opcodes, so we hardwire FA to F31
+/// here rather than letting callers pass an arbitrary FPR.
+fn fp_cvt(fn_code: u32, src: Fpr, dst: Fpr) -> Vec<u8> {
+    let word: u32 = (0x16u32 << 26)
+        | ((Fpr::F31.encoding() as u32) << 21)   // FA = F31 (required by encoding)
+        | ((src.encoding() as u32) << 16)         // FB = source
+        | ((fn_code & 0x7FF) << 5)
+        | (dst.encoding() as u32);                // FC = destination
+    word.to_le_bytes().to_vec()
+}
+
 /// Load double (LDT, opcode 0x23): FPR `fa` <- mem[rb + disp].
 fn fp_ldt(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
     let word: u32 = (0x23u32 << 26)
@@ -1579,22 +1621,26 @@ fn fp_sts(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
 
 // Alpha FP function codes (IEEE).  T = double (64-bit), S = single (32-bit).
 // Arithmetic is performed in T; S operands are widened via CVTST and
-// narrowed via CVTTS.  On Alpha, CVTST and CVTTS share the same function
-// code 0x2AC -- the distinction is which precision the source register is
-// tagged with.  We emit 0x2AC for both and rely on the surrounding
-// load/store width (LDS/STS vs LDT/STT) to carry the precision intent.
-const FP_ADDT: u32   = 0x525; // f64 add
-const FP_SUBT: u32   = 0x521; // f64 sub
-const FP_MULT: u32   = 0x532; // f64 mul
-const FP_DIVT: u32   = 0x563; // f64 div
-const FP_CVTQT: u32  = 0x2BE; // int64 -> f64
-const FP_CVTTQ: u32  = 0x52F; // f64 -> int64 (truncating)
-const FP_CVTST: u32  = 0x2AC; // f32 -> f64 (widen)
-const FP_CVTTS: u32  = 0x2AC; // f64 -> f32 (narrow; same fc as CVTST)
-const FP_CMPTUN: u32 = 0x5A4; // compare unordered
-const FP_CMPTEQ: u32 = 0x5A5; // compare equal
-const FP_CMPTLT: u32 = 0x5A6; // compare less-than
-const FP_CMPTLE: u32 = 0x5A7; // compare less-or-equal
+// narrowed via CVTTS.  Function codes use the /su (software-completion +
+// underflow + dynamic rounding) variants for arithmetic, /sv (software-
+// completion + integer-overflow) for CVTTQ, /sui (software-completion +
+// underflow + inexact) for CVTQT, and /s for CVTST.  These are the codes
+// QEMU-alpha's translator recognises (cross-checked against libopcodes
+// alpha-opc.c: addt/su=0x5A0, cvttq/sv=0x5AF, cvtqt/sui=0x7BE, etc.).
+// Earlier values (0x525/0x532/0x2BE/0x52F) were not in the opcode table or
+// were inconsistent (/suc, /sum, /svc mixed) and caused SIGILL on QEMU-alpha.
+const FP_ADDT: u32   = 0x5A0; // f64 add  (addt/su)
+const FP_SUBT: u32   = 0x5A1; // f64 sub  (subt/su)
+const FP_MULT: u32   = 0x5A2; // f64 mul  (mult/su)
+const FP_DIVT: u32   = 0x5A3; // f64 div  (divt/su)
+const FP_CVTQT: u32  = 0x7BE; // int64 -> f64   (cvtqt/sui)
+const FP_CVTTQ: u32  = 0x5AF; // f64 -> int64   (cvttq/sv, truncating)
+const FP_CVTST: u32  = 0x6AC; // f32 -> f64     (cvtst/s, widen)
+const FP_CVTTS: u32  = 0x5AC; // f64 -> f32     (cvtts/su, narrow)
+const FP_CMPTUN: u32 = 0x5A4; // compare unordered  (cmptun/su)
+const FP_CMPTEQ: u32 = 0x5A5; // compare equal      (cmpteq/su)
+const FP_CMPTLT: u32 = 0x5A6; // compare less-than  (cmptlt/su)
+const FP_CMPTLE: u32 = 0x5A7; // compare less-or-eq (cmptle/su)
 
 /// Emit a binary op (BinOpKind) result into dst's stack slot.
 fn emit_binop(
@@ -1880,7 +1926,7 @@ fn emit_fp_binop(
         code.extend(fp_ldt(FA, FP, lhs_off as i16));
     } else {
         code.extend(fp_lds(FA, FP, lhs_off as i16));
-        code.extend(fp_op(FP_CVTST, FA, FA, FA)); // widen f32 -> f64
+        code.extend(fp_cvt(FP_CVTST, FA, FA)); // widen f32 -> f64
     }
 
     // Spill rhs immediate (after FA is loaded, so even if rhs_off == lhs_off
@@ -1893,7 +1939,7 @@ fn emit_fp_binop(
         code.extend(fp_ldt(FB, FP, rhs_off as i16));
     } else {
         code.extend(fp_lds(FB, FP, rhs_off as i16));
-        code.extend(fp_op(FP_CVTST, FB, FB, FB)); // widen f32 -> f64
+        code.extend(fp_cvt(FP_CVTST, FB, FB)); // widen f32 -> f64
     }
 
     // Dispatch.  Arithmetic is always in T (double); S narrowing happens at
@@ -1928,22 +1974,23 @@ fn emit_fp_binop(
             } else {
                 code.extend(fp_op(fc_code, FA, FB, FA));
             }
-            // FA now holds 0.0 or 1.0 as f64.  For Ne, invert: compute
-            // 1.0 - (CMPTEQ result).  Materialize 1.0 in FB via CVTQT
-            // (no FP immediate on Alpha).
+            // Alpha FP compare writes 2.0 (true) or 0.0 (false) to FC -- NOT
+            // 1.0/0.0.  Convert to int (0 or 2) via CVTTQ, then shift right
+            // by 1 (SRL) to normalize to 0 or 1.  For Ne, XOR with 1 to
+            // invert (0<->1) -- this replaces the old `1.0 - FA` path which
+            // was broken because it assumed the compare returned 1.0 for true
+            // (producing -1.0 for true, which `& 1` then masked to 1 for BOTH
+            // true and false).
+            code.extend(fp_cvt(FP_CVTTQ, FA, FA));       // FA = 0 or 2 (int bits in FPR)
+            code.extend(fp_stt(FA, FP, dst_off as i16)); // store to dst
+            code.extend(ss_ld(S0, dst_off));             // S0 = 0 or 2
+            // SRL S0, 1, S0 -- normalize 2->1, 0->0 (SRL = opcode 0x12, fn 0x34, literal form)
+            code.extend_from_slice(&op_lit(0x12, S0, 1, S0, 0x34).to_le_bytes());
             if matches!(op, BinOpKind::Ne) {
-                code.extend(ss_load_imm(S0, 1));
-                code.extend(ss_st(S0, dst_off));
-                code.extend(fp_ldt(FB, FP, dst_off as i16));
-                code.extend(fp_op(FP_CVTQT, FB, FB, FB)); // int 1 -> f64 1.0
-                code.extend(fp_op(FP_SUBT, FB, FA, FA)); // FA = 1.0 - FA
+                // Ne = !eq.  XOR with 1 flips 0<->1.
+                code.extend(ss_load_imm(S1, 1));
+                code.extend(Instruction::Xor { ra: S0, rb: S1, rc: S0 }.encode());
             }
-            // Convert f64 0.0/1.0 -> i64 0/1, store, reload, mask.
-            code.extend(fp_op(FP_CVTTQ, FA, FA, FA));
-            code.extend(fp_stt(FA, FP, dst_off as i16));
-            code.extend(ss_ld(S0, dst_off));
-            code.extend(ss_load_imm(S1, 1));
-            code.extend(Instruction::And { ra: S0, rb: S1, rc: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
             return; // done -- skip the post-arithmetic store below
         }
@@ -1962,7 +2009,7 @@ fn emit_fp_binop(
     if is_f64 {
         code.extend(fp_stt(FA, FP, dst_off as i16));
     } else {
-        code.extend(fp_op(FP_CVTTS, FA, FA, FA)); // narrow f64 -> f32
+        code.extend(fp_cvt(FP_CVTTS, FA, FA)); // narrow f64 -> f32
         code.extend(fp_sts(FA, FP, dst_off as i16));
     }
     // Reload into S0 so the integer-path slot is consistent.  Downstream FP

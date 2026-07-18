@@ -490,12 +490,17 @@ fn encode_nop() -> [u8; 4] {
 // operation and precision.  The rs1 field is unused for most FPop1
 // operations (treated as 0).
 //
-// FP load/store uses Format 3 with op=0b11 (load/store), op3 in
-// {0x20=LDF, 0x21=STF, 0x23=LDDF, 0x26=STDF}.  The immediate form
-// (i=1) is used with a 13-bit signed displacement added to rs1 (here
-// always %fp).  Following the convention of `ss_ld`/`ss_stx`, callers
-// pass a NEGATIVE displacement (e.g. `-slot_off`) so that the effective
-// address is `[%fp + (-slot_off)] = [%fp - slot_off]`.
+// FP load/store uses Format 3 with op=0b11 (load/store).  The V9 op3
+// layout is:
+//   Load FP:  0x20=LDF (32-bit), 0x21=LDFSR, 0x22=LDQF (128-bit),
+//             0x23=LDDF (64-bit)
+//   Store FP: 0x24=STF (32-bit), 0x25=STFSR, 0x26=STQF (128-bit,
+//             16-byte align), 0x27=STDF (64-bit, 4-byte align)
+// The immediate form (i=1) is used with a 13-bit signed displacement
+// added to rs1 (here always %fp).  Following the convention of
+// `ss_ld`/`ss_stx`, callers pass a NEGATIVE displacement (e.g.
+// `-slot_off`) so that the effective address is
+// `[%fp + (-slot_off)] = [%fp - slot_off]`.
 
 /// Encode an FP arithmetic instruction (FPop1, op3=0x34) with two source
 /// FPRs.  `opf` selects the operation (e.g. `FP_FADDS`).
@@ -545,22 +550,32 @@ fn encode_lddf(rd: Fpr, rs1: Gpr, imm: i32) -> [u8; 4] {
     word.to_be_bytes()
 }
 
-/// Encode `STF` (store 32-bit float): op=0b11, op3=0x21, immediate form.
+/// Encode `STF` (store 32-bit float): op=0b11, op3=0x24, immediate form.
+///
+/// SPARC V9 FP store op3 layout (op=0b11, xop > 0x23 && xop < 0x28):
+///   0x24=STF (32-bit), 0x25=STFSR, 0x26=STQF (128-bit, 16-byte align),
+///   0x27=STDF (64-bit, 4-byte align).  Note: op3=0x21 is *LDFSR* (a load),
+///   not STF — using it for STF silently stores nothing.
 fn encode_stf(rd: Fpr, rs1: Gpr, imm: i32) -> [u8; 4] {
     let word: u32 = (0b11u32 << 30)
         | (rd.encoding() << 25)
-        | (0x21u32 << 19)
+        | (0x24u32 << 19)
         | (rs1.encoding() << 14)
         | (1u32 << 13)
         | ((imm as i32 as u32) & 0x1FFF);
     word.to_be_bytes()
 }
 
-/// Encode `STDF` (store 64-bit double): op=0b11, op3=0x26, immediate form.
+/// Encode `STDF` (store 64-bit double): op=0b11, op3=0x27, immediate form.
+///
+/// In SPARC V9, op3=0x26 is STQF (128-bit store, requires 16-byte
+/// alignment) — QEMU 7.2 raises mem_address_not_aligned (SIGBUS) if the
+/// address is only 8-byte aligned.  The 64-bit STDF was moved to op3=0x27
+/// in V9 (QEMU enforces 4-byte alignment there).
 fn encode_stdf(rd: Fpr, rs1: Gpr, imm: i32) -> [u8; 4] {
     let word: u32 = (0b11u32 << 30)
         | (rd.encoding() << 25)
-        | (0x26u32 << 19)
+        | (0x27u32 << 19)
         | (rs1.encoding() << 14)
         | (1u32 << 13)
         | ((imm as i32 as u32) & 0x1FFF);
@@ -3966,15 +3981,36 @@ fn emit_sparc64_fp_binop(
             //   Ge = !sign OR is_zero
             let sub_opf = if is_f64 { FP_FSUBD } else { FP_FSUBS };
             code.extend_from_slice(&encode_fp_arith(sub_opf, FA, FA, FB));
-            if is_f64 {
+            // Store the FP diff and reload it into a GPR for bit inspection.
+            //
+            // For f64: STDF (64-bit) + LDX (64-bit).  The full 64-bit diff
+            //   lands in %l0; sign bit at bit 63, is_zero = (L0 == 0).
+            // For f32: STF (32-bit) + LDUW (32-bit, zero-extended).  The
+            //   32-bit diff lands in %l0; sign bit at bit 31, is_zero =
+            //   (L0 == 0).  Using LDUW (not LDX) avoids reading 4 stale
+            //   bytes adjacent to the stored word, and only needs 4-byte
+            //   alignment.
+            //
+            // NB: the previous implementation loaded a "low word" via
+            // `ss_ld(L1, dst_off + 4)` — that issued a 64-bit LDX from a
+            // 4-byte-aligned address (dst_off+4 is never 8-byte aligned
+            // because slots are 8 bytes wide), which QEMU rejects with
+            // mem_address_not_aligned (SIGBUS).  The low word is not
+            // needed once the full diff is in L0.
+            let _ = if is_f64 {
                 code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
-                code.extend(ss_ld(Gpr::L0, dst_off));       // high word (sign in bit 31)
-                code.extend(ss_ld(Gpr::L1, dst_off + 4));   // low word
+                code.extend(ss_ld(Gpr::L0, dst_off));
             } else {
                 code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
-                code.extend(ss_ld(Gpr::L0, dst_off));       // the word (sign in bit 31)
-                code.extend(ss_load_imm(Gpr::L1, 0));
-            }
+                code.extend_from_slice(&Instruction::Lduw {
+                    rd: Gpr::L0,
+                    rs1: Gpr::I6,
+                    imm: -dst_off,
+                }
+                .encode());
+            };
+            // L1 = 0 so L2 = L0 | L1 = L0 (full diff; nonzero iff diff != 0.0).
+            code.extend(ss_load_imm(Gpr::L1, 0));
             // L2 = L0 | L1 (nonzero iff diff != 0.0).
             code.extend_from_slice(&encode_fmt3_rr(
                 OPC_FORMAT3, Gpr::L2, OP3_OR, Gpr::L0, Gpr::L1,
@@ -3990,22 +4026,41 @@ fn emit_sparc64_fp_binop(
             code.extend_from_slice(&encode_fmt3_rr(
                 OPC_FORMAT3, Gpr::L4, OP3_OR, Gpr::L2, Gpr::L4,
             ));
-            // nonzero = L4 >> 63  (the sign bit; 1 if L2 != 0, 0 if == 0).
-            // SRLX by 63: needs shift count 63 in a register (imm max 31).
-            code.extend(ss_load_imm(Gpr::L5, 63));
-            code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L4, 0x27, Gpr::L4, Gpr::L5,
-            ));  // L4 = nonzero (0 or 1)
-            // is_zero = 1 - nonzero = nonzero XOR 1.
+            // nonzero = L4 >> 63  (1 if L2 != 0, 0 if == 0).
+            // MUST use SRLX (64-bit logical shift) — the 32-bit SRA/SRL only
+            // examine the low 32 bits and mask the shift count to 5 bits,
+            // producing -1/0 instead of 1/0 and corrupting every downstream
+            // boolean (Eq/Ne/Lt/Le/Gt/Ge).
+            code.extend_from_slice(&Instruction::SrlxImm {
+                rd: Gpr::L4,
+                rs1: Gpr::L4,
+                imm: 63,
+            }
+            .encode());
+            // is_zero = nonzero XOR 1.
             code.extend(ss_load_imm(Gpr::L5, 1));
             code.extend_from_slice(&encode_fmt3_rr(
                 OPC_FORMAT3, Gpr::L3, OP3_XOR, Gpr::L4, Gpr::L5,
             ));  // L3 = is_zero (1 if L2 == 0, else 0)
-            // sign in L6: L6 = L0 >> 31  (sign bit of high word).
-            code.extend(ss_load_imm(Gpr::L5, 31));
-            code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L6, 0x27, Gpr::L0, Gpr::L5,
-            ));  // L6 = sign (0 or 1)
+            // sign in L6: L6 = L0 >> sign_shift  (sign bit of the diff).
+            // For f64, sign_shift = 63 (bit 63 of the 64-bit value) → SRLX.
+            // For f32, sign_shift = 31 (bit 31 of the zero-extended 32-bit
+            //   value) → SRL (32-bit, zero-extends to 64).
+            if is_f64 {
+                code.extend_from_slice(&Instruction::SrlxImm {
+                    rd: Gpr::L6,
+                    rs1: Gpr::L0,
+                    imm: 63,
+                }
+                .encode());
+            } else {
+                code.extend_from_slice(&Instruction::SrlImm {
+                    rd: Gpr::L6,
+                    rs1: Gpr::L0,
+                    imm: 31,
+                }
+                .encode());
+            }  // L6 = sign (0 or 1)
             // not_sign = 1 - sign = sign XOR 1.
             // Now materialize per op:
             //   Eq = is_zero                    → L3
