@@ -374,27 +374,30 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // it's void. K4f's syscall handler will check for ELF parse failures
 // BEFORE calling sys_exec (so sys_exec is only called on the success
 // path).
-fn sys_exec(tbl: State<ProcessTable>, task_idx: u32, entry: u64, stack: u64) {
+fn sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack: u64) {
     // Overwrite the task's mm_root with the stub sentinel 57005 (0xDEAD).
     // In a real kernel, this would be the new program's PGD physical
     // address (the ELF loader's output).
     //
-    // The entry/stack parameters are accepted (the contract's signature
-    // requires them) but NOT stored in the ProcessTable — the layout
-    // doesn't include the per-arch saved-register file. K4f's syscall
+    // The `_entry` / `_stack` parameters are accepted (the contract's
+    // signature requires them) but NOT stored in the ProcessTable —
+    // the layout doesn't include the per-arch saved-register file
+    // (rip / rsp live in K4c's per-arch Task struct). K4f's syscall
     // handler will store them via K4c's task_init_for_switch on the
-    // per-arch Task. Referencing the parameters here would generate
-    // unused-parameter warnings, so we deliberately don't reference
-    // them — the comment is the documentation of what they'd be used
-    // for in a real kernel.
+    // per-arch Task side; this function only updates the ProcessTable
+    // side. The leading underscore marks them as deliberately unused
+    // (the conventional "I know this parameter is unused" signal),
+    // so a future reader knows the absence of references is intended
+    // rather than an oversight.
     //
     // Note: per the VUMA calling convention, unused parameters are
-    // silently dropped (no warning, no error). This is the same
-    // behavior as C's `void f(int x) { (void)x; }` pattern — the
-    // parameter is part of the ABI signature but the function body
-    // doesn't have to use it. K4c's switch.vuma self-test follows the
-    // same convention (the cr3_write extern is declared but never
-    // called from the self-test).
+    // silently dropped (no warning, no error) — the leading underscore
+    // is a documentation convention, not a syntactic requirement.
+    // This is the same behavior as C's `void f(int x) { (void)x; }`
+    // pattern — the parameter is part of the ABI signature but the
+    // function body doesn't have to use it. K4c's switch.vuma self-test
+    // follows the same convention (the cr3_write extern is declared
+    // but never called from the self-test).
     pt_set_mm_root(tbl, task_idx, 57005);
 }
 
