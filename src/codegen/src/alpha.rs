@@ -1622,19 +1622,39 @@ fn fp_sts(fa: Fpr, rb: Gpr, disp: i16) -> Vec<u8> {
 // Alpha FP function codes (IEEE).  T = double (64-bit), S = single (32-bit).
 // Arithmetic is performed in T; S operands are widened via CVTST and
 // narrowed via CVTTS.  Function codes use the /su (software-completion +
-// underflow + dynamic rounding) variants for arithmetic, /sv (software-
-// completion + integer-overflow) for CVTTQ, /sui (software-completion +
-// underflow + inexact) for CVTQT, and /s for CVTST.  These are the codes
-// QEMU-alpha's translator recognises (cross-checked against libopcodes
-// alpha-opc.c: addt/su=0x5A0, cvttq/sv=0x5AF, cvtqt/sui=0x7BE, etc.).
-// Earlier values (0x525/0x532/0x2BE/0x52F) were not in the opcode table or
-// were inconsistent (/suc, /sum, /svc mixed) and caused SIGILL on QEMU-alpha.
+// underflow) variants for arithmetic, /svc (software-completion + integer-
+// overflow + chopped) for CVTTQ, /sui (software-completion + underflow +
+// inexact) for CVTQT, and /s for CVTST.  These are the codes QEMU-alpha's
+// translator recognises.
+//
+// IMPORTANT (FIX-alpha-v2): the previous FP_CVTTQ = 0x5AF is decoded by
+// QEMU-alpha 7.2 as `cvttq/sv` -- WITHOUT the /c (chopped) qualifier --
+// which causes QEMU to honour the FPCR rounding mode (default = round-to-
+// nearest) instead of truncating toward zero.  This produced off-by-one
+// results in three gold-standard tests:
+//   - neg_float_trunc: floattoint(-2.9) returned -3 (round-to-nearest)
+//     instead of -2 (trunc toward zero).  Exit 253 vs expected 254.
+//   - newton_sqrt: floattoint(sqrt(1000)=31.62) returned 32 instead of 31.
+//   - taylor_exp: floattoint(e=2.718) returned 3 instead of 2.
+//
+// Function code 0x52F is decoded by QEMU 7.2 as `cvttq/svc` (with the /c
+// chopped qualifier), which forces round-toward-zero (truncation)
+// regardless of FPCR.  This matches the binutils canonical `cvttq/sv`
+// table entry (0x52F) and the Alpha ARM, which states CVTTQ chops unless
+// the /m (dynamic) qualifier is present.  Verified empirically on
+// QEMU-alpha 7.2:
+//   0x52F: floattoint(-2.9) -> exit 254 (-2, truncation)  [CORRECT]
+//   0x5AF: floattoint(-2.9) -> exit 253 (-3, round-to-nearest)  [WRONG]
+//
+// The earlier worklog note that 0x52F caused SIGILL was incorrect: the
+// SIGILL was caused by a different bug (FA != 31 for unary CVT*), which
+// is now fixed by the fp_cvt helper hardwiring FA to F31.
 const FP_ADDT: u32   = 0x5A0; // f64 add  (addt/su)
 const FP_SUBT: u32   = 0x5A1; // f64 sub  (subt/su)
 const FP_MULT: u32   = 0x5A2; // f64 mul  (mult/su)
 const FP_DIVT: u32   = 0x5A3; // f64 div  (divt/su)
 const FP_CVTQT: u32  = 0x7BE; // int64 -> f64   (cvtqt/sui)
-const FP_CVTTQ: u32  = 0x5AF; // f64 -> int64   (cvttq/sv, truncating)
+const FP_CVTTQ: u32  = 0x52F; // f64 -> int64   (cvttq/svc, chopped/truncating)
 const FP_CVTST: u32  = 0x6AC; // f32 -> f64     (cvtst/s, widen)
 const FP_CVTTS: u32  = 0x5AC; // f64 -> f32     (cvtts/su, narrow)
 const FP_CMPTUN: u32 = 0x5A4; // compare unordered  (cmptun/su)

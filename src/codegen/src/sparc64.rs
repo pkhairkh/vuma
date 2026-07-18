@@ -2658,19 +2658,55 @@ fn emit_instr(
                 }
                 CastKind::UIntToFloat => {
                     // Unsigned int64 → float.  SPARC V9 has no direct
-                    // uint→float instruction.  APPROXIMATION: use FXTOD
-                    // (treats bits as signed int64).  For values < 2^63
-                    // this is exact; for values >= 2^63 the result is
-                    // wrong (off by 2^64).  TODO F1d: unsigned correction
-                    // (subtract 2^63, convert, add 2^63 as double).
-                    code.extend(ss_stx(Gpr::L0, dst_off));
+                    // uint→float instruction.  FXTOD treats the bits as a
+                    // signed int64, so values with the MSB set (>= 2^63)
+                    // come out negative — manifesting as `uinttofloat(2^63)`
+                    // returning -9.22e18 instead of +9.22e18.
+                    //
+                    // Use the shift-halve-double-add technique (identical
+                    // to the loongarch64 backend's UIntToFloat path):
+                    //   1. bit0 = value & 1
+                    //   2. half = value >> 1   (logical shift; fits in i63)
+                    //   3. f64_half = (double)half  (signed FXTOD; exact
+                    //      since half is in [0, 2^63) and non-negative)
+                    //   4. f64_doubled = f64_half + f64_half
+                    //   5. f64_bit0 = (double)bit0   (0.0 or 1.0)
+                    //   6. f64_result = f64_doubled + f64_bit0
+                    // This yields 2*(value>>1) + (value&1) == value (as f64)
+                    // for *all* u64 values (MSB set or clear).
+                    //
+                    // NB: source int is already in %l0 (loaded by the Cast
+                    // handler above).  We use %l1/%l2 as GPR scratches and
+                    // FA/FB as FPR scratches.  The destination stack slot
+                    // (dst_off) is used as the GPR↔FPR ferry.
+
+                    // L1 = value & 1   (bit 0 saved)
+                    code.extend_from_slice(&Instruction::AndImm {
+                        rd: Gpr::L1, rs1: Gpr::L0, imm: 1,
+                    }.encode());
+                    // L2 = value >> 1   (logical shift right by 1)
+                    code.extend_from_slice(&Instruction::SrlxImm {
+                        rd: Gpr::L2, rs1: Gpr::L0, imm: 1,
+                    }.encode());
+                    // Spill L2 to dst_off, LDDF as i64, FXTOD → FA
+                    code.extend(ss_stx(Gpr::L2, dst_off));
                     code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -dst_off));
-                    if matches!(to_ty, Some(IRType::F64)) {
-                        code.extend_from_slice(&encode_fp_unary(FP_FXTOD, FA, FA));
-                        code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
-                    } else {
-                        code.extend_from_slice(&encode_fp_unary(FP_FXTOS, FA, FA));
+                    code.extend_from_slice(&encode_fp_unary(FP_FXTOD, FA, FA));
+                    // FA = FA + FA = 2 * (value >> 1)
+                    code.extend_from_slice(&encode_fp_arith(FP_FADDD, FA, FA, FA));
+                    // Spill L1 to dst_off, LDDF as i64, FXTOD → FB
+                    code.extend(ss_stx(Gpr::L1, dst_off));
+                    code.extend_from_slice(&encode_lddf(FB, Gpr::I6, -dst_off));
+                    code.extend_from_slice(&encode_fp_unary(FP_FXTOD, FB, FB));
+                    // FA = FA + FB = 2*(value>>1) + (value & 1) == value (as f64)
+                    code.extend_from_slice(&encode_fp_arith(FP_FADDD, FA, FA, FB));
+                    // Narrow to f32 if the destination is F32; otherwise
+                    // store as f64.
+                    if matches!(to_ty, Some(IRType::F32)) {
+                        code.extend_from_slice(&encode_fp_unary(FP_FDTOS, FA, FA));
                         code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                    } else {
+                        code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                     }
                     let _ = (from_ty, to_ty);
                     return;
@@ -3905,35 +3941,50 @@ fn emit_sparc64_fp_binop(
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     let is_f64 = matches!(ty, Some(IRType::F64));
 
-    // Resolve operand stack offsets.  Spill immediates to slot 0 (with
-    // the caveat noted in the function doc comment).
+    // Resolve operand stack offsets and load into FPRs.
+    //
+    // CRITICAL: when both lhs and rhs are immediates, they cannot share the
+    // same scratch slot — the second spill would overwrite the first, and
+    // both LDDF loads would return the rhs value (losing lhs entirely).
+    // This bug manifested as `3.0 + 0.0` producing `0.0` (because both
+    // operands were spilled to slot 0, then both loaded as 0.0).
+    //
+    // Fix: interleave spill and load. Spill lhs to slot 0 and immediately
+    // LDDF it into FA, THEN spill rhs to slot 0 (now safe — FA already
+    // holds lhs) and LDDF it into FB.
+    //
+    // `encode_ldf`/`encode_lddf` take a signed displacement; pass
+    // `-slot_off` so the effective address is
+    // `[%fp + (-slot_off)] = [%fp - slot_off]`.
     let lhs_off = lhs
         .as_register()
         .and_then(|id| vreg_stack_slots.get(&id).copied())
         .unwrap_or_else(|| {
             code.extend(ss_load_value(lhs, vreg_stack_slots, Gpr::L0));
             // NOTE: slot 0 = [%fp + 0] overlaps the register save area.
-            // See TODO in doc comment.
+            // See TODO in doc comment.  Safe here because we LDDF into FA
+            // immediately, before any other spill.
             code.extend(ss_stx(Gpr::L0, 0));
             0
         });
+    if is_f64 {
+        code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -lhs_off));
+    } else {
+        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -lhs_off));
+    }
+
     let rhs_off = rhs
         .as_register()
         .and_then(|id| vreg_stack_slots.get(&id).copied())
         .unwrap_or_else(|| {
             code.extend(ss_load_value(rhs, vreg_stack_slots, Gpr::L1));
+            // Safe to reuse slot 0: FA already loaded above.
             code.extend(ss_stx(Gpr::L1, 0));
             0
         });
-
-    // Load operands into FPRs FA, FB.  `encode_ldf`/`encode_lddf` take a
-    // signed displacement; pass `-slot_off` so the effective address is
-    // `[%fp + (-slot_off)] = [%fp - slot_off]`.
     if is_f64 {
-        code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -lhs_off));
         code.extend_from_slice(&encode_lddf(FB, Gpr::I6, -rhs_off));
     } else {
-        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -lhs_off));
         code.extend_from_slice(&encode_ldf(FB, Gpr::I6, -rhs_off));
     }
 
