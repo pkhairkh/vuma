@@ -115,6 +115,7 @@ layout PageTable = {
 //   29-21 = level 1, 20-12 = level 0 (the `level3` field then holds
 //   bits 38-30, `level2` holds bits 29-21, `level1` holds bits 20-12,
 //   and `level0` is unused). `offset` is always bits 11-0 (page offset).
+// NOTE: Used only in self-test; production code uses vmm_walk_idx.
 layout VaddrParts = {
     level3: u32,   // bits 47-39 (or 38-30 for Sv39)
     level2: u32,   // bits 38-30 (or 29-21)
@@ -164,6 +165,7 @@ extern "C" {
 // 2"); the walk_idx helper below re-derives the index from the level
 // number directly, so the field-name-vs-level-number mismatch does not
 // affect vmm_map / vmm_unmap / vmm_translate.
+// NOTE: Used only in self-test; production code uses vmm_walk_idx.
 
 fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
     out.level3 = ((vaddr >> 39) as u32) & 511;
