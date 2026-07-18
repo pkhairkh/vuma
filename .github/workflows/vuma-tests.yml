@@ -35,8 +35,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain (nightly-2026-03-01)
+        # Pinned by rust-toolchain.toml. Must match the rest of the project
+        # (ci.yml, cross-compile.yml, proof-verify.yml, release.yml,
+        # wave50-hardening.yml all pin nightly-2026-03-01). Previously this
+        # step installed `stable`, which built the compiler against a
+        # different toolchain than every other CI workflow.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-01
+          components: rustfmt, clippy
 
       - name: Install QEMU user-mode emulators
         run: |

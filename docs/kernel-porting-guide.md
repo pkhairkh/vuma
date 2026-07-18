@@ -2,8 +2,16 @@
 
 This guide walks through porting the VWK (Vuma Womb Kernel) to a new CPU
 architecture. The kernel currently ships per-arch files for **x86_64**,
-**aarch64**, and **riscv64** under `womb/kernel/arch/<arch>/`. To add a fourth
-architecture (e.g. loongarch64, ppc64le, s390x), follow the nine steps below.
+**aarch64**, **riscv64**, and **wasm32** under `womb/kernel/arch/<arch>/`
+(4 ports — see `womb/kernel/arch/`). To add a fifth architecture (e.g.
+loongarch64, ppc64le, s390x), follow the nine steps below.
+
+Note the distinction from the compiler: VUMA's codegen has 19 `BackendKind`
+variants (see [`architecture.md` §8](./architecture.md#8-backends)), and the
+kernel *compiles* on all 19. But only 4 of those have per-arch kernel source
+under `womb/kernel/arch/`; the remaining 15 run the kernel in hosted mode
+where every hardware extern resolves to `__ffi_fallback_stub` (no real
+boot path). This guide is about adding a 5th *real* arch port.
 
 The x86_64 port is the worked example throughout — it is the most mature port
 (the hosted-mode build target since K1) and its `bootinfo.vuma`,
@@ -45,9 +53,9 @@ Before starting, confirm:
 - The VUMA 2.0 compiler already emits code for the target arch. Run
   `./target/release-fast/compile_dump --help` and check that `<arch>` is
   listed. If not, add the backend first (out of scope for this guide — see
-  `src/codegen/src/<arch>/` for the existing 19 backends and
-  [`architecture.md` §7](./architecture.md#7-backends) for the backend
-  contract).
+  `src/codegen/src/<arch>/` for the existing 19 codegen backends in the
+  `BackendKind` enum, and [`architecture.md` §8](./architecture.md#8-backends)
+  for the backend contract).
 - You have a QEMU (or real hardware) boot target. The hosted-mode test path
   uses Linux syscalls; the bare-metal test path uses QEMU `-kernel` /
   `-bios`. Both should work before you start.
@@ -71,15 +79,18 @@ The file count differs per arch:
 
 | Arch     | Files                                                                                                       | Count |
 |----------|-------------------------------------------------------------------------------------------------------------|-------|
-| x86_64   | bootinfo, trampoline, mm_trampoline, trap_trampoline, switch, pt                                            | **6** |
-| aarch64  | mm_trampoline, trap_trampoline, switch, pt (no bootinfo.vuma, no trampoline.vuma — hosted path reuses x86_64's) | **4** |
-| riscv64  | mm_trampoline, trap_trampoline, switch, pt (same as aarch64)                                                | **4** |
+| x86_64   | bootinfo, trampoline, mm_trampoline, trap_trampoline, switch, pt, vmm_hal                                   | **7** |
+| aarch64  | bootinfo, mm_trampoline, trap_trampoline, switch, pt, vmm_hal (no trampoline.vuma — hosted path reuses x86_64's) | **6** |
+| riscv64  | bootinfo, mm_trampoline, trap_trampoline, switch, pt, vmm_hal (same as aarch64)                             | **6** |
+| wasm32   | sched_hal (wasm-specific scheduler HAL shim; no MMU/paging/trap files — wasm32 has no concept of these)     | **1** |
 
 If you're adding a **hosted** port (the new arch will run as a regular Linux
-process for testing), follow the x86_64 pattern: write all 6 files (bootinfo
-+ trampoline + the 4 core files). If you're adding a **bare-metal-only**
+process for testing), follow the x86_64 pattern: write all 7 files (bootinfo
++ trampoline + the 5 core files). If you're adding a **bare-metal-only**
 port (no hosted test path), follow the aarch64/riscv64 pattern: write only
-the 4 core files; the boot protocol handling goes in `boot.S` (Step 2) instead.
+the 6 core files; the boot protocol handling goes in `boot.S` (Step 2) instead.
+The wasm32 port is a special case (single HAL shim, no paging or traps —
+wasm has no MMU), not a template for new ports.
 
 The remaining files (`mm/pmm.vuma`, `proc/scheduler.vuma`, `net/tcp.vuma`,
 ...) are arch-agnostic and need no porting — they consume the per-arch
@@ -890,16 +901,20 @@ relies on the same Linux syscalls — but the syscall numbers differ per arch
 
 ### Gold-standard test suite
 
-The `tests/gold_standard/` directory contains ~700 pinned tests organized by
-wave. After your port compiles + the kernel boots, run the parity sweep:
+The `tests/gold_standard/` directory contains the curated PMT test suite
+organized by wave (see `tests/gold_standard/manifest.json` for the current
+program count). After your port compiles + the kernel boots, run the parity
+sweep:
 
 ```
     ./scripts/kernel_parity.sh --quick
-    # Compiles arena_basic + kernel smoke across all 19 backends.
+    # Compiles arena_basic + kernel smoke across all 19 codegen backends
+    # (7 executable via QEMU + wasmtime, 12 compile-only).
     # Exits 0 only if every backend passes.
 
     ./scripts/kernel_parity.sh
-    # Full sweep — every gold-standard test × every backend. Takes ~10 min.
+    # Full sweep — 10 gold-standard tests × every codegen backend + 19
+    # kernel modules × 4 arch ports. Takes ~10 min.
 ```
 
 The parity sweep uses QEMU user-mode for non-x86_64 arches. If QEMU is not

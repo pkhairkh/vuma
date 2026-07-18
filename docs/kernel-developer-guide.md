@@ -1320,11 +1320,12 @@ Integration tests run as part of the regular test harnesses:
 
 - **`scripts/kernel_smoke.sh`** — runs `womb/kernel/kernel.vuma` (the
   most-integrated test, since `kernel.vuma` inlines `console.vuma` +
-  `kmain` + future subsystems).
+  `kmain` + future subsystems). The smoke test greps stdout for
+  "vuma kernel: hello" itself; the old `tests/gold_standard/kernel_boot/`
+  expected-output fixture was removed during the 2026-07 cleanup.
 - **`scripts/kernel_parity.sh`** — runs the kernel + a subset of
-  gold-standard tests across all 19 backends.
-- **`tests/gold_standard/kernel_boot/`** — the kernel-boot smoke test
-  (greps stdout for "vuma kernel: hello").
+  gold-standard tests across all 19 codegen backends (7 executable via
+  QEMU + wasmtime, 12 compile-only).
 - **`tests/gold_standard/kernel_crypto/`** — the SHA-256 KAT test
   (exercises `crypto/api.vuma` end-to-end).
 

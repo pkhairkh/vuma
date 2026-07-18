@@ -9,26 +9,48 @@ Usage: python3 run_one_batch.py <backend> <start_idx> <count>
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-REPO_ROOT = Path("/home/z/my-project/vuma")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPILE_DUMP = REPO_ROOT / "target/release/compile_dump"
 GOLD_DIR = REPO_ROOT / "tests/gold_standard"
-QEMU_DIR = Path("/tmp/qemu/extracted/usr/bin")
-OUT_DIR = Path("/home/z/my-project/download/gold_standard_results")
+OUT_DIR = Path(os.environ.get("VUMA_RESULTS_DIR", REPO_ROOT / "test_results" / "gold_standard_results"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _qemu_path(arch: str) -> str:
+    """Resolve a qemu-<arch> binary path.
+
+    Prefers /tmp/qemu_bins/qemu-<arch> (symlinks created by the CI
+    workflow), then /usr/bin, then `command -v qemu-<arch>` on PATH.
+    Returns "" for the native x86_64 backend.
+    """
+    if arch == "x86_64":
+        return ""
+    candidates = [
+        Path("/tmp/qemu_bins") / f"qemu-{arch}",
+        Path("/usr/bin") / f"qemu-{arch}",
+        Path("/usr/local/bin") / f"qemu-{arch}",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    found = shutil.which(f"qemu-{arch}")
+    return found or ""
+
 
 BACKENDS = {
     "x86_64": "",
-    "aarch64": str(QEMU_DIR / "qemu-aarch64"),
-    "riscv64": str(QEMU_DIR / "qemu-riscv64"),
-    "arm32": str(QEMU_DIR / "qemu-arm"),
-    "mips64": str(QEMU_DIR / "qemu-mips64el"),
-    "ppc64": str(QEMU_DIR / "qemu-ppc64"),
-    "loongarch64": str(QEMU_DIR / "qemu-loongarch64"),
+    "aarch64": _qemu_path("aarch64"),
+    "riscv64": _qemu_path("riscv64"),
+    "arm32": _qemu_path("arm"),
+    "mips64": _qemu_path("mips64el"),
+    "ppc64": _qemu_path("ppc64"),
+    "loongarch64": _qemu_path("loongarch64"),
 }
 
 EXPECTED_RE = re.compile(r"^//\s*[Ee]xpected\s+exit\s+code\s*:\s*(-?\d+)", re.MULTILINE)
