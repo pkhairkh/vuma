@@ -1,15 +1,14 @@
 // womb/kernel/kernel.vuma — VWK Integrated Interactive Kernel
 //
-// Imports all subsystems and wires them into a running interactive system.
-// Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc, free, ver, memstat, cd, pwd
+// Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc,
+//                  free, ver, memstat, cd, pwd
 //
-// Build: ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
-// Run:   printf 'help\nls\ntouch hello.txt\necho hi > hello.txt\ncat hello.txt\nls\nmemstat\nps\nexit\n' | /tmp/kernel.bin
+// Terminal mode: RAW.  The kernel switches stdin to raw mode on startup
+// and handles all line editing itself (echo, backspace, arrow keys,
+// history).  On exit, the original terminal settings are restored.
 //
-// Terminal mode: COOKED (default).  The terminal handles echo, backspace,
-// and basic line editing (arrow keys, Ctrl-W, etc.) natively.  The kernel
-// just reads bytes one at a time, stores them in cbuf, and on '\n' parses
-// and executes the command.  No raw-mode ioctl needed — works everywhere.
+// Build: ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin aarch64 --verify
+// Run:   ./scripts/qemu_boot.sh aarch64 interactive
 
 import "bootinfo.vuma";
 import "drivers/early_console.vuma";
@@ -27,32 +26,59 @@ extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn read(fd: i64, buf: Address, count: i64) -> i64;
     fn exit(code: i64);
+    fn ioctl(fd: i64, request: i64, arg: Address) -> i64;
 }
 
 layout KBuf = { data: [u8; 256] }
+
+// Linux struct termios — 36 bytes (NCCS=19, no c_ispeed/c_ospeed).
+// Field offsets: iflag=0, oflag=4, cflag=8, lflag=12, line=16, cc[0..18]=17..35
+layout Termios = {
+    c_iflag: u32,   // offset 0
+    c_oflag: u32,   // offset 4
+    c_cflag: u32,   // offset 8
+    c_lflag: u32,   // offset 12 — ICANON|ECHO|ISIG|IEXTEN live here
+    c_line: u8,     // offset 16
+    c_cc0: u8,      // offset 17  VINTR
+    c_cc1: u8,      // offset 18  VQUIT
+    c_cc2: u8,      // offset 19  VERASE
+    c_cc3: u8,      // offset 20  VKILL
+    c_cc4: u8,      // offset 21  VEOF
+    c_cc5: u8,      // offset 22  VTIME
+    c_cc6: u8,      // offset 23  VMIN
+    c_cc7: u8,      // offset 24  VSWTC
+    c_cc8: u8,      // offset 25  VSTART
+    c_cc9: u8,      // offset 26  VSTOP
+    c_cc10: u8,     // offset 27  VSUSP
+    c_cc11: u8,     // offset 28  VEOL
+    c_cc12: u8,     // offset 29  VREPRINT
+    c_cc13: u8,     // offset 30  VDISCARD
+    c_cc14: u8,     // offset 31  VWERASE
+    c_cc15: u8,     // offset 32  VLNEXT
+    c_cc16: u8,     // offset 33  VEOL2
+    c_cc17: u8,     // offset 34
+    c_cc18: u8,     // offset 35
+}
+
+// History: 8 commands of up to 255 bytes
+layout History = {
+    cmds: [u8; 2048],
+    lens: [u32; 8],
+    count: u32,
+}
 
 fn kprint(ec: State<EarlyConsole>, c: u8) {
     early_console_write_byte(ec, c);
 }
 
-fn kputs_str(ec: State<EarlyConsole>, s: State<KBuf>) {
-    let i = 0;
-    while i < 256 {
-        let c = s.data[i];
-        if c == 0 { return; }
-        kprint(ec, c);
-        i = i + 1;
-    }
-}
-
-fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 10); }
+fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 13); kprint(ec, 10); }
 
 fn kputs_banner(ec: State<EarlyConsole>) {
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 107); kprint(ec, 101); kprint(ec, 114); kprint(ec, 110);
     kprint(ec, 101); kprint(ec, 108); kprint(ec, 32);
     kprint(ec, 98); kprint(ec, 111); kprint(ec, 111); kprint(ec, 116);
-    kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
+    kprint(ec, 101); kprint(ec, 100); kputs_nl(ec);
 }
 
 fn kputs_prompt(ec: State<EarlyConsole>) {
@@ -64,15 +90,15 @@ fn kputs_shutdown(ec: State<EarlyConsole>) {
     kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
     kprint(ec, 116); kprint(ec, 105); kprint(ec, 110); kprint(ec, 103);
     kprint(ec, 32); kprint(ec, 100); kprint(ec, 111); kprint(ec, 119);
-    kprint(ec, 110); kprint(ec, 10);
+    kprint(ec, 110); kputs_nl(ec);
 }
 
 fn kputs_ok(ec: State<EarlyConsole>) {
-    kprint(ec, 79); kprint(ec, 75); kprint(ec, 10);
+    kprint(ec, 79); kprint(ec, 75); kputs_nl(ec);
 }
 
 fn kputs_err(ec: State<EarlyConsole>) {
-    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kprint(ec, 10);
+    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kputs_nl(ec);
 }
 
 fn kputs_num(ec: State<EarlyConsole>, n: u64) {
@@ -93,9 +119,122 @@ fn kputs_num(ec: State<EarlyConsole>, n: u64) {
     }
 }
 
+// ── Termios raw-mode helpers ───────────────────────────────────────────
+// TCGETS=0x5401 reads current settings.  TCSETS=0x5402 applies new settings.
+// We clear ICANON(0x2)|ECHO(0x8)|ISIG(0x1)|IEXTEN(0x8000) from c_lflag,
+// ICRNL(0x100) from c_iflag, OPOST(0x1) from c_oflag.
+// We set VMIN=1 (c_cc6) and VTIME=0 (c_cc5) so read() returns 1 byte at a time.
+
+// Save original termios into `saved`, then switch to raw mode.
+fn termios_enable_raw(saved: State<Termios>) -> i64 {
+    // Save original settings
+    let ret = ioctl(0, 0x5401, saved as Address);
+    if ret != 0 { return ret; }
+    // Copy to a temp, modify, apply
+    let raw = state_new(Termios);
+    raw.c_iflag = saved.c_iflag & 0xFFFFFEFF;  // ~ICRNL
+    raw.c_oflag = saved.c_oflag & 0xFFFFFFFE;  // ~OPOST
+    raw.c_cflag = saved.c_cflag;
+    raw.c_lflag = saved.c_lflag & 0xFFFF7FF4;  // ~(ICANON|ECHO|ISIG|IEXTEN)
+    raw.c_line = saved.c_line;
+    raw.c_cc0 = saved.c_cc0; raw.c_cc1 = saved.c_cc1; raw.c_cc2 = saved.c_cc2;
+    raw.c_cc3 = saved.c_cc3; raw.c_cc4 = saved.c_cc4;
+    raw.c_cc5 = 0;   // VTIME = 0
+    raw.c_cc6 = 1;   // VMIN = 1
+    raw.c_cc7 = saved.c_cc7; raw.c_cc8 = saved.c_cc8; raw.c_cc9 = saved.c_cc9;
+    raw.c_cc10 = saved.c_cc10; raw.c_cc11 = saved.c_cc11; raw.c_cc12 = saved.c_cc12;
+    raw.c_cc13 = saved.c_cc13; raw.c_cc14 = saved.c_cc14; raw.c_cc15 = saved.c_cc15;
+    raw.c_cc16 = saved.c_cc16; raw.c_cc17 = saved.c_cc17; raw.c_cc18 = saved.c_cc18;
+    return ioctl(0, 0x5402, raw as Address);
+}
+
+fn termios_restore(saved: State<Termios>) {
+    ioctl(0, 0x5402, saved as Address);
+}
+
+// ── History helpers ────────────────────────────────────────────────────
+fn history_init(h: State<History>) {
+    h.count = 0;
+    let i = 0;
+    while i < 8 { h.lens[i] = 0; i = i + 1; }
+}
+
+fn history_push(h: State<History>, cbuf: State<KBuf>, len: u32) {
+    if len == 0 { return; }
+    // Skip duplicate of last command
+    if h.count > 0 {
+        let last = h.count - 1;
+        let llen = h.lens[last];
+        if llen == len {
+            let same = 1;
+            let j = 0;
+            while j < len {
+                if h.cmds[last * 256 + j] != cbuf.data[j] { same = 0; break; }
+                j = j + 1;
+            }
+            if same == 1 { return; }
+        }
+    }
+    // Shift down if full
+    if h.count >= 8 {
+        let s = 0;
+        while s < 7 {
+            let k = 0;
+            while k < 256 { h.cmds[s * 256 + k] = h.cmds[(s + 1) * 256 + k]; k = k + 1; }
+            h.lens[s] = h.lens[s + 1];
+            s = s + 1;
+        }
+        h.count = 7;
+    }
+    let slot = h.count;
+    if slot < 8 {
+        let k = 0;
+        while k < len { h.cmds[slot * 256 + k] = cbuf.data[k]; k = k + 1; }
+        h.lens[slot] = len;
+        h.count = h.count + 1;
+    }
+}
+
+fn history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
+    if idx >= h.count { return 0; }
+    let len = h.lens[idx];
+    let k = 0;
+    while k < len { cbuf.data[k] = h.cmds[idx * 256 + k]; k = k + 1; }
+    return len;
+}
+
+// ── Redraw the current line from scratch ───────────────────────────────
+// Erases everything on the line, reprints prompt + cbuf[0..pos], then
+// moves cursor back to `cursor` position.
+fn redraw_line(ec: State<EarlyConsole>, cbuf: State<KBuf>, pos: u32, cursor: u32) {
+    // Move cursor to beginning of line (CR)
+    kprint(ec, 13);
+    // Print prompt
+    kputs_prompt(ec);
+    // Print buffer contents
+    let i = 0;
+    while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
+    // Clear to end of line: ESC [ K
+    kprint(ec, 27); kprint(ec, 91); kprint(ec, 75);
+    // Move cursor back to correct position
+    let back = pos - cursor;
+    let b = 0;
+    while b < back {
+        kprint(ec, 27); kprint(ec, 91); kprint(ec, 68);  // ESC [ D (left)
+        b = b + 1;
+    }
+}
+
 fn kmain() -> i32 {
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
+
+    // ── Switch to raw mode BEFORE any output ──────────────────────────
+    let saved_termios = state_new(Termios);
+    let raw_ret = termios_enable_raw(saved_termios);
+    // If ioctl fails (e.g. piped stdin), we continue in whatever mode
+    // the terminal is in — the shell still works, just without inline editing.
+
     kputs_banner(ec);
 
     // Init PMM
@@ -121,14 +260,12 @@ fn kmain() -> i32 {
     let files = state_new(FileTable);
     inode_init_table(inodes);
     dentry_init(dentries);
-    // Create root dentry (index 0, name="/")
     let root = dentry_alloc(dentries);
-    dentry_set_name_byte(dentries, root, 0, 47);  // '/'
+    dentry_set_name_byte(dentries, root, 0, 47);
     dentry_set_name_byte(dentries, root, 1, 0);
     dentry_set_used(dentries, root, 1);
-    // Create root inode
     let root_ino = inode_alloc(inodes);
-    inode_set_mode(inodes, root_ino, 16384);  // S_IFDIR
+    inode_set_mode(inodes, root_ino, 16384);
     dentry_set_inode(dentries, root, root_ino as u64);
     kprint(ec, 86); kprint(ec, 70); kprint(ec, 83); kprint(ec, 58);
     kprint(ec, 32); kprint(ec, 114); kprint(ec, 111); kprint(ec, 111);
@@ -136,403 +273,516 @@ fn kmain() -> i32 {
     kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
     kprint(ec, 100); kputs_nl(ec);
 
-    // Shell loop — COOKED MODE
-    // The terminal handles echo, backspace, and line editing natively.
-    // We just read bytes, buffer them, and on '\n' execute the command.
-    kputs_nl(ec);
-    kputs_prompt(ec);
-
+    // ── Shell state ───────────────────────────────────────────────────
     let rbuf = state_new(KBuf);
     let cbuf = state_new(KBuf);
+    let hist = state_new(History);
+    history_init(hist);
+
     let pos: u32 = 0;
+    let cursor: u32 = 0;
     let running: u8 = 1;
-    let cwd: u32 = 0;  // current working directory (dentry index, 0=root)
+    let cwd: u32 = 0;
+    let hist_idx: u32 = 0;
+    let raw_ok: u8 = if raw_ret == 0 { 1 } else { 0 };
+
+    kputs_nl(ec);
+    kputs_prompt(ec);
 
     while running == 1 {
         let n = read(0, rbuf as Address, 1);
         if n <= 0 { break; }
         let c = rbuf.data[0];
 
-        // NOTE: do NOT echo `c` here — the terminal's cooked-mode TTY
-        // already echoes keystrokes.  Echoing here would double-print.
-
-        if c == 10 {
-            // Newline — execute the command.
-            let cmd = cbuf.data[0];
-
-            // help (104='h')
-            if cmd == 104 {
-                kprint(ec, 99); kprint(ec, 109); kprint(ec, 100); kprint(ec, 115);
-                kprint(ec, 58); kprint(ec, 32);
-                kprint(ec, 101); kprint(ec, 99); kprint(ec, 104); kprint(ec, 111);
-                kprint(ec, 44); kprint(ec, 32); kprint(ec, 104); kprint(ec, 101);
-                kprint(ec, 108); kprint(ec, 112); kprint(ec, 44); kprint(ec, 32);
-                kprint(ec, 101); kprint(ec, 120); kprint(ec, 105); kprint(ec, 116);
-                kprint(ec, 44); kprint(ec, 32); kprint(ec, 112); kprint(ec, 105);
-                kprint(ec, 100); kprint(ec, 44); kprint(ec, 32); kprint(ec, 112);
-                kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 108);
-                kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 99);
-                kprint(ec, 97); kprint(ec, 116); kprint(ec, 44); kprint(ec, 32);
-                kprint(ec, 116); kprint(ec, 111); kprint(ec, 117); kprint(ec, 99);
-                kprint(ec, 104); kprint(ec, 44); kprint(ec, 32); kprint(ec, 109);
-                kprint(ec, 107); kprint(ec, 100); kprint(ec, 105); kprint(ec, 114);
-                kprint(ec, 44); kprint(ec, 32); kprint(ec, 97); kprint(ec, 108);
-                kprint(ec, 108); kprint(ec, 111); kprint(ec, 99); kprint(ec, 44);
-                kprint(ec, 32); kprint(ec, 102); kprint(ec, 114); kprint(ec, 101);
-                kprint(ec, 101); kprint(ec, 44); kprint(ec, 32); kprint(ec, 118);
-                kprint(ec, 101); kprint(ec, 114); kprint(ec, 44); kprint(ec, 32);
-                kprint(ec, 109); kprint(ec, 101); kprint(ec, 109); kprint(ec, 115);
-                kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kprint(ec, 44);
-                kprint(ec, 32); kprint(ec, 99); kprint(ec, 100); kprint(ec, 44);
-                kprint(ec, 32); kprint(ec, 112); kprint(ec, 119); kprint(ec, 100);
-                kputs_nl(ec);
-            }
-
-            // pid (112='p') / ps (112='p', 115='s') / pwd (112='p', 119='w')
-            if cmd == 112 {
-                if pos > 1 {
-                    if cbuf.data[1] == 119 {
-                        // pwd — print working directory name
-                        if cwd == 0 {
-                            kprint(ec, 47); kputs_nl(ec);  // "/"
-                        } else {
-                            let j = 0;
-                            while j < 64 {
-                                let nc = dentry_get_name_byte(dentries, cwd, j);
-                                if nc == 0 { break; }
-                                kprint(ec, nc);
-                                j = j + 1;
-                            }
-                            kputs_nl(ec);
-                        }
-                    } else {
-                        if cbuf.data[1] == 115 {
-                            // ps — list process table
-                            kprint(ec, 80); kprint(ec, 73); kprint(ec, 68); kprint(ec, 32);
-                            kprint(ec, 83); kprint(ec, 84); kprint(ec, 65); kprint(ec, 84);
-                            kprint(ec, 45); kprint(ec, 78); kprint(ec, 82); kputs_nl(ec);
-                            let i = 0;
-                            while i < 256 {
-                                if pt_get_state(tbl, i) != 0 {
-                                    kputs_num(ec, pt_get_pid(tbl, i) as u64);
-                                    kprint(ec, 32);
-                                    let st = pt_get_state(tbl, i);
-                                    if st == 1 { kprint(ec, 82); kprint(ec, 85); kprint(ec, 78); }
-                                    else { if st == 2 { kprint(ec, 82); kprint(ec, 68); kprint(ec, 89); }
-                                    else { if st == 4 { kprint(ec, 90); kprint(ec, 79); kprint(ec, 77); }
-                                    else { kprint(ec, 63); } } }
-                                    kputs_nl(ec);
-                                }
-                                i = i + 1;
-                            }
-                        } else {
-                            // pid
-                            kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
-                            kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
-                        }
-                    }
-                } else {
-                    kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
-                    kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
-                }
-            }
-
-            // ls (108='l')
-            if cmd == 108 {
-                // List CWD directory children.
-                let child = dentry_get_child(dentries, cwd) as u32;
-                let found = 0;
-                if child != 0 {
-                    let cur = child;
-                    while cur < 64 {
-                        if dentry_get_used(dentries, cur) == 1 {
-                            let j = 0;
-                            while j < 64 {
-                                let nc = dentry_get_name_byte(dentries, cur, j);
-                                if nc == 0 { break; }
-                                kprint(ec, nc);
-                                j = j + 1;
-                            }
-                            kprint(ec, 32); kprint(ec, 32);
-                            found = 1;
-                        }
-                        let nxt = dentry_get_next(dentries, cur);
-                        if nxt == 0 { break; }
-                        cur = nxt as u32;
-                    }
-                }
-                kputs_nl(ec);
-                if found == 0 {
-                    kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
-                    kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
-                }
-            }
-
-            // cat (99='c') / cd (99='c', 100='d')
-            if cmd == 99 {
-                if pos > 1 && cbuf.data[1] == 100 {
-                    // ── cd ──────────────────────────────────────────────
-                    if pos == 2 {
-                        cwd = 0;
-                        kputs_ok(ec);
-                    } else {
-                        let name_start: u32 = 3;
-                        if cbuf.data[2] != 32 { name_start = 2; }
-                        // cd ..
-                        if cbuf.data[name_start] == 46 && (name_start + 1) < pos && cbuf.data[name_start + 1] == 46 {
-                            let p = dentry_get_parent(dentries, cwd);
-                            if p < 64 { cwd = p as u32; }
-                            kputs_ok(ec);
-                        } else {
-                            // cd /
-                            if cbuf.data[name_start] == 47 {
-                                cwd = 0;
-                                kputs_ok(ec);
-                            } else {
-                                // cd <name> — search CWD children
-                                let child = dentry_get_child(dentries, cwd) as u32;
-                                let cur = child;
-                                let found_idx = 64;
-                                while cur < 64 {
-                                    if dentry_get_used(dentries, cur) == 1 {
-                                        let match_ok = 1;
-                                        let j = 0;
-                                        while j < 58 && (name_start + j) < pos {
-                                            let fn_c = dentry_get_name_byte(dentries, cur, j);
-                                            let cmd_c = cbuf.data[name_start + j];
-                                            if fn_c == 0 { match_ok = 0; break; }
-                                            if fn_c != cmd_c { match_ok = 0; break; }
-                                            j = j + 1;
-                                        }
-                                        if match_ok == 1 {
-                                            let fn_c = dentry_get_name_byte(dentries, cur, j);
-                                            if fn_c == 0 { found_idx = cur; break; }
-                                        }
-                                    }
-                                    let nxt = dentry_get_next(dentries, cur);
-                                    if nxt == 0 { break; }
-                                    cur = nxt as u32;
-                                }
-                                if found_idx < 64 {
-                                    let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
-                                    let mode = inode_get_mode(inodes, ino_idx);
-                                    if mode == 16384 {
-                                        cwd = found_idx;
-                                        kputs_ok(ec);
-                                    } else {
-                                        kprint(ec, 78); kprint(ec, 79); kprint(ec, 84);
-                                        kprint(ec, 32); kprint(ec, 68); kprint(ec, 73);
-                                        kprint(ec, 82); kputs_nl(ec);
-                                    }
-                                } else {
-                                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32);
-                                    kprint(ec, 100); kprint(ec, 105); kprint(ec, 114);
-                                    kputs_nl(ec);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // ── cat ──────────────────────────────────────────────
-                    let fname_start: u32 = 4;
-                    if cbuf.data[3] != 32 { fname_start = 3; }
-                    let child = dentry_get_child(dentries, cwd) as u32;
-                    let cur = child;
-                    let found_idx = 64;
-                    while cur < 64 {
-                        if dentry_get_used(dentries, cur) == 1 {
-                            let match_ok = 1;
-                            let j = 0;
-                            while j < 58 && (fname_start + j) < pos {
-                                let fn_c = dentry_get_name_byte(dentries, cur, j);
-                                let cmd_c = cbuf.data[fname_start + j];
-                                if fn_c == 0 { match_ok = 0; break; }
-                                if fn_c != cmd_c { match_ok = 0; break; }
-                                j = j + 1;
-                            }
-                            if match_ok == 1 {
-                                let fn_c = dentry_get_name_byte(dentries, cur, j);
-                                if fn_c == 0 { found_idx = cur; break; }
-                            }
-                        }
-                        let nxt = dentry_get_next(dentries, cur);
-                        if nxt == 0 { break; }
-                        cur = nxt as u32;
-                    }
-                    if found_idx < 64 {
-                        let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
-                        let fsize = inode_get_size(inodes, ino_idx);
-                        if fsize > 0 {
-                            kprint(ec, 104); kprint(ec, 105); kputs_nl(ec);
-                        } else {
-                            kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
-                            kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
-                        }
-                    } else {
-                        kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102);
-                        kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
-                    }
-                }
-            }
-
-            // touch (116='t')
-            if cmd == 116 {
-                // Create a new file under CWD
-                let new_d = dentry_alloc(dentries);
-                if new_d < 64 {
-                    let k = 0;
-                    while k < 64 {
-                        dentry_set_name_byte(dentries, new_d, k, 0);
-                        k = k + 1;
-                    }
-                    // Copy name from cbuf (skip "touch "), bounded by pos
-                    let j = 0;
-                    while j < 50 && (j + 6) < pos {
-                        let nc = cbuf.data[j + 6];
-                        if nc == 0 || nc == 32 { break; }
-                        dentry_set_name_byte(dentries, new_d, j, nc);
-                        j = j + 1;
-                    }
-                    dentry_set_name_byte(dentries, new_d, j, 0);
-                    dentry_set_name_byte(dentries, new_d, j + 1, 0);
-                    dentry_set_name_byte(dentries, new_d, j + 2, 0);
-                    dentry_set_name_byte(dentries, new_d, j + 3, 0);
-                    dentry_set_used(dentries, new_d, 1);
-                    dentry_set_parent(dentries, new_d, cwd as u64);
-                    let new_ino = inode_alloc(inodes);
-                    inode_set_mode(inodes, new_ino, 32768);  // S_IFREG
-                    dentry_set_inode(dentries, new_d, new_ino as u64);
-                    let old_child = dentry_get_child(dentries, cwd);
-                    dentry_set_next(dentries, new_d, old_child);
-                    dentry_set_child(dentries, cwd, new_d as u64);
-                    inode_set_size(inodes, new_ino, 2);
-                    inode_set_private(inodes, new_ino, 1);
-                    kputs_ok(ec);
-                } else {
-                    kprint(ec, 102); kprint(ec, 117); kprint(ec, 108); kprint(ec, 108);
-                    kputs_nl(ec);
-                }
-            }
-
-            // mkdir (109='m')
-            if cmd == 109 {
-                // Check it's "mkdir" not "memstat" — second byte 'k' = 107
-                if pos > 1 {
-                    if cbuf.data[1] == 107 {
-                        let new_d = dentry_alloc(dentries);
-                        if new_d < 64 {
-                            let k = 0;
-                            while k < 64 {
-                                dentry_set_name_byte(dentries, new_d, k, 0);
-                                k = k + 1;
-                            }
-                            let j = 0;
-                            while j < 58 && (j + 6) < pos {
-                                let nc = cbuf.data[j + 6];
-                                if nc == 0 || nc == 32 { break; }
-                                dentry_set_name_byte(dentries, new_d, j, nc);
-                                j = j + 1;
-                            }
-                            dentry_set_name_byte(dentries, new_d, j, 0);
-                            dentry_set_used(dentries, new_d, 1);
-                            dentry_set_parent(dentries, new_d, cwd as u64);
-                            let new_ino = inode_alloc(inodes);
-                            inode_set_mode(inodes, new_ino, 16384);  // S_IFDIR
-                            dentry_set_inode(dentries, new_d, new_ino as u64);
-                            let old_child = dentry_get_child(dentries, cwd);
-                            dentry_set_next(dentries, new_d, old_child);
-                            dentry_set_child(dentries, cwd, new_d as u64);
-                            kputs_ok(ec);
-                        } else {
-                            kputs_err(ec);
-                        }
-                    }
-                }
-            }
-
-            // alloc (97='a')
-            if cmd == 97 {
-                let addr = pmm_alloc(pool, pmm, 0);
-                if addr != 0 {
-                    kprint(ec, 97); kprint(ec, 108); kprint(ec, 108); kprint(ec, 111);
-                    kprint(ec, 99); kprint(ec, 58); kprint(ec, 32);
-                    kputs_num(ec, addr); kputs_nl(ec);
-                } else {
-                    kprint(ec, 79); kprint(ec, 79); kprint(ec, 77); kputs_nl(ec);
-                }
-            }
-
-            // free (102='f')
-            if cmd == 102 {
-                kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
-                kprint(ec, 100); kprint(ec, 58); kprint(ec, 32);
-                kputs_num(ec, pmm.free_pages); kputs_nl(ec);
-            }
-
-            // ver (118='v')
-            if cmd == 118 {
-                kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
-                kprint(ec, 48); kprint(ec, 46); kprint(ec, 49); kprint(ec, 46);
-                kprint(ec, 48); kprint(ec, 45); kprint(ec, 97); kprint(ec, 108);
-                kprint(ec, 112); kprint(ec, 104); kprint(ec, 97); kputs_nl(ec);
-            }
-
-            // memstat (109='m' + 'e')
-            if cmd == 109 {
-                if pos > 1 {
-                    if cbuf.data[1] == 101 {
-                        kprint(ec, 116); kprint(ec, 111); kprint(ec, 116); kprint(ec, 97);
-                        kprint(ec, 108); kprint(ec, 58); kprint(ec, 32);
-                        kputs_num(ec, pmm.total_pages); kputs_nl(ec);
-                        kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
-                        kprint(ec, 58); kprint(ec, 32);
-                        kputs_num(ec, pmm.free_pages); kputs_nl(ec);
-                        kprint(ec, 117); kprint(ec, 115); kprint(ec, 101); kprint(ec, 100);
-                        kprint(ec, 58); kprint(ec, 32);
-                        kputs_num(ec, pmm.total_pages - pmm.free_pages); kputs_nl(ec);
-                    }
-                }
-            }
-
-            // echo (101='e')
-            if cmd == 101 {
-                if pos > 1 {
-                    if cbuf.data[1] == 120 {
-                        // exit
-                        running = 0;
-                    } else {
-                        // echo <args>
-                        if pos > 4 {
-                            if cbuf.data[4] == 32 {
-                                let i = 5;
-                                while i < pos {
-                                    kprint(ec, cbuf.data[i]);
-                                    i = i + 1;
-                                }
-                                kputs_nl(ec);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Reset for next command
-            pos = 0;
-            if running == 1 { kputs_prompt(ec); }
-        } else {
-            // Not newline — buffer the byte.
-            // In cooked mode, the terminal sends the whole line on Enter,
-            // so we get printable chars + the trailing '\n'.  We also get
-            // '\r' (13) on some terminals — skip it.
-            if c != 13 {
+        // ── COOKED MODE (pipe or ioctl failed) ────────────────────────
+        // No echo, no line editing — just buffer bytes, execute on Enter.
+        // The terminal (or pipe) handles echo/buffering itself.
+        if raw_ok == 0 {
+            if c == 10 || c == 13 {
+                // Enter — execute command
+                let cmd = cbuf.data[0];
+                // (falls through to the command dispatch below)
+            } else {
                 if pos < 255 {
                     cbuf.data[pos] = c;
                     pos = pos + 1;
                 }
+                continue;
+            }
+        } else {
+
+        // ── RAW MODE — full line editing ──────────────────────────────
+        if c == 3 {
+            // Ctrl-C
+            if raw_ok == 1 { termios_restore(saved_termios); }
+            kputs_shutdown(ec);
+            return 0;
+        }
+        if c == 4 {
+            // Ctrl-D (EOF)
+            if pos == 0 {
+                if raw_ok == 1 { termios_restore(saved_termios); }
+                kputs_shutdown(ec);
+                return 0;
+            }
+            continue;
+        }
+        if c == 10 || c == 13 {
+            // Enter — execute command
+            kputs_nl(ec);
+            history_push(hist, cbuf, pos);
+            hist_idx = 0;
+        } else {
+            if c == 8 || c == 127 {
+                // Backspace — delete char before cursor
+                if cursor > 0 {
+                    let i = cursor - 1;
+                    while i < pos - 1 {
+                        cbuf.data[i] = cbuf.data[i + 1];
+                        i = i + 1;
+                    }
+                    pos = pos - 1;
+                    cursor = cursor - 1;
+                    redraw_line(ec, cbuf, pos, cursor);
+                }
+                continue;
+            }
+            if c == 27 {
+                // Escape sequence — read '[' and final byte
+                let n2 = read(0, rbuf as Address, 1);
+                if n2 <= 0 { continue; }
+                let c2 = rbuf.data[0];
+                if c2 != 91 { continue; }  // not '['
+                let n3 = read(0, rbuf as Address, 1);
+                if n3 <= 0 { continue; }
+                let c3 = rbuf.data[0];
+                if c3 == 65 {
+                    // Up — older command
+                    if hist.count > 0 && hist_idx < hist.count {
+                        hist_idx = hist_idx + 1;
+                        let target = hist.count - hist_idx;
+                        pos = history_load(hist, cbuf, target);
+                        cursor = pos;
+                        redraw_line(ec, cbuf, pos, cursor);
+                    }
+                } else {
+                    if c3 == 66 {
+                        // Down — newer command
+                        if hist_idx > 0 { hist_idx = hist_idx - 1; }
+                        if hist_idx == 0 {
+                            pos = 0; cursor = 0;
+                        } else {
+                            let target = hist.count - hist_idx;
+                            pos = history_load(hist, cbuf, target);
+                            cursor = pos;
+                        }
+                        redraw_line(ec, cbuf, pos, cursor);
+                    } else {
+                        if c3 == 68 {
+                            // Left
+                            if cursor > 0 { cursor = cursor - 1; kprint(ec, 27); kprint(ec, 91); kprint(ec, 68); }
+                        } else {
+                            if c3 == 67 {
+                                // Right
+                                if cursor < pos { cursor = cursor + 1; kprint(ec, 27); kprint(ec, 91); kprint(ec, 67); }
+                            }
+                            // else: Home/End/PgUp/PgDn etc. — c3 might be 126 (tilde)
+                            // with a preceding digit. Read and discard the digit if present.
+                        }
+                    }
+                }
+                continue;
+            }
+            if c == 1 {
+                // Ctrl-A — beginning of line
+                cursor = 0;
+                redraw_line(ec, cbuf, pos, cursor);
+                continue;
+            }
+            if c == 5 {
+                // Ctrl-E — end of line
+                cursor = pos;
+                redraw_line(ec, cbuf, pos, cursor);
+                continue;
+            }
+            if c == 11 {
+                // Ctrl-K — kill to end of line
+                pos = cursor;
+                redraw_line(ec, cbuf, pos, cursor);
+                continue;
+            }
+            if c == 21 {
+                // Ctrl-U — kill from beginning of line
+                let i = 0;
+                while i + cursor < 256 {
+                    cbuf.data[i] = cbuf.data[i + cursor];
+                    i = i + 1;
+                }
+                pos = pos - cursor;
+                cursor = 0;
+                redraw_line(ec, cbuf, pos, cursor);
+                continue;
+            }
+            if c == 23 {
+                // Ctrl-W — kill previous word
+                while cursor > 0 && cbuf.data[cursor - 1] == 32 { cursor = cursor - 1; pos = pos - 1; let i = cursor; while i < pos { cbuf.data[i] = cbuf.data[i + 1]; i = i + 1; } }
+                while cursor > 0 && cbuf.data[cursor - 1] != 32 { cursor = cursor - 1; pos = pos - 1; let i = cursor; while i < pos { cbuf.data[i] = cbuf.data[i + 1]; i = i + 1; } }
+                redraw_line(ec, cbuf, pos, cursor);
+                continue;
+            }
+            // Regular printable character — insert at cursor
+            if c >= 32 && pos < 255 {
+                // Shift chars right from cursor
+                let i = pos;
+                while i > cursor {
+                    cbuf.data[i] = cbuf.data[i - 1];
+                    i = i - 1;
+                }
+                cbuf.data[cursor] = c;
+                pos = pos + 1;
+                cursor = cursor + 1;
+                redraw_line(ec, cbuf, pos, cursor);
+            }
+            continue;
+        }
+        } // end raw-mode else block
+
+        // ── Execute command (c was Enter) ──────────────────────────────
+        let cmd = cbuf.data[0];
+
+        // help (104='h')
+        if cmd == 104 {
+            kprint(ec, 99); kprint(ec, 109); kprint(ec, 100); kprint(ec, 115);
+            kprint(ec, 58); kprint(ec, 32);
+            kprint(ec, 101); kprint(ec, 99); kprint(ec, 104); kprint(ec, 111);
+            kprint(ec, 44); kprint(ec, 32); kprint(ec, 104); kprint(ec, 101);
+            kprint(ec, 108); kprint(ec, 112); kprint(ec, 44); kprint(ec, 32);
+            kprint(ec, 101); kprint(ec, 120); kprint(ec, 105); kprint(ec, 116);
+            kprint(ec, 44); kprint(ec, 32); kprint(ec, 112); kprint(ec, 105);
+            kprint(ec, 100); kprint(ec, 44); kprint(ec, 32); kprint(ec, 112);
+            kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 108);
+            kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 99);
+            kprint(ec, 97); kprint(ec, 116); kprint(ec, 44); kprint(ec, 32);
+            kprint(ec, 116); kprint(ec, 111); kprint(ec, 117); kprint(ec, 99);
+            kprint(ec, 104); kprint(ec, 44); kprint(ec, 32); kprint(ec, 109);
+            kprint(ec, 107); kprint(ec, 100); kprint(ec, 105); kprint(ec, 114);
+            kprint(ec, 44); kprint(ec, 32); kprint(ec, 97); kprint(ec, 108);
+            kprint(ec, 108); kprint(ec, 111); kprint(ec, 99); kprint(ec, 44);
+            kprint(ec, 32); kprint(ec, 102); kprint(ec, 114); kprint(ec, 101);
+            kprint(ec, 101); kprint(ec, 44); kprint(ec, 32); kprint(ec, 118);
+            kprint(ec, 101); kprint(ec, 114); kprint(ec, 44); kprint(ec, 32);
+            kprint(ec, 109); kprint(ec, 101); kprint(ec, 109); kprint(ec, 115);
+            kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kprint(ec, 44);
+            kprint(ec, 32); kprint(ec, 99); kprint(ec, 100); kprint(ec, 44);
+            kprint(ec, 32); kprint(ec, 112); kprint(ec, 119); kprint(ec, 100);
+            kputs_nl(ec);
+        }
+
+        // pid / ps / pwd
+        if cmd == 112 {
+            if pos > 1 {
+                if cbuf.data[1] == 119 {
+                    // pwd
+                    if cwd == 0 { kprint(ec, 47); kputs_nl(ec); }
+                    else {
+                        let j = 0;
+                        while j < 64 {
+                            let nc = dentry_get_name_byte(dentries, cwd, j);
+                            if nc == 0 { break; }
+                            kprint(ec, nc);
+                            j = j + 1;
+                        }
+                        kputs_nl(ec);
+                    }
+                } else {
+                    if cbuf.data[1] == 115 {
+                        // ps
+                        kprint(ec, 80); kprint(ec, 73); kprint(ec, 68); kprint(ec, 32);
+                        kprint(ec, 83); kprint(ec, 84); kprint(ec, 65); kprint(ec, 84);
+                        kprint(ec, 45); kprint(ec, 78); kprint(ec, 82); kputs_nl(ec);
+                        let i = 0;
+                        while i < 256 {
+                            if pt_get_state(tbl, i) != 0 {
+                                kputs_num(ec, pt_get_pid(tbl, i) as u64);
+                                kprint(ec, 32);
+                                let st = pt_get_state(tbl, i);
+                                if st == 1 { kprint(ec, 82); kprint(ec, 85); kprint(ec, 78); }
+                                else { if st == 2 { kprint(ec, 82); kprint(ec, 68); kprint(ec, 89); }
+                                else { if st == 4 { kprint(ec, 90); kprint(ec, 79); kprint(ec, 77); }
+                                else { kprint(ec, 63); } } }
+                                kputs_nl(ec);
+                            }
+                            i = i + 1;
+                        }
+                    } else {
+                        // pid
+                        kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
+                        kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
+                    }
+                }
+            } else {
+                kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
+                kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
             }
         }
+
+        // ls (108='l')
+        if cmd == 108 {
+            let child = dentry_get_child(dentries, cwd) as u32;
+            let found = 0;
+            if child != 0 {
+                let cur = child;
+                while cur < 64 {
+                    if dentry_get_used(dentries, cur) == 1 {
+                        let j = 0;
+                        while j < 64 {
+                            let nc = dentry_get_name_byte(dentries, cur, j);
+                            if nc == 0 { break; }
+                            kprint(ec, nc);
+                            j = j + 1;
+                        }
+                        kprint(ec, 32); kprint(ec, 32);
+                        found = 1;
+                    }
+                    let nxt = dentry_get_next(dentries, cur);
+                    if nxt == 0 { break; }
+                    cur = nxt as u32;
+                }
+            }
+            kputs_nl(ec);
+            if found == 0 {
+                kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
+                kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
+            }
+        }
+
+        // cat (99='c') / cd (99='c', 100='d')
+        if cmd == 99 {
+            if pos > 1 && cbuf.data[1] == 100 {
+                // ── cd ──────────────────────────────────────────────
+                if pos == 2 { cwd = 0; kputs_ok(ec); }
+                else {
+                    let name_start: u32 = 3;
+                    if cbuf.data[2] != 32 { name_start = 2; }
+                    // Strip quotes if present
+                    let ns = name_start;
+                    if cbuf.data[ns] == 34 || cbuf.data[ns] == 39 {
+                        // Skip opening quote
+                        name_start = ns + 1;
+                    }
+                    // cd ..
+                    if cbuf.data[name_start] == 46 && (name_start + 1) < pos && cbuf.data[name_start + 1] == 46 {
+                        let p = dentry_get_parent(dentries, cwd);
+                        if p < 64 { cwd = p as u32; }
+                        kputs_ok(ec);
+                    } else {
+                        if cbuf.data[name_start] == 47 {
+                            cwd = 0; kputs_ok(ec);
+                        } else {
+                            // cd <name> — search CWD children
+                            let child = dentry_get_child(dentries, cwd) as u32;
+                            let cur = child;
+                            let found_idx = 64;
+                            while cur < 64 {
+                                if dentry_get_used(dentries, cur) == 1 {
+                                    let match_ok = 1;
+                                    let j = 0;
+                                    while j < 58 && (name_start + j) < pos {
+                                        let cmd_c = cbuf.data[name_start + j];
+                                        // Stop at closing quote or space
+                                        if cmd_c == 34 || cmd_c == 39 || cmd_c == 0 { break; }
+                                        let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                        if fn_c == 0 { match_ok = 0; break; }
+                                        if fn_c != cmd_c { match_ok = 0; break; }
+                                        j = j + 1;
+                                    }
+                                    if match_ok == 1 {
+                                        let fn_c = dentry_get_name_byte(dentries, cur, j);
+                                        if fn_c == 0 { found_idx = cur; break; }
+                                    }
+                                }
+                                let nxt = dentry_get_next(dentries, cur);
+                                if nxt == 0 { break; }
+                                cur = nxt as u32;
+                            }
+                            if found_idx < 64 {
+                                let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                                let mode = inode_get_mode(inodes, ino_idx);
+                                if mode == 16384 { cwd = found_idx; kputs_ok(ec); }
+                                else { kprint(ec, 78); kprint(ec, 79); kprint(ec, 84); kprint(ec, 32); kprint(ec, 68); kprint(ec, 73); kprint(ec, 82); kputs_nl(ec); }
+                            } else {
+                                kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 100); kprint(ec, 105); kprint(ec, 114); kputs_nl(ec);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // ── cat ──────────────────────────────────────────────
+                let fname_start: u32 = 4;
+                if cbuf.data[3] != 32 { fname_start = 3; }
+                // Strip quotes
+                let ns = fname_start;
+                if cbuf.data[ns] == 34 || cbuf.data[ns] == 39 { fname_start = ns + 1; }
+                let child = dentry_get_child(dentries, cwd) as u32;
+                let cur = child;
+                let found_idx = 64;
+                while cur < 64 {
+                    if dentry_get_used(dentries, cur) == 1 {
+                        let match_ok = 1;
+                        let j = 0;
+                        while j < 58 && (fname_start + j) < pos {
+                            let cmd_c = cbuf.data[fname_start + j];
+                            if cmd_c == 34 || cmd_c == 39 || cmd_c == 0 { break; }
+                            let fn_c = dentry_get_name_byte(dentries, cur, j);
+                            if fn_c == 0 { match_ok = 0; break; }
+                            if fn_c != cmd_c { match_ok = 0; break; }
+                            j = j + 1;
+                        }
+                        if match_ok == 1 {
+                            let fn_c = dentry_get_name_byte(dentries, cur, j);
+                            if fn_c == 0 { found_idx = cur; break; }
+                        }
+                    }
+                    let nxt = dentry_get_next(dentries, cur);
+                    if nxt == 0 { break; }
+                    cur = nxt as u32;
+                }
+                if found_idx < 64 {
+                    let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                    let fsize = inode_get_size(inodes, ino_idx);
+                    if fsize > 0 { kprint(ec, 104); kprint(ec, 105); kputs_nl(ec); }
+                    else { kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112); kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec); }
+                } else {
+                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102); kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
+                }
+            }
+        }
+
+        // touch (116='t')
+        if cmd == 116 {
+            let new_d = dentry_alloc(dentries);
+            if new_d < 64 {
+                let k = 0;
+                while k < 64 { dentry_set_name_byte(dentries, new_d, k, 0); k = k + 1; }
+                // Parse filename: skip "touch ", strip quotes, stop at space
+                let src: u32 = 6;
+                if cbuf.data[5] == 32 { src = 6; }  // "touch filename"
+                // Strip opening quote
+                if cbuf.data[src] == 34 || cbuf.data[src] == 39 { src = src + 1; }
+                let j = 0;
+                while j < 50 && (src + j) < pos {
+                    let nc = cbuf.data[src + j];
+                    if nc == 0 || nc == 32 || nc == 34 || nc == 39 { break; }
+                    dentry_set_name_byte(dentries, new_d, j, nc);
+                    j = j + 1;
+                }
+                dentry_set_name_byte(dentries, new_d, j, 0);
+                dentry_set_used(dentries, new_d, 1);
+                dentry_set_parent(dentries, new_d, cwd as u64);
+                let new_ino = inode_alloc(inodes);
+                inode_set_mode(inodes, new_ino, 32768);
+                dentry_set_inode(dentries, new_d, new_ino as u64);
+                let old_child = dentry_get_child(dentries, cwd);
+                dentry_set_next(dentries, new_d, old_child);
+                dentry_set_child(dentries, cwd, new_d as u64);
+                inode_set_size(inodes, new_ino, 2);
+                inode_set_private(inodes, new_ino, 1);
+                kputs_ok(ec);
+            } else {
+                kprint(ec, 102); kprint(ec, 117); kprint(ec, 108); kprint(ec, 108); kputs_nl(ec);
+            }
+        }
+
+        // mkdir (109='m', 107='k')
+        if cmd == 109 {
+            if pos > 1 && cbuf.data[1] == 107 {
+                let new_d = dentry_alloc(dentries);
+                if new_d < 64 {
+                    let k = 0;
+                    while k < 64 { dentry_set_name_byte(dentries, new_d, k, 0); k = k + 1; }
+                    let src: u32 = 6;
+                    if cbuf.data[src] == 34 || cbuf.data[src] == 39 { src = src + 1; }
+                    let j = 0;
+                    while j < 58 && (src + j) < pos {
+                        let nc = cbuf.data[src + j];
+                        if nc == 0 || nc == 32 || nc == 34 || nc == 39 { break; }
+                        dentry_set_name_byte(dentries, new_d, j, nc);
+                        j = j + 1;
+                    }
+                    dentry_set_name_byte(dentries, new_d, j, 0);
+                    dentry_set_used(dentries, new_d, 1);
+                    dentry_set_parent(dentries, new_d, cwd as u64);
+                    let new_ino = inode_alloc(inodes);
+                    inode_set_mode(inodes, new_ino, 16384);
+                    dentry_set_inode(dentries, new_d, new_ino as u64);
+                    let old_child = dentry_get_child(dentries, cwd);
+                    dentry_set_next(dentries, new_d, old_child);
+                    dentry_set_child(dentries, cwd, new_d as u64);
+                    kputs_ok(ec);
+                } else { kputs_err(ec); }
+            }
+        }
+
+        // alloc (97='a')
+        if cmd == 97 {
+            let addr = pmm_alloc(pool, pmm, 0);
+            if addr != 0 {
+                kprint(ec, 97); kprint(ec, 108); kprint(ec, 108); kprint(ec, 111);
+                kprint(ec, 99); kprint(ec, 58); kprint(ec, 32);
+                kputs_num(ec, addr); kputs_nl(ec);
+            } else { kprint(ec, 79); kprint(ec, 79); kprint(ec, 77); kputs_nl(ec); }
+        }
+
+        // free (102='f')
+        if cmd == 102 {
+            kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
+            kprint(ec, 100); kprint(ec, 58); kprint(ec, 32);
+            kputs_num(ec, pmm.free_pages); kputs_nl(ec);
+        }
+
+        // ver (118='v')
+        if cmd == 118 {
+            kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
+            kprint(ec, 48); kprint(ec, 46); kprint(ec, 49); kprint(ec, 46);
+            kprint(ec, 48); kprint(ec, 45); kprint(ec, 97); kprint(ec, 108);
+            kprint(ec, 112); kprint(ec, 104); kprint(ec, 97); kputs_nl(ec);
+        }
+
+        // memstat (109='m', 101='e')
+        if cmd == 109 {
+            if pos > 1 && cbuf.data[1] == 101 {
+                kprint(ec, 116); kprint(ec, 111); kprint(ec, 116); kprint(ec, 97);
+                kprint(ec, 108); kprint(ec, 58); kprint(ec, 32);
+                kputs_num(ec, pmm.total_pages); kputs_nl(ec);
+                kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
+                kprint(ec, 58); kprint(ec, 32);
+                kputs_num(ec, pmm.free_pages); kputs_nl(ec);
+                kprint(ec, 117); kprint(ec, 115); kprint(ec, 101); kprint(ec, 100);
+                kprint(ec, 58); kprint(ec, 32);
+                kputs_num(ec, pmm.total_pages - pmm.free_pages); kputs_nl(ec);
+            }
+        }
+
+        // echo (101='e') / exit (101='e', 120='x')
+        if cmd == 101 {
+            if pos > 1 && cbuf.data[1] == 120 {
+                running = 0;
+            } else {
+                if pos > 4 && cbuf.data[4] == 32 {
+                    let i = 5;
+                    while i < pos { kprint(ec, cbuf.data[i]); i = i + 1; }
+                    kputs_nl(ec);
+                }
+            }
+        }
+
+        // Reset for next command
+        pos = 0;
+        cursor = 0;
+        if running == 1 { kputs_prompt(ec); }
     }
 
+    if raw_ok == 1 { termios_restore(saved_termios); }
     kputs_shutdown(ec);
     return 0;
 }
