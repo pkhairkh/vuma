@@ -444,11 +444,9 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
 
     // Search free_lists[order] for the buddy block.
     let buddy = pmm_buddy(addr, order);
-    let prev = 256;   // 256 = "no previous" (head of list)
-    let cur = pmm_get_free_list(pmm, order);
     let found = 256;  // 256 = "buddy not found"
-    let cur2 = cur;
-    let prev2 = prev;
+    let cur2 = pmm_get_free_list(pmm, order);
+    let prev2: u64 = 256;  // 256 = "no previous" (head of list)
     // Walk the list looking for a node whose base == buddy.
     while cur2 != 256 {
         let cur_base = pool_get_base(pool, cur2 as u32);
