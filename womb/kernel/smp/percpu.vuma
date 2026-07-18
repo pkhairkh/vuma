@@ -1,0 +1,568 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/smp/percpu.vuma
+// VWK SMP Subsystem — Per-CPU state (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K4f layer of the VWK kernel: the per-CPU state block
+// (the analog of Linux's `struct percpu_area` / x86's GS-base-pointed
+// per-CPU region) and the helpers the scheduler / IRQ entry use to read
+// and write the currently-running task, the per-CPU kernel stack, the
+// per-CPU runqueue head, and the per-CPU preempt counter.
+//
+// K4a-e built up the task / scheduler / context-switch / fork-exec-exit /
+// waitpid stack — but ALL of those operate on a SINGLE global
+// ProcessTable + a single current-task pointer. K4f is the file that
+// makes the design SMP-aware: every CPU has its OWN PerCpu block, so the
+// scheduler (K4b) can pick the next task for "this CPU" without locking
+// against the other CPUs' current-task pointers. In bare-metal K11,
+// each CPU's percpu block is anchored in a per-CPU segment register
+// (GS base on x86_64, TPIDR_EL0 on aarch64, tp on riscv64), and the
+// scheduler reads `current_task` via a single segment-relative load
+// (no atomic, no lock — it's CPU-local data). In hosted mode, the
+// self-test allocates ONE PerCpu (single-CPU simulation) and passes it
+// by reference to percpu_init / percpu_get_current / percpu_set_current
+// / percpu_preempt_disable / percpu_preempt_enable / percpu_preemptable.
+//
+// ── PerCpu layout (6 fields, 28 bytes) ──────────────────────────────────────
+//   cpu_id         (u32) — CPU number (0, 1, 2, ...). K11's per-CPU
+//                            boot stub writes this once at CPU bring-up
+//                            (AP processor is told its CPU ID via the
+//                            APIC / GIC / PLIC, then wr-cpu_id).
+//   current_task   (u32) — index of the currently-running task in the
+//                            ProcessTable, or 256 = idle (the per-CPU
+//                            idle task isn't a real ProcessTable slot;
+//                            it's a per-CPU spin loop). Set by the
+//                            scheduler (K4b's sched_dequeue + K4c's
+//                            context_switch) on every context switch.
+//   kernel_stack   (u64) — top (highest address) of this CPU's kernel
+//                            stack. K11's trap entry loads RSP from
+//                            here on every kernel entry (the trap stub
+//                            does `mov rsp, gs:kernel_stack` on x86_64).
+//                            K4c's context_switch swaps this when
+//                            switching to a kernel-thread stack.
+//   idle_task      (u32) — index of the idle task for this CPU. Set
+//                            once at boot by kmain. The scheduler picks
+//                            this task when the runqueue is empty (256
+//                            returned from sched_dequeue).
+//   rq_head        (u32) — runqueue head for this CPU (or 256 = empty).
+//                            Per-CPU runqueues are the CFS pattern (one
+//                            rbtree per CPU) — K4b's scheduler.vuma uses
+//                            a single global Runqueue; K4f declares the
+//                            per-CPU rq_head field for the K11 migration
+//                            to per-CPU runqueues (kmain wires each
+//                            CPU's rq_head to a per-CPU Runqueue).
+//   preempt_count  (u32) — non-zero = preemption disabled. Incremented
+//                            by percpu_preempt_disable (called by IRQ
+//                            entry on x86_64 — `cli` plus preempt_count++
+//                            in the trap stub), decremented by
+//                            percpu_preempt_enable (called by IRQ exit
+//                            — `sti` plus preempt_count--). The timer-
+//                            IRQ handler (K4c) checks percpu_preemptable
+//                            before calling schedule(); if 0, it skips
+//                            the preemption (the kernel is in a critical
+//                            section and can't be preempted).
+//
+//   Total size: 4 + 4 + 8 + 4 + 4 + 4 = 28 bytes (7 × 4-byte alignment
+//   for the u64 — VUMA pads the layout to its max-field alignment, so
+//   the actual buffer size is 32 bytes — 4 bytes of trailing padding
+//   after the u64 alignment bump before kernel_stack, and 0 trailing
+//   padding after preempt_count. The codegen's layout allocator handles
+//   this automatically; field accessors see field-relative offsets
+//   directly, so the trailing padding is invisible to VUMA source).
+//
+// ── Why per-CPU state? ──────────────────────────────────────────────────────
+// Linux, FreeBSD, and every other SMP OS keeps the following per-CPU
+// rather than global, because each CPU accesses them in its own hot
+// path and they DON'T need cross-CPU coherence (each CPU only reads
+// ITS OWN current_task, kernel_stack, preempt_count — never another
+// CPU's). This eliminates the cache-line bouncing a global atomic
+// would cause on every context switch (every switch on CPU 0 would
+// invalidate CPU 1's cache of the global current_task, even though
+// CPU 1 doesn't care). The per-CPU state pattern is the canonical
+// answer: each CPU has its own cache line, never touched by other
+// CPUs, accessed via a segment-relative load (single instruction, no
+// lock prefix, no cache invalidation).
+//
+//   x86_64:    GS base (KernelGSbase MSR) points at this CPU's PerCpu.
+//              `mov rax, gs:0` reads cpu_id; `mov rax, gs:8` reads
+//              current_task; etc. wrgsbase / wrmsr KernelGSbase sets
+//              the GS base on a context switch into the kernel.
+//   aarch64:   TPIDR_EL0 (thread pointer register) points at this CPU's
+//              PerCpu. `mrs x0, tpidr_el0` reads the base; the per-CPU
+//              fields are then accessed via [x0, #offset].
+//   riscv64:   tp (thread pointer register, x4) points at this CPU's
+//              PerCpu. `mv a0, tp` reads the base; the per-CPU fields
+//              are then accessed via 0(a0) / 4(a0) / etc.
+//
+// In hosted mode, there's only ONE CPU (the host process), so the
+// per-CPU state is just a single global State<PerCpu>. The externs
+// (rdgsbase / wrgsbase / rd_tpidr_el0 / wr_tpidr_el0 / rd_tp / wr_tp)
+// are declared for K11's bare-metal path; in hosted mode they resolve
+// to __ffi_fallback_stub (returns 0, void calls no-op), and the
+// functions in this file just read/write the PerCpu state directly
+// (init-style — see "Why init-style?" below).
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K4f contract's main() allocates `pcpu = state_new(PerCpu)` and
+// passes it by reference to percpu_init / percpu_get_current /
+// percpu_set_current / percpu_preempt_disable / percpu_preempt_enable /
+// percpu_preemptable. This is the canonical PMT pattern (K2a's
+// pmm_init(pool, pmm, ...), K3d's trap_frame_init(tf), K4a's pt_init(tbl))
+// — see womb/kernel/mm/pmm.vuma header "Why init-style?" for the codegen
+// rationale: the current codegen does NOT propagate State-typedness
+// through function return values, so `fn percpu_new() -> State<PerCpu>`
+// would produce broken field-access code in callers). All percpu.vuma
+// helpers take `pcpu: State<PerCpu>` by regular VUMA-fn borrow (NOT
+// extern #[borrow] — VUMA fn calls don't need the attribute; only
+// extern "C" calls do, and none of these helpers call any extern).
+//
+// ── State<T> params: 1 per function ─────────────────────────────────────────
+// Per the K4b contract's "Keep State<T> params to 1-2 per function" rule,
+// every function in this file takes exactly 1 State<PerCpu> param (plus
+// small u32 / u64 / u8 args). Same discipline as K4a's task_alloc(tbl)
+// (1 State param) and K4b's sched_tick(tbl, task_idx, delta) (1 State
+// param + u32 + u64). This file does NOT take a State<ProcessTable>
+// param — percpu_get_current / percpu_set_current return/accept a task
+// INDEX (u32), not a State<Task>; the scheduler (K4b) is the file that
+// owns the ProcessTable and looks up the actual Task struct from the
+// index. percpu.vuma only tracks the INDEX.
+//
+// ── Why does the self-test pass `cpu_id=0, idle_task=0`? ────────────────────
+// In hosted mode, there's only one CPU (CPU 0), and the idle task is
+// at ProcessTable slot 0 (PID 1 = init, repurposed as idle for the
+// self-test). Real kernels (K11) will use a separate idle task per
+// CPU — slot 0 is init (PID 1), and CPU 0's idle task is a separate
+// kernel thread at, say, slot 255 (PID 256, the highest PID — Linux
+// reserves PID 0 for the swapper/idle task; VWK uses slot 255 for the
+// idle task to keep PID 0 unused). The K4f self-test uses slot 0 for
+// simplicity (it doesn't exercise the ProcessTable — it just verifies
+// the PerCpu field round-trip through percpu_init / percpu_get_current
+// / percpu_set_current / percpu_preempt_*).
+//
+// ── Arch-specific externs (per-CPU segment register access) ─────────────────
+// The 6 externs declared below are the per-arch per-CPU segment-register
+// access primitives. In hosted mode they resolve to __ffi_fallback_stub
+// (returns 0, void calls no-op) — the self-test doesn't call them. In
+// bare-metal K11 they're implemented as per-arch asm stubs registered
+// in src/codegen/src/<arch>/mod.rs::build_runtime_syscall_stubs:
+//
+//   x86_64:
+//     rdgsbase()  — `rdgsbase rax; ret` (reads KernelGSbase into RAX).
+//                    Requires CR4.FSGSBASE=1 (set during early boot); if
+//                    not set, the alternative is `mov rax, gs:0` plus a
+//                    GS-base-canonicalization trick. K11 picks one.
+//     wrgsbase(v) — `mov rdi, rax; wrgsbase rax; ret` (writes RDI into
+//                    KernelGSbase). Called by the AP bring-up stub to
+//                    switch to this CPU's PerCpu block.
+//   aarch64:
+//     rd_tpidr_el0()  — `mrs x0, tpidr_el0; ret`.
+//     wr_tpidr_el0(v) — `msr tpidr_el0, x0; ret`.
+//   riscv64:
+//     rd_tp()  — `mv a0, tp; ret`.
+//     wr_tp(v) — `mv tp, a0; ret`.
+//
+// The 3 arch-pairs are DECLARED but NOT CALLED in this file — they're
+// the K11 hooks for the bare-metal per-CPU bring-up path. The hosted
+// self-test uses the init-style API (percpu_init + percpu_get/set_*
+// taking State<PerCpu>) directly; K11's kmain will call percpu_init
+// first (to set up the State<PerCpu> contents), then wrgsbase /
+// wr_tpidr_el0 / wr_tp (to anchor the State<PerCpu>'s address in the
+// per-CPU segment register), after which the scheduler can read
+// `current_task` via a single segment-relative load instead of passing
+// the State<PerCpu> around. The two access paths coexist: the init-
+// style API for setup / hosted mode / self-test, the segment-register
+// path for the bare-metal hot path.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// PerCpu block is a 28-byte (32-byte padded) struct held in a
+// `___pmt_buffer`-backed State<PerCpu>; the CALLER allocates it via
+// `state_new(PerCpu)` and passes it by reference to percpu_init /
+// percpu_get_current / percpu_set_current / percpu_preempt_disable /
+// percpu_preempt_enable / percpu_preemptable (init-style API — see
+// "Why init-style?" above). The 6 arch-specific externs (rdgsbase /
+// wrgsbase / rd_tpidr_el0 / wr_tpidr_el0 / rd_tp / wr_tp) are
+// DECLARED but NOT CALLED in this file (see "Arch-specific externs"
+// above) — they're the K11 hooks for bare-metal per-CPU bring-up.
+// None of the VUMA-fn helpers in this file call any extern, so the
+// codegen's conservative State-invalidation-on-extern-call doesn't
+// fire. K4g's syscall handler will call rdgsbase / rd_tpidr_el0 /
+// rd_tp to fetch the calling CPU's PerCpu base, then call into this
+// file's helpers with that base.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K4f contract's
+// "Use decimal constants (131072 = 128KB, 256 = empty sentinel)" rule.
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096). The constants:
+//     131072 = 0x20000 (128 KB — the kernel_stack address used in the
+//                       self-test; matches Linux's THREAD_SIZE on x86_64
+//                       for the kernel stack top of a typical 16KB-
+//                       aligned kernel stack)
+//     256    = the "idle" sentinel for current_task (no real task is
+//                       running; the CPU is in its idle loop) AND the
+//                       "empty" sentinel for rq_head (no tasks queued
+//                       on this CPU's runqueue). Same value as K4a's
+//                       "table full" sentinel and K4b's "queue empty"
+//                       sentinel — VWK consistently uses 256 as the
+//                       "no slot" sentinel for u32 indices into the
+//                       256-slot ProcessTable / Runqueue.
+//     1      = "preemptable" return value (preempt_count == 0)
+//     0      = "not preemptable" return value (preempt_count > 0) AND
+//              the FREE / idle state value AND the initial preempt_count
+//              AND the initial cpu_id (CPU 0)
+//     5      = the task index used in the self-test's percpu_set_current
+//              call (just a non-zero, non-256 value to verify the round-
+//              trip through percpu_set_current → percpu_get_current)
+//     2      = the preempt_count after two percpu_preempt_disable calls
+//              (1 + 1 = 2 — verifies the increment path)
+//     1      = the preempt_count after one percpu_preempt_enable call
+//              following the two disable calls (2 - 1 = 1 — verifies
+//              the decrement path)
+//
+// ── No pointer syntax ───────────────────────────────────────────────────────
+// Verified: no `*ptr`, `&x`, `allocate(`, or `free(` anywhere in this
+// file. The 6 externs take / return plain scalars (u64) — no Address
+// params, no State<T> params — so there's no `c as Address` cast and
+// no `&state` borrow. The VUMA-fn helpers all take State<PerCpu> by
+// regular VUMA-fn borrow (NOT extern #[borrow] — see "Why init-style?"
+// above), so no `&` borrow syntax. The only non-scalar access is the
+// direct field access (`pcpu.current_task`, `pcpu.preempt_count`, etc.)
+// which is the standard PMT pattern (K2a, K3d, K4a all use it).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares the PerCpu layout for the
+// FIRST time (no prior VUMA file has it) and declares the 6 arch-
+// specific externs (rdgsbase / wrgsbase / rd_tpidr_el0 / wr_tpidr_el0
+// / rd_tp / wr_tp) for the FIRST time (no prior VUMA file declares
+// per-CPU segment-register access). Future files that want to call
+// percpu_init / percpu_get_current / percpu_set_current / percpu_*
+// will re-declare the PerCpu layout byte-identically to this file
+// (same pattern as K4b's scheduler.vuma re-declaring ProcessTable +
+// pt_get_* / pt_set_* byte-identically to K4a's task.vuma). K4g's
+// syscall handler will be the first file to do this (re-declaring
+// PerCpu + percpu_get_current to read the calling CPU's current task).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/smp/percpu.vuma \
+//         /tmp/percpu.bin x86_64 --verify
+//     /tmp/percpu.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 10 self-test checks pass — init,
+// current_task starts as idle, kernel_stack round-trip, rq_head =
+// empty sentinel, preempt_count starts at 0, percpu_set_current +
+// percpu_get_current round-trip, two preempt_disable → count=2,
+// not preemptable, one preempt_enable → count=1, second preempt_enable
+// → preemptable).
+//
+// ── Cross-arch note ─────────────────────────────────────────────────────────
+// This file is arch-AGNOSTIC in its VUMA-fn helpers (percpu_init,
+// percpu_get_current, etc. operate on State<PerCpu> the same way on
+// all 3 arches — same field offsets, same access patterns). The 6
+// arch-specific externs are DECLARED in a single block at the top of
+// the file (not in per-arch files) because:
+//   (a) VUMA's extern "C" block doesn't support #[cfg(arch)] — every
+//       extern in the block resolves to a registered stub or to
+//       __ffi_fallback_stub on every arch. The stubs for the OFF-
+//       arch externs (e.g. rd_tpidr_el0 on x86_64) just return 0
+//       (void calls no-op) and are never called by this file.
+//   (b) The K11 asm stubs for the ON-arch extern (e.g. rdgsbase /
+//       wrgsbase on x86_64) are registered in the per-arch
+//       src/codegen/src/<arch>/mod.rs::build_runtime_syscall_stubs.
+//       K11's kmain / scheduler only calls the ON-arch pair.
+// So this file compiles + IVE-verifies on all 3 arches (x86_64,
+// aarch64, riscv64) — the same single file. K4c's switch.vuma is the
+// only K4 wave that DIVERGES across arches (per-arch context-switch
+// asm); K4f is uniformly arch-agnostic like K4a/K4b/K4d/K4e.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PerCpu: per-CPU state block. 6 fields, 28 bytes (padded to 32 by the
+// codegen's max-field-alignment rule — see "PerCpu layout" in the file
+// header). In bare-metal K11, one PerCpu block is allocated per CPU
+// (kmain allocates CPU 0's, the AP bring-up stub allocates CPU N's),
+// and each CPU's PerCpu address is anchored in the per-CPU segment
+// register (GS base / TPIDR_EL0 / tp) so the scheduler can read
+// `current_task` via a single segment-relative load.
+//
+// The field order matches the canonical order: identity fields first
+// (cpu_id), then the hot-path fields the scheduler / IRQ entry touch
+// on every switch (current_task, kernel_stack, idle_task, rq_head),
+// then the preempt counter last (the IRQ entry touches preempt_count
+// once per IRQ, less hot than current_task).
+layout PerCpu = {
+    cpu_id: u32,
+    current_task: u32,
+    kernel_stack: u64,
+    idle_task: u32,
+    rq_head: u32,
+    preempt_count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Arch-specific externs for per-CPU segment-register access.
+// ────────────────────────────────────────────────────────────────────────────
+// DECLARED but NOT CALLED in this file — they're the K11 hooks for the
+// bare-metal per-CPU bring-up path (see "Arch-specific externs" in the
+// file header). Hosted: __ffi_fallback_stub (returns 0, void calls
+// no-op). K11 swaps these for real asm stubs registered in
+// src/codegen/src/<arch>/mod.rs::build_runtime_syscall_stubs.
+extern "C" {
+    // x86_64: read GS base (KernelGSbase MSR). Returns the address of
+    // this CPU's PerCpu block. K11 stub: `rdgsbase rax; ret` (requires
+    // CR4.FSGSBASE=1).
+    fn rdgsbase() -> u64;
+    // x86_64: write GS base. Sets KernelGSbase to `val` (the address of
+    // this CPU's PerCpu block). Called by the AP bring-up stub on CPU
+    // N to switch from CPU 0's PerCpu to CPU N's PerCpu.
+    // K11 stub: `wrgsbase rdi; ret` (RDI = val).
+    fn wrgsbase(val: u64);
+    // aarch64: read TPIDR_EL0 (thread pointer register). Returns the
+    // address of this CPU's PerCpu block. K11 stub:
+    // `mrs x0, tpidr_el0; ret`.
+    fn rd_tpidr_el0() -> u64;
+    // aarch64: write TPIDR_EL0. Sets the thread pointer to `val`.
+    // K11 stub: `msr tpidr_el0, x0; ret` (X0 = val).
+    fn wr_tpidr_el0(val: u64);
+    // riscv64: read tp (thread pointer register, x4). Returns the
+    // address of this CPU's PerCpu block. K11 stub: `mv a0, tp; ret`.
+    fn rd_tp() -> u64;
+    // riscv64: write tp. Sets the thread pointer to `val`.
+    // K11 stub: `mv tp, a0; ret` (A0 = val).
+    fn wr_tp(val: u64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-CPU lifecycle + accessors.
+// ────────────────────────────────────────────────────────────────────────────
+
+// percpu_init: initialize a PerCpu block. Called by kmain at boot for
+// CPU 0, and by the AP bring-up stub for CPU N (N >= 1). Sets:
+//   cpu_id        = cpu_id parameter
+//   current_task  = idle_task (start running the idle task — kmain /
+//                   AP bring-up will sched_enqueue the first real task
+//                   and call schedule() to switch off the idle task)
+//   kernel_stack  = kernel_stack parameter (top of this CPU's kernel
+//                   stack — the trap entry loads RSP from here)
+//   idle_task     = idle_task parameter (the index of this CPU's idle
+//                   task in the ProcessTable)
+//   rq_head       = 256 (empty — no tasks queued on this CPU's runqueue
+//                   yet; kmain / AP bring-up will sched_enqueue the
+//                   first real task)
+//   preempt_count = 0 (preemption allowed — the kernel hasn't entered
+//                   any critical sections yet)
+//
+// This function does NOT call wrgsbase / wr_tpidr_el0 / wr_tp — that's
+// the caller's responsibility (kmain / AP bring-up), because the GS
+// base / TPIDR_EL0 / tp write needs to happen on the TARGET CPU, not
+// the calling CPU (the segment register is per-CPU; writing it from
+// another CPU would have no effect on the target CPU's segment
+// register). K11's kmain does:
+//     percpu_init(pcpu, 0, kernel_stack_0, idle_task_0);
+//     wrgsbase(pcpu as u64);  // anchor CPU 0's PerCpu in GS base
+// and K11's AP bring-up stub does:
+//     percpu_init(pcpu, n, kernel_stack_n, idle_task_n);
+//     wrgsbase(pcpu as u64);  // anchor CPU N's PerCpu in GS base
+// (where `pcpu as u64` is the `c as Address` cast — PMT pattern for
+// handing a State<T> to an FFI callee that takes a raw u64 address).
+//
+// In hosted mode, this function is just a sequence of field writes —
+// no externs called, no per-CPU segment register to write (hosted
+// mode is single-CPU, so the State<PerCpu> is just a single global).
+fn percpu_init(pcpu: State<PerCpu>, cpu_id: u32, kernel_stack: u64, idle_task: u32) {
+    pcpu.cpu_id = cpu_id;
+    pcpu.current_task = idle_task;  // start with idle
+    pcpu.kernel_stack = kernel_stack;
+    pcpu.idle_task = idle_task;
+    pcpu.rq_head = 256;  // empty runqueue
+    pcpu.preempt_count = 0;
+}
+
+// percpu_get_current: read the current task index for this CPU.
+// Called by the scheduler (K4b's sched_yield), the syscall dispatcher
+// (K4g — to find the calling task), and the IRQ entry path (K4c — to
+// save the current task's TrapFrame before calling schedule()).
+//
+// In hosted mode, reads from the PerCpu state directly. In bare-metal
+// K11, the hot path would read from GS base / TPIDR_EL0 / tp
+// (segment-relative load) instead — but this function provides the
+// init-style API for setup / hosted mode / self-test; the hot path
+// is inlined into the scheduler / IRQ entry as a single asm load.
+//
+// Returns 256 if the CPU is currently idle (no real task running).
+fn percpu_get_current(pcpu: State<PerCpu>) -> u32 {
+    return pcpu.current_task;
+}
+
+// percpu_set_current: write the current task index for this CPU.
+// Called by the scheduler on every context switch (K4b's sched_dequeue
+// picks the next task, then K4c's context_switch performs the actual
+// register / stack / CR3 swap, and finally percpu_set_current updates
+// the per-CPU current_task pointer to reflect the new running task).
+//
+// The order matters: percpu_set_current must be called AFTER the
+// register / stack swap (so a timer IRQ that arrives mid-swap doesn't
+// see a stale current_task pointing at the OLD task — it sees the NEW
+// task). K4c's context_switch calls this last.
+//
+// In hosted mode, writes to the PerCpu state directly. In bare-metal
+// K11, the hot path would write to GS base / TPIDR_EL0 / tp (segment-
+// relative store). K11 may inline this as a single asm store in
+// context_switch rather than calling the function (the function call
+// overhead is significant on the hot path).
+fn percpu_set_current(pcpu: State<PerCpu>, task_idx: u32) {
+    pcpu.current_task = task_idx;
+}
+
+// percpu_preempt_disable: disable preemption on this CPU.
+// Increments preempt_count. Called by:
+//   - IRQ entry (K11's trap stub does `cli; incl gs:preempt_count` —
+//     the `cli` blocks further IRQs, the incl tracks the disable depth
+//     so the IRQ exit can decrement and re-enable IRQs only when the
+//     depth reaches 0).
+//   - Spin-lock acquisition (K11's spin_lock does
+//     `percpu_preempt_disable` before the lock-acquire loop, so a
+//     timer IRQ that arrives while holding the lock doesn't preempt
+//     the lock-holder and deadlock).
+//   - Critical sections (percpu_preempt_disable / percpu_preempt_enable
+//     bracket any code that can't be preempted — modifying the
+//     runqueue, freeing a task slot, etc.).
+//
+// The function is nestable: two consecutive calls leave preempt_count
+// at 2, and two percpu_preempt_enable calls are needed to bring it
+// back to 0. This matches Linux's preempt_disable() / preempt_enable()
+// semantics (Linux uses a per-CPU __preempt_count, incremented by
+// preempt_disable and decremented by preempt_enable, with the IRQ
+// path adding PREEMPT_MASK bits on top).
+fn percpu_preempt_disable(pcpu: State<PerCpu>) {
+    pcpu.preempt_count = pcpu.preempt_count + 1;
+}
+
+// percpu_preempt_enable: re-enable preemption on this CPU.
+// Decrements preempt_count (clamped at 0 — a buggy caller that calls
+// percpu_preempt_enable without a matching percpu_preempt_disable
+// would otherwise underflow the u32 to a huge value, marking the CPU
+// as permanently non-preemptable; the clamp makes the bug visible as
+// "preempt_count stays at 0, preemption stays enabled" instead of
+// "preempt_count underflows, preemption permanently disabled").
+//
+// Called by:
+//   - IRQ exit (K11's trap stub does `decl gs:preempt_count; jnz
+//     restore; sti; ...` — re-enable IRQs only when preempt_count
+//     reaches 0).
+//   - Spin-lock release.
+//   - Critical-section exit.
+//
+// The clamp check (preempt_count > 0) is the underflow guard. Without
+// it, `0 - 1` on a u32 produces 4294967295, which would make
+// percpu_preemptable return 0 (not preemptable) forever — a permanent
+// scheduler lockup. With the clamp, an unmatched enable is a no-op
+// (preempt_count stays at 0, preemption stays enabled) — still a bug
+// (the caller's enable/disable bookkeeping is wrong), but not a
+// scheduler-lockup bug.
+fn percpu_preempt_enable(pcpu: State<PerCpu>) {
+    if pcpu.preempt_count > 0 {
+        pcpu.preempt_count = pcpu.preempt_count - 1;
+    }
+}
+
+// percpu_preemptable: check if preemption is currently allowed on
+// this CPU. Returns 1 if preempt_count == 0 (preemption allowed), 0
+// otherwise. Called by:
+//   - The timer-IRQ handler (K4c) before calling schedule(); if 0,
+//     the handler skips the preemption (the kernel is in a critical
+//     section and can't be preempted — schedule() would pick a task
+//     that can't be switched to).
+//   - The scheduler's "should I preempt the current task?" check
+//     (K4b's sched_tick — after bumping vruntime, check if a higher-
+//     priority task has appeared AND if percpu_preemptable; only
+//     then call schedule()).
+//
+// Returns u8 (not bool — VUMA has no bool; the convention is 1=true,
+// 0=false, matching K4a's state==0 check, K4b's sched_dequeue's
+// 256-return, K3e's syscall_table_get's u8 return).
+fn percpu_preemptable(pcpu: State<PerCpu>) -> u8 {
+    if pcpu.preempt_count == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K4f DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a PerCpu via state_new, init it via percpu_init, then:
+//   (1) pcpu.cpu_id == 0 (init set it correctly).
+//   (2) pcpu.current_task == 0 (init set it to idle_task = 0).
+//   (3) pcpu.kernel_stack == 131072 (init set it to the kernel_stack
+//       parameter — 128 KB, the typical kernel stack top).
+//   (4) pcpu.rq_head == 256 (init set it to the "empty" sentinel).
+//   (5) pcpu.preempt_count == 0 (init set it to 0 — preemption
+//       allowed).
+//   (6) percpu_set_current(pcpu, 5); percpu_get_current(pcpu) == 5
+//       (the set/get round-trip works — catches any field-offset bug
+//       where set_current would write to a different offset than
+//       get_current reads).
+//   (7) Two percpu_preempt_disable calls → preempt_count == 2 (the
+//       increment path works, and the disable is nestable).
+//   (8) percpu_preemptable == 0 (not preemptable — preempt_count > 0).
+//   (9) One percpu_preempt_enable call → preempt_count == 1 (the
+//       decrement path works).
+//   (10) Second percpu_preempt_enable call → percpu_preemptable == 1
+//        (preemptable again — preempt_count == 0).
+// Returns 0 on success, 1..10 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K4f contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (131072, 256, 5, 2, 1, 10) —
+// decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096). The 131072 value is 128 KB
+// (0x20000), the typical Linux THREAD_SIZE / kernel-stack-top value.
+
+fn main() -> i32 {
+    let pcpu = state_new(PerCpu);
+    percpu_init(pcpu, 0, 131072, 0);  // CPU 0, stack at 128KB, idle=task 0
+
+    // Check 1: cpu_id was set correctly.
+    if pcpu.cpu_id != 0 { return 1; }
+
+    // Check 2: current_task starts as idle (0).
+    if pcpu.current_task != 0 { return 2; }
+
+    // Check 3: kernel_stack was set to 131072 (128 KB).
+    if pcpu.kernel_stack != 131072 { return 3; }
+
+    // Check 4: rq_head starts as 256 (empty sentinel).
+    if pcpu.rq_head != 256 { return 4; }
+
+    // Check 5: preempt_count starts at 0.
+    if pcpu.preempt_count != 0 { return 5; }
+
+    // Check 6: percpu_set_current + percpu_get_current round-trip.
+    percpu_set_current(pcpu, 5);
+    if percpu_get_current(pcpu) != 5 { return 6; }
+
+    // Check 7: two percpu_preempt_disable calls → preempt_count == 2.
+    percpu_preempt_disable(pcpu);
+    percpu_preempt_disable(pcpu);
+    if pcpu.preempt_count != 2 { return 7; }
+
+    // Check 8: percpu_preemptable == 0 (not preemptable while count > 0).
+    if percpu_preemptable(pcpu) != 0 { return 8; }
+
+    // Check 9: one percpu_preempt_enable call → preempt_count == 1.
+    percpu_preempt_enable(pcpu);
+    if pcpu.preempt_count != 1 { return 9; }
+
+    // Check 10: second percpu_preempt_enable → preemptable == 1.
+    percpu_preempt_enable(pcpu);
+    if percpu_preemptable(pcpu) != 1 { return 10; }
+
+    return 0;
+}
