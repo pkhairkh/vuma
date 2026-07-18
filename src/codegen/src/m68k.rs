@@ -1921,16 +1921,21 @@ fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
 ///
 /// TODO G4: needs QEMU-m68k verification — encoding uncertain.
 fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
-    let opcode: u16 = match op {
-        BinOpKind::Add => 0x22,
-        BinOpKind::Sub => 0x28,
-        BinOpKind::Mul => 0x23,
-        BinOpKind::SDiv | BinOpKind::UDiv => 0x20,
-        _ => 0x22, // defensive; should be unreachable for FP
+    // 68881 dyadic register form:
+    // Word 1: 0xF200 (cp1, cpGEN, EA placeholder)
+    // Word 2: 0 R/M(0) 0 0 0 0 OPMODE(6) DEST(3) 0
+    //   OPMODE = {1, operation(2), source_FPm(3)}
+    //   FADD=00, FMUL=01, FSUB=10, FDIV=11
+    //   DEST at bits 3-1
+    let base_opmode: u16 = match op {
+        BinOpKind::Add => 0x20,       // FADD: operation=00
+        BinOpKind::Mul => 0x28,       // FMUL: operation=01
+        BinOpKind::Sub => 0x30,       // FSUB: operation=10
+        BinOpKind::SDiv | BinOpKind::UDiv => 0x38, // FDIV: operation=11
+        _ => 0x20,
     };
-    let w2 = (opcode << 8)
-        | ((dst.encoding() as u16) << 4)
-        | (src.encoding() as u16);
+    let opmode = base_opmode | (src.encoding() as u16); // source FPm at bits 2-0
+    let w2 = (opmode << 4) | ((dst.encoding() as u16) << 1); // OPMODE at bits 9-4, DEST at bits 3-1
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }

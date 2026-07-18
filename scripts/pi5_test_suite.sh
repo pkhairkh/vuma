@@ -613,7 +613,13 @@ def run_one(args):
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
         else:
             os.chmod(out, 0o755)
-            cmd = ["timeout", str(EXEC_TIMEOUT), BACKENDS[backend], out]
+            qemu_bin = BACKENDS[backend]
+            cmd = ["timeout", str(EXEC_TIMEOUT), qemu_bin]
+            # riscv32: QEMU's default rv32 CPU lacks the D extension.
+            # Use sifive-u34 (RV32GC) which includes F+D.
+            if backend == "riscv32":
+                cmd += ["-cpu", "sifive-u34"]
+            cmd.append(out)
 
         try:
             # self_exec uses fork/exec/pipe which is timing-sensitive
