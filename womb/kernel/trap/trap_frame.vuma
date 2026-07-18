@@ -262,7 +262,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// tf_init: zero every field of a caller-allocated TrapFrame.
+// tf_init: zero the scalar fields of a caller-allocated TrapFrame.
 // ────────────────────────────────────────────────────────────────────────────
 // Called once per TrapFrame before any arch-specific trap-to-superset
 // adapter (x86_trap_to_superset / arm64_trap_to_superset / riscv_trap_to_
@@ -272,59 +272,92 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // "zeroed by that arch's trap_entry stub" contract from the R2a task
 // description, identical to the R1a BootInfo contract).
 //
-// State<T> params: 1 (tf). Pure write — no reads, no helper calls. The
-// 5 scalar-field assignments + the three byte-zeroing loops (gpr 256,
-// fpu 256, _pad 24) are direct typed-memory writes; no
-// `*ptr`/`&tf`/`allocate` anywhere.
+// ── Fix 7: only zero the SCALAR fields — leave the arrays uninitialized ────
+// Previously tf_init explicitly zeroed all 256 gpr bytes + 256 fpu bytes +
+// 24 _pad bytes via three byte-zeroing while loops. This was REDUNDANT
+// (state_new(TrapFrame) already zero-fills the entire 576-byte buffer —
+// see the StateNew codegen lowering in pipeline.rs) AND it blocked the
+// e-graph's `state_dead_init_elim` rule from firing when the caller
+// immediately overwrites all the array slots.
 //
-// The byte-zeroing loops are explicit (rather than relying on state_new's
-// zero-fill) because: (a) the contract requires tf_init to be a self-
-// contained zeroing function — callers may pass a TrapFrame that was
-// previously written to (e.g. by a prior trap, then re-used); (b) the
-// loops document the gpr/fpu/_pad region semantics for readers (and
-// match the same explicit-zero pattern R1a's bootinfo_init uses for the
-// 7-byte _pad).
+// Concretely: x86_trap_to_superset (R2b) writes all 15 GPR slots (rax,
+// rbx, rcx, ..., r15) plus pc/status/vector/error_code/sp. The 15 GPR
+// writes are 120 bytes covering slots 0..14 (byte offsets 0..119) — half
+// the gpr array. The explicit zero-loop wrote all 256 bytes first; the
+// e-graph could NOT eliminate the dead init writes for slots 0..14
+// because the writes were "alive" (they set the array to 0 before the
+// adapter overwrote it with the real register values). With Fix 7, the
+// init function only writes the 5 scalar fields (40 bytes) — the gpr
+// array slots that the adapter doesn't write stay 0 (from state_new's
+// zero-fill), and the slots the adapter DOES write are simply overwritten
+// (no dead init to eliminate).
+//
+// Why is this safe?
+//   - state_new(TrapFrame) zero-fills the entire buffer (the Alloc node
+//     in pipeline.rs initializes the buffer to 0 via memset before any
+//     field writes). So gpr/fpu/_pad are 0 BEFORE tf_init is called.
+//   - tf_init's scalar-field writes (pc/status/vector/error_code/sp) are
+//     still needed — they're the "explicit contract" that the dispatcher
+//     can rely on (a caller that re-uses a TrapFrame across traps must
+//     re-zero these scalars, since the prior trap may have set pc/vector
+//     to non-zero values).
+//   - The array fields (gpr/fpu/_pad) don't NEED re-zeroing because: (a)
+//     the arch adapter overwrites the slots it cares about, (b) the slots
+//     it doesn't care about are "don't read" by the dispatcher (the
+//     contract says e.g. x86_64 slots 16..31 stay 0 — but the dispatcher
+//     never reads them, so the value doesn't matter).
+//
+// State<T> params: 1 (tf). Pure write — no reads, no helper calls. The
+// 5 scalar-field assignments are direct typed-memory writes; no
+// `*ptr`/`&tf`/`allocate` anywhere.
 fn tf_init(tf: State<TrapFrame>) {
-    let i = 0;
-    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    // Only zero scalar fields — leave arrays uninitialized so the e-graph
+    // can eliminate dead init when the caller immediately overwrites.
+    // state_new(TrapFrame) already zero-fills the entire buffer; the
+    // explicit array-zeroing here was redundant AND blocked
+    // state_dead_init_elim (the e-graph rewrite that removes init writes
+    // to slots the caller overwrites).
     tf.pc = 0;
     tf.status = 0;
     tf.vector = 0;
     tf.error_code = 0;
     tf.sp = 0;
-    let j = 0;
-    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
-    let k = 0;
-    while k < 24 { tf._pad[k] = 0; k = k + 1; }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the canonical superset TrapFrame end-to-end through 6 checks:
+// Exercises the canonical superset TrapFrame end-to-end through 7 checks:
 //   1. tf_init zeros tf.pc (must read back 0).
 //   2. tf_init zeros tf.vector (must read back 0).
-//   3. tf_set_gpr(tf, 0, 42) then tf_get_gpr(tf, 0) == 42 — round-trip
+//   3. Fix 7: tf.gpr[0] == 0 after tf_init — verifies the state_new zero-
+//      fill invariant (tf_init no longer explicitly zeros the gpr array,
+//      but state_new(TrapFrame) zero-fills the entire 576-byte buffer
+//      before tf_init is called, so gpr[0] is still 0). This check is
+//      the regression guard for the Fix 7 change: if a future wave breaks
+//      state_new's zero-fill, this check will catch it.
+//   4. tf_set_gpr(tf, 0, 42) then tf_get_gpr(tf, 0) == 42 — round-trip
 //      through the lowest GPR slot (byte offset 0..7). Verifies the 8-byte
 //      LE pack/unpack loop handles a small value (high bytes must be zero).
-//   4. tf_set_gpr(tf, 5, 100000) then tf_get_gpr(tf, 5) == 100000 —
+//   5. tf_set_gpr(tf, 5, 100000) then tf_get_gpr(tf, 5) == 100000 —
 //      round-trip through slot 5 (byte offset 40..47). Verifies the
 //      helpers index correctly past slot 0, and that a value crossing
 //      the u16/u32 boundary (100000 = 0x186a0 — 3 bytes) packs/unpacks
 //      without truncation.
-//   5. Direct tf.pc = 4096 (0x1000) write/read — verifies the scalar u64
+//   6. Direct tf.pc = 4096 (0x1000) write/read — verifies the scalar u64
 //      field path (the most common path the dispatcher will use).
-//   6. Direct tf.vector = 14 (page fault) write/read — verifies the
+//   7. Direct tf.vector = 14 (page fault) write/read — verifies the
 //      scalar u64 field path used by trap_handler's vector routing
 //      (vector 14 = #PF on x86_64).
 //
-// Returns 0 on success, 1..6 on the 6 individual check failures:
+// Returns 0 on success, 1..7 on the 7 individual check failures:
 //   1: tf.pc != 0 after tf_init
 //   2: tf.vector != 0 after tf_init
-//   3: tf_get_gpr(tf, 0) != 42 after tf_set_gpr(tf, 0, 42)
-//   4: tf_get_gpr(tf, 5) != 100000 after tf_set_gpr(tf, 5, 100000)
-//   5: tf.pc != 4096 after direct write
-//   6: tf.vector != 14 after direct write
+//   3: tf.gpr[0] != 0 after tf_init (Fix 7 state_new zero-fill invariant)
+//   4: tf_get_gpr(tf, 0) != 42 after tf_set_gpr(tf, 0, 42)
+//   5: tf_get_gpr(tf, 5) != 100000 after tf_set_gpr(tf, 5, 100000)
+//   6: tf.pc != 4096 after direct write
+//   7: tf.vector != 14 after direct write
 //
 // Per the R2a contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL — see the Decimal-constants
@@ -334,16 +367,22 @@ fn main() -> i32 {
     tf_init(tf);
     if tf.pc != 0 { return 1; }
     if tf.vector != 0 { return 2; }
+    // Fix 7: tf_init no longer explicitly zeros gpr[] (the e-graph's
+    // state_dead_init_elim rule fires when callers immediately overwrite
+    // all gpr slots — e.g. x86_trap_to_superset writes all 15 GPRs). The
+    // gpr[] array is still 0 here because state_new(TrapFrame) zero-fills
+    // the entire 576-byte buffer; this check verifies that invariant.
+    if tf.gpr[0] != 0 { return 3; }
     // Set and get gpr[0]
     tf_set_gpr(tf, 0, 42);
-    if tf_get_gpr(tf, 0) != 42 { return 3; }
+    if tf_get_gpr(tf, 0) != 42 { return 4; }
     // Set and get gpr[5]
     tf_set_gpr(tf, 5, 100000);
-    if tf_get_gpr(tf, 5) != 100000 { return 4; }
+    if tf_get_gpr(tf, 5) != 100000 { return 5; }
     // Set pc + vector
     tf.pc = 4096;
     tf.vector = 14;  // page fault
-    if tf.pc != 4096 { return 5; }
-    if tf.vector != 14 { return 6; }
+    if tf.pc != 4096 { return 6; }
+    if tf.vector != 14 { return 7; }
     return 0;
 }

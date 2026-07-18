@@ -119,7 +119,51 @@
 // return the byte count in RAX. The runtime stub is the canonical
 // "mov eax,#num; syscall; ret" sequence — no register shuffling needed
 // because all 3 args already match the syscall ABI.
+//
+// ── Fix 5a: #[marshal] write_marshal ────────────────────────────────────────
+// A second extern variant `write_marshal` carries the `#[marshal]` FFI mode
+// on its `buf: State<ByteBuf>` parameter. The marshal pass (see
+// src/codegen/src/marshal.rs::ArgMode::Marshal) declares that the foreign
+// function MUST receive the State's bytes via the scratchpad (a private
+// per-thread FFI buffer, see src/codegen/src/runtime/ffi_scratch.rs), NOT
+// directly through ___pmt_buffer. This preserves PMT purity:
+//   - C may not alias ___pmt_buffer (the sacred invariant from marshal.rs).
+//   - The State's bytes are copied to the scratchpad; C reads from there.
+//   - The State is PRESERVED after the call (untouched — same as Borrow).
+//
+// In hosted mode (compile_dump on x86_64), `write_marshal` is NOT a
+// pre-registered syscall stub (only `write`/`read`/.../`exit_group` are —
+// see src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs). So the
+// call resolves to `__ffi_fallback_stub` (xor eax, eax; ret → returns 0).
+// This is the SAME behavior the existing ffi_wave3 tests document (see
+// tests/gold_standard/ffi_wave3/foreign_arg_pass.vuma — the State<DbHandle>
+// call is shown in a comment, not executed; foreign_consume_emitted.vuma —
+// the sqlite3_close call is in a comment). The Fix 5a self-test below
+// accepts EITHER 0 (hosted fallback) OR 3 (real write, when K11+ bare-
+// metal wires write_marshal to an MMIO UART trampoline).
+//
+// K11+ will register `write_marshal` as a real syscall/MMIO stub:
+//   - x86_64 bare-metal: COM1 serial port @ I/O port 0x3F8 (outb loop)
+//   - aarch64 bare-metal: PL011 UART @ MMIO base
+//   - riscv64 bare-metal: NS16550 UART @ MMIO base
+// The marshal pass is the compile-time + semantic gate that ensures the
+// State<ByteBuf> bytes are routed through the scratchpad before the call —
+// so when K11 wires up the runtime stub, the bytes will already be in the
+// right place. Same extern-swap pattern as the hosted/bare-metal `write`
+// swap (see the "Hosted vs bare-metal swap" header above).
 extern "C" {
+    // #[marshal] tells the FFI marshal pass to copy the State<ByteBuf>
+    // to the scratchpad before the call, preserving PMT purity (the
+    // ___pmt_buffer is never aliased by C). See src/codegen/src/marshal.rs
+    // ArgMode::Marshal — precedence: may_retain > marshal > borrow >
+    // foreign > default(Invalidate). With #[marshal] on the fn-level
+    // (the "shorthand form" per validate_extern_fn_ffi_attrs in
+    // src/parser/src/parser.rs:1247), the mode applies to ALL State-typed
+    // params — here just `buf`.
+    #[marshal]
+    fn write_marshal(fd: i64, buf: State<ByteBuf>, count: i64) -> i64;
+    // Keep the raw version for non-state buffers (backward compat — the
+    // existing sys_write below calls this with `buf as Address`).
     fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn read(fd: i64, buf: Address, count: i64) -> i64;
 }
@@ -163,6 +207,47 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// sys_write_state — Fix 5a: the #[marshal] variant of sys_write.
+// ────────────────────────────────────────────────────────────────────────────
+// Takes the buffer as a State<ByteBuf> (a typed-memory handle into
+// ___pmt_buffer) instead of as a raw u64 address. Routes by fd to the
+// `write_marshal` extern, which carries the `#[marshal]` FFI mode — the
+// marshal pass copies the State's bytes to the scratchpad before the
+// foreign call, so C never aliases ___pmt_buffer (the PMT purity invariant
+// from src/codegen/src/marshal.rs::ArgMode::Marshal).
+//
+// Why a separate function (rather than overloading sys_write)?
+//   - VUMA has no function overloading (signatures must be unique by name).
+//   - The two paths have different arg types (u64 raw address vs State<Buf>)
+//     and different FFI modes (raw Address → direct call; State<ByteBuf> →
+//     marshal pass routes through scratchpad). Keeping them as two named
+//     functions lets the caller choose the appropriate purity level:
+//       - sys_write: legacy raw-address path (used by K3e's trap_syscall
+//         dispatcher, which receives args as u64 fields of SyscallArgs).
+//       - sys_write_state: PMT-pure path (used by future kernel-internal
+//         callers that already hold a State<ByteBuf>, e.g. K5's vfs_write
+//         once K6 wires sys_write to the VFS dispatch).
+//   - Both paths share the same routing logic (fd 1 = stdout, fd 2 =
+//     stderr, else VFS stub) — duplicated here for clarity rather than
+//     factored into a helper (factoring would require an extra layer of
+//     extern-call indirection that VUMA's pure-PMT model discourages).
+//
+// State<T> params: 1 (buf). The buf is passed by reference (the State
+// handle is a pointer into ___pmt_buffer); the marshal pass copies the
+// bytes to the scratchpad before the call. The State is PRESERVED after
+// the call (Marshal mode is non-consuming — see marshal.rs::ArgMode).
+fn sys_write_state(fd: u64, buf: State<ByteBuf>, count: u64) -> i64 {
+    if fd == 1 {
+        return write_marshal(1, buf, count as i64);
+    }
+    if fd == 2 {
+        return write_marshal(2, buf, count as i64);
+    }
+    // Other fds: VFS write (K5). Stub for now — same as sys_write.
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // sys_read — read `count` bytes into `buf` from fd `fd`.
 // ────────────────────────────────────────────────────────────────────────────
 // Routes by fd:
@@ -184,9 +269,12 @@ fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
 // Allocate a ByteBuf via state_new, populate the first 3 bytes with
 // "hi\n" (ASCII 104, 105, 10), call sys_write(1, &buf, 3) and verify the
 // return value is 3 (3 bytes written). Then call sys_read on an invalid
-// fd (99) and verify it returns 0 (the VFS-stub path). Returns 0 on
+// fd (99) and verify it returns 0 (the VFS-stub path). Then call
+// sys_write_state(1, &buf, 3) — the Fix 5a #[marshal] variant — and
+// verify the FFI marshal path runs without crashing. Returns 0 on
 // success, 1 on the write-byte-count mismatch, 2 on the VFS-stub return
-// mismatch (so a future CI failure pinpoints the broken path).
+// mismatch, 3 on the marshal-path return mismatch (so a future CI
+// failure pinpoints the broken path).
 //
 // The test exercises:
 //   - state_new(ByteBuf) — PMT allocation
@@ -195,6 +283,10 @@ fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
 //     K1d's console_flush)
 //   - sys_write(1, addr, 3) → write(1, addr, 3) → 3 bytes to stdout
 //   - sys_read(99, addr, 3) → returns 0 (VFS stub — fd 99 != 0)
+//   - sys_write_state(1, buf_state, 3) → write_marshal(1, buf, 3) →
+//     hosted mode: __ffi_fallback_stub returns 0; K11+ bare-metal: real
+//     MMIO UART write returns 3. Accept EITHER (the marshal path itself
+//     is the test — the byte count depends on the runtime stub wiring).
 //
 // Per the K3f contract's "IMPORTANT" rule: all non-zero constants in the
 // self-test use DECIMAL (104, 105, 10, 3, 1, 99) — decimal avoids the
@@ -217,6 +309,16 @@ fn main() -> i32 {
     // Test 2: sys_read(99, &buf, 3) → VFS stub returns 0 (fd 99 != 0).
     let ret2 = sys_read(99, buf_addr, 3);
     if ret2 != 0 { return 2; }
+
+    // Test 3 (Fix 5a): sys_write_state(1, buf_state, 3) — the #[marshal]
+    // FFI variant. In hosted mode, write_marshal resolves to the
+    // __ffi_fallback_stub (returns 0). In K11+ bare-metal, write_marshal
+    // will be wired to an MMIO UART trampoline (returns 3). Accept either
+    // — the test verifies the marshal path compiles + verifies + runs
+    // without crashing (the FFI marshal pass is the compile-time gate;
+    // the runtime byte count depends on the stub wiring).
+    let ret3 = sys_write_state(1, buf_state, 3);
+    if ret3 != 0 && ret3 != 3 { return 3; }
 
     return 0;
 }

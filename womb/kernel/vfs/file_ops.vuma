@@ -396,6 +396,58 @@ fn vfs_close(ft: State<FileTable>, fd: u32) -> i64 {
     return 0;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// vfs_close_transform — Fix 5b: the linear-ownership variant of vfs_close.
+// ────────────────────────────────────────────────────────────────────────────
+// vfs_close as a TRANSFORM — the FileTable is "consumed" (linear ownership)
+// and a fresh State<FileTable> is produced with the fd slot marked FREE.
+// After vfs_close_transform, the fd slot is FREE; any subsequent access
+// through the SAME State handle is a logical error (the PMT model would
+// make this a compile error if FileTable tracked per-slot linearity, which
+// is a future enhancement to the StateTransform verifier — see the Fix 1
+// worklog notes on the state_returning_fns inference and the StateTransform
+// verifier).
+//
+// Why a transform (not a regular fn)?
+//   - The semantic intent of vfs_close is "consume this fd" — the fd slot
+//     is no longer usable after the call. Modeling this as a transform
+//     makes the consume-produce flow explicit in the type system: the
+//     caller hands over State<FileTable> and gets back a NEW State<File-
+//     Table> whose slot is FREE. This is the same linear-ownership pattern
+//     Fix 6 applied to sys_exit / sys_fork / sys_exec / sys_mmap.
+//   - In a future wave, the StateTransform verifier can check that no
+//     State<FileTable> read of slot `fd` happens after vfs_close_transform
+//     without an intervening vfs_open (which would re-allocate the slot).
+//     Today the verifier treats transforms as regular state-mutating fns
+//     (per the Fix 1 worklog: "transforms are verified as regular functions
+//     via the IVE state verifiers, which is sufficient for the DoD test").
+//
+// Relationship to vfs_close (the regular fn)?
+//   - vfs_close_transform is the LINEAR variant — it ALWAYS succeeds and
+//     returns the mutated State<FileTable>. The EBADF check (used[k] == 0)
+//     is omitted because in a linear-ownership model, the caller has
+//     ALREADY established that `fd` is open (e.g. by holding the linear
+//     capability from vfs_open). The regular vfs_close retains the EBADF
+//     check for the legacy dispatch path (K6's sys_close, which receives
+//     a raw u32 fd from user space and must validate it).
+//   - Both functions share the same mutation: file_set_used(ft, fd, 0) +
+//     ft.count = ft.count - 1. They differ only in: (a) the EBADF gate
+//     (vfs_close has it, vfs_close_transform doesn't), (b) the return
+//     type (i64 error code vs State<FileTable>), and (c) the FFI mode
+//     semantics (regular fn = borrow-and-mutate; transform = consume-
+//     and-produce).
+//
+// State<T> params: 1 (ft). Returns State<FileTable> — the Fix 1
+// `state_returning_fns` inference registers vfs_close_transform in
+// BridgeCtx::state_returning_fns so a caller writing `let ft2 =
+// vfs_close_transform(ft, fd);` gets ft2 recognized as a State<FileTable>
+// without needing an explicit `: State<FileTable>` annotation.
+transform vfs_close_transform(ft: State<FileTable>, fd: u32) -> State<FileTable> {
+    file_set_used(ft, fd, 0);
+    ft.count = ft.count - 1;
+    return ft;
+}
+
 // vfs_lseek: reposition open file `fd`'s read/write offset.
 //   whence == 0 (SEEK_SET): pos = offset
 //   whence == 1 (SEEK_CUR): pos = pos + offset
@@ -443,7 +495,7 @@ fn vfs_stat(ft: State<FileTable>, fd: u32, st: State<Stat>) -> i64 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K5f DoD).
+// Self-test (the K5f DoD + Fix 5b vfs_close_transform).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a FileTable via state_new, zero all used flags (initialize
 // the table — same as K5a's file_init but inlined since K5f doesn't re-
@@ -454,11 +506,16 @@ fn vfs_stat(ft: State<FileTable>, fd: u32, st: State<Stat>) -> i64 {
 //   (4) vfs_close(ft, 0) → returns 0; count == 0.
 //   (5) vfs_read(ft, 0, buf, 10) → returns 9 (-EBADF, since fd 0 was
 //       closed by check 4 — exercises the EBADF path in vfs_read).
-// Returns 0 on success, 1..7 on the corresponding check failure (so a
+//   (6) Fix 5b: vfs_open(ft, 6, 0) → returns 0 again (slot 0 was freed
+//       by check 4's vfs_close); count == 1.
+//   (7) Fix 5b: vfs_close_transform(ft, 0) → returns a fresh State<File-
+//       Table> with used[0]==0 and count==0 (the linear-ownership close
+//       path — the transform "consumes" the fd and produces a new State).
+// Returns 0 on success, 1..11 on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
 //
 // Per the K5f contract's "Use decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (5, 100, 50, 10, 9, 64, 1) —
+// constants in the self-test use DECIMAL (5, 100, 50, 10, 9, 64, 1, 6) —
 // decimal avoids the parser's hex-literal path (parse_int_radix width-
 // extension subtleties — see K5a's file.vuma header for the same
 // rationale). The 9 literal is the EBADF sentinel — K5f's vfs_*
@@ -485,12 +542,28 @@ fn main() -> i32 {
     // Seek.
     let pos = vfs_lseek(ft, fd, 50, 0);
     if pos != 50 { return 4; }
-    // Close it.
+    // Close it (using the existing fn vfs_close — backward compat).
     let ret2 = vfs_close(ft, fd);
     if ret2 != 0 { return 5; }
     if ft.count != 0 { return 6; }
     // Read from closed fd → -EBADF.
     let ret3 = vfs_read(ft, fd, buf, 10);
     if ret3 != 9 { return 7; }  // -EBADF
+
+    // ── Fix 5b: vfs_close_transform (the linear-ownership variant) ──────
+    // Open another file (dentry 6) — should get fd=0 again (slot 0 was
+    // freed by the vfs_close above). Then close it via vfs_close_transform
+    // and verify the returned State<FileTable> reflects the linear consume
+    // (used[0]==0, count==0). The transform returns the mutated State<File-
+    // Table>; the Fix 1 `state_returning_fns` inference registers
+    // vfs_close_transform so `let ft2 = vfs_close_transform(ft, fd2);`
+    // recognizes ft2 as a State<FileTable> without an explicit type
+    // annotation.
+    let fd2 = vfs_open(ft, 6, 0);
+    if fd2 != 0 { return 8; }
+    if ft.count != 1 { return 9; }
+    let ft2 = vfs_close_transform(ft, fd2);
+    if ft2.count != 0 { return 10; }
+    if file_get_used(ft2, fd2) != 0 { return 11; }
     return 0;
 }
