@@ -1,0 +1,677 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/inode.vuma
+// VWK VFS Subsystem — Inode (index node) + InodeTable + lifecycle (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5a layer #1 of the VWK kernel VFS: the Inode (index
+// node — describes a file's metadata: inode number, mode, owner, size,
+// timestamps, fs-private data) and the InodeTable (a 64-slot array of
+// Inodes stored as parallel flat byte arrays — VUMA has no struct
+// arrays). K5b (superblock + dentry) will consume InodeTable to look up
+// inodes by number; K5c (file ops) will read/write inode.size and
+// inode.mtime on read/write syscalls; K5d (tmpfs) will call inode_alloc
+// to allocate inodes for new files / directories.
+//
+// ── Inode layout (10 fields, 72 bytes) ──────────────────────────────────────
+//   ino      (u64) — inode number, unique within the superblock. ino == 0
+//                    is the FREE marker (no real inode uses ino 0 —
+//                    matches Linux's "inode 0 is invalid" convention).
+//                    inode_alloc sets ino = idx + 1 so ino 0 is never
+//                    handed out.
+//   mode     (u32) — file mode: permission bits + type. Type bits:
+//                    S_IFDIR = 16384 (0x4000) — directory
+//                    S_IFREG = 32768 (0x8000) — regular file
+//                    S_IFLNK = 40960 (0xA000) — symlink (K5d)
+//                    S_IFBLK = 24576 (0x6000) — block device
+//                    S_IFCHR = 8192  (0x2000) — char device
+//                    S_IFIFO = 4096  (0x1000) — named pipe
+//                    S_IFSOCK = 49152 (0xC000) — socket
+//                    Perm bits: 0o644 = 420 (rw-r--r--), 0o755 = 493
+//                    (rwxr-xr-x), etc. Example: S_IFREG | 0o644 =
+//                    32768 + 420 = 33188.
+//   uid      (u32) — owner user ID (0 = root).
+//   gid      (u32) — owner group ID (0 = root).
+//   size     (u64) — file size in bytes. Updated by K5c on every write.
+//   blocks   (u64) — number of 512-byte blocks allocated (POSIX st_blocks,
+//                    NOT the file size in blocks — includes indirect
+//                    blocks, holes count as 0). K5d's tmpfs reports
+//                    ceil(size/512).
+//   atime    (u64) — access time (seconds since epoch — K5c updates on
+//                    read; K11 wires the RTC).
+//   mtime    (u64) — modification time (seconds since epoch — K5c updates
+//                    on write).
+//   ops      (u64) — inode operations table (function pointer to a
+//                    per-filesystem struct inode_operations — K5d's
+//                    tmpfs sets this to tmpfs_inode_ops; K5e's initramfs
+//                    sets it to initramfs_inode_ops). The VUMA side
+//                    stores it as an opaque u64; K11 dereferences it as
+//                    a C struct pointer.
+//   private  (u64) — filesystem-specific data (e.g. tmpfs's per-inode
+//                    page-list head, initramfs's offset-into-initramfs).
+//                    The VFS layer never touches this; the FS-specific
+//                    inode_operations do.
+//
+//   Total size: 8 + 4 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 8 = 68 bytes
+//   (padded to 72 by the codegen's max-field-alignment rule — 4 bytes
+//   of trailing padding after the u64 alignment, no inter-field padding
+//   because every u32 fits before the next u64 alignment boundary. The
+//   codegen's layout allocator handles this automatically; field
+//   accessors see field-relative offsets directly.)
+//
+// ── InodeTable layout (per K5a contract) ────────────────────────────────────
+// 64 Inode slots stored as parallel flat byte arrays. The K5a contract
+// pins the field list (10 field arrays + count). Each field array is
+// sized for 64 slots × the field's byte width:
+//     inos:      [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     modes:     [u8; 256]   = 64 * 4 bytes (u32 per inode)
+//     uids:      [u8; 256]   = 64 * 4 bytes (u32 per inode)
+//     gids:      [u8; 256]   = 64 * 4 bytes (u32 per inode)
+//     sizes:     [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     blocks:    [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     atimes:    [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     mtimes:    [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     ops:       [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     privates:  [u8; 512]   = 64 * 8 bytes (u64 per inode)
+//     count:     u32         — number of slots in use (0..64)
+//
+// ── Why parallel flat byte arrays? ──────────────────────────────────────────
+// VUMA's codegen (src/pipeline.rs::flatten_expr, Expr::Index arm) does
+// NOT scale the index by the element size for non-u8 array element
+// types — every `state.array[i]` is lowered to `*(base_addr + i)` with
+// a U8 Load/Store. VUMA also doesn't support `[Inode; 64]` (array of
+// structs) in the parser at all (only `[u8; N]` and other primitive-u8
+// arrays parse). So instead the InodeTable stores each Inode field in
+// a SEPARATE flat [u8; N] array, and the field accessors
+// (inode_get_mode / inode_set_mode / etc.) pack/unpack the multi-byte
+// values byte-by-byte. This is byte-identical in spirit to K2a's
+// pmm.vuma FlatPool, K3e's SyscallTable, and K4a's ProcessTable. When
+// the codegen gains proper typed-array index lowering, this file can
+// collapse back to `[Inode; 64]` with `tbl.inodes[i].mode` access.
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K5a contract's main() allocates `tbl = state_new(InodeTable)` and
+// passes it by reference to inode_init / inode_alloc / inode_free / all
+// inode_get_* / inode_set_* helpers. This is the canonical PMT pattern
+// (K2a's pmm_init(pool, pmm, ...), K3d's trap_frame_init(tf), K4a's
+// pt_init(tbl) — see womb/kernel/mm/pmm.vuma header "Why init-style?"
+// for the codegen rationale: the current codegen does NOT propagate
+// State-typedness through function return values, so `fn inode_new() ->
+// State<InodeTable>` would produce broken field-access code in
+// callers). All inode.vuma helpers take `tbl: State<InodeTable>` by
+// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// need the attribute; only extern "C" calls do, and none of these
+// helpers call any extern).
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Two flavors:
+//   (1) u32 fields (modes, uids, gids): 4-byte pack/unpack loop.
+//   (2) u64 fields (inos, sizes, blocks, atimes, mtimes, ops, privates):
+//       8-byte pack/unpack loop.
+// Both use the same pattern as K2a's pool_get_base / pool_set_base,
+// K3e's syscall_table_get / syscall_table_set, and K4a's pt_get_pid /
+// pt_set_pid / pt_get_vruntime / pt_set_vruntime: little-endian byte
+// order (byte i goes to bit i*8), shift-and-mask-255 on writes, sum-
+// of-shifted-bytes on reads. u8 fields don't exist in Inode (all
+// fields are u32 or u64), so no direct-array-index accessors needed.
+//
+// The self-test exercises a representative subset (alloc, ino, mode,
+// size, uid, gid, count, free, reuse) but ALL helpers must exist for
+// K5b/K5c/K5d to use (K5b's dentry_lookup reads inode + mode; K5c's
+// file_read reads size + pos, writes size + mtime; K5d's tmpfs_create
+// writes mode + uid + gid + size + atime + mtime). Hence this file
+// declares all 20 helpers (10 getters + 10 setters) even though only
+// ~6 are exercised by the self-test.
+//
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+//   inode_init(tbl)            — zero all 64 inos (mark every slot FREE,
+//                                since ino == 0 is the free marker),
+//                                set count = 0. Idempotent. Called by
+//                                kmain at boot before the first
+//                                inode_alloc (K5d's tmpfs_fill_super
+//                                calls this on the tmpfs InodeTable).
+//   inode_alloc(tbl) -> u32    — find the first FREE slot (ino == 0),
+//                                set ino = idx + 1 (so ino 0 is never
+//                                handed out — matches Linux's "inode 0
+//                                is invalid" convention), bump count,
+//                                return the slot index. Returns 64 if
+//                                the table is full (the caller MUST
+//                                check — K5d's tmpfs_create returns
+//                                -ENOSPC in that case). Does NOT touch
+//                                mode / uid / gid / size / etc. —
+//                                those are populated by the caller
+//                                (K5d's tmpfs_create sets mode + uid +
+//                                gid; K5c's file_write bumps size +
+//                                mtime).
+//   inode_free(tbl, idx)       — mark slot `idx` as FREE (ino = 0),
+//                                decrement count. Does NOT zero the
+//                                other fields (mode, size, etc. stay
+//                                stale until inode_alloc reuses the
+//                                slot — inode_alloc only writes ino,
+//                                leaving the other fields for K5d's
+//                                tmpfs_create to repopulate).
+//
+//   The slot-reuse semantics are important: inode_free'ing slot 0 and
+//   then inode_alloc'ing again returns slot 0 (lowest free slot wins —
+//   same as Linux's find_first_zero_bit). The self-test verifies this.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// InodeTable is a flat-byte-array struct held in a `___pmt_buffer`-
+// backed State<InodeTable>; the CALLER allocates it via
+// `state_new(InodeTable)` and passes it by reference to inode_init /
+// inode_alloc / inode_free / all inode_get_* / inode_set_* helpers
+// (init-style API — see "Why init-style?" above). No externs are
+// declared in this file (the inode lifecycle primitives are pure-PM —
+// K5c's file ops will declare its own externs for disk read/write,
+// and K5d's tmpfs will declare its own externs for page allocation).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a
+// contract's "Use decimal constants" rule. Decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K4a's task.vuma for the same rule applied to slot count 256). The
+// constants:
+//     64     = number of Inode slots in the InodeTable (and the
+//              "table full" sentinel returned by inode_alloc)
+//     4      = bytes per u32 field (loop bound for mode/uid/gid
+//              pack/unpack)
+//     8      = bytes per u64 field (loop bound for ino/size/blocks/
+//              atime/mtime/ops/private pack/unpack)
+//     255    = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     1      = ino offset (ino = idx + 1, so slot 0 → ino 1; also
+//              the "one slot in use" count value)
+//     33188  = S_IFREG | 0o644 = 32768 + 420 — the test mode for a
+//              regular file with rw-r--r-- permissions
+//     32768  = S_IFREG = 0x8000 — regular-file type bit
+//     16384  = S_IFDIR = 0x4000 — directory type bit
+//     1024   = test file size (1 KB)
+//     1000   = test uid / gid (typical first-user uid)
+//     0      = FREE marker (ino == 0), initial count, initial byte
+//              value for the zero-everything loop in inode_init
+// All `0x...` mentions in this file are in doc-comments only (verified
+// by rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. K5b's dentry.vuma will re-declare
+// InodeTable, Inode, and the inode_get_* / inode_set_* helpers
+// byte-identically to this file (same pattern as K4b's scheduler.vuma
+// re-declaring ProcessTable from K4a, and K4d's fork.vuma re-declaring
+// ProcessTable from K4a). K5c's file.vuma and K5d's tmpfs.vuma will do
+// the same.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/vfs/inode.vuma \
+//         /tmp/inode.bin x86_64 --verify
+//     /tmp/inode.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 10 self-test checks pass — alloc,
+// ino=1, count=1, mode set/get round-trip, size set/get round-trip,
+// uid set/get round-trip, gid set/get round-trip, second alloc +
+// count=2, free + count=1, reuse-slot-0 alloc).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// An Inode (index node — describes a file's metadata). The fields are
+// documented in the file header. Stored as a layout for documentation;
+// the actual InodeTable uses parallel flat byte arrays (VUMA has no
+// struct arrays — see "Why parallel flat byte arrays?" in the file
+// header). K5b/K5c/K5d will re-declare this layout byte-identically.
+layout Inode = {
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    blocks: u64,
+    atime: u64,
+    mtime: u64,
+    ops: u64,
+    private: u64,
+}
+
+// InodeTable: 64 Inode slots stored as parallel flat byte arrays (VUMA
+// has no struct-array support — see "Why parallel flat byte arrays?" in
+// the file header). Each field is a separate [u8; N] array sized for 64
+// slots × the field's byte width. `count` tracks how many slots are in
+// use (0..64). Field accessors (inode_get_* / inode_set_*) pack/unpack
+// the multi-byte values byte-by-byte. `ino == 0` is the FREE marker.
+layout InodeTable = {
+    inos: [u8; 512],
+    modes: [u8; 256],
+    uids: [u8; 256],
+    gids: [u8; 256],
+    sizes: [u8; 512],
+    blocks: [u8; 512],
+    atimes: [u8; 512],
+    mtimes: [u8; 512],
+    ops: [u8; 512],
+    privates: [u8; 512],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (inos, sizes, blocks, atimes, mtimes, ops,
+// privates).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K2a's
+// pool_get_base / pool_set_base (pmm.vuma), K3e's syscall_table_get /
+// syscall_table_set (table.vuma), and K4a's pt_get_vruntime /
+// pt_set_vruntime / pt_get_mm_root / pt_set_mm_root / etc. (task.vuma):
+// 8-iteration while loop, shift by i*8, mask 255 on writes, sum-of-
+// shifted-bytes on reads.
+
+// Read the u64 `ino` field of Inode slot `idx` from InodeTable.inos.
+fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inos[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ino` field of Inode slot `idx` into InodeTable.inos.
+fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inos[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `size` field of Inode slot `idx` from InodeTable.sizes.
+fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.sizes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `size` field of Inode slot `idx` into InodeTable.sizes.
+fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.sizes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `blocks` field of Inode slot `idx` from InodeTable.blocks.
+fn inode_get_blocks(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.blocks[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `blocks` field of Inode slot `idx` into InodeTable.blocks.
+fn inode_set_blocks(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.blocks[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `atime` field of Inode slot `idx` from InodeTable.atimes.
+fn inode_get_atime(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.atimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `atime` field of Inode slot `idx` into InodeTable.atimes.
+fn inode_set_atime(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.atimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `mtime` field of Inode slot `idx` from InodeTable.mtimes.
+fn inode_get_mtime(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.mtimes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `mtime` field of Inode slot `idx` into InodeTable.mtimes.
+fn inode_set_mtime(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.mtimes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `ops` field of Inode slot `idx` from InodeTable.ops.
+fn inode_get_ops(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.ops[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ops` field of Inode slot `idx` into InodeTable.ops.
+fn inode_set_ops(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ops[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `private` field of Inode slot `idx` from InodeTable.privates.
+fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.privates[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `private` field of Inode slot `idx` into InodeTable.privates.
+fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.privates[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u32 pack/unpack helpers (modes, uids, gids).
+// ────────────────────────────────────────────────────────────────────────────
+// 4-byte little-endian pack/unpack. Same pattern as K4a's pt_get_pid /
+// pt_set_pid / pt_get_ppid / pt_set_ppid (task.vuma) and K3e's
+// syscall_table_get / syscall_table_set with a 4-byte loop bound (u32,
+// not u64). The 4-byte loop is correct because u32 fits in 4 bytes —
+// bytes 4..7 would be zero-shifted out anyway.
+
+// Read the u32 `mode` field of Inode slot `idx` from InodeTable.modes.
+fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.modes[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `mode` field of Inode slot `idx` into InodeTable.modes.
+fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.modes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `uid` field of Inode slot `idx` from InodeTable.uids.
+fn inode_get_uid(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.uids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `uid` field of Inode slot `idx` into InodeTable.uids.
+fn inode_set_uid(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.uids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `gid` field of Inode slot `idx` from InodeTable.gids.
+fn inode_get_gid(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.gids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `gid` field of Inode slot `idx` into InodeTable.gids.
+fn inode_set_gid(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.gids[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives.
+// ────────────────────────────────────────────────────────────────────────────
+
+// inode_init: zero all 64 inos (mark every slot FREE — ino == 0 is the
+// free marker) and set count = 0. Idempotent. Called by kmain at boot
+// before the first inode_alloc (K5d's tmpfs_fill_super will call this
+// on the tmpfs InodeTable). Does NOT zero the other Inode fields
+// (modes, sizes, etc.) — those are populated by inode_alloc's caller
+// (K5d's tmpfs_create sets mode + uid + gid; K5c's file_write bumps
+// size + mtime), so zeroing them here would be wasted work (and VUMA
+// has no memset).
+fn inode_init(tbl: State<InodeTable>) {
+    let i = 0;
+    while i < 64 {
+        inode_set_ino(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// inode_alloc: find the first FREE slot (ino == 0), set ino = idx + 1
+// (so ino 0 is never handed out — matches Linux's "inode 0 is
+// invalid" convention; this also serves as the "slot is in use" marker
+// for subsequent allocs), bump count, return the slot index. Returns 64
+// if the table is full (the caller MUST check — K5d's tmpfs_create
+// returns -ENOSPC in that case).
+//
+// Does NOT touch mode / uid / gid / size / etc. — those are populated
+// by the caller. The caller MUST set at least mode before the inode is
+// linked into the directory tree (K5b's dentry_link checks mode != 0
+// as a "real inode" sanity check before linking).
+//
+// The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
+// (verified by the self-test: free slot 0, alloc → returns 0, not 2).
+fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if inode_get_ino(tbl, i) == 0 {
+            inode_set_ino(tbl, i, i + 1);  // ino = idx + 1
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // table full
+}
+
+// inode_free: mark slot `idx` as FREE (ino = 0), decrement count. Does
+// NOT zero the other Inode fields (mode, size, etc. stay stale until
+// inode_alloc reuses the slot — inode_alloc only writes ino, leaving
+// the other fields for the caller to repopulate). K5c's file_close
+// calls this when the last reference to an inode is dropped; K5d's
+// tmpfs_unlink calls this when a file is removed from the directory
+// tree AND the link count reaches 0.
+fn inode_free(tbl: State<InodeTable>, idx: u32) {
+    inode_set_ino(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate an InodeTable via state_new, init it via inode_init, then:
+//   (1) inode_alloc → returns 0 (first slot).
+//   (2) inode_get_ino(0) == 1 (ino = idx + 1).
+//   (3) tbl.count == 1.
+//   (4) inode_set_mode(0, 33188); inode_get_mode(0) == 33188 (mode
+//       set/get round-trip — catches any pack/unpack or field-offset
+//       bug in the u32 4-byte pack/unpack path. 33188 = S_IFREG |
+//       0o644 = 32768 + 420 — the standard "regular file, rw-r--r--"
+//       mode).
+//   (5) inode_set_size(0, 1024); inode_get_size(0) == 1024 (size
+//       set/get round-trip — catches any pack/unpack or field-offset
+//       bug in the u64 8-byte pack/unpack path).
+//   (6) inode_set_uid(0, 1000); inode_get_uid(0) == 1000 (uid
+//       round-trip).
+//   (7) inode_set_gid(0, 1000); inode_get_gid(0) == 1000 (gid
+//       round-trip — exercises a DIFFERENT u32 array than check 4 to
+//       catch any field-array mix-up where uid and gid would alias).
+//   (8) inode_alloc → returns 1 (second slot); tbl.count == 2.
+//   (9) inode_free(0); tbl.count == 1; inode_get_ino(0) == 0 (freed).
+//   (10) inode_alloc → returns 0 (reuses the freed slot — lowest-free-
+//        slot-wins policy).
+// Returns 0 on success, 1..10 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K5a contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (33188, 1024, 1000, 1, 2, 10)
+// — decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same rationale, and K4a's task.vuma for the same rule
+// applied to slot count 256 and state values 1/2).
+
+fn main() -> i32 {
+    let tbl = state_new(InodeTable);
+    inode_init(tbl);
+
+    // Check 1: inode_alloc → returns 0 (first slot).
+    let i0 = inode_alloc(tbl);
+    if i0 != 0 { return 1; }
+
+    // Check 2: the new slot's ino should be 1 (idx + 1).
+    if inode_get_ino(tbl, 0) != 1 { return 2; }
+
+    // Check 3: count should be 1.
+    if tbl.count != 1 { return 3; }
+
+    // Check 4: mode set/get round-trip (u32 4-byte pack/unpack).
+    // 33188 = S_IFREG | 0o644 = 32768 + 420.
+    inode_set_mode(tbl, 0, 33188);
+    if inode_get_mode(tbl, 0) != 33188 { return 4; }
+
+    // Check 5: size set/get round-trip (u64 8-byte pack/unpack).
+    inode_set_size(tbl, 0, 1024);
+    if inode_get_size(tbl, 0) != 1024 { return 5; }
+
+    // Check 6: uid set/get round-trip (u32 pack/unpack on a different
+    // array than mode — catches any field-array mix-up).
+    inode_set_uid(tbl, 0, 1000);
+    if inode_get_uid(tbl, 0) != 1000 { return 6; }
+
+    // Check 7: gid set/get round-trip (u32 pack/unpack on yet another
+    // array — catches uid/gid aliasing).
+    inode_set_gid(tbl, 0, 1000);
+    if inode_get_gid(tbl, 0) != 1000 { return 7; }
+
+    // Check 8: alloc a second inode → returns 1; count == 2.
+    let i1 = inode_alloc(tbl);
+    if i1 != 1 { return 8; }
+    if tbl.count != 2 { return 8; }
+
+    // Check 9: free slot 0 → ino == 0 (FREE), count == 1.
+    inode_free(tbl, i0);
+    if inode_get_ino(tbl, 0) != 0 { return 9; }
+    if tbl.count != 1 { return 9; }
+
+    // Check 10: alloc should reuse slot 0 (lowest-free-slot-wins).
+    let i2 = inode_alloc(tbl);
+    if i2 != 0 { return 10; }
+
+    return 0;
+}
