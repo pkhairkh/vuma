@@ -1,0 +1,23 @@
+// horner_poly — Evaluate p(x) = 3x^3 - 2x^2 + 5x - 7 at x=2.0.
+// Expected exit code: 19
+//
+// p(2.0) = 3*8 - 2*4 + 5*2 - 7 = 24 - 8 + 10 - 7 = 19.
+// Horner's form: ((3*x - 2)*x + 5)*x - 7.
+// Exercises:
+//   - f64 multiplication and addition/subtraction
+//   - Mixed int/float (coefficients as int literals -> inttofloat)
+
+fn main() -> i32 {
+    x: f64 = 2.0;
+    // Coefficients 3, -2, 5, -7 — use inttofloat for signed.
+    c0: f64 = inttofloat(3);
+    c1: f64 = inttofloat(-2);
+    c2: f64 = inttofloat(5);
+    c3: f64 = inttofloat(-7);
+    // Horner: ((c0*x + c1)*x + c2)*x + c3
+    acc: f64 = c0;
+    acc = acc * x + c1;
+    acc = acc * x + c2;
+    acc = acc * x + c3;
+    return floattoint(acc);
+}

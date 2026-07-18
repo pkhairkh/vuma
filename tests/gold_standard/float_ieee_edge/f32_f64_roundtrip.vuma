@@ -1,0 +1,21 @@
+// f32_f64_roundtrip — f32 -> f64 -> f32 must preserve the value.
+// Expected exit code: 1
+//
+// Start with 3.5 (f32).  Widen to f64 (3.5).  Narrow back to f32 (3.5).
+// The widened and narrowed values must be == the original.
+// Exercises:
+//   - floattofloat (f32 -> f64 widen)
+//   - floattofloat (f64 -> f32 narrow)
+//   - f32 == comparison
+//
+// CRITICAL for G3/G4 hppa/m68k: validates the FloatToFloat bit-copy.
+
+fn main() -> i32 {
+    x: f32 = 3.5;
+    x_wide: f64 = floattofloat(x);      // f32 -> f64
+    x_back: f32 = floattofloat(x_wide); // f64 -> f32
+    if x == x_back {
+        return 1;
+    }
+    return 0;
+}

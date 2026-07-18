@@ -1,0 +1,20 @@
+// neg_zero_equality — IEEE 754: -0.0 == 0.0 is true.
+// Expected exit code: 1
+//
+// -0.0 and +0.0 have different bit patterns (sign bit differs) but ==
+// must return true.  Exercises:
+//   - f64 == comparison (MUST use FP compare — integer CMP on the
+//     different bit patterns would wrongly return 0/false).
+//
+// CRITICAL for G1: this test FAILS if == uses integer CMP.
+
+fn main() -> i32 {
+    pos_zero: f64 = 0.0;
+    // Produce -0.0: 0.0 * -1.0 = -0.0 (IEEE).
+    neg_one: f64 = -1.0;
+    neg_zero: f64 = pos_zero * neg_one;   // -0.0
+    if pos_zero == neg_zero {
+        return 1;
+    }
+    return 0;
+}

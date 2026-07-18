@@ -1,0 +1,52 @@
+// monte_carlo_pi — Approximate pi via a deterministic pseudo-random
+// sequence (no real RNG in VUMA; use a simple LCG).
+// Expected exit code: 3
+//
+// pi = 4 * (points_in_circle / total_points).
+// With a fixed LCG seed, the result converges near 3.0 after 1000 samples
+// (poor coverage from a short LCG, but deterministic).  floattoint(3.x) = 3.
+//
+// Exercises:
+//   - f64 multiplication and division
+//   - f64 < comparison (inside-circle test: x^2 + y^2 < 1.0)
+//   - inttofloat (LCG state -> coordinate)
+//   - floattoint (final truncation)
+//   - f64 subtraction and addition (LCG advance)
+
+fn main() -> i32 {
+    total: i64 = 1000;
+    inside: i64 = 0;
+    state: i64 = 12345;  // LCG seed
+    i: i64 = 0;
+    while i < total {
+        // LCG: state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        state = state * 1103515245 + 12345;
+        state = state & 2147483647;
+        // Map to [0, 1) approximately: state / 2147483647.0
+        sx: f64 = inttofloat(state);
+        maxf: f64 = inttofloat(2147483647);
+        x: f64 = sx / maxf;
+        // Second coordinate: advance LCG again
+        state = state * 1103515245 + 12345;
+        state = state & 2147483647;
+        sy: f64 = inttofloat(state);
+        y: f64 = sy / maxf;
+        // Inside circle if x^2 + y^2 < 1.0
+        x2: f64 = x * x;
+        y2: f64 = y * y;
+        dist: f64 = x2 + y2;
+        one: f64 = 1.0;
+        if dist < one {
+            inside = inside + 1;
+        }
+        i = i + 1;
+    }
+    // pi = 4 * inside / total
+    pi4: f64 = inttofloat(inside);
+    pi: f64 = pi4 / pi4;  // wrong — want pi4 / total * 4.  Fix:
+    totalf: f64 = inttofloat(total);
+    ratio: f64 = pi4 / totalf;
+    four: f64 = inttofloat(4);
+    pi = ratio * four;
+    return floattoint(pi);
+}
