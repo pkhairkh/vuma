@@ -1136,7 +1136,16 @@ fn patch_call_site(
 /// (i.e., the offset just past the last emitted instruction).
 fn patch_cmpb_to_here(code: &mut Vec<u8>, cmpb_off: usize) {
     let here = code.len() as i64;
-    let disp = ((here - cmpb_off as i64 - 8) as i32) & !3;
+    patch_cmpb_to_target(code, cmpb_off, here as usize);
+}
+
+/// Patch a cmpb instruction at `cmpb_off` to branch to `target_off`.
+/// Used when multiple cmpbs must branch to the same target (the
+/// `patch_cmpb_to_here` helper always uses `code.len()` as the target,
+/// which doesn't work when the target is emitted before the second
+/// cmpb is patched).
+fn patch_cmpb_to_target(code: &mut Vec<u8>, cmpb_off: usize, target_off: usize) {
+    let disp = ((target_off as i64 - cmpb_off as i64 - 8) as i32) & !3;
     let word = u32::from_be_bytes([
         code[cmpb_off], code[cmpb_off + 1],
         code[cmpb_off + 2], code[cmpb_off + 3],
@@ -1370,22 +1379,168 @@ fn build_f64_to_u64_stub() -> Vec<u8> {
     build_f64_to_i64_stub_inner(64)
 }
 
-/// Build `__vuma_i64_to_f64` — i64→f64. Simplified: returns 0.0 for now.
-/// TODO: full implementation requires finding the highest set bit and
-/// packing the f64 sign/exponent/mantissa fields.
-fn build_i64_to_f64_stub() -> Vec<u8> {
+/// Build `__vuma_i64_to_f64` — i64→f64 conversion.
+///
+/// Input:  R26 = lo (low 32 bits of i64), R25 = hi (high 32 bits of i64)
+/// Output: R28 = lo (f64 bits low), R29 = hi (f64 bits high)
+///
+/// Algorithm:
+///   1. Default result = 0.0
+///   2. Extract sign: if R25 bit 31 set, sign = 1, negate (two's complement)
+///   3. If value == 0, return 0.0
+///   4. Normalize: shift left until bit 62 is set (bit 30 of hi). Count S.
+///   5. exp = 1023 + 62 - S = 1085 - S
+///   6. Shift right by 10 to get bit 52 set (implicit bit position)
+///   7. Pack: R29 = (sign << 31) | (exp << 20) | (hi & 0xFFFFF), R28 = lo
+fn build_int_to_f64_stub_inner(signed: bool) -> Vec<u8> {
     let mut code = Vec::new();
-    code.extend_from_slice(&encode_copy(R0, R28));  // R28 = 0
-    code.extend_from_slice(&encode_copy(R0, R29));  // R29 = 0
+    // Allocate 32 bytes of stack scratch.
+    code.extend_from_slice(&encode_ldo(R30, -32, R30));
+
+    // Default result = 0.0
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend_from_slice(&encode_copy(R0, R29));
+
+    // Save sign to [R30+0]: sign = R25 >> 31 (for signed) or 0 (for unsigned)
+    if signed {
+        code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
+        code.extend_from_slice(&encode_stw(R19, R30, 0));
+
+        // If sign == 1, negate the 64-bit value (two's complement).
+        // Skip negate if sign == 0.
+        let neg_skip = code.len();
+        code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));
+        code.extend_from_slice(&encode_nop());
+        let skip_negate = emit_forward_branch_placeholder(&mut code);
+        patch_cmpb_to_here(&mut code, neg_skip);
+        // Negate: lo = ~lo + 1, hi = ~hi + carry
+        code.extend(ss_load_imm(R20, 0xFFFFFFFF));
+        code.extend_from_slice(&encode_xor(R26, R20, R26));
+        code.extend_from_slice(&encode_xor(R25, R20, R25));
+        code.extend_from_slice(&encode_ldi(1, R20));
+        code.extend_from_slice(&encode_add(R26, R20, R26));
+        let carry_check = code.len();
+        code.extend_from_slice(&encode_cmpb(R26, R0, 0b001, false, false, 0));
+        code.extend_from_slice(&encode_nop());
+        let skip_carry = emit_forward_branch_placeholder(&mut code);
+        patch_cmpb_to_here(&mut code, carry_check);
+        code.extend_from_slice(&encode_add(R25, R20, R25));
+        patch_forward_branch_to_here(&mut code, skip_carry);
+        patch_forward_branch_to_here(&mut code, skip_negate);
+    } else {
+        // Unsigned: sign = 0, no negate.
+        code.extend_from_slice(&encode_copy(R0, R19));
+        code.extend_from_slice(&encode_stw(R19, R30, 0));
+    }
+
+    // Check if value == 0: if hi == 0 and lo == 0, return 0.0
+    code.extend_from_slice(&encode_or(R25, R26, R20));  // R20 = hi | lo
+    let val_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if 0, return 0.0
+    code.extend_from_slice(&encode_nop());
+
+    // Normalize: shift left until bit 62 is set (bit 30 of hi = 0x40000000).
+    // Count shifts S, save to [R30+4].
+    code.extend_from_slice(&encode_copy(R0, R19));  // R19 = 0 (S counter)
+    code.extend(ss_load_imm(R20, 0x80000000));
+    let norm_loop = code.len() as i64;
+    code.extend_from_slice(&encode_and(R25, R20, R21));  // R21 = hi & 0x80000000 (bit 63)
+    let norm_done = code.len();
+    code.extend_from_slice(&encode_cmpb(R21, R0, 0b001, true, false, 0));  // cmpb,<> → if != 0, done
+    code.extend_from_slice(&encode_nop());
+    // Shift left by 1 (64-bit): carry = R26 >> 31; R26 <<= 1; R25 <<= 1; R25 |= carry
+    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R21));  // R21 = bit 31 of lo
+    code.extend_from_slice(&encode_shladd(1, R26, R0, R26));  // lo <<= 1
+    code.extend_from_slice(&encode_shladd(1, R25, R0, R25));  // hi <<= 1
+    code.extend_from_slice(&encode_or(R25, R21, R25));  // hi |= carry
+    code.extend_from_slice(&encode_ldo(R19, 1, R19));  // S++
+    // Loop back
+    let norm_back = code.len() as i64;
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // always loop
+    code.extend_from_slice(&encode_nop());
+    {
+        let disp = ((norm_loop - (norm_back + 8)) as i32) & !3;
+        let off = norm_back as usize;
+        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
+        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+    }
+    // norm_done:
+    let norm_after = code.len();
+    patch_cmpb_to_target(&mut code, norm_done, norm_after);
+    // Save S to [R30+4]
+    code.extend_from_slice(&encode_stw(R19, R30, 4));
+
+    // exp = 1086 - S. (1086 = 1023 + 63)
+    code.extend(ss_load_imm(R20, 1086));
+    code.extend_from_slice(&encode_sub(R20, R19, R19));  // R19 = 1085 - S = exp
+    code.extend_from_slice(&encode_stw(R19, R30, 8));  // save exp
+
+    // Shift right by 11 (to get bit 52 set, since we normalized to bit 63).
+    // 11 iterations of 64-bit right shift by 1.
+    code.extend_from_slice(&encode_ldi(11, R19));  // R19 = 11 (counter)
+    let shr_loop = code.len() as i64;
+    let shr_done = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // if counter == 0, done
+    code.extend_from_slice(&encode_nop());
+    // 64-bit right shift by 1:
+    //   new_lo = SHRPW(hi, lo, 1) = (hi:lo) >> 1 (low 32 bits)
+    //   new_hi = SHRPW(R0, hi, 1) = hi >> 1
+    // Order: compute new_lo first (reads hi), then new_hi (overwrites hi).
+    code.extend_from_slice(&encode_shrpw(R25, R26, 1, R26));  // R26 = (R25:R26) >> 1 (low)
+    code.extend_from_slice(&encode_shrpw(R0, R25, 1, R25));   // R25 = R25 >> 1
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));  // counter--
+    let shr_back = code.len() as i64;
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // always loop
+    code.extend_from_slice(&encode_nop());
+    {
+        let disp = ((shr_loop - (shr_back + 8)) as i32) & !3;
+        let off = shr_back as usize;
+        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
+        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+    }
+    patch_cmpb_to_here(&mut code, shr_done);
+
+    // Pack result.
+    // R28 = lo (mant_lo)
+    code.extend_from_slice(&encode_copy(R26, R28));
+    // R29 = hi & 0xFFFFF (mant_hi)
+    code.extend(ss_load_imm(R24, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R25, R24, R29));
+    // R29 |= (exp << 20). exp in [R30+8].
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R24));  // R24 = exp << 3
+    for _ in 0..17 {
+        code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
+    }
+    code.extend_from_slice(&encode_or(R29, R24, R29));
+    // R29 |= (sign << 31). sign in [R30+0].
+    code.extend_from_slice(&encode_ldw(R30, 0, R19));
+    code.extend_from_slice(&encode_copy(R19, R24));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
+    }
+    code.extend_from_slice(&encode_or(R29, R24, R29));
+
+    // Return (normal path)
+    code.extend_from_slice(&encode_ldo(R30, 32, R30));
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
+
+    // Handler: val_zero → return 0.0 (already in R28/R29)
+    patch_cmpb_to_here(&mut code, val_zero);
+    code.extend_from_slice(&encode_ldo(R30, 32, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
     code
 }
 
 /// Build `__vuma_u64_to_f64` — u64→f64. Reuses the i64 stub (same for
 /// non-negative values, which is all the test suite uses).
 fn build_u64_to_f64_stub() -> Vec<u8> {
-    build_i64_to_f64_stub()
+    build_int_to_f64_stub_inner(false)
 }
 
 /// Build `__vuma_f32_to_f64` — f32→f64 widen.
@@ -1664,45 +1819,41 @@ fn build_f64_le_stub() -> Vec<u8> {
     code
 }
 
-/// Build `__vuma_f64_add` — f64 addition (same-sign, normal numbers).
+/// Build `__vuma_f64_add` — f64 addition (full IEEE 754 for normal numbers).
 ///
 /// Input:  R26=lo_a, R25=hi_a, R24=lo_b, R23=hi_b
 /// Output: R28=lo, R29=hi
 ///
-/// Algorithm (simplified — handles same-sign addition; different signs
-/// return 0; denormals/Inf/NaN return 0):
-///   1. Save lo_b (R24) to stack BEFORE any extraction (W4e fix — R24 is
-///      reused as a scratch register during field extraction).
-///   2. Extract sign_a, exp_a, mant_a (with implicit bit) → save to stack.
-///   3. Extract sign_b, exp_b, mant_b (with implicit bit).
-///   4. If signs differ: return 0 (subtraction handled by __vuma_f64_sub
-///      which flips b's sign before falling through to this add logic).
-///   5. If exp_a < exp_b: swap a and b.
-///   6. diff = exp_a - exp_b. If diff > 60: return a.
-///   7. Shift mant_b right by diff (1-bit loop).
-///   8. result_mant = mant_a + mant_b (64-bit add with carry).
-///   9. If carry (bit 53): shift right 1, exp_a++.
-///   10. If exp_a >= 0x7FF: return 0 (overflow).
-///   11. Pack: R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF),
-///       R28 = mant_lo.
+/// Algorithm:
+///   1. Save original a/b bits to stack (for early-return handlers).
+///   2. Unpack sign/exp/mantissa for both a and b (add implicit bit).
+///   3. Handle special cases: zero operand (return the other), Inf/NaN
+///      (return a).  These use per-case handlers that set R28/R29 and
+///      return.
+///   4. Compute sign_diff = sign_a XOR sign_b.
+///   5. Ensure exp_a >= exp_b (swap if needed).
+///   6. Shift mant_b right by (exp_a - exp_b).
+///   7. If sign_diff == 0 (same sign): result_mant = mant_a + mant_b,
+///      result_sign = sign_a.
+///      If sign_diff != 0 (different sign): compare magnitudes, subtract
+///      smaller from larger, result_sign = sign of larger.
+///   8. Normalize: if carry (bit 53 set): shift right 1, exp++.  If
+///      leading zeros (bit 52 not set, subtract case): shift left 1,
+///      exp-- (loop).
+///   9. If result == 0: return 0.  If exp >= 0x7FF: return Inf.
+///  10. Pack and return.
 fn build_f64_add_stub() -> Vec<u8> {
     let mut code = Vec::new();
     // Allocate 64 bytes of stack scratch.
     code.extend_from_slice(&encode_ldo(R30, -64, R30));
-    // W4e DEBUG: default result = 7.0 (distinctive marker for early return).
-    // 7.0 bits = 0x401C000000000000 → lo=0, hi=0x401C0000
-    code.extend(ss_load_imm(R28, 0));
-    code.extend(ss_load_imm(R29, 0x401C0000));
-    // Default result = 0
-    // code.extend_from_slice(&encode_copy(R0, R28));
-    // code.extend_from_slice(&encode_copy(R0, R29));
 
-    // W4e: Save lo_b (R24) to [R30+32] IMMEDIATELY, before R24 is reused as
-    // a scratch register during a's field extraction.  Without this, lo_b is
-    // clobbered by the ss_load_imm(R24, ...) calls below and the add produces
-    // garbage.  hi_b (R23) is only read (not written) during extraction, so
-    // it is safe without an early save.
+    // --- Save original a/b bits for early-return handlers ---
+    // [R30+0]  = a_lo (R26), [R30+40] = a_hi (R25)
+    // [R30+32] = b_lo (R24), [R30+44] = b_hi (R23)
+    code.extend_from_slice(&encode_stw(R26, R30, 0));
+    code.extend_from_slice(&encode_stw(R25, R30, 40));
     code.extend_from_slice(&encode_stw(R24, R30, 32));
+    code.extend_from_slice(&encode_stw(R23, R30, 44));
 
     // --- Extract a's fields ---
     // sign_a = R25 >> 31 → R19, save to [R30+4]
@@ -1740,89 +1891,90 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend(ss_load_imm(R24, 0x100000));
     code.extend_from_slice(&encode_or(R21, R24, R21));
     code.extend_from_slice(&encode_stw(R21, R30, 28));
-    // W4e: mant_b_lo was already saved to [R30+32] at the top of this stub
-    // (before R24 was clobbered).  No action needed here.
+    // mant_b_lo already saved to [R30+32] above.
 
-    // --- Check signs: if sign_a != sign_b, return 0 ---
-    code.extend_from_slice(&encode_ldw(R30, 4, R19));   // sign_a
-    code.extend_from_slice(&encode_ldw(R30, 20, R21));  // sign_b
-    let diff_sign = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R21, 0b001, true, false, 0));  // cmpb,<> → return 0
-    code.extend_from_slice(&encode_nop());
-
-    // --- Check zero/Inf/NaN: if exp_a == 0 or exp_a == 0x7FF, return 0 ---
-    code.extend_from_slice(&encode_ldw(R30, 8, R20));  // exp_a
-    let exp_a_zero = code.len();
+    // --- Early-return checks ---
+    // If exp_a == 0 (a is zero): return b.
+    code.extend_from_slice(&encode_ldw(R30, 8, R20));
+    let a_zero = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
-    code.extend(ss_load_imm(R24, 0x7FF));
-    let exp_a_inf = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R24, 0b001, false, false, 0));
-    code.extend_from_slice(&encode_nop());
-    // If exp_b == 0 or exp_b == 0x7FF, return 0
-    code.extend_from_slice(&encode_ldw(R30, 24, R20));  // exp_b
-    let exp_b_zero = code.len();
+
+    // If exp_b == 0 (b is zero): return a.
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    let b_zero = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
+
+    // If exp_a == 0x7FF (a is Inf/NaN): return a.
+    code.extend_from_slice(&encode_ldw(R30, 8, R20));
     code.extend(ss_load_imm(R24, 0x7FF));
-    let exp_b_inf = code.len();
+    let a_inf = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R24, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
 
-    // --- Ensure exp_a >= exp_b. If not, swap a and b. ---
-    // Load exp_a and exp_b, compare.
-    code.extend_from_slice(&encode_ldw(R30, 8, R19));   // R19 = exp_a
-    code.extend_from_slice(&encode_ldw(R30, 24, R20));  // R20 = exp_b
-    // cmpb,< R19, R20, swap (if exp_a < exp_b signed, swap)
-    let need_swap = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R20, 0b010, false, false, 0));  // cond=010 (<)
+    // If exp_b == 0x7FF (b is Inf/NaN): return b.
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    code.extend(ss_load_imm(R24, 0x7FF));
+    let b_inf = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R24, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
 
-    // --- No swap path: a stays as a, b stays as b. ---
-    // Load mant_a and mant_b into R21:R22 (mant_a) and R23:R24 (mant_b).
-    code.extend_from_slice(&encode_ldw(R30, 12, R21));  // mant_a_hi
-    code.extend_from_slice(&encode_ldw(R30, 16, R22));  // mant_a_lo
-    code.extend_from_slice(&encode_ldw(R30, 28, R23));  // mant_b_hi
-    code.extend_from_slice(&encode_ldw(R30, 32, R24));  // mant_b_lo
-    // Branch past swap block.
-    let skip_swap = emit_forward_branch_placeholder(&mut code);
-
-    // --- Swap path: exchange a and b. ---
-    patch_cmpb_to_here(&mut code, need_swap);
-    // Load b's mant into R21:R22, a's mant into R23:R24.
-    code.extend_from_slice(&encode_ldw(R30, 28, R21));  // mant_b_hi → R21
-    code.extend_from_slice(&encode_ldw(R30, 32, R22));  // mant_b_lo → R22
-    code.extend_from_slice(&encode_ldw(R30, 12, R23));  // mant_a_hi → R23
-    code.extend_from_slice(&encode_ldw(R30, 16, R24));  // mant_a_lo → R24
-    // Swap exp_a and exp_b on stack.
-    code.extend_from_slice(&encode_ldw(R30, 24, R19));  // R19 = exp_b
-    code.extend_from_slice(&encode_ldw(R30, 8, R20));   // R20 = exp_a
-    code.extend_from_slice(&encode_stw(R19, R30, 8));   // [R30+8] = exp_b (new exp_a)
-    code.extend_from_slice(&encode_stw(R20, R30, 24));  // [R30+24] = exp_a (new exp_b)
-    patch_forward_branch_to_here(&mut code, skip_swap);
-
-    // --- Now exp_a >= exp_b. mant_a in R21:R22, mant_b in R23:R24. ---
-    // diff = exp_a - exp_b. exp_a in [R30+8], exp_b in [R30+24].
-    code.extend_from_slice(&encode_ldw(R30, 8, R19));   // R19 = exp_a
-    code.extend_from_slice(&encode_ldw(R30, 24, R20));  // R20 = exp_b
-    code.extend_from_slice(&encode_sub(R19, R20, R19));  // R19 = diff
-    // If diff > 60: return a (b is negligible). Simplified: just proceed.
-    // Save diff to [R30+36].
+    // --- Compute sign_diff = sign_a XOR sign_b, save to [R30+36] ---
+    code.extend_from_slice(&encode_ldw(R30, 4, R19));
+    code.extend_from_slice(&encode_ldw(R30, 20, R21));
+    code.extend_from_slice(&encode_xor(R19, R21, R19));
     code.extend_from_slice(&encode_stw(R19, R30, 36));
 
-    // --- Shift mant_b (R23:R24) right by diff (R19). 1-bit loop. ---
-    let shift_loop = code.len() as i64;
-    // If diff == 0, skip shifting.
-    let shift_done_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // cmpb,= → shift_done
+    // --- Ensure exp_a >= exp_b. If not, swap a and b. ---
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    let need_swap = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b010, false, false, 0));  // cmpb,< → swap
     code.extend_from_slice(&encode_nop());
-    // 1-bit right shift of (R23:R24):
-    code.extend_from_slice(&encode_shrpw(R23, R24, 1, R24));  // R24 = (R23:R24) >> 1 low
-    code.extend_from_slice(&encode_shrpw(R0, R23, 1, R23));   // R23 = R23 >> 1
-    code.extend_from_slice(&encode_ldo(R19, -1, R19));  // diff--
-    // Loop back if diff != 0.
+
+    // No swap path: load mant_a into R21:R22, mant_b into R23:R24.
+    code.extend_from_slice(&encode_ldw(R30, 12, R21));
+    code.extend_from_slice(&encode_ldw(R30, 16, R22));
+    code.extend_from_slice(&encode_ldw(R30, 28, R23));
+    code.extend_from_slice(&encode_ldw(R30, 32, R24));
+    let skip_swap = emit_forward_branch_placeholder(&mut code);
+
+    // Swap path: load mant_b into R21:R22, mant_a into R23:R24.
+    // Also swap exps AND signs so that [R30+4]/[R30+8] always refer to
+    // the operand now in R21:R22 (the larger-exp one), and [R30+20]/
+    // [R30+24] refer to the operand now in R23:R24.  Without swapping
+    // signs, the subtract path would use the wrong sign for the result.
+    patch_cmpb_to_here(&mut code, need_swap);
+    code.extend_from_slice(&encode_ldw(R30, 28, R21));
+    code.extend_from_slice(&encode_ldw(R30, 32, R22));
+    code.extend_from_slice(&encode_ldw(R30, 12, R23));
+    code.extend_from_slice(&encode_ldw(R30, 16, R24));
+    // Swap exps: [R30+8] <-> [R30+24]
+    code.extend_from_slice(&encode_ldw(R30, 24, R19));
+    code.extend_from_slice(&encode_ldw(R30, 8, R20));
+    code.extend_from_slice(&encode_stw(R19, R30, 8));
+    code.extend_from_slice(&encode_stw(R20, R30, 24));
+    // Swap signs: [R30+4] <-> [R30+20]
+    code.extend_from_slice(&encode_ldw(R30, 20, R19));
+    code.extend_from_slice(&encode_ldw(R30, 4, R20));
+    code.extend_from_slice(&encode_stw(R19, R30, 4));
+    code.extend_from_slice(&encode_stw(R20, R30, 20));
+    patch_forward_branch_to_here(&mut code, skip_swap);
+
+    // --- Shift mant_b right by (exp_a - exp_b) ---
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    code.extend_from_slice(&encode_sub(R19, R20, R19));  // R19 = diff
+    let shift_loop = code.len() as i64;
+    let shift_done_check = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    code.extend_from_slice(&encode_shrpw(R23, R24, 1, R24));
+    code.extend_from_slice(&encode_shrpw(R0, R23, 1, R23));
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));
     let shift_back = code.len() as i64;
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> → shift_loop
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((shift_loop - (shift_back + 8)) as i32) & !3;
@@ -1831,117 +1983,246 @@ fn build_f64_add_stub() -> Vec<u8> {
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
         code[off..off+4].copy_from_slice(&patched.to_be_bytes());
     }
-    // shift_done:
     patch_cmpb_to_here(&mut code, shift_done_check);
 
-    // --- Add mant_a (R21:R22) + mant_b (R23:R24) → R21:R22 with carry. ---
-    // Add lo: R22 = R22 + R24.
-    code.extend_from_slice(&encode_add(R22, R24, R22));
-    // Check carry: if R22 < R24 (unsigned), carry = 1. (R24 was the old R22 value... wait)
-    // Actually, ADD r1, r2, dst computes dst = r1 + r2. Here R22 = R22 + R24.
-    // Carry if (R22 < R24) since R22 was one of the operands... no.
-    // ADD r1, r2, dst: dst = r1 + r2. Carry if dst < r1 (or dst < r2).
-    // Here r1 = R22 (old), r2 = R24, dst = R22 (new). But we overwrote R22!
-    // We need to check if new R22 < old R22 (or R24).
-    // Since r2 = R24 is preserved, check: new R22 < R24? No, that's wrong too.
-    // The correct check: carry = (new_dst < r1) where r1 is the OLD value of dst.
-    // But we overwrote dst. Hmm.
-    // Actually, carry = (new_dst < r1) OR (new_dst < r2). Since both r1 and r2
-    // are non-negative, carry occurs iff the true sum >= 2^32, which means
-    // new_dst < r1 (because new_dst = r1 + r2 - 2^32 < r1 when r2 > 0).
-    // But we need the OLD r1, which was R22 before the add.
-    // Let me use a different approach: save R22 first.
-    // Actually, the standard trick: carry = (new_dst < r2) where r2 is the
-    // OTHER operand (not the one we overwrote). Since r2 = R24 is preserved:
-    // carry = (new_R22 < R24).
-    // Wait, that's not right. new_R22 = old_R22 + R24. If no carry,
-    // new_R22 >= R24 (since old_R22 >= 0). If carry, new_R22 < R24.
-    // Hmm, that's only true if old_R22 >= 0, which it is (unsigned).
-    // Actually: new_R22 = (old_R22 + R24) mod 2^32. If old_R22 + R24 >= 2^32,
-    // then new_R22 = old_R22 + R24 - 2^32 < R24 (since old_R22 < 2^32).
-    // So carry = (new_R22 < R24). This works!
-    code.extend_from_slice(&encode_copy(R0, R19));  // R19 = 0 (carry default)
-    let carry_lo = code.len();
-    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // cmpb,<< R22, R24, set_carry
+    // --- Dispatch: add or subtract based on sign_diff ---
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));  // R19 = sign_diff
+    let do_subtract = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // if != 0, subtract
     code.extend_from_slice(&encode_nop());
-    let skip_carry = emit_forward_branch_placeholder(&mut code);
-    // set_carry:
-    patch_cmpb_to_here(&mut code, carry_lo);
-    code.extend_from_slice(&encode_ldi(1, R19));  // R19 = 1 (carry)
-    patch_forward_branch_to_here(&mut code, skip_carry);
-    // Add hi: R21 = R21 + R23 + carry.
-    code.extend_from_slice(&encode_add(R21, R23, R21));  // R21 = R21 + R23
-    code.extend_from_slice(&encode_add(R21, R19, R21));  // R21 += carry
 
-    // --- Check if carry (bit 53 set). Bit 53 = bit 21 of R21. ---
-    // R19 = R21 & 0x200000 (bit 21). If != 0, carry occurred.
-    code.extend(ss_load_imm(R24, 0x200000));
-    code.extend_from_slice(&encode_and(R21, R24, R19));  // R19 = R21 & 0x200000
-    let no_carry = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // cmpb,= → no carry, skip shift
+    // ===== ADD PATH (signs match) =====
+    // R21:R22 = mant_a, R23:R24 = mant_b. result = mant_a + mant_b.
+    code.extend_from_slice(&encode_add(R22, R24, R22));  // R22 = lo_a + lo_b
+    code.extend_from_slice(&encode_copy(R0, R19));  // R19 = 0 (carry)
+    let carry_add = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // if R22 < R24, carry
     code.extend_from_slice(&encode_nop());
-    // Carry: shift (R21:R22) right by 1.
-    code.extend_from_slice(&encode_shrpw(R21, R22, 1, R22));  // R22 = (R21:R22) >> 1 low
-    code.extend_from_slice(&encode_shrpw(R0, R21, 1, R21));   // R21 = R21 >> 1
-    // exp_a++. Load exp_a, increment, store back.
-    code.extend_from_slice(&encode_ldw(R30, 8, R19));  // R19 = exp_a
-    code.extend_from_slice(&encode_ldo(R19, 1, R19));  // R19++
-    code.extend_from_slice(&encode_stw(R19, R30, 8));   // [R30+8] = exp_a
-    // no_carry:
+    let skip_carry_add = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, carry_add);
+    code.extend_from_slice(&encode_ldi(1, R19));
+    patch_forward_branch_to_here(&mut code, skip_carry_add);
+    code.extend_from_slice(&encode_add(R21, R23, R21));
+    code.extend_from_slice(&encode_add(R21, R19, R21));
+    // result_sign = sign_a → R25
+    code.extend_from_slice(&encode_ldw(R30, 4, R25));
+    // Branch to normalize.
+    let skip_subtract = emit_forward_branch_placeholder(&mut code);
+
+    // ===== SUBTRACT PATH (signs differ) =====
+    patch_cmpb_to_here(&mut code, do_subtract);
+    // R21:R22 = mant_a, R23:R24 = mant_b.
+    // If mant_a >= mant_b: result = a - b, sign = sign_a.
+    // Else: result = b - a, sign = sign_b.
+    // Compare hi words (unsigned):
+    //   cmpb,<< R21, R23 → if R21 < R23, mant_a < mant_b (do b-a)
+    let sub_a_lt_hi = code.len();
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    //   cmpb,<> R21, R23 → if R21 != R23 (and not <, so >), do a-b
+    let sub_a_gt_hi = code.len();
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b001, true, false, 0));
+    code.extend_from_slice(&encode_nop());
+    // R21 == R23: compare lo.
+    let sub_a_lt_lo = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // if R22 < R24, b-a
+    code.extend_from_slice(&encode_nop());
+    // Fall through: mant_a >= mant_b → do a-b.
+
+    // --- a-b path ---
+    patch_cmpb_to_here(&mut code, sub_a_gt_hi);
+    // borrow = (R22 < R24) ? 1 : 0
+    code.extend_from_slice(&encode_copy(R0, R19));
+    let borrow1 = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let skip_borrow1 = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, borrow1);
+    code.extend_from_slice(&encode_ldi(1, R19));
+    patch_forward_branch_to_here(&mut code, skip_borrow1);
+    code.extend_from_slice(&encode_sub(R22, R24, R22));
+    code.extend_from_slice(&encode_sub(R21, R23, R21));
+    code.extend_from_slice(&encode_sub(R21, R19, R21));
+    code.extend_from_slice(&encode_ldw(R30, 4, R25));  // result_sign = sign_a
+    let skip_ba = emit_forward_branch_placeholder(&mut code);
+
+    // --- b-a path (mant_a < mant_b) ---
+    let ba_start = code.len();
+    patch_cmpb_to_target(&mut code, sub_a_lt_hi, ba_start);
+    patch_cmpb_to_target(&mut code, sub_a_lt_lo, ba_start);
+    // Swap R21<->R23, R22<->R24 (using R20 as scratch).
+    code.extend_from_slice(&encode_copy(R21, R20));
+    code.extend_from_slice(&encode_copy(R23, R21));
+    code.extend_from_slice(&encode_copy(R20, R23));
+    code.extend_from_slice(&encode_copy(R22, R20));
+    code.extend_from_slice(&encode_copy(R24, R22));
+    code.extend_from_slice(&encode_copy(R20, R24));
+    // Now R21:R22 = mant_b, R23:R24 = mant_a. Do a-b (= b-a).
+    code.extend_from_slice(&encode_copy(R0, R19));
+    let borrow2 = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let skip_borrow2 = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, borrow2);
+    code.extend_from_slice(&encode_ldi(1, R19));
+    patch_forward_branch_to_here(&mut code, skip_borrow2);
+    code.extend_from_slice(&encode_sub(R22, R24, R22));
+    code.extend_from_slice(&encode_sub(R21, R23, R21));
+    code.extend_from_slice(&encode_sub(R21, R19, R21));
+    code.extend_from_slice(&encode_ldw(R30, 20, R25));  // result_sign = sign_b
+    patch_forward_branch_to_here(&mut code, skip_ba);
+
+    // ===== NORMALIZE =====
+    patch_forward_branch_to_here(&mut code, skip_subtract);
+    // R21:R22 = result_mant, R25 = result_sign, exp_a in [R30+8].
+
+    // Check if result is zero: if R21|R22 == 0, return 0.
+    code.extend_from_slice(&encode_or(R21, R22, R20));
+    let result_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+
+    // Check carry (bit 53 set): R21 & 0x200000.
+    code.extend(ss_load_imm(R24, 0x200000));
+    code.extend_from_slice(&encode_and(R21, R24, R19));
+    let no_carry = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // if no carry, skip
+    code.extend_from_slice(&encode_nop());
+    // Carry: shift right by 1, exp++.
+    code.extend_from_slice(&encode_shrpw(R21, R22, 1, R22));
+    code.extend_from_slice(&encode_shrpw(R0, R21, 1, R21));
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_ldo(R19, 1, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 8));
     patch_cmpb_to_here(&mut code, no_carry);
 
-    // --- Check overflow: if exp_a >= 0x7FF, return 0. ---
-    code.extend_from_slice(&encode_ldw(R30, 8, R19));  // R19 = exp_a
+    // Check leading zeros (bit 52 not set): shift left, exp--.
+    // This handles subtract results that have leading zeros.
+    // Loop: while (R21 & 0x100000) == 0 and exp > 1: shift left 1, exp--.
+    // R24 holds 0x100000 throughout the loop (do NOT clobber it in the body).
+    code.extend(ss_load_imm(R24, 0x100000));
+    let norm_loop = code.len() as i64;
+    code.extend_from_slice(&encode_and(R21, R24, R19));  // R19 = R21 & 0x100000
+    let norm_done = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> → if R19 != 0 (bit 52 set), done
+    code.extend_from_slice(&encode_nop());
+    // Check exp > 1 (stop if exp <= 1, i.e., denormal).
+    // Use R20 (not R24) for the constant 1 to avoid clobbering R24.
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_ldi(1, R20));
+    let norm_exp1 = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b011, false, false, 0));  // cmpb,<= → if exp <= 1, done
+    code.extend_from_slice(&encode_nop());
+    // Shift left by 1 (64-bit): R20 = R22 >> 31; R22 <<= 1; R21 <<= 1; R21 |= R20.
+    code.extend_from_slice(&encode_shrpw(R0, R22, 31, R20));  // R20 = bit 31 of R22
+    code.extend_from_slice(&encode_shladd(1, R22, R0, R22));  // R22 <<= 1
+    code.extend_from_slice(&encode_shladd(1, R21, R0, R21));  // R21 <<= 1
+    code.extend_from_slice(&encode_or(R21, R20, R21));  // R21 |= carry bit
+    // exp--
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 8));
+    // Loop back to norm_loop.
+    let norm_back = code.len() as i64;
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> → always loop
+    code.extend_from_slice(&encode_nop());
+    {
+        let disp = ((norm_loop - (norm_back + 8)) as i32) & !3;
+        let off = norm_back as usize;
+        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
+        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+    }
+    // Patch norm_done and norm_exp1 to branch here.
+    let norm_after = code.len();
+    patch_cmpb_to_target(&mut code, norm_done, norm_after);
+    patch_cmpb_to_target(&mut code, norm_exp1, norm_after);
+
+    // Check overflow: if exp_a >= 0x7FF, return Inf.
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
     code.extend(ss_load_imm(R24, 0x7FF));
     let overflow = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R24, 0b001, false, false, 0));  // cmpb,= → return 0
+    code.extend_from_slice(&encode_cmpb(R19, R24, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
 
-    // W4e DEBUG: return 4.0 to confirm we reached the pack section.
-    // 4.0 bits = 0x4010000000000000 → lo=0, hi=0x40100000
-    // code.extend(ss_load_imm(R28, 0));
-    // code.extend(ss_load_imm(R29, 0x40100000));
-    // code.extend_from_slice(&encode_ldo(R30, 64, R30));
-    // code.extend_from_slice(&encode_bv(R2, R0));
-    // code.extend_from_slice(&encode_nop());
-    // return code;
-
-    // --- Pack result. ---
+    // ===== PACK RESULT =====
+    // R28 = R22 (mant_lo)
     // R29 = (sign << 31) | (exp << 20) | (R21 & 0xFFFFF)
-    // R28 = R22
-    code.extend_from_slice(&encode_copy(R22, R28));  // R28 = mant_lo
-    // R29 = R21 & 0xFFFFF
+    code.extend_from_slice(&encode_copy(R22, R28));
     code.extend(ss_load_imm(R24, 0xFFFFF));
     code.extend_from_slice(&encode_and(R21, R24, R29));  // R29 = mant_hi & 0xFFFFF
-    // R29 |= (exp << 20). exp in R19.
-    code.extend_from_slice(&encode_shladd(3, R19, R0, R24));  // R24 = R19 << 3
-    // Shift left 17 more to get << 20.
+    // R29 |= (exp << 20). exp in [R30+8].
+    code.extend_from_slice(&encode_ldw(R30, 8, R19));
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R24));  // R24 = exp << 3
     for _ in 0..17 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R29, R24, R29));  // R29 |= (exp << 20)
-    // R29 |= (sign << 31). sign in [R30+4].
-    code.extend_from_slice(&encode_ldw(R30, 4, R19));  // R19 = sign
-    // R24 = R19 << 31 (31 SHLADD ops).
-    code.extend_from_slice(&encode_copy(R19, R24));
+    code.extend_from_slice(&encode_or(R29, R24, R29));
+    // R29 |= (sign << 31). sign in R25.
+    code.extend_from_slice(&encode_copy(R25, R24));
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R29, R24, R29));  // R29 |= (sign << 31)
+    code.extend_from_slice(&encode_or(R29, R24, R29));
 
-    // --- return ---
-    // Patch all early-return cmpbs to branch here.
-    // W4e DEBUG: apply patches one at a time to find the culprit.
-    patch_cmpb_to_here(&mut code, diff_sign);
-    patch_cmpb_to_here(&mut code, exp_a_zero);
-    patch_cmpb_to_here(&mut code, exp_a_inf);
-    patch_cmpb_to_here(&mut code, exp_b_zero);
-    patch_cmpb_to_here(&mut code, exp_b_inf);
-    patch_cmpb_to_here(&mut code, overflow);
-    // Restore R30 and return.
-    code.extend_from_slice(&encode_ldo(R30, 64, R30));  // R30 += 64
+    // ===== RETURN (normal path) =====
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: result_zero → return 0 =====
+    patch_cmpb_to_here(&mut code, result_zero);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend_from_slice(&encode_copy(R0, R29));
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: overflow → return Inf with sign =====
+    patch_cmpb_to_here(&mut code, overflow);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend(ss_load_imm(R29, 0x7FF00000));
+    code.extend_from_slice(&encode_copy(R25, R24));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
+    }
+    code.extend_from_slice(&encode_or(R29, R24, R29));
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: a_zero → return b =====
+    patch_cmpb_to_here(&mut code, a_zero);
+    code.extend_from_slice(&encode_ldw(R30, 32, R28));  // b_lo
+    code.extend_from_slice(&encode_ldw(R30, 44, R29));  // b_hi
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: b_zero → return a =====
+    patch_cmpb_to_here(&mut code, b_zero);
+    code.extend_from_slice(&encode_ldw(R30, 0, R28));   // a_lo
+    code.extend_from_slice(&encode_ldw(R30, 40, R29));  // a_hi
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: a_inf → return a =====
+    patch_cmpb_to_here(&mut code, a_inf);
+    code.extend_from_slice(&encode_ldw(R30, 0, R28));
+    code.extend_from_slice(&encode_ldw(R30, 40, R29));
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // ===== HANDLER: b_inf → return b =====
+    patch_cmpb_to_here(&mut code, b_inf);
+    code.extend_from_slice(&encode_ldw(R30, 32, R28));
+    code.extend_from_slice(&encode_ldw(R30, 44, R29));
+    code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
     code
 }
 
@@ -1990,6 +2271,11 @@ fn build_f64_arith_stub_zero() -> Vec<u8> {
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
     code
+}
+
+/// Wrapper: i64→f64 (signed).
+fn build_i64_to_f64_stub() -> Vec<u8> {
+    build_int_to_f64_stub_inner(true)
 }
 
 /// Return all soft-float stubs as (symbol_name, machine_code) pairs.
@@ -2859,7 +3145,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     };
                                     emit_softfloat_call(&mut code, &mut relocations, stub);
                                     code.extend(ss_st(R28, d_off));
-                                    // Store high word for I64 Return path.
+                                    // Store high word at d_off-4 (for subsequent i64 operations)
+                                    // AND at TMP64_B_HI (for I64 Return path).
+                                    code.extend(ss_st(R29, d_off - 4));
                                     code.extend_from_slice(&encode_stw(R29, R3, TMP64_B_HI as i16));
                                 } else {
                                     // F32 Register: stub (store 0). TODO: F32→I64.
