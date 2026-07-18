@@ -1,0 +1,266 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/panic/panic.vuma
+// VWK Kernel Panic Subsystem — banner-print + halt (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K12a layer of the VWK kernel: the panic handler — the
+// last-resort diagnostic path that fires when an invariant is violated.
+// K12 (the final wave) rounds out the kernel with three modules:
+//   K12a — panic handler (this file)
+//   K12b — kmsg ring buffer (womb/kernel/panic/kmsg.vuma)
+//   K12c — power management (womb/kernel/power/pm.vuma)
+//
+// ── What K12a provides ──────────────────────────────────────────────────────
+//   panic(msg)         — print "*** KERNEL PANIC ***\n" + the caller's
+//                        message to fd 1, then exit(1) (halts the kernel).
+//                        Returns 1 (unreachable — exit does not return).
+//   assert(cond, msg)  — if cond == 0, call panic(msg). No-op otherwise.
+//                        The kernel's invariant gate: every "this MUST be
+//                        true" check (e.g. pmm_alloc returned a valid PFN,
+//                        scheduler picked a runnable task, vfs_open found
+//                        an inode) goes through assert.
+//
+// ── Why a panic handler? ────────────────────────────────────────────────────
+//   A kernel panic is the kernel's "I can't safely continue" signal: an
+//   invariant has been violated and any further execution risks corrupting
+//   persistent state, leaking secrets, or wedging the hardware. The two
+//   universally-agreed rules for panic handlers (since V6 Unix ~1975):
+//     (1) Print as much diagnostic context as possible, as early as
+//         possible (before any further corruption can occur).
+//     (2) Halt the system (don't try to recover — recovery from a kernel-
+//         space invariant violation is almost always wrong).
+//   Linux's panic() flushes kmsg + dumps a stack trace + halts; this K12a
+//   skeleton does the simpler "print banner + print msg + exit" sequence.
+//   K13+ will add stack-trace capture (frame-pointer unwinding on x86_64,
+//   pointer-authentication-aware unwinding on aarch64) and the kmsg flush
+//   (delegating to K12b's kmsg ring buffer).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   PanicMsg buffer is a flat-byte-array layout held in a
+//   `___pmt_buffer`-backed State<PanicMsg>; the CALLER allocates it via
+//   `state_new(PanicMsg)` and passes it by reference to panic/assert
+//   (init-style API — same convention as K2a's pmm_init, K4a's pt_init,
+//   K10b's aes_key_expansion, etc.).
+//
+//   The `banner as Address` / `msg as Address` casts inside panic() are
+//   pure-arena-address extractions (no pointer arithmetic, no heap
+//   allocation) — the same PMT pattern used by console_flush
+//   (`c as Address` in womb/kernel/console.vuma:114) and hw_aes_encrypt
+//   (`key as Address` in womb/kernel/crypto/hw_trampoline.vuma:220). The
+//   cast yields the State<T>'s u64-aligned offset within
+//   `___pmt_buffer`, which is the value passed to write (the write stub
+//   is "mov eax,#1; syscall; ret" — see
+//   womb/kernel/arch/x86_64/trampoline.vuma:53).
+//
+// ── Extern ABI ──────────────────────────────────────────────────────────────
+//   write(fd, buf, count) — sys_write (nr 1). Pre-registered on x86_64
+//     (see build_runtime_syscall_stubs). Returns byte count or -errno.
+//   exit(code) — sys_exit (nr 60). Pre-registered on x86_64. The stub
+//     ends with INT3 as a safety guard — control never returns to the
+//     panic() caller. (K13+ bare-metal will swap this for an HLT loop.)
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The "*** KERNEL PANIC ***\n" banner is the
+//   ASCII sequence 42 42 42 32 75 69 82 78 69 76 32 80 65 78 73 67 32 42
+//   42 42 10 (21 bytes — '*' '*' '*' ' ' 'K' 'E' 'R' 'N' 'E' 'L' ' ' 'P'
+//   'A' 'N' 'I' 'C' ' ' '*' '*' '*' '\n').
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). Each kernel module
+//   that calls `write` / `exit` MUST re-declare the externs locally. Keep
+//   the declarations byte-identical to the canonical ones in
+//   womb/kernel/arch/x86_64/trampoline.vuma — same arg types, same order.
+//   A mismatch would silently produce different ABI at the call site.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/panic/panic.vuma \
+//         /tmp/panic.bin x86_64 --verify
+//     /tmp/panic.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (assert(1, msg) is a no-op — panic is NOT
+// called, so the process exits 0 from main).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// Mirror of womb/kernel/arch/x86_64/trampoline.vuma:53 (write) and :60
+// (exit). Both are pre-registered syscalls on x86_64 — no
+// __ffi_fallback_stub warning emitted.
+
+extern "C" {
+    // sys_write (nr 1): write `count` bytes from `buf` to file descriptor
+    // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three already
+    // match the syscall ABI; the stub is "mov eax,#1; syscall; ret".
+    // Returns the byte count written (or a negative errno on failure).
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+
+    // sys_exit (nr 60): terminate the process with exit code `code`.
+    // Does NOT return — the stub ends with INT3 as a safety guard so a
+    // buggy caller that falls through after exit() traps immediately
+    // (rather than silently executing stale instructions in the panic
+    // path). The panic() function's `return 1;` after `exit(1);` is
+    // unreachable in practice; it exists only to satisfy VUMA's parser
+    // (every `-> i32` function must end with a return).
+    fn exit(code: i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PanicMsg: 128-byte message buffer + current length. The `data` field is
+// at offset 0 so that `msg as Address` (cast of the State<PanicMsg> base
+// pointer) yields the address of the first message byte — the natural
+// argument for `write(1, base, msg.len)`. (Same offset-0-buf pattern as
+// K1a's Console layout in womb/kernel/console.vuma:55.)
+//
+// 128 bytes is large enough for short diagnostic strings like "pmm_alloc:
+// out of memory" or "scheduler: no runnable task" — K13+ may grow this
+// via an arena or chain multiple PanicMsgs together for long stack traces.
+layout PanicMsg = {
+    data: [u8; 128],  // message bytes (offset 0 — `as Address` yields &data[0])
+    len:  u32,        // number of valid bytes in `data` (0..128)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Panic operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// panic: print the panic banner + the caller's message, then halt.
+//
+//   msg: caller-allocated State<PanicMsg> holding the diagnostic message
+//        (msg.data[0..msg.len] are the message bytes; msg.len is the
+//        byte count — typically set by the caller before invoking panic,
+//        as in main()'s "test\n" setup below).
+//
+// Behavior:
+//   1. Build the banner "*** KERNEL PANIC ***\n" (21 bytes) in a fresh
+//      State<PanicMsg> via state_new(PanicMsg) — 21 byte writes to
+//      banner.data[0..20].
+//   2. write(1, banner_as_addr, 21) — print the banner to stdout (fd 1).
+//   3. write(1, msg_as_addr, msg.len as i64) — print the caller's
+//      message. (The `as Address` cast is the documented PMT pattern
+//      for handing a State<T> to an FFI callee that takes a raw buffer
+//      pointer — see docs/language-reference.md §14.5.)
+//   4. exit(1) — halt the kernel. Does not return.
+//   5. return 1 — unreachable; satisfies VUMA's "every -> i32 fn must
+//      end with return" parser rule.
+//
+// PMT field access (`banner.data[0]`, `msg.len`) is typed and endian-safe
+// by construction; no `*(addr + i)` pointer arithmetic anywhere. The
+// `banner as Address` cast is the same pattern as K1a's console_flush
+// (`c as Address` in womb/kernel/console.vuma:114) — a pure arena-offset
+// extraction, not a pointer dereference.
+//
+// State<T> params: 1 (msg). State<T> locals: 1 (banner). The function
+// returns i32 (unreachable 1 after exit) so assert can call it inside
+// a void function and discard the return — same void-caller-discards-
+// i32-callee pattern as K1d's kmain calling write (write returns i64,
+// kmain discards).
+fn panic(msg: State<PanicMsg>) -> i32 {
+    // ── Build the banner "*** KERNEL PANIC ***\n" (21 bytes) ──
+    // Decimal ASCII constants (per the K12a contract's "Use decimal
+    // ASCII values" rule — VUMA has no char-literal syntax):
+    //   42 = '*', 32 = ' ', 10 = '\n'
+    //   75 = 'K', 69 = 'E', 82 = 'R', 78 = 'N', 76 = 'L'
+    //   80 = 'P', 65 = 'A', 78 = 'N', 73 = 'I', 67 = 'C'
+    let banner = state_new(PanicMsg);
+    banner.data[0]  = 42;   // '*'
+    banner.data[1]  = 42;   // '*'
+    banner.data[2]  = 42;   // '*'
+    banner.data[3]  = 32;   // ' '
+    banner.data[4]  = 75;   // 'K'
+    banner.data[5]  = 69;   // 'E'
+    banner.data[6]  = 82;   // 'R'
+    banner.data[7]  = 78;   // 'N'
+    banner.data[8]  = 69;   // 'E'
+    banner.data[9]  = 76;   // 'L'
+    banner.data[10] = 32;   // ' '
+    banner.data[11] = 80;   // 'P'
+    banner.data[12] = 65;   // 'A'
+    banner.data[13] = 78;   // 'N'
+    banner.data[14] = 73;   // 'I'
+    banner.data[15] = 67;   // 'C'
+    banner.data[16] = 32;   // ' '
+    banner.data[17] = 42;   // '*'
+    banner.data[18] = 42;   // '*'
+    banner.data[19] = 42;   // '*'
+    banner.data[20] = 10;   // '\n'
+    let addr = banner as Address;
+    write(1, addr, 21);
+
+    // ── Print the caller's message ──
+    // `msg as Address` yields the address of msg.data[0] (offset 0 in
+    // the PanicMsg layout — see the layout comment above). The `msg.len
+    // as i64` cast widens the u32 length to i64 for the write count.
+    let msg_addr = msg as Address;
+    write(1, msg_addr, msg.len as i64);
+
+    // ── Halt ──
+    // exit(1) does not return (the stub ends with INT3). The `return 1;`
+    // below is unreachable; it exists only to satisfy VUMA's parser.
+    exit(1);
+    return 1;  // unreachable
+}
+
+// assert: if cond is 0, panic with msg. No-op otherwise.
+//
+//   cond: u8 condition value (0 = fail, non-zero = pass). Typically the
+//         result of a comparison or a "validate" helper — e.g.
+//         `assert(pfn < 4096, msg)` after pmm_alloc, or
+//         `assert(task.state == 1, msg)` before scheduler_pick.
+//   msg:  caller-allocated State<PanicMsg> holding the diagnostic message
+//         to print if cond == 0.
+//
+// State<T> params: 1 (msg). Pure gate — no state mutation, no I/O on the
+// pass path. On the fail path, calls panic(msg) which prints the banner +
+// msg + halts. The panic() return value (i32) is discarded (same pattern
+// as shell.vuma:314 calling write without assignment).
+fn assert(cond: u8, msg: State<PanicMsg>) {
+    if cond == 0 {
+        panic(msg);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K12a panic API surface end-to-end on the PASS path only
+// (the FAIL path would call exit(1) and abort the self-test, so it's
+// not exercised in the automated test — K13+ may add a fork-based test
+// that catches the exit and verifies the banner was printed).
+//
+//   1. assert(1, msg) — cond=1 (non-zero), so panic is NOT called.
+//      The self-test continues to `return 0`.
+//
+// Returns 0 on success (the only path — assert(1, ...) is a no-op).
+// On the FAIL path (assert(0, ...)) the process would exit 1 from
+// panic's exit(1) call.
+//
+// ── Why not test assert(0, ...)? ────────────────────────────────────────────
+//   assert(0, msg) calls panic(msg) which calls exit(1) — the process
+//   terminates immediately. There's no portable way to catch that in a
+//   VUMA self-test (no fork+wait in K12a's API surface; K4d's sys_exit
+//   is the kernel-side primitive, not usable from a hosted self-test).
+//   K13+ may add a `panic_mock` test mode that swaps exit(1) for a
+//   flag-set + return, allowing the self-test to verify the banner was
+//   emitted without actually halting.
+fn main() -> i32 {
+    // Build a "test\n" message (5 bytes: 't' 'e' 's' 't' '\n').
+    let msg = state_new(PanicMsg);
+    msg.data[0] = 116;  // 't'
+    msg.data[1] = 101;  // 'e'
+    msg.data[2] = 115;  // 's'
+    msg.data[3] = 116;  // 't'
+    msg.data[4] = 10;   // '\n'
+    msg.len = 5;
+
+    // assert(1, msg): cond=1 (non-zero) → no-op, panic NOT called.
+    // The self-test continues to `return 0`.
+    assert(1, msg);
+
+    return 0;
+}
