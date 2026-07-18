@@ -200,6 +200,84 @@ impl fmt::Display for Gpr {
 }
 
 // ===========================================================================
+// Floating-Point Registers
+// ===========================================================================
+
+/// s390x floating-point registers (F0–F15, 64-bit each).
+///
+/// s390x FP uses the same 4-bit register encoding as GPRs, but the registers
+/// are interpreted as FPRs in FP instructions.  The RRE/RRF/RXY-a encoders
+/// below accept `Fpr` values and pack them into the same 4-bit field as `Gpr`.
+///
+/// - F0, F2 — FP argument registers (Linux s390x ABI; `num_fp_arg_regs = 2`)
+/// - F1, F3 — caller-saved scratch (NOT arg regs; used as FA, FB below)
+/// - F4–F6 — callee-saved (preserved across calls)
+/// - F7–F15 — caller-saved scratch
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Fpr {
+    F0 = 0,
+    F1 = 1,
+    F2 = 2,
+    F3 = 3,
+    F4 = 4,
+    F5 = 5,
+    F6 = 6,
+    F7 = 7,
+    F8 = 8,
+    F9 = 9,
+    F10 = 10,
+    F11 = 11,
+    F12 = 12,
+    F13 = 13,
+    F14 = 14,
+    F15 = 15,
+}
+
+impl Fpr {
+    /// Returns the 4-bit encoding index (0–15) for this FP register.
+    /// Identical layout to `Gpr::encoding()` — FP and GP registers share the
+    /// same 4-bit field encoding, just interpreted differently by the opcode.
+    pub fn encoding(&self) -> u8 {
+        *self as u8
+    }
+
+    /// Returns the assembly name for this FP register.
+    pub fn asm_name(&self) -> &'static str {
+        match self {
+            Fpr::F0 => "%f0",
+            Fpr::F1 => "%f1",
+            Fpr::F2 => "%f2",
+            Fpr::F3 => "%f3",
+            Fpr::F4 => "%f4",
+            Fpr::F5 => "%f5",
+            Fpr::F6 => "%f6",
+            Fpr::F7 => "%f7",
+            Fpr::F8 => "%f8",
+            Fpr::F9 => "%f9",
+            Fpr::F10 => "%f10",
+            Fpr::F11 => "%f11",
+            Fpr::F12 => "%f12",
+            Fpr::F13 => "%f13",
+            Fpr::F14 => "%f14",
+            Fpr::F15 => "%f15",
+        }
+    }
+}
+
+impl fmt::Display for Fpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.asm_name())
+    }
+}
+
+/// FP scratch register: accumulator / result.  F1 is caller-saved and is NOT
+/// one of the FP arg regs (F0/F2), so it's free for our use.
+const FA: Fpr = Fpr::F1;
+/// FP scratch register: second operand.  F3 is caller-saved, not an arg reg.
+const FB: Fpr = Fpr::F3;
+
+// ===========================================================================
 // Scratch register allocation (stack-slot ISel uses these as temporaries)
 // ===========================================================================
 
@@ -1476,12 +1554,114 @@ fn emit_instr(
                 CastKind::BitCast => {
                     // No-op (reinterpret bits).
                 }
-                CastKind::IntToFloat
-                | CastKind::UIntToFloat
-                | CastKind::FloatToInt
-                | CastKind::FloatToUInt
-                | CastKind::FloatToFloat => {
-                    // FP not supported in this minimal backend; leave as-is.
+                CastKind::IntToFloat => {
+                    // Signed int → float.  S0 holds src (zero-extended for
+                    // sub-64-bit types per the existing emit_binop convention).
+                    // Sign-extend to int64 so CDGBRA/CEGBRA interpret the value
+                    // correctly (e.g. I32 = -1, stored zero-extended as
+                    // 0x00000000FFFFFFFF, must become -1.0, not 4294967295.0).
+                    match from_ty {
+                        Some(IRType::I8) => {
+                            // LGBR S0, S0: sign-extend byte → int64.  op2=0xA6.
+                            code.extend_from_slice(&encode_rre(0xB9, 0xA6, S0, S0));
+                        }
+                        Some(IRType::I16) => {
+                            // LGHR S0, S0: sign-extend halfword → int64.  op2=0xA5.
+                            code.extend_from_slice(&encode_rre(0xB9, 0xA5, S0, S0));
+                        }
+                        Some(IRType::I32) => {
+                            // LGFR S0, S0: sign-extend word → int64.  op2=0x14.
+                            code.extend_from_slice(&encode_lgfr(S0, S0));
+                        }
+                        _ => {} // I64 / U* / None: no extension (U* should use UIntToFloat).
+                    }
+                    // LDGR FA, S0: bit-copy int64 into FPR (no float interpretation).
+                    code.extend_from_slice(&encode_ldgr(FA, S0));
+                    if matches!(to_ty, Some(IRType::F32)) {
+                        // CEGBRA: signed int64 → F32.  op1=0xB3, op2=0xA4.  m3=0 (current rounding).
+                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA4, FA, FA, 0, 0));
+                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                    } else {
+                        // CDGBRA: signed int64 → F64.  op1=0xB3, op2=0xA5.  m3=0.
+                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA5, FA, FA, 0, 0));
+                        code.extend_from_slice(&encode_std(FA, FP, dst_off));
+                    }
+                    return; // skip trailing ss_st — S0 still holds the int, would clobber float bits.
+                }
+                CastKind::UIntToFloat => {
+                    // Unsigned int → float.  S0 holds src (zero-extended per
+                    // existing convention).  Ensure full 32-bit zero-extension
+                    // for sub-64-bit types so CDLGBRA/CELGBRA see the correct
+                    // uint64 (the slot's high bits are already 0 for U8/U16/U32
+                    // stored via LLGFR, but LLGFR again is harmless and safe).
+                    match from_ty {
+                        Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32)
+                        | Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32) => {
+                            // LLGFR S0, S0: zero-extend word → uint64.  op2=0x16.
+                            code.extend_from_slice(&encode_llgfr(S0, S0));
+                        }
+                        _ => {}
+                    }
+                    code.extend_from_slice(&encode_ldgr(FA, S0));
+                    if matches!(to_ty, Some(IRType::F32)) {
+                        // CELGBRA: unsigned int64 → F32.  op1=0xB3, op2=0xA6.  m3=0.
+                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA6, FA, FA, 0, 0));
+                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                    } else {
+                        // CDLGBRA: unsigned int64 → F64.  op1=0xB3, op2=0xA7.  m3=0.
+                        code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA7, FA, FA, 0, 0));
+                        code.extend_from_slice(&encode_std(FA, FP, dst_off));
+                    }
+                    return; // skip trailing ss_st.
+                }
+                CastKind::FloatToInt => {
+                    // Float → signed int64 (truncating).  S0 holds src's bit
+                    // pattern (LG-loaded from the slot).  CGDBRA takes an F64
+                    // operand, so widen F32 → F64 first if needed.
+                    code.extend_from_slice(&encode_ldgr(FA, S0)); // FA bits = float bits
+                    if matches!(from_ty, Some(IRType::F32)) {
+                        // LDEBR FA, FA: widen F32 → F64.  op1=0xB3, op2=0x04.
+                        code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA));
+                    }
+                    // CGDBRA: F64 → signed int64, m3=5 (round toward zero / truncate).
+                    // op1=0xB3, op2=0xA1.  Result bits land in FA.
+                    code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA1, FA, FA, 5, 0));
+                    // LGDR S0, FA: bit-copy int64 from FPR back to GPR.
+                    code.extend_from_slice(&encode_lgdr(S0, FA));
+                    // Fall through to trailing ss_st(S0, dst_off) — stores the int64.
+                }
+                CastKind::FloatToUInt => {
+                    // Float → unsigned int64 (truncating).
+                    code.extend_from_slice(&encode_ldgr(FA, S0));
+                    if matches!(from_ty, Some(IRType::F32)) {
+                        code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA)); // LDEBR widen
+                    }
+                    // CLFDBRA: F64 → unsigned int64, m3=5 (truncate).
+                    // op1=0xB3, op2=0xA9.
+                    code.extend_from_slice(&encode_fp_rrf(0xB3, 0xA9, FA, FA, 5, 0));
+                    code.extend_from_slice(&encode_lgdr(S0, FA));
+                    // Fall through to trailing ss_st.
+                }
+                CastKind::FloatToFloat => {
+                    // F32 ↔ F64.  Treat None as F64 (per IR doc default).
+                    let src_is_f64 = !matches!(from_ty, Some(IRType::F32));
+                    let dst_is_f64 = !matches!(to_ty, Some(IRType::F32));
+                    if src_is_f64 && !dst_is_f64 {
+                        // F64 → F32: LEDBR (narrow, rounds per current rounding mode).
+                        // op1=0xB3, op2=0x05.
+                        code.extend_from_slice(&encode_ldgr(FA, S0));
+                        code.extend_from_slice(&encode_fp_rre(0xB3, 0x05, FA, FA));
+                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                        return; // skip trailing ss_st.
+                    } else if !src_is_f64 && dst_is_f64 {
+                        // F32 → F64: LDEBR (widen, exact).  op1=0xB3, op2=0x04.
+                        code.extend_from_slice(&encode_ldgr(FA, S0));
+                        code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA));
+                        code.extend_from_slice(&encode_std(FA, FP, dst_off));
+                        return; // skip trailing ss_st.
+                    }
+                    // Same-width (F32→F32 or F64→F64): no-op cast.
+                    // S0 already holds src's bits; fall through to trailing ss_st.
                 }
             }
             code.extend(ss_st(S0, dst_off));
@@ -1796,6 +1976,128 @@ fn emit_instr(
     }
 }
 
+// ===========================================================================
+// s390x FP Instruction Encoders (big-endian)
+// ===========================================================================
+//
+// s390x FP instructions use the same 4-bit register field as GP instructions,
+// so `Fpr` and `Gpr` share an identical encoding layout.  The encoders below
+// produce RRE / RRF-b / RXY-a format instructions with `Fpr` operands.
+//
+// Reference: IBM z/Architecture Principles of Operation.
+
+/// Encode an RRE-format FP instruction (4 bytes): `op1 op2 00 r1r2`.
+///
+/// Same byte layout as `encode_rre` (line ~381), but `r1`/`r2` are FPRs.
+/// Used for ADBR/SDBR/MDBR/DDBR (F64 arith), AEBR/SEBR/MEBR/DEBR (F32 arith),
+/// CDBR/CEBR (compare), SQDBR/SQEBR (sqrt), LDEBR/LEDBR (widen/narrow),
+/// LCDBR/LPDBR (negate/abs), LDGR/LGDR (FPR↔GPR bit copy).
+fn encode_fp_rre(op1: u8, op2: u8, r1: Fpr, r2: Fpr) -> [u8; 4] {
+    [
+        op1,
+        op2,
+        0x00,
+        ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF),
+    ]
+}
+
+/// Encode an RRF-b format FP instruction (4 bytes): `op1 op2 r1r2 m3m4`.
+///
+/// Used for FP↔int conversions (CDGBRA, CGDBRA, CELGBRA, CLFDBRA, etc.).
+/// - `m3` = rounding mode (0=current, 1=to-nearest, 5=toward-zero/truncate,
+///   7=round-away).  Use m3=0 for int→float (exact), m3=5 for float→int
+///   (C-style truncation).
+/// - `m4` = inexact-flag-control (0=silent, 1=raise).  Use 0.
+fn encode_fp_rrf(op1: u8, op2: u8, r1: Fpr, r2: Fpr, m3: u8, m4: u8) -> [u8; 4] {
+    [
+        op1,
+        op2,
+        ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF),
+        ((m3 & 0xF) << 4) | (m4 & 0xF),
+    ]
+}
+
+/// Encode LDGR R1, R2 (Load FPR from GPR, 64-bit bit copy).  RRE format.
+/// op1=0xB3, op2=0xC1.  `r1` is FPR, `r2` is GPR.
+///
+/// Bit-copies the 64-bit GPR value into the FPR WITHOUT interpreting it as a
+/// float.  Used to ferry int-typed bit patterns (e.g. the raw bits of an i64
+/// or the bit pattern of a float stored in a stack slot) into an FPR for FP
+/// conversion instructions (CDGBRA/CEGBRA/CDLGBRA/CELGBRA).
+fn encode_ldgr(r1: Fpr, r2: Gpr) -> [u8; 4] {
+    [
+        0xB3,
+        0xC1,
+        0x00,
+        ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF),
+    ]
+}
+
+/// Encode LGDR R1, R2 (Load GPR from FPR, 64-bit bit copy).  RRE format.
+/// op1=0xB3, op2=0xCD.  `r1` is GPR, `r2` is FPR.
+///
+/// Bit-copies the 64-bit FPR value into a GPR WITHOUT interpreting it.  Used
+/// to ferry an FP conversion result (e.g. CGDBRA's int64 output, which lands
+/// in an FPR's bits) back into the GPR file so it can be stored via STG.
+fn encode_lgdr(r1: Gpr, r2: Fpr) -> [u8; 4] {
+    [
+        0xB3,
+        0xCD,
+        0x00,
+        ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF),
+    ]
+}
+
+/// Encode a 6-byte RXY-a instruction with an FP register operand.
+///
+/// Byte layout is IDENTICAL to `encode_rxy_a` (line ~312) — only `r1` comes
+/// from an `Fpr` instead of a `Gpr`.  The X2 index field is forced to 0
+/// (no index register), mirroring `encode_lg`/`encode_stg`.
+///
+///   byte 0: opcode1 (8 bits)
+///   byte 1: R1 (4 bits, high nibble) | X2=0 (4 bits, low nibble)
+///   byte 2: B2 (4 bits, high nibble) | DL2[11:8] (4 bits, low nibble)
+///   byte 3: DL2[7:0] (8 bits)
+///   byte 4: DH2 (8 bits)
+///   byte 5: opcode2 (8 bits — the FULL byte)
+fn encode_fp_rxy_a(op1: u8, op2: u8, r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    // 20-bit signed displacement: DH2 (8 bits) << 12 | DL2 (12 bits).
+    let d = disp as i64;
+    let d20 = (d & 0xFFFFF) as u32; // low 20 bits (two's-complement for negatives)
+    let dl2_low_8 = (d20 & 0xFF) as u8; // byte 3: DL2[7:0]
+    let dl2_high_4 = ((d20 >> 8) & 0xF) as u8; // byte 2 low nibble: DL2[11:8]
+    let dh2 = ((d20 >> 12) & 0xFF) as u8; // byte 4: DH2
+
+    [
+        op1,
+        (r1.encoding() & 0xF) << 4, // r1 in high nibble, x2=0 in low
+        ((b2.encoding() & 0xF) << 4) | dl2_high_4,
+        dl2_low_8,
+        dh2,
+        op2, // FULL 8-bit opcode2
+    ]
+}
+
+/// Encode LD R1, D2(X2, B2) (Load F64, 8 bytes).  op1=0xED, op2=0x64.
+fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x64, r1, b2, disp)
+}
+
+/// Encode STD R1, D2(X2, B2) (Store F64, 8 bytes).  op1=0xED, op2=0x66.
+fn encode_std(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x66, r1, b2, disp)
+}
+
+/// Encode LE R1, D2(X2, B2) (Load F32, 4 bytes).  op1=0xED, op2=0x74.
+fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x74, r1, b2, disp)
+}
+
+/// Encode STE R1, D2(X2, B2) (Store F32, 4 bytes).  op1=0xED, op2=0x78.
+fn encode_ste(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+    encode_fp_rxy_a(0xED, 0x78, r1, b2, disp)
+}
+
 /// Emit a binary operation as s390x machine code.
 fn emit_binop(
     op: &BinOpKind,
@@ -1809,6 +2111,14 @@ fn emit_binop(
     let dst_id = dst.as_register().unwrap_or(0);
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     let is_32bit = is_32bit_ty(ty);
+
+    // ── FP dispatch ──
+    // Mirror x86_64's stack_slot_isel.rs:414-549 — branch on F32/F64 before
+    // the integer `match op` and route to the FP emitter.
+    if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
+        emit_s390x_fp_binop(op, dst, lhs, rhs, ty, vreg_stack_slots, code);
+        return;
+    }
 
     match op {
         BinOpKind::Add => {
@@ -2126,6 +2436,160 @@ fn emit_binop(
             code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
             code.extend(ss_st(S0, dst_off));
         }
+    }
+}
+
+/// Emit s390x floating-point binary op (F32/F64).
+///
+/// Operand bits are ferried from their stack slots into FPRs via the GPR file
+/// (`ss_load_value` → `LDGR`), the FP arithmetic executes in FPRs (FA += FB,
+/// etc.), and the result is stored back via `STD`/`STE`.
+///
+/// We use `LDGR`/`LGDR` (64-bit GPR↔FPR bit copy) instead of `LD`/`STD` for
+/// the operand-load path so that **immediates** work without needing a scratch
+/// stack slot — `ss_load_value` already handles immediates via `ss_load_imm`,
+/// and `LDGR` ferries the resulting GPR bits straight into the FPR.  (A direct
+/// `LD` from a stack slot would require the operand to already be in a slot;
+/// spilling an immediate to the catch-all "slot 0" would corrupt the 160-byte
+/// ABI save area, so we avoid that.)
+///
+/// For comparisons (`Eq`/`Ne`/`SLt`/...), `CDBR`/`CEBR` sets the condition
+/// code with the SAME CC semantics as integer `CGR` (0=eq, 1=lt, 2=gt), plus
+/// CC=3 for unordered (NaN).  We mirror the integer compare emission (LGHI 1;
+/// BRC <mask>,skip; LGHI 0; skip:) — the BRC masks (0x8/0x6/0x4/0xC/0x2/0xA)
+/// already produce the IEEE-correct result for NaN (all comparisons except Ne
+/// return false; Ne returns true), so no special NaN handling is needed.
+fn emit_s390x_fp_binop(
+    op: &BinOpKind,
+    dst: &IRValue,
+    lhs: &IRValue,
+    rhs: &IRValue,
+    ty: Option<&IRType>,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let dst_id = dst.as_register().unwrap_or(0);
+    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+    let is_f64 = matches!(ty, Some(IRType::F64));
+
+    // Load operands into FPRs FA (lhs) and FB (rhs) via the GPR file.
+    // ss_load_value gives us the operand's bit pattern in a GPR (LG for vregs,
+    // LGHI/LGFI/LLILF for immediates).  LDGR bit-copies the GPR's 64 bits into
+    // the FPR, preserving the float's bit representation.
+    code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+    code.extend_from_slice(&encode_ldgr(FA, S0));
+    code.extend(ss_load_value(rhs, vreg_stack_slots, S0));
+    code.extend_from_slice(&encode_ldgr(FB, S0));
+
+    match op {
+        BinOpKind::Add => {
+            if is_f64 {
+                // ADBR: Add F64.  op1=0xB3, op2=0x1A.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x1A, FA, FB));
+            } else {
+                // AEBR: Add F32.  op1=0xB3, op2=0x0A.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x0A, FA, FB));
+            }
+        }
+        BinOpKind::Sub => {
+            if is_f64 {
+                // SDBR: Subtract F64.  op2=0x1B.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x1B, FA, FB));
+            } else {
+                // SEBR: Subtract F32.  op2=0x0B.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x0B, FA, FB));
+            }
+        }
+        BinOpKind::Mul => {
+            if is_f64 {
+                // MDBR: Multiply F64.  op2=0x1C.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x1C, FA, FB));
+            } else {
+                // MEBR: Multiply F32 (low).  op2=0x17.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x17, FA, FB));
+            }
+        }
+        BinOpKind::SDiv | BinOpKind::UDiv => {
+            // FP division is the same for signed/unsigned (FP has no sign
+            // extension concerns); both map to DDBR/DEBR.
+            if is_f64 {
+                // DDBR: Divide F64.  op2=0x1D.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x1D, FA, FB));
+            } else {
+                // DEBR: Divide F32.  op2=0x0D.
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x0D, FA, FB));
+            }
+        }
+        BinOpKind::Eq
+        | BinOpKind::Ne
+        | BinOpKind::SLt
+        | BinOpKind::ULt
+        | BinOpKind::SLe
+        | BinOpKind::ULe
+        | BinOpKind::SGt
+        | BinOpKind::UGt
+        | BinOpKind::SGe
+        | BinOpKind::UGe => {
+            // CDBR (F64, op2=0x19) / CEBR (F32, op2=0x09) sets CC:
+            //   CC=0 equal, CC=1 lhs<rhs, CC=2 lhs>rhs, CC=3 unordered (NaN).
+            // BRC masks (same as integer CGR-based compares):
+            //   0x8=CC0, 0x6=CC!=0, 0x4=CC1, 0xC=CC0|1, 0x2=CC2, 0xA=CC0|2.
+            // For NaN (CC=3): only 0x6 (Ne) matches → Ne=true, all others false.
+            // This matches IEEE-754 NaN comparison semantics.
+            if is_f64 {
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x19, FA, FB)); // CDBR
+            } else {
+                code.extend_from_slice(&encode_fp_rre(0xB3, 0x09, FA, FB)); // CEBR
+            }
+            // S0 = 1 (default: assume condition true).
+            code.extend_from_slice(&encode_lghi(S0, 1));
+            let mask: u8 = match op {
+                BinOpKind::Eq => 0x8,                               // CC=0
+                BinOpKind::Ne => 0x6,                               // CC!=0
+                BinOpKind::SLt | BinOpKind::ULt => 0x4,             // CC=1
+                BinOpKind::SLe | BinOpKind::ULe => 0xC,             // CC=0 or 1
+                BinOpKind::SGt | BinOpKind::UGt => 0x2,             // CC=2
+                BinOpKind::SGe | BinOpKind::UGe => 0xA,             // CC=0 or 2
+                _ => 0x8,
+            };
+            // BRC <mask>, skip  (skip the "S0 = 0" if condition holds).
+            let skip_patch = code.len();
+            code.extend_from_slice(&encode_brc(mask, 0));
+            // S0 = 0 (condition false).
+            code.extend_from_slice(&encode_lghi(S0, 0));
+            // skip: patch BRC displacement.
+            let skip_target = code.len() as i64;
+            let disp = (skip_target - skip_patch as i64) / 2;
+            let disp_be = (disp as i16).to_be_bytes();
+            code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
+            code.extend(ss_st(S0, dst_off));
+            return;
+        }
+        // Bitwise/shift/remainder on floats: invalid (IR verifier F2a rejects).
+        // Defensive fallback: store 0 so dst slot is well-defined.
+        BinOpKind::SRem
+        | BinOpKind::URem
+        | BinOpKind::And
+        | BinOpKind::Or
+        | BinOpKind::Xor
+        | BinOpKind::Shl
+        | BinOpKind::ShrL
+        | BinOpKind::ShrA
+        | BinOpKind::Ror
+        | BinOpKind::Rol => {
+            code.extend(ss_load_imm(S0, 0));
+            code.extend(ss_st(S0, dst_off));
+            return;
+        }
+    }
+
+    // Store FP result back to dst slot via STD (F64, 8 bytes) / STE (F32, 4 bytes).
+    // The slot now holds the result's bit pattern; subsequent FP ops will
+    // ss_load_value (LG) → LDGR to retrieve it.
+    if is_f64 {
+        code.extend_from_slice(&encode_std(FA, FP, dst_off));
+    } else {
+        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
     }
 }
 
