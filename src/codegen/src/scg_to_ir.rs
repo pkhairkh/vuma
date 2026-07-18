@@ -3844,6 +3844,80 @@ impl IRBuilder {
                 });
                 return Ok(());
             }
+            // ── Float-conversion builtins → proper IR Cast instructions ──
+            // The parser/AST lowers `inttofloat(x)`, `uinttofloat(x)`,
+            // `floattoint(x)`, `floattouint(x)`, and `floattofloat(x)` as
+            // CallNodes.  Without this interception they would be emitted
+            // as regular Call instructions to nonexistent runtime functions,
+            // causing crashes or wrong results on backends that don't
+            // special-case them in instruction selection.
+            //
+            // By lowering them to IR Cast instructions here, every backend's
+            // existing CastKind handling (in emit.rs or their instruction
+            // selector) produces the correct native conversion instructions.
+            "inttofloat" | "uinttofloat" | "floattoint" | "floattouint" | "floattofloat" => {
+                let args: Vec<IRValue> = call
+                    .args
+                    .iter()
+                    .map(|e| self.resolve_expr(e, names, ir_func))
+                    .collect::<Result<Vec<_>>>()?;
+                let src_val = args.into_iter().next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        format!("{} requires 1 argument", call.func)))?;
+                let dst = match &call.dst {
+                    Some(name) => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                        names.insert(name.clone(), vreg);
+                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
+                        IRValue::Register(vreg)
+                    }
+                    None => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::anonymous(vreg));
+                        IRValue::Register(vreg)
+                    }
+                };
+                let kind = match call.func.as_str() {
+                    "inttofloat" => CastKind::IntToFloat,
+                    "uinttofloat" => CastKind::UIntToFloat,
+                    "floattoint" => CastKind::FloatToInt,
+                    "floattouint" => CastKind::FloatToUInt,
+                    "floattofloat" => CastKind::FloatToFloat,
+                    _ => unreachable!(),
+                };
+                let (from_ty, to_ty) = match kind {
+                    CastKind::IntToFloat | CastKind::UIntToFloat => {
+                        (Some(IRType::I64), Some(IRType::F64))
+                    }
+                    CastKind::FloatToInt | CastKind::FloatToUInt => {
+                        (Some(IRType::F64), Some(IRType::I64))
+                    }
+                    CastKind::FloatToFloat => {
+                        (Some(IRType::F64), Some(IRType::F64))
+                    }
+                    _ => unreachable!(),
+                };
+                let result_ty = match kind {
+                    CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat => IRType::F64,
+                    CastKind::FloatToInt | CastKind::FloatToUInt => IRType::I64,
+                    _ => unreachable!(),
+                };
+                let dst_vreg = if let IRValue::Register(vr) = dst { Some(vr) } else { None };
+                ir_func.current_block().push(IRInstruction::Cast {
+                    dst,
+                    src: src_val,
+                    kind,
+                    from_ty,
+                    to_ty,
+                });
+                // Register the result vreg type so downstream BinOp/Cmp
+                // can dispatch to the FP path.
+                if let Some(vr) = dst_vreg {
+                    self.vreg_types.insert(vr, result_ty);
+                }
+                return Ok(());
+            }
             _ => {} // fall through to regular Call handling
         }
 
