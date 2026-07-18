@@ -493,6 +493,12 @@ fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
         if dentry_get_used(tbl, i) == 0 {
             dentry_set_used(tbl, i, 1);
             tbl.count = tbl.count + 1;
+            // Zero the name area (64 bytes) to prevent stale name data.
+            let k = 0;
+            while k < 64 {
+                dentry_set_name_byte(tbl, i, k, 0);
+                k = k + 1;
+            }
             return i;
         }
         i = i + 1;
