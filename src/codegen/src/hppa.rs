@@ -516,32 +516,68 @@ fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
     word.to_be_bytes()
 }
 
-/// Load 32-bit FP from memory (FLDW).  Uses the single-form load indexed.
-/// best-effort encoding: coprocessor load single.
+/// Load 32-bit FP from memory (FLDW) — PA-RISC 1.1 coprocessor load.
+///
+/// G3 STATUS (NOP stub, NOT exercised by the current FP strategy):
+/// The PA-RISC 1.1 coprocessor load/store encoding is intricate
+/// (14-bit signed displacement split across the instruction word, with
+/// `b` (base) and `t` (target coprocessor reg) at non-contiguous field
+/// positions).  It cannot be byte-verified in this sandbox without
+/// QEMU-hppa decode testing.
+///
+/// The G3 fallback strategy AVOIDS exercising this encoder:
+///   - `CastKind::FloatToFloat` is implemented as a GPR-transit bit-copy
+///     (see the Cast arm in `emit_function`), so no FPR load is needed.
+///   - `CastKind::IntToFloat` / `FloatToInt` / etc. are documented stubs
+///     ("store 0") pending either verified FPR load/store encoders OR
+///     soft-float runtime symbols (`__vuma_f64_add` etc.) added to
+///     `womb/ieee/fp.vuma`.  Neither path is in place yet.
+///
+/// The FP arithmetic path (`emit_hppa_fp_binop`) does call this encoder,
+/// so its results are currently incorrect — see that function's doc.
+///
+/// TODO G3 (deferred): replace with verified FLDW encoding once
+/// QEMU-hppa testing is wired up.
 fn encode_fldw(base: Reg, offset: i16, dst: FReg) -> [u8; 4] {
-    // FLDW,offset(base),t  — coprocessor load single.
-    // Encoding (approx): 0x24<<26 (load) | ... This is genuinely uncertain.
-    // FALLBACK: emit a NOP + comment; the integer path will be used as a
-    // safety net.  Document the limitation.
-    // TODO F1b: replace with verified FLDW encoding.
     let _ = (base, offset, dst);
-    0x08000040u32.to_be_bytes()  // NOP
+    0x08000040u32.to_be_bytes()  // NOP — see G3 doc above
 }
 
-/// Store 32-bit FP to memory (FSTW).
+/// Store 32-bit FP to memory (FSTW).  See `encode_fldw` for the G3
+/// strategy and the reason this remains a NOP stub.
+///
+/// TODO G3 (deferred): replace with verified FSTW encoding once
+/// QEMU-hppa testing is wired up.
 fn encode_fstw(src: FReg, base: Reg, offset: i16) -> [u8; 4] {
     let _ = (src, base, offset);
-    // TODO F1b: replace with verified FSTW encoding.
-    0x08000040u32.to_be_bytes()  // NOP
+    0x08000040u32.to_be_bytes()  // NOP — see G3 doc above
 }
 
 /// Emit HPPA floating-point binary op.
 ///
-/// NOTE F1b: The FPR load/store encoders (encode_fldw/encode_fstw) are
-/// currently stubs pending QEMU-hppa verification of the PA-RISC 1.1
-/// coprocessor-load encoding.  The arithmetic encoder (encode_fp_arith)
-/// is best-effort.  Until verified, this path may produce incorrect
-/// results — the IR verifier (F2a) and gold tests (F3) will catch it.
+/// G3 STATUS (best-effort, NOT functional): The FP arithmetic path
+/// emits a real PA-RISC 1.1 coprocessor word via `encode_fp_arith`
+/// for FADD/FSUB/FMUL/FDIV, BUT the operands never reach the FPRs
+/// because `encode_fldw` / `encode_fstw` are NOP stubs (see their
+/// docs).  The FPR accumulators retain their prior state, the
+/// arithmetic executes on garbage, and the store-back is a NOP — so
+/// the result is always wrong.
+///
+/// The proper fix is one of:
+///   (a) Verify the coprocessor load/store encoders on QEMU-hppa so
+///       operands flow through FPRs; OR
+///   (b) Emit soft-float runtime calls (`__vuma_f64_add`,
+///       `__vuma_f64_sub`, `__vuma_f64_mul`, `__vuma_f64_div`) using
+///       the existing `IRInstr::Call` path (the call-emission code
+///       and `R_PARISC_PCREL` relocation are already in place — see
+///       the `IRInstr::Call` arm in `emit_function`).
+/// Path (b) is blocked on the soft-float symbols being defined in
+/// `womb/ieee/fp.vuma` (currently that file only has utility helpers
+/// like `f64_abs` / `f64_trunc`; no arithmetic, no conversions).
+///
+/// The FP comparison path (Eq/Ne/SLt/...) is also stubbed ("store 0").
+/// The IR verifier (F2a) and gold tests (F3) will catch incorrect
+/// results until either (a) or (b) lands.  See TODO G3.
 fn emit_hppa_fp_binop(
     op: &crate::ir::BinOpKind,
     dst: &IRValue,
@@ -773,7 +809,7 @@ impl TargetInfo for HppaTargetInfo {
     fn endianness(&self) -> Endianness { Endianness::Big }
     fn has_registers(&self) -> bool { true }
     fn num_gp_regs(&self) -> usize { 32 }
-    fn num_simd_fp_regs(&self) -> usize { 16 }  // PA-RISC 1.1: F0–F15
+    fn num_simd_fp_regs(&self) -> usize { 16 }  // PA-RISC 1.1: F0–F15 (hardware FP NOT emitted — see G3 strategy in emit_hppa_fp_binop doc + Cast arm)
     fn has_hardwired_zero(&self) -> bool { true }
     fn has_link_register(&self) -> bool { true }
     fn has_branch_delay_slots(&self) -> bool { false }
@@ -1533,8 +1569,16 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 code.extend(ss_st(S0, d_off));
                             }
                             CastKind::IntToFloat | CastKind::UIntToFloat => {
-                                // TODO F1b: emit FCNVXF (int→float).  Stub: store 0.0 (bits = 0).
-                                // PA-RISC FCNVXF f-op = 0x3B.
+                                // TODO G3: requires either hardware FCNVXF
+                                // (PA-RISC f-op = 0x3B) once the FPR load/store
+                                // encoders (encode_fldw/encode_fstw) are verified
+                                // on QEMU-hppa, OR a soft-float runtime call to
+                                // `__vuma_i64_to_f64` / `__vuma_u64_to_f64`
+                                // (symbols not yet defined in womb/ieee/fp.vuma).
+                                // The call-emission path exists (IRInstr::Call
+                                // arm uses R_PARISC_PCREL relocation) but the
+                                // callee symbols do not.
+                                // Stub: store 0.0 (bits = 0).
                                 code.extend(ss_load_imm(S0, 0));
                                 code.extend(ss_st(S0, d_off));
                                 // For f64, also zero the high slot.
@@ -1543,15 +1587,69 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 }
                             }
                             CastKind::FloatToInt | CastKind::FloatToUInt => {
-                                // TODO F1b: emit FCNVFX (float→int).  f-op = 0x3C.
+                                // TODO G3: requires either hardware FCNVFX
+                                // (PA-RISC f-op = 0x3C) once FPR load/store is
+                                // verified, OR a soft-float runtime call to
+                                // `__vuma_f64_to_i64` / `__vuma_f64_to_u64`
+                                // (symbols not yet defined in womb/ieee/fp.vuma).
+                                // See IntToFloat comment above for full blocker.
+                                // Stub: store 0.
                                 code.extend(ss_load_imm(S0, 0));
                                 code.extend(ss_st(S0, d_off));
                             }
                             CastKind::FloatToFloat => {
-                                // TODO F1b: emit FCNVFF (fmt convert).  f-op = 0x3A.
-                                // For now, copy the bits through S0.
-                                code.extend(ss_st(S0, d_off));
-                                let _ = (from_ty, to_ty);
+                                // G3 strategy (bit-copy fallback): PA-RISC 1.1
+                                // hardware FCNVFF (f-op = 0x3A) is NOT emitted
+                                // because the coprocessor load/store encoders
+                                // (encode_fldw/encode_fstw) remain NOP stubs
+                                // pending QEMU verification, and soft-float
+                                // runtime symbols (__vuma_f32_to_f64 etc.) are
+                                // not yet defined in womb/ieee/fp.vuma.  The
+                                // honest, always-correct-as-bits fallback is to
+                                // preserve the low 32 bits of src and zero-
+                                // extend (f32→f64) or truncate (f64→f32) to the
+                                // dst width using only the working GPR-transit
+                                // helpers (ss_ld/ss_st/ss_load_imm).
+                                //
+                                // HONESTY: This is a BIT-PRESERVING operation,
+                                // NOT a true IEEE-754 f32↔f64 conversion.  True
+                                // conversion would re-pack the sign/exponent/
+                                // mantissa fields (f32 has 8-bit exp + 23-bit
+                                // mantissa; f64 has 11-bit exp + 52-bit
+                                // mantissa).  The bit-preservation here is
+                                // correct only for BitCast-style reinterpretation
+                                // of the low 32 bits.  Real f32↔f64 conversion
+                                // requires either hardware FCNVFF (gated on FPR
+                                // load/store verification) or soft-float runtime
+                                // support.  See TODO G3.
+                                //
+                                // S0 already holds the low 32 bits of src
+                                // (loaded above by ss_load_value).
+                                let src_is_f32 = matches!(from_ty, Some(IRType::F32));
+                                let dst_is_f32 = matches!(to_ty, Some(IRType::F32));
+                                let dst_is_f64 = matches!(to_ty, Some(IRType::F64));
+                                if src_is_f32 && dst_is_f64 {
+                                    // f32 → f64 (widen): store low word, zero
+                                    // the high word at d_off - 4 (matches the
+                                    // f64 layout convention used elsewhere in
+                                    // this file — high word at smaller offset).
+                                    code.extend(ss_st(S0, d_off));
+                                    code.extend(ss_load_imm(S0, 0));
+                                    code.extend(ss_st(S0, d_off - 4));
+                                } else if !src_is_f32 && dst_is_f32 {
+                                    // f64 → f32 (narrow): keep the low 32 bits,
+                                    // discard the high word.
+                                    code.extend(ss_st(S0, d_off));
+                                } else {
+                                    // Same-width (f32→f32, f64→f64) or unknown
+                                    // types: bit-copy the low word.  For f64→f64
+                                    // the high word is NOT copied (known
+                                    // limitation — same as the prior F1b stub);
+                                    // correct f64→f64 is a no-op in a real
+                                    // backend and should be optimized out by
+                                    // the IR verifier / DCE pass.
+                                    code.extend(ss_st(S0, d_off));
+                                }
                             }
                         }
                         let _ = (from_ty, to_ty);
