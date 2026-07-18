@@ -66,6 +66,24 @@ pub fn set_64bit_returns(names: &std::collections::HashSet<String>) {
     let lock = func_64bit_returns();
     *lock.write().unwrap() = Some(names.clone());
 }
+
+// Global map of function name -> parameter types, used by the Call handler
+// to determine the ABI register/stack layout of each argument (64-bit params
+// consume TWO arg registers per AAPCS). Each function records its own
+// signature at the start of `allocate_registers`; the Call handler looks up
+// the callee's signature. If the callee hasn't been registered yet (race
+// under parallel allocation) or is an extern symbol, the caller falls back to
+// the conservative "all args are 64-bit" assumption -- which is the
+// pre-existing behaviour and is correct for the all-64-bit call sites that
+// motivated this path (e.g. newton_sqrt(f64, f64, i64)).
+// Uses RwLock (not thread_local) because `allocate_registers` is invoked in
+// parallel by `par_collect_result` / `std::thread::scope`.
+static FUNC_PARAM_TYPES: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashMap<String, Vec<IRType>>>>> = std::sync::OnceLock::new();
+
+fn func_param_types() -> &'static std::sync::RwLock<Option<std::collections::HashMap<String, Vec<IRType>>>> {
+    FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
+}
+
 use std::fmt;
 
 // ===========================================================================
@@ -3419,6 +3437,17 @@ impl Backend for Arm32Backend {
 
         let func_name = func.name.clone();
 
+        // Record this function's param types for cross-function Call ABI.
+        // Each function records its own signature; the Call handler looks up
+        // the callee.  get_or_insert_with ensures the map is created once and
+        // reused by all worker threads (no data loss under parallel alloc).
+        {
+            let lock = func_param_types();
+            let mut guard = lock.write().unwrap();
+            let map = guard.get_or_insert_with(std::collections::HashMap::new);
+            map.insert(func.name.clone(), func.param_types.clone());
+        }
+
         // ── Phase 1: Collect all vreg IDs ──
         let mut all_vreg_ids: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
@@ -3793,6 +3822,31 @@ impl Backend for Arm32Backend {
             code
         }
 
+        /// Store 32-bit word from src_reg into [SP + offset].
+        /// Used by the Call handler to push stack-passed arguments.
+        /// Handles large offsets (> 4095) by computing the address into R12
+        /// first.  IMPORTANT: src_reg must NOT be R12 (callers use R0/R1).
+        fn str_sp_offset(src_reg: Gpr, offset: u32) -> Vec<u8> {
+            if offset <= 4095 {
+                encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), src_reg.encoding(), offset,
+                ).to_vec()
+            } else {
+                let mut code = Vec::new();
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, offset));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_ADD, false,
+                    Gpr::R13.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                ));
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R12.encoding(), src_reg.encoding(), 0,
+                ));
+                code
+            }
+        }
+
         const R12_TEMP: u32 = 12; // R12 encoding for temp use
 
         // ── Phase 2: Emit prologue ──
@@ -3875,16 +3929,27 @@ impl Backend for Arm32Backend {
 
         // Store function parameters to their stack slots.
         // G7: 64-bit params (f64/i64/u64) consume TWO arg registers per AAPCS.
+        // When the 4 arg registers (R0-R3) are exhausted, remaining params are
+        // loaded from the caller's stack frame at [R11 + 8 + stack_off].
+        // 64-bit stack params occupy 8 bytes (low then high); 32-bit occupy 4.
         let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
         let mut arg_reg_idx = 0usize;
+        let mut stack_arg_off: i32 = 8; // first stack arg at [R11+8] (above saved {R11,LR})
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
                 let param_ty = func.param_types.get(i);
                 let is_64bit = matches!(param_ty, Some(IRType::F64) | Some(IRType::I64) | Some(IRType::U64));
                 let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                if arg_reg_idx < 4 {
-                    if is_64bit && arg_reg_idx + 1 < 4 {
-                        // 64-bit: store both halves via ss_store_64
+                // 64-bit params need 2 consecutive regs (R0-R1 or R2-R3).
+                // If only 1 reg remains, the 64-bit param goes on the stack
+                // and the lone remaining reg is skipped (per AAPCS).
+                let fits_in_regs = if is_64bit {
+                    arg_reg_idx + 1 < 4
+                } else {
+                    arg_reg_idx < 4
+                };
+                if fits_in_regs {
+                    if is_64bit {
                         let store_code = ss_store_64(arg_regs[arg_reg_idx], arg_regs[arg_reg_idx + 1], offset);
                         instructions.push(AllocatedInstruction {
                             opcode: "str_64".to_string(),
@@ -3907,25 +3972,33 @@ impl Backend for Arm32Backend {
                         arg_reg_idx += 1;
                     }
                 } else {
-                    // Stack-passed argument: located at [R11 + 8 + (i-4)*4]
-                    // Load into R0 (free — already saved to its slot for param 0),
-                    // then store to the parameter's stack slot.
-                    // NOTE: We use R0 rather than R12 because ss_store_to_slot
-                    // uses R12 internally for large offsets and documents that
-                    // src_reg must NOT be R12 in that case.
-                    let arg_offset_from_r11: i32 = 8 + ((arg_reg_idx - 4) * 4) as i32;
-                    let slot_offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                    // Stack-passed argument: located at [R11 + stack_arg_off].
+                    // Load into R0 (and R1 for 64-bit), then store to the
+                    // parameter's stack slot.  We use R0/R1 rather than R12
+                    // because ss_store_to_slot / ss_store_64 use R12 internally
+                    // for large offsets.
                     let mut param_code = Vec::new();
-                    // LDR R0, [R11, #arg_offset_from_r11]
-                    param_code.extend(ss_load_from_r11_plus(Gpr::R0, arg_offset_from_r11));
-                    // STR R0, [R11 - slot_offset] + zero high word
-                    param_code.extend(ss_store_32_zero(Gpr::R0, slot_offset, fs));
+                    if is_64bit {
+                        param_code.extend(ss_load_from_r11_plus(Gpr::R0, stack_arg_off));
+                        param_code.extend(ss_load_from_r11_plus(Gpr::R1, stack_arg_off + 4));
+                        param_code.extend(ss_store_64(Gpr::R0, Gpr::R1, offset));
+                        stack_arg_off += 8;
+                    } else {
+                        param_code.extend(ss_load_from_r11_plus(Gpr::R0, stack_arg_off));
+                        param_code.extend(ss_store_32_zero(Gpr::R0, offset, fs));
+                        stack_arg_off += 4;
+                    }
                     instructions.push(AllocatedInstruction {
                         opcode: "ldr+str".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
                         writes: vec![],
                         encoded: param_code,
                     });
+                    // 64-bit param that skipped the last reg(s): mark regs
+                    // exhausted so subsequent params also use the stack.
+                    if is_64bit && arg_reg_idx < 4 {
+                        arg_reg_idx = 4;
+                    }
                 }
             }
         }
@@ -5642,7 +5715,54 @@ impl Backend for Arm32Backend {
                     crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
                         let num_args = args.len();
-                        let num_stack_args = num_args.saturating_sub(4);
+
+                        // Look up the callee's parameter types to determine
+                        // 64-bit-ness of each argument (64-bit params consume
+                        // TWO arg registers per AAPCS).  If unavailable
+                        // (extern symbol, or race under parallel allocation
+                        // where the callee hasn't registered yet), fall back to
+                        // the conservative "all args are 64-bit" assumption.
+                        let callee_param_types: Option<Vec<crate::ir::IRType>> = if !*is_extern {
+                            let lock = func_param_types();
+                            let guard = lock.read().unwrap();
+                            guard.as_ref()
+                                .and_then(|map| map.get(target_func))
+                                .cloned()
+                        } else {
+                            None
+                        };
+                        let arg_is_64bit: Vec<bool> = match &callee_param_types {
+                            Some(types) => args.iter().enumerate().map(|(i, _)| {
+                                types.get(i)
+                                    .map(|t| matches!(t,
+                                        crate::ir::IRType::F64
+                                        | crate::ir::IRType::I64
+                                        | crate::ir::IRType::U64))
+                                    .unwrap_or(false)
+                            }).collect(),
+                            None => vec![true; num_args],
+                        };
+
+                        // Compute which args go in R0-R3 vs on the stack.
+                        // 64-bit args need 2 consecutive regs (R0-R1 or R2-R3);
+                        // if only 1 reg remains, the 64-bit arg goes on the
+                        // stack and the lone reg is skipped (per AAPCS).
+                        let mut arg_reg_idx = 0usize;
+                        let mut arg_in_reg: Vec<Option<usize>> = vec![None; num_args];
+                        let mut stack_arg_sizes: Vec<u32> = Vec::new();
+                        for i in 0..num_args {
+                            let is_64 = arg_is_64bit[i];
+                            let fits = if is_64 { arg_reg_idx + 1 < 4 } else { arg_reg_idx < 4 };
+                            if fits {
+                                arg_in_reg[i] = Some(arg_reg_idx);
+                                arg_reg_idx += if is_64 { 2 } else { 1 };
+                            } else {
+                                stack_arg_sizes.push(if is_64 { 8 } else { 4 });
+                                if is_64 && arg_reg_idx < 4 {
+                                    arg_reg_idx = 4; // skip remaining reg(s)
+                                }
+                            }
+                        }
 
                         // AAPCS-VFP calling convention limitation: when calling
                         // external (C ABI) functions that take floating-point
@@ -5670,66 +5790,50 @@ impl Backend for Arm32Backend {
                         }
 
                         // AAPCS requires the stack to remain 8-byte aligned at
-                        // a public function boundary. If an odd number of stack
-                        // args is passed, pad the allocation up to the next
-                        // 8-byte boundary; the cleanup below uses the same
-                        // padded size.
-                        let stack_args_bytes = (num_stack_args * 4 + 7) & !7;
+                        // a public function boundary.  Each stack arg occupies
+                        // 8 bytes (64-bit) or 4 bytes (32-bit); pad the total
+                        // up to the next 8-byte boundary.
+                        let stack_args_bytes_raw: u32 = stack_arg_sizes.iter().sum();
+                        let stack_args_bytes = (stack_args_bytes_raw + 7) & !7;
 
-                        // ── AAPCS: args 5+ go on the stack ──
+                        // ── AAPCS: args that don't fit in R0-R3 go on the stack ──
                         // 1. Decrement SP to make room for stack-passed arguments
                         if stack_args_bytes > 0 {
                             code.extend_from_slice(&emit_sub_sp(stack_args_bytes as i32));
                         }
 
-                        // 2. Store args 5+ onto the stack (right-to-left push is
-                        //    achieved by placing arg5 at [SP+0], arg6 at [SP+4], etc.)
-                        for (i, arg) in args.iter().enumerate() {
-                            if i >= 4 {
-                                let stack_offset = ((i - 4) * 4) as u32;
-                                if stack_offset <= 4095 {
-                                    // Load arg value into R12 and STR directly
-                                    code.extend(ss_load_value(arg, &vreg_stack_slots, Gpr::R12));
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R13.encoding(), Gpr::R12.encoding(), stack_offset,
-                                    ));
+                        // 2. Store stack args at [SP + offset].  Done BEFORE
+                        //    loading reg args so R0/R1 are free as scratch.
+                        let mut stack_off: u32 = 0;
+                        for i in 0..num_args {
+                            if arg_in_reg[i].is_none() {
+                                let is_64 = arg_is_64bit[i];
+                                let size = if is_64 { 8 } else { 4 };
+                                if is_64 {
+                                    // Load 64-bit value into R0:R1, store both words.
+                                    code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, &args[i], &vreg_stack_slots));
+                                    code.extend(str_sp_offset(Gpr::R0, stack_off));
+                                    code.extend(str_sp_offset(Gpr::R1, stack_off + 4));
                                 } else {
-                                    // Large offset (extremely unlikely): compute addr first,
-                                    // then load arg value and store.
-                                    // Compute SP + stack_offset into R12
-                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, stack_offset));
-                                    code.extend_from_slice(&encode_dp_reg(
-                                        Condition::Al, DP_ADD, false,
-                                        Gpr::R13.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
-                                    ));
-                                    // Load arg into R0 (R0-R3 not yet set up for this call)
-                                    code.extend(ss_load_value(arg, &vreg_stack_slots, Gpr::R0));
-                                    // STR R0, [R12, #0]
-                                    code.extend_from_slice(&encode_ls_imm(
-                                        Condition::Al, true, true, false, false, false,
-                                        Gpr::R12.encoding(), Gpr::R0.encoding(), 0,
-                                    ));
+                                    code.extend(ss_load_value(&args[i], &vreg_stack_slots, Gpr::R0));
+                                    code.extend(str_sp_offset(Gpr::R0, stack_off));
                                 }
+                                stack_off += size;
                             }
                         }
 
-                        // 3. Move args 0–3 to R0–R3.
-                        // G7: load each arg as 64-bit (two registers) to handle
-                        // f64/i64/u64 params correctly. 32-bit params get a
-                        // harmless high-word load (zero from ss_store_32_zero).
-                        let mut arg_reg_idx = 0usize;
-                        for arg in args.iter() {
-                            if arg_reg_idx >= 4 { break; }
-                            if arg_reg_idx + 1 < 4 {
-                                let lo_reg = Gpr::arg_register(arg_reg_idx).unwrap();
-                                let hi_reg = Gpr::arg_register(arg_reg_idx + 1).unwrap();
-                                code.extend(ss_load_value_64(lo_reg, hi_reg, arg, &vreg_stack_slots));
-                                arg_reg_idx += 2;
-                            } else {
-                                let arg_reg = Gpr::arg_register(arg_reg_idx).unwrap();
-                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg));
-                                arg_reg_idx += 1;
+                        // 3. Move register args into R0-R3.
+                        //    64-bit args use 2 regs (lo, hi); 32-bit use 1.
+                        for i in 0..num_args {
+                            if let Some(reg_idx) = arg_in_reg[i] {
+                                if arg_is_64bit[i] {
+                                    let lo_reg = Gpr::arg_register(reg_idx).unwrap();
+                                    let hi_reg = Gpr::arg_register(reg_idx + 1).unwrap();
+                                    code.extend(ss_load_value_64(lo_reg, hi_reg, &args[i], &vreg_stack_slots));
+                                } else {
+                                    let arg_reg = Gpr::arg_register(reg_idx).unwrap();
+                                    code.extend(ss_load_value(&args[i], &vreg_stack_slots, arg_reg));
+                                }
                             }
                         }
 
@@ -5756,32 +5860,26 @@ impl Backend for Arm32Backend {
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            // Store low word (R0) + zero high word.
-                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                             if !is_extern {
-                                // Check if the callee returns 64-bit (I64/U64).
-                                // If so, store R1 (high word). Otherwise, leave high word zeroed.
-                                let is_64bit_ret = {
-                                    let lock = func_64bit_returns();
-                                    let guard = lock.read().unwrap();
-                                    guard.as_ref()
-                                        .map(|set| set.contains(target_func))
-                                        .unwrap_or(false)
-                                };
-                                if is_64bit_ret {
-                                    code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
-                                }
+                                // Non-extern (VUMA) call: callee returns 64-bit in
+                                // R0:R1 (AAPCS).  The callee's Ret handler always
+                                // loads R0:R1 — for 32-bit returns R1 is explicitly
+                                // zeroed, for 64-bit returns (I64/U64/F64) both
+                                // words carry data.  Store both words via
+                                // ss_store_64 so the dst slot is correct for all
+                                // return types without needing callee type info.
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             } else {
-                                // Extern/syscall: sign-extend 32-bit R0 to 64-bit R0:R1.
-                                // MOV R1, R0, ASR #31 — fills R1 with 0xFFFFFFFF if R0 is
-                                // negative (bit 31 set), or 0x00000000 if non-negative.
-                                // This is correct for both signed returns (i64) and for
-                                // user-space pointers (which have bit 31 = 0 on 32-bit Linux).
+                                // Extern/syscall: 32-bit return in R0 only —
+                                // sign-extend to 64-bit R0:R1 so that negative
+                                // values (e.g. -1 error returns) are correctly
+                                // represented in 64-bit operations.
+                                // MOV R1, R0, ASR #31
                                 code.extend_from_slice(&encode_dp_shift_imm(
                                     Condition::Al, DP_MOV, false, 0,
                                     Gpr::R1.encoding(), Gpr::R0.encoding(), 2, 31,
                                 ));
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             }
                         }
 
@@ -6632,10 +6730,20 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         // Load return value into R0 (and R1 for 64-bit returns).
                         // AAPCS: 64-bit return values are passed in R0:R1.
+                        // F64 is treated as 64-bit here so that f64-returning
+                        // functions load both R0 and R1 — previously f64
+                        // returns were truncated to R0 only, corrupting the
+                        // bit pattern.  The caller's Call handler stores R0:R1
+                        // unconditionally for non-extern calls, so 32-bit
+                        // returns must zero R1 (done below) to keep the dst
+                        // slot's high word clean.
                         // Check result_types first; fall back to parsing the
                         // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
                         let is_64bit_ret = func.result_types.first()
-                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                            .map(|t| matches!(t,
+                                crate::ir::IRType::I64
+                                | crate::ir::IRType::U64
+                                | crate::ir::IRType::F64))
                             .unwrap_or_else(|| {
                                 // Fallback: parse return type from function name
                                 if let Some(open) = func.name.rfind('(') {
@@ -6643,7 +6751,8 @@ impl Backend for Arm32Backend {
                                         if close > open {
                                             let ret_ty = &func.name[open + 1..close];
                                             return ret_ty == "u64" || ret_ty == "i64"
-                                                || ret_ty == "U64" || ret_ty == "I64";
+                                                || ret_ty == "U64" || ret_ty == "I64"
+                                                || ret_ty == "f64" || ret_ty == "F64";
                                         }
                                     }
                                 }
@@ -6654,12 +6763,20 @@ impl Backend for Arm32Backend {
                                 // Load both low (R0) and high (R1) words.
                                 code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, val, &vreg_stack_slots));
                             } else {
+                                // 32-bit return: load R0, then zero R1 so the
+                                // caller can unconditionally store R0:R1.
                                 code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R0));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
                             }
                         } else {
                             code.extend_from_slice(&encode_dp_imm(
                                 Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
                             )); // MOV R0, #0
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                            )); // MOV R1, #0
                         }
                         // Epilogue: restore R11 and LR, then return
                         // LDR R11, [SP, #frame_size]

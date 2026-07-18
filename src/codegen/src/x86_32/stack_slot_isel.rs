@@ -670,24 +670,50 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_push(reg), "push_callee_save");
     }
 
-    // Copy function parameters from arg registers to their stack slots.
-    // x86_32 only has 8 GPRs; we use EDI, ESI, EDX, ECX for the first 4 args.
-    // Use store_vreg (which zeros the high word) so that 64-bit operations
-    // on parameters don't read garbage from the high 4 bytes.
-    // Args 4+ are passed on the stack at [EBP + 8 + (i-4)*4].
+    // Copy function parameters from arg registers / stack to their vreg slots.
+    //
+    // Calling convention (x86_32 VUMA-internal):
+    //   • Non-FP params: first 4 in EDI/ESI/EDX/ECX, rest on stack (4 bytes each).
+    //   • FP params (F32/F64): on the stack, 8 bytes each, at [EBP + 8 + fp_idx*8].
+    //
+    // This split convention is needed because x86_32 GPRs are only 32 bits
+    // wide and cannot carry a 64-bit f64 value.  FP params are therefore
+    // passed on the stack (matching the SysV i386 ABI for doubles).
+    //
+    // The prologue and the Call handler must agree on the layout.  The
+    // layout is computed by walking params left-to-right, assigning non-FP
+    // params to registers (in order) and FP params to stack slots (in order).
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
+    let mut reg_count = 0usize;
+    let mut fp_stack_idx = 0usize;  // number of FP params seen so far
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
-            if i < arg_regs.len() {
-                emit(store_vreg(id, arg_regs[i]), "store_param");
-            } else {
-                // Stack-passed argument: load from [EBP + 8 + (i-4)*4]
-                // and store to the vreg's stack slot.
-                let stack_off = 8 + (i - arg_regs.len()) * 4;
+            let is_fp = i < func.param_types.len()
+                && matches!(func.param_types[i], IRType::F32 | IRType::F64);
+            if is_fp {
+                // FP param: load 8 bytes from [EBP + 8 + fp_stack_idx*8].
+                let stack_off = 8 + (fp_stack_idx * 8) as i32;
+                let dst_off = slot_offset(id);
                 let mut param_code = Vec::new();
-                // MOV EAX, [EBP + stack_off]
-                param_code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off as i32));
-                // Store EAX to vreg slot (with high word zeroing)
+                // MOV EAX, [EBP + stack_off]; MOV [EBP + dst_off], EAX (low)
+                param_code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, stack_off));
+                param_code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                // MOV EAX, [EBP + stack_off + 4]; MOV [EBP + dst_off + 4], EAX (high)
+                param_code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, stack_off + 4));
+                param_code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                emit(param_code, "store_fp_param");
+                fp_stack_idx += 1;
+            } else if reg_count < arg_regs.len() {
+                // Non-FP param in register: store_vreg (writes low + zeros high).
+                emit(store_vreg(id, arg_regs[reg_count]), "store_param");
+                reg_count += 1;
+            } else {
+                // Overflow non-FP param: load from [EBP + 8 + fp_count*8 + overflow*4].
+                // (FP params come first on the stack, then overflow non-FP params.)
+                let overflow_idx = reg_count - arg_regs.len();
+                let stack_off = 8 + (fp_stack_idx * 8) as i32 + (overflow_idx * 4) as i32;
+                let mut param_code = Vec::new();
+                param_code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off));
                 param_code.extend(store_vreg(id, Gpr::Rax));
                 emit(param_code, "store_stack_param");
             }
@@ -1748,24 +1774,153 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(store_vreg(dst_id, Gpr::Rax));
                         code
                     } else {
-                        let cc = cmp_kind_to_cc(kind);
-                        code.extend(load_value(lhs, Gpr::Rax));
-                        if let IRValue::Immediate(imm) = rhs {
-                            let imm = *imm;
-                            if (-2147483648..=2147483647).contains(&imm) {
-                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, imm as i32));
+                        // Integer comparison path.
+                        // On x86_32, 64-bit values live in two 32-bit stack
+                        // slots (low + high).  For 64-bit comparisons, we
+                        // compare the high words first (signed or unsigned,
+                        // depending on kind), and only if they're equal do we
+                        // compare the low words (always unsigned).  This
+                        // matches the standard 64-bit comparison algorithm.
+                        let is_64bit_int = matches!(ty,
+                            Some(IRType::I64) | Some(IRType::U64)
+                        );
+                        if is_64bit_int {
+                            // 64-bit integer comparison.
+                            let dst_off = slot_offset(dst_id);
+
+                            // Load the high 32 bits of a 64-bit IRValue into
+                            // a GPR.  For Register: MOV from [src_off+4].
+                            // For Immediate: sign-extend if it fits in i32,
+                            // else use the actual high word.
+                            let load_high = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+                                match val {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id) + 4;
+                                        encode_mov_reg32_mem(scratch, Gpr::Rbp, off)
+                                    }
+                                    IRValue::Immediate(imm) => {
+                                        let high = if (-2147483648i64..=2147483647i64).contains(imm) {
+                                            if *imm < 0 { -1i32 } else { 0i32 }
+                                        } else {
+                                            ((*imm >> 32) as u32) as i32
+                                        };
+                                        encode_mov_reg_imm32(scratch, high)
+                                    }
+                                    IRValue::Address(_) => encode_mov_reg_imm32(scratch, 0),
+                                    IRValue::Label(_) => encode_mov_reg_imm32(scratch, 0),
+                                }
+                            };
+                            // Load the low 32 bits of a 64-bit IRValue.
+                            let load_low = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+                                match val {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        encode_mov_reg32_mem(scratch, Gpr::Rbp, off)
+                                    }
+                                    IRValue::Immediate(imm) => {
+                                        encode_mov_reg_imm32(scratch, (*imm as u32) as i32)
+                                    }
+                                    IRValue::Address(addr) => {
+                                        encode_mov_reg_imm32(scratch, (*addr as u32) as i32)
+                                    }
+                                    IRValue::Label(_) => encode_mov_reg_imm32(scratch, 0),
+                                }
+                            };
+
+                            match kind {
+                                CmpKind::Eq | CmpKind::Ne => {
+                                    // result = (a.high == b.high) & (a.low == b.low)  for Eq
+                                    // result = (a.high != b.high) | (a.low != b.low)  for Ne
+                                    let cc = if matches!(kind, CmpKind::Eq) {
+                                        Cc::Equal
+                                    } else {
+                                        Cc::NotEqual
+                                    };
+                                    // Compare high words.
+                                    code.extend(load_high(lhs, Gpr::Rax));
+                                    code.extend(load_high(rhs, Gpr::Rcx));
+                                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_setcc(cc, Gpr::Rax));
+                                    code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                                    // Compare low words.
+                                    code.extend(load_low(lhs, Gpr::Rcx));
+                                    code.extend(load_low(rhs, Gpr::Rdx));
+                                    code.extend(encode_cmp_reg_reg(Gpr::Rcx, Gpr::Rdx));
+                                    code.extend(encode_setcc(cc, Gpr::Rcx));
+                                    code.extend(encode_movzx_reg8(Gpr::Rcx, Gpr::Rcx));
+                                    // Combine: AND for Eq, OR for Ne.
+                                    if matches!(kind, CmpKind::Eq) {
+                                        code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    } else {
+                                        code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
+                                }
+                                _ => {
+                                    // Ordering comparison:
+                                    // result = high_cmp | (high_eq & low_cmp)
+                                    // where high_cmp uses signed SETcc for SLt/etc.
+                                    // and unsigned SETcc for ULt/etc., and
+                                    // low_cmp always uses unsigned SETcc
+                                    // (the low words are compared as unsigned
+                                    // because they're the lower 32 bits).
+                                    let (high_cc, low_cc) = match kind {
+                                        CmpKind::SLt => (Cc::Less, Cc::Below),
+                                        CmpKind::SLe => (Cc::LessEqual, Cc::BelowEqual),
+                                        CmpKind::SGt => (Cc::Greater, Cc::Above),
+                                        CmpKind::SGe => (Cc::GreaterEqual, Cc::AboveEqual),
+                                        CmpKind::ULt => (Cc::Below, Cc::Below),
+                                        CmpKind::ULe => (Cc::BelowEqual, Cc::BelowEqual),
+                                        CmpKind::UGt => (Cc::Above, Cc::Above),
+                                        CmpKind::UGe => (Cc::AboveEqual, Cc::AboveEqual),
+                                        _ => unreachable!(),
+                                    };
+                                    // Step 1: Compare high words.
+                                    code.extend(load_high(lhs, Gpr::Rax));
+                                    code.extend(load_high(rhs, Gpr::Rcx));
+                                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_setcc(high_cc, Gpr::Rax));
+                                    code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax)); // EAX = high_cmp
+                                    code.extend(encode_setcc(Cc::Equal, Gpr::Rcx));
+                                    code.extend(encode_movzx_reg8(Gpr::Rcx, Gpr::Rcx)); // ECX = high_eq
+                                    // Save high_cmp and high_eq to dst_off (scratch).
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rcx));
+                                    // Step 2: Compare low words (unsigned).
+                                    code.extend(load_low(lhs, Gpr::Rax));
+                                    code.extend(load_low(rhs, Gpr::Rcx));
+                                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_setcc(low_cc, Gpr::Rax));
+                                    code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax)); // EAX = low_cmp
+                                    // Step 3: result = high_cmp | (high_eq & low_cmp).
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rbp, dst_off + 4)); // ECX = high_eq
+                                    code.extend(encode_and_reg_reg(Gpr::Rcx, Gpr::Rax)); // ECX = high_eq & low_cmp
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, dst_off)); // EAX = high_cmp
+                                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx)); // EAX = result
+                                }
+                            }
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                            code
+                        } else {
+                            // 32-bit integer comparison (existing path).
+                            let cc = cmp_kind_to_cc(kind);
+                            code.extend(load_value(lhs, Gpr::Rax));
+                            if let IRValue::Immediate(imm) = rhs {
+                                let imm = *imm;
+                                if (-2147483648..=2147483647).contains(&imm) {
+                                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, imm as i32));
+                                } else {
+                                    code.extend(load_value(rhs, Gpr::Rcx));
+                                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                }
                             } else {
                                 code.extend(load_value(rhs, Gpr::Rcx));
                                 code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
                             }
-                        } else {
-                            code.extend(load_value(rhs, Gpr::Rcx));
-                            code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            code.extend(encode_setcc(cc, Gpr::Rax));
+                            code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                            code
                         }
-                        code.extend(encode_setcc(cc, Gpr::Rax));
-                        code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
-                        code
                     }
                 }
 
@@ -1977,6 +2132,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
+                    // Set to true when the conversion stores its result
+                    // directly to dst's stack slot (both low and high
+                    // words), so the trailing `store_vreg(dst_id, Rax)`
+                    // must be skipped (it would clobber the high word).
+                    let mut result_in_slot = false;
 
                     // Helper predicates for type-driven instruction selection.
                     // When type info is unavailable (`None`), we fall back to
@@ -2420,40 +2580,186 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // ── Floating-point → unsigned integer ────────────────
                         //
                         // x86 has no direct FP→unsigned-int instruction before
-                        // AVX-512.  For values in the positive signed range,
-                        // CVTTSD2SI/CVTTSS2SI produces the correct unsigned
-                        // result.  For values >= 2^31 (u32) or >= 2^63 (u64),
-                        // use the subtract-XOR technique:
-                        //   1. Subtract 2^N from the float
-                        //   2. Convert with CVTTSD2SI (now fits in signed range)
-                        //   3. XOR the result with 2^(N-1) to add 2^N back
+                        // AVX-512.  Two cases:
                         //
-                        // | from_ty | to_ty       | Instruction(s)                          |
-                        // |---------|-------------|-----------------------------------------|
-                        // | f32     | u8..u32     | MOVSS xmm,[mem]; SUBSS; CVTTSS2SI; XOR  |
-                        // | f64     | u8..u32     | MOVQ xmm,[mem]; SUBSD; CVTTSD2SI; XOR   |
-                        // | f64     | u64         | MOVQ xmm,[mem]; SUBSD; CVTTSD2SI; XOR 2^63 |
+                        // 1. u8..u32 destination: use CVTTSD2SI r32 with the
+                        //    subtract-2^31 + XOR trick for values >= 2^31.
+                        //
+                        // 2. u64 destination: CVTTSD2SI r32 only produces a
+                        //    32-bit result (no REX.W on x86_32).  We use the
+                        //    x87 FISTP instruction (which natively converts
+                        //    f64 → signed i64) with a branch:
+                        //      • value < 2^63: FISTP directly (fits in i64).
+                        //      • value >= 2^63: subtract 2^63, FISTP, XOR the
+                        //        high bit to add 2^63 back.
+                        //    The branch is necessary because the unconditional
+                        //    subtract trick loses f64 precision for small
+                        //    values (e.g. 2.9 - 2^63 rounds, corrupting the
+                        //    low bits of the truncated result).
+                        //
+                        // Truncation mode: the x87 control word's RC field is
+                        // set to 11 (truncate toward zero) via FLDCW before
+                        // FISTP, matching C-style float→int cast semantics.
+                        // The CW is not restored because FILD/FSTP (the only
+                        // other x87 users) don't depend on RC, and SSE
+                        // arithmetic uses MXCSR (independent of x87 CW).
+                        //
+                        // | from_ty | to_ty   | Instruction(s)                              |
+                        // |---------|---------|---------------------------------------------|
+                        // | f32     | u8..u32 | MOVSS; SUBSS; CVTTSS2SI r32; XOR 2^31       |
+                        // | f64     | u8..u32 | MOVQ; SUBSD; CVTTSD2SI r32; XOR 2^31        |
+                        // | f32/f64 | u64     | widen→f64; FLDCW(trunc); UCOMISD; branch;   |
+                        // |         |         |   FISTP i64  (or SUBSD+FISTP+XOR 2^63)     |
                         CastKind::FloatToUInt => {
                             let dst_off = slot_offset(dst_id);
-                            code.extend(load_fp_to_xmm(src, Xmm::Xmm0, !src_is_f32, dst_off));
-                            if src_is_f32 {
-                                // f32 → u32: threshold 2^31 (0x4F000000 as f32).
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x4F000000));
-                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
-                                code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
-                                code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
+                            if dst_is_32bit_int {
+                                // ── u8..u32 destination (unchanged) ──
+                                code.extend(load_fp_to_xmm(src, Xmm::Xmm0, !src_is_f32, dst_off));
+                                if src_is_f32 {
+                                    // f32 → u32: threshold 2^31 (0x4F000000 as f32).
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x4F000000));
+                                    code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                                    code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                    code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
+                                } else {
+                                    // f64 → u32: threshold 2^31 (0x41E0000000000000 as f64).
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off, 0));
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x41E00000));
+                                    code.extend(encode_movq_xmm_mem(Xmm::Xmm1, Gpr::Rbp, dst_off));
+                                    code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                    code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
+                                }
+                                // RAX holds the 32-bit unsigned result.  store_vreg
+                                // writes EAX and zeroes the high word.
                             } else {
-                                // f64 → u32: threshold 2^31 (0x41E0000000000000 as f64).
+                                // ── u64 destination (x87 FISTP + subtract trick) ──
+                                //
+                                // Step 1: Materialise 2^63 as f64 in XMM1.
+                                //   Spill the bit pattern 0x43E0000000000000 to
+                                //   dst_off, then MOVQ XMM1, [dst_off].
                                 code.extend(encode_store_imm32_mem_ebp(dst_off, 0));
-                                code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x41E00000));
+                                code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x43E00000));
                                 code.extend(encode_movq_xmm_mem(Xmm::Xmm1, Gpr::Rbp, dst_off));
+
+                                // Step 2: Load the f64 value into XMM0.
+                                //   If src is f32, widen to f64 first.
+                                if src_is_f32 {
+                                    code.extend(load_fp_to_xmm(src, Xmm::Xmm0, false, dst_off));
+                                    code.extend(encode_cvtss2sd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                } else {
+                                    code.extend(load_fp_to_xmm(src, Xmm::Xmm0, true, dst_off));
+                                }
+
+                                // Step 3: Set x87 rounding mode to truncation.
+                                //   This must come BEFORE the UCOMISD comparison
+                                //   because the OR instruction below clobbers CF
+                                //   (which UCOMISD sets and the JAE below tests).
+                                //   FNSTCW [dst_off]          — save 16-bit CW.
+                                //   MOVZX ECX, WORD [dst_off] — ECX = original CW.
+                                //   OR ECX, 0x0C00            — set RC=11 (truncate).
+                                //   MOV [dst_off], ECX        — store new CW.
+                                //   FLDCW [dst_off]           — load new CW.
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xD9, 0x7D, dst_off as u8]); // FNSTCW
+                                } else {
+                                    code.extend_from_slice(&[0xD9, 0xBD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0x0F, 0xB7, 0x4D, dst_off as u8]); // MOVZX ECX, WORD [dst_off]
+                                } else {
+                                    code.extend_from_slice(&[0x0F, 0xB7, 0x8D]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                code.extend_from_slice(&[0x81, 0xC9, 0x00, 0x0C, 0x00, 0x00]); // OR ECX, 0x0C00
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0x89, 0x4D, dst_off as u8]); // MOV [dst_off], ECX
+                                } else {
+                                    code.extend_from_slice(&[0x89, 0x8D]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xD9, 0x6D, dst_off as u8]); // FLDCW
+                                } else {
+                                    code.extend_from_slice(&[0xD9, 0xAD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+
+                                // Step 4: Spill XMM0 (value) to dst_off.
+                                code.extend(encode_movq_mem_xmm(Gpr::Rbp, dst_off, Xmm::Xmm0));
+
+                                // Step 5: Compare value (XMM0) to 2^63 (XMM1).
+                                //   UCOMISD sets EFLAGS: CF=0 iff value >= 2^63.
+                                //   This must come AFTER the CW setup (which
+                                //   clobbers CF via OR) and immediately before
+                                //   the JAE so CF is preserved.
+                                code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+
+                                // Step 6: Branch on the UCOMISD result.
+                                //   JAE .subtract (CF=0 → value >= 2^63).
+                                let jae_pos = code.len();
+                                code.extend_from_slice(&[0x73, 0x00]); // JAE rel8 (placeholder)
+
+                                // Step 7: Direct path (value < 2^63).
+                                //   FLD qword [dst_off]      — ST(0) = value.
+                                //   FISTP qword [dst_off]    — store as signed i64, pop.
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDD, 0x45, dst_off as u8]); // FLD qword
+                                } else {
+                                    code.extend_from_slice(&[0xDD, 0x85]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDF, 0x7D, dst_off as u8]); // FISTP qword
+                                } else {
+                                    code.extend_from_slice(&[0xDF, 0xBD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                // JMP .done
+                                let jmp_pos = code.len();
+                                code.extend_from_slice(&[0xEB, 0x00]); // JMP rel8 (placeholder)
+
+                                // Step 8: Subtract path (value >= 2^63).
+                                //   Patch JAE to skip to here.
+                                code[jae_pos + 1] = (code.len() - jae_pos - 2) as u8;
+                                //   SUBSD XMM0, XMM1 — XMM0 = value - 2^63.
                                 code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
-                                code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
+                                //   MOVQ [dst_off], XMM0 — spill.
+                                code.extend(encode_movq_mem_xmm(Gpr::Rbp, dst_off, Xmm::Xmm0));
+                                //   FLD qword [dst_off] — ST(0) = value - 2^63.
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDD, 0x45, dst_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDD, 0x85]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                //   FISTP qword [dst_off] — store as signed i64, pop.
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDF, 0x7D, dst_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDF, 0xBD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                //   XOR DWORD [dst_off+4], 0x80000000 — flip high bit.
+                                let hi_off = dst_off + 4;
+                                if hi_off >= -128 && hi_off <= 127 {
+                                    code.extend_from_slice(&[0x81, 0x75, hi_off as u8, 0x00, 0x00, 0x00, 0x80]);
+                                } else {
+                                    code.extend_from_slice(&[0x81, 0xB5]);
+                                    code.extend_from_slice(&hi_off.to_le_bytes());
+                                    code.extend_from_slice(&[0x00, 0x00, 0x00, 0x80]);
+                                }
+
+                                // Step 9: .done — patch JMP to skip to here.
+                                let done_pos = code.len();
+                                code[jmp_pos + 1] = (done_pos as isize - jmp_pos as isize - 2) as u8;
+
+                                // Result is already in dst_off (8 bytes).
+                                // Skip the trailing store_vreg (would clobber high word).
+                                result_in_slot = true;
                             }
-                            // RAX holds the 32-bit unsigned result.  store_vreg
-                            // writes EAX and zeroes the high word.
                         }
 
                         // ── Floating-point ↔ floating-point ──────────────────
@@ -2481,18 +2787,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             }
                         }
                     }
-                    // For FP→int casts, RAX holds the int result; store_vreg
-                    // writes it.  For int→FP and FP→FP casts, the FP result
-                    // was already stored directly to dst's slot via
-                    // store_xmm_to_vreg or x87 FSTP — skip the redundant
-                    // store_vreg (which would clobber the high word with 0
-                    // and corrupt the f64 value).
+                    // For FP→int casts where the result is in EAX, store_vreg
+                    // writes it to dst's slot (low word + zero high word).
+                    // For int→FP and FP→FP casts, the FP result was already
+                    // stored directly to dst's slot via store_xmm_to_vreg or
+                    // x87 FSTP — skip the redundant store_vreg (which would
+                    // clobber the high word with 0 and corrupt the f64 value).
+                    // The f64→u64 path also stores directly to dst's slot
+                    // (both words) and sets `result_in_slot` to skip this.
                     match kind {
-                        CastKind::FloatToInt | CastKind::FloatToUInt => {
+                        CastKind::FloatToInt | CastKind::FloatToUInt
+                            if !result_in_slot =>
+                        {
                             code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         _ => {
-                            // int→FP and FP→FP: result already in dst's slot.
+                            // int→FP, FP→FP, or f64→u64: result already in dst's slot.
                         }
                     }
                     code
@@ -2666,65 +2976,132 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Call ──
                 IRInstr::Call { dst, func: call_target, args, is_extern } => {
                     let mut code = Vec::new();
-                    // Load arguments from stack into arg registers.
-                    // x86_32 only has 8 GPRs (EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI).
-                    // We use EDI, ESI, EDX, ECX for the first 4 args.
-                    // EAX is reserved for return value; EBX is callee-saved; ESP/EBP are frame.
-                    // For 5+ args, push them on the stack (reverse order).
+                    // Load arguments for the call.
+                    //
+                    // Calling convention (matches the prologue above):
+                    //   • Non-FP args: first 4 in EDI/ESI/EDX/ECX, rest on stack.
+                    //   • FP args (F32/F64): on the stack, 8 bytes each.
+                    //
+                    // FP-ness is inferred from `fp_vregs` for Register args.
+                    // Immediate/Address args are treated as non-FP (integer
+                    // constants), which matches the IR builder's practice of
+                    // materialising FP literals via Cast/Load rather than
+                    // passing them directly as Call args.
                     let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
-                    let num_reg_args = call_arg_regs.len().min(args.len());
 
-                    // ── Stack alignment for stack-passed args (SysV i386 ABI) ──
-                    // The ABI requires (ESP + 4) % 16 == 0 at the callee's entry
-                    // point, which means ESP % 16 == 0 immediately before the
-                    // CALL instruction (CALL pushes a 4-byte return address).
-                    //
-                    // The function prologue guarantees ESP % 16 == 0 at the
-                    // start of the function body (see the `frame_size` alignment
-                    // computation above: it forces `frame_size % 16 == 12` so
-                    // that `push ebp` (-4) + `sub esp, frame_size` (-12) +
-                    // `push rbx` (-4) brings ESP back to 0 mod 16).
-                    //
-                    // Pushing N stack args subtracts 4*N bytes from ESP.  To
-                    // restore ESP % 16 == 0 before CALL, we round the total
-                    // stack-args area up to a multiple of 16:
-                    //   aligned_bytes = (stack_bytes + 15) & !15
-                    //   padding       = aligned_bytes - stack_bytes
-                    // and `SUB ESP, padding` *before* pushing the args.  After
-                    // CALL we `ADD ESP, aligned_bytes` to release both the
-                    // padding and the pushed args.
-                    let num_stack_args = args.len().saturating_sub(num_reg_args);
-                    let stack_bytes = num_stack_args * 4;
+                    // Compute the call layout (mirrors the prologue).
+                    let mut reg_assignments: Vec<(usize, Gpr)> = Vec::new();
+                    let mut stack_assignments: Vec<(usize, i32)> = Vec::new(); // (arg_idx, size_bytes)
+                    let mut reg_count = 0usize;
+                    let mut fp_stack_count = 0usize;
+                    let mut nonfp_overflow_count = 0usize;
+                    for (i, arg) in args.iter().enumerate() {
+                        let is_fp = match arg {
+                            IRValue::Register(id) => fp_vregs.contains(id),
+                            _ => false,
+                        };
+                        if is_fp {
+                            stack_assignments.push((i, 8));
+                            fp_stack_count += 1;
+                        } else if reg_count < call_arg_regs.len() {
+                            reg_assignments.push((i, call_arg_regs[reg_count]));
+                            reg_count += 1;
+                        } else {
+                            stack_assignments.push((i, 4));
+                            nonfp_overflow_count += 1;
+                        }
+                    }
+
+                    // Total stack bytes for stack args.
+                    // FP args: 8 bytes each.  Non-FP overflow: 4 bytes each.
+                    let stack_bytes: usize = stack_assignments.iter().map(|(_, s)| *s as usize).sum();
+
+                    // ── Stack alignment (SysV i386 ABI) ──
+                    // ESP % 16 == 0 immediately before CALL.
                     let aligned_bytes = (stack_bytes + 15) & !15;
                     let padding = aligned_bytes - stack_bytes;
 
-                    // SUB ESP, padding before pushing args (i386 stack alignment).
-                    // Use the 3-byte `83 /5 ib` form for small padding (≤ 127)
-                    // and the 6-byte `81 /5 id` form otherwise.
+                    // SUB ESP, padding (alignment).
                     if padding > 0 {
                         if padding <= 0x7f {
-                            // SUB ESP, imm8  →  83 EC <ib>
                             code.extend_from_slice(&[0x83, 0xEC, padding as u8]);
                         } else {
-                            // SUB ESP, imm32 →  81 EC <id>
                             code.extend_from_slice(&[0x81, 0xEC]);
                             code.extend_from_slice(&(padding as i32).to_le_bytes());
                         }
                     }
 
-                    // Push extra args (5+) on stack in reverse order
-                    if num_stack_args > 0 {
-                        for arg in args[num_reg_args..].iter().rev() {
-                            // Load arg into EAX, then push EAX
-                            code.extend(load_value(arg, Gpr::Rax));
-                            code.extend(encode_push(Gpr::Rax));
+                    // Allocate stack space for stack args (if any).
+                    // We write each arg to its computed offset within this area.
+                    if stack_bytes > 0 {
+                        if stack_bytes <= 0x7f {
+                            code.extend_from_slice(&[0x83, 0xEC, stack_bytes as u8]);
+                        } else {
+                            code.extend_from_slice(&[0x81, 0xEC]);
+                            code.extend_from_slice(&(stack_bytes as i32).to_le_bytes());
                         }
                     }
 
-                    // Load first 4 args into registers
-                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                        code.extend(load_value(arg, call_arg_regs[i]));
+                    // Write each stack arg to its slot at [ESP + offset].
+                    // The layout (matching the prologue): FP args first (8 bytes
+                    // each, left-to-right), then non-FP overflow (4 bytes each).
+                    // After CALL + push EBP, the callee sees them at
+                    // [EBP + 8 + fp_idx*8] (FP) and [EBP + 8 + fp_count*8 + overflow_idx*4] (non-FP).
+                    let mut esp_off = 0i32;  // current offset from ESP
+                    let mut fp_idx = 0usize;
+                    let mut overflow_idx = 0usize;
+                    for (arg_idx, size) in &stack_assignments {
+                        let arg = &args[*arg_idx];
+                        if *size == 8 {
+                            // FP arg (8 bytes): write low and high 32 bits.
+                            match arg {
+                                IRValue::Register(id) => {
+                                    let src_off = slot_offset(*id);
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, src_off));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, src_off + 4));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off + 4, Gpr::Rax));
+                                }
+                                IRValue::Immediate(imm) => {
+                                    let bits = *imm as u64;
+                                    let low = bits as u32 as i32;
+                                    let high = (bits >> 32) as u32 as i32;
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, low));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, high));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off + 4, Gpr::Rax));
+                                }
+                                IRValue::Address(addr) => {
+                                    let bits = *addr as u64;
+                                    let low = bits as u32 as i32;
+                                    let high = (bits >> 32) as u32 as i32;
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, low));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, high));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off + 4, Gpr::Rax));
+                                }
+                                IRValue::Label(_) => {
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off + 4, Gpr::Rax));
+                                }
+                            }
+                            esp_off += 8;
+                            fp_idx += 1;
+                        } else {
+                            // Non-FP overflow arg (4 bytes).
+                            code.extend(load_value(arg, Gpr::Rax));
+                            code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
+                            esp_off += 4;
+                            overflow_idx += 1;
+                        }
                     }
+
+                    // Load non-FP register args into their registers.
+                    for (arg_idx, reg) in &reg_assignments {
+                        code.extend(load_value(&args[*arg_idx], *reg));
+                    }
+
                     // CALL rel32
                     code.extend(encode_call_rel32(0));
                     let call_rel32_offset = byte_offset + code.len() - 4;
@@ -2734,50 +3111,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         reloc_type: R_X86_64_PLT32.to_string(),
                     });
 
-                    // Clean up stack: release both padding and pushed args.
-                    // Use `ADD ESP, aligned_bytes` (the rounded-up total).
+                    // Clean up stack: release both padding and stack args.
                     if aligned_bytes > 0 {
                         code.extend(encode_add_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
                     }
 
                     // Store return value to dst's stack slot.
-                    //
                     // VUMA (non-extern) functions return 64-bit values in
-                    // EDX:EAX (i386 cdecl ABI), matching the Ret instruction's
-                    // 64-bit path (see `IRInstr::Ret` above, which loads EAX
-                    // from slot and EDX from slot+4 when `is_64bit_ret`). For
-                    // non-extern calls, store BOTH EAX (low) and EDX (high) so
-                    // 64-bit returns — e.g. base64_encode's packed
-                    // `(out_idx << 32) | checksum` — are captured correctly.
-                    // Without this, `result >> 32` in the caller extracts a
-                    // zeroed high word (the prior store_vreg-only path zeroed
-                    // dst.high), yielding 0 instead of out_idx (20).
-                    //
-                    // For 32-bit VUMA returns, EDX is garbage (the callee's Ret
-                    // only loads EAX for `!is_64bit_ret`). This is safe because:
-                    //   1. The gold-standard suite has no test that applies a
-                    //      64-bit op (e.g. `>> 32`, `<< 32`, 64-bit And/Or/Xor
-                    //      with a non-zero high mask) directly to a u32/i32
-                    //      call result. All `>> 32`/`<< 32` sites operate on
-                    //      explicitly-declared u64 variables/parameters.
-                    //   2. Any subsequent 32-bit BinOp (Add/Sub/Mul/...) uses
-                    //      `store_vreg`, which zeroes the high word — clearing
-                    //      the garbage before any 64-bit op can observe it.
-                    // This mirrors riscv32's Call handling, which stores
-                    // a0:a1 for VUMA functions and relies on the same
-                    // invariant.
-                    //
-                    // For extern (syscall) calls, the return is 32-bit in EAX
-                    // only; store EAX and zero the high word via store_vreg.
+                    // EDX:EAX.  Extern calls return 32-bit in EAX only.
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
                         if !is_extern {
-                            // VUMA function: 64-bit return in EDX:EAX.
                             let dst_off = slot_offset(dst_id);
                             code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));     // dst.low  = EAX
                             code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx)); // dst.high = EDX
                         } else {
-                            // Extern: 32-bit return in EAX, zero high word.
                             code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                     }

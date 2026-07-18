@@ -510,6 +510,98 @@ fn max_vreg_id(func: &IRFunction) -> u32 {
     max_id
 }
 
+/// Materialize f32-bit immediates in FP Cmp/BinOp instructions into vregs.
+///
+/// **Problem:** The IR has an ambiguous convention for f32 immediates:
+/// - Float literals from `resolve_expr` are stored as **f64 bits**.
+/// - Folded f32 results from `try_fold_binop` are stored as **f32 bits**
+///   (in the low 32 bits, zero-extended to i64).
+///
+/// The x86_64 `load_value_f32` helper (in `stack_slot_isel.rs`) assumes the
+/// immediate holds f64 bits and narrows to f32 bits via
+/// `(f64::from_bits(imm) as f32).to_bits()`. This is wrong for folded f32
+/// results (which are already f32 bits): e.g. `Immediate(1080033280)` (f32
+/// 3.5 = `0x40600000`) is misinterpreted as f64 `5.3e-315`, which narrows to
+/// f32 `0.0`. The Cmp then compares `0.0` with the actual value, producing
+/// the wrong result.
+///
+/// **Fix:** This pass inserts an integer `Add { dst, lhs: imm, rhs: 0,
+/// ty: None }` before each Cmp/BinOp with `ty=F32` that has an f32-bit
+/// Immediate operand, and replaces the Immediate with the Add's dst Register.
+/// The integer Add codegen uses `load_value` (which loads the bits as-is,
+/// NOT `load_value_f32`), so the f32 bits are stored verbatim to the vreg's
+/// stack slot. The Cmp/BinOp then loads the f32 bits from the stack via
+/// `load_value_f32(Register)` -> `load_value(Register)`, which is correct.
+///
+/// **Target-agnostic:** Backends that expect f32 bits in immediates (e.g.
+/// arm64, whose `ss_load_value` + `FMOV D0` + `FCMP` reads the low 32 bits
+/// directly) are unaffected -- the materialized vreg holds the same f32 bits
+/// they would have loaded from the immediate.
+///
+/// **Why `ty: None`?** The Add must use the *integer* codegen path (which
+/// uses `load_value`), not the FP path (which uses `load_value_f32`). Setting
+/// `ty: None` and relying on `infer_fp_vregs` not classifying the dst as FP
+/// (since neither operand is a known-FP vreg) ensures the integer path is
+/// taken. The downstream Cmp/BinOp's `ty=F32` still triggers the FP compare
+/// path regardless of the operand vregs' FP classification.
+///
+/// **Heuristic:** Only immediates that fit in 32 bits (as u64) and are
+/// non-zero are materialized. Zero is handled correctly by all backends
+/// (f64 `0.0` and f32 `0.0` both have bit pattern 0). f64-bit immediates
+/// (which don't fit in 32 bits) are already handled correctly by
+/// `load_value_f32` and are left as-is.
+fn materialize_f32_immediates(mut func: IRFunction) -> IRFunction {
+    /// Returns true if `imm` holds f32 bits (fits in 32 bits as u64) and
+    /// is non-zero (zero is handled correctly by all backends).
+    fn is_f32_bits(imm: i64) -> bool {
+        let u = imm as u64;
+        u != 0 && u <= 0xFFFFFFFF
+    }
+
+    /// If `val` is an f32-bit Immediate, emit a materializing `Add` and
+    /// replace `val` with the Add's dst Register.
+    fn materialize(
+        val: &mut IRValue,
+        vreg_counter: &mut u32,
+        new_instrs: &mut Vec<IRInstr>,
+    ) {
+        if let IRValue::Immediate(imm) = val {
+            if is_f32_bits(*imm) {
+                let dst_vreg = *vreg_counter;
+                *vreg_counter += 1;
+                new_instrs.push(IRInstr::Add {
+                    dst: IRValue::Register(dst_vreg),
+                    lhs: IRValue::Immediate(*imm),
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
+                *val = IRValue::Register(dst_vreg);
+            }
+        }
+    }
+
+    let mut vreg_counter = max_vreg_id(&func) + 1;
+    for block in &mut func.blocks {
+        let mut new_instrs = Vec::new();
+        for instr in &block.instructions {
+            let mut instr = instr.clone();
+            match &mut instr {
+                IRInstr::Cmp { lhs, rhs, ty, .. }
+                | IRInstr::BinOp { lhs, rhs, ty, .. } => {
+                    if matches!(ty, Some(IRType::F32)) {
+                        materialize(lhs, &mut vreg_counter, &mut new_instrs);
+                        materialize(rhs, &mut vreg_counter, &mut new_instrs);
+                    }
+                }
+                _ => {}
+            }
+            new_instrs.push(instr);
+        }
+        block.instructions = new_instrs;
+    }
+    func
+}
+
 /// Redirect a terminator's branch targets from `from_label` to `to_label`.
 fn redirect_terminator(terminator: &mut IRTerminator, from_label: &str, to_label: &str) {
     match terminator {
@@ -1809,6 +1901,15 @@ fn run_optimizations_inner(
     program = whole_program_dce(program);
     for func in &mut program.functions {
         *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+    }
+
+    // W1e: Materialize f32-bit immediates in FP Cmp/BinOp instructions.
+    // Must run AFTER all folding/propagation passes (which produce f32-bit
+    // immediates via `try_fold_binop`) and BEFORE codegen (whose
+    // `load_value_f32` on x86_64 misinterprets f32-bit immediates as f64
+    // bits). See `materialize_f32_immediates` for the full rationale.
+    for func in &mut program.functions {
+        *func = materialize_f32_immediates(std::mem::replace(func, IRFunction::new("__tmp__")));
     }
 
     program
