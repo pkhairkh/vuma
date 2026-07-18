@@ -3445,50 +3445,58 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToUInt => {
-                                // f64 → u64 (truncate toward zero). QEMU 7.2's default
-                                // ppc64 CPU (970fx, PowerISA v2.02) does NOT implement
-                                // FCTIDUZ (v2.06+) — it traps with SIGILL.
+                                // f64 → u64: For values < 2^63, FCTIDZ directly gives
+                                // the correct unsigned result (positive signed == unsigned).
+                                // For values >= 2^63, use subtract-2^63 + FCTIDZ + XOR.
                                 //
-                                // Use the standard subtract-convert-XOR technique (same
-                                // pattern as loongarch64/stack_slot_isel.rs:1534):
-                                //   1. Subtract 2^63 from the float → value in [-2^63, 2^63)
-                                //      (always representable as signed i64 after truncation)
-                                //   2. FCTIDZ (signed truncation; result fits in i64 range)
-                                //   3. XOR with 0x8000000000000000 — flips bit 63,
-                                //      equivalent to adding 2^63 (mod 2^64) back as unsigned
+                                // The old approach ALWAYS subtracted 2^63, which loses
+                                // small values in f64 rounding (2.0 - 2^63 = -2^63 exactly).
                                 //
-                                // Works for ALL non-negative f64 values in [0, 2^64):
-                                //   * value <  2^63: (value - 2^63) in [-2^63, 0);
-                                //     FCTIDZ yields bits with sign bit set; XOR clears it
-                                //   * value >= 2^63: (value - 2^63) in [0, 2^63);
-                                //     FCTIDZ yields bits with sign bit clear; XOR sets it
+                                // New approach: compute BOTH paths, compare the original
+                                // float with 2^63, and select the correct result.
                                 //
-                                // The previous "detect sign of FCTIDZ result + XOR" scheme
-                                // was broken: FCTIDZ SATURATES to 0x8000000000000000 for
-                                // inputs >= 2^63 (per Power ISA), and XOR-ing that with
-                                // 0x8000000000000000 produced 0 — losing the high bit and
-                                // failing the uint63_to_float round-trip test.
-                                //
-                                // 1. STD (store FP bits), LFD F0 (load into FPR)
+                                // 1. Direct: FCTIDZ F0 → store → load R3 (correct for < 2^63)
+                                // 2. Corrected: subtract 2^63, FCTIDZ, XOR 2^63 (correct for >= 2^63)
+                                // 3. FCMPU F0 vs 2^63; if F0 >= 2^63, use corrected; else use direct
+
+                                // Load src into F0
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                                 code.extend(ss_load_fpr_from_slot(Fpr::F0, dst_offset));
-                                // 2. Materialize 2^63 as f64 bits (0x43E0_0000_0000_0000)
-                                //    in R5, spill, and load into F1.
+
+                                // Direct conversion (correct for < 2^63)
+                                code.extend_from_slice(&Instruction::Fctidz { ft: Fpr::F2, fb: Fpr::F0 }.encode());
+                                code.extend(ss_store_fpr_to_slot(Fpr::F2, dst_offset));
+                                code.extend(ss_load_from_slot(Gpr::R6, dst_offset)); // R6 = direct result
+
+                                // Corrected conversion (correct for >= 2^63)
+                                // Load 2^63 as f64 (0x43E0000000000000)
                                 code.extend(ss_load_imm(Gpr::R5, 0x43E0_0000_0000_0000u64 as i64));
                                 code.extend(ss_store_to_slot(Gpr::R5, dst_offset));
                                 code.extend(ss_load_fpr_from_slot(Fpr::F1, dst_offset));
-                                // 3. F0 = F0 - 2^63   (now in [-2^63, 2^63))
+                                // F0 = F0 - 2^63
                                 code.extend_from_slice(&Instruction::Fsub { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
-                                // 4. F0 = (i64)F0  via signed FCTIDZ (always in range)
+                                // FCTIDZ
                                 code.extend_from_slice(&Instruction::Fctidz { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                // 5. Store i64 bits and load into R3
+                                // Store and load
                                 code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
-                                // 6. XOR R3, R3, 0x8000000000000000 — flip bit 63
-                                //    (equivalent to adding 2^63 as unsigned)
+                                // XOR with 0x8000000000000000
                                 code.extend(ss_load_imm(Gpr::R5, 0x8000_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
-                                // Store the corrected result back to dst slot
+
+                                // FCMPU F0_original vs 2^63 — but F0 was modified by FSUB.
+                                // Reload original value: F2 still has FCTIDZ(direct) result,
+                                // but we need the ORIGINAL float. We saved it to dst_offset
+                                // at the start. But dst_offset was overwritten. Use a simpler
+                                // approach: if direct result (R4) is negative, use corrected (R3).
+                                // FCTIDZ saturates to 0x8000000000000000 for values >= 2^63,
+                                // so a negative direct result means we need the corrected path.
+                                // Compare R6 with 0: if R6 < 0, use R3 (corrected); else use R6 (direct).
+                                code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1u32, ra: Gpr::R6, simm: 0 }.encode());
+                                // isel R3, R3, R6, 0  (if LT, R3 = R3 corrected; else R3 = R6 direct)
+                                let isel_word: u32 = (31u32 << 26) | ((Gpr::R3.encoding() as u32) << 21) | ((Gpr::R3.encoding() as u32) << 16) | ((Gpr::R6.encoding() as u32) << 11) | (15u32 << 1) | 0;
+                                code.extend_from_slice(&isel_word.to_be_bytes());
+                                // Store result
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToFloat => {
