@@ -13,7 +13,7 @@ integer. A mismatch is a regression. Categories whose tests are *meant
 to fail* (see `pmt_wave3_negative/` below) carry a different header and
 a different pass/fail convention.
 
-This directory was reduced from ~5,851 `.vuma` files to **1,502** on
+This directory was reduced from ~5,851 `.vuma` files to **1,519** on
 **2026-07** by removing:
 
 | Removed                                                 | Count |
@@ -24,6 +24,13 @@ This directory was reduced from ~5,851 `.vuma` files to **1,502** on
 | `build_categories.py` (dead footgun — hard-coded `/tmp/my-project/`) | 1 file |
 | Run-log artifacts at the suite root (no script consumes them) | 6 files |
 
+A subsequent pass **renamed 990 surviving `sN_` files** to clean names
+by stripping the `s<digits>_` prefix. 12 files retained the prefix
+because stripping would have collided with an existing same-named test
+in the same category (different bodies). The `sN_` prefix is now
+limited to those 12 disambiguated files and should never appear in new
+tests.
+
 The pre-cleanup `manifest.json` claimed 704 programs while the disk
 held ~5,851; both numbers were wrong. The new `manifest.json` is
 regenerated from the cleaned disk and lists every `.vuma` actually
@@ -31,8 +38,8 @@ present.
 
 ## Categories
 
-Counts below are read from the regenerated `manifest.json` (36
-categories, 1,502 programs total).
+Counts below are read from the regenerated `manifest.json` (38
+categories, 1,519 programs total).
 
 ### Core feature categories (the "16 main")
 
@@ -88,23 +95,19 @@ in them is a deliberate test.
 
 ## The legacy `sN_` filename prefix
 
-Many files in the 16 main categories carry a prefix of the form
-`s<number>_`, e.g. `s3_mf_chained_adders.vuma`, `s37_mf_three_chain.vuma`.
+**What it was.** Each `sN_` prefix was a *sweep-batch ID* — a
+now-deleted generator produced ~16 near-duplicate variants per family,
+one per sweep ID (`s3`, `s4`, …, `s106`), where the variants differed
+only in the integer constants used. On 2026-07 these near-duplicate
+families were collapsed to **one representative per family** and 990
+of those were renamed by stripping the `s<digits>_` prefix.
 
-**What it means.** Each `sN_` prefix was a *sweep-batch ID* — at some
-point in the suite's history a now-deleted generator produced ~16
-near-duplicate variants per family, one per sweep ID (`s3`, `s4`, …,
-`s106`), where the variants differed only in the integer constants used
-(the code shape, function structure, and expected behavior were
-identical). On 2026-07 these near-duplicate families were collapsed to
-**one representative per family** (the file with the smallest sweep ID,
-deterministically). The other ~3,842 duplicates were deleted.
+**Why 12 files still carry the prefix.** 12 files retain the `sN_`
+prefix because stripping it would collide with a same-named test in
+the same category (the two files have different bodies, so both must
+coexist). The prefix serves as a disambiguator for those 12 files.
 
-**Why the prefix is retained.** The surviving representative still
-carries its original `sN_` prefix. Renaming it would risk breaking any
-external reference (the audit found none, but renaming is still riskier
-than retaining). Treat the prefix as cosmetic — it has no operational
-meaning going forward. **Do not use the `sN_` prefix for new tests.**
+**Do not use the `sN_` prefix for new tests.**
 
 ## File-naming convention (going forward)
 
@@ -115,8 +118,7 @@ New gold-standard tests should be named
 ```
 
 for example `arith_add_overflow.vuma`, `ptr_two_cell_diff.vuma`,
-`crypto_xor_pair.vuma`. Do **not** introduce new `sN_` prefixes. The
-existing `sN_` files are legacy and are not being renamed.
+`crypto_xor_pair.vuma`. Do **not** introduce new `sN_` prefixes.
 
 ## The `pmt_wave3_negative/` must-fail convention
 
