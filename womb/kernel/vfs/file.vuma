@@ -1,0 +1,599 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/file.vuma
+// VWK VFS Subsystem — File (open file descriptor) + FileTable +
+// lifecycle (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5a layer #3 of the VWK kernel VFS: the File (an
+// open file descriptor — the per-process handle that ties a file
+// position + flags + ops to a dentry) and the FileTable (a 64-slot
+// array of Files stored as parallel flat byte arrays — VUMA has no
+// struct arrays). K5c (file ops) will consume FileTable to read/write/
+// seek; K5d (tmpfs) will provide the file_operations table that
+// File.ops points at; the syscall layer (K4g / K6) will call file_alloc
+// on open(2) and file_free on close(2).
+//
+// ── File layout (5 fields, 32 bytes) ────────────────────────────────────────
+//   dentry   (u64) — dentry INDEX (NOT a pointer — PMT discipline). The
+//                    dentry this open file was created from. K5c's
+//                    file_read / file_write dereference this via
+//                    DentryTable.inodes[dentry] → InodeTable to find
+//                    the inode's size, mode, ops. Stored as an index
+//                    into the DentryTable (0..63).
+//   pos      (u64) — current read/write position (byte offset within
+//                    the file). Updated by K5c's file_read / file_write
+//                    on every read/write call; set explicitly by K5c's
+//                    file_lseek. Starts at 0 for O_RDONLY / O_WRONLY /
+//                    O_RDWR; starts at file size for O_APPEND (K5c's
+//                    file_open sets pos = inode.size when O_APPEND is
+//                    in flags).
+//   flags    (u32) — open flags. The low 2 bits are the access mode:
+//                    O_RDONLY = 0 (read-only)
+//                    O_WRONLY = 1 (write-only)
+//                    O_RDWR   = 2 (read-write)
+//                    The remaining bits are the option flags:
+//                    O_CREAT   = 64   (create file if it doesn't exist)
+//                    O_EXCL    = 128  (fail if O_CREAT and file exists)
+//                    O_TRUNC   = 512  (truncate to 0 on open)
+//                    O_APPEND  = 1024 (seek to end on every write)
+//                    O_NONBLOCK = 2048 (non-blocking I/O)
+//                    K5c's file_read checks (flags & 3) != 1 (not
+//                    O_WRONLY) before reading; K5c's file_write checks
+//                    (flags & 3) != 0 (not O_RDONLY) before writing.
+//   ops      (u64) — file operations table (function pointer to a
+//                    per-filesystem struct file_operations — K5d's
+//                    tmpfs sets this to tmpfs_file_ops; K5e's initramfs
+//                    sets it to initramfs_file_ops for the read-only
+//                    path). The VUMA side stores it as an opaque u64;
+//                    K11 dereferences it as a C struct pointer.
+//   private  (u64) — filesystem-specific data (e.g. tmpfs's per-open-
+//                    file page-cache cursor, initramfs's offset-into-
+//                    initramfs). The VFS layer never touches this; the
+//                    FS-specific file_operations do.
+//
+//   Total size: 8 + 8 + 4 + 8 + 8 = 36 bytes (padded to 40 by the
+//   codegen's max-field-alignment rule — 4 bytes of inter-field padding
+//   between flags (u32 at offset 16) and ops (u64 at offset 24), no
+//   trailing padding. The codegen's layout allocator handles this
+//   automatically; field accessors see field-relative offsets
+//   directly.)
+//
+// ── FileTable layout (designed by K5a — NOT pinned by contract) ───────────
+// 64 File slots stored as parallel flat byte arrays. The K5a contract
+// doesn't pin the exact field list (only says "FileTable: 64 File
+// slots. Flat byte arrays."), so this file adds an explicit `used`
+// array (1 byte per slot, 1 = used / 0 = free) for the alloc/free
+// bookkeeping. Why `used` instead of a semantic free marker? Because:
+//   - `dentry == 0` is ambiguous: dentry index 0 IS a valid dentry
+//     (the root dentry — opening "/" gives dentry = 0). So using
+//     `dentry == 0` as the free marker would conflate "free slot"
+//     with "real open file pointing at the root dentry".
+//   - `flags == 0` is ambiguous: O_RDONLY = 0 is a valid flags value
+//     (a read-only open of a file).
+//   - `pos == 0` is ambiguous: position 0 is the start of the file —
+//     a real open file with pos = 0 (just-opened regular file).
+//   - `ops == 0` is ambiguous: an open file with no ops table yet
+//     (still being constructed by file_alloc's caller) has ops = 0.
+//   - The `used` array is the only unambiguous free marker.
+// This is the same design choice as K5a's DentryTable (which adds a
+// `used` array for the same reason — see dentry.vuma header). K5a's
+// InodeTable uses `ino == 0` instead because its layout is pinned by
+// the contract AND ino == 0 is unambiguous (the contract doesn't allow
+// ino 0 as a real inode number — inode_alloc sets ino = idx + 1 so
+// ino 0 is never handed out). The FileTable contract doesn't pin the
+// layout, so we use the cleaner `used` array.
+// Each field array is sized for 64 slots × the field's byte width:
+//     dentries:   [u8; 512]   = 64 * 8 bytes (u64 per file)
+//     poses:      [u8; 512]   = 64 * 8 bytes (u64 per file)
+//     flags:      [u8; 256]   = 64 * 4 bytes (u32 per file)
+//     ops:        [u8; 512]   = 64 * 8 bytes (u64 per file)
+//     privates:   [u8; 512]   = 64 * 8 bytes (u64 per file)
+//     used:       [u8; 64]    = 64 * 1 byte  (1=used, 0=free)
+//     count:      u32         — number of slots in use (0..64)
+//
+// ── Why parallel flat byte arrays? ──────────────────────────────────────────
+// VUMA's codegen (src/pipeline.rs::flatten_expr, Expr::Index arm) does
+// NOT scale the index by the element size for non-u8 array element
+// types — every `state.array[i]` is lowered to `*(base_addr + i)` with
+// a U8 Load/Store. VUMA also doesn't support `[File; 64]` (array of
+// structs) in the parser at all (only `[u8; N]` and other primitive-u8
+// arrays parse). So instead the FileTable stores each File field in
+// a SEPARATE flat [u8; N] array, and the field accessors
+// (file_get_pos / file_set_pos / etc.) pack/unpack the multi-byte
+// values byte-by-byte. This is byte-identical in spirit to K2a's
+// pmm.vuma FlatPool, K3e's SyscallTable, K4a's ProcessTable, K5a's
+// own InodeTable and DentryTable. When the codegen gains proper typed-
+// array index lowering, this file can collapse back to `[File; 64]`
+// with `tbl.files[i].pos` access.
+//
+// ── Why init-style? ─────────────────────────────────────────────────────────
+// The K5a contract's main() allocates `tbl = state_new(FileTable)` and
+// passes it by reference to file_init / file_alloc / file_free / all
+// file_get_* / file_set_* helpers. This is the canonical PMT pattern
+// (K2a's pmm_init(pool, pmm, ...), K3d's trap_frame_init(tf), K4a's
+// pt_init(tbl), K5a's own inode_init / dentry_init — see womb/kernel/
+// mm/pmm.vuma header "Why init-style?" for the codegen rationale: the
+// current codegen does NOT propagate State-typedness through function
+// return values, so `fn file_new() -> State<FileTable>` would produce
+// broken field-access code in callers). All file.vuma helpers take
+// `tbl: State<FileTable>` by regular VUMA-fn borrow (NOT extern
+// #[borrow] — VUMA fn calls don't need the attribute; only extern "C"
+// calls do, and none of these helpers call any extern).
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Two flavors:
+//   (1) u32 fields (flags): 4-byte pack/unpack loop. Same pattern as
+//       K4a's pt_get_pid / pt_set_pid and K5a's inode_get_mode /
+//       inode_set_mode.
+//   (2) u64 fields (dentries, poses, ops, privates): 8-byte pack/
+//       unpack loop. Same pattern as K2a's pool_get_base / pool_set_base,
+//       K4a's pt_get_vruntime / etc., and K5a's inode_get_size / etc.
+//   (3) u8 fields (used): direct array index — no pack/unpack needed
+//       (the byte IS the value). Same pattern as K4a's pt_get_state /
+//       pt_set_state and K5a's dentry_get_mounted / dentry_set_mounted.
+//
+// The self-test exercises a representative subset (alloc, dentry set/
+// get, pos set/get, flags set/get, ops set/get, private set/get,
+// count, free, reuse) but ALL helpers must exist for K5b/K5c/K5d/K6
+// to use (K5c's file_read reads pos + ops; K5c's file_write writes pos
+// + reads ops; K5c's file_lseek writes pos; K5d's tmpfs_open writes
+// dentry + flags + ops; K6's sys_open calls file_alloc, K6's sys_close
+// calls file_free). Hence this file declares all 13 helpers (4 u64
+// getters + 4 u64 setters + 1 u32 getter + 1 u32 setter + 1 u8 getter
+// + 1 u8 setter + 1 count is a direct field, not a helper) even
+// though only ~7 are exercised by the self-test.
+//
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+//   file_init(tbl)            — zero all 64 used flags (mark every
+//                               slot FREE), set count = 0. Idempotent.
+//                               Called by kmain at boot before the
+//                               first file_alloc (K6's sys_open is the
+//                               first caller — every open(2) syscall
+//                               calls file_alloc). Does NOT zero the
+//                               other File fields (dentries, poses,
+//                               etc.) — those are populated by
+//                               file_alloc's caller, so zeroing them
+//                               here would be wasted work (and VUMA
+//                               has no memset).
+//   file_alloc(tbl) -> u32    — find the first FREE slot (used == 0),
+//                               set used = 1, bump count, return the
+//                               slot index. Returns 64 if the table
+//                               is full (the caller MUST check — K6's
+//                               sys_open returns -EMFILE in that
+//                               case). Does NOT touch dentry / pos /
+//                               flags / etc. — those are populated by
+//                               the caller (K5d's tmpfs_open sets
+//                               dentry + flags + ops + pos; K5c's
+//                               file_open sets pos = 0 or pos =
+//                               inode.size depending on O_APPEND).
+//   file_free(tbl, idx)       — mark slot `idx` as FREE (used = 0),
+//                               decrement count. Does NOT zero the
+//                               other File fields (dentry, pos, etc.
+//                               stay stale until file_alloc reuses
+//                               the slot). K6's sys_close calls this
+//                               on every close(2) syscall. K4d's
+//                               sys_exit calls this in a loop for
+//                               every open file in the exiting task's
+//                               fd table (K4g will wire that).
+//
+//   The slot-reuse semantics are important: file_free'ing slot 0 and
+//   then file_alloc'ing again returns slot 0 (lowest free slot wins —
+//   same as Linux's find_first_zero_bit, same as K5a's inode_alloc /
+//   dentry_alloc and K4a's task_alloc). The self-test verifies this.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// FileTable is a flat-byte-array struct held in a `___pmt_buffer`-
+// backed State<FileTable>; the CALLER allocates it via
+// `state_new(FileTable)` and passes it by reference to file_init /
+// file_alloc / file_free / all file_get_* / file_set_* helpers
+// (init-style API — see "Why init-style?" above). No externs are
+// declared in this file (the file lifecycle primitives are pure-PM —
+// K5c's file_read / file_write will declare its own externs for the
+// page-cache / disk-read / disk-write; K5d's tmpfs will declare its
+// own externs for page allocation; K6's sys_open / sys_close don't
+// need any externs — they just call file_alloc / file_free).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a
+// contract's "Use decimal constants" rule. Decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K4a's task.vuma for the same rule applied to slot count 256). The
+// constants:
+//     64    = number of File slots in the FileTable (and the "table
+//             full" sentinel returned by file_alloc); also the per-
+//             slot byte count for the used array
+//     8     = bytes per u64 field (loop bound for dentry/pos/ops/
+//             private pack/unpack)
+//     4     = bytes per u32 field (loop bound for flags pack/unpack)
+//     255   = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     5     = test dentry index (a valid DentryTable slot)
+//     4096  = test file position (4 KB into the file — a realistic
+//             position after a few read() calls)
+//     2     = test flags value (O_RDWR — read/write access; the access
+//             mode is the low 2 bits of flags, so 2 == O_RDWR)
+//     12345 = test ops table address (a fake function-pointer value —
+//             in real use this is the address of a struct
+//             file_operations, but for the self-test any non-zero u64
+//             suffices to verify the pack/unpack round-trip)
+//     67890 = test private data value (a fake fs-private value — same
+//             rationale as 12345)
+//     1     = the "used" set value
+//     0     = FREE marker (used == 0), initial count, initial byte
+//             value for the zero-everything loop in file_init
+// All `0x...` mentions in this file are in doc-comments only (verified
+// by rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It does NOT re-declare InodeTable /
+// Inode (those are in inode.vuma) or DentryTable / Dentry (those are
+// in dentry.vuma) — K5b's superblock.vuma will re-declare all three
+// (InodeTable + DentryTable + FileTable) byte-identically when it
+// ties them together. K5c's file_ops.vuma will re-declare FileTable,
+// File, and the file_get_* / file_set_* helpers byte-identically to
+// this file (same pattern as K4b's scheduler.vuma re-declaring
+// ProcessTable from K4a, and K4d's fork.vuma re-declaring ProcessTable
+// from K4a).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/vfs/file.vuma \
+//         /tmp/file.bin x86_64 --verify
+//     /tmp/file.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — alloc +
+// count=1, dentry set/get round-trip, pos set/get round-trip, flags
+// set/get round-trip, ops set/get round-trip, private set/get round-
+// trip, second alloc + count=2, free + count=1, reuse-slot-0 alloc).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// A File (an open file descriptor — the per-process handle that ties a
+// file position + flags + ops to a dentry). The fields are documented
+// in the file header. Stored as a layout for documentation; the actual
+// FileTable uses parallel flat byte arrays (VUMA has no struct arrays
+// — see "Why parallel flat byte arrays?" in the file header). K5b/K5c/
+// K5d/K6 will re-declare this layout byte-identically.
+layout File = {
+    dentry: u64,
+    pos: u64,
+    flags: u32,
+    ops: u64,
+    private: u64,
+}
+
+// FileTable: 64 File slots stored as parallel flat byte arrays (VUMA
+// has no struct-array support — see "Why parallel flat byte arrays?"
+// in the file header). Each field is a separate [u8; N] array sized
+// for 64 slots × the field's byte width. `used` is the alloc/free
+// flag (1 = used, 0 = free) — see "FileTable layout" in the file
+// header for why `used` is preferred over a semantic free marker.
+// `count` tracks how many slots are in use (0..64).
+layout FileTable = {
+    dentries: [u8; 512],
+    poses: [u8; 512],
+    flags: [u8; 256],
+    ops: [u8; 512],
+    privates: [u8; 512],
+    used: [u8; 64],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (dentries, poses, ops, privates).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical pattern to K2a's
+// pool_get_base / pool_set_base (pmm.vuma), K3e's syscall_table_get /
+// syscall_table_set (table.vuma), K4a's pt_get_vruntime / etc.
+// (task.vuma), K5a's own inode_get_ino / etc. (inode.vuma), and K5a's
+// own dentry_get_parent / etc. (dentry.vuma): 8-iteration while loop,
+// shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
+
+// Read the u64 `dentry` field of File slot `idx` from FileTable.dentries.
+fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.dentries[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `dentry` field of File slot `idx` into FileTable.dentries.
+fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.dentries[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `pos` field of File slot `idx` from FileTable.poses.
+fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.poses[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `pos` field of File slot `idx` into FileTable.poses.
+fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.poses[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `ops` field of File slot `idx` from FileTable.ops.
+fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.ops[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ops` field of File slot `idx` into FileTable.ops.
+fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.ops[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `private` field of File slot `idx` from FileTable.privates.
+fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.privates[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `private` field of File slot `idx` into FileTable.privates.
+fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.privates[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u32 pack/unpack helpers (flags).
+// ────────────────────────────────────────────────────────────────────────────
+// 4-byte little-endian pack/unpack. Same pattern as K4a's pt_get_pid /
+// pt_set_pid (task.vuma), K5a's inode_get_mode / etc. (inode.vuma), and
+// K5a's dentry_get_*(u32 fields — none in dentry, but the pattern
+// applies). 4-iteration while loop, shift by i*8, mask 255 on writes,
+// sum-of-shifted-bytes on reads.
+
+// Read the u32 `flags` field of File slot `idx` from FileTable.flags.
+fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.flags[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `flags` field of File slot `idx` into FileTable.flags.
+fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.flags[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessors (used) — direct array index, no pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// Same pattern as K4a's pt_get_state / pt_set_state (task.vuma), K5a's
+// dentry_get_mounted / dentry_set_mounted / dentry_get_used /
+// dentry_set_used (dentry.vuma) — direct u8 indexing, no pack/unpack
+// loop. The byte IS the value.
+
+// Read the u8 `used` flag of File slot `idx` from FileTable.used.
+// Internal helper — only used by file_alloc / file_free / file_init
+// (not part of the K5a contract's helper list, but exposed for K5c's
+// file_close to double-check a slot is in use before freeing it, and
+// for K6's sys_close to do the same).
+fn file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of File slot `idx` into FileTable.used.
+fn file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle primitives.
+// ────────────────────────────────────────────────────────────────────────────
+
+// file_init: zero all 64 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Called by kmain at boot before the first
+// file_alloc (K6's sys_open is the first caller). Does NOT zero the
+// other File fields (dentries, poses, etc.) — those are populated by
+// file_alloc's caller, so zeroing them here would be wasted work (and
+// VUMA has no memset).
+fn file_init(tbl: State<FileTable>) {
+    let i = 0;
+    while i < 64 {
+        file_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// file_alloc: find the first FREE slot (used == 0), set used = 1, bump
+// count, return the slot index. Returns 64 if the table is full (the
+// caller MUST check — K6's sys_open returns -EMFILE in that case).
+//
+// Does NOT touch dentry / pos / flags / etc. — those are populated by
+// the caller (K5d's tmpfs_open sets dentry + flags + ops + pos; K5c's
+// file_open sets pos = 0 or pos = inode.size depending on O_APPEND).
+// The caller MUST set at least dentry + flags + ops before the file
+// is used (K5c's file_read / file_write check dentry != 0 as a "real
+// open file" sanity check before reading / writing).
+//
+// The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
+// (verified by the self-test: free slot 0, alloc → returns 0, not 2).
+fn file_alloc(tbl: State<FileTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if file_get_used(tbl, i) == 0 {
+            file_set_used(tbl, i, 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;  // table full
+}
+
+// file_free: mark slot `idx` as FREE (used = 0), decrement count. Does
+// NOT zero the other File fields (dentry, pos, etc. stay stale until
+// file_alloc reuses the slot — file_alloc only writes used, leaving
+// the other fields for the caller to repopulate). K6's sys_close
+// calls this on every close(2) syscall. K4d's sys_exit calls this in
+// a loop for every open file in the exiting task's fd table (K4g
+// will wire that).
+fn file_free(tbl: State<FileTable>, idx: u32) {
+    file_set_used(tbl, idx, 0);
+    tbl.count = tbl.count - 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a FileTable via state_new, init it via file_init, then:
+//   (1) file_alloc → returns 0 (first slot); tbl.count == 1.
+//   (2) file_set_dentry(0, 5); file_get_dentry(0) == 5 (u64 set/get
+//       round-trip — catches any pack/unpack or field-offset bug in
+//       the u64 8-byte pack/unpack path).
+//   (3) file_set_pos(0, 4096); file_get_pos(0) == 4096 (u64 round-trip
+//       on a different array than dentry — catches any field-array
+//       mix-up).
+//   (4) file_set_flags(0, 2); file_get_flags(0) == 2 (u32 4-byte
+//       pack/unpack round-trip — 2 == O_RDWR).
+//   (5) file_set_ops(0, 12345); file_get_ops(0) == 12345 (u64 round-
+//       trip on yet another array — exercises a non-trivial u64 value
+//       to catch any pack/unpack bug that would only show up with
+//       non-low-byte values).
+//   (6) file_set_private(0, 67890); file_get_private(0) == 67890 (u64
+//       round-trip on the last u64 array).
+//   (7) file_alloc → returns 1 (second slot); tbl.count == 2.
+//   (8) file_free(0); tbl.count == 1; file_get_used(0) == 0 (freed).
+//   (9) file_alloc → returns 0 (reuses the freed slot — lowest-free-
+//       slot-wins policy).
+// Returns 0 on success, 1..9 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// Per the K5a contract's "Use decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (5, 4096, 2, 12345, 67890, 1,
+// 9) — decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same rationale, and K4a's task.vuma for the same rule
+// applied to slot count 256 and state values 1/2). The 12345 / 67890
+// values are non-trivial u64 values (greater than 255, with non-zero
+// high bytes) — they catch any pack/unpack bug that would only show up
+// when byte 1+ of the u64 is non-zero (e.g. a missing shift, a wrong
+// mask, an off-by-one in the loop bound).
+
+fn main() -> i32 {
+    let tbl = state_new(FileTable);
+    file_init(tbl);
+
+    // Check 1: file_alloc → returns 0; count == 1.
+    let f0 = file_alloc(tbl);
+    if f0 != 0 { return 1; }
+    if tbl.count != 1 { return 1; }
+
+    // Check 2: dentry set/get round-trip (u64 8-byte pack/unpack).
+    file_set_dentry(tbl, 0, 5);
+    if file_get_dentry(tbl, 0) != 5 { return 2; }
+
+    // Check 3: pos set/get round-trip (u64 pack/unpack on a different
+    // array than dentry — catches any field-array mix-up).
+    file_set_pos(tbl, 0, 4096);
+    if file_get_pos(tbl, 0) != 4096 { return 3; }
+
+    // Check 4: flags set/get round-trip (u32 4-byte pack/unpack —
+    // 2 == O_RDWR).
+    file_set_flags(tbl, 0, 2);
+    if file_get_flags(tbl, 0) != 2 { return 4; }
+
+    // Check 5: ops set/get round-trip (u64 pack/unpack with a non-
+    // trivial value — 12345 has non-zero bytes 0 and 1, catching any
+    // shift/mask bug that would only show up with multi-byte values).
+    file_set_ops(tbl, 0, 12345);
+    if file_get_ops(tbl, 0) != 12345 { return 5; }
+
+    // Check 6: private set/get round-trip (u64 pack/unpack on the
+    // last u64 array — 67890 has non-zero bytes 0, 1, and 2,
+    // exercising the highest-byte shift path).
+    file_set_private(tbl, 0, 67890);
+    if file_get_private(tbl, 0) != 67890 { return 6; }
+
+    // Check 7: alloc a second file → returns 1; count == 2.
+    let f1 = file_alloc(tbl);
+    if f1 != 1 { return 7; }
+    if tbl.count != 2 { return 7; }
+
+    // Check 8: free slot 0; count == 1; used == 0 (FREE).
+    file_free(tbl, f0);
+    if tbl.count != 1 { return 8; }
+    if file_get_used(tbl, 0) != 0 { return 8; }
+
+    // Check 9: alloc should reuse slot 0 (lowest-free-slot-wins).
+    let f2 = file_alloc(tbl);
+    if f2 != 0 { return 9; }
+
+    return 0;
+}
