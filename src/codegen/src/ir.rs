@@ -947,27 +947,53 @@ impl fmt::Display for IRValue {
 // ---------------------------------------------------------------------------
 
 /// Binary operations supported by the IR.
+///
+/// # Type-tag polymorphism (int + float)
+///
+/// `BinOpKind` is deliberately **type-tag-polymorphic**: the same `Add`/
+/// `Sub`/`Mul`/`SDiv`/`UDiv` variants serve both integer AND floating-point
+/// operations.  Backends branch on the operand's [`IRType`] (`F32`/`F64`)
+/// to select ALU vs FPU encoding.  This mirrors a common IR design (cf.
+/// LLVM's type-tagged operators) and avoids duplicating the operator enum.
+///
+/// The canonical reference dispatch is in
+/// `src/codegen/src/x86_64/stack_slot_isel.rs:414-545` (SSE/SSE2 scalar FP).
+/// As of the F-series waves, native FP codegen is present on 15 of 19
+/// backends; see `docs/fp_backends.md` for the full matrix.
+///
+/// # Float-op legality
+///
+/// Bitwise/shift ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/`ShrA`/`Ror`/`Rol`)
+/// and integer remainder (`SRem`/`URem`) are **not meaningful on floats**.
+/// They are rejected by [`crate::backend::verify_float_op`] (see
+/// `src/codegen/src/backend.rs`, F2a) before any backend lowers them.
+/// `SDiv`/`UDiv` are reused for `FDIV` because float division has no
+/// signedness distinction — backends emit the same `DIVSD`/`FDIV`/`fdiv.d`
+/// regardless of which variant the IR carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOpKind {
-    /// Integer addition.
+    /// Addition.  Covers both integer (`ADD`/`ADDQ`) and floating-point
+    /// (`ADDSD`/`FADD`/`fadd.d`) — backends select via the operand `IRType`.
     Add,
-    /// Integer subtraction.
+    /// Subtraction.  Covers both integer and floating-point (backend-selected).
     Sub,
-    /// Integer multiplication.
+    /// Multiplication.  Covers both integer and floating-point (backend-selected).
     Mul,
-    /// Signed integer division.
+    /// Signed integer division, OR floating-point division when the operand
+    /// type is `F32`/`F64` (float division has no signedness distinction).
     SDiv,
-    /// Unsigned integer division.
+    /// Unsigned integer division, OR (like `SDiv`) floating-point division
+    /// when the operand type is `F32`/`F64`.
     UDiv,
     /// Signed integer remainder.
     SRem,
     /// Unsigned integer remainder.
     URem,
-    /// Bitwise AND.
+    /// Bitwise AND.  **Integer only** — rejected on `F32`/`F64` by `verify_float_op`.
     And,
-    /// Bitwise OR.
+    /// Bitwise OR.  **Integer only** — rejected on `F32`/`F64` by `verify_float_op`.
     Or,
-    /// Bitwise XOR.
+    /// Bitwise XOR.  **Integer only** — rejected on `F32`/`F64` by `verify_float_op`.
     Xor,
     /// Logical left shift.
     Shl,

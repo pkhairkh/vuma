@@ -31,7 +31,10 @@
 //! per-call `Alloc` path).
 
 use crate::arm32::Arm32Backend;
-use crate::ir::{size_of_with_ptr_width, alignment_of_with_ptr_width, IRFunction, IRInstr, IRType};
+use crate::ir::{
+    size_of_with_ptr_width, alignment_of_with_ptr_width, BinOpKind, IRFunction, IRInstr, IRProgram,
+    IRType,
+};
 use crate::loongarch64::LoongArch64Backend;
 use crate::mips64::Mips64Backend;
 use crate::ppc64::PPC64Backend;
@@ -48,6 +51,145 @@ use crate::hppa::HppaBackend;
 use crate::x86_64::X86_64Backend;
 use std::collections::HashMap;
 use std::fmt;
+
+// ---------------------------------------------------------------------------
+// IR float-op verification (F2a)
+// ---------------------------------------------------------------------------
+//
+// VUMA's `BinOpKind` is deliberately type-tag-polymorphic: the same
+// `Add`/`Sub`/`Mul`/`SDiv`/`UDiv` variants (plus all comparison variants)
+// serve both integer AND float operands, and backends branch on
+// `IRType::F32`/`IRType::F64` to select ALU vs FPU encoding.  However,
+// bitwise/shift ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/`ShrA`/`Ror`/`Rol`)
+// and integer remainder (`SRem`/`URem`) are NOT meaningful on floats —
+// emitting them would silently produce wrong code (backends fall through
+// to the integer path).
+//
+// `verify_float_op` rejects such combinations ONCE, centrally, before any
+// backend lowering runs.  `verify_function_float_ops` and
+// `verify_program_float_ops` walk an `IRFunction` / `IRProgram` and collect
+// every violation.
+//
+// WIRING: The `Backend` trait's `allocate_registers(&self, func: &IRFunction)`
+// is the per-function, pre-lowering entry point every backend implements.
+// Each backend SHOULD call `verify_function_float_ops(func)` (or the
+// `verify_float_op` helper directly in its own walk) at the top of its
+// `allocate_registers` impl and map any `Err` into
+// `BackendError::InvalidInstruction`.  `AArch64Backend::allocate_registers`
+// (in this file) is wired as the reference call site; other backends
+// (`alpha.rs`, `hppa.rs`, `s390x.rs`, `sparc64.rs`, `arm64.rs`,
+// `x86_64/`, `riscv64.rs`, `arm32/`, `mips64/`, `ppc64/`, `ppc64le.rs`,
+// `loongarch64/`, `wasm32/`, `riscv32.rs`, `x86_32/`, `mips64be.rs`,
+// `armeb.rs`, `aarch64_be.rs`, `m68k.rs`) need the same one-liner added —
+// that wiring is a follow-up task (out of scope for F2a because F2a is
+// restricted to editing `backend.rs` only).
+
+/// Verify that a binary operation is valid for the given result type.
+///
+/// VUMA's `BinOpKind` is deliberately type-tag-polymorphic: `Add`/`Sub`/
+/// `Mul`/`SDiv`/`UDiv` and all comparison variants serve both integer and
+/// floating-point operands (backends branch on `IRType` to select ALU vs
+/// FPU encoding).  However, bitwise/shift ops (`And`/`Or`/`Xor`/`Shl`/
+/// `ShrL`/`ShrA`/`Ror`/`Rol`) and integer remainder (`SRem`/`URem`) are
+/// NOT meaningful on `F32`/`F64` values — emitting them would silently
+/// produce wrong code.  This function rejects such combinations once,
+/// centrally, before any backend lowering runs.
+///
+/// Call this from the compilation pipeline (e.g. inside a backend's
+/// `allocate_registers` impl, or a pre-lowering validation walk) for every
+/// `IRInstr::BinOp`.
+pub fn verify_float_op(op: BinOpKind, ty: Option<&IRType>) -> Result<(), String> {
+    let is_float = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+    if !is_float {
+        return Ok(());
+    }
+    match op {
+        // Valid on floats: arithmetic + all comparisons.
+        BinOpKind::Add
+        | BinOpKind::Sub
+        | BinOpKind::Mul
+        | BinOpKind::SDiv
+        | BinOpKind::UDiv
+        | BinOpKind::Eq
+        | BinOpKind::Ne
+        | BinOpKind::SLt
+        | BinOpKind::SLe
+        | BinOpKind::SGt
+        | BinOpKind::SGe
+        | BinOpKind::ULt
+        | BinOpKind::ULe
+        | BinOpKind::UGt
+        | BinOpKind::UGe => Ok(()),
+        // Invalid on floats: bitwise, shift, remainder.
+        BinOpKind::And
+        | BinOpKind::Or
+        | BinOpKind::Xor
+        | BinOpKind::Shl
+        | BinOpKind::ShrL
+        | BinOpKind::ShrA
+        | BinOpKind::Ror
+        | BinOpKind::Rol
+        | BinOpKind::SRem
+        | BinOpKind::URem => Err(format!(
+            "float-op-reject: {:?} is not valid on {:?} (bitwise/shift/remainder ops require integer operands)",
+            op, ty
+        )),
+    }
+}
+
+/// Walk every `IRInstr::BinOp` in `func` and collect all float-op
+/// violations.  Returns `Ok(())` if the function is clean, or
+/// `Err(Vec<String>)` with one message per violating instruction
+/// (each message includes the function name and block label so the
+/// user can locate the offending op).
+///
+/// This is the per-function pre-lowering validation pass.  Backends
+/// should call it at the top of `allocate_registers` and map the
+/// error vector to `BackendError::InvalidInstruction` (joining the
+/// messages with `"; "`).
+pub fn verify_function_float_ops(func: &IRFunction) -> Result<(), Vec<String>> {
+    let mut errs: Vec<String> = Vec::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::BinOp { op, ty, .. } = instr {
+                if let Err(msg) = verify_float_op(*op, ty.as_ref()) {
+                    errs.push(format!(
+                        "function `{}` block `{}`: {}",
+                        func.name, block.label, msg
+                    ));
+                }
+            }
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs)
+    }
+}
+
+/// Walk every function in `program` and collect all float-op violations.
+/// Returns `Ok(())` if the program is clean, or `Err(Vec<String>)` with
+/// one message per violating instruction (across all functions).
+///
+/// This is the program-level pre-lowering validation pass.  It is the
+/// ideal single call site for a future central compilation driver: call
+/// `verify_program_float_ops(&program)?` once after IR construction and
+/// before any backend's `allocate_registers` runs, and every backend
+/// benefits without per-backend wiring.
+pub fn verify_program_float_ops(program: &IRProgram) -> Result<(), Vec<String>> {
+    let mut errs: Vec<String> = Vec::new();
+    for func in &program.functions {
+        if let Err(fn_errs) = verify_function_float_ops(func) {
+            errs.extend(fn_errs);
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Endianness
@@ -2578,6 +2720,18 @@ impl Backend for AArch64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // F2a: Pre-lowering float-op verification.  Reject bitwise/shift/
+        // remainder ops on F32/F64 operands before any backend lowers them,
+        // so the emitter never sees an integer encoding for a float op.
+        // AArch64 is wired as the reference call site; other backends
+        // (alpha.rs, hppa.rs, s390x.rs, sparc64.rs, ...) should add the
+        // same one-liner at the top of their `allocate_registers` impls —
+        // see the doc on `verify_function_float_ops` above.
+        verify_function_float_ops(func).map_err(|errs| BackendError::InvalidInstruction {
+            isa: "aarch64",
+            details: errs.join("; "),
+        })?;
+
         // Use the existing Emitter to emit the function, which internally
         // performs register allocation and instruction encoding.
         let mut emitter = crate::emit::Emitter::new();
