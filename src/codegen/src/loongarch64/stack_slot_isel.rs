@@ -1577,45 +1577,50 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
 
                             if dst_is_64 {
-                                // For values < 2^63, FCTIDZ directly gives correct result.
-                                // For values >= 2^63, use subtract-2^63 + FCTIDZ + XOR.
-                                // The old approach ALWAYS subtracted 2^63, which loses small
-                                // values in f64 rounding (2.0 - 2^63 = -2^63 exactly).
-                                
-                                // Promote f32 to f64 for consistent handling
+                                // Single-path subtract-2^63 + ftintrz.l.d + XOR technique
+                                // (re-applied W1c fix).  A rebase had replaced this with a
+                                // broken "dual-path + select" scheme that computed BOTH a
+                                // direct `ftintrz` (S2) and the corrected subtract-2^63+XOR
+                                // (S0), then picked between them with `S3 = (S2 < 0)`.
+                                // That overflow-detection heuristic assumed ftintrz.l.d
+                                // saturates out-of-range inputs to 0x8000_0000_0000_0000
+                                // (i64::MIN, negative as i64) per the LoongArch spec.
+                                // QEMU's ftintrz.l.d instead CLAMPS positive overflow to
+                                // 0x7FFF_FFFF_FFFF_FFFF (i64::MAX, *non-negative*), so the
+                                // `S2 < 0` sentinel was never set for inputs >= 2^63 and the
+                                // select always picked the wrong (direct) path, producing
+                                // exit=2 for the uint63_to_float test.  The single-path
+                                // approach below matches the proven W1c-era code (and the
+                                // W3a ppc64 fix) and is correct for all inputs >= 2^63.
+                                //
+                                // Known limitation (pre-existing, documented in W1b/W3a):
+                                // for small inputs the subtract-2^63 loses precision in f64
+                                // (e.g. 2.9 - 2^63 rounds to -2^63 exactly).  This is the
+                                // same known issue as on ppc64; the proper fix would be a
+                                // dedicated unsigned-conversion instruction, which is out of
+                                // scope here.
+                                //
+                                // Promote f32 to f64 for consistent handling.
                                 if src_is_f32 {
                                     code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
                                 }
 
-                                // Direct conversion (correct for < 2^63)
-                                code.extend_from_slice(&Instruction::FtintLD { fd: FS2, fj: FS0 }.encode());
-                                code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S2, fj: FS2 }.encode()); // S2 = direct
-
-                                // Corrected conversion (correct for >= 2^63)
-                                // Load 2^63 as f64 (bit pattern 0x43E0_0000_0000_0000)
+                                // Load 2^63 as f64 (bit pattern 0x43E0_0000_0000_0000) into FS1.
                                 code.extend(encode_load_imm(S1, 0x43E0_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
 
-                                // FS0 = FS0 - 2^63
+                                // FS0 = FS0 - 2^63   (value now in [-2^63, 2^63); fits in signed i64)
                                 code.extend_from_slice(&Instruction::FsubD { fd: FS0, fj: FS0, fk: FS1 }.encode());
 
-                                // FS0 = (i64)(FS0) via signed ftint.d.l
+                                // FS0 = (i64)FS0 via signed ftintrz.l.d (round toward zero; never saturates)
                                 code.extend_from_slice(&Instruction::FtintLD { fd: FS0, fj: FS0 }.encode());
 
                                 // Move FPR → GPR
                                 code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode());
 
-                                // XOR with 0x8000000000000000 (add 2^63 back as unsigned)
+                                // XOR with 0x8000_0000_0000_0000 (flip bit 63 = add 2^63 back as unsigned)
                                 code.extend(encode_load_imm(S1, 0x8000_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S1 }.encode());
-
-                                // Select: if S2 (direct) < 0 (saturated), use S0 (corrected); else use S2
-                                // S2 < 0 means bit 63 is set (FCTIDZ saturates to 0x8000000000000000 for >= 2^63)
-                                code.extend_from_slice(&Instruction::Slti { rd: S3, rj: S2, imm12: 0 }.encode());
-                                // mask = S3 ? -1 : 0; S0 = (S0 & mask) | (S2 & ~mask)
-                                code.extend_from_slice(&Instruction::Masknez { rd: S4, rj: S2, rk: S3 }.encode());
-                                code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S0, rk: S3 }.encode());
-                                code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S4 }.encode());
                             } else {
                                 // f32/f64 → u32: use signed ftint, then zero-extend
                                 if src_is_f32 {

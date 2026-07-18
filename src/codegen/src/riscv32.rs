@@ -49,6 +49,12 @@ const OP_JALR: u32 = 0b1100111;
 const OP_BRANCH: u32 = 0b1100011;
 const OP_LOAD: u32 = 0b0000011;
 const OP_STORE: u32 = 0b0100011;
+// FP load/store opcodes (RISC-V F/D extension). Per the spec, FP loads use
+// LOAD-FP=0b0000111 and FP stores use STORE-FP=0b0100111 (NOT the integer
+// LOAD/STORE opcodes). Using the integer opcodes makes FLD encode as LD
+// (64-bit integer load, RV64-only) and FSD as SD (RV64-only) -> SIGILL on RV32.
+const OP_LOAD_FP: u32 = 0b0000111;
+const OP_STORE_FP: u32 = 0b0100111;
 const OP_IMM: u32 = 0b0010011;
 const OP_REG: u32 = 0b0110011;
 const OP_SYSTEM: u32 = 0b1110011;
@@ -1159,33 +1165,36 @@ impl Instruction {
             ),
 
             // ── F/D Extension: Load/Store ───────────────────────────
+            // FP loads use opcode LOAD-FP=0b0000111 and FP stores use
+            // STORE-FP=0b0100111 (NOT the integer LOAD/STORE opcodes).
+            // funct3 selects width: 0b010=32-bit (FLW/FSW), 0b011=64-bit (FLD/FSD).
             Instruction::Flw { rd, rs1, imm } => encode_i_type(
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
                 0b010,
                 rd.encoding(),
-                OP_LOAD,
+                OP_LOAD_FP,
             ),
             Instruction::Fld { rd, rs1, imm } => encode_i_type(
                 (*imm as u32) & 0xFFF,
                 rs1.encoding(),
                 0b011,
                 rd.encoding(),
-                OP_LOAD,
+                OP_LOAD_FP,
             ),
             Instruction::Fsw { rs1, rs2, imm } => encode_s_type(
                 (*imm as u32) & 0xFFF,
                 rs2.encoding(),
                 rs1.encoding(),
                 0b010,
-                OP_STORE,
+                OP_STORE_FP,
             ),
             Instruction::Fsd { rs1, rs2, imm } => encode_s_type(
                 (*imm as u32) & 0xFFF,
                 rs2.encoding(),
                 rs1.encoding(),
                 0b011,
-                OP_STORE,
+                OP_STORE_FP,
             ),
 
             // ── F/D Extension: Arithmetic ───────────────────────────
@@ -1238,7 +1247,9 @@ impl Instruction {
             }
 
             // ── F/D Extension: FP ↔ Integer Conversion ────────────────
-            // FCVT.S.W: funct7=1101000, rs2=00000, funct3=rm (0b111=dynamic)
+            // FCVT.S.W: funct7=1101000, rs2=00000 (int32 -> f32).
+            // funct3=rm: we use 0b111 (DYN) here because the SOURCE is an
+            // integer (no rounding needed for int->float; rm is ignored).
             Instruction::FcvtSW { rd, rs1 } => {
                 encode_r_type(0b1101000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
@@ -1251,44 +1262,50 @@ impl Instruction {
             Instruction::FcvtSLU { rd, rs1 } => {
                 encode_r_type(0b1101000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
-            // FCVT.D.W: funct7=1100001, rs2=00000
+            // FCVT.D.W/WU/L/LU: int -> double. funct7=0b1101001 (int->float
+            // direction). The previous 0b1100001 is the float->int direction
+            // (FCVT.W.D), which reads from an FPR and writes to a GPR --
+            // silently producing garbage for int->float casts.
             Instruction::FcvtDW { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDWU { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDL { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
             Instruction::FcvtDLU { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1101001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
             }
-            // FCVT.W.S: funct7=1100000, rs2=00000
+            // FCVT.W.S/WU.S/W.D/WU.D: float -> int32. funct3=0b001 (RTZ =
+            // round-toward-zero) for C truncation semantics. The previous
+            // 0b111 (DYN) used QEMU's default fcsr.rm=RNE, giving wrong
+            // results (e.g. floattoint(15.5)=16 instead of 15).
             Instruction::FcvtWS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00000, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtWUS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00001, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLUS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
-            // FCVT.W.D: funct7=1100001, rs2=00000
+            // FCVT.W.D/WU.D: float -> int32 (double source). funct3=0b001 (RTZ).
             Instruction::FcvtWD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtWUD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             Instruction::FcvtLUD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
             }
             // FCVT.D.S: funct7=0100001, rs2=00000
             Instruction::FcvtDS { rd, rs1 } => {
@@ -4252,6 +4269,88 @@ fn ss_store_fpr_s_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
     }
 }
 
+/// Load a double-precision FP value from a stack slot at [S0 - offset_from_s0] into an FPR.
+///
+/// On RV32, FMV.D.X is invalid (GPRs are 32-bit). FP values must be ferried
+/// between memory and FPRs via FLD (f64) / FLW (f32). This helper is the
+/// memory-transit replacement for the RV64-only `FMV.D.X` instruction.
+fn ss_load_fpr_d_from_slot(dst_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Fld { rd: dst_fpr, rs1: Gpr::S0, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Fld { rd: dst_fpr, rs1: Gpr::T3, imm: 0 }.encode());
+        code
+    }
+}
+
+/// Load a single-precision FP value from a stack slot at [S0 - offset_from_s0] into an FPR.
+fn ss_load_fpr_s_from_slot(dst_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Flw { rd: dst_fpr, rs1: Gpr::S0, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Flw { rd: dst_fpr, rs1: Gpr::T3, imm: 0 }.encode());
+        code
+    }
+}
+
+/// Load an FP value from an [`IRValue`] into an FPR via memory transit.
+///
+/// This is the RV32 replacement for the RV64-only `FMV.D.X`/`FMV.X.D`
+/// pattern. On RV32, 64-bit FP values cannot live in GPRs (GPRs are 32-bit),
+/// so they must be ferried through memory:
+///
+/// - **Register operand**: FLD/FLW directly from the vreg's stack slot.
+/// - **f64 immediate/address**: spill the 64-bit bit pattern to a scratch
+///   slot (via `ss_load_value_64` + two SWs), then FLD from the scratch slot.
+/// - **f32 immediate/address**: load the 32-bit bit pattern into T0 via
+///   `ss_load_value`, then `FMV.W.X` (valid on RV32, since both GPR and FPR
+///   are 32-bit).
+///
+/// `scratch_off` is the offset_from_s0 of a free 8-byte scratch slot used
+/// only for the f64 immediate spill path. It must not alias any live vreg.
+fn ss_load_fpr_from_value(
+    fpr: Fpr,
+    val: &IRValue,
+    slots: &HashMap<u32, i32>,
+    is_f64: bool,
+    scratch_off: i32,
+) -> Vec<u8> {
+    let mut code = Vec::new();
+    if let IRValue::Register(id) = val {
+        let off = slots.get(id).copied().unwrap_or(0);
+        if is_f64 {
+            code.extend(ss_load_fpr_d_from_slot(fpr, off));
+        } else {
+            code.extend(ss_load_fpr_s_from_slot(fpr, off));
+        }
+    } else if is_f64 {
+        // f64 immediate/address: spill 8 bytes to scratch slot, then FLD.
+        // ss_load_value_64 loads lo into T0 and hi into T1.
+        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, val, slots));
+        code.extend(ss_store_to_slot(Gpr::T0, scratch_off));
+        code.extend(ss_store_to_slot(Gpr::T1, scratch_off - 4));
+        code.extend(ss_load_fpr_d_from_slot(fpr, scratch_off));
+    } else {
+        // f32 immediate/address: load 32-bit bit pattern into T0, then
+        // FMV.W.X (valid on RV32 — both GPR and FPR are 32-bit).
+        code.extend(ss_load_value(val, slots, Gpr::T0));
+        code.extend(Instruction::FmvWX { rd: fpr, rs1: Gpr::T0 }.encode());
+    }
+    code
+}
+
 /// Load a 32-bit word from a stack slot at [S0 - offset_from_s0] into a GPR.
 fn ss_load_word_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
@@ -4310,14 +4409,15 @@ fn ss_load_value_64(lo_reg: Gpr, hi_reg: Gpr, val: &IRValue, slots: &HashMap<u32
             code.extend(ss_load_from_slot(hi_reg, hi_offset));
         }
         IRValue::Immediate(v) => {
-            code.extend(ss_load_imm(lo_reg, *v));
-            // High word: sign-extend from bit 63
-            if *v < 0 {
-                // MV hi_reg, -1 (all ones)
-                code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: -1 }.encode());
-            } else {
-                code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: 0 }.encode());
-            }
+            // Load the low 32 bits into lo_reg and the high 32 bits into
+            // hi_reg. The previous code sign-extended from bit 63 (assuming
+            // the immediate fit in 32 bits), which is wrong for full 64-bit
+            // immediates like f64 bit patterns (e.g. 2.0 = 0x4000_0000_0000_0000
+            // needs hi=0x40000000, not 0).
+            let lo_val = (*v as u32) as i32 as i64;
+            let hi_val = ((*v >> 32) as u32) as i32 as i64;
+            code.extend(ss_load_imm(lo_reg, lo_val));
+            code.extend(ss_load_imm(hi_reg, hi_val));
         }
         IRValue::Address(a) => {
             code.extend(ss_load_imm(lo_reg, *a as i64));
@@ -4556,42 +4656,18 @@ impl Backend for RiscV32Backend {
                         let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                         if is_fp {
                             let is_f64 = matches!(ty, Some(IRType::F64));
-                            // Load lhs/rhs bit patterns into FPRs
-                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                            if is_f64 {
-                                // On RV32, fmv.d.x is invalid (GPRs are 32-bit).
-                                // Use fld to load 64-bit float directly from stack to FPR.
-                                // Compute slot address in T0, then fld F0, 0(T0).
-                                if let IRValue::Register(id) = lhs {
-                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-                                    code.extend(ss_load_addr(Gpr::T0, off));
-                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T0, imm: 0 }.encode());
-                                } else {
-                                    // Immediate: store to scratch slot, then fld
-                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots));
-                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
-                                    code.extend(ss_store_to_slot(Gpr::T1, -60));
-                                    code.extend(ss_load_addr(Gpr::T0, -64));
-                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T0, imm: 0 }.encode());
-                                }
-                                if let IRValue::Register(id) = rhs {
-                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-                                    code.extend(ss_load_addr(Gpr::T1, off));
-                                    code.extend(Instruction::Fld { rd: Fpr::F1, rs1: Gpr::T1, imm: 0 }.encode());
-                                } else {
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, rhs, &vreg_stack_slots));
-                                    code.extend(ss_store_to_slot(Gpr::T0, -64));
-                                    code.extend(ss_store_to_slot(Gpr::T1, -60));
-                                    code.extend(ss_load_addr(Gpr::T1, -64));
-                                    code.extend(Instruction::Fld { rd: Fpr::F1, rs1: Gpr::T1, imm: 0 }.encode());
-                                }
-                            } else {
-                                code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(Instruction::FmvWX { rd: Fpr::F1, rs1: Gpr::T1 }.encode());
-                            }
+                            // Load lhs/rhs into FPRs via memory transit (FLD for
+                            // f64, FLW/FMV.W.X for f32). Never use FMV.D.X
+                            // (RV64-only — SIGILL on RV32). The helper handles
+                            // both Register operands (FLD/FLW from slot) and
+                            // immediates (spill 8 bytes to scratch + FLD for f64,
+                            // FMV.W.X for f32).
+                            code.extend(ss_load_fpr_from_value(
+                                Fpr::F0, lhs, &vreg_stack_slots, is_f64, 64,
+                            ));
+                            code.extend(ss_load_fpr_from_value(
+                                Fpr::F1, rhs, &vreg_stack_slots, is_f64, 56,
+                            ));
                             match op {
                                 BinOpKind::Add => {
                                     if is_f64 { code.extend(Instruction::FaddD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode()); }
@@ -4637,25 +4713,25 @@ impl Backend for RiscV32Backend {
                                     }
                                 }
                                 _ => {
-                                    // Other FP ops (And/Or/Xor/Shl/etc.) — fall through to integer
-                                    if is_f64 { code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode()); }
-                                    else { code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode()); }
+                                    // Other FP ops (And/Or/Xor/Shl/etc.) are
+                                    // not meaningful on FP types — leave F0
+                                    // holding the lhs value (already loaded).
+                                    // No FMV.D.X (RV64-only).
                                 }
                             }
-                            // Move result back to GPR
+                            // Move FP result back to the dst stack slot.
+                            // On RV32, FMV.X.D is invalid — use FSD/FSW to
+                            // store the FPR directly to dst_offset, then load
+                            // the low 4 bytes into T0 for the final
+                            // ss_store_to_slot (which is a no-op for the f64
+                            // path, since FSD already wrote all 8 bytes).
                             if is_f64 {
-                                // On RV32, fmv.x.d is invalid. Use fsd to store
-                                // F0 to scratch, then load two 32-bit halves.
-                                code.extend(ss_load_addr(Gpr::T0, -64));
-                                code.extend(Instruction::Fsd { rs1: Gpr::T0, rs2: Fpr::F0, imm: 0 }.encode());
-                                code.extend(ss_load_from_slot(Gpr::T0, 64));
-                                code.extend(ss_load_from_slot(Gpr::T1, 60));
-                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
-                                code.extend(ss_store_to_slot(Gpr::T1, dst_offset - 4));
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                             } else {
-                                code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                                code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                             }
-                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                             code
                         } else {
 
@@ -4927,37 +5003,12 @@ impl Backend for RiscV32Backend {
                             // path that works for the common case where the
                             // IR builder materialises FP immediates as bit
                             // patterns in GPRs.
+                            // Load an FP operand into an FPR via memory transit
+                            // (FLD/FLW for registers, spill+FLD for f64 immediates,
+                            // FMV.W.X for f32 immediates). Never use FMV.D.X
+                            // (RV64-only — SIGILL on RV32).
                             let load_fpr = |fpr: Fpr, val: &IRValue| -> Vec<u8> {
-                                let mut c = Vec::new();
-                                if let IRValue::Register(id) = val {
-                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-                                    let neg_off = -off;
-                                    if neg_off >= -2048 {
-                                        if is_f64 {
-                                            c.extend(Instruction::Fld { rd: fpr, rs1: Gpr::S0, imm: neg_off }.encode());
-                                        } else {
-                                            c.extend(Instruction::Flw { rd: fpr, rs1: Gpr::S0, imm: neg_off }.encode());
-                                        }
-                                    } else {
-                                        // Large offset: compute addr into T3, then FLD/FLW from T3.
-                                        c.extend(ss_load_imm(Gpr::T3, off as i64));
-                                        c.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-                                        if is_f64 {
-                                            c.extend(Instruction::Fld { rd: fpr, rs1: Gpr::T3, imm: 0 }.encode());
-                                        } else {
-                                            c.extend(Instruction::Flw { rd: fpr, rs1: Gpr::T3, imm: 0 }.encode());
-                                        }
-                                    }
-                                } else {
-                                    // Immediate/address: load as integer bits, then move to FPR.
-                                    c.extend(ss_load_value(val, &vreg_stack_slots, Gpr::T0));
-                                    if is_f64 {
-                                        c.extend(Instruction::FmvDX { rd: fpr, rs1: Gpr::T0 }.encode());
-                                    } else {
-                                        c.extend(Instruction::FmvWX { rd: fpr, rs1: Gpr::T0 }.encode());
-                                    }
-                                }
-                                c
+                                ss_load_fpr_from_value(fpr, val, &vreg_stack_slots, is_f64, 64)
                             };
                             code.extend(load_fpr(Fpr::F0, lhs));
                             code.extend(load_fpr(Fpr::F1, rhs));
@@ -5060,8 +5111,14 @@ impl Backend for RiscV32Backend {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
                         let off = *offset as i32;
+                        // `finalized` indicates the match arm already stored the
+                        // result to dst_offset (e.g. FP loads that use FSD/FSW
+                        // directly). When false, the fall-through ss_store_to_slot
+                        // stores T0 (the 4-byte integer load result).
+                        let finalized;
                         match ty {
                             IRType::I8 => {
+                                finalized = false;
                                 if off >= -2048 && off <= 2047 {
                                     code.extend(Instruction::Lb { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
                                 } else {
@@ -5071,6 +5128,7 @@ impl Backend for RiscV32Backend {
                                 }
                             }
                             IRType::U8 => {
+                                finalized = false;
                                 if off >= -2048 && off <= 2047 {
                                     code.extend(Instruction::Lbu { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
                                 } else {
@@ -5080,6 +5138,7 @@ impl Backend for RiscV32Backend {
                                 }
                             }
                             IRType::I32 | IRType::U32 => {
+                                finalized = false;
                                 if off >= -2048 && off <= 2047 {
                                     code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
                                 } else {
@@ -5088,7 +5147,53 @@ impl Backend for RiscV32Backend {
                                     code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
                                 }
                             }
+                            IRType::F32 => {
+                                // 4-byte FP load via FLW into F0, then FSW to dst slot.
+                                finalized = true;
+                                if off >= -2048 && off <= 2047 {
+                                    code.extend(Instruction::Flw { rd: Fpr::F0, rs1: Gpr::T3, imm: off }.encode());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Flw { rd: Fpr::F0, rs1: Gpr::T2, imm: 0 }.encode());
+                                }
+                                code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                            }
+                            IRType::F64 => {
+                                // 8-byte FP load via FLD into F0, then FSD to dst slot.
+                                finalized = true;
+                                if off >= -2048 && off <= 2047 {
+                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T3, imm: off }.encode());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Fld { rd: Fpr::F0, rs1: Gpr::T2, imm: 0 }.encode());
+                                }
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                            }
+                            IRType::I64 | IRType::U64 => {
+                                // 8-byte integer load: two Lw's into T0/T1, then two Sw's.
+                                finalized = true;
+                                if off >= -2048 && off <= 2047 {
+                                    code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
+                                }
+                                let hi_off = off + 4;
+                                if hi_off >= -2048 && hi_off <= 2047 {
+                                    code.extend(Instruction::Lw { rd: Gpr::T1, rs1: Gpr::T3, imm: hi_off }.encode());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T2, hi_off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Lw { rd: Gpr::T1, rs1: Gpr::T2, imm: 0 }.encode());
+                                }
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                code.extend(ss_store_to_slot(Gpr::T1, dst_offset - 4));
+                            }
                             _ => {
+                                finalized = false;
                                 if off >= -2048 && off <= 2047 {
                                     code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
                                 } else {
@@ -5098,7 +5203,9 @@ impl Backend for RiscV32Backend {
                                 }
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        if !finalized {
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        }
                         code
                     }
 
@@ -5124,6 +5231,66 @@ impl Backend for RiscV32Backend {
                                     code.extend(ss_load_imm(Gpr::T2, off as i64));
                                     code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
                                     code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                }
+                            }
+                            IRType::F32 => {
+                                // 4-byte FP store: load value bits into F0 (via
+                                // FLW from value's slot if Register, or FMV.W.X
+                                // from T0 if immediate), then FSW to [addr+off].
+                                if let IRValue::Register(id) = value {
+                                    let voff = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                    code.extend(ss_load_fpr_s_from_slot(Fpr::F0, voff));
+                                } else {
+                                    // Immediate: T0 already holds the 32-bit f32 bits.
+                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                }
+                                if off >= -2048 && off <= 2047 {
+                                    code.extend(Instruction::Fsw { rs1: Gpr::T3, rs2: Fpr::F0, imm: off }.encode());
+                                } else {
+                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Fsw { rs1: Gpr::T2, rs2: Fpr::F0, imm: 0 }.encode());
+                                }
+                            }
+                            IRType::F64 | IRType::I64 | IRType::U64 => {
+                                // 8-byte store. For F64: FLD value into F0, then FSD.
+                                // For I64/U64: load lo/hi into T0/T1, then two Sw's.
+                                if matches!(ty, IRType::F64) {
+                                    if let IRValue::Register(id) = value {
+                                        let voff = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                        code.extend(ss_load_fpr_d_from_slot(Fpr::F0, voff));
+                                    } else {
+                                        // f64 immediate: spill to scratch, then FLD.
+                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                        code.extend(ss_store_to_slot(Gpr::T0, 64));
+                                        code.extend(ss_store_to_slot(Gpr::T1, 56));
+                                        code.extend(ss_load_fpr_d_from_slot(Fpr::F0, 64));
+                                    }
+                                    if off >= -2048 && off <= 2047 {
+                                        code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: Fpr::F0, imm: off }.encode());
+                                    } else {
+                                        code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                        code.extend(Instruction::Fsd { rs1: Gpr::T2, rs2: Fpr::F0, imm: 0 }.encode());
+                                    }
+                                } else {
+                                    // I64/U64: load lo (T0) and hi (T1), then two Sw's.
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                    if off >= -2048 && off <= 2047 {
+                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    } else {
+                                        code.extend(ss_load_imm(Gpr::T2, off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    }
+                                    let hi_off = off + 4;
+                                    if hi_off >= -2048 && hi_off <= 2047 {
+                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T1, imm: hi_off }.encode());
+                                    } else {
+                                        code.extend(ss_load_imm(Gpr::T2, hi_off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T1, imm: 0 }.encode());
+                                    }
                                 }
                             }
                             _ => {
@@ -5259,72 +5426,77 @@ impl Backend for RiscV32Backend {
                                 }
                             }
                             CastKind::FloatToInt => {
-                                // float → signed int.
+                                // float → signed int. On RV32, the only valid
+                                // float→int conversions are FCVT.W.S/WU.S/W.D/WU.D
+                                // (FCVT.L.* require 64-bit GPRs and SIGILL).
+                                // Load the FP value into F0 via memory transit
+                                // (FLD for f64, FLW/FMV.W.X for f32) — NOT
+                                // FMV.D.X which is RV64-only.
+                                code.extend(ss_load_fpr_from_value(
+                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, 64,
+                                ));
                                 if src_is_f32 {
-                                    // f32 → signed int: FMV.X.W F0→T0 bits, FMV.W.X T0→F0, FCVT.W.S or FCVT.L.S
-                                    // Actually: move bits to FPR first, then convert
-                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                    if dst_is_32bit {
-                                        code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                        // Sign-extend the 32-bit result
-                                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
-                                    } else {
-                                        vuma_log!(warn, "riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
-                                        code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                    }
+                                    code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                 } else {
-                                    // f64 → signed int: FMV.D.X F0←T0, FCVT.W.D or FCVT.L.D
-                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                    if dst_is_32bit {
-                                        code.extend(Instruction::FcvtWD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                        // Sign-extend the 32-bit result
-                                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
-                                    } else {
-                                        vuma_log!(warn, "riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
-                                        code.extend(Instruction::FcvtWD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                    }
+                                    code.extend(Instruction::FcvtWD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                 }
+                                if !dst_is_32bit {
+                                    vuma_log!(warn, "riscv32: FP→I64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                }
+                                // T0 now holds the 32-bit signed int result;
+                                // the final ss_store_to_slot writes it to dst.
                             }
                             CastKind::FloatToUInt => {
-                                // float → unsigned int.
+                                // float → unsigned int. Same RV32 constraint as
+                                // FloatToInt: use FCVT.WU.* (not FCVT.LU.*).
+                                code.extend(ss_load_fpr_from_value(
+                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, 64,
+                                ));
                                 if src_is_f32 {
-                                    // f32 → unsigned int: FMV.W.X T0→F0, FCVT.WU.S or FCVT.LU.S
-                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                    if dst_is_32bit {
-                                        code.extend(Instruction::FcvtWUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                        // Zero-extend the 32-bit result
-                                        code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                    } else {
-                                        code.extend(Instruction::FcvtLUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                    }
+                                    code.extend(Instruction::FcvtWUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                                 } else {
-                                    // f64 → unsigned int: FMV.D.X T0→F0, FCVT.WU.D or FCVT.LU.D
-                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                    if dst_is_32bit {
-                                        code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                        // Zero-extend the 32-bit result
-                                        code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                    } else {
-                                        vuma_log!(warn, "riscv32: FP→U64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
-                                        code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                    }
+                                    code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                }
+                                if !dst_is_32bit {
+                                    vuma_log!(warn, "riscv32: FP→U64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
                                 }
                             }
                             CastKind::FloatToFloat => {
+                                // float → float. On RV32, ferry FP values
+                                // through memory (FLD/FSD), never via
+                                // FMV.D.X/FMV.X.D (RV64-only).
                                 if src_is_f32 && !dst_is_f32 {
-                                    // f32 → f64 (widen): FMV.W.X T0→F0, FCVT.D.S F0→F0, FMV.X.D F0→T0
-                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    // f32 → f64 (widen): load f32 into F0,
+                                    // FCVT.D.S, store f64 result via FSD.
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F0, src, &vreg_stack_slots, false, 64,
+                                    ));
                                     code.extend(Instruction::FcvtDS { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
-                                    code.extend(Instruction::FmvXD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                                 } else if !src_is_f32 && dst_is_f32 {
-                                    // f64 → f32 (narrow): FMV.D.X T0→F0, FCVT.S.D F0→F0, FMV.X.W F0→T0
-                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    // f64 → f32 (narrow): load f64 into F0,
+                                    // FCVT.S.D, store f32 result via FSW.
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F0, src, &vreg_stack_slots, true, 64,
+                                    ));
                                     code.extend(Instruction::FcvtSD { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
-                                    code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
+                                } else if !src_is_f32 && !dst_is_f32 {
+                                    // f64 → f64 (same-width): copy via FLD+FSD.
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F0, src, &vreg_stack_slots, true, 64,
+                                    ));
+                                    code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                                 } else {
-                                    // Same-width float→float: no-op (bitcast)
+                                    // f32 → f32 (same-width): copy via FLW+FSW.
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F0, src, &vreg_stack_slots, false, 64,
+                                    ));
+                                    code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                                 }
                             }
                         }
