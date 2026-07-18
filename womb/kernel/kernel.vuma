@@ -1,256 +1,225 @@
-// ═══════════════════════════════════════════════════════════════════════════
-// womb/kernel/kernel.vuma
-// VWK kernel entry point — R1e kmain integration (EarlyConsole path).
-// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/kernel.vuma — VWK Integrated Kernel Entry Point
 //
-// This is the file compile_dump builds into the kernel ELF. Its `fn main()`
-// is the program entry — the hosted _start stub sets up argc/argv then calls
-// main(); main() calls kmain() and returns the result as the process exit
-// code.
+// The REAL kernel — imports all subsystems and wires them into a running
+// interactive system. Uses VUMA's import system to share layouts/functions
+// across modules (no re-declaration hack).
 //
-// ── R1e — kmain integration with EarlyConsole ──────────────────────────────
-// R1a/R1b+c/R1d landed the superset BootInfo + per-arch bootinfo_init variants
-// + the universal EarlyConsole (single `early_console_write_byte` dispatch
-// across 16550/PL011/semihost/diag/wasm). R1e is the wire-up wave: it replaces
-// kmain's old Console-based buffered-output path (the K1a `console_putc` +
-// `console_flush` pair, which routed through a 256-byte State<Console> line
-// buffer and a single `write(1, base, len)` syscall at flush time) with the
-// R1d universal byte-at-a-time path. The banner is the same byte sequence —
-// "vuma kernel: hello\n" — but the bytes now flow through
-// `early_console_write_byte` so the same kmain source compiles + runs on
-// every backend (hosted x86_64 today, bare-metal 16550 / PL011 / semihost /
-// diag in Wave K11) with only the `con_type` argument differing per boot.
-//
-// Hosted mode (this file's build target) always uses con_type = 4 (wasm host
-// callback), which makes `early_console_write_byte` route through the
-// `write(1, buf, 1)` extern — same syscall as the old Console path, just one
-// byte at a time per call instead of one batched write. K11's bare-metal
-// boot stub will dispatch on `boot_type` (R1a's BootInfo field) to pick
-// con_type 0/1/2/3 instead; that boot_type → con_type dispatch is documented
-// in womb/kernel/drivers/early_console.vuma's header and will be wired into
-// the kmain body when K11 lands (the bare-metal `x86_bootinfo_init` populates
-// `boot_type = 0`, then kmain picks con_type = 0 + base = 1016 for COM1).
-//
-// ── Why is everything inlined here? ────────────────────────────────────────
-// VUMA has NO `import` statement yet (Open Work §7). Each kernel module that
-// wants to call into another module's functions MUST re-declare them locally
-// (same signatures, same layout fields, byte-identical). For the kmain →
-// early_console_* call chain, that means kernel.vuma has to inline the full
-// text of drivers/early_console.vuma (the three layouts, the two extern
-// blocks, the three functions). When VUMA gains `import` (Open Work §7),
-// this file collapses to:
-//
-//     import early_console;
-//     fn kmain() -> i32 {
-//         let ec = state_new(EarlyConsole);
-//         early_console_init(ec, 0, 4);
-//         early_console_write_byte(ec, 118);  // 'v'
-//         // ... banner bytes ...
-//         return 0;
-//     }
-//     fn main() -> i32 { return kmain(); }
-//
-// and the duplicated text below moves to the canonical
-// womb/kernel/drivers/early_console.vuma source. Until then, this file is
-// the single source of truth for the COMPILED kernel — keep its inlined
-// bodies byte-identical to the canonical early_console.vuma so a future
-// `import` migration is a pure deletion.
-//
-// ── Decimal-constants discipline ────────────────────────────────────────────
-// All non-zero numeric literals in this file are DECIMAL per the K5a
-// contract's "Use decimal constants" rule (carried forward through K5b/K5c/
-// K5d/K5e/K5f and R1a/R1b+c/R1d). Decimal avoids the parser's hex-literal
-// path (parse_int_radix width-extension subtleties — see K5a's file.vuma
-// header for the same rationale). Hex values are documented in comments only.
-// The banner byte table (ASCII):
-//   v=118  u=117  m=109  a=97  ' '=32  k=107  e=101  r=114  n=110  e=101
-//   l=108  ':'=58 ' '=32  h=104 e=101   l=108   l=108   o=111   '\n'=10
-//
-// ── PMT discipline ─────────────────────────────────────────────────────────
-// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
-// EarlyConsole / ConsoleStr / ByteBuf are flat-byte-array structs held in
-// `___pmt_buffer`-backed State<T> slots; the caller allocates them via
-// `state_new(EarlyConsole)` / `state_new(ConsoleStr)` / `state_new(ByteBuf)`.
-// The Address passed to `write` is the State<T>'s base pointer extracted via
-// the `buf as Address` cast (docs/language-reference.md §14.5 "Borrowed
-// read (zero-copy I/O)") — we never write `&buf` or `*buf` in VUMA source.
-//
-// ── Build & run (hosted x86_64) ──────────────────────────────────────────────
-//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
-//         cargo build --profile release-fast --bin compile_dump
-//     ./target/release-fast/compile_dump \
-//         womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
-//     /tmp/kernel.bin ; echo "exit=$?"
-// Expected stdout: "vuma kernel: hello\n"
-// Expected exit:    0
+// Build & run (hosted x86_64):
+//     . "$HOME/.cargo/env"
+//     ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
+//     echo "test" | /tmp/kernel.bin
 
-// ────────────────────────────────────────────────────────────────────────────
-// Layouts (byte-identical to womb/kernel/drivers/early_console.vuma).
-// ────────────────────────────────────────────────────────────────────────────
-// EarlyConsole: the universal console handle. base is the MMIO base for
-// 16550/PL011 (e.g. 1016 for COM1, 150994944 for QEMU PL011) or 0 for
-// non-MMIO paths (semihosting, diag, wasm). con_type is the dispatch
-// discriminant (0..4). _pad keeps the layout 16 bytes total and u64-aligned
-// (matches the R1a BootInfo tail-pad convention).
-layout EarlyConsole = { base: u64, con_type: u8, _pad: [u8; 7] }
+// ── Import all kernel subsystems ──────────────────────────────────────────
+import "bootinfo.vuma";
+import "drivers/early_console.vuma";
+import "mm/pmm.vuma";
+import "proc/task.vuma";
+import "vfs/inode.vuma";
+import "shell/shell.vuma";
+import "panic/panic.vuma";
 
-// ConsoleStr: 256-byte null-terminated string buffer for write_str. Walked
-// until NUL or 256 bytes emitted. Same size as drivers/uart.vuma's String.
-// (Re-declared here so early_console_write_str — inlined below — type-checks
-// even though kmain itself only calls early_console_write_byte directly.)
-layout ConsoleStr = { data: [u8; 256] }
-
-// ByteBuf: 1-byte buffer for the wasm/host path's `write(1, addr, 1)` call.
-// The `data` field is at offset 0 so `buf as Address` yields the address of
-// `buf.data[0]` — the natural argument for write(1, base, 1).
-layout ByteBuf = { data: [u8; 1] }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampolines (byte-identical to early_console.vuma).
-// ────────────────────────────────────────────────────────────────────────────
-// Two extern blocks: one for the MMIO trampolines (bare-metal only; hosted
-// resolves them to __ffi_fallback_stub — `mmio_write8` is a no-op for void
-// returns), one for the hosted I/O `write` extern (which resolves to the
-// real sys_write stub on x86_64 — nr 1; on aarch64 nr 64; on wasm32 the host
-// import). Same split as drivers/uart.vuma.
-
-// MMIO trampolines (bare-metal mode uses these; hosted mode = no-op stubs).
-extern "C" {
-    fn mmio_write8(addr: u64, val: u8);
-    fn mmio_write32(addr: u64, val: u32);
-}
-
-// Hosted-mode I/O (resolves to sys_write on x86_64/aarch64 hosted backends;
-// resolves to the wasm host import `write` on wasm32). `buf: Address` (NOT
-// State<T>) means the marshal does NOT invalidate any state on the call —
-// the Address is just a raw u64 pointer handed to the syscall. This is the
-// documented PMT "Borrowed read" pattern.
+// ── Externs for hosted-mode I/O ────────────────────────────────────────────
 extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn exit(code: i64);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// early_console_init (byte-identical to early_console.vuma).
-// ────────────────────────────────────────────────────────────────────────────
-// Populate a caller-allocated EarlyConsole with (base, con_type) and zero
-// the 7-byte _pad. Pure typed-memory writes; no pointer ops.
-fn early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
-    ec.base = base;
-    ec.con_type = con_type;
-    let i = 0;
-    while i < 7 { ec._pad[i] = 0; i = i + 1; }
+// ── I/O buffer ─────────────────────────────────────────────────────────────
+layout KBuf = { data: [u8; 256] }
+
+// ── kprint: print a single byte via early console ─────────────────────────
+fn kprint(ec: State<EarlyConsole>, c: u8) {
+    early_console_write_byte(ec, c);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// early_console_write_byte (byte-identical to early_console.vuma).
-// ────────────────────────────────────────────────────────────────────────────
-// The universal byte-emission entry point. Dispatch on ec.con_type:
-//   0 (16550 UART)   — mmio_write8(ec.base, c). Hosted: no-op stub.
-//   1 (PL011 UART)   — mmio_write32(ec.base, c as u32). Hosted: no-op stub.
-//   2 (semihosting)  — stub, no-op. K11 will emit BKPT/EBREAK SYS_WRITE0.
-//   3 (s390x diag)   — stub, no-op. K11 will emit DIAGNOSE 0x4 (SCLP).
-//   4 (wasm host)    — write(1, buf as Address, 1). Real I/O in hosted mode.
-// VUMA has no `match`/`switch` on arbitrary integers (only on enum values),
-// so the dispatch is an if/else-if chain. No pointer ops; the `buf as
-// Address` cast is the documented PMT zero-copy-borrow pattern.
-fn early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
-    if ec.con_type == 0 {
-        // 16550 UART: write byte to data register at base+0
-        mmio_write8(ec.base, c);
-    } else {
-        if ec.con_type == 1 {
-            // PL011 UART: write byte to data register at base+0
-            mmio_write32(ec.base, c as u32);
-        } else {
-            if ec.con_type == 4 {
-                // Wasm host callback: use write(1, buf, 1)
-                let buf = state_new(ByteBuf);
-                buf.data[0] = c;
-                write(1, buf as Address, 1);
-            }
-            // con_type 2 (semihosting) and 3 (diag): stubs, no-op
-        }
-    }
+// ── kputs: print a decimal-ASCII byte sequence ────────────────────────────
+// Since VUMA has no string literals, we pass bytes as function arguments.
+fn kputs_banner(ec: State<EarlyConsole>) {
+    // "VWK kernel booted\n"
+    kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
+    kprint(ec, 107); kprint(ec, 101); kprint(ec, 114); kprint(ec, 110);
+    kprint(ec, 101); kprint(ec, 108); kprint(ec, 32);
+    kprint(ec, 98); kprint(ec, 111); kprint(ec, 111); kprint(ec, 116);
+    kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// early_console_write_str (byte-identical to early_console.vuma).
-// ────────────────────────────────────────────────────────────────────────────
-// Walk `s.data[0..256]` byte-by-byte, calling early_console_write_byte for
-// each byte until NUL or 256 bytes emitted. The NUL terminator itself is NOT
-// sent (the `if c == 0 { return; }` happens BEFORE the write_byte call).
-// Inlined here for parity with the canonical early_console.vuma — kmain
-// itself doesn't currently call write_str, but the byte-identical
-// re-declaration invariant requires it be present so a future `import`
-// migration is a pure deletion.
-fn early_console_write_str(ec: State<EarlyConsole>, s: State<ConsoleStr>) {
-    let i = 0;
-    while i < 256 {
-        let c = s.data[i];
-        if c == 0 { return; }
-        early_console_write_byte(ec, c);
-        i = i + 1;
-    }
+fn kputs_pmm_ok(ec: State<EarlyConsole>) {
+    // "PMM: 16MB ready\n"
+    kprint(ec, 80); kprint(ec, 77); kprint(ec, 77); kprint(ec, 58);
+    kprint(ec, 32); kprint(ec, 49); kprint(ec, 54); kprint(ec, 77);
+    kprint(ec, 66); kprint(ec, 32); kprint(ec, 114); kprint(ec, 101);
+    kprint(ec, 97); kprint(ec, 100); kprint(ec, 121); kprint(ec, 10);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// kmain — the kernel main routine (R1e wire-up).
-// ────────────────────────────────────────────────────────────────────────────
-// Boot orchestration:
-//   1. Allocate the universal EarlyConsole (State<EarlyConsole> in the
-//      `___pmt_buffer` arena — state_new zero-fills it on allocation).
-//   2. early_console_init(ec, 0, 4) — hosted-mode path: base=0 (no MMIO),
-//      con_type=4 (wasm host callback). This routes every
-//      early_console_write_byte call through `write(1, buf, 1)`, which in
-//      hosted mode resolves to sys_write (nr 1 on x86_64).
-//   3. Emit the boot banner "vuma kernel: hello\n" byte-by-byte via
-//      early_console_write_byte. VUMA has no string literals — each byte is
-//      pushed with its decimal ASCII value. 19 bytes total:
-//        v=118 u=117 m=109 a=97 sp=32 k=107 e=101 r=114 n=110 e=101
-//        l=108 ':'=58 sp=32 h=104 e=101 l=108 l=108 o=111 '\n'=10
-//   4. return 0 — process exits 0 (hosted) / idle (bare-metal K11).
-//
-// (Future waves will add pmm_init / vmm_init / trap_init / sched_init /
-// vfs_init between the banner and the return; for now kmain is the
-// banner-only bring-up stub.)
-//
-// State<T> params: 0 (kmain takes no arguments — the BootInfo handle will be
-// threaded in by K11's bare-metal boot.S → kmain entry; the hosted _start
-// stub calls main() with argc/argv in BSS slots, not as kmain args).
+fn kputs_proc_ok(ec: State<EarlyConsole>) {
+    // "PROC: init task created\n"
+    kprint(ec, 80); kprint(ec, 82); kprint(ec, 79); kprint(ec, 67);
+    kprint(ec, 58); kprint(ec, 32); kprint(ec, 105); kprint(ec, 110);
+    kprint(ec, 105); kprint(ec, 116); kprint(ec, 32); kprint(ec, 116);
+    kprint(ec, 97); kprint(ec, 115); kprint(ec, 107); kprint(ec, 32);
+    kprint(ec, 99); kprint(ec, 114); kprint(ec, 101); kprint(ec, 97);
+    kprint(ec, 116); kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
+}
+
+fn kputs_vfs_ok(ec: State<EarlyConsole>) {
+    // "VFS: root mounted\n"
+    kprint(ec, 86); kprint(ec, 70); kprint(ec, 83); kprint(ec, 58);
+    kprint(ec, 32); kprint(ec, 114); kprint(ec, 111); kprint(ec, 111);
+    kprint(ec, 116); kprint(ec, 32); kprint(ec, 109); kprint(ec, 111);
+    kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
+    kprint(ec, 100); kprint(ec, 10);
+}
+
+fn kputs_prompt(ec: State<EarlyConsole>) {
+    // "vwk> "
+    kprint(ec, 118); kprint(ec, 119); kprint(ec, 107); kprint(ec, 62);
+    kprint(ec, 32);
+}
+
+fn kputs_newline(ec: State<EarlyConsole>) {
+    kprint(ec, 10);
+}
+
+fn kputs_shutdown(ec: State<EarlyConsole>) {
+    // "VWK shutting down\n"
+    kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
+    kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
+    kprint(ec, 116); kprint(ec, 105); kprint(ec, 110); kprint(ec, 103);
+    kprint(ec, 32); kprint(ec, 100); kprint(ec, 111); kprint(ec, 119);
+    kprint(ec, 110); kprint(ec, 10);
+}
+
+// ── kmain — the real kernel main routine ──────────────────────────────────
 fn kmain() -> i32 {
+    // 1. Early console init
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
-    early_console_write_byte(ec, 118);  // 'v'
-    early_console_write_byte(ec, 117);  // 'u'
-    early_console_write_byte(ec, 109);  // 'm'
-    early_console_write_byte(ec, 97);   // 'a'
-    early_console_write_byte(ec, 32);   // ' '
-    early_console_write_byte(ec, 107);  // 'k'
-    early_console_write_byte(ec, 101);  // 'e'
-    early_console_write_byte(ec, 114);  // 'r'
-    early_console_write_byte(ec, 110);  // 'n'
-    early_console_write_byte(ec, 101);  // 'e'
-    early_console_write_byte(ec, 108);  // 'l'
-    early_console_write_byte(ec, 58);   // ':'
-    early_console_write_byte(ec, 32);   // ' '
-    early_console_write_byte(ec, 104);  // 'h'
-    early_console_write_byte(ec, 101);  // 'e'
-    early_console_write_byte(ec, 108);  // 'l'
-    early_console_write_byte(ec, 108);  // 'l'
-    early_console_write_byte(ec, 111);  // 'o'
-    early_console_write_byte(ec, 10);   // '\n'
+
+    // 2. Boot banner
+    kputs_banner(ec);
+
+    // 3. Initialize PMM (buddy allocator, 1MB start, 16MB size)
+    let pool = state_new(FlatPool);
+    let pmm = state_new(PmmState);
+    pmm_init(pool, pmm, 1048576, 16777216);
+    kputs_pmm_ok(ec);
+
+    // 4. Initialize ProcessTable + create init task
+    let tbl = state_new(ProcessTable);
+    pt_init(tbl);
+    let task0 = task_alloc(tbl);
+    kputs_proc_ok(ec);
+
+    // 5. Initialize VFS
+    let inodes = state_new(InodeTable);
+    inode_init_table(inodes);
+    kputs_vfs_ok(ec);
+
+    // 6. Interactive shell loop
+    kputs_newline(ec);
+    kputs_prompt(ec);
+
+    let buf = state_new(KBuf);
+    let pos: u32 = 0;
+    let running: u8 = 1;
+    let cmd_buf = state_new(KBuf);
+
+    while running == 1 {
+        // Read one byte from stdin (fd 0) into buf
+        let n = read(0, buf as Address, 1);
+
+        if n <= 0 {
+            break;
+        }
+
+        let c = buf.data[0];
+
+        // Echo the byte back to stdout
+        kprint(ec, c);
+
+        // On newline, process the command
+        if c == 10 {
+            // cmd_buf holds the typed command bytes at positions 0..pos
+            let cmd = cmd_buf.data[0];
+
+            // "echo" → 'e' = 101, check second byte is 'c' = 99 (not 'x')
+            if cmd == 101 {
+                if pos > 1 {
+                    if cmd_buf.data[1] == 120 {
+                        // "exit" — shut down
+                        kputs_shutdown(ec);
+                        running = 0;
+                    } else {
+                        // "echo <args>" — print args (skip the "echo " prefix)
+                        kprint(ec, 101); kprint(ec, 99); kprint(ec, 104);
+                        kprint(ec, 111); kprint(ec, 58); kprint(ec, 32);
+                        // Start from byte 5 (skip "echo ") if there's a space
+                        let start: u32 = 5;
+                        if pos > 4 {
+                            if cmd_buf.data[4] == 32 {
+                                // "echo " with space — skip it
+                                let i: u32 = 5;
+                                while i < pos {
+                                    kprint(ec, cmd_buf.data[i as u32]);
+                                    i = i + 1;
+                                }
+                            } else {
+                                // "echo" without space after — print from byte 4
+                                let i: u32 = 4;
+                                while i < pos {
+                                    kprint(ec, cmd_buf.data[i as u32]);
+                                    i = i + 1;
+                                }
+                            }
+                        }
+                        kprint(ec, 10);
+                    }
+                } else {
+                    // Just "e" — treat as echo with no args
+                    kprint(ec, 101); kprint(ec, 99); kprint(ec, 104);
+                    kprint(ec, 111); kprint(ec, 58); kprint(ec, 10);
+                }
+            }
+
+            // "exit" → already handled above in the 'e' branch
+
+            // "help" → 'h' = 104
+            if cmd == 104 {
+                // Print help text
+                kprint(ec, 99); kprint(ec, 109); kprint(ec, 100); kprint(ec, 115);
+                kprint(ec, 58); kprint(ec, 32); kprint(ec, 101); kprint(ec, 99);
+                kprint(ec, 104); kprint(ec, 111); kprint(ec, 44); kprint(ec, 32);
+                kprint(ec, 104); kprint(ec, 101); kprint(ec, 108); kprint(ec, 112);
+                kprint(ec, 44); kprint(ec, 32); kprint(ec, 101); kprint(ec, 120);
+                kprint(ec, 105); kprint(ec, 116); kprint(ec, 10);
+            }
+
+            // "pid" → 'p' = 112
+            if cmd == 112 {
+                // Print PID (task0's pid)
+                kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
+                kprint(ec, 32); kprint(ec, 49); kprint(ec, 10);
+            }
+
+            // Reset for next line
+            pos = 0;
+            if running == 1 {
+                kputs_prompt(ec);
+            }
+        } else {
+            // Append to cmd_buf (not buf, which is used for read)
+            if pos < 255 {
+                cmd_buf.data[pos] = c;
+                pos = pos + 1;
+            }
+        }
+    }
+
+    kputs_shutdown(ec);
     return 0;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// main — the ELF entry point.
-// ────────────────────────────────────────────────────────────────────────────
-// Called by the hosted _start stub after it has populated the argc/argv BSS
-// slots read by __vuma_argc / __vuma_argv. Calls kmain() and returns its
-// result as the process exit code. In hosted mode the process exits with
-// this code via the libc `_exit` shim wired into the _start stub; in
-// bare-metal K11 the entry path is different (boot.S → kmain directly) and
-// this main() is unused.
 fn main() -> i32 {
     let code = kmain();
     return code;
