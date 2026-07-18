@@ -3472,7 +3472,16 @@ impl IRBuilder {
                 self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
             })
             .or_else(|| self.expr_ir_type(&comp.lhs))
-            .or_else(|| self.expr_ir_type(&comp.rhs));
+            .or_else(|| self.expr_ir_type(&comp.rhs))
+            .or_else(|| {
+                // G7: check param_types by name (for function parameters
+                // whose vreg was remapped by loop-body SSA renaming).
+                if let ScgExpr::Var(name) = &comp.lhs {
+                    self.param_types.get(name).cloned()
+                } else {
+                    None
+                }
+            });
         // Record the dst vreg's type so downstream operations can use it
         if let Some(ref ty) = op_ty {
             self.vreg_types.insert(dst_vreg, ty.clone());
@@ -3892,6 +3901,17 @@ impl IRBuilder {
                 self.pointer_vregs.insert(vreg);
                 self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
             }
+            // G7: register result types for float-conversion builtins so
+            // downstream BinOp/Cmp instructions can dispatch to the FP path.
+            match call.func.as_str() {
+                "inttofloat" | "uinttofloat" | "floattofloat" => {
+                    self.vreg_types.insert(vreg, crate::ir::IRType::F64);
+                }
+                "floattoint" | "floattouint" => {
+                    self.vreg_types.insert(vreg, crate::ir::IRType::I64);
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -4218,6 +4238,7 @@ impl IRBuilder {
     fn resolve_expr(&mut self, expr: &ScgExpr, names: &HashMap<String, u32>, ir_func: &mut IRFunction) -> Result<IRValue> {
         match expr {
             ScgExpr::Var(name) => {
+
                 // Try user-visible name first (via alias map) because
                 // user names are always updated to the latest vreg by
                 // lower_computation's reassigns handling. The synthetic
