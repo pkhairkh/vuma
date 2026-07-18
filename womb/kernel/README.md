@@ -1,7 +1,7 @@
 # VWK — The Vuma Womb Kernel
 
 The **VWK** (Vuma Womb Kernel) is a kernel written entirely in VUMA 2.0's
-own PMT syntax. It lives under `womb/kernel/` and consists of **75 `.vuma`
+own PMT syntax. It lives under `womb/kernel/` and consists of **84 `.vuma`
 files** organized into 14 subsystem directories plus a per-architecture
 layer for x86_64, aarch64, and riscv64. The kernel is **PMT-pure**: there
 is no pointer syntax (`*T`, `&x`, `allocate`, `free`), no `--pmt` flag, no
@@ -133,7 +133,7 @@ per-arch layer and the top-level kernel entry:
 | **hosted** | `hosted/` | 1 | `host` (host_* wrappers around trampoline.vuma externs) |
 | **Total** | | **75** | |
 
-Grand total: **75 files, ~33,470 LOC**.
+Grand total: **84 files, ~33,470 LOC**.
 
 ---
 
@@ -433,7 +433,7 @@ the substrate the PMT verifiers target.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│  L4 — PMT Kernel Logic (womb/kernel/*.vuma — 75 files)                 │
+│  L4 — PMT Kernel Logic (womb/kernel/*.vuma — 84 files)                 │
 │    Pure PMT — State<T>, state_new, layout field access.                │
 │    Verification: IVE StateRead + StateWrite + StateTransform (compile).│
 └────────────────────────────────────────────────────────────────────────┘

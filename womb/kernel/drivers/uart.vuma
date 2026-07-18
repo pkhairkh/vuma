@@ -5,7 +5,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the K6a layer of the VWK kernel: the UART driver. The kernel
-// console (K6 next: womb/kernel/console.vuma already exists from K1a) needs
+// console (K6 next: womb/kernel/tty/console.vuma already exists from K1a) needs
 // a byte-level serial driver underneath it; this file provides that driver
 // for the two UARTs the VWK target hardware exposes:
 //   - 8250 (PC COM1 @ 0x3F8) — used by QEMU's `pc`/`q35` x86_64 machines.
@@ -243,7 +243,7 @@ extern "C" {
 
 // Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
 // sys_write on x86_64 / aarch64 hosted backends). Same declaration as
-// womb/kernel/console.vuma / kmain.vuma / arch/x86_64/trampoline.vuma.
+// womb/kernel/tty/console.vuma / kmain.vuma / arch/x86_64/trampoline.vuma.
 // `buf: Address` (NOT State<T>) means the marshal does NOT invalidate any
 // state on the call — the Address is just a raw u64 pointer handed to
 // the syscall. This is the documented PMT "Borrowed read" pattern.

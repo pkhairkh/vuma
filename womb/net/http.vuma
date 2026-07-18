@@ -1,4 +1,4 @@
-// womb/lib/http.vuma — HTTP/1.1 Parser and Builder (RFC 7230 / RFC 9112)
+// womb/net/http.vuma — HTTP/1.1 Parser and Builder (RFC 7230 / RFC 9112)
 // No main() — importable library module.
 //
 // Task ID: W4.1

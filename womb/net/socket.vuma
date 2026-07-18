@@ -1,7 +1,7 @@
-// womb/lib/socket.vuma — BSD Socket API (POSIX sys/socket.h equivalent)
+// womb/net/socket.vuma — BSD Socket API (POSIX sys/socket.h equivalent)
 // No main() — importable library module.
 // Provides: full TCP/UDP socket API + inet_pton/ntop + htons/ntohs
-// Requires: import "../lib/string.vuma"::{htons, ntohs, htonl, ntohl};
+// Requires: ::{htons, ntohs, htonl, ntohl};
 // Uses the vuma-native syscall() intrinsic for all socket syscalls (asm-generic nrs).
 //
 // PMT migration (Wave 8c): the local `allocate(N)` scratch buffers
