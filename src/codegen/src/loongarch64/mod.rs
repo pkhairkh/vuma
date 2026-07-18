@@ -1617,26 +1617,36 @@ impl Instruction {
             Instruction::FmovD { fd, fj } => encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding()),
 
             // ── FP Conversion (2R) ──────────────────────────────
-            // FFINT.S.W: opcode=0x004519 (i32→f32)
-            Instruction::FfintSW { fd, fj } => encode_2r(0x004519, fj.encoding(), fd.encoding()),
-            // FFINT.S.L: opcode=0x00451A (i64→f32)
-            Instruction::FfintSL { fd, fj } => encode_2r(0x00451A, fj.encoding(), fd.encoding()),
-            // FFINT.D.W: opcode=0x00451B (i32→f64)
-            Instruction::FfintDW { fd, fj } => encode_2r(0x00451B, fj.encoding(), fd.encoding()),
-            // FFINT.D.L: opcode=0x00451C (i64→f64)
-            Instruction::FfintDL { fd, fj } => encode_2r(0x00451C, fj.encoding(), fd.encoding()),
-            // FTINT.W.S: opcode=0x00450C (f32→i32)
-            Instruction::FtintWS { fd, fj } => encode_2r(0x00450C, fj.encoding(), fd.encoding()),
-            // FTINT.W.D: opcode=0x00450D (f64→i32)
-            Instruction::FtintWD { fd, fj } => encode_2r(0x00450D, fj.encoding(), fd.encoding()),
-            // FTINT.L.S: opcode=0x00450E (f32→i64)
-            Instruction::FtintLS { fd, fj } => encode_2r(0x00450E, fj.encoding(), fd.encoding()),
-            // FTINT.L.D: opcode=0x00450F (f64→i64)
-            Instruction::FtintLD { fd, fj } => encode_2r(0x00450F, fj.encoding(), fd.encoding()),
-            // FCVT.D.S: opcode=0x004502 (f32→f64)
-            Instruction::FcvtDS { fd, fj } => encode_2r(0x004502, fj.encoding(), fd.encoding()),
-            // FCVT.S.D: opcode=0x004503 (f64→f32)
-            Instruction::FcvtSD { fd, fj } => encode_2r(0x004503, fj.encoding(), fd.encoding()),
+            // Opcodes verified against QEMU 7.2.0 loongarch64 disassembly.
+            // The 0x004502-0x00451F range used previously maps to fabs/fclass/
+            // frsqrt — *not* the conversion instructions — which is why QEMU
+            // raised SIGILL on every Cast. The real conversions live in the
+            // 0x0046XX (fcvt/ftint) and 0x0047XX (ffint) ranges.
+            //
+            // For FloatToInt casts we use the round-toward-zero (truncating)
+            // `ftintrz.*` variants rather than the default-rounding `ftint.*`,
+            // matching Rust `as` semantics (e.g. 9.7 -> 9, not 10).
+            //
+            // FFINT.S.W: opcode=0x004744 (i32→f32)
+            Instruction::FfintSW { fd, fj } => encode_2r(0x004744, fj.encoding(), fd.encoding()),
+            // FFINT.S.L: opcode=0x004746 (i64→f32)
+            Instruction::FfintSL { fd, fj } => encode_2r(0x004746, fj.encoding(), fd.encoding()),
+            // FFINT.D.W: opcode=0x004748 (i32→f64)
+            Instruction::FfintDW { fd, fj } => encode_2r(0x004748, fj.encoding(), fd.encoding()),
+            // FFINT.D.L: opcode=0x00474A (i64→f64)
+            Instruction::FfintDL { fd, fj } => encode_2r(0x00474A, fj.encoding(), fd.encoding()),
+            // FTINTRZ.W.S: opcode=0x0046A1 (f32→i32, round toward zero)
+            Instruction::FtintWS { fd, fj } => encode_2r(0x0046A1, fj.encoding(), fd.encoding()),
+            // FTINTRZ.W.D: opcode=0x0046A2 (f64→i32, round toward zero)
+            Instruction::FtintWD { fd, fj } => encode_2r(0x0046A2, fj.encoding(), fd.encoding()),
+            // FTINTRZ.L.S: opcode=0x0046A9 (f32→i64, round toward zero)
+            Instruction::FtintLS { fd, fj } => encode_2r(0x0046A9, fj.encoding(), fd.encoding()),
+            // FTINTRZ.L.D: opcode=0x0046AA (f64→i64, round toward zero)
+            Instruction::FtintLD { fd, fj } => encode_2r(0x0046AA, fj.encoding(), fd.encoding()),
+            // FCVT.D.S: opcode=0x004649 (f32→f64)
+            Instruction::FcvtDS { fd, fj } => encode_2r(0x004649, fj.encoding(), fd.encoding()),
+            // FCVT.S.D: opcode=0x004646 (f64→f32)
+            Instruction::FcvtSD { fd, fj } => encode_2r(0x004646, fj.encoding(), fd.encoding()),
 
             // ── FP Compare (4R-like) ──────────────────────────────
             Instruction::FCmpS { cond, fj, fk, cd } => encode_4r(

@@ -22,7 +22,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction,
     BackendError, PhysicalReg, RegClass, RelocationEntry,
 };
-use crate::ir::{BinOpKind, CastKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
@@ -62,6 +62,9 @@ use super::{
     encode_mov_reg_imm32, encode_mov_reg_imm64, encode_mov_reg_mem, encode_mov_reg_reg,
     encode_movd_gpr_xmm, encode_movd_xmm_gpr,
     encode_movq_gpr_xmm, encode_movq_xmm_gpr,
+    encode_movq_xmm_mem, encode_movq_mem_xmm,
+    encode_movss_xmm_mem, encode_movss_mem_xmm,
+    encode_store_imm32_mem_ebp,
     encode_movsx_reg8,
     encode_movsx_reg8_mem,
     encode_movsx_reg16,
@@ -81,6 +84,241 @@ use super::{
     encode_test_reg_reg,
     encode_xor_reg_imm32, encode_xor_reg_reg,
 };
+
+// =============================================================================
+// FP type inference — pre-pass
+// =============================================================================
+
+/// Infer which virtual registers hold floating-point (F32/F64) values.
+///
+/// VUMA's `scg_to_ir` lowering hardcodes `ty: None` on every `Add`/`Sub`/
+/// `Mul`/`Div` (arithmetic is type-tag-polymorphic in the IR but the type
+/// tag is dropped before backend lowering).  As a result, the x86_32 backend
+/// cannot dispatch to the SSE/SSE2 path by inspecting `ty` alone.  This
+/// pre-pass walks the IR forward to fixed-point and recovers FP-ness from:
+///
+///   * function parameters with declared F32/F64 type,
+///   * `Cast { IntToFloat | UIntToFloat | FloatToFloat }` outputs,
+///   * `Call` to the runtime float-conversion builtins `inttofloat` /
+///     `uinttofloat` (which the IR builder emits as ordinary calls rather
+///     than `Cast`s — see `lower_call` in `scg_to_ir.rs`),
+///   * `Load` with F32/F64 type,
+///   * `Add`/`Sub`/`Mul`/`Div`/`BinOp`/`Phi`/`Select` whose operands (or
+///     any incoming, for `Phi`) are already known-FP,
+///   * the IEEE-754 NaN-producing pattern `0 / 0` (both operands provably
+///     zero with no type tag): integer `0 / 0` is undefined (SIGFPE on
+///     x86), so reclassifying it as FP division (which produces NaN) is
+///     strictly safer and is the only way to recover the FP type when the
+///     IR has dropped it (e.g. `nan: f64 = 0.0 / 0.0`).
+///
+/// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
+/// match arms below to decide between the integer and SSE codegen paths.
+///
+/// This is a verbatim port of the x86_64 pre-pass (see
+/// `x86_64/stack_slot_isel.rs`); x86_32 needs the same inference because
+/// its `Add`/`Sub`/`Mul`/`Div` arms also see `ty: None` for FP arithmetic.
+fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
+    use std::collections::HashSet;
+    let mut fp: HashSet<u32> = HashSet::new();
+    let mut fp_f32: HashSet<u32> = HashSet::new();  // specifically f32 (not f64)
+    // Track vregs that provably hold the integer/float bit-pattern 0
+    // (used to recognise the `0.0 / 0.0` NaN pattern when `ty` is None).
+    let mut zero: HashSet<u32> = HashSet::new();
+
+    let is_zero = |v: &IRValue, zero: &HashSet<u32>| -> bool {
+        match v {
+            IRValue::Immediate(0) => true,
+            IRValue::Register(id) => zero.contains(id),
+            _ => false,
+        }
+    };
+    let is_fp = |v: &IRValue, fp: &HashSet<u32>| -> bool {
+        match v {
+            IRValue::Register(id) => fp.contains(id),
+            _ => false,
+        }
+    };
+
+    // Seed: function parameters with FP types.
+    for (param, ty) in func.params.iter().zip(func.param_types.iter()) {
+        if matches!(ty, IRType::F32 | IRType::F64) {
+            if let Some(id) = param.as_register() {
+                fp.insert(id);
+                if matches!(ty, IRType::F32) {
+                    fp_f32.insert(id);
+                }
+            }
+        }
+    }
+
+    // Iterate to fixed point (Phis / loops may need multiple passes).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::Cast { kind, dst, src, .. } => {
+                        if matches!(kind, CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat) {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        // Backward propagation: when a Cast reads an FP value
+                        // (FloatToInt / FloatToUInt / FloatToFloat), the src
+                        // vreg MUST hold an FP value.  Mark it FP so the
+                        // producing instruction uses the FP path on the next
+                        // fixed-point pass.  This is critical on x86_32,
+                        // where the integer path truncates 64-bit f64 values.
+                        if matches!(kind, CastKind::FloatToInt | CastKind::FloatToUInt | CastKind::FloatToFloat) {
+                            if let IRValue::Register(id) = src {
+                                if fp.insert(*id) { changed = true; }
+                            }
+                        }
+                        // Zero propagates through int<->int casts.
+                        if matches!(kind, CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast)
+                            && is_zero(src, &zero)
+                        {
+                            if let Some(id) = dst.as_register() {
+                                if zero.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Call { dst, func: fname, .. } => {
+                        if fname == "inttofloat" || fname == "uinttofloat" {
+                            if let Some(d) = dst {
+                                if let Some(id) = d.as_register() {
+                                    if fp.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::Load { dst, ty, .. } => {
+                        if matches!(ty, IRType::F32 | IRType::F64) {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Add { dst, lhs, rhs, ty }
+                    | IRInstr::Sub { dst, lhs, rhs, ty }
+                    | IRInstr::Mul { dst, lhs, rhs, ty }
+                    | IRInstr::Div { dst, lhs, rhs, ty } => {
+                        let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        // `0 / 0` with no type tag: classify as FP (NaN).
+                        let zero_div_zero = matches!(instr, IRInstr::Div { .. })
+                            && ty.is_none()
+                            && is_zero(lhs, &zero)
+                            && is_zero(rhs, &zero);
+                        if op_fp || zero_div_zero {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                            // Backward propagation: when the instruction's
+                            // `ty` is explicitly FP, the operand vregs MUST
+                            // hold FP values (the IR builder emits `ty: F64`
+                            // only for genuine FP arithmetic).  Mark them FP
+                            // so the producing instructions (which may have
+                            // `ty: None`, e.g. constant-materialising Adds)
+                            // use the FP path on the next fixed-point pass.
+                            // This is critical on x86_32, where the integer
+                            // path truncates 64-bit f64 values to 32 bits.
+                            if ty_fp {
+                                if let IRValue::Register(id) = lhs {
+                                    if fp.insert(*id) { changed = true; }
+                                }
+                                if let IRValue::Register(id) = rhs {
+                                    if fp.insert(*id) { changed = true; }
+                                }
+                            }
+                        }
+                        // Zero propagation (only meaningful for integer ops).
+                        if !op_fp {
+                            let result_zero = match instr {
+                                IRInstr::Add { .. } => is_zero(lhs, &zero) && is_zero(rhs, &zero),
+                                IRInstr::Sub { .. } => match (lhs, rhs) {
+                                    (IRValue::Register(a), IRValue::Register(b)) if a == b => true,
+                                    _ => is_zero(lhs, &zero) && is_zero(rhs, &zero),
+                                },
+                                IRInstr::Mul { .. } => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                _ => false,
+                            };
+                            if result_zero {
+                                if let Some(id) = dst.as_register() {
+                                    if zero.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty, .. } => {
+                        let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                                // Track f32 specifically
+                                if matches!(ty, Some(IRType::F32)) {
+                                    fp_f32.insert(id);
+                                }
+                            }
+                            // Backward propagation (see Add/Sub/Mul/Div above).
+                            if ty_fp {
+                                if let IRValue::Register(id) = lhs {
+                                    if fp.insert(*id) { changed = true; }
+                                }
+                                if let IRValue::Register(id) = rhs {
+                                    if fp.insert(*id) { changed = true; }
+                                }
+                            }
+                        }
+                        if !op_fp {
+                            let result_zero = match op {
+                                BinOpKind::And => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                BinOpKind::Xor => {
+                                    lhs == rhs || (is_zero(lhs, &zero) && is_zero(rhs, &zero))
+                                }
+                                BinOpKind::Mul => is_zero(lhs, &zero) || is_zero(rhs, &zero),
+                                _ => false,
+                            };
+                            if result_zero {
+                                if let Some(id) = dst.as_register() {
+                                    if zero.insert(id) { changed = true; }
+                                }
+                            }
+                        }
+                    }
+                    IRInstr::Phi { dst, incoming } => {
+                        let op_fp = incoming.iter().any(|(v, _)| is_fp(v, &fp));
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                        if incoming.iter().all(|(v, _)| is_zero(v, &zero)) {
+                            if let Some(id) = dst.as_register() {
+                                if zero.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    IRInstr::Select { dst, true_val, false_val, ty, .. } => {
+                        let op_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                            || is_fp(true_val, &fp)
+                            || is_fp(false_val, &fp);
+                        if op_fp {
+                            if let Some(id) = dst.as_register() {
+                                if fp.insert(id) { changed = true; }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    (fp, fp_f32)
+}
 
 // =============================================================================
 // allocate_registers — Stack-Slot Code Generation
@@ -104,6 +342,13 @@ use super::{
 /// Callee-save: RBX, R12–R15 are pushed in prologue, popped in epilogue.
 pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     let func_name = func.name.clone();
+
+    // ── Phase 0: FP type inference ──
+    // VUMA's IR drops the type tag on arithmetic ops (Add/Sub/Mul/Div).
+    // Recover FP-ness from Casts, float-builtin Calls, param types, and
+    // operand propagation so the Add/Sub/Mul/Div/Cmp arms below can pick
+    // the SSE path. See `infer_fp_vregs` above for the full rule set.
+    let (fp_vregs, fp_vregs_f32) = infer_fp_vregs(func);
 
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
@@ -299,6 +544,96 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
     };
 
+    // ── FP load/store helpers (x86_32-specific) ──
+    //
+    // On x86_32, GPRs are only 32 bits wide, so the x86_64 pattern of
+    // ferrying f64 values through `RAX` via `MOVQ xmm, r64` does NOT work —
+    // `encode_movq_xmm_gpr` emits `66 0F 6E /r` (no REX.W on x86_32), which
+    // the CPU decodes as `MOVD xmm, r/m32` and silently zeroes the upper
+    // 32 bits of the XMM destination.  An f64 like `2.0` (`0x4000_0000_0000_0000`)
+    // would arrive in XMM0 as `0x0000_0000_4000_0000` (i.e. the subnormal
+    // `5.3e-314`), and `CVTTSD2SI` would then yield a wildly wrong integer.
+    //
+    // To move 64-bit FP values between the stack and XMMs correctly, we use
+    // the memory-operand forms:
+    //   • `MOVQ xmm, m64`  (F3 0F D6 /r mem) — load 8 bytes from a stack
+    //     slot directly into the low 64 bits of an XMM.
+    //   • `MOVQ m64, xmm`  (66 0F D6 /r mem) — store the low 64 bits of an
+    //     XMM directly to a stack slot.
+    //   • `MOVSS xmm, m32` / `MOVSS m32, xmm` for f32.
+    //
+    // For `IRValue::Immediate` sources, we cannot use a single `MOV r64, imm64`
+    // (x86_32 has no 64-bit GPR).  Instead we spill the 64-bit constant to
+    // `spill_off` as two 32-bit immediate-to-memory writes, then load it via
+    // `MOVQ xmm, [mem]`.  The caller passes `spill_off` (typically the
+    // destination's own stack slot, which is about to be overwritten anyway)
+    // because no `RAX`-mediated path can carry the bits.
+    let load_fp_to_xmm = |val: &IRValue, dst_xmm: Xmm, is_f64: bool, spill_off: i32| -> Vec<u8> {
+        let mut code = Vec::new();
+        match val {
+            IRValue::Register(id) => {
+                let off = slot_offset(*id);
+                if is_f64 {
+                    code.extend(encode_movq_xmm_mem(dst_xmm, Gpr::Rbp, off));
+                } else {
+                    code.extend(encode_movss_xmm_mem(dst_xmm, Gpr::Rbp, off));
+                }
+            }
+            IRValue::Immediate(imm) => {
+                let bits = *imm as u64;
+                let low = bits as u32 as i32;
+                let high = (bits >> 32) as u32 as i32;
+                code.extend(encode_store_imm32_mem_ebp(spill_off, low));
+                code.extend(encode_store_imm32_mem_ebp(spill_off + 4, high));
+                if is_f64 {
+                    code.extend(encode_movq_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                } else {
+                    code.extend(encode_movss_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                }
+            }
+            IRValue::Address(addr) => {
+                let bits = *addr as u64;
+                let low = bits as u32 as i32;
+                let high = (bits >> 32) as u32 as i32;
+                code.extend(encode_store_imm32_mem_ebp(spill_off, low));
+                code.extend(encode_store_imm32_mem_ebp(spill_off + 4, high));
+                if is_f64 {
+                    code.extend(encode_movq_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                } else {
+                    code.extend(encode_movss_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                }
+            }
+            IRValue::Label(name) => {
+                vuma_log!(warn, "IRValue::Label('{}') in load_fp_to_xmm: emitting placeholder 0", name);
+                code.extend(encode_store_imm32_mem_ebp(spill_off, 0));
+                code.extend(encode_store_imm32_mem_ebp(spill_off + 4, 0));
+                if is_f64 {
+                    code.extend(encode_movq_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                } else {
+                    code.extend(encode_movss_xmm_mem(dst_xmm, Gpr::Rbp, spill_off));
+                }
+            }
+        }
+        code
+    };
+
+    // Store an FP value from an XMM register directly to a vreg's stack slot.
+    // For f64: MOVQ [ebp+off], xmm  (writes all 8 bytes).
+    // For f32: MOVSS [ebp+off], xmm  (writes 4 bytes), then zero the high
+    //          4 bytes so the 8-byte slot doesn't retain stale garbage.
+    let store_xmm_to_vreg = |src_xmm: Xmm, dst_id: u32, is_f64: bool| -> Vec<u8> {
+        let off = slot_offset(dst_id);
+        let mut code = Vec::new();
+        if is_f64 {
+            code.extend(encode_movq_mem_xmm(Gpr::Rbp, off, src_xmm));
+        } else {
+            code.extend(encode_movss_mem_xmm(Gpr::Rbp, off, src_xmm));
+            // Zero the high 4 bytes (slot is 8 bytes; MOVSS writes only 4).
+            code.extend(encode_store_imm32_mem_ebp(off + 4, 0));
+        }
+        code
+    };
+
     // ── Phase 2: Generate prologue ──
 
     let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
@@ -389,75 +724,140 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
             let encoded = match instr {
                 // ── Add ──
-                IRInstr::Add { dst, lhs, rhs, .. } => {
+                IRInstr::Add { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load lhs into RAX
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    // Add rhs (immediate or from stack)
-                    if let IRValue::Immediate(imm) = rhs {
-                        let imm = *imm;
-                        if (-2147483648..=2147483647).contains(&imm) {
-                            code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                    // FP dispatch: if the dst vreg is known-FP (or ty says so),
+                    // use SSE ADDSD/ADDSS instead of the integer ADD.  On
+                    // x86_32, FP operands are loaded directly from memory into
+                    // XMM0/XMM1 via MOVQ/MOVSS xmm, [mem] (NOT via the GPR —
+                    // see mod.rs caveat about `encode_movq_xmm_gpr`).
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = matches!(ty, Some(IRType::F64))
+                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
+                        if is_f64 { code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        else { code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, is_f64));
+                        instr_opcode = Some(if is_f64 { "addsd" } else { "addss" }.to_string());
+                        code
+                    } else {
+                        // Load lhs into RAX
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        // Add rhs (immediate or from stack)
+                        if let IRValue::Immediate(imm) = rhs {
+                            let imm = *imm;
+                            if (-2147483648..=2147483647).contains(&imm) {
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                            } else {
+                                code.extend(load_value(rhs, Gpr::Rcx));
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
                         } else {
                             code.extend(load_value(rhs, Gpr::Rcx));
                             code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
                         }
-                    } else {
-                        code.extend(load_value(rhs, Gpr::Rcx));
-                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        // Store result to dst stack slot
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
                     }
-                    // Store result to dst stack slot
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
                 }
 
                 // ── Sub ──
-                IRInstr::Sub { dst, lhs, rhs, .. } => {
+                IRInstr::Sub { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    if let IRValue::Immediate(imm) = rhs {
-                        let imm = *imm;
-                        if (-2147483648..=2147483647).contains(&imm) {
-                            code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = matches!(ty, Some(IRType::F64))
+                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
+                        if is_f64 { code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        else { code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, is_f64));
+                        instr_opcode = Some(if is_f64 { "subsd" } else { "subss" }.to_string());
+                        code
+                    } else {
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if let IRValue::Immediate(imm) = rhs {
+                            let imm = *imm;
+                            if (-2147483648..=2147483647).contains(&imm) {
+                                code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                            } else {
+                                code.extend(load_value(rhs, Gpr::Rcx));
+                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
                         } else {
                             code.extend(load_value(rhs, Gpr::Rcx));
                             code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
                         }
-                    } else {
-                        code.extend(load_value(rhs, Gpr::Rcx));
-                        code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
                     }
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
                 }
 
                 // ── Mul ──
-                IRInstr::Mul { dst, lhs, rhs, .. } => {
+                IRInstr::Mul { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    code.extend(load_value(rhs, Gpr::Rcx));
-                    code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = matches!(ty, Some(IRType::F64))
+                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
+                        if is_f64 { code.extend(encode_mulsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        else { code.extend(encode_mulss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, is_f64));
+                        instr_opcode = Some(if is_f64 { "mulsd" } else { "mulss" }.to_string());
+                        code
+                    } else {
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        code.extend(load_value(rhs, Gpr::Rcx));
+                        code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
+                    }
                 }
 
                 // ── Div ──
-                IRInstr::Div { dst, lhs, rhs, .. } => {
+                IRInstr::Div { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load lhs into RAX
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    // Sign-extend RAX into RDX:RAX
-                    code.extend(encode_cqo());
-                    // Load rhs into RCX, then IDIV RCX
-                    code.extend(load_value(rhs, Gpr::Rcx));
-                    code.extend(encode_idiv_reg(Gpr::Rcx));
-                    // Quotient in RAX, store to dst
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
+                        || fp_vregs.contains(&dst_id);
+                    if is_fp {
+                        let is_f64 = matches!(ty, Some(IRType::F64))
+                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
+                        if is_f64 { code.extend(encode_divsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        else { code.extend(encode_divss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                        code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, is_f64));
+                        instr_opcode = Some(if is_f64 { "divsd" } else { "divss" }.to_string());
+                        code
+                    } else {
+                        // Load lhs into RAX
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        // Sign-extend RAX into RDX:RAX
+                        code.extend(encode_cqo());
+                        // Load rhs into RCX, then IDIV RCX
+                        code.extend(load_value(rhs, Gpr::Rcx));
+                        code.extend(encode_idiv_reg(Gpr::Rcx));
+                        // Quotient in RAX, store to dst
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
+                    }
                 }
 
                 // ── BinOp (generic) ──
@@ -468,25 +868,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // FP BinOp dispatch: when ty is F32/F64, use SSE/SSE2 scalar
                     // arithmetic (ADDSD/ADDSS, SUBSD/SUBSS, MULSD/MULSS,
                     // DIVSD/DIVSS) or UCOMISD/UCOMISS + SETcc for comparisons.
-                    // Operands are ferried through EAX and moved into XMM0/XMM1
-                    // via MOVQ (F64) or MOVD (F32).
+                    //
+                    // On x86_32, GPRs are 32-bit, so we cannot ferry f64
+                    // operands through EAX via `MOVQ xmm, r64` (the encoder
+                    // emits `66 0F 6E /r` without REX.W, which the CPU
+                    // decodes as the 32-bit `MOVD` and silently truncates).
+                    // Instead, we load each operand directly from its stack
+                    // slot into XMM0/XMM1 via `MOVQ xmm, [mem]` (f64) or
+                    // `MOVSS xmm, [mem]` (f32), and store the result back to
+                    // dst's slot via `MOVQ/MOVSS [mem], xmm`.
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64));
-                        // Load lhs → EAX → XMM0
-                        code.extend(load_value(lhs, Gpr::Rax));
-                        if is_f64 {
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                        } else {
-                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                        }
-                        // Load rhs → EAX → XMM1
-                        code.extend(load_value(rhs, Gpr::Rax));
-                        if is_f64 {
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
-                        } else {
-                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
-                        }
+                        let dst_off = slot_offset(dst_id);
+                        // Load lhs → XMM0 directly from memory (spill to
+                        // dst_off first if it's an Immediate, since x86_32
+                        // cannot hold a 64-bit constant in a single GPR).
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        // Load rhs → XMM1.  Reuse dst_off as the spill temp
+                        // (lhs is already preserved in XMM0, so overwriting
+                        // dst_off with rhs's bits is safe).
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
                         let mut is_cmp = false;
                         match op {
                             BinOpKind::Add => {
@@ -508,10 +910,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             BinOpKind::Eq | BinOpKind::Ne | BinOpKind::SLt | BinOpKind::SLe
                             | BinOpKind::SGt | BinOpKind::SGe | BinOpKind::ULt | BinOpKind::ULe
                             | BinOpKind::UGt | BinOpKind::UGe => {
-                                // UCOMISD/UCOMISS sets EFLAGS with the same
-                                // ZF/PF/CF semantics as CMP for the ordered case,
-                                // so we can reuse binop_cmp_to_cc + SETcc.
-                                let cc = binop_cmp_to_cc(op);
+                                // UCOMISD/UCOMISS sets EFLAGS with CF/ZF/PF
+                                // (NOT SF/OF like integer CMP).  The signed
+                                // condition codes (Less/Greater) depend on
+                                // SF/OF and would give wrong results after
+                                // UCOMIS*.  Remap to the unsigned conditions
+                                // (Below/Above) which use CF/ZF — matching
+                                // the x86_64 FP comparison path (G7).
+                                let cc = match op {
+                                    BinOpKind::SLt | BinOpKind::ULt => Cc::Below,
+                                    BinOpKind::SLe | BinOpKind::ULe => Cc::BelowEqual,
+                                    BinOpKind::SGt | BinOpKind::UGt => Cc::Above,
+                                    BinOpKind::SGe | BinOpKind::UGe => Cc::AboveEqual,
+                                    BinOpKind::Eq => Cc::Equal,
+                                    BinOpKind::Ne => Cc::NotEqual,
+                                    _ => Cc::Equal,
+                                };
                                 if is_f64 { code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
                                 else { code.extend(encode_ucomiss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
                                 code.extend(encode_setcc(cc, Gpr::Rax));
@@ -529,13 +943,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             }
                         }
                         if !is_cmp {
-                            // Move result back to EAX and store
-                            if is_f64 {
-                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
-                            } else {
-                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
-                            }
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                            // Store the FP result from XMM0 directly to dst's
+                            // slot via MOVQ/MOVSS [mem], xmm (NOT via the GPR —
+                            // `encode_movq_gpr_xmm` truncates on x86_32).
+                            code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, is_f64));
                         }
                         code
                     } else {
@@ -1300,30 +1711,32 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    let cc = cmp_kind_to_cc(kind);
                     // FP Cmp dispatch: when ty is F32/F64, use UCOMISD/UCOMISS
                     // instead of integer CMP (integer CMP on raw FP bits gives
                     // silently wrong results for negatives/NaN).
                     let is_fp_cmp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                     if is_fp_cmp {
                         let is_f64 = matches!(ty, Some(IRType::F64));
-                        // Load lhs → EAX → XMM0
-                        code.extend(load_value(lhs, Gpr::Rax));
-                        if is_f64 {
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                        } else {
-                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                        }
-                        // Load rhs → EAX → XMM1
-                        code.extend(load_value(rhs, Gpr::Rax));
-                        if is_f64 {
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
-                        } else {
-                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
-                        }
-                        // UCOMISD/UCOMISS sets EFLAGS with the same ZF/PF/CF
-                        // semantics as CMP for the ordered case, so we can
-                        // reuse cmp_kind_to_cc + SETcc.
+                        let dst_off = slot_offset(dst_id);
+                        // On x86_32, load FP operands directly from memory into
+                        // XMM0/XMM1 via MOVQ/MOVSS xmm, [mem] (NOT via the GPR —
+                        // see mod.rs caveat about `encode_movq_xmm_gpr`).
+                        code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
+                        code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
+                        // UCOMISD/UCOMISS sets EFLAGS with CF/ZF/PF
+                        // (NOT SF/OF like integer CMP).  The signed condition
+                        // codes (Less/Greater) depend on SF/OF and would give
+                        // wrong results after UCOMIS*.  Remap to the unsigned
+                        // conditions (Below/Above) which use CF/ZF — matching
+                        // the x86_64 FP comparison path (G7).
+                        let cc = match kind {
+                            CmpKind::SLt | CmpKind::ULt => Cc::Below,
+                            CmpKind::SLe | CmpKind::ULe => Cc::BelowEqual,
+                            CmpKind::SGt | CmpKind::UGt => Cc::Above,
+                            CmpKind::SGe | CmpKind::UGe => Cc::AboveEqual,
+                            CmpKind::Eq => Cc::Equal,
+                            CmpKind::Ne => Cc::NotEqual,
+                        };
                         if is_f64 {
                             code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                         } else {
@@ -1334,6 +1747,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(store_vreg(dst_id, Gpr::Rax));
                         code
                     } else {
+                        let cc = cmp_kind_to_cc(kind);
                         code.extend(load_value(lhs, Gpr::Rax));
                         if let IRValue::Immediate(imm) = rhs {
                             let imm = *imm;
@@ -1702,202 +2116,384 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                         // ── Signed integer → floating-point ──────────────────
                         //
+                        // On x86_32, GPRs are 32-bit, so:
+                        //   • i8/i16/i32 sources: load low word into EAX,
+                        //     CVTSI2SD/SS xmm, r32 converts the 32-bit value.
+                        //   • i64 sources: use x87 FILD to load the 64-bit value
+                        //     from memory as a signed 80-bit float, then store
+                        //     as f64/f32.
+                        //
+                        // The FP result is stored directly from XMM0 (or via
+                        // x87 FSTP) to dst's stack slot using MOVQ/MOVSS [mem],
+                        // NOT via the GPR — `encode_movq_gpr_xmm` truncates to
+                        // 32 bits on x86_32 (see mod.rs caveat).
+                        //
                         // | from_ty       | to_ty | Instruction(s)                           |
                         // |---------------|-------|------------------------------------------|
-                        // | i8/i16/i32    | f32   | CVTSI2SS xmm, r32; MOVD r32, xmm        |
-                        // | i8/i16/i32    | f64   | CVTSI2SD xmm, r32; MOVQ r64, xmm        |
-                        // | i64           | f32   | CVTSI2SS xmm, r64; MOVD r32, xmm        |
-                        // | i64           | f64   | CVTSI2SD xmm, r64; MOVQ r64, xmm        |
-                        // | None (default)| f64   | CVTSI2SD xmm, r32; MOVQ r64, xmm        |
+                        // | i8/i16/i32    | f32   | CVTSI2SS xmm, r32; MOVSS [mem], xmm     |
+                        // | i8/i16/i32    | f64   | CVTSI2SD xmm, r32; MOVQ [mem], xmm      |
+                        // | i64           | f32   | FILD m64; FSTP m32 (via x87)             |
+                        // | i64           | f64   | FILD m64; FSTP m64 (via x87)             |
+                        // | None (default)| f64   | CVTSI2SD xmm, r32; MOVQ [mem], xmm      |
                         CastKind::IntToFloat => {
-                            code.extend(load_value(src, Gpr::Rax));
-                            if dst_is_f32 {
-                                // → f32
-                                if src_is_32bit_int {
+                            let dst_off = slot_offset(dst_id);
+                            if src_is_32bit_int {
+                                // 32-bit (or narrower) signed int → float.
+                                code.extend(load_value(src, Gpr::Rax));
+                                if dst_is_f32 {
                                     code.extend(encode_cvtsi2ss_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, false));
                                 } else {
-                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                                }
-                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
-                            } else {
-                                // → f64 (default)
-                                if src_is_32bit_int {
                                     code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
-                                } else {
-                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, true));
                                 }
-                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            } else {
+                                // 64-bit signed int → float.  x86_32 cannot
+                                // hold a 64-bit value in a GPR, so we use the
+                                // x87 FPU's FILD m64 instruction, which loads
+                                // a signed 64-bit integer from memory and
+                                // pushes it as an 80-bit extended float.
+                                // Then FSTP stores it as f64/f32.
+                                //
+                                // Determine the memory location of the 64-bit
+                                // source value:
+                                //   • Register: the source vreg's own stack slot.
+                                //   • Immediate/Address/Label: spill to dst_off
+                                //     (the destination's slot, which we're about
+                                //     to overwrite anyway) as two 32-bit writes.
+                                let src_off = match src {
+                                    IRValue::Register(id) => slot_offset(*id),
+                                    _ => {
+                                        // Spill the 64-bit constant to dst_off.
+                                        let bits = if let IRValue::Immediate(imm) = src {
+                                            *imm as u64
+                                        } else if let IRValue::Address(addr) = src {
+                                            *addr as u64
+                                        } else {
+                                            0
+                                        };
+                                        let low = bits as u32 as i32;
+                                        let high = (bits >> 32) as u32 as i32;
+                                        code.extend(encode_store_imm32_mem_ebp(dst_off, low));
+                                        code.extend(encode_store_imm32_mem_ebp(dst_off + 4, high));
+                                        dst_off
+                                    }
+                                };
+                                // FILD qword [ebp+src_off]:  DF /5 m64
+                                if src_off >= -128 && src_off <= 127 {
+                                    code.extend_from_slice(&[0xDF, 0x6D, src_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDF, 0xAD]);
+                                    code.extend_from_slice(&src_off.to_le_bytes());
+                                }
+                                if dst_is_f32 {
+                                    // FSTP dword [ebp+dst_off]:  D9 /3 m32
+                                    if dst_off >= -128 && dst_off <= 127 {
+                                        code.extend_from_slice(&[0xD9, 0x5D, dst_off as u8]);
+                                    } else {
+                                        code.extend_from_slice(&[0xD9, 0x9D]);
+                                        code.extend_from_slice(&dst_off.to_le_bytes());
+                                    }
+                                    // Zero the high 4 bytes of the 8-byte slot.
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0));
+                                } else {
+                                    // FSTP qword [ebp+dst_off]:  DD /3 m64
+                                    if dst_off >= -128 && dst_off <= 127 {
+                                        code.extend_from_slice(&[0xDD, 0x5D, dst_off as u8]);
+                                    } else {
+                                        code.extend_from_slice(&[0xDD, 0x9D]);
+                                        code.extend_from_slice(&dst_off.to_le_bytes());
+                                    }
+                                }
                             }
                         }
 
                         // ── Unsigned integer → floating-point ────────────────
                         //
-                        // For u32: zero-extend to 64-bit (fitting in a signed i64),
-                        // then use the 64-bit signed conversion.
+                        // For u32: the bit pattern fits in a 32-bit GPR.
+                        //   • If the high bit is clear (value < 2^31): CVTSI2SD
+                        //     produces the correct positive f64.
+                        //   • If the high bit is set (value >= 2^31): CVTSI2SD
+                        //     treats it as negative.  We correct this by
+                        //     subtracting 2^31 from the GPR (clearing the high
+                        //     bit), converting, then adding 2^31 back as f64.
                         //
-                        // For u64: complex — we must handle the sign bit separately.
-                        // Strategy: test if the value is negative (bit 63 set).
-                        //   If clear: CVTSI2SD xmm, r64 (value fits in signed i64).
-                        //   If set:   divide by 2 in the GPR, convert, then add the
-                        //             result to itself in the XMM (×2).  This avoids
-                        //             overflow because the halved value fits in i63.
+                        // For u64: use x87 FILD with the subtract-add trick
+                        // for values >= 2^63.
                         //
                         // | from_ty | to_ty | Instruction(s)                              |
                         // |---------|-------|---------------------------------------------|
-                        // | u32     | f32   | zero-extend; CVTSI2SS xmm, r64; MOVD r,x   |
-                        // | u32     | f64   | zero-extend; CVTSI2SD xmm, r64; MOVQ r,x   |
-                        // | u64     | f32   | CAS sequence (see below); MOVD r,x          |
-                        // | u64     | f64   | CAS sequence (see below); MOVQ r,x          |
+                        // | u32     | f32   | CVTSI2SS xmm, r32; MOVSS [mem], xmm        |
+                        // | u32     | f64   | CVTSI2SD xmm, r32; MOVQ [mem], xmm         |
+                        // | u64     | f32   | x87 FILD + subtract-2^63 + FSTP m32         |
+                        // | u64     | f64   | x87 FILD + subtract-2^63 + FSTP m64         |
                         CastKind::UIntToFloat => {
-                            code.extend(load_value(src, Gpr::Rax));
-
+                            let dst_off = slot_offset(dst_id);
                             let src_is_u64 = matches!(from_ty,
                                 Some(IRType::I64) | Some(IRType::U64)
                             );
 
                             if src_is_u64 {
-                                // u64 → float: x86_64 has no direct unsigned conversion.
-                                // Strategy: shift right by 1 (halving), convert as
-                                // signed i63, then double the FP result.
-                                //
-                                //   1. RCX = 1
-                                //   2. R10 = RAX            (save original)
-                                //   3. SHR RAX, CL          (halve; fits in i63)
-                                //   4. Convert RAX → float in XMM0
-                                //   5. ADDSD/ADDSS XMM0, XMM0  (double)
-                                //   6. If the original had bit 0 set, add 1.0
-                                //      (compensate for the truncated bit).
-                                //      For simplicity we skip the bit-0 fix-up;
-                                //      the error is at most 1 ULP for f64.
-                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));  // CL = 1
-                                // Save original value — on x86_32 there's no R10,
-                                // so use PUSH/POP to preserve RAX across the SHR.
-                                code.extend(encode_push(Gpr::Rax));  // save original
-                                code.extend(encode_shr_reg_cl(Gpr::Rax));  // RAX >>= 1
-                                if dst_is_f32 {
-                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                                    code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
-                                    code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
-                                } else {
-                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                                    code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
-                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                // u64 → float via x87 FILD.
+                                // First, copy the 64-bit source value to dst_off
+                                // (the destination's slot, which we're about to
+                                // overwrite anyway).  For Register sources, this
+                                // is a 2-word copy from the source's slot; for
+                                // Immediate sources, it's two immediate-to-memory
+                                // writes.  This gives us a mutable working copy
+                                // that the AND (for the >= 2^63 case) can modify
+                                // without clobbering the original.
+                                match src {
+                                    IRValue::Register(id) => {
+                                        let src_off = slot_offset(*id);
+                                        // MOV EAX, [ebp+src_off]; MOV [ebp+dst_off], EAX
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, src_off));
+                                        code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                        // MOV EAX, [ebp+src_off+4]; MOV [ebp+dst_off+4], EAX
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, src_off + 4));
+                                        code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                    }
+                                    _ => {
+                                        let bits = if let IRValue::Immediate(imm) = src {
+                                            *imm as u64
+                                        } else if let IRValue::Address(addr) = src {
+                                            *addr as u64
+                                        } else {
+                                            0
+                                        };
+                                        let low = bits as u32 as i32;
+                                        let high = (bits >> 32) as u32 as i32;
+                                        code.extend(encode_store_imm32_mem_ebp(dst_off, low));
+                                        code.extend(encode_store_imm32_mem_ebp(dst_off + 4, high));
+                                    }
                                 }
-                                // Restore original RAX (we pushed it before the SHR)
-                                code.extend(encode_pop(Gpr::Rcx));  // pop saved value into RCX (discard)
+                                // Check if the high bit is set (value >= 2^63).
+                                // MOV EAX, [ebp+dst_off+4]; TEST EAX, EAX
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, dst_off + 4));
+                                code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // JNS .positive (short jump, target computed below)
+                                let jns_pos = code.len();
+                                code.extend_from_slice(&[0x79, 0x00]); // JNS rel8 (placeholder)
+
+                                // Negative path (high bit set): subtract 2^63
+                                // from the 64-bit integer, FILD, then add 2^63
+                                // back as a float.
+                                // Clear the top bit: AND DWORD [ebp+dst_off+4], 0x7FFFFFFF
+                                // Use 81 /4 form with imm32 (sign-safe).
+                                code.extend_from_slice(&[0x81, 0xA5]);
+                                code.extend_from_slice(&(dst_off + 4).to_le_bytes());
+                                code.extend_from_slice(&0x7FFFFFFFu32.to_le_bytes());
+                                // FILD qword [ebp+dst_off]
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDF, 0x6D, dst_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDF, 0xAD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                // Push 2^63 as f64 (bit pattern 0x43E0000000000000)
+                                // to dst_off, then FLD it (NOT FILD — FILD would
+                                // treat 0x8000000000000000 as signed i64::MIN
+                                // and push -9.22e18, not +9.22e18).
+                                code.extend(encode_store_imm32_mem_ebp(dst_off, 0));
+                                code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x43E00000));
+                                // FLD qword [ebp+dst_off]:  DD /0 m64
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDD, 0x45, dst_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDD, 0x85]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+                                // FADDP ST(1), ST — add ST(1) to ST(0), pop ST(1).
+                                code.extend_from_slice(&[0xDE, 0xC1]);
+                                // Jump to store.
+                                let jmp_pos = code.len();
+                                code.extend_from_slice(&[0xEB, 0x00]); // JMP rel8 (placeholder)
+
+                                // Patch the JNS to skip to here.
+                                code[jns_pos + 1] = (code.len() - jns_pos - 2) as u8;
+
+                                // Positive path: FILD qword [ebp+dst_off].
+                                // dst_off already has the source value (copied
+                                // at the top of this block).
+                                if dst_off >= -128 && dst_off <= 127 {
+                                    code.extend_from_slice(&[0xDF, 0x6D, dst_off as u8]);
+                                } else {
+                                    code.extend_from_slice(&[0xDF, 0xAD]);
+                                    code.extend_from_slice(&dst_off.to_le_bytes());
+                                }
+
+                                // Patch the JMP to skip to here.
+                                let store_pos = code.len();
+                                code[jmp_pos + 1] = (store_pos as isize - jmp_pos as isize - 2) as u8;
+
+                                // Store ST(0) to dst_off as f64 or f32.
+                                if dst_is_f32 {
+                                    // FSTP dword [ebp+dst_off]:  D9 /3 m32
+                                    if dst_off >= -128 && dst_off <= 127 {
+                                        code.extend_from_slice(&[0xD9, 0x5D, dst_off as u8]);
+                                    } else {
+                                        code.extend_from_slice(&[0xD9, 0x9D]);
+                                        code.extend_from_slice(&dst_off.to_le_bytes());
+                                    }
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0));
+                                } else {
+                                    // FSTP qword [ebp+dst_off]:  DD /3 m64
+                                    if dst_off >= -128 && dst_off <= 127 {
+                                        code.extend_from_slice(&[0xDD, 0x5D, dst_off as u8]);
+                                    } else {
+                                        code.extend_from_slice(&[0xDD, 0x9D]);
+                                        code.extend_from_slice(&dst_off.to_le_bytes());
+                                    }
+                                }
                             } else {
-                                // u32 → float: zero-extend to 64-bit (which fits in
-                                // signed i64), then use 64-bit signed conversion.
-                                // On x86_64, writing to a 32-bit register zeroes the
-                                // upper 32 bits, so RAX already has the zero-extended
-                                // value if it was loaded as 32-bit.  For safety, if
-                                // the value might have garbage in upper bits, we rely
-                                // on the 64-bit load having zero-extended.
+                                // u32 → float.
+                                code.extend(load_value(src, Gpr::Rax));
+                                // Check if the high bit is set (value >= 2^31).
+                                code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
+                                let jns_pos = code.len();
+                                code.extend_from_slice(&[0x79, 0x00]); // JNS rel8 (placeholder)
+                                // Negative path: subtract 2^31, convert, add 2^31 back.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                                 if dst_is_f32 {
-                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                                    code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvtsi2ss_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                    // Add 2^31 as f32 (0x4F000000).
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x4F000000));
+                                    code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rcx));
+                                    code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                 } else {
-                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                    // Add 2^31 as f64 (0x41E0000000000000).
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off, 0));
+                                    code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x41E00000));
+                                    code.extend(encode_movq_xmm_mem(Xmm::Xmm1, Gpr::Rbp, dst_off));
+                                    code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                 }
+                                let jmp_pos = code.len();
+                                code.extend_from_slice(&[0xEB, 0x00]); // JMP rel8 (placeholder)
+                                // Patch JNS to skip to here.
+                                code[jns_pos + 1] = (code.len() - jns_pos - 2) as u8;
+                                // Positive path: convert directly.
+                                if dst_is_f32 {
+                                    code.extend(encode_cvtsi2ss_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                } else {
+                                    code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                }
+                                // Patch JMP to skip to here.
+                                let store_pos = code.len();
+                                code[jmp_pos + 1] = (store_pos as isize - jmp_pos as isize - 2) as u8;
+                                code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, !dst_is_f32));
                             }
                         }
 
                         // ── Floating-point → signed integer ──────────────────
                         //
+                        // On x86_32, we load the FP value from its stack slot
+                        // directly into XMM0 via MOVQ/MOVSS xmm, [mem] (NOT
+                        // via the GPR — see mod.rs caveat), then CVTTSD2SI/
+                        // CVTTSS2SI converts to a 32-bit int in EAX (the r64
+                        // form is identical on x86_32 since there's no REX.W).
+                        //
                         // | from_ty | to_ty       | Instruction(s)                          |
                         // |---------|-------------|-----------------------------------------|
-                        // | f32     | i8..i32     | MOVD xmm,r32; CVTSS2SI r32,xmm         |
-                        // | f32     | i64         | MOVD xmm,r32; CVTSS2SI r64,xmm         |
-                        // | f64     | i8..i32     | MOVQ xmm,r64; CVTSD2SI r32,xmm         |
-                        // | f64     | i64         | MOVQ xmm,r64; CVTSD2SI r64,xmm         |
-                        // | None    | i8..i32     | MOVQ xmm,r64; CVTSD2SI r32,xmm (def)   |
+                        // | f32     | i8..i32     | MOVSS xmm,[mem]; CVTTSS2SI r32,xmm     |
+                        // | f32     | i64         | MOVSS xmm,[mem]; CVTTSS2SI r32,xmm     |
+                        // | f64     | i8..i32     | MOVQ xmm,[mem]; CVTTSD2SI r32,xmm      |
+                        // | f64     | i64         | MOVQ xmm,[mem]; CVTTSD2SI r32,xmm      |
                         CastKind::FloatToInt => {
-                            code.extend(load_value(src, Gpr::Rax));
+                            // Materialise the FP source in XMM0 via memory.
+                            // Use dst_id's slot as the spill temp (about to be
+                            // overwritten with the int result).
+                            let dst_off = slot_offset(dst_id);
+                            code.extend(load_fp_to_xmm(src, Xmm::Xmm0, !src_is_f32, dst_off));
                             if src_is_f32 {
-                                // f32 → signed int (truncate toward zero)
-                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                                if dst_is_32bit_int {
-                                    code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                } else {
-                                    code.extend(encode_cvttss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
-                                }
+                                code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                             } else {
-                                // f64 → signed int (default, truncate toward zero)
-                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                                if dst_is_32bit_int {
-                                    code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                } else {
-                                    code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
-                                }
+                                code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                             }
+                            // RAX holds the 32-bit int result.  store_vreg
+                            // writes EAX to dst's slot and zeroes the high
+                            // word (correct for both i32 and i64 destinations
+                            // whose value fits in 32 bits).
                         }
 
                         // ── Floating-point → unsigned integer ────────────────
                         //
-                        // x86_64 has no direct FP→unsigned-int instruction before AVX-512.
-                        // For values in the positive signed range, CVTTSD2SI/CVTTSS2SI
-                        // produces the same result as an unsigned conversion.
-                        //
-                        // For out-of-range values (≥ 2^31 for i32, ≥ 2^63 for i64),
-                        // we need a correction sequence:
-                        //   1. Convert to signed with CVTTSD2SI/CVTTSS2SI
-                        //   2. If the result is negative, subtract 2^31/2^63 and
-                        //      set the sign bit (or use the compare-and-adjust pattern)
-                        //
-                        // For simplicity and correctness for the common case (values
-                        // fitting in the positive signed range), we use the same
-                        // instruction as FloatToInt.  A full unsigned conversion
-                        // would require a CAS sequence for edge cases.
+                        // x86 has no direct FP→unsigned-int instruction before
+                        // AVX-512.  For values in the positive signed range,
+                        // CVTTSD2SI/CVTTSS2SI produces the correct unsigned
+                        // result.  For values >= 2^31 (u32) or >= 2^63 (u64),
+                        // use the subtract-XOR technique:
+                        //   1. Subtract 2^N from the float
+                        //   2. Convert with CVTTSD2SI (now fits in signed range)
+                        //   3. XOR the result with 2^(N-1) to add 2^N back
                         //
                         // | from_ty | to_ty       | Instruction(s)                          |
                         // |---------|-------------|-----------------------------------------|
-                        // | f32     | u8..u32     | MOVD xmm,r32; CVTSS2SI r32,xmm         |
-                        // | f32     | u64         | MOVD xmm,r32; CVTSS2SI r64,xmm         |
-                        // | f64     | u8..u32     | MOVQ xmm,r64; CVTSD2SI r32,xmm         |
-                        // | f64     | u64         | MOVQ xmm,r64; CVTSD2SI r64,xmm         |
+                        // | f32     | u8..u32     | MOVSS xmm,[mem]; SUBSS; CVTTSS2SI; XOR  |
+                        // | f64     | u8..u32     | MOVQ xmm,[mem]; SUBSD; CVTTSD2SI; XOR   |
+                        // | f64     | u64         | MOVQ xmm,[mem]; SUBSD; CVTTSD2SI; XOR 2^63 |
                         CastKind::FloatToUInt => {
-                            code.extend(load_value(src, Gpr::Rax));
+                            let dst_off = slot_offset(dst_id);
+                            code.extend(load_fp_to_xmm(src, Xmm::Xmm0, !src_is_f32, dst_off));
                             if src_is_f32 {
-                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                                if dst_is_32bit_int {
-                                    code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                } else {
-                                    code.extend(encode_cvttss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
-                                }
+                                // f32 → u32: threshold 2^31 (0x4F000000 as f32).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x4F000000));
+                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                                code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                             } else {
-                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                                if dst_is_32bit_int {
-                                    code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
-                                } else {
-                                    code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
-                                }
+                                // f64 → u32: threshold 2^31 (0x41E0000000000000 as f64).
+                                code.extend(encode_store_imm32_mem_ebp(dst_off, 0));
+                                code.extend(encode_store_imm32_mem_ebp(dst_off + 4, 0x41E00000));
+                                code.extend(encode_movq_xmm_mem(Xmm::Xmm1, Gpr::Rbp, dst_off));
+                                code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                                code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                             }
+                            // RAX holds the 32-bit unsigned result.  store_vreg
+                            // writes EAX and zeroes the high word.
                         }
 
                         // ── Floating-point ↔ floating-point ──────────────────
                         //
+                        // On x86_32, load the FP source directly from memory
+                        // into XMM0 via MOVQ/MOVSS xmm, [mem], perform the
+                        // precision conversion in XMM0, then store the result
+                        // back to dst's slot via MOVQ/MOVSS [mem], xmm.
+                        //
                         // | from_ty | to_ty | Instruction(s)                          |
                         // |---------|-------|-----------------------------------------|
-                        // | f32     | f64   | MOVD xmm,r32; CVTSS2SD xmm,xmm; MOVQ r,x |
-                        // | f64     | f32   | MOVQ xmm,r64; CVTSD2SS xmm,xmm; MOVD r,x |
-                        // | None    | f64   | MOVQ xmm,r64; CVTSD2SS xmm,xmm; MOVD r,x |
+                        // | f32     | f64   | MOVSS xmm,[mem]; CVTSS2SD; MOVQ [mem],xmm|
+                        // | f64     | f32   | MOVQ xmm,[mem]; CVTSD2SS; MOVSS [mem],xmm|
                         CastKind::FloatToFloat => {
-                            code.extend(load_value(src, Gpr::Rax));
+                            let dst_off = slot_offset(dst_id);
+                            code.extend(load_fp_to_xmm(src, Xmm::Xmm0, !src_is_f32, dst_off));
                             if src_is_f32 {
                                 // f32 → f64 (widen)
-                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 code.extend(encode_cvtss2sd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
-                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, true));
                             } else {
                                 // f64 → f32 (narrow, default)
-                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 code.extend(encode_cvtsd2ss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
-                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, false));
                             }
                         }
                     }
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    // For FP→int casts, RAX holds the int result; store_vreg
+                    // writes it.  For int→FP and FP→FP casts, the FP result
+                    // was already stored directly to dst's slot via
+                    // store_xmm_to_vreg or x87 FSTP — skip the redundant
+                    // store_vreg (which would clobber the high word with 0
+                    // and corrupt the f64 value).
+                    match kind {
+                        CastKind::FloatToInt | CastKind::FloatToUInt => {
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                        _ => {
+                            // int→FP and FP→FP: result already in dst's slot.
+                        }
+                    }
                     code
                 }
 
