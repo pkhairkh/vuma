@@ -670,15 +670,8 @@ fn find_natural_loops(func: &IRFunction) -> Vec<(String, HashSet<String>)> {
 /// hold a constant, subsequent uses of that register are replaced with the
 /// constant, potentially enabling further folds.
 pub fn constant_fold(mut func: IRFunction) -> IRFunction {
-    // Cross-block constant propagation: maintain a function-level subst map
-    // so constants folded in one block are propagated to uses in subsequent
-    // blocks. This is critical for float codegen where a let-binding like
-    // `a: f32 = 3.0` is in a different block than `a + b`.
-    let mut global_subst: HashMap<u32, IRValue> = HashMap::new();
-
     for block in &mut func.blocks {
-        // Start with the global subst, then add block-local folds.
-        let mut subst = global_subst.clone();
+        let mut subst: HashMap<u32, IRValue> = HashMap::new();
         let mut new_instrs = Vec::new();
 
         for instr in &block.instructions {
@@ -730,9 +723,6 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
 
         // Substitute in the terminator as well.
         block.terminator = substitute_terminator(&block.terminator, &subst);
-
-        // Merge block-local folds into the global subst for cross-block propagation.
-        global_subst.extend(subst);
     }
     func
 }
