@@ -3894,7 +3894,18 @@ impl IRBuilder {
                         (Some(IRType::F64), Some(IRType::I64))
                     }
                     CastKind::FloatToFloat => {
-                        (Some(IRType::F64), Some(IRType::F64))
+                        // Determine source type from vreg_types if possible.
+                        // Default to F64→F64 (no-op) if source type is unknown.
+                        let src_f32 = if let IRValue::Register(vr) = &src_val {
+                            self.vreg_types.get(vr) == Some(&IRType::F32)
+                        } else {
+                            false
+                        };
+                        if src_f32 {
+                            (Some(IRType::F32), Some(IRType::F64))  // widen f32→f64
+                        } else {
+                            (Some(IRType::F64), Some(IRType::F64))  // no-op
+                        }
                     }
                     _ => unreachable!(),
                 };
