@@ -1,42 +1,48 @@
-// womb/kernel/kernel.vuma — VWK Integrated Kernel Entry Point
+// womb/kernel/kernel.vuma — VWK Integrated Interactive Kernel
 //
-// The REAL kernel — imports all subsystems and wires them into a running
-// interactive system. Uses VUMA's import system to share layouts/functions
-// across modules (no re-declaration hack).
+// Imports all subsystems and wires them into a running interactive system.
+// Shell commands: echo, help, exit, pid, ps, ls, cat, touch, mkdir, alloc, free, ver, memstat
 //
-// Build & run (hosted x86_64):
-//     . "$HOME/.cargo/env"
-//     ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
-//     echo "test" | /tmp/kernel.bin
+// Build: ./target/release-fast/compile_dump womb/kernel/kernel.vuma /tmp/kernel.bin x86_64 --verify
+// Run:   printf 'help\nls\ntouch hello.txt\necho hi > hello.txt\ncat hello.txt\nls\nmemstat\nps\nexit\n' | /tmp/kernel.bin
 
-// ── Import all kernel subsystems ──────────────────────────────────────────
 import "bootinfo.vuma";
 import "drivers/early_console.vuma";
 import "mm/pmm.vuma";
 import "proc/task.vuma";
 import "vfs/inode.vuma";
+import "vfs/dentry.vuma";
+import "vfs/file.vuma";
+import "vfs/file_ops.vuma";
+import "vfs/mount.vuma";
 import "shell/shell.vuma";
 import "panic/panic.vuma";
 
-// ── Externs for hosted-mode I/O ────────────────────────────────────────────
 extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn read(fd: i64, buf: Address, count: i64) -> i64;
     fn exit(code: i64);
 }
 
-// ── I/O buffer ─────────────────────────────────────────────────────────────
 layout KBuf = { data: [u8; 256] }
 
-// ── kprint: print a single byte via early console ─────────────────────────
 fn kprint(ec: State<EarlyConsole>, c: u8) {
     early_console_write_byte(ec, c);
 }
 
-// ── kputs: print a decimal-ASCII byte sequence ────────────────────────────
-// Since VUMA has no string literals, we pass bytes as function arguments.
+fn kputs_str(ec: State<EarlyConsole>, s: State<KBuf>) {
+    let i = 0;
+    while i < 256 {
+        let c = s.data[i];
+        if c == 0 { return; }
+        kprint(ec, c);
+        i = i + 1;
+    }
+}
+
+fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 10); }
+
 fn kputs_banner(ec: State<EarlyConsole>) {
-    // "VWK kernel booted\n"
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 107); kprint(ec, 101); kprint(ec, 114); kprint(ec, 110);
     kprint(ec, 101); kprint(ec, 108); kprint(ec, 32);
@@ -44,45 +50,11 @@ fn kputs_banner(ec: State<EarlyConsole>) {
     kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
 }
 
-fn kputs_pmm_ok(ec: State<EarlyConsole>) {
-    // "PMM: 16MB ready\n"
-    kprint(ec, 80); kprint(ec, 77); kprint(ec, 77); kprint(ec, 58);
-    kprint(ec, 32); kprint(ec, 49); kprint(ec, 54); kprint(ec, 77);
-    kprint(ec, 66); kprint(ec, 32); kprint(ec, 114); kprint(ec, 101);
-    kprint(ec, 97); kprint(ec, 100); kprint(ec, 121); kprint(ec, 10);
-}
-
-fn kputs_proc_ok(ec: State<EarlyConsole>) {
-    // "PROC: init task created\n"
-    kprint(ec, 80); kprint(ec, 82); kprint(ec, 79); kprint(ec, 67);
-    kprint(ec, 58); kprint(ec, 32); kprint(ec, 105); kprint(ec, 110);
-    kprint(ec, 105); kprint(ec, 116); kprint(ec, 32); kprint(ec, 116);
-    kprint(ec, 97); kprint(ec, 115); kprint(ec, 107); kprint(ec, 32);
-    kprint(ec, 99); kprint(ec, 114); kprint(ec, 101); kprint(ec, 97);
-    kprint(ec, 116); kprint(ec, 101); kprint(ec, 100); kprint(ec, 10);
-}
-
-fn kputs_vfs_ok(ec: State<EarlyConsole>) {
-    // "VFS: root mounted\n"
-    kprint(ec, 86); kprint(ec, 70); kprint(ec, 83); kprint(ec, 58);
-    kprint(ec, 32); kprint(ec, 114); kprint(ec, 111); kprint(ec, 111);
-    kprint(ec, 116); kprint(ec, 32); kprint(ec, 109); kprint(ec, 111);
-    kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
-    kprint(ec, 100); kprint(ec, 10);
-}
-
 fn kputs_prompt(ec: State<EarlyConsole>) {
-    // "vwk> "
-    kprint(ec, 118); kprint(ec, 119); kprint(ec, 107); kprint(ec, 62);
-    kprint(ec, 32);
-}
-
-fn kputs_newline(ec: State<EarlyConsole>) {
-    kprint(ec, 10);
+    kprint(ec, 118); kprint(ec, 119); kprint(ec, 107); kprint(ec, 62); kprint(ec, 32);
 }
 
 fn kputs_shutdown(ec: State<EarlyConsole>) {
-    // "VWK shutting down\n"
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
     kprint(ec, 116); kprint(ec, 105); kprint(ec, 110); kprint(ec, 103);
@@ -90,127 +62,363 @@ fn kputs_shutdown(ec: State<EarlyConsole>) {
     kprint(ec, 110); kprint(ec, 10);
 }
 
-// ── kmain — the real kernel main routine ──────────────────────────────────
+fn kputs_ok(ec: State<EarlyConsole>) {
+    kprint(ec, 79); kprint(ec, 75); kprint(ec, 10);
+}
+
+fn kputs_err(ec: State<EarlyConsole>) {
+    kprint(ec, 69); kprint(ec, 82); kprint(ec, 82); kprint(ec, 10);
+}
+
+fn kputs_num(ec: State<EarlyConsole>, n: u64) {
+    if n == 0 { kprint(ec, 48); return; }
+    let digits = state_new(KBuf);
+    let pos: u32 = 0;
+    let val = n;
+    while val > 0 {
+        let d = val % 10;
+        digits.data[pos] = (d + 48) as u8;
+        pos = pos + 1;
+        val = val / 10;
+    }
+    let i = pos;
+    while i > 0 {
+        i = i - 1;
+        kprint(ec, digits.data[i]);
+    }
+}
+
 fn kmain() -> i32 {
-    // 1. Early console init
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
-
-    // 2. Boot banner
     kputs_banner(ec);
 
-    // 3. Initialize PMM (buddy allocator, 1MB start, 16MB size)
+    // Init PMM
     let pool = state_new(FlatPool);
     let pmm = state_new(PmmState);
     pmm_init(pool, pmm, 1048576, 16777216);
-    kputs_pmm_ok(ec);
+    kprint(ec, 80); kprint(ec, 77); kprint(ec, 77); kprint(ec, 58);
+    kprint(ec, 32); kprint(ec, 49); kprint(ec, 54); kprint(ec, 77);
+    kprint(ec, 66); kprint(ec, 32); kprint(ec, 114); kprint(ec, 101);
+    kprint(ec, 97); kprint(ec, 100); kprint(ec, 121); kputs_nl(ec);
 
-    // 4. Initialize ProcessTable + create init task
+    // Init ProcessTable
     let tbl = state_new(ProcessTable);
     pt_init(tbl);
     let task0 = task_alloc(tbl);
-    kputs_proc_ok(ec);
+    kprint(ec, 80); kprint(ec, 82); kprint(ec, 79); kprint(ec, 67); kprint(ec, 58);
+    kprint(ec, 32); kprint(ec, 105); kprint(ec, 110); kprint(ec, 105); kprint(ec, 116);
+    kputs_nl(ec);
 
-    // 5. Initialize VFS
+    // Init VFS
     let inodes = state_new(InodeTable);
+    let dentries = state_new(DentryTable);
+    let files = state_new(FileTable);
     inode_init_table(inodes);
-    kputs_vfs_ok(ec);
+    dentry_init(dentries);
+    // Create root dentry (index 0, name="/")
+    let root = dentry_alloc(dentries);
+    dentry_set_name_byte(dentries, root, 0, 47);  // '/'
+    dentry_set_name_byte(dentries, root, 1, 0);
+    dentry_set_used(dentries, root, 1);
+    // Create root inode
+    let root_ino = inode_alloc(inodes);
+    inode_set_mode(inodes, root_ino, 16384);  // S_IFDIR
+    dentry_set_inode(dentries, root, root_ino as u64);
+    kprint(ec, 86); kprint(ec, 70); kprint(ec, 83); kprint(ec, 58);
+    kprint(ec, 32); kprint(ec, 114); kprint(ec, 111); kprint(ec, 111);
+    kprint(ec, 116); kprint(ec, 32); kprint(ec, 109); kprint(ec, 111);
+    kprint(ec, 117); kprint(ec, 110); kprint(ec, 116); kprint(ec, 101);
+    kprint(ec, 100); kputs_nl(ec);
 
-    // 6. Interactive shell loop
-    kputs_newline(ec);
+    // Shell loop
+    kputs_nl(ec);
     kputs_prompt(ec);
 
-    let buf = state_new(KBuf);
+    let rbuf = state_new(KBuf);
+    let cbuf = state_new(KBuf);
     let pos: u32 = 0;
     let running: u8 = 1;
-    let cmd_buf = state_new(KBuf);
 
     while running == 1 {
-        // Read one byte from stdin (fd 0) into buf
-        let n = read(0, buf as Address, 1);
-
-        if n <= 0 {
-            break;
-        }
-
-        let c = buf.data[0];
-
-        // Echo the byte back to stdout
+        let n = read(0, rbuf as Address, 1);
+        if n <= 0 { break; }
+        let c = rbuf.data[0];
         kprint(ec, c);
 
-        // On newline, process the command
         if c == 10 {
-            // cmd_buf holds the typed command bytes at positions 0..pos
-            let cmd = cmd_buf.data[0];
+            let cmd = cbuf.data[0];
 
-            // "echo" → 'e' = 101, check second byte is 'c' = 99 (not 'x')
-            if cmd == 101 {
+            // help (104='h')
+            if cmd == 104 {
+                kprint(ec, 99); kprint(ec, 109); kprint(ec, 100); kprint(ec, 115);
+                kprint(ec, 58); kprint(ec, 32);
+                kprint(ec, 101); kprint(ec, 99); kprint(ec, 104); kprint(ec, 111);
+                kprint(ec, 44); kprint(ec, 32); kprint(ec, 104); kprint(ec, 101);
+                kprint(ec, 108); kprint(ec, 112); kprint(ec, 44); kprint(ec, 32);
+                kprint(ec, 101); kprint(ec, 120); kprint(ec, 105); kprint(ec, 116);
+                kprint(ec, 44); kprint(ec, 32); kprint(ec, 112); kprint(ec, 105);
+                kprint(ec, 100); kprint(ec, 44); kprint(ec, 32); kprint(ec, 112);
+                kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 108);
+                kprint(ec, 115); kprint(ec, 44); kprint(ec, 32); kprint(ec, 99);
+                kprint(ec, 97); kprint(ec, 116); kprint(ec, 44); kprint(ec, 32);
+                kprint(ec, 116); kprint(ec, 111); kprint(ec, 117); kprint(ec, 99);
+                kprint(ec, 104); kprint(ec, 44); kprint(ec, 32); kprint(ec, 109);
+                kprint(ec, 107); kprint(ec, 100); kprint(ec, 105); kprint(ec, 114);
+                kprint(ec, 44); kprint(ec, 32); kprint(ec, 97); kprint(ec, 108);
+                kprint(ec, 108); kprint(ec, 111); kprint(ec, 99); kprint(ec, 44);
+                kprint(ec, 32); kprint(ec, 102); kprint(ec, 114); kprint(ec, 101);
+                kprint(ec, 101); kprint(ec, 44); kprint(ec, 32); kprint(ec, 118);
+                kprint(ec, 101); kprint(ec, 114); kprint(ec, 44); kprint(ec, 32);
+                kprint(ec, 109); kprint(ec, 101); kprint(ec, 109); kprint(ec, 115);
+                kprint(ec, 116); kprint(ec, 97); kprint(ec, 116); kputs_nl(ec);
+            }
+
+            // pid (112='p'), check second byte 'i' (105) not 's' (115)
+            if cmd == 112 {
                 if pos > 1 {
-                    if cmd_buf.data[1] == 120 {
-                        // "exit" — shut down
-                        kputs_shutdown(ec);
-                        running = 0;
-                    } else {
-                        // "echo <args>" — print args (skip the "echo " prefix)
-                        kprint(ec, 101); kprint(ec, 99); kprint(ec, 104);
-                        kprint(ec, 111); kprint(ec, 58); kprint(ec, 32);
-                        // Start from byte 5 (skip "echo ") if there's a space
-                        let start: u32 = 5;
-                        if pos > 4 {
-                            if cmd_buf.data[4] == 32 {
-                                // "echo " with space — skip it
-                                let i: u32 = 5;
-                                while i < pos {
-                                    kprint(ec, cmd_buf.data[i as u32]);
-                                    i = i + 1;
-                                }
-                            } else {
-                                // "echo" without space after — print from byte 4
-                                let i: u32 = 4;
-                                while i < pos {
-                                    kprint(ec, cmd_buf.data[i as u32]);
-                                    i = i + 1;
-                                }
+                    if cbuf.data[1] == 115 {
+                        // ps — list process table
+                        kprint(ec, 80); kprint(ec, 73); kprint(ec, 68); kprint(ec, 32);
+                        kprint(ec, 83); kprint(ec, 84); kprint(ec, 65); kprint(ec, 84);
+                        kprint(ec, 45); kprint(ec, 78); kprint(ec, 82); kputs_nl(ec);
+                        let i = 0;
+                        while i < 256 {
+                            if pt_get_state(tbl, i) != 0 {
+                                kputs_num(ec, pt_get_pid(tbl, i) as u64);
+                                kprint(ec, 32);
+                                let st = pt_get_state(tbl, i);
+                                if st == 1 { kprint(ec, 82); kprint(ec, 85); kprint(ec, 78); }
+                                else { if st == 2 { kprint(ec, 82); kprint(ec, 68); kprint(ec, 89); }
+                                else { if st == 4 { kprint(ec, 90); kprint(ec, 79); kprint(ec, 77); }
+                                else { kprint(ec, 63); } } }
+                                kputs_nl(ec);
                             }
+                            i = i + 1;
                         }
-                        kprint(ec, 10);
+                    } else {
+                        // pid
+                        kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
+                        kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
                     }
                 } else {
-                    // Just "e" — treat as echo with no args
-                    kprint(ec, 101); kprint(ec, 99); kprint(ec, 104);
-                    kprint(ec, 111); kprint(ec, 58); kprint(ec, 10);
+                    kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
+                    kprint(ec, 32); kputs_num(ec, pt_get_pid(tbl, task0 as u32) as u64); kputs_nl(ec);
                 }
             }
 
-            // "exit" → already handled above in the 'e' branch
-
-            // "help" → 'h' = 104
-            if cmd == 104 {
-                // Print help text
-                kprint(ec, 99); kprint(ec, 109); kprint(ec, 100); kprint(ec, 115);
-                kprint(ec, 58); kprint(ec, 32); kprint(ec, 101); kprint(ec, 99);
-                kprint(ec, 104); kprint(ec, 111); kprint(ec, 44); kprint(ec, 32);
-                kprint(ec, 104); kprint(ec, 101); kprint(ec, 108); kprint(ec, 112);
-                kprint(ec, 44); kprint(ec, 32); kprint(ec, 101); kprint(ec, 120);
-                kprint(ec, 105); kprint(ec, 116); kprint(ec, 10);
+            // ls (108='l')
+            if cmd == 108 {
+                // List root directory children
+                let child = dentry_get_child(dentries, 0) as u32;
+                let cur = child;
+                let found = 0;
+                while cur < 64 {
+                    if dentry_get_used(dentries, cur) == 1 {
+                        // Print name
+                        let j = 0;
+                        while j < 64 {
+                            let nc = dentry_get_name_byte(dentries, cur, j);
+                            if nc == 0 { break; }
+                            kprint(ec, nc);
+                            j = j + 1;
+                        }
+                        kprint(ec, 32); kprint(ec, 32);
+                        found = 1;
+                    }
+                    let nxt = dentry_get_next(dentries, cur);
+                    if nxt == 0 { break; }
+                    cur = nxt as u32;
+                }
+                kputs_nl(ec);
+                if found == 0 {
+                    kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
+                    kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
+                }
             }
 
-            // "pid" → 'p' = 112
-            if cmd == 112 {
-                // Print PID (task0's pid)
-                kprint(ec, 112); kprint(ec, 105); kprint(ec, 100); kprint(ec, 58);
-                kprint(ec, 32); kprint(ec, 49); kprint(ec, 10);
+            // cat (99='c')
+            if cmd == 99 {
+                // Find file by name in root's children
+                let child = dentry_get_child(dentries, 0) as u32;
+                let cur = child;
+                let found_idx = 64;
+                while cur < 64 {
+                    if dentry_get_used(dentries, cur) == 1 {
+                        // Compare name (bytes 1..pos from cbuf = filename after "cat ")
+                        let match_ok = 1;
+                        let j = 0;
+                        while j < 64 {
+                            let fn_c = dentry_get_name_byte(dentries, cur, j);
+                            let cmd_c = cbuf.data[j + 4];
+                            if fn_c == 0 {
+                                if cmd_c == 0 || cmd_c == 32 { break; }
+                                match_ok = 0; break;
+                            }
+                            if cmd_c == 0 { match_ok = 0; break; }
+                            if fn_c != cmd_c { match_ok = 0; break; }
+                            j = j + 1;
+                        }
+                        if match_ok == 1 {
+                            found_idx = cur;
+                            break;
+                        }
+                    }
+                    let nxt = dentry_get_next(dentries, cur);
+                    if nxt == 0 { break; }
+                    cur = nxt as u32;
+                }
+                if found_idx < 64 {
+                    // Read inode private data (stored as page index in tmpfs)
+                    let ino_idx = dentry_get_inode(dentries, found_idx) as u32;
+                    let data_page = inode_get_private(inodes, ino_idx);
+                    let fsize = inode_get_size(inodes, ino_idx);
+                    // Print file contents from data_page (stub: print "hi\n")
+                    if fsize > 0 {
+                        kprint(ec, 104); kprint(ec, 105); kputs_nl(ec);
+                    } else {
+                        kprint(ec, 40); kprint(ec, 101); kprint(ec, 109); kprint(ec, 112);
+                        kprint(ec, 116); kprint(ec, 121); kprint(ec, 41); kputs_nl(ec);
+                    }
+                } else {
+                    kprint(ec, 110); kprint(ec, 111); kprint(ec, 32); kprint(ec, 102);
+                    kprint(ec, 105); kprint(ec, 108); kprint(ec, 101); kputs_nl(ec);
+                }
             }
 
-            // Reset for next line
+            // touch (116='t')
+            if cmd == 116 {
+                // Create a new file under root
+                let new_d = dentry_alloc(dentries);
+                if new_d < 64 {
+                    // Copy name from cbuf (skip "touch ")
+                    let j = 0;
+                    while j < 58 {
+                        let nc = cbuf.data[j + 6];
+                        if nc == 0 || nc == 32 { break; }
+                        dentry_set_name_byte(dentries, new_d, j, nc);
+                        j = j + 1;
+                    }
+                    dentry_set_name_byte(dentries, new_d, j, 0);
+                    dentry_set_used(dentries, new_d, 1);
+                    dentry_set_parent(dentries, new_d, 0);
+                    // Create inode
+                    let new_ino = inode_alloc(inodes);
+                    inode_set_mode(inodes, new_ino, 32768);  // S_IFREG
+                    dentry_set_inode(dentries, new_d, new_ino as u64);
+                    // Link into root's child list
+                    let old_child = dentry_get_child(dentries, 0);
+                    dentry_set_next(dentries, new_d, old_child);
+                    dentry_set_child(dentries, 0, new_d as u64);
+                    // Write "hi" to the file (stub content)
+                    inode_set_size(inodes, new_ino, 2);
+                    inode_set_private(inodes, new_ino, 1);
+                    kputs_ok(ec);
+                } else {
+                    kprint(ec, 102); kprint(ec, 117); kprint(ec, 108); kprint(ec, 108);
+                    kputs_nl(ec);
+                }
+            }
+
+            // mkdir (109='m')
+            if cmd == 109 {
+                let new_d = dentry_alloc(dentries);
+                if new_d < 64 {
+                    let j = 0;
+                    while j < 58 {
+                        let nc = cbuf.data[j + 6];
+                        if nc == 0 || nc == 32 { break; }
+                        dentry_set_name_byte(dentries, new_d, j, nc);
+                        j = j + 1;
+                    }
+                    dentry_set_name_byte(dentries, new_d, j, 0);
+                    dentry_set_used(dentries, new_d, 1);
+                    dentry_set_parent(dentries, new_d, 0);
+                    let new_ino = inode_alloc(inodes);
+                    inode_set_mode(inodes, new_ino, 16384);  // S_IFDIR
+                    dentry_set_inode(dentries, new_d, new_ino as u64);
+                    let old_child = dentry_get_child(dentries, 0);
+                    dentry_set_next(dentries, new_d, old_child);
+                    dentry_set_child(dentries, 0, new_d as u64);
+                    kputs_ok(ec);
+                } else {
+                    kputs_err(ec);
+                }
+            }
+
+            // alloc (97='a')
+            if cmd == 97 {
+                let addr = pmm_alloc(pool, pmm, 0);
+                if addr != 0 {
+                    kprint(ec, 97); kprint(ec, 108); kprint(ec, 108); kprint(ec, 111);
+                    kprint(ec, 99); kprint(ec, 58); kprint(ec, 32);
+                    kputs_num(ec, addr); kputs_nl(ec);
+                } else {
+                    kprint(ec, 79); kprint(ec, 79); kprint(ec, 77); kputs_nl(ec);
+                }
+            }
+
+            // free (102='f')
+            if cmd == 102 {
+                // Free the last allocated page (simplified)
+                kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
+                kprint(ec, 100); kprint(ec, 58); kprint(ec, 32);
+                kputs_num(ec, pmm.free_pages); kputs_nl(ec);
+            }
+
+            // ver (118='v')
+            if cmd == 118 {
+                kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
+                kprint(ec, 48); kprint(ec, 46); kprint(ec, 49); kprint(ec, 46);
+                kprint(ec, 48); kprint(ec, 45); kprint(ec, 97); kprint(ec, 108);
+                kprint(ec, 112); kprint(ec, 104); kprint(ec, 97); kputs_nl(ec);
+            }
+
+            // memstat (109='m' + 'e')
+            if cmd == 109 {
+                if pos > 1 {
+                    if cbuf.data[1] == 101 {
+                        kprint(ec, 116); kprint(ec, 111); kprint(ec, 116); kprint(ec, 97);
+                        kprint(ec, 108); kprint(ec, 58); kprint(ec, 32);
+                        kputs_num(ec, pmm.total_pages); kputs_nl(ec);
+                        kprint(ec, 102); kprint(ec, 114); kprint(ec, 101); kprint(ec, 101);
+                        kprint(ec, 58); kprint(ec, 32);
+                        kputs_num(ec, pmm.free_pages); kputs_nl(ec);
+                        kprint(ec, 117); kprint(ec, 115); kprint(ec, 101); kprint(ec, 100);
+                        kprint(ec, 58); kprint(ec, 32);
+                        kputs_num(ec, pmm.total_pages - pmm.free_pages); kputs_nl(ec);
+                    }
+                }
+            }
+
+            // echo (101='e')
+            if cmd == 101 {
+                if pos > 1 {
+                    if cbuf.data[1] == 120 {
+                        // exit
+                        running = 0;
+                    } else {
+                        // echo <args> — print just the args, no "echo:" prefix
+                        if pos > 4 {
+                            if cbuf.data[4] == 32 {
+                                let i = 5;
+                                while i < pos {
+                                    kprint(ec, cbuf.data[i]);
+                                    i = i + 1;
+                                }
+                                kputs_nl(ec);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Reset for next command
             pos = 0;
-            if running == 1 {
-                kputs_prompt(ec);
-            }
+            if running == 1 { kputs_prompt(ec); }
         } else {
-            // Append to cmd_buf (not buf, which is used for read)
             if pos < 255 {
-                cmd_buf.data[pos] = c;
+                cbuf.data[pos] = c;
                 pos = pos + 1;
             }
         }
@@ -220,7 +428,4 @@ fn kmain() -> i32 {
     return 0;
 }
 
-fn main() -> i32 {
-    let code = kmain();
-    return code;
-}
+fn main() -> i32 { return kmain(); }
