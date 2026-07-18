@@ -8539,8 +8539,10 @@ fn detect_array_elem_type(
                         return match elem_type_str {
                             "u8" | "i8" | "bool" => (1, Some(vuma_codegen::ir::IRType::U8)),
                             "u16" | "i16" => (2, Some(vuma_codegen::ir::IRType::U16)),
-                            "u32" | "i32" | "f32" => (4, Some(vuma_codegen::ir::IRType::U32)),
-                            "u64" | "i64" | "f64" => (8, Some(vuma_codegen::ir::IRType::U64)),
+                            "u32" | "i32" => (4, Some(vuma_codegen::ir::IRType::U32)),
+                            "f32" => (4, Some(vuma_codegen::ir::IRType::F32)),
+                            "u64" | "i64" => (8, Some(vuma_codegen::ir::IRType::U64)),
+                            "f64" => (8, Some(vuma_codegen::ir::IRType::F64)),
                             _ => (1, None),
                         };
                     }
