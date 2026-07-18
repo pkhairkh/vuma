@@ -1,0 +1,40 @@
+// fp_vec_sum — Floating-point array sum (vectorization demo)
+// Expected exit code: 0
+//
+// Sums a 1024-element f32 array.  Used by F4c (FP loop vectorization)
+// to verify SSE ADDPS / AArch64 FADD vector emission on x86_64 and
+// aarch64 backends.
+//
+// VUMA Key Concepts:
+//   - f32 array allocation and iteration
+//   - Pointer arithmetic for array access
+//   - IVE verifies Interpretation (loaded type matches stored type)
+
+fn main() -> i32 {
+    // Allocate 1024 * 4 = 4096 bytes for an f32 array.
+    ptr = allocate(4096);
+    // Fill with 1.0 each.
+    i: i64 = 0;
+    while i < 1024 {
+        slot = ptr + (i * 4);
+        // Store 1.0 (as f32) at each slot.
+        // floattofloat widens i32 1 to f32? No -- use inttofloat then floattofloat.
+        one_f64: f64 = inttofloat(1);
+        one_f32: f32 = floattofloat(one_f64);
+        *(slot) = one_f32;
+        i = i + 1;
+    }
+    // Sum the array.
+    total: f64 = 0.0;
+    j: i64 = 0;
+    while j < 1024 {
+        slot = ptr + (j * 4);
+        val: f32 = *slot;
+        val_f64: f64 = floattofloat(val);
+        total = total + val_f64;
+        j = j + 1;
+    }
+    free(ptr);
+    // total should be 1024.0; we don't check (just exit 0).
+    return 0;
+}
