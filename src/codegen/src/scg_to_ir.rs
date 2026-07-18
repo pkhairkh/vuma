@@ -3466,7 +3466,6 @@ impl IRBuilder {
                 }
             })
             .or_else(|| {
-                eprintln!("DEBUG G7: comp.dst={} fn_var_types={:?}", comp.dst, self.fn_var_types.keys().collect::<Vec<_>>());
                 // G7: look up the dst temp name in the function's var_types
                 // (populated from let-binding type annotations like `let a: f64`).
                 self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
@@ -4862,6 +4861,12 @@ impl IRBuilder {
     fn expr_ir_type(&self, expr: &ScgExpr) -> Option<IRType> {
         match expr {
             ScgExpr::Float(_) => Some(IRType::F64),
+            ScgExpr::Var(name) => {
+                // Check fn_var_types for the variable's declared type.
+                // This is critical for f32 variables: `a: f32 = 3.0` creates
+                // a Float literal (F64) but the variable is F32.
+                self.fn_var_types.get(name).map(|t| t.to_ir_type())
+            }
             ScgExpr::BinOp { lhs, .. } => self.expr_ir_type(lhs),
             _ => None,
         }

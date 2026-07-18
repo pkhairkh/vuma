@@ -461,6 +461,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
     };
 
+    // Like load_value, but narrows f64 immediate bits to f32 bits.
+    // Used by the f32 FP paths (addss/subss/mulss/divss/ucomiss) where
+    // the immediate holds f64 bits but the instruction needs f32 bits
+    // in the low 32 bits of the GPR.
+    let load_value_f32 = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+        match val {
+            IRValue::Immediate(imm) => {
+                let f = f64::from_bits(*imm as u64);
+                let f32_bits = (f as f32).to_bits();
+                encode_mov_reg_imm32(scratch, f32_bits as i32)
+            }
+            _ => load_value(val, scratch),
+        }
+    };
+
     // ── Phase 2: Generate prologue ──
 
     let mut encoded_instrs: Vec<AllocatedInstruction> = Vec::new();
@@ -562,17 +577,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     let f32_bits = (f as f32).to_bits();
                                     encode_mov_reg_imm32(scratch, f32_bits as i32)
                                 }
-                                _ => load_value(val, scratch),
+                                _ => if is_f64 { load_value(val, scratch) } else { load_value_f32(val, scratch) },
                             }
                         };
                         let load_fn: &dyn Fn(&IRValue, Gpr) -> Vec<u8> = if is_f64 { &load_value } else { &load_value_f32 };
-                        code.extend(load_fn(lhs, Gpr::Rax));
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
-                        code.extend(load_fn(rhs, Gpr::R10));
+                        code.extend(load_value(rhs, Gpr::R10));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -621,13 +636,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
-                        code.extend(load_value(lhs, Gpr::Rax));
+
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(if is_f64 { load_value(rhs, Gpr::R10) } else { load_value_f32(rhs, Gpr::R10) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -673,13 +689,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
-                        code.extend(load_value(lhs, Gpr::Rax));
+
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(if is_f64 { load_value(rhs, Gpr::R10) } else { load_value_f32(rhs, Gpr::R10) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -715,13 +732,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
-                        code.extend(load_value(lhs, Gpr::Rax));
+
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(if is_f64 { load_value(rhs, Gpr::R10) } else { load_value_f32(rhs, Gpr::R10) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -772,15 +790,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                     if ty_fp || lhs_fp || rhs_fp || fp_vregs.contains(&dst_id) {
                         let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+
                         // Load lhs into RAX and move to XMM0.
-                        code.extend(load_value(lhs, Gpr::Rax));
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
                         // Load rhs into R10 and move to XMM1.
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(if is_f64 { load_value(rhs, Gpr::R10) } else { load_value_f32(rhs, Gpr::R10) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -1150,15 +1169,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         || lhs_fp || rhs_fp;
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+
                         // Load lhs into RAX and move to XMM0.
-                        code.extend(load_value(lhs, Gpr::Rax));
+                        code.extend(if is_f64 { load_value(lhs, Gpr::Rax) } else { load_value_f32(lhs, Gpr::Rax) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
                         // Load rhs into R10 and move to XMM1.
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(if is_f64 { load_value(rhs, Gpr::R10) } else { load_value_f32(rhs, Gpr::R10) });
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
