@@ -45,7 +45,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Arm32TargetInfo,
     Backend, BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRType, UnaryOpKind};
 use std::collections::HashMap;
 
 // Global set of function names that return 64-bit values (I64/U64).
@@ -3873,25 +3873,39 @@ impl Backend for Arm32Backend {
             encoded: set_fp_code,
         });
 
-        // Store function parameters to their stack slots
-        // Args 0–3 come from R0–R3; args 4+ reside on the stack above the
-        // saved {R11, LR} pair at [R11 + 8 + (i-4)*4].
+        // Store function parameters to their stack slots.
+        // G7: 64-bit params (f64/i64/u64) consume TWO arg registers per AAPCS.
         let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
+        let mut arg_reg_idx = 0usize;
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
-                if i < 4 {
-                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                    // Use ss_store_32_zero to store the 32-bit register value
-                    // AND zero the high 32 bits of the 8-byte slot. This prevents
-                    // garbage in the high word of I64/Address params, which would
-                    // cause SIGSEGV when used as pointers.
-                    let store_code = ss_store_32_zero(arg_regs[i], offset, fs);
-                    instructions.push(AllocatedInstruction {
-                        opcode: "str".to_string(),
-                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
-                        writes: vec![],
-                        encoded: store_code,
-                    });
+                let param_ty = func.param_types.get(i);
+                let is_64bit = matches!(param_ty, Some(IRType::F64) | Some(IRType::I64) | Some(IRType::U64));
+                let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                if arg_reg_idx < 4 {
+                    if is_64bit && arg_reg_idx + 1 < 4 {
+                        // 64-bit: store both halves via ss_store_64
+                        let store_code = ss_store_64(arg_regs[arg_reg_idx], arg_regs[arg_reg_idx + 1], offset);
+                        instructions.push(AllocatedInstruction {
+                            opcode: "str_64".to_string(),
+                            reads: vec![
+                                PhysicalReg::new(RegClass::Gpr, arg_regs[arg_reg_idx].encoding()),
+                                PhysicalReg::new(RegClass::Gpr, arg_regs[arg_reg_idx + 1].encoding()),
+                            ],
+                            writes: vec![],
+                            encoded: store_code,
+                        });
+                        arg_reg_idx += 2;
+                    } else {
+                        let store_code = ss_store_32_zero(arg_regs[arg_reg_idx], offset, fs);
+                        instructions.push(AllocatedInstruction {
+                            opcode: "str".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[arg_reg_idx].encoding())],
+                            writes: vec![],
+                            encoded: store_code,
+                        });
+                        arg_reg_idx += 1;
+                    }
                 } else {
                     // Stack-passed argument: located at [R11 + 8 + (i-4)*4]
                     // Load into R0 (free — already saved to its slot for param 0),
@@ -3899,7 +3913,7 @@ impl Backend for Arm32Backend {
                     // NOTE: We use R0 rather than R12 because ss_store_to_slot
                     // uses R12 internally for large offsets and documents that
                     // src_reg must NOT be R12 in that case.
-                    let arg_offset_from_r11: i32 = 8 + ((i - 4) * 4) as i32;
+                    let arg_offset_from_r11: i32 = 8 + ((arg_reg_idx - 4) * 4) as i32;
                     let slot_offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
                     let mut param_code = Vec::new();
                     // LDR R0, [R11, #arg_offset_from_r11]
@@ -5700,16 +5714,22 @@ impl Backend for Arm32Backend {
                             }
                         }
 
-                        // 3. Move args 0–3 to R0–R3
-                        // We need to be careful: if an arg is in a stack slot that
-                        // uses R12 for large offsets, and we've already loaded an
-                        // earlier arg into R0-R3, we need to handle this carefully.
-                        // Since ss_load_value only uses R12 as a temp for large offsets
-                        // and doesn't touch R0-R3, loading sequentially is safe.
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < 4 {
-                                let arg_reg = Gpr::arg_register(i).unwrap();
+                        // 3. Move args 0–3 to R0–R3.
+                        // G7: load each arg as 64-bit (two registers) to handle
+                        // f64/i64/u64 params correctly. 32-bit params get a
+                        // harmless high-word load (zero from ss_store_32_zero).
+                        let mut arg_reg_idx = 0usize;
+                        for arg in args.iter() {
+                            if arg_reg_idx >= 4 { break; }
+                            if arg_reg_idx + 1 < 4 {
+                                let lo_reg = Gpr::arg_register(arg_reg_idx).unwrap();
+                                let hi_reg = Gpr::arg_register(arg_reg_idx + 1).unwrap();
+                                code.extend(ss_load_value_64(lo_reg, hi_reg, arg, &vreg_stack_slots));
+                                arg_reg_idx += 2;
+                            } else {
+                                let arg_reg = Gpr::arg_register(arg_reg_idx).unwrap();
                                 code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg));
+                                arg_reg_idx += 1;
                             }
                         }
 
