@@ -1,0 +1,271 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/crypto/hw_trampoline.vuma
+// Hardware Crypto Trampolines — AES-NI (x86_64) + ARMv8 Crypto (aarch64).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NOT real hardware acceleration. This is the K10e structural skeleton:
+// the extern `aesni_*` / `aes_arm_*` function declarations + the
+// `hw_aes_available` dispatch + the `hw_aes_encrypt` trampoline that
+// falls back to the K10b XOR-stub when hardware AES is unavailable.
+// K11+ adds the real AES-NI / ARMv8 asm trampolines (AESENC + AESE
+// instructions) on bare-metal builds.
+//
+// ── What K10e provides ──────────────────────────────────────────────────────
+//   hw_aes_available()                          — query the CPU's hardware
+//                                                  AES capability. In hosted
+//                                                  mode: returns 0 (the
+//                                                  aesni_available stub is
+//                                                  resolved to the
+//                                                  __ffi_fallback_stub that
+//                                                  returns 0 — see
+//                                                  womb/kernel/arch/x86_64/
+//                                                  trampoline.vuma). On real
+//                                                  x86_64 with AES-NI:
+//                                                  returns 1 (CPUID.01H:ECX.
+//                                                  AESNI[bit 25] = 1). On
+//                                                  aarch64 with crypto
+//                                                  extensions: returns 1
+//                                                  (ID_AA64ISAR0_EL1.AES).
+//   hw_aes_encrypt(key,input,output)            — encrypt one 16-byte block.
+//                                                  Dispatches to the AES-NI
+//                                                  (x86_64) or ARMv8 (aarch64)
+//                                                  trampoline when HW is
+//                                                  available; falls back to
+//                                                  the K10b XOR-stub when not.
+//
+// ── Extern ABI ──────────────────────────────────────────────────────────────
+//   The 4 externs declared here (aesni_encrypt_block, aesni_available,
+//   aes_arm_encrypt_block, aes_arm_available) are NOT pre-registered by
+//   the x86_64 backend's `build_runtime_syscall_stubs` (see
+//   womb/kernel/arch/x86_64/trampoline.vuma). Unregistered externs resolve
+//   at link time to `__ffi_fallback_stub` ("xor eax, eax; ret" → returns
+//   0), with a runtime warning emitted by encode_program. So:
+//     • In hosted mode: aesni_available() returns 0 (fallback stub).
+//     • In hosted mode: aesni_encrypt_block(...) is never called
+//       (because hw_aes_available() returned 0 and we took the fallback
+//       branch in hw_aes_encrypt).
+//     • On bare-metal x86_64 with AES-NI (K11): the K11 trampoline will
+//       register real asm stubs for these externs (movdqu + aesenc + movdqu
+//       sequence for aesni_encrypt_block; CPUID-based check for
+//       aesni_available).
+//     • On bare-metal aarch64 with crypto extensions (K11): same, but
+//       with AESE + AESMC instructions (ld1 + aese + aesmc + st1).
+//
+// ── VUMA Key Concepts ──────────────────────────────────────────────────────
+//   - `extern "C" { fn ... }` block declares external ABI functions
+//   - `Address` type for raw pointer-typed arguments (no `*T` / `&x`)
+//   - `state_param as Address` cast: convert a State<T> parameter to its
+//     raw arena address (same pattern as womb/kernel/mm/pmm.vuma:306
+//     `pmm.pool = pool as Address;`)
+//   - PMT layouts with [u8; 16] fixed-size array fields (one AES block)
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The HW-trampoline self-test uses:
+//     key.data[0]       = 42
+//     input.data[0]     = 99
+//     output.data[0]    = 73    (99 XOR 42 = 73 — the K10b XOR fallback)
+//     aesni_available() = 0     (hosted-mode stub return value)
+//
+// ── Why 99 XOR 42 == 73? ────────────────────────────────────────────────────
+//   99 = 0x63 (0b01100011), 42 = 0x2A (0b00101010).
+//   0x63 XOR 0x2A = 0x49 (0b01001001) = 73 decimal.
+//   The XOR fallback is the SAME as K10b's stub AES round function
+//   (aes_encrypt_block) — this preserves cross-wave behavioral parity
+//   (K10e's fallback path produces the same ciphertext byte as K10b's
+//   standalone AES stub for the same key+input, so existing K10b KAT
+//   vectors that exercise the XOR path still pass under K10e).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   HwAesKey + HwAesBlock structs are flat-byte-array layouts held in
+//   `___pmt_buffer`-backed State<T> values; the CALLER allocates them via
+//   `state_new(HwAesKey)` etc. and passes them by reference to
+//   hw_aes_encrypt (init-style API — same convention as K10b's AES +
+//   K10c's SHA-256).
+//
+//   The `as Address` cast on `key` / `input` / `output` inside the
+//   HW-accelerated branch is a pure-arena-address extraction (no pointer
+//   arithmetic, no heap allocation) — equivalent to the pattern in
+//   womb/kernel/mm/pmm.vuma:306 (`pmm.pool = pool as Address;`). The cast
+//   yields the State<T>'s u64-aligned offset within `___pmt_buffer`,
+//   which is the value passed to the AES-NI asm trampoline (which will
+//   `movdqu xmm0, [rdi]` / `aesenc xmm0, [rsi]` / `movdqu [rdx], xmm0`
+//   on x86_64).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/crypto/hw_trampoline.vuma \
+//         /tmp/hw_trampoline.bin x86_64 --verify
+//     /tmp/hw_trampoline.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (both self-test checks pass — hw_aes_available
+// returns 0 in hosted mode; fallback XOR path produces output[0] = 99^42
+// = 73). NOTE: encode_program will emit a runtime warning that the 4
+// externs are not pre-registered and will resolve to
+// __ffi_fallback_stub — this is EXPECTED behavior on hosted x86_64 (the
+// real asm stubs land in K11's bare-metal trampoline).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// The 4 hardware-crypto trampoline externs. None are pre-registered on
+// hosted x86_64 (see file header), so all resolve to
+// __ffi_fallback_stub (returns 0). K11's bare-metal x86_64 + aarch64
+// trampolines will register real asm stubs.
+
+extern "C" {
+    // x86_64 AES-NI: encrypt one 16-byte block using the AESENC
+    // instruction (plus the AESKEYGENASSIST-driven key schedule).
+    //   key:    Address of the 16-byte round key (or 176-byte expanded
+    //           schedule for AES-128; K11 will dispatch on ctx.nr).
+    //   input:  Address of the 16-byte plaintext block.
+    //   output: Address of the 16-byte ciphertext output buffer.
+    // SysV AMD64: RDI=key, RSI=input, RDX=output. The K11 stub will be
+    // "movdqu xmm0, [rsi] ; movdqu xmm1, [rdi] ; pxor xmm0, xmm1 ;
+    //  aesenc xmm0, xmm1 ; ... ; movdqu [rdx], xmm0 ; ret" (10 rounds
+    //  of AESENC + 1 round of AESENCLAST for AES-128).
+    fn aesni_encrypt_block(key: Address, input: Address, output: Address);
+
+    // x86_64: check if AES-NI is available via CPUID.01H:ECX.AESNI[bit 25].
+    // Returns 1 if available, 0 if not. The K11 stub will be
+    // "mov eax, 1 ; cpuid ; bt ecx, 25 ; setc al ; movzx eax, al ; ret".
+    fn aesni_available() -> u8;
+
+    // aarch64 ARMv8 Crypto: encrypt one 16-byte block using the AESE +
+    // AESMC instructions (plus the AES key schedule).
+    //   key:    Address of the 16-byte round key (or expanded schedule).
+    //   input:  Address of the 16-byte plaintext block.
+    //   output: Address of the 16-byte ciphertext output buffer.
+    // AAPCS64: X0=key, X1=input, X2=output. The K11 stub will be
+    // "ld1 {v0.16b}, [x1] ; ld1 {v1.16b}, [x0] ; aese v0.16b, v1.16b ;
+    //  aesmc v0.16b, v0.16b ; ... ; st1 {v0.16b}, [x2] ; ret" (10 rounds
+    //  of AESE+AESMC + 1 final AESE for AES-128).
+    fn aes_arm_encrypt_block(key: Address, input: Address, output: Address);
+
+    // aarch64: check if ARMv8 crypto extensions are available via
+    // ID_AA64ISAR0_EL1.AES. Returns 1 if available, 0 if not. The K11
+    // stub will be "mrs x0, ID_AA64ISAR0_EL1 ; ubfx x0, x0, #4, #4 ;
+    //  cmp x0, #2 ; cset x0, ge ; ret" (the AES field is bits [7:4],
+    //  value 0b0010+ means AES is implemented).
+    fn aes_arm_available() -> u8;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// HwAesKey: 16-byte AES-128 key wrapper (one round key for the XOR
+// fallback path; K11 will use this as round-0 key for the AES-NI path
+// and rely on a separate AesRoundKey layout for the expanded schedule
+// — see womb/kernel/crypto/aes.vuma:AesRoundKey).
+layout HwAesKey = {
+    data: [u8; 16],     // 16-byte AES-128 key
+}
+
+// HwAesBlock: 16-byte AES block (Rijndael block size — always 16 bytes
+// for AES-128/192/256, per FIPS-197 §3.2). Used as both the input and
+// output of hw_aes_encrypt.
+layout HwAesBlock = {
+    data: [u8; 16],     // 16-byte AES block
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Hardware-crypto dispatch functions.
+// ────────────────────────────────────────────────────────────────────────────
+
+// hw_aes_available: check if hardware AES is available on the current CPU.
+//
+//   returns: 1 if AES-NI (x86_64) or ARMv8 crypto (aarch64) is available,
+//            0 if not.
+//
+// On hosted x86_64: aesni_available() resolves to __ffi_fallback_stub
+// (returns 0) — see file header. On bare-metal x86_64 with AES-NI
+// (K11): returns 1 (CPUID.01H:ECX.AESNI[bit 25]). On bare-metal aarch64
+// with crypto extensions (K11): returns 1 (ID_AA64ISAR0_EL1.AES).
+//
+// K11 will add arch dispatch (compile-time #ifdef or runtime CPUID) to
+// pick the right aesni_available vs aes_arm_available call — for K10e's
+// hosted-mode test, the dispatch is hardwired to aesni_available.
+fn hw_aes_available() -> u8 {
+    // In hosted mode: aesni_available returns 0 (stub).
+    // On real x86_64 with AES-NI: returns 1.
+    return aesni_available();
+}
+
+// hw_aes_encrypt: encrypt one 16-byte block, using hardware acceleration
+// if available, falling back to the K10b XOR-stub otherwise.
+//
+//   key:    caller-allocated State<HwAesKey> holding the 16-byte key.
+//   input:  caller-allocated State<HwAesBlock> holding the plaintext.
+//   output: caller-allocated State<HwAesBlock> (ciphertext output).
+//
+// HW path (K11, bare-metal x86_64 with AES-NI): casts each State<T> to
+// its raw arena Address and invokes aesni_encrypt_block, which issues
+// the AESENC sequence (10 rounds for AES-128). The arena address is
+// the byte-offset of the State<T>'s data within ___pmt_buffer — the
+// AES-NI trampoline treats it as a host-VM address (in hosted mode,
+// ___pmt_buffer is mmapped at a real address, so the cast is sound).
+//
+// Fallback path (K10e hosted-mode test, or any CPU without AES-NI):
+// XORs each input byte with the corresponding key byte — identical to
+// K10b's aes_encrypt_block stub. This preserves cross-wave behavioral
+// parity (see file header "Why 99 XOR 42 == 73?").
+fn hw_aes_encrypt(key: State<HwAesKey>, input: State<HwAesBlock>, output: State<HwAesBlock>) {
+    if hw_aes_available() == 1 {
+        // Use hardware acceleration.
+        // Cast each State<T> parameter to its raw arena Address for the
+        // AES-NI trampoline. Same pattern as womb/kernel/mm/pmm.vuma:306
+        // (`pmm.pool = pool as Address;`).
+        let key_addr = key as Address;
+        let in_addr = input as Address;
+        let out_addr = output as Address;
+        aesni_encrypt_block(key_addr, in_addr, out_addr);
+    } else {
+        // Fallback: XOR each input byte with the corresponding key byte
+        // (same as K10b's aes_encrypt_block stub).
+        let i = 0;
+        while i < 16 {
+            output.data[i] = input.data[i] ^ key.data[i];
+            i = i + 1;
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K10e HW-trampoline API surface end-to-end:
+//   1. hw_aes_available()         → returns 0 (hosted mode: aesni_available
+//                                    resolves to __ffi_fallback_stub).
+//   2. hw_aes_encrypt(key,in,out) → takes the XOR fallback path (because
+//                                    hw_aes_available() returned 0);
+//                                    out[0] = in[0] ^ key[0] = 99 ^ 42 = 73.
+//
+// Returns 0 on success, 1..2 on the 2 individual check failures.
+//
+// On K11's bare-metal x86_64+AES-NI build, check 1 will be inverted
+// (hw_aes_available() returns 1, not 0), and check 2 will exercise the
+// real AESENC path (out[0] will be the real AES-128 ciphertext byte for
+// key[0]=42 + in[0]=99, NOT 73 — K11 will update this self-test to
+// dispatch on the availability check rather than hard-wiring the
+// expected fallback value).
+fn main() -> i32 {
+    // ── Availability check ──
+    // In hosted mode: hw_aes_available() returns 0 (aesni_available is
+    // the __ffi_fallback_stub).
+    let avail = hw_aes_available();
+    if avail != 0 { return 1; }  // stub returns 0 in hosted mode
+
+    // ── Encrypt (XOR fallback path) ──
+    let key = state_new(HwAesKey);
+    key.data[0] = 42;
+    let input = state_new(HwAesBlock);
+    input.data[0] = 99;
+    let output = state_new(HwAesBlock);
+    hw_aes_encrypt(key, input, output);
+    // XOR fallback: 99 ^ 42 = 73.
+    if output.data[0] != 73 { return 2; }
+
+    return 0;
+}
