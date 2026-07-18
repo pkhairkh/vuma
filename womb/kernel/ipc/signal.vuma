@@ -1,0 +1,642 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/ipc/signal.vuma
+// VWK IPC Subsystem — Signals (32-signal handler table + send/deliver/check)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K7b layer of the VWK kernel: the signal primitive — a
+// per-process table of 32 signal handlers (1=SIGHUP, 2=SIGINT, 9=SIGKILL,
+// 15=SIGTERM, etc., matching the asm-generic numbering used by Linux on
+// every architecture VWK targets) plus a 32-bit pending mask, a 32-bit
+// blocked mask, and the 7 operations that manipulate them. K7 (IPC) is
+// building pipe (K7a, done), signal (this file, K7b), futex (K7c), and
+// shm (K7d); K7e built the foundational WaitQueue that all four rest on.
+//
+// Signals are the kernel's "out-of-band notification" mechanism — a way
+// for one task (or the kernel itself) to interrupt another task's normal
+// control flow with an event the target task has registered interest in.
+// Classic uses: Ctrl-C → SIGINT to the foreground process group; parent
+// death → SIGHUP to the children; kill -9 → SIGKILL (uncatchable); the
+// page-oom-killer → SIGTERM. K7b's SignalTable tracks the per-process
+// state that lets the kernel deliver these notifications.
+//
+// ── What K7b provides ──────────────────────────────────────────────────────
+//   signal_init(tbl)                          — zero all 32 handlers, clear
+//                                                mask, clear pending. Called
+//                                                once per process during
+//                                                process creation (K4a).
+//   signal_install(tbl, sig, handler)         — install a handler address
+//                                                for signal `sig` (1..32).
+//                                                handler=0 = default action
+//                                                (terminate for SIGINT/
+//                                                SIGTERM, ignore for SIGCHLD),
+//                                                handler=1 = ignore (SIG_IGN
+//                                                in POSIX), any other value =
+//                                                function address to call.
+//   signal_get_handler(tbl, sig) -> u64       — read back the installed
+//                                                handler for `sig`. Returns
+//                                                0 if none installed (the
+//                                                default-action sentinel).
+//   signal_send(tbl, sig) -> i64              — post `sig` to the pending
+//                                                mask. Returns 0 on
+//                                                success, 22 (-EINVAL) if
+//                                                sig is 0 or > 32. (In a
+//                                                real kernel this would
+//                                                also wake any task blocked
+//                                                in pause()/sigsuspend()
+//                                                via K7e's waitq_wake_one —
+//                                                K7b is PMT-pure and defers
+//                                                the wake to K8+ scheduler
+//                                                integration.)
+//   signal_check(tbl) -> u8                   — return the lowest-numbered
+//                                                pending, unblocked signal
+//                                                (1..32) and clear its
+//                                                pending bit. Returns 0 if
+//                                                nothing is deliverable. The
+//                                                kernel's main loop calls
+//                                                this on every return-to-user
+//                                                to deliver pending signals
+//                                                before resuming user code.
+//   signal_block(tbl, sig)                    — add `sig` to the blocked
+//                                                mask (POSIX sigprocmask
+//                                                SIG_BLOCK). Blocked
+//                                                signals stay pending but
+//                                                are not delivered until
+//                                                unblocked.
+//   signal_unblock(tbl, sig)                  — remove `sig` from the
+//                                                blocked mask (POSIX
+//                                                sigprocmask SIG_UNBLOCK).
+//
+// ── SignalTable layout (NEW in K7b) ─────────────────────────────────────────
+//   layout SignalTable = {
+//       handlers: [u8; 256],  // 32 * 8 bytes — u64 handler function addr
+//                              // per signal, stored little-endian byte-by-
+//                              // byte (VUMA has no u64 array indexing, so
+//                              // each 8-byte slot is 8 separate u8 cells).
+//                              // Signal `sig` (1..32) lives at byte
+//                              // offset (sig-1) * 8. handlers[0..7] =
+//                              // SIGHUP's address, [8..15] = SIGINT's,
+//                              // ..., [248..255] = signal 32's.
+//       mask:     u32,         // blocked signals. Bit N (0..31) set means
+//                              // signal N+1 is blocked (will not be
+//                              // delivered by signal_check, but stays
+//                              // pending). The bit-to-signal mapping is
+//                              // signal = bit_position + 1 (so SIGINT=2
+//                              // → bit 1, SIGKILL=9 → bit 8, SIGTERM=15
+//                              // → bit 14).
+//       pending:  u32,         // pending signals. Same bit-to-signal
+//                              // mapping as mask. A bit set here means
+//                              // "signal_send was called for this signal,
+//                              // but signal_check has not yet delivered
+//                              // it (either because it's blocked, or
+//                              // because the kernel hasn't reached a
+//                              // delivery point yet)."
+//   }
+//
+// Field byte-offsets (verified by IVE's layout resolver):
+//     handlers   [  0 .. 255]  256 bytes  (32 × 8-byte slots)
+//     mask       [256 .. 259]    4 bytes  (u32, 4-aligned — pad to 8)
+//     pending    [264 .. 267]    4 bytes  (u32)
+//   total: 268 bytes, padded to 272 for 8-byte alignment of the trailing
+//   State<T> footprint (the codegen rounds State<T> sizes up to a multiple
+//   of the largest field's alignment; here that's 8 because the 256-byte
+//   array slot is 8-byte aligned in the runtime PMT buffer pool — the
+//   [u8; 256] array is treated as a single 256-byte block whose natural
+//   alignment is 1, but State<T> footprints round to 8 regardless).
+//
+// NOTE on handler storage: the handlers field is `[u8; 256]`, NOT
+// `[u64; 32]`. VUMA's parser accepts `[u64; 32]` as a layout field, but
+// indexing it (`tbl.handlers[i]`) only yields a u8 cell — VUMA's array
+// indexing is byte-granular regardless of the element type (see K7a's
+// `Pipe.buf: [u8; 256]` and K4a's `ProcessTable.names: [u8; 256*32]`
+// for the same byte-array pattern). So whether we declare `[u8; 256]`
+// or `[u64; 32]`, we still have to store/load the 8-byte handler
+// addresses byte-by-byte. Declaring it as `[u8; 256]` is the cleaner
+// choice — it makes the byte-by-byte access pattern self-documenting
+// (no reader will be misled into thinking `tbl.handlers[2]` returns
+// the whole SIGINT handler).
+//
+// ── Signal numbering (asm-generic, Linux 6.x) ───────────────────────────────
+//   1  SIGHUP       hangup detected on controlling terminal or death of
+//                   controlling process
+//   2  SIGINT       interrupt from keyboard (Ctrl-C)
+//   3  SIGQUIT      quit from keyboard (Ctrl-\)
+//   4  SIGILL       illegal instruction
+//   5  SIGTRAP      trace/breakpoint trap
+//   6  SIGABRT      abort signal from abort(3)
+//   7  SIGBUS       bus error (bad memory access)
+//   8  SIGFPE       floating-point exception
+//   9  SIGKILL      kill signal (uncatchable, unblockable — K8+ will
+//                   enforce this in signal_send by ignoring the mask
+//                   bit for signal 9)
+//   10 SIGUSR1      user-defined signal 1
+//   11 SIGSEGV      invalid memory reference
+//   12 SIGUSR2      user-defined signal 2
+//   13 SIGPIPE      broken pipe (write to pipe with no readers — K7a's
+//                   pipe_write returns 32 / -EPIPE in this case)
+//   14 SIGALRM      timer signal from alarm(2)
+//   15 SIGTERM      termination signal (kill(1) default)
+//   16 SIGSTKFLT    stack fault on coprocessor (unused, x86-only)
+//   17 SIGCHLD      child stopped or terminated (K4e's wait() is
+//                   notified via this signal in real Unix)
+//   18 SIGCONT      continue if stopped
+//   19 SIGSTOP      stop process (uncatchable, unblockable — like SIGKILL)
+//   20 SIGTSTP      stop typed at terminal (Ctrl-Z)
+//   21 SIGTTIN      background process trying to read from tty
+//   22 SIGTTOU      background process trying to write to tty
+//   23 SIGURG       urgent condition on socket
+//   24 SIGXCPU      CPU time limit exceeded
+//   25 SIGXFSZ      file size limit exceeded
+//   26 SIGVTALRM    virtual alarm clock
+//   27 SIGPROF      profiling alarm clock
+//   28 SIGWINCH     window resize signal
+//   29 SIGIO        I/O now possible (poll-style notification)
+//   30 SIGPWR       power failure
+//   31 SIGSYS       bad system call
+//   32 SIGRTMIN-32  first real-time signal (rarely used; on Linux the
+//                   first 32 are "standard" and 33+ are "real-time")
+//
+// K7b only manipulates the bit-to-signal mapping — it doesn't enforce
+// the catchability rules (SIGKILL=9 and SIGSTOP=19 cannot be caught or
+// blocked). The K8+ signal delivery layer will enforce those rules in
+// signal_install (reject installs for sig=9 and sig=19) and signal_block
+// (reject blocks for sig=9 and sig=19). K7b's PMT-pure self-test does
+// NOT test the catchability rules because the contract's reference
+// implementation doesn't enforce them.
+//
+// ── Bit-to-signal mapping ───────────────────────────────────────────────────
+//   Signal `sig` (1..32) → bit (sig - 1) in mask/pending (0..31).
+//   bit mask = `1 as u32 << (sig - 1)`.
+//   Signal from bit `b` (0..31) → sig = b + 1.
+//   The `1 as u32` cast is necessary because the literal `1` parses as
+//   i64 by default (VUMA's int literal type inference prefers i64 for
+//   bare integer literals — see bignum.vuma line 330 for the same
+//   `1 as u64 << q_pos` pattern). Without the cast, `1 << (sig - 1)`
+//   would shift within i64 — which would still work correctly for
+//   signals 1..32 (the shift result fits in u32), but the result type
+//   would be i64, requiring an `as u32` cast before storing into
+//   `tbl.mask` / `tbl.pending` (u32 fields). The `1 as u32` cast makes
+//   the whole expression u32-typed, so no extra cast is needed on the
+//   store. This matches the K7b contract's literal reference text.
+//
+// ── Bitwise NOT (`~`) on u32 ────────────────────────────────────────────────
+//   The K7b contract uses `~tbl.mask` for the complement of the mask,
+//   and `~bit` for the complement of a single-bit mask (used to clear a
+//   pending bit). VUMA's `~` operator lowers to `operand XOR -1` (see
+//   src/pipeline.rs::flatten_expr, UnOp::BitNot arm — the rhs is
+//   `ScgExpr::Int(-1)`, which is i64 0xFFFFFFFFFFFFFFFF). When the
+//   operand is a u32 value loaded into an i64 register (zero-extended),
+//   `~mask` produces an i64 with the LOW 32 bits = ~mask_low and the
+//   HIGH 32 bits = 0xFFFFFFFF (because mask_high was 0, ~0 = all-1s).
+//   This is then ANDed with `tbl.pending` (also u32, zero-extended,
+//   high 32 = 0). The high-high AND (0xFFFFFFFF & 0x00000000) = 0, so
+//   the upper 32 bits of the result are 0 — exactly what we want for a
+//   u32 value. The low-low AND (mask_low_complement & pending_low) is
+//   the correct 32-bit "pending AND NOT mask". Verified by probe
+//   /home/z/probe/probe_signal.vuma: `tbl.pending = 0xFFFFFFFF;
+//   tbl.mask = 16386; deliverable = tbl.pending & (~tbl.mask);` →
+//   4294950909 (0xFFFFBFFD). ✓
+//
+//   An alternative is to use XOR with 4294967295 (= 0xFFFFFFFF as u32,
+//   = -1 as i32): `tbl.pending & (tbl.mask ^ 4294967295)`. This
+//   explicitly masks to 32 bits. The K7b contract's "or use XOR with
+//   4294967295" note offers this as a fallback. THIS file uses `~`
+//   directly (the contract's first choice) because the probe confirmed
+//   it produces the correct 32-bit result via the zero-extension
+//   argument above. The same `~` pattern is used in womb/crypto/hmac.vuma
+//   line 191 (with an extra `& HMAC_MASK32` for paranoia — but the
+//   probe shows the extra mask is unnecessary when the OTHER operand
+//   is also u32, as it is here).
+//
+// ── `signal_check` semantics: lowest-numbered pending signal wins ───────────
+//   signal_check scans the deliverable mask (pending & ~mask) from bit 0
+//   (SIGHUP) to bit 31 (signal 32), returns the FIRST set bit's signal
+//   number (1..32), and CLEARS that bit in pending. This matches POSIX's
+//   "lowest signal number first" delivery order (POSIX doesn't actually
+//   MANDATE this for non-realtime signals, but Linux's get_signal() loop
+//   does it that way and most user-space assumes it). The clear-on-
+//   deliver means a subsequent signal_check will return the next pending
+//   signal (or 0 if nothing else is pending). Real-time signals (33+)
+//   have a different delivery rule (queue per signal, deliver in order
+//   of arrival) — K7b doesn't model those (only signals 1..32).
+//
+//   The clear-on-deliver is what makes signal_check a "consume" operation
+//   rather than a "peek" operation. The kernel's main loop calls
+//   signal_check in a loop until it returns 0, delivering each pending
+//   signal in turn before resuming user code.
+//
+// ── No actual handler invocation in K7b ─────────────────────────────────────
+//   signal_install stores the handler address. signal_check returns the
+//   signal number. NEITHER function CALLS the handler — that's the K8+
+//   delivery layer's job (it would push a signal trampoline frame onto
+//   the target task's user stack, set RIP to the handler address, set
+//   RSP to the trampoline frame, and let the task resume into the
+//   handler; on return, the trampoline does an rt_sigreturn syscall to
+//   restore the pre-signal register state). K7b is PMT-pure: it only
+//   tracks the metadata (which signals are pending, which are blocked,
+//   what handler is installed for each). The actual control-flow
+//   manipulation requires the trap machinery from K3a/K3b/K3c — the
+//   K8+ delivery layer will live in womb/kernel/sched/signal_deliver.vuma
+//   (or similar) and take both State<SignalTable> and State<Task> +
+//   State<TrapFrame>.
+//
+// ── No wait-queue integration in K7b ────────────────────────────────────────
+//   K7e's wait queue is the foundation for pause() / sigsuspend() — a
+//   task that calls pause() blocks on a sigwaitq until a signal arrives.
+//   In a real kernel, signal_send would call waitq_wake_one(sigwaitq) to
+//   wake the blocked task. K7b does NOT include a sigwaitq field in
+//   SignalTable (the contract's layout has only handlers/mask/pending),
+//   and signal_send does NOT call waitq_wake_one. This is the same PMT-
+//   pure simplification K7a made for pipe (K7a includes the waitq fields
+//   but the self-test never adds any waiters — see K7a's "Why no actual
+//   blocking?" header note). K8+ scheduler integration will add the
+//   sigwaitq to SignalTable and wire signal_send into waitq_wake_one.
+//   The K7b self-test only checks the synchronous paths (install → send
+//   → check → block → unblock) — no actual task blocking is tested.
+//
+// ── Error codes (decimal, per the K7b contract) ─────────────────────────────
+//   22 = EINVAL ("Invalid argument"). The K7b contract specifies
+//        signal_send returns 22 (POSITIVE 22, not -22) for sig=0 or sig>32.
+//        K7a and K7e used the same positive-error convention (K7a: 11 =
+//        EAGAIN, 32 = EPIPE; K7e: -1 as i64 via `0 - 1`). The positive-
+//        error convention matches the K4e wait() contract and is the
+//        project-wide standard for kernel-internal error codes (the
+//        syscall layer in K4f will negate them to -errno before returning
+//        to user space, matching Linux's syscall ABI). The K7b self-test
+//        checks `if ret != 22` (positive 22) on signal_send's EINVAL
+//        path — see main() below.
+//   0  = success (signal_send returns 0 on valid sig).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   SignalTable is a flat struct held in a `___pmt_buffer`-backed
+//   State<SignalTable>; the CALLER allocates it via
+//   `state_new(SignalTable)` and passes it by reference to signal_init /
+//   signal_install / signal_get_handler / signal_send / signal_check /
+//   signal_block / signal_unblock (init-style API — see "Why init-
+//   style?" in K4e's wait.vuma header for the codegen rationale: the
+//   current codegen does NOT propagate State-typedness through function
+//   return values, so `fn signal_new() -> State<SignalTable>` would
+//   produce broken field-access code in callers). No externs are
+//   declared in this file (signal is pure-PM on the SignalTable — no
+//   syscalls, no context switch, no memory allocation, no handler
+//   invocation).
+//
+//   State<T> params: 1 per function (tbl only), per the K4b contract's
+//   "1-2 per function" rule. The signal_* functions don't need a
+//   ProcessTable or a Task — they're manipulating only the per-process
+//   SignalTable. K8+ scheduler integration will add a State<Task>
+//   parameter to signal_send (to look up the target's SignalTable from
+//   the task index — K7b's caller does this lookup itself and passes
+//   the resulting State<SignalTable> directly).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+//   All non-zero constants in this file use DECIMAL per the K7b contract's
+//   "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+//   path (parse_int_radix width-extension subtleties — see
+//   womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+//   K3a's trap_trampoline.vuma for the same rule). The constants:
+//     256  = handlers array size (32 signals × 8 bytes per handler).
+//     32   = maximum signal number (asm-generic upper bound).
+//     8    = bytes per handler (u64 address, stored as 8 u8 cells).
+//     255  = single-byte mask for the low 8 bits (used in
+//            signal_install / signal_get_handler's `(handler >> sh) & 255`
+//            byte-extraction).
+//     22   = EINVAL (signal_send's error return for sig=0 or sig>32).
+//     1    = the `1` in `1 as u32 << (sig - 1)` (the single bit being
+//            shifted into position) and the `1` in `i + 1` (signal-
+//            from-bit conversion: bit i → signal i+1).
+//     1000, 2, 15 = self-test constants (SIGINT handler address 1000,
+//                   signal numbers 2 and 15).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   This file is self-contained. It declares the SignalTable layout (new
+//   to this file — no prior VWK file declares a SignalTable). No
+//   externs, no helpers from other files — signal_* is a closed 7-
+//   function API. K8+ files that need to manipulate signals (the
+//   scheduler's signal-delivery layer, the syscall layer's kill() /
+//   sigaction() / sigprocmask() wrappers) will re-declare this layout
+//   byte-identically and call these functions directly (VUMA's lack of
+//   `import` means each consumer file re-declares; see K1a-hosted's
+//   "no-import re-declaration rule" header note for the same pattern).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/ipc/signal.vuma \
+//         /tmp/signal.bin x86_64 --verify
+//     /tmp/signal.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — install +
+// get_handler round-trip, send + check delivers SIGINT, second check
+// returns 0 (pending cleared), block SIGTERM + send + check returns 0
+// (blocked), unblock + check returns 15 (now deliverable)).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layout.
+// ────────────────────────────────────────────────────────────────────────────
+
+// SignalTable: per-process signal state.
+// 3 fields × (256 + 4 + 4) = 264 bytes (padded to 272 for 8-byte alignment
+// of the trailing State<T> footprint — see "SignalTable layout" in the
+// file header for the rationale).
+//
+// handlers is `[u8; 256]` rather than `[u64; 32]` because VUMA's array
+// indexing is byte-granular regardless of element type (see "NOTE on
+// handler storage" in the file header). Each 8-byte slot holds one u64
+// handler address, stored little-endian byte-by-byte via the
+// signal_install byte-loop. Signal `sig` (1..32) lives at byte offset
+// (sig - 1) * 8.
+//
+// mask and pending are u32 (32 bits = 32 signals). Bit N (0..31) in
+// mask = signal N+1 is blocked. Bit N in pending = signal N+1 has been
+// sent but not yet delivered. The bit-to-signal mapping is
+// signal = bit_position + 1 (matching the asm-generic numbering — bit 0
+// is SIGHUP=1, bit 1 is SIGINT=2, ..., bit 31 is signal 32).
+layout SignalTable = {
+    handlers: [u8; 256],  // 32 * 8 bytes — u64 handler addr per signal
+    mask:     u32,        // blocked signals (bit N = signal N+1 blocked)
+    pending:  u32,        // pending signals (bit N = signal N+1 pending)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SignalTable operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// signal_init: zero the signal table. Sets all 32 handler slots to 0
+// (default-action sentinel — no handler installed), mask = 0 (no signals
+// blocked), pending = 0 (no signals pending). Called once per process
+// during process creation (K4a's pt_alloc would call this on the new
+// task's SignalTable slot before returning the new pid). The CALLER
+// allocates the SignalTable via `state_new(SignalTable)` and passes it
+// by reference (init-style API — see "Why init-style?" in K4e's
+// wait.vuma header for the codegen rationale).
+//
+// State<T> params: 1 (tbl). Pure write — no reads, no helper calls.
+// The 256-byte handlers array is zeroed by a single while loop (the
+// same pattern as K7a's pipe_init zeroing the 256-byte ring buffer).
+fn signal_init(tbl: State<SignalTable>) {
+    // Zero all handler slots.
+    let i = 0;
+    while i < 256 {
+        tbl.handlers[i] = 0;
+        i = i + 1;
+    }
+    tbl.mask = 0;
+    tbl.pending = 0;
+}
+
+// signal_install: install a handler address for signal `sig`.
+//
+//   sig: 1..32 (signal number, asm-generic). Out-of-range values are
+//        silently ignored (return without modifying the table) — the
+//        caller is responsible for validating sig before calling
+//        (K8+ sigaction() syscall wrapper will return -EINVAL to user
+//        space; K7b's signal_install just no-ops).
+//   handler: u64 function address (or 0 = default action, 1 = ignore).
+//        The K8+ sigaction() layer will resolve user-space function
+//        pointers to kernel-side trampoline addresses before calling
+//        signal_install; K7b itself just stores whatever u64 the caller
+//        passes.
+//
+// The handler is stored little-endian byte-by-byte at byte offset
+// (sig - 1) * 8 in tbl.handlers. Each byte is extracted from `handler`
+// by shifting right by (i * 8) bits and masking with 255. The
+// `(handler >> sh) & 255` pattern is the standard VUMA byte-extraction
+// idiom (same as bignum.vuma's bn_store_u64 reverse).
+//
+// State<T> params: 1 (tbl). Pure write — writes 8 bytes into
+// tbl.handlers[off..off+8]. No reads, no helper calls.
+fn signal_install(tbl: State<SignalTable>, sig: u8, handler: u64) {
+    if sig == 0 { return; }
+    if sig > 32 { return; }
+    let off = (sig as u32 - 1) * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (handler >> sh) & 255;
+        tbl.handlers[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// signal_get_handler: read back the installed handler for signal `sig`.
+//
+// Returns the u64 handler address (or 0 if none installed / sig out of
+// range). The handler is reconstructed from the 8 little-endian bytes
+// at tbl.handlers[(sig-1)*8 .. (sig-1)*8 + 7] by shifting each byte
+// left by (i * 8) bits and OR-ing into the accumulator. The `v + (b << sh)`
+// form is the standard VUMA byte-assembly idiom (same as bignum.vuma's
+// bn_load_u64 — but using `+` instead of `|` because the bytes are
+// guaranteed non-overlapping in their bit positions, so `+` and `|`
+// produce the same result; the K7b contract's reference text uses `+`).
+//
+// State<T> params: 1 (tbl). Pure read — reads 8 bytes from
+// tbl.handlers[off..off+8]. No writes, no helper calls.
+fn signal_get_handler(tbl: State<SignalTable>, sig: u8) -> u64 {
+    if sig == 0 { return 0; }
+    if sig > 32 { return 0; }
+    let off = (sig as u32 - 1) * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// signal_send: post a signal to the pending mask.
+//
+//   sig: 1..32 (signal number). Out-of-range values return 22 (EINVAL).
+//
+// Sets the pending bit for `sig` (bit (sig - 1) in tbl.pending). The
+// signal is NOT immediately delivered — delivery happens when
+// signal_check is next called AND the signal is not blocked.
+//
+// Returns 0 on success, 22 (EINVAL, positive) if sig is 0 or > 32.
+//
+// (In a real kernel, signal_send would ALSO:
+//   (1) Look up the target task's State<SignalTable> from the pid
+//       (this K7b version takes the table directly — the K8+ kill()
+//       syscall wrapper will do the pid → table lookup).
+//   (2) If the target task is blocked in pause() / sigsuspend() /
+//       interruptible sleep, wake it via waitq_wake_one(sigwaitq).
+//       K7b's SignalTable has no sigwaitq field — see "No wait-queue
+//       integration in K7b" in the file header.
+//   (3) If sig is SIGKILL (9) or SIGSTOP (19), bypass the mask and
+//       force-deliver. K7b doesn't enforce catchability rules — see
+//       "Signal numbering" in the file header.)
+//
+// State<T> params: 1 (tbl). Reads tbl.pending, writes tbl.pending.
+fn signal_send(tbl: State<SignalTable>, sig: u8) -> i64 {
+    if sig == 0 { return 22; }  // -EINVAL
+    if sig > 32 { return 22; }  // -EINVAL
+    let bit = 1 as u32 << (sig - 1);
+    tbl.pending = tbl.pending | bit;
+    return 0;
+}
+
+// signal_check: return the lowest-numbered pending, unblocked signal
+// and clear its pending bit. Returns 0 if nothing is deliverable.
+//
+// This is the kernel's "signal delivery point" — called on every
+// return-to-user (and after every interruptible sleep) to deliver any
+// signals that arrived while the task was in the kernel. The kernel
+// calls signal_check in a loop until it returns 0, delivering each
+// pending signal in turn (lowest first) before resuming user code.
+//
+// Implementation:
+//   (1) Compute deliverable = pending & ~mask. (Blocked signals stay
+//       pending but are not delivered.) The `~tbl.mask` is bitwise NOT
+//       on u32 — see "Bitwise NOT (`~`) on u32" in the file header for
+//       why this produces the correct 32-bit result via zero-extension.
+//   (2) If deliverable == 0, return 0 (nothing to deliver).
+//   (3) Scan from bit 0 (SIGHUP) to bit 31 (signal 32). Return the
+//       FIRST set bit's signal number (i + 1) and clear that bit in
+//       tbl.pending via `tbl.pending = tbl.pending & (~bit)`. The clear
+//       makes signal_check a "consume" operation — the next call will
+//       return the NEXT pending signal (or 0). The `~bit` is bitwise
+//       NOT on u32 — same zero-extension argument as step (1).
+//
+// State<T> params: 1 (tbl). Reads tbl.pending + tbl.mask, writes
+// tbl.pending (the clear-bit path). The `let deliverable = ...` local-
+// capture pattern is the same as K4b's scheduler.vuma `let min_idx =
+// rq.head;` — direct field read into a local, then subsequent field
+// writes (in the loop body) don't affect the local (verified to work
+// by scheduler.vuma's self-test and by K7e's waitq_wake_all).
+fn signal_check(tbl: State<SignalTable>) -> u8 {
+    let deliverable = tbl.pending & (~tbl.mask);
+    if deliverable == 0 {
+        return 0;
+    }
+    // Find the lowest-numbered pending signal.
+    let i = 0;
+    while i < 32 {
+        let bit = 1 as u32 << i;
+        if (deliverable & bit) != 0 {
+            // Clear the pending bit.
+            tbl.pending = tbl.pending & (~bit);
+            return (i + 1) as u8;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// signal_block: add `sig` to the blocked mask.
+//
+//   sig: 1..32 (signal number). Out-of-range values are silently
+//        ignored (same convention as signal_install).
+//
+// Sets the bit (sig - 1) in tbl.mask. Blocked signals stay pending
+// (signal_send still posts them to tbl.pending) but are NOT delivered
+// by signal_check until signal_unblock is called. This matches POSIX
+// sigprocmask(SIG_BLOCK, ...).
+//
+// (In a real kernel, SIGKILL=9 and SIGSTOP=19 cannot be blocked — K7b
+// doesn't enforce this; see "Signal numbering" in the file header.)
+//
+// State<T> params: 1 (tbl). Reads tbl.mask, writes tbl.mask.
+fn signal_block(tbl: State<SignalTable>, sig: u8) {
+    if sig == 0 { return; }
+    if sig > 32 { return; }
+    let bit = 1 as u32 << (sig - 1);
+    tbl.mask = tbl.mask | bit;
+}
+
+// signal_unblock: remove `sig` from the blocked mask.
+//
+//   sig: 1..32 (signal number). Out-of-range values are silently
+//        ignored (same convention as signal_install / signal_block).
+//
+// Clears the bit (sig - 1) in tbl.mask via `tbl.mask & (~bit)`. The
+// `~bit` is bitwise NOT on u32 — same zero-extension argument as
+// signal_check. After unblock, signal_check will deliver any pending
+// instance of `sig` on the next call. This matches POSIX
+// sigprocmask(SIG_UNBLOCK, ...).
+//
+// State<T> params: 1 (tbl). Reads tbl.mask, writes tbl.mask.
+fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
+    if sig == 0 { return; }
+    if sig > 32 { return; }
+    let bit = 1 as u32 << (sig - 1);
+    tbl.mask = tbl.mask & (~bit);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7b DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SignalTable via state_new, init it via signal_init, then:
+//   (1) Install handler for SIGINT (sig=2) at address 1000.
+//   (2) Check signal_get_handler(tbl, 2) == 1000 (round-trip).
+//   (3) Send SIGINT (signal_send(tbl, 2)).
+//   (4) Check signal_send returned 0.
+//   (5) Check signal_check(tbl) == 2 (SIGINT is pending + not blocked).
+//   (6) Check signal_check(tbl) == 0 again (pending bit cleared in step 5).
+//   (7) Block SIGTERM (sig=15), send it, check signal_check == 0 (blocked).
+//   (8) Unblock SIGTERM, check signal_check == 15 (now deliverable).
+//   (9) Return 0 (success).
+//
+// Returns 0 on success, 1..6 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+// Every function call (signal_init, signal_install, signal_get_handler,
+// signal_send, signal_check, signal_block, signal_unblock) takes tbl
+// as a parameter — so the state-typedness is preserved across the
+// calls, and the direct field reads work correctly after each call.
+// The `let h = signal_get_handler(...);` / `let ret = signal_send(...);`
+// / `let sig = signal_check(...);` locals are plain u64 / i64 / u8
+// values (function return values, not State<T> field reads) — no
+// state-typedness concern. (Same pattern as K7e's waitq.vuma self-test
+// header note.)
+//
+// Per the K7b contract's "decimal constants" rule: all non-zero
+// constants in the self-test use DECIMAL (2, 1000, 15) — decimal
+// avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
+// for the same rationale, and K3a's trap_trampoline.vuma for the same
+// rule).
+
+fn main() -> i32 {
+    let tbl = state_new(SignalTable);
+    signal_init(tbl);
+
+    // (1-2) Install handler for SIGINT (2) at address 1000. Read it
+    // back and verify the round-trip (byte-by-byte store/load).
+    signal_install(tbl, 2, 1000);
+    let h = signal_get_handler(tbl, 2);
+    if h != 1000 { return 1; }
+
+    // (3-4) Send SIGINT. Should return 0 (success).
+    let ret = signal_send(tbl, 2);
+    if ret != 0 { return 2; }
+
+    // (5) Check — should return 2 (SIGINT is pending + not blocked).
+    let sig = signal_check(tbl);
+    if sig != 2 { return 3; }
+
+    // (6) Check again — should return 0 (pending bit was cleared in
+    // the previous signal_check call).
+    let sig2 = signal_check(tbl);
+    if sig2 != 0 { return 4; }
+
+    // (7) Block SIGTERM (15), send it, check → 0 (blocked). The
+    // pending bit IS set by signal_send, but signal_check filters it
+    // out via `pending & ~mask` because mask now has bit 14 set.
+    signal_block(tbl, 15);
+    signal_send(tbl, 15);
+    let sig3 = signal_check(tbl);
+    if sig3 != 0 { return 5; }
+
+    // (8) Unblock SIGTERM (clear mask bit 14), check → 15. The pending
+    // bit is STILL set from step 7's signal_send; now that the mask is
+    // clear, signal_check's `pending & ~mask` includes bit 14, so the
+    // scan returns signal 15.
+    signal_unblock(tbl, 15);
+    let sig4 = signal_check(tbl);
+    if sig4 != 15 { return 6; }
+
+    return 0;
+}
