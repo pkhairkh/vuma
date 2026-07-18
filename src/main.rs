@@ -36,7 +36,7 @@ use vuma_codegen::ScgToIr;
 /// describes the parsed result.
 #[derive(Debug)]
 struct Cli {
-    /// Optimization level (overrides subcommand default) [default: O2]
+    /// Optimization level (overrides subcommand default) [default: O3]
     opt_level: OptLevelArg,
 
     /// Verification level (overrides subcommand default).
@@ -527,7 +527,7 @@ fn print_usage() {
          \x20  pkg       Package manager subcommands\n\
          \x20  help      Print this message or the help of the given subcommand(s)\n\n\
          Options:\n\
-         \x20      --opt-level <OPT_LEVEL>        Optimization level [default: O2] [possible values: O0, O1, O2, O3]\n\
+         \x20      --opt-level <OPT_LEVEL>        Optimization level [default: O3] [possible values: O0, O1, O2, O3]\n\
          \x20      --verification <VERIFICATION>  Verification level [default: normal] [possible values: quick, normal, exhaustive]\n\
          \x20      --no-verify                    Explicitly skip all verification (escape hatch)\n\
          \x20      --strict-verification          Treat Inconclusive verdicts as compilation-blocking errors\n\
@@ -584,7 +584,7 @@ where
         .peekable();
 
     let mut cli = Cli {
-        opt_level: OptLevelArg::O2,
+        opt_level: OptLevelArg::O3, // O3 is always on (default since 2026-07)
         verification: VerificationArg::Normal,
         no_verify: false,
         strict_verification: false,
@@ -3125,7 +3125,7 @@ mod tests {
     #[test]
     fn test_defaults() {
         let cli = parse_cli_from(["vuma", "build", "hello.vuma"]).unwrap();
-        assert_eq!(cli.opt_level, OptLevelArg::O2);
+        assert_eq!(cli.opt_level, OptLevelArg::O3);
         assert_eq!(cli.verification, VerificationArg::Normal);
         assert!(!cli.debug);
     }
