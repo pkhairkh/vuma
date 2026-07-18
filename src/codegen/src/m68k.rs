@@ -1934,16 +1934,16 @@ fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
     //   Bits 6-5: OPMODE (00=FADD, 01=FMUL, 10=FSUB, 11=FDIV)
     //   Bits 4-2: SOURCE FPm
     let opmode: u16 = match op {
-        BinOpKind::Add => 0b00,       // FADD
-        BinOpKind::Mul => 0b01,       // FMUL
-        BinOpKind::Sub => 0b10,       // FSUB
-        BinOpKind::SDiv | BinOpKind::UDiv => 0b11, // FDIV
-        _ => 0b00,
+        BinOpKind::Add => 0b000,      // FADD
+        BinOpKind::Mul => 0b001,      // FMUL
+        BinOpKind::Sub => 0b010,      // FSUB
+        BinOpKind::SDiv | BinOpKind::UDiv => 0b011, // FDIV
+        _ => 0b000,
     };
-    let w2: u16 = (1u16 << 7)                          // dyadic indicator
-        | (opmode << 5)                                // OPMODE
-        | ((src.encoding() as u16) << 2)               // SOURCE FPm
-        | ((dst.encoding() as u16) << 11);             // DEST FPn
+    let w2: u16 = (1u16 << 7)                          // dyadic indicator (bit 7)
+        | (opmode << 4)                                // OPMODE at bits 6-4
+        | ((src.encoding() as u16) << 1)               // SOURCE FPm at bits 3-1
+        | ((dst.encoding() as u16) << 12);             // DEST FPn at bits 14-12
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
