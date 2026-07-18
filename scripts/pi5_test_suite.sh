@@ -565,7 +565,7 @@ def run_one(args):
         return result
     out = f"/tmp/vuma_{os.getpid()}_{backend}_{test_name}.bin"
     try:
-        compile_cmd = [str(COMPILE), test_path, out, backend]
+        compile_cmd = [str(COMPILE), test_path, out, backend, "--opt-level=O3"]
         if verify:
             compile_cmd.append("--verify")
         r = subprocess.run(compile_cmd, capture_output=True, timeout=15)

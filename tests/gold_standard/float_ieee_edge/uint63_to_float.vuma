@@ -4,6 +4,10 @@
 // 2^63 = i64::MIN as bits (high bit set).  uinttofloat must treat it as
 // unsigned 2^63 -> +9.22e18 (positive).  floattouint must round-trip.
 // Return 0 if both checks pass.
+//
+// We construct 2^63 as (1 << 63) to avoid the parser limitation that
+// -9223372036854775808 (i64::MIN) is parsed as unary minus applied to
+// 9223372036854775808, which overflows i64 before the negation.
 
 fn main() -> i32 {
     n: i64 = 1;
@@ -11,6 +15,8 @@ fn main() -> i32 {
     big: f64 = uinttofloat(n);
     zero: f64 = 0.0;
     if big > zero {
+        // Round-trip: floattouint(big) should have the high bit set,
+        // i.e. be negative as a signed i64 (< 0).
         back: i64 = floattouint(big);
         if back < 0 {
             return 0;  // both checks passed
