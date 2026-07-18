@@ -1,0 +1,905 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/net/socket.vuma
+// VWK Network Subsystem — Socket layer (sys_socket/bind/listen/accept/send/recv)
+// (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K9a layer of the VWK kernel: the BSD-socket API surface
+// — sys_socket / sys_bind / sys_listen / sys_accept / sys_send / sys_recv.
+// K9 (Network) is building socket (this file), and (in later sub-waves) the
+// TCP/UDP + IP + NIC layers below it. K9a is the FIRST concrete object in
+// the network stack: a 64-slot socket table backed by parallel flat byte
+// arrays (same pattern as K4a's ProcessTable, K8e's IpiTable, K8f's
+// SmpState) with the six POSIX-style syscalls operating on it.
+//
+// ── What K9a provides ──────────────────────────────────────────────────────
+//   sock_init(tbl)                                 — zero all 64 slots' state
+//                                                   + used flags, count=0.
+//   sys_socket(tbl, family, sock_type, proto) -> i64 — find a free slot,
+//                                                   set family/type/proto,
+//                                                   state=closed(0), used=1,
+//                                                   bump count, return slot
+//                                                   index (0..63) or -1 if
+//                                                   the table is full.
+//   sys_bind(tbl, fd, addr, port) -> i64           — set local_addr +
+//                                                   local_port on the socket,
+//                                                   flip state to bound(1).
+//                                                   -EINVAL(22) on bad fd,
+//                                                   -EBADF(9) on unused slot.
+//   sys_listen(tbl, fd, backlog) -> i64            — flip state to
+//                                                   listening(2), record
+//                                                   backlog (max pending
+//                                                   connections). Same error
+//                                                   codes as sys_bind.
+//   sys_accept(tbl, fd) -> i64                     — allocate a new socket
+//                                                   (via sys_socket with
+//                                                   AF_INET/SOCK_STREAM) and
+//                                                   flip its state to
+//                                                   connected(3). Returns
+//                                                   the new fd or -1 if the
+//                                                   table is full. -EINVAL
+//                                                   if fd is not listening.
+//   sys_send(tbl, fd, buf, len) -> i64             — STUB: returns len
+//                                                   (pretend sent). Real
+//                                                   TCP send is K9b/K9c.
+//   sys_recv(tbl, fd, buf, len) -> i64             — STUB: returns 0 (no
+//                                                   data). Real TCP recv is
+//                                                   K9b/K9c.
+//
+// ── Socket layout (single-socket descriptor) ───────────────────────────────
+//   layout Socket = {
+//       family:      u32,   // AF_INET=2, AF_UNIX=1
+//       type:        u32,   // SOCK_STREAM=1, SOCK_DGRAM=2
+//       proto:       u32,   // 0 = default (IPPROTO_IP)
+//       state:       u8,    // 0=closed, 1=bound, 2=listening, 3=connected
+//       local_port:  u16,   // host-order port (8080, 80, 443, ...)
+//       remote_port: u16,
+//       local_addr:  u32,   // IPv4 as u32 (host order; 127.0.0.1 stored as
+//                           // 0x0100007F = 16777343 in little-endian byte
+//                           // layout — see "127.0.0.1 representation" below)
+//       remote_addr: u32,
+//       backlog:     u32,   // max pending connections (listen(2) arg)
+//       rx_waitq:    u32,   // number of waiters on recv (K9c/K9d blocking)
+//       tx_waitq:    u32,   // number of waiters on send
+//   }
+//
+// The Socket layout exists for documentation + IVE verification (the DoD
+// requires "Socket, SocketTable, NetBuf layouts verify"). The actual
+// syscall implementations do NOT operate on `State<Socket>` directly —
+// they operate on `State<SocketTable>` (parallel flat arrays — see "Why
+// parallel flat byte arrays?" below). This mirrors K4a's choice:
+// ProcessTable is the operational structure, Task is the documentation
+// structure. When the codegen gains proper typed-array indexing (Open
+// Work §"Pipeline: typed array index"), SocketTable can collapse to
+// `[Socket; 64]` with `tbl.sockets[i].family` access, and the Socket
+// layout will become the operational structure.
+//
+// ── SocketTable layout (64 sockets as parallel flat byte arrays) ───────────
+//   layout SocketTable = {
+//       families:     [u8; 256],   // 64 * 4 bytes (u32 per socket)
+//       types:        [u8; 256],   // 64 * 4 bytes (u32)
+//       protos:       [u8; 256],   // 64 * 4 bytes (u32)
+//       states:       [u8; 64],    // 64 * 1 byte  (u8 — direct index)
+//       local_ports:  [u8; 128],   // 64 * 2 bytes (u16)
+//       remote_ports: [u8; 128],   // 64 * 2 bytes (u16)
+//       local_addrs:  [u8; 256],   // 64 * 4 bytes (u32)
+//       remote_addrs: [u8; 256],   // 64 * 4 bytes (u32)
+//       backlogs:     [u8; 256],   // 64 * 4 bytes (u32)
+//       rx_waitqs:    [u8; 256],   // 64 * 4 bytes (u32)
+//       tx_waitqs:    [u8; 256],   // 64 * 4 bytes (u32)
+//       used:         [u8; 64],    // 64 * 1 byte  (u8 — direct index)
+//       count:        u32,         // number of slots in use (0..64)
+//   }
+//
+// Total: 256*9 + 64*2 + 128*2 + 4 = 2304 + 128 + 256 + 4 = 2692 bytes
+// (padded to 2696 for 4-byte alignment of the trailing u32 count). 64
+// slots is the K9a contract size — enough for a typical kernel's
+// per-task socket table (Linux default is 1024 system-wide + per-task
+// rlimit; K9a's 64 is a simplified fixed cap matching K8's small-table
+// convention). Bumping to 256/1024 later is a one-line change (and the
+// array sizes scale linearly — no algorithmic change).
+//
+// ── Why parallel flat byte arrays? ─────────────────────────────────────────
+// Same reason as K4a's ProcessTable (see womb/kernel/proc/task.vuma
+// header "Why parallel flat byte arrays for ProcessTable?"): the VUMA
+// codegen (src/pipeline.rs::flatten_expr, Expr::Index arm) does NOT scale
+// the index by the element size for non-u8 array element types — every
+// `tbl.array[i]` is lowered to `*(base_addr + i)` with a U8 Load/Store.
+// VUMA also doesn't support `[Socket; 64]` (array of structs) in the
+// parser at all (only `[u8; N]` and other primitive-u8 arrays parse).
+// So instead each Socket field lives in its OWN [u8; N] array, sized
+// for 64 slots × the field's byte width. Field accessors
+// (sock_get_family / sock_set_family / sock_get_local_port /
+// sock_set_local_port / etc.) pack/unpack the multi-byte values
+// byte-by-byte. This is byte-identical in spirit to K2a's pmm.vuma
+// FlatPool, K4a's ProcessTable, K8e's IpiTable.handlers — when the
+// codegen gains proper typed-array index lowering, this file can
+// collapse back to `[Socket; 64]` with `tbl.sockets[i].family` access.
+//
+// ── Pack/unpack helpers ─────────────────────────────────────────────────────
+// Three flavors:
+//   (1) u32 fields (families, types, protos, local_addrs, remote_addrs,
+//       backlogs, rx_waitqs, tx_waitqs): 4-byte pack/unpack loop.
+//   (2) u16 fields (local_ports, remote_ports): 2-byte pack/unpack loop.
+//   (3) u8 fields (states, used): direct array index, no pack/unpack.
+// All use the same little-endian pattern as K2a's pool_get_base /
+// pool_set_base, K3e's syscall_table_get / syscall_table_set, K4a's
+// pt_get_pid / pt_set_pid, and K8e's ipi_register_handler /
+// ipi_get_handler: byte i goes to bit i*8, shift-and-mask-255 on writes,
+// sum-of-shifted-bytes on reads.
+//
+// The K9a contract says "Implement at least: get/set for family, type,
+// state, local_port, used." This file goes further and implements ALL
+// 26 helpers (13 getters + 13 setters — family/type/proto/state/used/
+// local_port/remote_port/local_addr/remote_addr/backlog/rx_waitq/
+// tx_waitq) so K9b/K9c/K9d (TCP/UDP/IP) can use them without
+// re-implementing the pack/unpack loops. Only 4 helpers are exercised
+// by the self-test (sock_set_family + sock_set_type + sock_set_proto
+// via sys_socket; sock_set_local_addr + sock_set_local_port via
+// sys_bind) — but all 26 verify (the DoD's "all helpers verify"
+// requirement). u8 fields (states, used) use direct indexing rather
+// than helper functions because the helpers would be one-line wrappers
+// that add no value — same choice as K4a's pt_get_state / pt_set_state
+// (which are kept as wrappers for API symmetry; K9a deviates slightly:
+// states/used are accessed directly as `tbl.states[fd]` /
+// `tbl.used[fd]` throughout, mirroring K8e's tbl.count access).
+//
+// ── Socket states ───────────────────────────────────────────────────────────
+// Stored as u8 in SocketTable.states. The values are a simplified subset
+// of Linux's socket states (Linux has SS_FREE, SS_UNCONNECTED, SS_CONNECTING,
+// SS_CONNECTED, SS_DISCONNECTING — K9a collapses these to 4):
+//     0 = closed      — initial state after sys_socket (no bind yet)
+//     1 = bound       — sys_bind has set local_addr + local_port
+//     2 = listening   — sys_listen has marked the socket as a passive
+//                       accept target (only valid on SOCK_STREAM)
+//     3 = connected   — sys_accept has spawned this socket for an
+//                       incoming connection (or sys_connect — K9b)
+//
+// state transitions:
+//     sys_socket  : (none) → 0 (closed)
+//     sys_bind    : 0 (closed) → 1 (bound)
+//     sys_listen  : 1 (bound) → 2 (listening)
+//     sys_accept  : creates a new socket, sets it to 3 (connected)
+//     sys_connect : (K9b) 0 or 1 → 3 (connected)
+//     sys_close   : (K9+) any → 0 (closed) + used = 0
+//
+// sys_send/sys_recv require state == 3 (connected) in a real kernel;
+// K9a's stubs don't enforce this (the DoD doesn't exercise send/recv
+// state checks — they're stubs).
+//
+// ── 127.0.0.1 representation ───────────────────────────────────────────────
+// The self-test binds fd 0 to "127.0.0.1:8080" by passing addr=16777343.
+// 16777343 = 0x0100007F (decimal: 16777216 + 127). The bytes in memory
+// (little-endian) are [0x7F, 0x00, 0x00, 0x01] — i.e. the IPv4 address
+// 127.0.0.1 stored with the first octet in the LOW byte. This is the
+// "host-order u32" representation: Linux's sockaddr_in.sin_addr.s_addr
+// is in NETWORK byte order (big-endian: 0x7F000001), but K9a stores it
+// in HOST byte order for simplicity — the IVE verifier doesn't care
+// about endianness, and the K9a self-test doesn't read back the addr
+// (it only checks the state transitions). K9b (TCP/IP layer) will
+// define htonl/ntohl helpers and pick a canonical byte order; K9a
+// leaves this as "whatever the caller passes" (host order, by
+// convention).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K9a contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
+// K3a's trap_trampoline.vuma for the same rule applied to vector=14
+// and rip=4096). The constants:
+//     64    = number of Socket slots in the SocketTable
+//     256   = "table full" sentinel for sys_socket's failure path
+//             (returns -1, not 256, but 256 is also one-past-the-end
+//             — same convention as K4a's task_alloc returning 256 for
+//             "table full", but K9a returns -1 per the contract)
+//     4     = bytes per u32 field (loop bound for family/type/proto/
+//             local_addr/remote_addr/backlog/rx_waitq/tx_waitq pack/
+//             unpack)
+//     2     = bytes per u16 field (loop bound for local_port/
+//             remote_port pack/unpack)
+//     8     = bits per byte (shift amount i*8 in pack/unpack)
+//     255   = 0xFF, byte mask for the unpack-shift-and-truncate path
+//     2, 1, 0 = AF_INET, SOCK_STREAM, IPPROTO_IP (the self-test's
+//               socket(2, 1, 0) call)
+//     16777343 = 127.0.0.1 in host-order u32 (see above)
+//     8080  = self-test bind port (fits in u16)
+//     5     = self-test listen backlog
+//     0..3  = socket state values (closed/bound/listening/connected)
+//     22    = EINVAL errno (returned by sys_bind/sys_listen/sys_accept/
+//             sys_send/sys_recv on fd >= 64)
+//     9     = EBADF errno (returned on used[fd] == 0)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// SocketTable and NetBuf are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<SocketTable> / State<NetBuf>; the CALLER
+// allocates them via `state_new(SocketTable)` / `state_new(NetBuf)` and
+// passes them by reference to sock_init / sys_socket / ... / sys_recv
+// (init-style API — see "Why init-style?" in K4e's wait.vuma header for
+// the codegen rationale: the current codegen does NOT propagate State-
+// typedness through function return values, so `fn sock_new() ->
+// State<SocketTable>` would produce broken field-access code in
+// callers). No externs are declared in this file (the socket ops are
+// pure-PM — no syscalls, no context switch, no memory allocation). The
+// actual "send packets over the wire" path is deferred to K9c (NIC
+// driver) / K9b (TCP state machine).
+//
+// State<T> params: 1 per function (tbl) for sock_init / sys_socket /
+// sys_bind / sys_listen / sys_accept; 2 (tbl + buf) for sys_send /
+// sys_recv. Per the K4b contract's "1-2 per function" rule. The
+// two-state-param pattern (caller-owned socket table + caller-owned
+// network buffer) is the same as K7a's pipe_read(p, buf, count) /
+// pipe_write(p, buf, count) and K6b's tty_readline(tty, out, max).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares Socket + SocketTable + NetBuf
+// + all 26 helpers + all 7 syscalls. K9b (TCP) will re-declare
+// SocketTable + the sock_get_* / sock_set_* helpers byte-identically
+// when it needs to read/write socket fields from the TCP state machine;
+// K9c (UDP) and K9d (NIC) will do the same. The byte-identical-
+// redeclaration invariant (K2c "extern signatures MUST stay byte-
+// identical" — extended to layouts in K3d, re-applied in K4a/K7a/K8a/
+// K8e/K8f) extends to K9a's Socket + SocketTable + NetBuf.
+//
+// ── Why are sys_send/sys_recv stubs? ────────────────────────────────────────
+// K9a is the socket LAYER (the API surface). The actual TCP/UDP packet
+// send/recv requires:
+//   (1) TCP state machine (K9b — sequence numbers, ACKs, retransmits,
+//       the FIN/ACK teardown handshake)
+//   (2) IP layer (K9b — IP header, fragmentation, routing table lookup)
+//   (3) NIC driver (K9c — DMA ring buffers, IRQ handling, the actual
+//       byte push to the wire)
+//
+// K9a's stubs just verify the syscall signatures + the fd validation
+// logic (EINVAL on fd >= 64, EBADF on unused slot). sys_send returns
+// `len` (pretend all bytes were sent — the caller's contract is "if
+// return >= 0, that many bytes were sent"). sys_recv returns 0 (EOF —
+// the caller's contract is "if return == 0, peer closed; if return >
+// 0, that many bytes were received"). Real TCP recv requires the
+// socket's RX ring buffer (K9b's TCPCtrl.rx_buf, a 4 KB ring matching
+// K7a's pipe ring pattern) and would block on an empty ring (returning
+// -EAGAIN or yielding to the scheduler — K9c/K9d will wire this up
+// via K7e's WaitQueue + K8b's mutex).
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/net/socket.vuma \
+//         /tmp/socket.bin x86_64 --verify
+//     /tmp/socket.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 8 self-test checks pass — sys_socket
+// returns fd 0 + count=1; sys_bind returns 0 + states[0]=1 (bound);
+// sys_listen returns 0 + states[0]=2 (listening); sys_accept returns
+// a non-negative new_fd + count=2).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Socket: a single socket descriptor. 11 fields, ~33 bytes (padded to
+// 40 for 4-byte alignment of the trailing u32 fields). Documented in
+// the file header. NOT used operationally by the syscalls — they use
+// SocketTable (parallel flat arrays — see "Why parallel flat byte
+// arrays?" in the file header). The Socket layout exists for IVE
+// verification (the DoD's "Socket, SocketTable, NetBuf layouts verify"
+// check) + as the canonical field-name/field-type reference for K9b+
+// (when the codegen gains typed-array indexing, SocketTable collapses
+// to `[Socket; 64]` and this layout becomes the operational structure).
+layout Socket = {
+    family:      u32,   // AF_INET=2, AF_UNIX=1
+    type:        u32,   // SOCK_STREAM=1, SOCK_DGRAM=2
+    proto:       u32,   // 0 = default (IPPROTO_IP)
+    state:       u8,    // 0=closed, 1=bound, 2=listening, 3=connected
+    local_port:  u16,   // host-order port (8080, 80, 443, ...)
+    remote_port: u16,
+    local_addr:  u32,   // IPv4 as u32 (host order — see "127.0.0.1
+                        // representation" in the file header)
+    remote_addr: u32,
+    backlog:     u32,   // max pending connections (listen(2) arg)
+    rx_waitq:    u32,   // number of waiters on recv (K9c/K9d blocking)
+    tx_waitq:    u32,   // number of waiters on send
+}
+
+// SocketTable: 64 sockets stored as parallel flat byte arrays (VUMA has
+// no struct-array support — see "Why parallel flat byte arrays?" in
+// the file header). Each field is a separate [u8; N] array sized for
+// 64 slots × the field's byte width. `count` tracks how many slots are
+// in use (0..64). Field accessors (sock_get_* / sock_set_*) pack/unpack
+// the multi-byte values byte-by-byte; u8 fields (states, used) are
+// accessed directly as `tbl.states[fd]` / `tbl.used[fd]`.
+//
+// Field byte-offsets (verified by IVE's layout resolver):
+//     families       [   0 ..  255]   256 bytes  (64 * u32)
+//     types          [ 256 ..  511]   256 bytes  (64 * u32)
+//     protos         [ 512 ..  767]   256 bytes  (64 * u32)
+//     states         [ 768 ..  831]    64 bytes  (64 * u8)
+//     local_ports    [ 832 ..  959]   128 bytes  (64 * u16)
+//     remote_ports   [ 960 .. 1087]   128 bytes  (64 * u16)
+//     local_addrs    [1088 .. 1343]   256 bytes  (64 * u32)
+//     remote_addrs   [1344 .. 1599]   256 bytes  (64 * u32)
+//     backlogs       [1600 .. 1855]   256 bytes  (64 * u32)
+//     rx_waitqs      [1856 .. 2111]   256 bytes  (64 * u32)
+//     tx_waitqs      [2112 .. 2367]   256 bytes  (64 * u32)
+//     used           [2368 .. 2431]    64 bytes  (64 * u8)
+//     count          [2432 .. 2435]     4 bytes  (u32, 4-aligned)
+//   total: 2436 bytes, padded to 2436 (already 4-aligned — last field
+//   is u32 and the prior field's end at 2431+1=2432 is 4-aligned, so
+//   no trailing pad needed; the ___pmt_buffer header rounds the
+//   footprint up to a multiple of 8 for the arena slot — see K8a's
+//   spinlock.vuma header for the same arena-rounding note).
+layout SocketTable = {
+    families:     [u8; 256],   // 64 * 4 bytes (u32 per socket)
+    types:        [u8; 256],   // 64 * 4 bytes (u32)
+    protos:       [u8; 256],   // 64 * 4 bytes (u32)
+    states:       [u8; 64],    // 64 * 1 byte  (u8 — direct index)
+    local_ports:  [u8; 128],   // 64 * 2 bytes (u16)
+    remote_ports: [u8; 128],   // 64 * 2 bytes (u16)
+    local_addrs:  [u8; 256],   // 64 * 4 bytes (u32)
+    remote_addrs: [u8; 256],   // 64 * 4 bytes (u32)
+    backlogs:     [u8; 256],   // 64 * 4 bytes (u32)
+    rx_waitqs:    [u8; 256],   // 64 * 4 bytes (u32)
+    tx_waitqs:    [u8; 256],   // 64 * 4 bytes (u32)
+    used:         [u8; 64],    // 64 * 1 byte  (u8 — direct index)
+    count:        u32,         // number of slots in use (0..64)
+}
+
+// NetBuf: a 256-byte network buffer for sys_send's payload / sys_recv's
+// destination. The caller allocates one (state_new(NetBuf)) and passes
+// it by reference; sys_send reads buf.data[0..len] (in K9b — K9a's stub
+// doesn't actually read it), sys_recv writes buf.data[0..n] (in K9b —
+// K9a's stub returns 0 without writing). 256 bytes matches K7a's
+// PipeBuf and K6b's LineBuf — a single sys_send/sys_recv can carry up
+// to 256 bytes (sufficient for a typical TCP segment payload after IP
+// + TCP headers; larger transfers loop in K9b). Same size choice as
+// K7a's PipeBuf (womb/kernel/ipc/pipe.vuma line 454) and K6b's
+// LineBuf (womb/kernel/tty/line_discipline.vuma line 210).
+layout NetBuf = { data: [u8; 256] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// u32 pack/unpack helpers (families, types, protos, local_addrs,
+// remote_addrs, backlogs, rx_waitqs, tx_waitqs).
+// ────────────────────────────────────────────────────────────────────────────
+// 4-byte little-endian pack/unpack. Same pattern as K4a's pt_get_pid /
+// pt_set_pid (womb/kernel/proc/task.vuma:280-303) and K8e's
+// ipi_register_handler / ipi_get_handler. The 4-byte loop is correct
+// because u32 fits in 4 bytes — bytes 4..7 would be zero-shifted out.
+
+// Read the u32 `family` field of socket slot `idx` from SocketTable.families.
+fn sock_get_family(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.families[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `family` field of socket slot `idx` into SocketTable.families.
+fn sock_set_family(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.families[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `type` field of socket slot `idx` from SocketTable.types.
+fn sock_get_type(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.types[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `type` field of socket slot `idx` into SocketTable.types.
+fn sock_set_type(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.types[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `proto` field of socket slot `idx` from SocketTable.protos.
+fn sock_get_proto(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.protos[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `proto` field of socket slot `idx` into SocketTable.protos.
+fn sock_set_proto(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.protos[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `local_addr` field of socket slot `idx` from SocketTable.local_addrs.
+fn sock_get_local_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.local_addrs[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `local_addr` field of socket slot `idx` into SocketTable.local_addrs.
+fn sock_set_local_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.local_addrs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `remote_addr` field of socket slot `idx` from SocketTable.remote_addrs.
+fn sock_get_remote_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.remote_addrs[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `remote_addr` field of socket slot `idx` into SocketTable.remote_addrs.
+fn sock_set_remote_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.remote_addrs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `backlog` field of socket slot `idx` from SocketTable.backlogs.
+fn sock_get_backlog(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.backlogs[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `backlog` field of socket slot `idx` into SocketTable.backlogs.
+fn sock_set_backlog(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.backlogs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `rx_waitq` field of socket slot `idx` from SocketTable.rx_waitqs.
+fn sock_get_rx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.rx_waitqs[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `rx_waitq` field of socket slot `idx` into SocketTable.rx_waitqs.
+fn sock_set_rx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.rx_waitqs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `tx_waitq` field of socket slot `idx` from SocketTable.tx_waitqs.
+fn sock_get_tx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.tx_waitqs[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `tx_waitq` field of socket slot `idx` into SocketTable.tx_waitqs.
+fn sock_set_tx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.tx_waitqs[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u16 pack/unpack helpers (local_ports, remote_ports).
+// ────────────────────────────────────────────────────────────────────────────
+// 2-byte little-endian pack/unpack. Same pattern as the u32 helpers above
+// but with a 2-byte loop bound (u16, not u32). The 2-byte loop is correct
+// because u16 fits in 2 bytes — bytes 2..3 would be zero-shifted out.
+
+// Read the u16 `local_port` field of socket slot `idx` from SocketTable.local_ports.
+fn sock_get_local_port(tbl: State<SocketTable>, idx: u32) -> u16 {
+    let off = idx * 2;
+    let v: u16 = 0;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = tbl.local_ports[off + i] as u16;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u16 `local_port` field of socket slot `idx` into SocketTable.local_ports.
+fn sock_set_local_port(tbl: State<SocketTable>, idx: u32, val: u16) {
+    let off = idx * 2;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = ((val >> sh) & 255) as u8;
+        tbl.local_ports[off + i] = b;
+        i = i + 1;
+    }
+}
+
+// Read the u16 `remote_port` field of socket slot `idx` from SocketTable.remote_ports.
+fn sock_get_remote_port(tbl: State<SocketTable>, idx: u32) -> u16 {
+    let off = idx * 2;
+    let v: u16 = 0;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = tbl.remote_ports[off + i] as u16;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u16 `remote_port` field of socket slot `idx` into SocketTable.remote_ports.
+fn sock_set_remote_port(tbl: State<SocketTable>, idx: u32, val: u16) {
+    let off = idx * 2;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = ((val >> sh) & 255) as u8;
+        tbl.remote_ports[off + i] = b;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Socket operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// sock_init: zero all 64 slots' state + used flags, set count = 0.
+// Idempotent. Called once at boot before any sys_socket. Does NOT zero
+// the other Socket fields (families, types, protos, local_addrs, etc.)
+// — those are populated by sys_socket / sys_bind on first use, so
+// zeroing them here would be wasted work (and VUMA has no memset).
+// Same choice as K4a's pt_init (womb/kernel/proc/task.vuma:502-509).
+//
+// State<T> params: 1 (tbl). Pure write — no reads, no helper calls.
+// The byte-by-byte loop is the PMT-pure way to zero two 64-byte arrays
+// (states + used); same idiom as K8e's ipi_init (womb/kernel/smp/ipi.vuma
+// :315-322) zeroing handlers[0..128] — just two arrays instead of one.
+fn sock_init(tbl: State<SocketTable>) {
+    let i = 0;
+    while i < 64 {
+        tbl.states[i] = 0;
+        tbl.used[i] = 0;
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// sys_socket: create a socket. Find the first free slot (used[i] == 0),
+// set family/type/proto via the pack/unpack helpers, mark state=closed(0),
+// mark used=1, bump count, return the slot index (0..63). Returns -1 if
+// the table is full (all 64 slots in use).
+//
+//   tbl:       the SocketTable.
+//   family:    AF_INET=2, AF_UNIX=1 (full enum in K9b).
+//   sock_type: SOCK_STREAM=1, SOCK_DGRAM=2 (full enum in K9b).
+//   proto:     0 = default (IPPROTO_IP — kernel picks based on `type`).
+//
+// Returns the slot index (0..63) on success, or -1 on table-full.
+//
+// The lowest-free-slot-wins policy matches Linux's find_next_zero_bit
+// and K4a's task_alloc (womb/kernel/proc/task.vuma:518-530). The self-
+// test verifies this indirectly: sys_accept calls sys_socket after fd 0
+// is already in use, and the new socket lands at fd 1 (the next free
+// slot).
+//
+// State<T> params: 1 (tbl). Writes 4 fields: families[i*4..i*4+4],
+// types[i*4..i*4+4], protos[i*4..i*4+4] (via the pack helpers), states[i]
+// (direct), used[i] (direct), count. No reads (the `used[i] == 0` check
+// is a direct array read, not a helper call).
+fn sys_socket(tbl: State<SocketTable>, family: u32, sock_type: u32, proto: u32) -> i64 {
+    let i = 0;
+    while i < 64 {
+        if tbl.used[i] == 0 {
+            sock_set_family(tbl, i, family);
+            sock_set_type(tbl, i, sock_type);
+            sock_set_proto(tbl, i, proto);
+            tbl.states[i] = 0;  // closed
+            tbl.used[i] = 1;
+            tbl.count = tbl.count + 1;
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;  // -1 (table full)
+}
+
+// sys_bind: bind a socket to a local address + port. Sets local_addr +
+// local_port on the socket, flips state to bound(1). Returns 0 on
+// success, 22 (-EINVAL) on fd >= 64, 9 (-EBADF) on unused slot.
+//
+//   tbl:  the SocketTable.
+//   fd:   socket file descriptor (slot index, 0..63).
+//   addr: IPv4 address as u32 (host order — see "127.0.0.1
+//         representation" in the file header).
+//   port: port number (host order, fits in u16).
+//
+// In a real kernel, sys_bind would also: (1) check that the port isn't
+// already in use by another socket (unless SO_REUSEADDR — K9b), (2)
+// route the address through the network interface table (K9c), (3)
+// acquire a lock on the socket table (K8a's spinlock or K8b's mutex —
+// K9b will wire this up). K9a is PMT-pure: no locks, no port-conflict
+// check, no routing — just the field writes + state flip.
+//
+// State<T> params: 1 (tbl). Writes 3 fields: local_addrs[fd*4..fd*4+4]
+// (via sock_set_local_addr), local_ports[fd*2..fd*2+2] (via
+// sock_set_local_port), states[fd] (direct). Reads used[fd] (direct).
+fn sys_bind(tbl: State<SocketTable>, fd: u32, addr: u32, port: u16) -> i64 {
+    if fd >= 64 { return 22; }       // -EINVAL
+    if tbl.used[fd] == 0 { return 9; }  // -EBADF
+    sock_set_local_addr(tbl, fd, addr);
+    sock_set_local_port(tbl, fd, port);
+    tbl.states[fd] = 1;  // bound
+    return 0;
+}
+
+// sys_listen: mark a socket as a passive accept target. Flips state to
+// listening(2), records the backlog (max pending connections the kernel
+// will queue before dropping new ones). Returns 0 on success, 22
+// (-EINVAL) on fd >= 64, 9 (-EBADF) on unused slot.
+//
+//   tbl:     the SocketTable.
+//   fd:      socket file descriptor (must be bound — K9b will enforce
+//            state == 1; K9a doesn't check, matching the contract).
+//   backlog: max pending connections (Linux default SOMAXCONN=4096;
+//            K9a's u32 can hold any reasonable value).
+//
+// In a real kernel, sys_listen would also initialize the listen queue
+// (a per-socket array of pending connection requests — K9b's
+// TCPCtrl.accept_queue). K9a just records the backlog field; the
+// actual queue is deferred to K9b.
+//
+// State<T> params: 1 (tbl). Writes 2 fields: backlogs[fd*4..fd*4+4]
+// (via sock_set_backlog), states[fd] (direct). Reads used[fd] (direct).
+fn sys_listen(tbl: State<SocketTable>, fd: u32, backlog: u32) -> i64 {
+    if fd >= 64 { return 22; }
+    if tbl.used[fd] == 0 { return 9; }
+    sock_set_backlog(tbl, fd, backlog);
+    tbl.states[fd] = 2;  // listening
+    return 0;
+}
+
+// sys_accept: accept an incoming connection on a listening socket.
+// Allocates a new socket (via sys_socket with AF_INET/SOCK_STREAM/
+// IPPROTO_IP — the canonical TCP tuple) and flips its state to
+// connected(3). Returns the new fd on success, 22 (-EINVAL) on fd >=
+// 64 or fd not in listening state, 9 (-EBADF) on unused slot, -1 if
+// the table is full (sys_socket failed).
+//
+//   tbl: the SocketTable.
+//   fd:  the LISTENING socket's file descriptor (must be state == 2).
+//
+// In a real kernel, sys_accept would also: (1) dequeue a pending
+// connection from the listen queue (K9b — the queue is populated by
+// the TCP state machine when a SYN arrives), (2) copy the peer's
+// remote_addr + remote_port into the new socket, (3) block (return
+// -EAGAIN or yield to the scheduler) if the queue is empty. K9a's
+// stub just allocates a new socket and flips it to connected — no
+// queue, no peer info, no blocking. The K9a self-test verifies the
+// allocation + state flip; the queue/peer/blocking path is K9b.
+//
+// State<T> params: 1 (tbl). Reads states[fd] + used[fd] (direct),
+// calls sys_socket (which writes 5 fields on the new slot — see
+// sys_socket's State<T> note), then writes states[new_fd] = 3
+// (direct). The new_fd is a local i64 (sys_socket's return value,
+// not a State<T> field read) — no state-typedness concern.
+fn sys_accept(tbl: State<SocketTable>, fd: u32) -> i64 {
+    if fd >= 64 { return 22; }
+    if tbl.used[fd] == 0 { return 9; }
+    if tbl.states[fd] != 2 { return 22; }  // not listening
+    // Create a new socket for the connection (AF_INET=2, SOCK_STREAM=1,
+    // IPPROTO_IP=0 — the canonical TCP tuple).
+    let new_fd = sys_socket(tbl, 2, 1, 0);
+    if new_fd < 0 { return new_fd; }
+    // Flip the new socket to connected.
+    tbl.states[new_fd as u32] = 3;  // connected
+    return new_fd;
+}
+
+// sys_send: send up to `len` bytes from buf.data on a connected socket.
+// Returns the number of bytes sent (n), 22 (-EINVAL) on fd >= 64, 9
+// (-EBADF) on unused slot.
+//
+// K9a STUB: returns `len` (pretend all bytes were sent). The real TCP
+// send path is K9b (segment the payload, push to the TCP send buffer,
+// hand off to the IP layer). K9a's stub just verifies the fd validation
+// logic + the syscall signature (State<SocketTable> + State<NetBuf> +
+// u64 len → i64). The K9a self-test does NOT exercise sys_send (the
+// contract says "the self-test only checks socket/bind/listen/accept
+// states") — but the function must verify (the DoD's "all syscalls
+// verify" requirement).
+//
+//   tbl: the SocketTable.
+//   fd:  the socket's file descriptor.
+//   buf: the source NetBuf (buf.data[0..len] is the payload — K9b will
+//        actually read it; K9a's stub doesn't).
+//   len: number of bytes to send (u64 so callers can pass large sizes
+//        without overflow — same as K7a's pipe_read/pipe_write `count`
+//        param).
+//
+// State<T> params: 2 (tbl + buf). K9a's stub reads nothing from either
+// (just returns len). K9b will read buf.data[0..len] + write to the
+// TCP send buffer; K9c will hand the segment to the NIC driver.
+fn sys_send(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
+    if fd >= 64 { return 22; }
+    if tbl.used[fd] == 0 { return 9; }
+    // K9a stub: pretend all bytes were sent.
+    return len as i64;
+}
+
+// sys_recv: receive up to `len` bytes from a connected socket into
+// buf.data. Returns the number of bytes received (n), 0 on EOF (peer
+// closed), 22 (-EINVAL) on fd >= 64, 9 (-EBADF) on unused slot.
+//
+// K9a STUB: returns 0 (EOF — no data). The real TCP recv path is K9b
+// (drain the TCP receive buffer into buf.data, return n bytes read,
+// block or return -EAGAIN if the buffer is empty). K9a's stub just
+// verifies the fd validation logic + the syscall signature. See
+// sys_send's header for the State<T> rationale.
+fn sys_recv(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
+    if fd >= 64 { return 22; }
+    if tbl.used[fd] == 0 { return 9; }
+    // K9a stub: no data available (EOF — peer closed).
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K9a DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SocketTable via state_new, init it via sock_init, then:
+//   (1) sys_socket(AF_INET=2, SOCK_STREAM=1, 0) → returns 0 (first slot).
+//   (2) tbl.count == 1.
+//   (3) sys_bind(0, 127.0.0.1=16777343, 8080) → returns 0.
+//   (4) tbl.states[0] == 1 (bound).
+//   (5) sys_listen(0, 5) → returns 0.
+//   (6) tbl.states[0] == 2 (listening).
+//   (7) sys_accept(0) → returns a non-negative new_fd (slot 1).
+//   (8) tbl.count == 2 (one listening socket + one connected socket).
+//   (9) Return 0 (success).
+//
+// Returns 0 on success, 1..8 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// ── State-typedness note ────────────────────────────────────────────────────
+// Every function call (sys_socket, sys_bind, sys_listen, sys_accept)
+// takes tbl as a parameter — so the state-typedness is preserved across
+// the calls, and the direct field reads `tbl.count` / `tbl.states[0]`
+// work correctly after each call. The `let fd = sys_socket(...);` /
+// `let ret = sys_bind(...);` / `let ret2 = sys_listen(...);` /
+// `let new_fd = sys_accept(...);` locals are plain i64 values (function
+// return values, not State<T> field reads) — no state-typedness concern.
+//
+// ── Decimal constants ───────────────────────────────────────────────────────
+// Per the K9a contract's "Use decimal constants" rule, all non-zero
+// constants in the self-test use DECIMAL: 2 = AF_INET, 1 = SOCK_STREAM,
+// 0 = IPPROTO_IP, 16777343 = 127.0.0.1 in host-order u32 (see "127.0.0.1
+// representation" in the file header), 8080 = bind port, 5 = listen
+// backlog, 1/2 = bound/listening states. Decimal avoids the parser's
+// hex-literal path (parse_int_radix width-extension subtleties — see
+// womb/kernel/arch/x86_64/pt.vuma header for the same rationale).
+fn main() -> i32 {
+    let tbl = state_new(SocketTable);
+    sock_init(tbl);
+
+    // (1-2) Create a socket — sys_socket(AF_INET=2, SOCK_STREAM=1, 0)
+    // should return 0 (first slot). tbl.count should be 1.
+    let fd = sys_socket(tbl, 2, 1, 0);
+    if fd != 0 { return 1; }
+    if tbl.count != 1 { return 2; }
+
+    // (3-4) Bind the socket to 127.0.0.1:8080. 127.0.0.1 in host-order
+    // u32 = 16777343 (see "127.0.0.1 representation" in the file header).
+    // sys_bind should return 0 and flip tbl.states[0] to 1 (bound).
+    let ret = sys_bind(tbl, 0, 16777343, 8080);
+    if ret != 0 { return 3; }
+    if tbl.states[0] != 1 { return 4; }  // bound
+
+    // (5-6) Listen with backlog=5. sys_listen should return 0 and flip
+    // tbl.states[0] to 2 (listening).
+    let ret2 = sys_listen(tbl, 0, 5);
+    if ret2 != 0 { return 5; }
+    if tbl.states[0] != 2 { return 6; }  // listening
+
+    // (7-8) Accept a connection (K9a stub — creates a new socket at
+    // slot 1). sys_accept should return a non-negative new_fd (1) and
+    // tbl.count should be 2 (one listening + one connected).
+    let new_fd = sys_accept(tbl, 0);
+    if new_fd < 0 { return 7; }
+    if tbl.count != 2 { return 8; }
+
+    // (9) Return 0 (success).
+    return 0;
+}
