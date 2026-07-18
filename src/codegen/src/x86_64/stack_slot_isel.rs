@@ -112,9 +112,10 @@ use super::{
 ///
 /// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
 /// match arms below to decide between the integer and SSE codegen paths.
-fn infer_fp_vregs(func: &IRFunction) -> std::collections::HashSet<u32> {
+fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
     use std::collections::HashSet;
     let mut fp: HashSet<u32> = HashSet::new();
+    let mut fp_f32: HashSet<u32> = HashSet::new();  // specifically f32 (not f64)
     // Track vregs that provably hold the integer/float bit-pattern 0
     // (used to recognise the `0.0 / 0.0` NaN pattern when `ty` is None).
     let mut zero: HashSet<u32> = HashSet::new();
@@ -138,6 +139,9 @@ fn infer_fp_vregs(func: &IRFunction) -> std::collections::HashSet<u32> {
         if matches!(ty, IRType::F32 | IRType::F64) {
             if let Some(id) = param.as_register() {
                 fp.insert(id);
+                if matches!(ty, IRType::F32) {
+                    fp_f32.insert(id);
+                }
             }
         }
     }
@@ -220,6 +224,10 @@ fn infer_fp_vregs(func: &IRFunction) -> std::collections::HashSet<u32> {
                         if op_fp {
                             if let Some(id) = dst.as_register() {
                                 if fp.insert(id) { changed = true; }
+                                // Track f32 specifically
+                                if matches!(ty, Some(IRType::F32)) {
+                                    fp_f32.insert(id);
+                                }
                             }
                         }
                         if !op_fp {
@@ -267,7 +275,7 @@ fn infer_fp_vregs(func: &IRFunction) -> std::collections::HashSet<u32> {
         }
     }
 
-    fp
+    (fp, fp_f32)
 }
 
 // =============================================================================
@@ -298,7 +306,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // Recover FP-ness from Casts, float-builtin Calls, param types, and
     // operand propagation so the Add/Sub/Mul/Div/Cmp arms below can pick
     // the SSE path. See `infer_fp_vregs` above for the full rule set.
-    let fp_vregs = infer_fp_vregs(func);
+    let (fp_vregs, fp_vregs_f32) = infer_fp_vregs(func);
 
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
@@ -542,14 +550,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
-                        code.extend(load_value(lhs, Gpr::Rax));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                        // For f32 operations, float literals are stored as f64
+                        // bits in the Immediate. We need to narrow them to f32
+                        // bits (in the low 32 bits) before loading into XMM.
+                        let load_value_f32 = |val: &IRValue, scratch: Gpr| -> Vec<u8> {
+                            match val {
+                                IRValue::Immediate(imm) => {
+                                    // Narrow f64 bits to f32 bits.
+                                    let f = f64::from_bits(*imm as u64);
+                                    let f32_bits = (f as f32).to_bits();
+                                    encode_mov_reg_imm32(scratch, f32_bits as i32)
+                                }
+                                _ => load_value(val, scratch),
+                            }
+                        };
+                        let load_fn: &dyn Fn(&IRValue, Gpr) -> Vec<u8> = if is_f64 { &load_value } else { &load_value_f32 };
+                        code.extend(load_fn(lhs, Gpr::Rax));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         } else {
                             code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                         }
-                        code.extend(load_value(rhs, Gpr::R10));
+                        code.extend(load_fn(rhs, Gpr::R10));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
                         } else {
@@ -597,7 +620,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
@@ -649,7 +672,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
@@ -691,7 +714,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
                             code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
@@ -748,7 +771,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let rhs_fp = rhs.as_register().map(|id| fp_vregs.contains(&id)).unwrap_or(false);
                     let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                     if ty_fp || lhs_fp || rhs_fp || fp_vregs.contains(&dst_id) {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
                         // Load lhs into RAX and move to XMM0.
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {
@@ -1126,7 +1149,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || lhs_fp || rhs_fp;
                     if is_fp {
-                        let is_f64 = !matches!(ty, Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64)) || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
                         // Load lhs into RAX and move to XMM0.
                         code.extend(load_value(lhs, Gpr::Rax));
                         if is_f64 {

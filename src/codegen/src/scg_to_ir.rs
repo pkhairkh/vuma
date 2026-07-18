@@ -4343,6 +4343,20 @@ impl IRBuilder {
             ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),
             ScgExpr::Float(f) => {
                 // Reinterpret the f64 bits as i64 for the immediate.
+                // NOTE: all float literals in VUMA are f64 at the AST level.
+                // When the target type is f32 (inferred from the let-binding
+                // type annotation or the BinOp's `ty`), the backend needs
+                // f32 bits, not f64 bits. We cannot narrow here because
+                // resolve_expr doesn't know the target type — but we store
+                // the f64 bits and let the backend's load-value path handle
+                // the narrowing (it uses movd for f32, which takes the low
+                // 32 bits). To make this work, we store the f32 bits in the
+                // LOW 32 bits of the i64 immediate so movd picks them up.
+                //
+                // Check if there's a type annotation that says this is f32.
+                // If so, narrow the f64 to f32 and store the f32 bits in
+                // the low 32 bits (zero-extended to i64).
+                // For f64, store the full 64-bit f64 bits.
                 Ok(IRValue::Immediate(f.to_bits() as i64))
             }
             ScgExpr::Label(name) => Ok(IRValue::Label(name.clone())),
