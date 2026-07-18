@@ -840,13 +840,15 @@ Every PR targeting `main` runs:
 - **Cross-compile** — builds for 8 targets (x86_64, aarch64, riscv64gc, armv7,
   mips64, powerpc64, loongarch64, wasm32).
 - **Gold-standard** — `scripts/pi5_test_suite.sh --workers 8 --verify` across
-  all 18 QEMU backends + `wasm32` under `wasmtime` (5,832+ tests).
+  all 18 QEMU backends + `wasm32` under `wasmtime` (program count is in
+  `tests/gold_standard/manifest.json`).
 - **Kernel smoke** — `scripts/kernel_smoke.sh` (boots `womb/kernel/kernel.vuma`
   on x86_64).
 - **Kernel parity** — `scripts/kernel_parity.sh` (full 19-backend sweep:
   190 gold checks + 76 kernel module compiles).
-- **KAT tests** — `scripts/run_all_kat.sh` + `scripts/run_real_kat.sh` (213
-  crypto known-answer tests).
+- **KAT tests** — `scripts/run_real_kat.sh` (213 cross-architecture crypto
+  known-answer tests; the standalone `run_all_kat.sh` runner was removed
+  during the 2026-07 cleanup).
 - **Proof verify** — `bv_verify`, `proof_artifacts`, `proof_log` subsets.
 
 All of them must be green before merge.

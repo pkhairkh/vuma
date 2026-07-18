@@ -26,7 +26,8 @@
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
-VUMA_ROOT="${VUMA_ROOT:-/tmp/my-project}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VUMA_ROOT="${VUMA_ROOT:-$REPO_ROOT}"
 TEST_OUT="${TEST_RESULTS_DIR:-$VUMA_ROOT/test_results}"
 BIN="$VUMA_ROOT/target/release"
 
@@ -44,10 +45,12 @@ if [[ ! -x "$BIN/fuzz_driver" ]]; then
 fi
 
 # Ensure QEMU symlinks exist (fuzz_driver hard-codes /tmp/qemu_bins paths).
+# CI stages these via .github/workflows/vuma-tests.yml; on dev machines
+# we create them from /usr/bin or `command -v`.
 mkdir -p /tmp/qemu_bins
 for suffix in aarch64 riscv64 arm mips64el ppc64 loongarch64; do
     if [[ ! -e "/tmp/qemu_bins/qemu-$suffix" ]]; then
-        for cand in "/tmp/qemu_extracted/usr/bin/qemu-$suffix" "/usr/bin/qemu-$suffix" "/usr/local/bin/qemu-$suffix"; do
+        for cand in "/usr/bin/qemu-$suffix" "/usr/local/bin/qemu-$suffix"; do
             if [[ -x "$cand" ]]; then ln -sf "$cand" "/tmp/qemu_bins/qemu-$suffix"; break; fi
         done
         if [[ ! -e "/tmp/qemu_bins/qemu-$suffix" ]] && command -v "qemu-$suffix" >/dev/null 2>&1; then

@@ -1,10 +1,12 @@
 #!/bin/bash
 set -u
-COMPILE_DUMP="/home/z/vuma_real/target/release/compile_dump"
-TEST_DIR="/home/z/my-project/scripts/real_kat_tests"
-OUT_DIR="/tmp/real_kat"
-REPORT="/home/z/my-project/download/real_kat_results.md"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+COMPILE_DUMP="${COMPILE_DUMP:-$REPO_ROOT/target/release-fast/compile_dump}"
+TEST_DIR="$REPO_ROOT/scripts/real_kat_tests"
+OUT_DIR="${OUT_DIR:-/tmp/real_kat}"
+REPORT="${REPORT:-$REPO_ROOT/test_results/real_kat_results.md}"
 mkdir -p "$OUT_DIR"
+mkdir -p "$(dirname "$REPORT")"
 
 declare -A EXPECTED
 EXPECTED[aes128_encrypt]="637c777bf26b6fc5"

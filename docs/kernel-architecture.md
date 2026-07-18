@@ -1427,12 +1427,20 @@ re-used as a mask, not a sentinel.
 
 ## 15. Cross-Compilation
 
-The kernel compiles on **all 19 VUMA backends**, but only the `x86_64`
-backend has hosted-mode pre-registered syscall stubs (so only `x86_64` can
-actually *run* the kernel as a hosted process today). The other 18 backends
-compile + verify + IVE-pass but the resulting ELF is bare-metal-shaped
-(real `boot.S` entry, no `_start` stub, every extern resolves to
-`__ffi_fallback_stub`).
+The kernel compiles on **all 19 VUMA backends** (the 19 `BackendKind` variants
+in `src/codegen/src/backend.rs`), but only the `x86_64` backend has
+hosted-mode pre-registered syscall stubs (so only `x86_64` can actually *run*
+the kernel as a hosted process today). The other 18 backends compile + verify
++ IVE-pass but the resulting ELF is bare-metal-shaped (real `boot.S` entry,
+no `_start` stub, every extern resolves to `__ffi_fallback_stub`).
+
+Of those 19 codegen backends, only **4 have per-arch kernel source** under
+`womb/kernel/arch/`: `x86_64`, `aarch64`, `riscv64`, and `wasm32` (which
+ships only `sched_hal.vuma`). The remaining 15 have no per-arch kernel
+files at all — they compile the kernel's arch-agnostic core, with every
+hardware extern routed to `__ffi_fallback_stub`. Adding a new *real* arch
+port (a 5th directory under `womb/kernel/arch/`) is covered in
+[`kernel-porting-guide.md`](./kernel-porting-guide.md).
 
 ### The 19 backends
 
@@ -1561,7 +1569,6 @@ specific expected exit codes, organized by the wave that introduced them:
         crypto_patterns/     K10 crypto primitives
         edge_cases/          parser edge cases
         ffi_wave0..4/        FFI marshal waves
-        kernel_boot/         the kernel.vuma smoke test
         kernel_crypto/       sha256 KAT test
         linked_structures/   linked list / tree
         memory/              state_new + field access
@@ -1613,10 +1620,13 @@ module's self-test:
 The `womb_kat_tests/` directory contains known-answer tests for crypto
 algorithms (SHA-256, AES, Ed25519, etc.). Each test is a `.vuma` program
 that computes a hash/ciphertext/signature and checks it against a known
-value. Run them all:
+value. The directory holds `.vuma` test data consumed by
+`scripts/womb_test_harness.sh`; the standalone `run_all_kat.sh` runner was
+removed during the 2026-07 cleanup. Run the cross-architecture real-KAT
+suite (`scripts/real_kat_tests/`) instead:
 
 ```
-    ./scripts/run_all_kat.sh
+    ./scripts/run_real_kat.sh
 ```
 
 The KAT tests are mostly used by the womb library (`womb/crypto/`) but the

@@ -1,6 +1,6 @@
 # examples/ — VUMA Example Programs
 
-The `examples/` directory contains **48 standalone `.vuma` programs**
+The `examples/` directory contains **50 standalone `.vuma` programs**
 demonstrating the VUMA language. Each example is a self-contained program
 with a header comment describing what it does, what VUMA features it
 exercises, and (where applicable) the expected exit code. Examples are
@@ -16,7 +16,7 @@ For the build reference see [`docs/building.md`](../docs/building.md).
 
 ## What's here
 
-48 `.vuma` files organized (loosely) by category. Each example is a single
+50 `.vuma` files organized (loosely) by category. Each example is a single
 file with no `import` dependencies — every example compiles standalone
 with `compile_dump`.
 
@@ -268,7 +268,7 @@ done
   — note that some examples use legacy pointer syntax (`allocate`, `*ptr`,
   `free`) and are pre-PMT.
 - [`tests/README.md`](../tests/README.md) — the gold-standard test suite
-  (5,832+ programs).
+  (see `tests/gold_standard/manifest.json` for the current program count).
 - [`womb/kernel/README.md`](../womb/kernel/README.md) — the VWK kernel
   source tree (75 PMT-pure `.vuma` files).
 

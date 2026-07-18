@@ -308,10 +308,8 @@ breakdown.
 | Script | Scope |
 |--------|-------|
 | [`scripts/run_all_gold.sh`](../scripts/run_all_gold.sh) | Run all gold-standard tests on x86_64 (fast loop) |
-| [`scripts/run_all_kat.sh`](../scripts/run_all_kat.sh) | Run all womb KAT tests (crypto known-answer) |
 | [`scripts/run_real_kat.sh`](../scripts/run_real_kat.sh) | Run real-KAT suite (cross-arch known-answer) |
 | [`scripts/cross_backend_test.sh`](../scripts/cross_backend_test.sh) | Cross-backend agreement sweep |
-| [`scripts/run_gold_sweep.py`](../scripts/run_gold_sweep.py) | Python gold-sweep with parallel workers |
 | [`scripts/run_backend_resilient.py`](../scripts/run_backend_resilient.py) | Resilient runner that retries failed backends |
 | [`scripts/supervisor.py`](../scripts/supervisor.py) | Long-running test supervisor |
 | [`scripts/wasm32_runner.py`](../scripts/wasm32_runner.py) | Wasm host function provider for `wasm32` backend |
@@ -327,8 +325,11 @@ See [`tests/README.md`](../tests/README.md) for the test-suite layout and
 
 All gold-standard tests live under
 [`tests/gold_standard/`](../tests/gold_standard/) as `.vuma` source files
-grouped by category. There are **5,832+ test programs** across 34
-subdirectories. **Every test is PMT-only** — there are no pointer-dialect
+grouped by category. See [`tests/gold_standard/manifest.json`](../tests/gold_standard/manifest.json)
+for the current program count and per-category breakdown (the suite was
+curated down from ~5,851 files to its current size; see
+[`tests/gold_standard/README.md`](../tests/gold_standard/README.md) for the
+history). **Every test is PMT-only** — there are no pointer-dialect
 tests in the suite.
 
 ### Feature categories (16 directories)
@@ -373,7 +374,6 @@ tests in the suite.
 | `arena_wave1/`          | K0 arena-overflow regression (4 files)                   |
 | `arena_wave2/`          | K0 arena-multiple + grow tests                           |
 | `ffi_wave0/`–`ffi_wave4/` | FFI marshal waves: borrow modes, marshal scratch, foreign state, callbacks |
-| `kernel_boot/`          | The `kernel.vuma` smoke test (expected-output fixture)   |
 | `kernel_crypto/`        | SHA-256 KAT test for the kernel crypto subsystem         |
 
 Every `.vuma` file begins with a header of the form:
@@ -413,12 +413,16 @@ See [§8 Kernel Testing](#8-kernel-testing) for usage.
 Known-answer tests for crypto algorithms live in two directories:
 [`scripts/womb_kat_tests/`](../scripts/womb_kat_tests/) (86 test files for
 the `womb/crypto/` library) and [`scripts/real_kat_tests/`](../scripts/real_kat_tests/)
-(127 cross-architecture known-answer tests). Run them with:
+(127 cross-architecture known-answer tests). Run the cross-arch suite with:
 
 ```bash
-bash scripts/run_all_kat.sh        # womb KAT tests
 bash scripts/run_real_kat.sh       # real cross-arch KAT suite
 ```
+
+The `womb_kat_tests/` directory holds `.vuma` test data consumed by
+`scripts/womb_test_harness.sh`; the standalone `run_all_kat.sh` runner was
+removed during the 2026-07 cleanup (its functionality is folded into the
+womb smoke harness).
 
 See [`womb/crypto/README.md`](../womb/crypto/README.md) for the algorithm
 coverage matrix and [`tests/README.md`](../tests/README.md) for the test
@@ -534,37 +538,45 @@ qemu-riscv64 --version
 This installs all `qemu-<arch>` user-mode emulators system-wide. Recommended
 for local dev boxes where you have root.
 
-### Path 2 — static binary tarball (no root, sandboxed CI)
+### Path 2 — stage QEMU binaries under `/tmp/qemu_bins/` (CI convention)
 
 If you cannot install via the system package manager (no root, sandboxed CI,
-containerized build), use the **static binary approach**: extract a
-`qemu-user-static` tarball into a local directory and add it to `PATH`. The
-test runner looks for QEMU binaries in this order:
+containerized build), use the **staged-symlink approach** that the CI
+workflow ([`.github/workflows/vuma-tests.yml`](../.github/workflows/vuma-tests.yml),
+"Stage QEMU binaries under /tmp/qemu_bins/" step) and the runner scripts
+(`scripts/run_all_gold.sh`, `scripts/kernel_parity.sh`,
+`scripts/run_backend_resilient.py`, etc.) both look at first. The runner's
+`qemu_bin_for()` / `_qemu_path()` helpers search in this order:
 
-1. `/tmp/my-project/bin`
-2. `/tmp/my-project/qemu-user-extract/usr/bin`
-3. `PATH`
+1. `/tmp/qemu_bins/qemu-<arch>` (CI-staged symlinks)
+2. `/usr/bin/qemu-<arch>` (system install)
+3. `command -v qemu-<arch>` / `shutil.which` (`PATH`)
 
-So a no-root install looks like:
+So a no-root install that mimics CI looks like:
 
 ```bash
-mkdir -p /tmp/my-project/qemu-user-extract
-cd /tmp/my-project/qemu-user-extract
-# Download the qemu-user-static .deb matching your distro, then:
-ar x qemu-user-static_*.deb && tar xf data.tar.* --strip-components=1
-# Binaries now at /tmp/my-project/qemu-user-extract/usr/bin/qemu-*
-export PATH="/tmp/my-project/qemu-user-extract/usr/bin:$PATH"
-qemu-aarch64 --version
+mkdir -p /tmp/qemu_bins
+# Either extract a qemu-user-static .deb you downloaded:
+ar x qemu-user-static_*.deb && tar xf data.tar.* --strip-components=4 \
+    --wildcards './usr/bin/qemu-*'
+# …then symlink each emulator into /tmp/qemu_bins/:
+for q in qemu-aarch64 qemu-riscv64 qemu-arm qemu-ppc64le \
+         qemu-mips64el qemu-loongarch64 qemu-s390x; do
+    [ -x "$q" ] && ln -sf "$(pwd)/$q" "/tmp/qemu_bins/$q"
+done
+ls -l /tmp/qemu_bins/
 ```
 
-Or grab pre-built static binaries from a QEMU release tarball:
+Or, if you already have the binaries on `PATH` (e.g. from a previous
+`apt-get install` on a different prefix), just mirror what the CI workflow
+does and symlink them in:
 
 ```bash
-curl -fSL -o /tmp/qemu-static.tar.xz \
-  https://github.com/<qemu-static-release>/qemu-user-static-<ver>-x86_64.tar.xz
-mkdir -p /tmp/my-project/bin
-tar xf /tmp/qemu-static.tar.xz -C /tmp/my-project/bin
-export PATH="/tmp/my-project/bin:$PATH"
+mkdir -p /tmp/qemu_bins
+for q in qemu-aarch64 qemu-riscv64 qemu-arm qemu-ppc64le \
+         qemu-mips64el qemu-loongarch64; do
+    src=$(command -v "$q") && ln -sf "$src" "/tmp/qemu_bins/$q"
+done
 ```
 
 In this build environment the QEMU binaries are already installed at
@@ -574,8 +586,9 @@ which is on `PATH` by default. Verify with `ls /usr/local/bin/qemu-*`.
 ### Path 3 — pre-built static binaries shipped with the repo
 
 Some CI environments ship a `qemu-user-static` tarball alongside the repo.
-The runner auto-detects it at `/tmp/my-project/qemu-user-extract/usr/bin`
-and prepends that directory to `PATH` for the duration of the sweep.
+The runner auto-detects it by symlinking every `qemu-*` it finds into
+`/tmp/qemu_bins/` (see Path 2) and prepending that directory to `PATH` for
+the duration of the sweep.
 
 ### `binfmt_misc` registration
 
@@ -766,9 +779,9 @@ qemu-aarch64 /tmp/kernel-aarch64.bin
 ### QEMU / wasmtime issues
 
 - **`qemu-aarch64: command not found`** — the runner looks for QEMU in
-  `/tmp/my-project/bin`, `/tmp/my-project/qemu-user-extract/usr/bin`, then
-  `PATH`. Install `qemu-user` or extract the bundled tarball into one of those
-  paths. See [§7 QEMU Installation](#7-qemu-installation).
+  `/tmp/qemu_bins/qemu-<arch>` (CI-staged symlinks), then `/usr/bin/qemu-<arch>`,
+  then `PATH`. Install `qemu-user` via `apt-get`, or symlink the binaries into
+  `/tmp/qemu_bins/`. See [§7 QEMU Installation](#7-qemu-installation).
 - **`wasm32` backend silently skipped** — `wasmtime` (CLI or Python package)
   is missing. See [§1 Prerequisites](#1-prerequisites).
 - **`binfmt_misc` registration fails** — needs root or a pre-configured

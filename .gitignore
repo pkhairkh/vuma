@@ -1,7 +1,9 @@
 /target
 **/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed — this is a binary/application crate.
+# (Previously ignored by mistake; un-ignored 2026-07 cleanup.)
+!Cargo.lock
 *.o
 *.wasm
 *.elf
@@ -22,6 +24,26 @@ WORKLOG.md
 worklog.md
 WAVE_PLAN.md
 MANIFEST.md
+
+# Test run artifacts.
+# test_results/ is the Pi's tracked output directory — the pi5_test_suite.sh
+# commits summary.json, failures.txt, checkpoint.jsonl, and build.log there
+# after every run and pushes to origin/main. Agents MUST NOT modify files
+# under test_results/ — it is exclusively the Pi's territory. This isolation
+# guarantees the Pi can always `git pull && git push` without merge conflicts
+# on test output, since agents only touch src/, tests/gold_standard/,
+# scripts/, docs/, womb/, and root config files.
+#
+# (Previously gitignored during the 2026-07 cleanup because a stale 39 MB
+# checkpoint.jsonl from a different host was committed; that artifact has
+# been removed. The Pi's own checkpoint.jsonl is the canonical run record
+# and SHOULD be committed for remote debugging.)
+!test_results/
+echo
+vuma_vm.h
+/tmp/vuma_results/
+/tmp/qemu_bins/
+/tmp/qemu/
 
 # Fuzz / Proptest artifacts
 **/fuzz/target/

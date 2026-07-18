@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all 5754 gold standard tests across all 7 native backends in parallel.
+# Run all gold standard tests across all 7 native backends in parallel.
 # Wasm32 is excluded (no native execution available).
 #
 # Usage: ./scripts/run_all_gold.sh [jobs]
@@ -14,8 +14,15 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMPILE_DUMP="$REPO_ROOT/target/release/compile_dump"
 GOLD_DIR="$REPO_ROOT/tests/gold_standard"
-QEMU_DIR="/tmp/qemu/extracted/usr/bin"
-OUT_DIR="/tmp/vuma_results"
+# Resolve QEMU user-mode emulators. CI stages /tmp/qemu_bins/qemu-<arch>
+# symlinks via .github/workflows/vuma-tests.yml; on dev machines the
+# emulators are typically on PATH (qemu-user package). We prefer
+# /tmp/qemu_bins/ when present and fall back to /usr/bin then PATH.
+QEMU_DIR="${QEMU_DIR:-$(dirname "$(command -v qemu-aarch64 2>/dev/null || echo /usr/bin/qemu-aarch64)")}"
+if [ ! -x "$QEMU_DIR/qemu-aarch64" ] && [ -x /tmp/qemu_bins/qemu-aarch64 ]; then
+    QEMU_DIR="/tmp/qemu_bins"
+fi
+OUT_DIR="${VUMA_RESULTS_DIR:-/tmp/vuma_results}"
 JOBS="${1:-8}"
 
 mkdir -p "$OUT_DIR"

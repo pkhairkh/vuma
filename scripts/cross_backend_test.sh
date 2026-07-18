@@ -28,7 +28,8 @@
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
-VUMA_ROOT="${VUMA_ROOT:-/tmp/my-project}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VUMA_ROOT="${VUMA_ROOT:-$REPO_ROOT}"
 COMPILE_DUMP="$VUMA_ROOT/target/release/compile_dump"
 
 DIR="${1:-examples}"
@@ -77,12 +78,23 @@ JSON_FILE="$OUTPUT_DIR/cross_backend_${TIMESTAMP}.json"
 # -----------------------------------------------------------------------------
 declare -a BACKENDS=("x86_64" "arm32" "mips64" "aarch64" "riscv64" "ppc64" "loongarch64")
 declare -A QEMU
-QEMU[arm32]="/tmp/qemu_bins/qemu-arm"
-QEMU[mips64]="/tmp/qemu_extracted/usr/bin/qemu-mips64el"
-QEMU[aarch64]="/tmp/qemu_bins/qemu-aarch64"
-QEMU[riscv64]="/tmp/qemu_bins/qemu-riscv64"
-QEMU[ppc64]="/tmp/qemu_bins/qemu-ppc64"
-QEMU[loongarch64]="/tmp/qemu_bins/qemu-loongarch64"
+# Resolve QEMU user-mode emulators. CI stages /tmp/qemu_bins/qemu-<arch>
+# symlinks via .github/workflows/vuma-tests.yml; on dev machines the
+# emulators are typically on PATH (qemu-user package).
+qemu_bin_for() {
+    local arch="$1"
+    if [ -x "/tmp/qemu_bins/qemu-$arch" ]; then
+        printf '%s\n' "/tmp/qemu_bins/qemu-$arch"
+    else
+        command -v "qemu-$arch" 2>/dev/null || true
+    fi
+}
+QEMU[arm32]="$(qemu_bin_for arm)"
+QEMU[mips64]="$(qemu_bin_for mips64el)"
+QEMU[aarch64]="$(qemu_bin_for aarch64)"
+QEMU[riscv64]="$(qemu_bin_for riscv64)"
+QEMU[ppc64]="$(qemu_bin_for ppc64)"
+QEMU[loongarch64]="$(qemu_bin_for loongarch64)"
 
 NB=${#BACKENDS[@]}
 

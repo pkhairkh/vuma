@@ -24,9 +24,12 @@ import os
 import subprocess
 import sys
 import json
+from pathlib import Path
 
-OUT_DIR = "/home/z/my-project/scripts/real_kat_tests"
-os.makedirs(OUT_DIR, exist_ok=True)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+OUT_DIR = Path(os.environ.get("VUMA_KAT_DIR", REPO_ROOT / "scripts" / "real_kat_tests"))
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = str(OUT_DIR)
 
 # Known answer vectors from NIST/RFC test suites
 KAT_VECTORS = {

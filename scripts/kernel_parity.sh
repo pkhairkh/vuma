@@ -11,8 +11,12 @@
 
 set -uo pipefail
 
-REPO="/home/z/vuma"
-source /home/z/.cargo/env
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Put cargo + the nightly toolchain on PATH (needed for the rebuild step
+# below; harmless if compile_dump is already up to date). Skip if absent
+# (e.g., minimal CI runners that pre-install cargo on PATH).
+# shellcheck disable=SC1091
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 cd "$REPO"
 
 BIN="./target/release-fast/compile_dump"
