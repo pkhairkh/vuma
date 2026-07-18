@@ -1,0 +1,659 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/vfs/namei.vuma
+// VWK VFS Subsystem — Path resolution (namei) — walk a path string through
+// the dentry tree to find the target Dentry (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5b layer of the VWK kernel VFS: the path resolver
+// (namei — "name-to-inode", the Unix-v6 / Linux legacy name for the path
+// resolution routine). K5a created the Inode + Dentry + File structures;
+// K5b walks a path string like "/etc/motd" through the dentry tree to find
+// the target Dentry (and from there, K5c will dereference the dentry's
+// inode pointer to get the Inode for file ops).
+//
+// ── What namei does ───────────────────────────────────────────────────────
+// Given a path string in a PathBuf (a [u8; 64] holding the full null-
+// terminated path) and the dentry index of the root directory, namei:
+//   1. Starts at the root dentry (cur = root_idx).
+//   2. Skips the leading '/' (absolute paths start with '/'; relative
+//      paths start at the cwd, which K5c will wire in via a separate
+//      argument — for now namei only handles absolute paths).
+//   3. Walks the path component-by-component (splitting on '/'):
+//        for each component:
+//          a. Extract the component into a temp PathBuf (null-terminated).
+//          b. Walk the child list of `cur` (Dentry.children[cur] →
+//             first child, then Dentry.nexts[child] → sibling, then
+//             sibling's next, etc.) looking for a name match.
+//          c. On a match, descend: cur = matched dentry.
+//          d. On no match, return 256 (the "not found" sentinel — out
+//             of the 64-slot DentryTable, so 256 is safely out of range).
+//   4. When the path is exhausted (path.data[path_pos] == 0), return cur.
+//
+// ── PathBuf layout ────────────────────────────────────────────────────────
+//   PathBuf = { data: [u8; 64] }
+// A PathBuf holds ONE null-terminated string up to 63 bytes + a null.
+// K5b uses PathBuf for two purposes:
+//   (1) The full input path (e.g. "/etc/motd") — held in `path: State<PathBuf>`
+//       passed to namei by the caller (K5c's sys_open will build this from
+//       the user-supplied path argument).
+//   (2) A single path component (e.g. "etc") — held in a fresh
+//       `comp = state_new(PathBuf)` allocated inside namei's outer loop,
+//       filled byte-by-byte from `path.data[path_pos]`, then compared
+//       against each candidate dentry's name via name_matches.
+// 63 bytes is plenty for the K5b self-test (longest path = "/etc/motd" =
+// 9 bytes + null = 10 bytes; longest component = "motd" = 4 bytes + null
+// = 5 bytes). K5c may bump PathBuf to [u8; 256] or chain multiple PathBufs
+// for PATH_MAX = 4096 support — that's a K5c concern.
+//
+// ── DentryTable re-declaration ────────────────────────────────────────────
+// VUMA has no `import` statement, so this file re-declares DentryTable
+// byte-identically to K5a's womb/kernel/vfs/dentry.vuma. Same parallel-flat-
+// byte-array layout, same field set, same 64-slot sizing. This is the same
+// pattern K4b's scheduler.vuma used to re-declare ProcessTable from K4a —
+// when K5c/K5d consume this file, they'll re-declare DentryTable + PathBuf
+// again, byte-identically. The DentryTable layout (from K5a):
+//   names:      [u8; 4096]  = 64 * 64 bytes (name per dentry)
+//   parents:    [u8; 512]   = 64 * 8 bytes  (u64 per dentry)
+//   inodes:     [u8; 512]   = 64 * 8 bytes  (u64 per dentry)
+//   nexts:      [u8; 512]   = 64 * 8 bytes  (u64 per dentry)
+//   children:   [u8; 512]   = 64 * 8 bytes  (u64 per dentry)
+//   mounteds:   [u8; 64]    = 64 * 1 byte   (u8 per dentry)
+//   used:       [u8; 64]    = 64 * 1 byte   (1=used, 0=free)
+//   count:      u32         — number of slots in use (0..64)
+// Total 6308 bytes (matches K5a). The K5b self-test allocates ONE
+// DentryTable via state_new(DentryTable) — the state buffer is zero-
+// initialized by the runtime, so all `used` flags start at 0 (FREE) and
+// the test sets the relevant slots to 1 (USED) via dentry_set_used.
+//
+// ── Helper re-declaration ─────────────────────────────────────────────────
+// K5b re-declares all 14 DentryTable helpers from K5a byte-identically:
+//   2 name-byte accessors  (dentry_get_name_byte / dentry_set_name_byte)
+//   4 u64 getters          (dentry_get_parent / _inode / _next / _child)
+//   4 u64 setters          (dentry_set_parent / _inode / _next / _child)
+//   2 u8 getters           (dentry_get_mounted / _used)
+//   2 u8 setters           (dentry_set_mounted / _used)
+// namei uses: dentry_get_child (descend into child list),
+//             dentry_get_used (skip FREE slots in the child-list walk),
+//             dentry_get_next (walk siblings), and via name_matches →
+//             dentry_get_name_byte (byte-by-byte name compare).
+// main() uses: dentry_set_name_byte (set up test dentries' names),
+//              dentry_set_used (mark test dentries as USED),
+//              dentry_set_parent (set parent links),
+//              dentry_set_child (set child links).
+// The remaining 7 helpers (dentry_set_inode / _next, all 4 getters for
+// parent/inode/next/child... wait, namei uses dentry_get_child + _next +
+// _used + _name_byte, so the unused ones are: dentry_get_inode, _parent,
+// dentry_set_inode, _next, _mounted, dentry_get_mounted) are re-declared
+// anyway because (a) K5c/K5d will use them when they re-use this file's
+// DentryTable, and (b) byte-identical re-declaration makes it trivial to
+// diff K5a's dentry.vuma against this file's helper block. This matches
+// the K4b/K4d/K4e pattern of re-declaring the full helper set even when
+// only a subset is used.
+//
+// ── name_matches: byte-by-byte name comparison ────────────────────────────
+// name_matches(tbl, idx, name) compares Dentry idx's name (in tbl.names)
+// byte-by-byte against the name in `name.data`, handling null terminators:
+//   - If both names end at the same position (both have a null byte at
+//     position i), return 1 (match).
+//   - If the dentry name ends (c == 0) but the search name continues
+//     (n != 0), return 0 (dentry name is shorter).
+//   - If the search name ends (n == 0) but the dentry name continues
+//     (c != 0), return 0 (search name is shorter).
+//   - If both bytes are non-null and differ, return 0 (mismatch).
+//   - If both bytes are non-null and equal, advance to the next byte.
+//   - If all 64 bytes match without either hitting a null, return 1
+//     (both names are exactly 64 bytes and identical — the edge case
+//     where the name fills the entire 64-byte field with no null
+//     terminator; this matches Linux's strnlen(NAME_MAX=255) convention
+//     of "no null needed if the name fills the buffer").
+// This is the same byte-by-byte compare pattern as libc's strncmp/strcmp,
+// but with an explicit 64-byte upper bound (NAME_MAX+1 = 64 in this
+// simplified VFS). Linux's vfs.c:link_path_walk does the same compare
+// via dentry_cmp (which is memcpy-based for short names, byte-loop for
+// longer ones).
+//
+// ── namei: the path resolver ──────────────────────────────────────────────
+// namei(tbl, path, root_idx) -> u32 returns the dentry index of the
+// resolved path, or 256 if any component is not found. 256 is the
+// "not found" sentinel (out of the 64-slot DentryTable's range, so
+// callers can distinguish "found dentry 0" — the root — from "not found").
+// The walk:
+//   1. cur = root_idx, path_pos = 0.
+//   2. If path.data[0] == '/' (47), advance path_pos to 1 (skip leading
+//      slash for absolute paths).
+//   3. While path.data[path_pos] != 0 (more path to consume):
+//        a. Extract next component into comp (state_new PathBuf, fill
+//           byte-by-byte until '/' or null, null-terminate).
+//        b. Skip the '/' separator if present.
+//        c. child = dentry_get_child(tbl, cur) — first child of cur.
+//        d. Walk child → next → next → ... (linked-list via dentry_get_next):
+//             for each `next`:
+//               - skip if used != 1 (defensive — child list should only
+//                 contain USED dentries, but a stale entry would crash).
+//               - if name_matches(tbl, next, comp) == 1: cur = next,
+//                 found = 1, break inner loop.
+//               - else: n = dentry_get_next(tbl, next); if n == 0,
+//                 break (end of sibling list); else next = n as u32.
+//        e. If found == 0, return 256 (component not found).
+//   4. Return cur.
+// The walk is O(path_length * avg_sibling_list_length * 64) — for the
+// K5b self-test tree (depth 2, max 1 sibling per dir), this is 2 * 1 * 64
+// = 128 byte-compares per namei call. Linux's real dentry cache uses
+// hash-table lookup for child lists, so it's O(1) per component — but
+// the K5b walk is fine for a 64-slot table.
+//
+// ── Self-test (K5b DoD) ───────────────────────────────────────────────────
+//   Build a 3-dentry tree in a fresh DentryTable:
+//     Dentry 0 (root): name = "/"  (byte 0 = 47, byte 1 = 0), used = 1,
+//                      child = 1 (the "etc" dentry).
+//     Dentry 1 ("etc"): name = "etc" (bytes 101, 116, 99, 0), used = 1,
+//                       parent = 0, child = 2 (the "motd" dentry),
+//                       next = 0 (no siblings — only child of root).
+//     Dentry 2 ("motd"): name = "motd" (bytes 109, 111, 116, 100, 0),
+//                        used = 1, parent = 1, child = 0 (leaf — no
+//                        children).
+//   Then resolve three paths:
+//     (1) "/etc/motd" → expect dentry 2 (descend root → etc → motd).
+//     (2) "/etc"      → expect dentry 1 (descend root → etc, then path
+//                       ends; return cur = 1).
+//     (3) "/x"        → expect 256 (search root's children for "x":
+//                       only "etc" exists; "x" not found → return 256).
+//   main() returns 0 if all three checks pass; 1/2/3 on the corresponding
+//   check failure (so a CI failure pinpoints the broken resolution).
+//
+// ── PMT discipline ────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// DentryTable and the PathBufs are flat-byte-array structs held in
+// `___pmt_buffer`-backed State<T> values; the CALLER allocates them via
+// `state_new(DentryTable)` (and namei allocates the temp `comp` PathBuf
+// via `state_new(PathBuf)` inside its outer loop — one fresh PathBuf per
+// path component). All helpers take `tbl: State<DentryTable>` by regular
+// VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't need the
+// attribute; only extern "C" calls do, and none of these helpers call
+// any extern). No externs are declared in this file (namei is pure-PMT
+// — K5c's sys_open will declare its own externs for copying the user-
+// supplied path into a PathBuf before calling namei).
+//
+// ── Decimal-constants discipline ──────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5b contract's
+// "Use decimal ASCII values" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see womb/kernel/
+// arch/x86_64/pt.vuma header for the same rationale, K4a's task.vuma for
+// the same rule applied to slot count 256, and K5a's dentry.vuma for the
+// same rule applied to ASCII 'a'/'b'/'c'). The constants:
+//     64     = number of Dentry slots in the DentryTable (and the per-
+//              name byte count — NAME_MAX+1 in this simplified VFS)
+//     8      = bytes per u64 field (loop bound for parent/inode/next/
+//              child pack/unpack)
+//     255    = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     256    = "not found" sentinel returned by namei (out of the 64-slot
+//              table's range, so callers can distinguish "found dentry
+//              0" from "not found")
+//     47     = ASCII '/' (path separator, also root dentry's name byte 0)
+//     101    = ASCII 'e' (first byte of "etc")
+//     116    = ASCII 't' (second byte of "etc", third byte of "motd")
+//     99     = ASCII 'c' (third byte of "etc")
+//     109    = ASCII 'm' (first byte of "motd")
+//     111    = ASCII 'o' (second byte of "motd")
+//     100    = ASCII 'd' (fourth byte of "motd")
+//     120    = ASCII 'x' (test path component that doesn't exist)
+//     1      = the "used" set value (slot is in use)
+//     0      = initial byte value (zero-init via state_new), name null
+//              terminator, "not found" inner-loop flag, "no next sibling"
+//              sentinel
+//     2      = dentry index of "motd" (expected namei result for
+//              "/etc/motd"); also the expected return code from main on
+//              the second check failure
+// All `0x...` mentions in this file are in doc-comments only (verified
+// by rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ──────────────────────────────────────────────────
+// This file is self-contained. It re-declares DentryTable + all 14 helpers
+// byte-identically to K5a's womb/kernel/vfs/dentry.vuma. K5c's file.vuma
+// will re-declare them again when it consumes namei for sys_open.
+//
+// ── Build & verify (hosted x86_64) ────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/vfs/namei.vuma \
+//         /tmp/namei.bin x86_64 --verify
+//     /tmp/namei.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 3 self-test checks pass — resolve
+// "/etc/motd" → 2, "/etc" → 1, "/x" → 256).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// PathBuf: a [u8; 64] holding a null-terminated path string. Used as the
+// input to namei (the full path) AND as the per-component buffer inside
+// namei's outer loop (filled byte-by-byte from the input path). 64 bytes
+// matches the per-dentry name field width (so a single component always
+// fits — NAME_MAX+1 = 64 in this simplified VFS; Linux's NAME_MAX is 255
+// but 64 is plenty for the K5b self-test).
+layout PathBuf = {
+    data: [u8; 64],
+}
+
+// DentryTable: 64 Dentry slots stored as parallel flat byte arrays.
+// Re-declared byte-identically to K5a's womb/kernel/vfs/dentry.vuma — VUMA
+// has no `import` (see "VUMA has no `import`" in the file header). Each
+// field is a separate [u8; N] array sized for 64 slots × the field's byte
+// width; the per-dentry byte offset within an array is `idx * width`.
+// `used` is the alloc/free flag (1 = used, 0 = free); `count` tracks how
+// many slots are in use (0..64). See K5a's dentry.vuma header for the full
+// rationale on the parallel-flat-byte-array layout and the `used` array.
+layout DentryTable = {
+    names: [u8; 4096],
+    parents: [u8; 512],
+    inodes: [u8; 512],
+    nexts: [u8; 512],
+    children: [u8; 512],
+    mounteds: [u8; 64],
+    used: [u8; 64],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Name byte accessors (the [u8; 64] name field).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing on the names array. The per-dentry name occupies
+// bytes [idx*64 .. idx*64+63] in the names array. The helper computes
+// `tbl.names[idx*64 + off]` and reads / writes a single byte. VUMA has
+// no `[u8; 64]` return type, so the helper returns ONE byte at a time;
+// the caller (name_matches, below) loops over `off` 0..63 to compare.
+// Byte-identical to K5a's dentry.vuma.
+
+// Read byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+    let base = idx * 64;
+    return tbl.names[base + off];
+}
+
+// Write byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+    let base = idx * 64;
+    tbl.names[base + off] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (parents, inodes, nexts, children).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Byte-identical to K5a's dentry.vuma
+// (and to K2a's pool_get_base / pool_set_base, K3e's syscall_table_get /
+// syscall_table_set, K4a's pt_get_vruntime / etc., K5a's inode_get_ino):
+// 8-iteration while loop, shift by i*8, mask 255 on writes, sum-of-
+// shifted-bytes on reads. namei uses dentry_get_child (descend into
+// child list) and dentry_get_next (walk siblings); main() uses
+// dentry_set_child and dentry_set_parent to build the test tree.
+
+// Read the u64 `parent` field of Dentry slot `idx`.
+fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.parents[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `parent` field of Dentry slot `idx`.
+fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.parents[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `inode` field of Dentry slot `idx`.
+fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inodes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `inode` field of Dentry slot `idx`.
+fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inodes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `next` field of Dentry slot `idx` (next sibling in the
+// parent's child list — 0 means "end of list").
+fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.nexts[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `next` field of Dentry slot `idx`.
+fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.nexts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `child` field of Dentry slot `idx` (first child in this
+// directory — 0 means "no children" i.e. leaf directory or regular file).
+fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.children[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `child` field of Dentry slot `idx`.
+fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.children[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessors (mounteds, used) — direct array index, no
+// pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// The byte IS the value. Byte-identical to K5a's dentry.vuma. namei uses
+// dentry_get_used (skip FREE slots during the child-list walk); main()
+// uses dentry_set_used (mark test dentries as USED). dentry_get_mounted /
+// dentry_set_mounted are re-declared for byte-identical-to-K5a cleanliness
+// (K5d's tmpfs_mount will set mounted = 1 on the mount-point dentry when
+// it wires a filesystem onto a directory).
+
+// Read the u8 `mounted` field of Dentry slot `idx`.
+fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.mounteds[idx];
+}
+
+// Write the u8 `mounted` field of Dentry slot `idx`.
+fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.mounteds[idx] = val;
+}
+
+// Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
+fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of Dentry slot `idx`.
+fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// name_matches: byte-by-byte name comparison.
+// ────────────────────────────────────────────────────────────────────────────
+// Compare Dentry idx's name (in tbl.names) byte-by-byte against the name
+// in `name.data`, handling null terminators. Returns 1 on match, 0 on
+// mismatch. The 4 cases are:
+//   - Both null at the same position → match (both names end here).
+//   - Dentry name null, search name not null → no match (dentry name
+//     is shorter).
+//   - Search name null, dentry name not null → no match (search name
+//     is shorter).
+//   - Both non-null and differ → no match (mismatch at this byte).
+//   - Both non-null and equal → advance to the next byte.
+// If all 64 bytes match without hitting a null, return 1 (both names fill
+// the entire 64-byte field — the no-null-needed edge case). This is the
+// same byte-by-byte compare pattern as libc's strncmp, but with an
+// explicit 64-byte upper bound.
+
+fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
+    let i = 0;
+    while i < 64 {
+        let c = dentry_get_name_byte(tbl, idx, i);
+        let n = name.data[i];
+        if c == 0 {
+            if n == 0 {
+                return 1;  // both end at the same position
+            }
+            return 0;  // dentry name is shorter
+        }
+        if n == 0 {
+            return 0;  // search name is shorter
+        }
+        if c != n {
+            return 0;  // mismatch at this byte
+        }
+        i = i + 1;
+    }
+    return 1;  // all 64 bytes match (no null hit)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// namei: resolve a path to a dentry index.
+// ────────────────────────────────────────────────────────────────────────────
+// Walk a path string through the dentry tree. `path` holds the full null-
+// terminated path (e.g. "/etc/motd"); `root_idx` is the dentry index of
+// the root directory (Dentry 0 in the K5b self-test; K5c's sys_open will
+// pass the cwd dentry for relative paths and the root dentry for absolute
+// paths). Returns the dentry index of the resolved path, or 256 if any
+// component is not found.
+//
+// The walk (see "What namei does" in the file header):
+//   1. cur = root_idx, path_pos = 0.
+//   2. Skip the leading '/' (absolute paths).
+//   3. While path.data[path_pos] != 0 (more path to consume):
+//        a. Extract the next component into a fresh `comp` PathBuf
+//           (filled byte-by-byte until '/' or null, null-terminated).
+//        b. Skip the '/' separator if present.
+//        c. Walk the child list of `cur`: child = dentry_get_child(tbl,
+//           cur); for each `next` in the linked list (next →
+//           dentry_get_next(tbl, next) → ...), check name_matches(tbl,
+//           next, comp). On match, cur = next, found = 1, break. On no
+//           match, follow next to the sibling; if next == 0, break (end
+//           of sibling list).
+//        d. If found == 0, return 256 (component not found).
+//   4. Return cur.
+//
+// `break` works in VUMA while loops (verified by K2a's pmm.vuma, K4a's
+// task.vuma, K5a's own dentry_alloc, and many others — see
+// womb/crypto/x25519.vuma:177 for a nested-while-with-break example).
+
+fn namei(tbl: State<DentryTable>, path: State<PathBuf>, root_idx: u32) -> u32 {
+    // Start at the root.
+    let cur = root_idx;
+    let path_pos = 0;
+    // Skip leading '/' (absolute paths start with '/'; relative paths
+    // don't, and path_pos stays at 0 so the first component is read
+    // from the start of the PathBuf).
+    if path.data[0] == 47 {  // '/'
+        path_pos = 1;
+    }
+    // Walk path components.
+    while path.data[path_pos] != 0 {
+        // Extract the next component into a temp PathBuf.
+        let comp = state_new(PathBuf);
+        let comp_pos = 0;
+        while path.data[path_pos] != 0 && path.data[path_pos] != 47 {
+            comp.data[comp_pos] = path.data[path_pos];
+            path_pos = path_pos + 1;
+            comp_pos = comp_pos + 1;
+            if comp_pos >= 64 { break; }  // component fills the PathBuf
+        }
+        // Null-terminate the component (guard against the 64-byte-full
+        // edge case where comp_pos == 64 after the break — write the
+        // null at the LAST valid byte, not past the end).
+        if comp_pos < 64 {
+            comp.data[comp_pos] = 0;
+        }
+        // Skip the '/' separator if present.
+        if path.data[path_pos] == 47 {
+            path_pos = path_pos + 1;
+        }
+        // Search for comp in the children of cur.
+        let child = dentry_get_child(tbl, cur) as u32;
+        let found = 0;
+        let next = child;
+        while next != 256 && dentry_get_used(tbl, next) == 1 {
+            if name_matches(tbl, next, comp) == 1 {
+                cur = next;
+                found = 1;
+                break;  // VUMA supports break in while
+            }
+            let n = dentry_get_next(tbl, next);
+            if n == 0 {
+                break;  // end of sibling list
+            }
+            next = n as u32;
+        }
+        if found == 0 {
+            return 256;  // component not found
+        }
+    }
+    return cur;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5b DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Build a 3-dentry tree in a fresh DentryTable, then resolve 3 paths:
+//   (1) "/etc/motd" → expect dentry 2 (descend root → etc → motd).
+//   (2) "/etc"      → expect dentry 1 (descend root → etc, path ends).
+//   (3) "/x"        → expect 256 (search root's children for "x": only
+//                    "etc" exists, no match → return 256).
+// Returns 0 if all three checks pass; 1/2/3 on the corresponding check
+// failure (so a future CI failure pinpoints the broken resolution).
+//
+// Tree setup:
+//   Dentry 0 (root):  name = "/"   (byte 0 = 47, byte 1 = 0), used = 1,
+//                     child = 1 (the "etc" dentry).
+//   Dentry 1 ("etc"): name = "etc" (bytes 101, 116, 99, 0), used = 1,
+//                     parent = 0, child = 2 (the "motd" dentry),
+//                     next = 0 (no siblings — only child of root).
+//   Dentry 2 ("motd"):name = "motd"(bytes 109, 111, 116, 100, 0),
+//                     used = 1, parent = 1, child = 0 (leaf).
+// The DentryTable is zero-initialized by state_new, so all unset fields
+// (e.g. dentry 0's parent, dentry 2's child, all `next` fields, all
+// `mounted` fields, all `inode` fields) default to 0 — which is the
+// correct "no link" sentinel for the K5b walk.
+//
+// Per the K5b contract's "Use decimal ASCII values" rule, all ASCII
+// constants in this self-test use DECIMAL: 47='/', 101='e', 116='t',
+// 99='c', 109='m', 111='o', 100='d', 120='x'. The 256 sentinel and the
+// 0/1/2/3 return codes are also decimal.
+
+fn main() -> i32 {
+    let tbl = state_new(DentryTable);
+
+    // ── Dentry 0 (root): name = "/" ──────────────────────────────────────
+    dentry_set_name_byte(tbl, 0, 0, 47);   // '/'
+    dentry_set_name_byte(tbl, 0, 1, 0);    // null terminator
+    dentry_set_used(tbl, 0, 1);
+
+    // ── Dentry 1 ("etc"): name = "etc" ───────────────────────────────────
+    dentry_set_name_byte(tbl, 1, 0, 101);  // 'e'
+    dentry_set_name_byte(tbl, 1, 1, 116);  // 't'
+    dentry_set_name_byte(tbl, 1, 2, 99);   // 'c'
+    dentry_set_name_byte(tbl, 1, 3, 0);    // null terminator
+    dentry_set_used(tbl, 1, 1);
+
+    // ── Dentry 2 ("motd"): name = "motd" ─────────────────────────────────
+    dentry_set_name_byte(tbl, 2, 0, 109);  // 'm'
+    dentry_set_name_byte(tbl, 2, 1, 111);  // 'o'
+    dentry_set_name_byte(tbl, 2, 2, 116);  // 't'
+    dentry_set_name_byte(tbl, 2, 3, 100);  // 'd'
+    dentry_set_name_byte(tbl, 2, 4, 0);    // null terminator
+    dentry_set_used(tbl, 2, 1);
+
+    // ── Link the tree ────────────────────────────────────────────────────
+    // Dentry 0 (root): child = 1 (the "etc" dentry).
+    //   (parent is left at 0 — root's parent is itself = index 0, which
+    //   is the zero-init default, so we don't need to set it.)
+    dentry_set_child(tbl, 0, 1);
+    // Dentry 1 ("etc"): parent = 0, child = 2 (the "motd" dentry).
+    //   (next is left at 0 — "etc" is the only child of root, so no
+    //   siblings; this is the zero-init default.)
+    dentry_set_parent(tbl, 1, 0);
+    dentry_set_child(tbl, 1, 2);
+    // Dentry 2 ("motd"): parent = 1.
+    //   (child is left at 0 — "motd" is a leaf file with no children;
+    //   this is the zero-init default. next is left at 0 — "motd" is
+    //   the only child of "etc".)
+    dentry_set_parent(tbl, 2, 1);
+
+    // ── Check 1: resolve "/etc/motd" → expect dentry 2 ───────────────────
+    // Path bytes: '/' 'e' 't' 'c' '/' 'm' 'o' 't' 'd' '\0'
+    //            = 47 101 116 99 47 109 111 116 100 0
+    let path = state_new(PathBuf);
+    path.data[0] = 47;    // '/'
+    path.data[1] = 101;   // 'e'
+    path.data[2] = 116;   // 't'
+    path.data[3] = 99;    // 'c'
+    path.data[4] = 47;    // '/'
+    path.data[5] = 109;   // 'm'
+    path.data[6] = 111;   // 'o'
+    path.data[7] = 116;   // 't'
+    path.data[8] = 100;   // 'd'
+    path.data[9] = 0;     // null terminator
+    let result = namei(tbl, path, 0);
+    if result != 2 { return 1; }
+
+    // ── Check 2: resolve "/etc" → expect dentry 1 ────────────────────────
+    // Path bytes: '/' 'e' 't' 'c' '\0' = 47 101 116 99 0
+    let path2 = state_new(PathBuf);
+    path2.data[0] = 47;   // '/'
+    path2.data[1] = 101;  // 'e'
+    path2.data[2] = 116;  // 't'
+    path2.data[3] = 99;   // 'c'
+    path2.data[4] = 0;    // null terminator
+    let result2 = namei(tbl, path2, 0);
+    if result2 != 1 { return 2; }
+
+    // ── Check 3: resolve "/x" → expect 256 (not found) ───────────────────
+    // Path bytes: '/' 'x' '\0' = 47 120 0
+    // Walk: cur=root(0), comp="x". Search root's children: child=1
+    // ("etc"), name_matches("etc", "x") = 0; next=0 → break inner loop;
+    // found=0 → return 256.
+    let path3 = state_new(PathBuf);
+    path3.data[0] = 47;   // '/'
+    path3.data[1] = 120;  // 'x'
+    path3.data[2] = 0;    // null terminator
+    let result3 = namei(tbl, path3, 0);
+    if result3 != 256 { return 3; }
+
+    return 0;
+}
