@@ -1893,22 +1893,26 @@ fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
 ///
 /// TODO G4: needs QEMU-m68k verification — encoding uncertain.
 fn emit_fmove_mem_to_fp(dst: Fpr, is_f64: bool, code: &mut Vec<u8>) {
-    let fmt: u16 = if is_f64 { 0x04 } else { 0x01 };
-    let w2 = 0x4000u16 | ((dst.encoding() as u16) << 7) | (1u16 << 6) | fmt;
+    // 68881 FMOVE.<fmt> (A1), FPn — external (memory) load.
+    // Word 1: 0xF211 (cp1, cpGEN, mode=2=(A1), reg=A1)
+    // Word 2: bit15=1(external) | bit13=0(load) | FPn(12-10) | fmt(6-4)
+    //   fmt: 0x01=Single(f32)→bits6-4=001, 0x05=Double(f64)→bits6-4=101
+    let fmt_bits: u16 = if is_f64 { 0x05 << 4 } else { 0x01 << 4 };
+    let w2 = 0x8000u16                          // bit 15 = 1 (external/memory)
+        | ((dst.encoding() as u16) << 10)       // FPn at bits 12-10
+        | fmt_bits;                             // format at bits 6-4
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
 
-/// Best-effort 68881 `FMOVE.S/D FPn, (A1)` — FPR-to-memory store.
-///
-/// Word 1: `0xF211` (cp1, cpGEN, mode 2 = (An), reg = A1).
-/// Word 2: `0x6000 | (FPn << 7) | (R/M=1 << 6) | format`
-///   format: `0x01` = S (f32), `0x04` = D (f64).
-///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+/// 68881 `FMOVE.S/D FPn, (A1)` — FPR-to-memory store.
 fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
-    let fmt: u16 = if is_f64 { 0x04 } else { 0x01 };
-    let w2 = 0x6000u16 | ((src.encoding() as u16) << 7) | (1u16 << 6) | fmt;
+    // Word 2: bit15=1(external) | bit13=1(store) | FPn(12-10) | fmt(6-4)
+    let fmt_bits: u16 = if is_f64 { 0x05 << 4 } else { 0x01 << 4 };
+    let w2 = 0x8000u16                          // bit 15 = 1 (external/memory)
+        | (1u16 << 13)                          // bit 13 = 1 (store direction)
+        | ((src.encoding() as u16) << 10)       // FPn at bits 12-10
+        | fmt_bits;                             // format at bits 6-4
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
@@ -1921,21 +1925,25 @@ fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
 ///
 /// TODO G4: needs QEMU-m68k verification — encoding uncertain.
 fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
-    // 68881 dyadic register form:
-    // Word 1: 0xF200 (cp1, cpGEN, EA placeholder)
-    // Word 2: 0 R/M(0) 0 0 0 0 OPMODE(6) DEST(3) 0
-    //   OPMODE = {1, operation(2), source_FPm(3)}
-    //   FADD=00, FMUL=01, FSUB=10, FDIV=11
-    //   DEST at bits 3-1
-    let base_opmode: u16 = match op {
-        BinOpKind::Add => 0x20,       // FADD: operation=00
-        BinOpKind::Mul => 0x28,       // FMUL: operation=01
-        BinOpKind::Sub => 0x30,       // FSUB: operation=10
-        BinOpKind::SDiv | BinOpKind::UDiv => 0x38, // FDIV: operation=11
-        _ => 0x20,
+    // 68881 dyadic register form (R/M=0):
+    // Word 1: 0xF200 (cp1, cpGEN, EA placeholder for register form)
+    // Word 2: 0_R/M(0)_0_0_DEST(3)_0_0_0_1_OPMODE(2)_SOURCE(3)_0_0
+    //   Bit 15: R/M = 0 (register-to-register)
+    //   Bits 13-11: DEST FPn
+    //   Bit 7: 1 (dyadic operation indicator)
+    //   Bits 6-5: OPMODE (00=FADD, 01=FMUL, 10=FSUB, 11=FDIV)
+    //   Bits 4-2: SOURCE FPm
+    let opmode: u16 = match op {
+        BinOpKind::Add => 0b00,       // FADD
+        BinOpKind::Mul => 0b01,       // FMUL
+        BinOpKind::Sub => 0b10,       // FSUB
+        BinOpKind::SDiv | BinOpKind::UDiv => 0b11, // FDIV
+        _ => 0b00,
     };
-    let opmode = base_opmode | (src.encoding() as u16); // source FPm at bits 2-0
-    let w2 = (opmode << 4) | ((dst.encoding() as u16) << 1); // OPMODE at bits 9-4, DEST at bits 3-1
+    let w2: u16 = (1u16 << 7)                          // dyadic indicator
+        | (opmode << 5)                                // OPMODE
+        | ((src.encoding() as u16) << 2)               // SOURCE FPm
+        | ((dst.encoding() as u16) << 11);             // DEST FPn
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
@@ -2183,12 +2191,10 @@ fn emit_cast_int_to_float(
         let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
         // 1. A1 = FP + src_off
         emit_lea_fp_disp(src_off, code);
-        // 2. FMOVE.L (A1), FP0 — best-effort 68881 encoding.
-        //    Word 1: 0xF211 (cp1, cpGEN, mode 2 = (An), reg = A1).
-        //    Word 2: 0x4000 | (FPn=0 << 7) | (R/M=1 << 6) | 0x00 (L format).
-        //    TODO G4: verify against M68000 PRM.
+        // 2. FMOVE.L (A1), FP0 — 68881 external load, Long format.
+        //    Word 2: bit15=1(ext) | bit13=0(load) | FPn=0(12-10) | fmt=000(L, bits 6-4)
         code.extend_from_slice(&0xF211u16.to_be_bytes());
-        code.extend_from_slice(&0x4040u16.to_be_bytes());
+        code.extend_from_slice(&0x8000u16.to_be_bytes());
         // 3. A1 = FP + dst_off
         emit_lea_fp_disp(dst_off, code);
         // 4. FMOVE.S/D FP0, (A1)
@@ -2250,12 +2256,10 @@ fn emit_cast_float_to_int(
         code.extend_from_slice(&0x0300u16.to_be_bytes());
         // 4. A1 = FP + dst_off
         emit_lea_fp_disp(dst_off, code);
-        // 5. FMOVE.L FP0, (A1) — best-effort 68881 encoding.
-        //    Word 1: 0xF211 (cp1, cpGEN, mode 2 = (An), reg = A1).
-        //    Word 2: 0x6000 | (FPn=0 << 7) | (R/M=1 << 6) | 0x00 (L format).
-        //    TODO G4: verify against M68000 PRM.
+        // 5. FMOVE.L FP0, (A1) — 68881 external store, Long format.
+        //    Word 2: bit15=1(ext) | bit13=1(store) | FPn=0(12-10) | fmt=000(L)
         code.extend_from_slice(&0xF211u16.to_be_bytes());
-        code.extend_from_slice(&0x6040u16.to_be_bytes());
+        code.extend_from_slice(&0xA000u16.to_be_bytes());
     } else {
         // Non-register src: stub with 0.
         // TODO G4: handle float-to-int for non-register sources.
