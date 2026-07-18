@@ -1,50 +1,77 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/syscall/dispatch.vuma
-// VWK Syscall Dispatch — nr → handler lookup + invocation (PMT-pure).
+// VWK Syscall Dispatch — nr → handler lookup via the superset TrapFrame.
+// Wave R4c (PMT-pure).
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file is the x86_64 syscall dispatch layer. Given a populated
-// SyscallArgs (nr + a0..a5) and a SyscallTable (the 512-entry handler
-// registry from sibling table.vuma), syscall_dispatch:
-//   1. Bounds-checks nr against 512 (asm-generic syscall max for VWK).
-//      Out-of-range → return -ENOSYS (38).
-//   2. Looks up the handler via syscall_table_get.
-//      Unregistered (handler == 0) → return -ENOSYS (38).
-//   3. Calls the handler with the args (K11 — VUMA has no fn-pointer
-//      call today, so this is a stub that returns 0; K11 adds real
-//      fn-pointer dispatch).
-//   4. Returns the handler's return value to the caller (K3d's
-//      trap_syscall, which will write it back into tf.rax via
-//      syscall_write_ret from sibling abi.vuma).
+// This file is the R4c rewrite of K3e's syscall dispatch layer. K3e's
+// version took a SyscallArgs struct (a separate 7-word view that K3d's
+// trap.vuma marshaled out of the TrapFrame via sibling abi.vuma). R4c
+// collapses that indirection: the dispatcher now reads the syscall
+// number and arguments directly from the superset TrapFrame's canonical
+// GPR slots, and writes the return value back to canonical slot 7. No
+// SyscallArgs intermediate, no abi.vuma marshaling layer needed at the
+// dispatch call site.
+//
+// ── Canonical GPR slot mapping (R2a) ────────────────────────────────────────
+// The superset TrapFrame packs 32 × u64 GPRs little-endian into a flat
+// 256-byte `gpr` array. The R4c syscall contract assigns canonical slots:
+//     slot 0  = syscall number (nr)
+//     slot 1  = arg0
+//     slot 2  = arg1
+//     slot 3  = arg2
+//     slot 4  = arg3
+//     slot 5  = arg4
+//     slot 6  = arg5
+//     slot 7  = return value
+//     slots 8..31 = unused by the syscall path (scratch / callee-saved)
+//
+// Per-arch, the trap_entry stub (R2b/R2c/R2d) is responsible for placing
+// the user's syscall-ABI registers into these canonical slots:
+//     x86_64 (Linux int 0x80 / syscall ABI):
+//         nr  ← rax  → slot 0
+//         a0  ← rdi  → slot 1
+//         a1  ← rsi  → slot 2
+//         a2  ← rdx  → slot 3
+//         a3  ← r10  → slot 4
+//         a4  ← r8   → slot 5
+//         a5  ← r9   → slot 6
+//         ret → rax  ← slot 7
+//     aarch64 (AArch64 Linux SVC):
+//         nr  ← x8   → slot 0
+//         a0..a5 ← x0..x5 → slots 1..6
+//         ret → x0   ← slot 7
+//     riscv64 (RISC-V Linux ecall):
+//         nr  ← a7   → slot 0
+//         a0..a5 ← a0..a5 → slots 1..6
+//         ret → a0   ← slot 7
+// The dispatcher does NOT know about these mappings — it reads/writes
+// the canonical slots via tf_get_gpr / tf_set_gpr. This is the R2 Golden
+// Rule: "Do not write arch-conditional logic inside kernel transforms."
 //
 // ── Why is the handler-call a stub? ─────────────────────────────────────────
 // VUMA has no function-pointer call today: `handler()` where `handler` is
 // a u64 won't compile (the parser only accepts direct fn-identifier
-// calls, not indirect calls through a u64). The K3e contract's "Note"
-// explicitly says: "VUMA has no function-pointer call — `handler()`
-// where handler is a u64 won't compile. The dispatch stub returns 0;
-// K11 adds real dispatch." So the stub:
+// calls, not indirect calls through a u64). The K3e contract documented
+// this same limitation; R4c inherits it. So the dispatch:
 //   - bounds-checks nr (exercises the u64-vs-512 comparison)
 //   - looks up the handler via syscall_table_get (exercises the pack/
 //     unpack helper)
 //   - branches on handler != 0 (both branches return 0)
-// This is NOT a violation of the "no stubs" rule because the DoD
-// explicitly documents this as a stub for K11 to replace. The hosted-
-// mode path never actually delivers syscalls via int 0x80 (the host
-// kernel uses its own syscall ABI), so the stub's no-op behavior is
-// correct for hosted mode. Same pattern as K3d's irq.vuma irq_dispatch
-// (handler-call stub, just sends EOI).
+//   - writes the return value to canonical slot 7
+// The hosted-mode path never actually delivers syscalls via int 0x80
+// (the host kernel uses its own syscall ABI), so the stub's no-op
+// behavior is correct for hosted mode. Same pattern as K3d's irq.vuma
+// irq_dispatch (handler-call stub, just sends EOI).
 //
 // K11 will replace the `return 0` with the real fn-pointer call. K11's
 // implementation will likely:
-//   - Add a new VUMA intrinsic `call_indirect(handler_addr: u64, args:
-//     State<SyscallArgs>) -> u64` that lowers to an indirect call
+//   - Add a new VUMA intrinsic `call_indirect(handler_addr: u64, tf:
+//     State<TrapFrame>) -> u64` that lowers to an indirect call
 //     instruction on each backend (call rax on x86_64, blr x8 on
-//     aarch64, jalr x0, x7 on riscv64). The intrinsic will handle the
-//     SysV AMD64 calling convention (args in rdi/rsi/rdx/rcx/r8/r9 —
-//     note: NOT r10 for a3, because indirect C calls use rcx not r10;
-//     the syscall ABI uses r10 because SYSCALL clobbers rcx, but
-//     regular C calls don't have that constraint).
+//     aarch64, jalr x0, x7 on riscv64). The intrinsic will read the
+//     args directly from tf's canonical slots (no separate SyscallArgs
+//     marshal step).
 //   - OR: lower syscall handlers as a giant switch statement in trap.S
 //     (one `cmp rax, NR; je handler_X` per registered syscall). This
 //     avoids the indirect-call entirely but bloats trap.S.
@@ -56,10 +83,10 @@
 // libc wrapper translates -errno → errno = -retval at the user-space
 // boundary). The VUMA convention in this file is to return the POSITIVE
 // errno value (38 = ENOSYS) and let the caller (K11's trap_syscall)
-// negate it before writing it back to tf.rax. This avoids signed-
-// arithmetic subtleties in VUMA's u64-dominated codegen (the alternative
-// `return -38` would require an i64 return type, and VUMA's u64/i64
-// implicit-conversion rules are sometimes surprising — see K2c's
+// negate it before writing it back to canonical slot 7. This avoids
+// signed-arithmetic subtleties in VUMA's u64-dominated codegen (the
+// alternative `return -38` would require an i64 return type, and VUMA's
+// u64/i64 implicit-conversion rules are sometimes surprising — see K2c's
 // pt.vuma header for the same "use unsigned, document the sign
 // convention" rationale). K11 will pick the final sign convention.
 //
@@ -78,36 +105,43 @@
 //
 // ── Layouts re-declared (no import in VUMA) ─────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares:
-//   - SyscallArgs byte-identically to sibling abi.vuma (K3e)
+//   - TrapFrame byte-identically to R2a's womb/kernel/trap/trap_frame.vuma
 //   - SyscallTable byte-identically to sibling table.vuma (K3e)
 // The byte-identical-redeclaration invariant (K2c "extern signatures
 // MUST stay byte-identical" — extended to layouts in K3d) extends to
-// layouts: this file's `syscall_dispatch(tbl: State<SyscallTable>, args:
-// State<SyscallArgs>)` MUST see the same field offsets, field names,
-// and field types as abi.vuma's and table.vuma's files.
+// layouts: this file's `syscall_dispatch_from_trap(tbl, tf)` MUST see
+// the same field offsets, field names, and field types as R2a's
+// trap_frame.vuma and table.vuma.
+//
+// R4c dropped the SyscallArgs layout (K3e's intermediate view) — the
+// dispatcher now operates on the TrapFrame directly. K11 may keep
+// abi.vuma around for the per-arch trap_entry stubs (which still need
+// to translate hardware registers into canonical slots), but the
+// dispatch layer no longer consumes SyscallArgs.
 //
 // ── Helper re-declarations ─────────────────────────────────────────────────
-// This file re-declares syscall_table_get and syscall_table_set byte-
-// identically to sibling table.vuma (K3e) — VUMA has no import, so the
-// dispatch layer needs its own copies. The re-declared helpers are
-// byte-identical (same 8-iteration while loop, same shift-by-i*8, same
-// mask-255 on writes, same sum-of-shifted-bytes on reads). K11 may
+// This file re-declares:
+//   - tf_get_gpr / tf_set_gpr / tf_init byte-identically to R2a's
+//     trap_frame.vuma (so the dispatcher can read/write canonical slots
+//     without depending on a sibling file at compile time).
+//   - syscall_table_get / syscall_table_set / syscall_register byte-
+//     identically to sibling table.vuma (K3e).
+// VUMA has no import, so the dispatcher needs its own copies. K11 may
 // consolidate these into a shared "syscall/table.vuma" that everyone
 // imports once VUMA gains an import mechanism.
 //
 // ── Forward function references ─────────────────────────────────────────────
-// This file's main() calls syscall_table_set BEFORE syscall_table_set is
-// declared (the helper appears after main in the source). VUMA's parser
-// supports forward function references (it does a two-pass scan: pass 1
-// collects all fn signatures into the symbol table, pass 2 resolves call
-// sites). Verified in this file's self-test (exit=0). Same forward-
-// reference pattern is used by K3d's irq.vuma (the helpers are declared
-// before main, but the principle holds — VUMA doesn't require
-// declaration-before-use for fns).
+// This file's main() calls syscall_dispatch_from_trap BEFORE
+// syscall_dispatch_from_trap is declared (the helper appears after
+// main in the source). VUMA's parser supports forward function
+// references (it does a two-pass scan: pass 1 collects all fn
+// signatures into the symbol table, pass 2 resolves call sites).
+// Verified in this file's self-test (exit=0). Same forward-reference
+// pattern is used by K3d's irq.vuma and K3e's original dispatch.vuma.
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
-// SyscallArgs and SyscallTable are ___pmt_buffer-backed State<T>'s
+// TrapFrame and SyscallTable are ___pmt_buffer-backed State<T>'s
 // allocated by the CALLER via `state_new(...)`. The State<T> params are
 // regular VUMA-fn borrows (NOT extern #[borrow] — VUMA fn calls don't
 // need the attribute, only extern "C" calls do). None of this file's
@@ -115,83 +149,137 @@
 // invalidation-on-extern-call doesn't fire.
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
-// All non-zero constants in this file use DECIMAL per the K3e contract's
-// "IMPORTANT" rule (8192 not 0x2000, 4096 not 0x1000):
-//     4096 = 0x1000 = 512 entries × 8 bytes (handler-table array size)
-//     8192 = 0x2000 = the dummy handler address used in the self-test
-//                     (also confirms u64 round-trip through pack/unpack
-//                      for a value larger than 255 — same rationale as
-//                      table.vuma's 8192 check)
-//     512  = the SyscallTable size (bounds-check threshold)
+// All non-zero constants in this file use DECIMAL per the contract's
+// "Use decimal constants (512=max syscalls, 38=ENOSYS, 64=write
+// syscall)" rule:
+//     512  = max syscalls (bounds-check threshold + handler-table size)
 //     38   = ENOSYS (the errno for "no such syscall" — returned for
 //            out-of-range nr AND unregistered nr)
-//     8    = bytes per u64 handler entry (loop bound for pack/unpack)
-//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
 //     64   = asm-generic __NR_write (the syscall number used in the
-//            self-test)
-//     999  = the out-of-range nr used in the self-test (> 512)
+//            self-test — write is the canonical "hello world" syscall)
+//     4096 = 0x1000 = handler-table array size (512 entries × 8 bytes)
+//     8192 = 0x2000 = the dummy handler address used in the self-test
+//     8    = bytes per u64 (loop bound for pack/unpack)
+//     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
+//     256  = gpr/fpu array size in TrapFrame (byte-loop bound)
+//     24   = _pad array size in TrapFrame (byte-loop bound)
+//     7    = canonical return-value slot (tf_set_gpr(tf, 7, ret))
+//     1    = fd arg in self-test (stdout)
+//     3    = count arg in self-test (3 bytes)
 // Decimal avoids the parser's hex-literal path (parse_int_radix width-
 // extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
 // the same rationale).
 //
-// ── Why does syscall_dispatch return u64, not i64? ──────────────────────────
-// The contract specifies `fn syscall_dispatch(...) -> u64`. The kernel's
-// syscall ABI conventionally returns -errno as a negative i64 (in the
-// range [-4095, -1]) for errors and a non-negative value for success.
-// VUMA's u64/i64 implicit-conversion rules are sometimes surprising (see
-// "Why -ENOSYS = 38 (not the negative value)?" above), so this file
-// returns u64 throughout (38 for -ENOSYS, 0 for the stub's success
-// path). K11 will pick the final sign convention — likely the file
-// stays u64 internally and the trap_syscall wrapper negates errno
-// values before writing them to tf.rax.
-//
-// ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. It re-declares:
-//   - SyscallArgs byte-identically to abi.vuma
-//   - SyscallTable byte-identically to table.vuma
-//   - syscall_table_get byte-identically to table.vuma
-//   - syscall_table_set byte-identically to table.vuma
-// (Same pattern as K3d's irq.vuma re-declaring irq_mask/irq_unmask/pic_eoi
-// from K3a's trap_trampoline.vuma.)
+// ── Why does syscall_dispatch_from_trap return u64, not i64? ────────────────
+// The contract specifies `fn syscall_dispatch_from_trap(...) -> u64`.
+// The kernel's syscall ABI conventionally returns -errno as a negative
+// i64 (in the range [-4095, -1]) for errors and a non-negative value
+// for success. VUMA's u64/i64 implicit-conversion rules are sometimes
+// surprising, so this file returns u64 throughout (38 for -ENOSYS, 0
+// for the stub's success path). K11 will pick the final sign convention
+// — likely the file stays u64 internally and the trap_syscall wrapper
+// negates errno values before writing them to canonical slot 7.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
 //     ./target/release-fast/compile_dump \
 //         womb/kernel/syscall/dispatch.vuma \
 //         /tmp/dispatch.bin x86_64 --verify
 //     /tmp/dispatch.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (2 self-test checks pass — out-of-range
-// nr returns 38, registered-nr dispatch returns 0 via the stub).
+// Expected: IVE Pass, exit=0 (3 self-test checks pass — out-of-range
+// nr returns 38, unregistered nr returns 38, registered-nr dispatch
+// returns 0 via the stub and writes the return value to slot 7).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts (re-declared — no import in VUMA).
 // ────────────────────────────────────────────────────────────────────────────
-// Re-declared byte-identically to sibling abi.vuma (SyscallArgs) and
-// sibling table.vuma (SyscallTable). See file header "Layouts re-declared".
 
-// Re-declared from abi.vuma (K3e).
-layout SyscallArgs = {
-    nr: u64,
-    a0: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
+// Canonical superset TrapFrame (576 bytes total) — re-declared byte-
+// identically to R2a's womb/kernel/trap/trap_frame.vuma. See R2a's header
+// for the field semantics (gpr 32×u64 LE-packed in 256 bytes; pc/status/
+// vector/error_code/sp are 5 scalar u64 fields; fpu is 32×u64 LE-packed
+// in 256 bytes; _pad is 24 alignment bytes).
+layout TrapFrame = {
+    gpr: [u8; 256],
+    pc: u64,
+    status: u64,
+    vector: u64,
+    error_code: u64,
+    sp: u64,
+    fpu: [u8; 256],
+    _pad: [u8; 24],
 }
 
-// Re-declared from table.vuma (K3e).
+// Re-declared from table.vuma (K3e). 512 entries × 8 bytes per entry.
+// count is the number of handlers registered (incremented by
+// syscall_register, never decremented — see table.vuma's header).
 layout SyscallTable = {
     handlers: [u8; 4096],  // 512 * 8 bytes — u64 handler addr per syscall
     count: u32,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Byte-array pack/unpack helpers (re-declared from table.vuma).
+// TrapFrame helpers (re-declared from R2a's trap_frame.vuma, byte-identical).
 // ────────────────────────────────────────────────────────────────────────────
-// Byte-identical to table.vuma's syscall_table_get / syscall_table_set.
-// See table.vuma's header for the pack/unpack rationale (8-iteration
-// while loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on
-// reads — same pattern as pmm.vuma's pool_get_base / pool_set_base).
+// tf_init + tf_get_gpr + tf_set_gpr, byte-identical to R2a. The
+// dispatcher uses tf_get_gpr to read the canonical syscall slots
+// (nr=slot 0, args=slots 1..6) and tf_set_gpr to write the return
+// value to canonical slot 7. tf_init is included so the self-test can
+// get a clean TrapFrame without relying on state_new's zero-fill.
+
+// Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
+fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tf.gpr[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
+// at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
+fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tf.gpr[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Zero every field of a caller-allocated TrapFrame. Called once per
+// TrapFrame before the arch-specific trap-to-superset adapter (R2b/R2c/
+// R2d) populates the arch-specific fields, OR before the self-test uses
+// it as a fresh save area. Byte-identical to R2a's tf_init.
+fn tf_init(tf: State<TrapFrame>) {
+    let i = 0;
+    while i < 256 { tf.gpr[i] = 0; i = i + 1; }
+    tf.pc = 0;
+    tf.status = 0;
+    tf.vector = 0;
+    tf.error_code = 0;
+    tf.sp = 0;
+    let j = 0;
+    while j < 256 { tf.fpu[j] = 0; j = j + 1; }
+    let k = 0;
+    while k < 24 { tf._pad[k] = 0; k = k + 1; }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SyscallTable helpers (re-declared from K3e's table.vuma, byte-identical).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical to table.vuma's syscall_table_get / syscall_table_set /
+// syscall_register. The dispatcher needs its own copies because VUMA
+// has no import (Open Work §7).
 
 // Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
 // Re-declared byte-identically to table.vuma.
@@ -221,77 +309,147 @@ fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Dispatch.
-// ────────────────────────────────────────────────────────────────────────────
-// Look up handler by nr, call it (K11 — VUMA has no fn-pointer call
-// today, so the call is omitted; K11 adds it), return result. Bounds-
-// checks nr against 512 first (out-of-range → -ENOSYS = 38). Returns
-// -ENOSYS = 38 for unregistered syscalls (handler == 0) too — this is
-// the standard Linux behavior for unimplemented syscalls (user-space
-// sees -ENOSYS from libc, which is the "Function not implemented" error).
+// Register a syscall handler: pack the address into the table slot AND
+// increment tbl.count. Re-declared byte-identically to table.vuma.
+// No "unregister" in this wave; K11 may add one if needed for runtime
+// syscall-table patching / seccomp-style filtering.
+fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    syscall_table_set(tbl, nr, handler);
+    tbl.count = tbl.count + 1;
+}
 
-// Syscall dispatch: look up handler by nr, call it, return result.
-//   - nr >= 512           → return 38 (-ENOSYS, out of range)
-//   - handler == 0        → return 38 (-ENOSYS, unregistered)
-//   - otherwise (K11)     → call handler(args), return its result
-//                           (K3e hosted-mode stub: just return 0)
-fn syscall_dispatch(tbl: State<SyscallTable>, args: State<SyscallArgs>) -> u64 {
-    let nr = args.nr;
+// ────────────────────────────────────────────────────────────────────────────
+// Dispatch (the R4c surface).
+// ────────────────────────────────────────────────────────────────────────────
+// syscall_dispatch_from_trap reads the syscall number from canonical
+// slot 0, looks up the handler, and writes the return value to canonical
+// slot 7. The handler-call itself is a stub (VUMA has no fn-pointer call
+// today — see file header "Why is the handler-call a stub?").
+//
+// The two helpers syscall_set_ret / syscall_get_arg expose the canonical
+// slot-7 (return) and slot-(1+idx) (arg) accesses so K11's per-syscall
+// handlers can read args / write ret without hardcoding the slot
+// numbers everywhere. K11's handler signature will likely be:
+//     fn sys_write(tf: State<TrapFrame>) -> u64 {
+//         let fd = syscall_get_arg(tf, 0);  // slot 1
+//         let buf = syscall_get_arg(tf, 1); // slot 2
+//         let count = syscall_get_arg(tf, 2); // slot 3
+//         ...
+//         syscall_set_ret(tf, bytes_written);
+//         return 0;
+//     }
+
+// Syscall dispatch from the superset TrapFrame.
+//   - nr (slot 0) >= 512    → return 38 (-ENOSYS, out of range)
+//   - handler == 0          → return 38 (-ENOSYS, unregistered)
+//   - otherwise (K11)       → call handler(tf), write result to slot 7
+//                             (R4c hosted-mode stub: result = 0)
+// Always writes `result` to canonical slot 7 (tf_set_gpr(tf, 7, result))
+// before returning, so the trap_entry stub can blindly reload slot 7
+// into the architecture's return register (rax / x0 / a0) on iretq/eret/
+// mret — no arch-conditional logic at the trap return path.
+fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
+    let nr = tf_get_gpr(tf, 0);
     if nr >= 512 {
-        return 38;  // -ENOSYS (out of range)
+        // Out-of-range: still write the -ENOSYS to slot 7 so the trap
+        // return path picks it up uniformly. K11's trap_entry will
+        // reload slot 7 into rax/x0/a0 unconditionally.
+        tf_set_gpr(tf, 7, 38);
+        return 38;
     }
     let handler = syscall_table_get(tbl, nr as u32);
     if handler == 0 {
-        return 38;  // -ENOSYS (unregistered)
+        tf_set_gpr(tf, 7, 38);
+        return 38;
     }
     // In hosted mode, can't call a function pointer directly (VUMA has
     // no fn-pointer call today — see file header "Why is the handler-
     // call a stub?"). K11 will add the real dispatch:
-    //     return call_indirect(handler, args);
+    //     let result = call_indirect(handler, tf);
     // Until then, return 0 (success). The hosted-mode path never
     // actually delivers syscalls via int 0x80 (the host kernel uses
     // its own syscall ABI), so the stub's no-op behavior is correct
     // for hosted mode.
-    return 0;
+    let result = 0;
+    tf_set_gpr(tf, 7, result);
+    return result;
+}
+
+// Write the syscall return value to canonical slot 7. Called by K11's
+// per-syscall handlers (sys_write, sys_read, ...) so they don't hardcode
+// the slot number. Pure PMT field-write.
+fn syscall_set_ret(tf: State<TrapFrame>, ret: u64) {
+    tf_set_gpr(tf, 7, ret);
+}
+
+// Read syscall argument `arg_idx` (0..5) from canonical slots 1..6.
+// K11's per-syscall handlers call this to fetch their arguments:
+//   arg_idx=0 → slot 1 (a0)
+//   arg_idx=1 → slot 2 (a1)
+//   ...
+//   arg_idx=5 → slot 6 (a5)
+// Pure PMT field-read.
+fn syscall_get_arg(tf: State<TrapFrame>, arg_idx: u32) -> u64 {
+    return tf_get_gpr(tf, arg_idx + 1);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test.
+// Self-test (the R4c DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// Allocate a SyscallTable and a SyscallArgs via state_new, then:
-//   (1) Out-of-range syscall (nr = 999 >= 512) → syscall_dispatch returns
-//       38 (-ENOSYS). Catches any u64-vs-512 comparison bug.
-//   (2) Register a handler for syscall 64 (__NR_write) at address 8192
-//       via syscall_table_set (re-declared locally — see "Helper re-
-//       declarations" in the file header). Then dispatch nr=64 → returns
-//       0 (the stub's success path; the handler is non-zero so we reach
-//       the stub's `return 0`).
-// Returns 0 on success, 1 on out-of-range failure, 2 on registered-
-// syscall-stub failure (so a future CI failure pinpoints the broken
-// check).
+// Allocate a SyscallTable and a TrapFrame via state_new, then:
+//   (1) Init the TrapFrame (tf_init zeros all fields, including slot 7).
+//       Set up a write(1, 4096, 3) syscall:
+//         slot 0 (nr)   = 64 (__NR_write)
+//         slot 1 (a0/fd) = 1 (stdout)
+//         slot 2 (a1/buf) = 4096 (the buffer address — arbitrary)
+//         slot 3 (a2/count) = 3 (write 3 bytes)
+//       Register a handler for syscall 64 at address 8192.
+//       Dispatch: the stub returns 0, AND writes 0 to canonical slot 7.
+//       Verify tf_get_gpr(tf, 7) == 0 (the stub wrote the return value
+//       to the canonical slot, NOT just returned it from the function).
+//   (2) Unregistered syscall (nr=65, no handler registered) → returns
+//       38 AND writes 38 to slot 7.
+//   (3) Out-of-range nr (nr=999 >= 512) → returns 38 AND writes 38 to
+//       slot 7.
+// Returns 0 on success, 1..6 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
 //
-// Per the K3e contract's "IMPORTANT" rule: all non-zero constants in the
-// self-test use DECIMAL (999, 38, 64, 8192) — decimal avoids the parser's
-// hex-literal path (parse_int_radix width-extension subtleties — see
-// womb/kernel/arch/x86_64/pt.vuma header for the same rationale, and
-// K3a's trap_trampoline.vuma for the same rule applied to vector=14
-// and rip=4096).
+// Per the contract's "Use decimal constants" rule: all non-zero constants
+// in the self-test use DECIMAL (64, 1, 4096, 3, 8192, 65, 999, 38, 0).
 
 fn main() -> i32 {
     let tbl = state_new(SyscallTable);
-    let args = state_new(SyscallArgs);
+    let tf = state_new(TrapFrame);
+    tf_init(tf);
+    // tbl.count starts at 0 (state_new zero-fill).
 
-    // Test 1: out-of-range nr (999 >= 512) → 38 (-ENOSYS).
-    args.nr = 999;
-    let ret = syscall_dispatch(tbl, args);
-    if ret != 38 { return 1; }
+    // ── Test 1: registered syscall (handler != 0) ─────────────────────────
+    // Set up a write(1, 4096, 3) syscall frame.
+    tf_set_gpr(tf, 0, 64);   // slot 0 = nr = __NR_write
+    tf_set_gpr(tf, 1, 1);    // slot 1 = a0 = fd (stdout)
+    tf_set_gpr(tf, 2, 4096); // slot 2 = a1 = buf (arbitrary)
+    tf_set_gpr(tf, 3, 3);    // slot 3 = a2 = count (3 bytes)
+    // Clear slot 7 to a sentinel so we can prove the dispatcher wrote it.
+    tf_set_gpr(tf, 7, 256);
+    // Register a handler for syscall 64 at address 8192.
+    syscall_register(tbl, 64, 8192);
+    let ret = syscall_dispatch_from_trap(tbl, tf);
+    if ret != 0 { return 1; }              // stub returned 0
+    if tf_get_gpr(tf, 7) != 0 { return 2; } // stub wrote 0 to slot 7
 
-    // Test 2: registered syscall (handler != 0) → 0 (stub success).
-    syscall_table_set(tbl, 64, 8192);
-    args.nr = 64;
-    let ret2 = syscall_dispatch(tbl, args);
-    if ret2 != 0 { return 2; }
+    // ── Test 2: unregistered syscall (nr=65, handler == 0) ───────────────
+    tf_set_gpr(tf, 0, 65);
+    tf_set_gpr(tf, 7, 256);  // sentinel
+    let ret2 = syscall_dispatch_from_trap(tbl, tf);
+    if ret2 != 38 { return 3; }              // -ENOSYS returned
+    if tf_get_gpr(tf, 7) != 38 { return 4; } // -ENOSYS written to slot 7
+
+    // ── Test 3: out-of-range nr (999 >= 512) ─────────────────────────────
+    tf_set_gpr(tf, 0, 999);
+    tf_set_gpr(tf, 7, 256);  // sentinel
+    let ret3 = syscall_dispatch_from_trap(tbl, tf);
+    if ret3 != 38 { return 5; }              // -ENOSYS returned
+    if tf_get_gpr(tf, 7) != 38 { return 6; } // -ENOSYS written to slot 7
 
     return 0;
 }
