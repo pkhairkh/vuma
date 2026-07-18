@@ -5443,7 +5443,18 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
                     }
                     Some(existing) => {
                         // Name collision — decide dedup vs. conflict.
-                        if fn_defs_equivalent(existing, fn_def) {
+                        // Special case: `main` is allowed to differ across
+                        // modules — the importing file's `main` (the LAST
+                        // one in the module list, since the main file is
+                        // appended after all imports) always wins. This
+                        // enables the kernel's import pattern where every
+                        // module has its own `fn main()` self-test, but
+                        // the top-level kernel.vuma's `main` is the real
+                        // entry point.
+                        if fn_def.name == "main" {
+                            // Replace with the later definition.
+                            fn_def_map.insert("main".to_string(), fn_def.clone());
+                        } else if fn_defs_equivalent(existing, fn_def) {
                             vuma_log!(
                                 debug,
                                 "merge_module_asts: dedup identical fn '{}' \
@@ -5492,13 +5503,16 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
         for item in &ast.items {
             match item {
                 Item::FnDef(fn_def) => {
-                    // First occurrence wins. `emitted_fns.insert` returns
-                    // false for subsequent occurrences, so we skip them.
-                    // (All subsequent occurrences were already verified
-                    // identical to the first in Pass 1; if any had been
-                    // conflicting, we'd have returned `Err(errors)`
-                    // before reaching Pass 2.)
-                    if emitted_fns.insert(fn_def.name.clone()) {
+                    // First occurrence wins for non-main fns.
+                    // For `main`, the LAST occurrence wins (the importing
+                    // file's main overrides imported modules' self-test mains).
+                    if fn_def.name == "main" {
+                        // Remove any previously emitted main, then emit this one.
+                        merged_items.retain(|item| {
+                            !matches!(item, Item::FnDef(f) if f.name == "main")
+                        });
+                        merged_items.push(item.clone());
+                    } else if emitted_fns.insert(fn_def.name.clone()) {
                         merged_items.push(item.clone());
                     }
                 }
