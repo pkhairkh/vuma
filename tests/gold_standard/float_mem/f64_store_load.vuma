@@ -4,9 +4,9 @@
 layout Cell = { v: f64 }
 
 fn main() -> i32 {
-    c = state_new(Cell);
+    let c = state_new(Cell);
     c.v = 42.5;
-    val: f64 = c.v;
-    result: i64 = floattoint(val);
+    let val = c.v;
+    let result = floattoint(val);
     return result;
 }
