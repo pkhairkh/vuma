@@ -734,6 +734,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // see mod.rs caveat about `encode_movq_xmm_gpr`).
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
+                    eprintln!("[DBG-ADD] dst={} lhs={:?} rhs={:?} ty={:?} is_fp={} fp_vregs_len={}", dst_id, lhs, rhs, ty, is_fp, fp_vregs.len());
                     if is_fp {
                         let is_f64 = matches!(ty, Some(IRType::F64))
                             || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
@@ -2505,20 +2506,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Check result_types first; fall back to parsing the
                     // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
                     let is_64bit_ret = func.result_types.first()
-                        .map(|t| matches!(t, IRType::I64 | IRType::U64))
+                        .map(|t| matches!(t, IRType::I64 | IRType::U64 | IRType::F64))
                         .unwrap_or_else(|| {
                             if let Some(open) = func.name.rfind('(') {
                                 if let Some(close) = func.name.rfind(')') {
                                     if close > open {
                                         let ret_ty = &func.name[open + 1..close];
                                         return ret_ty == "u64" || ret_ty == "i64"
-                                            || ret_ty == "U64" || ret_ty == "I64";
+                                            || ret_ty == "U64" || ret_ty == "I64"
+                                            || ret_ty == "f64" || ret_ty == "F64";
                                     }
                                 }
                             }
                             false
                         });
                     if let Some(val) = values.first() {
+                        eprintln!("[DBG-RET] val={:?} is_64bit_ret={} result_types={:?}", val, is_64bit_ret, func.result_types);
                         if is_64bit_ret {
                             // Load low word (EAX) from slot
                             code.extend(load_value(val, Gpr::Rax));
@@ -2555,9 +2558,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Emit phi copies for (target, current_block) before the jump.
                     if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
                         for (dst, src) in pairs {
-                            code.extend(load_value(src, Gpr::Rax));
                             let dst_id = dst.as_register().unwrap_or(0);
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                            let dst_is_fp = fp_vregs.contains(&dst_id);
+                            let src_is_fp = match src {
+                                IRValue::Register(id) => fp_vregs.contains(id),
+                                _ => false,
+                            };
+                            if dst_is_fp || src_is_fp {
+                                // FP copy: use MOVQ via XMM0 to preserve all 64 bits.
+                                let dst_off = slot_offset(dst_id);
+                                code.extend(load_fp_to_xmm(src, Xmm::Xmm0, true, dst_off));
+                                code.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, true));
+                            } else {
+                                code.extend(load_value(src, Gpr::Rax));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                            }
                         }
                     }
                     code.extend(encode_jmp_rel32(0));
@@ -2578,18 +2593,40 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
                         let mut c = Vec::new();
                         for (dst, src) in pairs {
-                            c.extend(load_value(src, Gpr::Rax));
                             let dst_id = dst.as_register().unwrap_or(0);
-                            c.extend(store_vreg(dst_id, Gpr::Rax));
+                            let dst_is_fp = fp_vregs.contains(&dst_id);
+                            let src_is_fp = match src {
+                                IRValue::Register(id) => fp_vregs.contains(id),
+                                _ => false,
+                            };
+                            if dst_is_fp || src_is_fp {
+                                let dst_off = slot_offset(dst_id);
+                                c.extend(load_fp_to_xmm(src, Xmm::Xmm0, true, dst_off));
+                                c.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, true));
+                            } else {
+                                c.extend(load_value(src, Gpr::Rax));
+                                c.extend(store_vreg(dst_id, Gpr::Rax));
+                            }
                         }
                         c
                     } else { Vec::new() };
                     let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
                         let mut c = Vec::new();
                         for (dst, src) in pairs {
-                            c.extend(load_value(src, Gpr::Rax));
                             let dst_id = dst.as_register().unwrap_or(0);
-                            c.extend(store_vreg(dst_id, Gpr::Rax));
+                            let dst_is_fp = fp_vregs.contains(&dst_id);
+                            let src_is_fp = match src {
+                                IRValue::Register(id) => fp_vregs.contains(id),
+                                _ => false,
+                            };
+                            if dst_is_fp || src_is_fp {
+                                let dst_off = slot_offset(dst_id);
+                                c.extend(load_fp_to_xmm(src, Xmm::Xmm0, true, dst_off));
+                                c.extend(store_xmm_to_vreg(Xmm::Xmm0, dst_id, true));
+                            } else {
+                                c.extend(load_value(src, Gpr::Rax));
+                                c.extend(store_vreg(dst_id, Gpr::Rax));
+                            }
                         }
                         c
                     } else { Vec::new() };

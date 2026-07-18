@@ -1649,20 +1649,40 @@ impl Instruction {
             Instruction::FcvtSD { fd, fj } => encode_2r(0x004646, fj.encoding(), fd.encoding()),
 
             // ── FP Compare (4R-like) ──────────────────────────────
-            Instruction::FCmpS { cond, fj, fk, cd } => encode_4r(
-                OPC_FCMP_S,
-                (*cond & 0x1F) as u32,
-                fk.encoding(),
-                fj.encoding(),
-                (*cd & 0x1F) as u32,
-            ),
-            Instruction::FCmpD { cond, fj, fk, cd } => encode_4r(
-                OPC_FCMP_D,
-                (*cond & 0x1F) as u32,
-                fk.encoding(),
-                fj.encoding(),
-                (*cd & 0x1F) as u32,
-            ),
+            Instruction::FCmpS { cond, fj, fk, cd } => {
+                // fcmp.cond.s cd, fj, fk — LoongArch encoding (verified
+                // empirically against QEMU):
+                //   bits 31-20: 12-bit opcode  = 0x0C1 (.s) / 0x0C2 (.d)
+                //   bits 19-16: cond (4 bits)  — selects CAF/CLT/CEQ/CLE/
+                //                               CUN/CNE/COR/... (NOT the
+                //                               standard 0-15 cond numbering;
+                //                               see LoongArch manual table)
+                //   bits 14-10: fk   (5 bits)
+                //   bits 9-5:   fj   (5 bits)
+                //   bits 4-0:   cd   (5 bits, only low 3 used for fcc0-7)
+                //
+                // The previous encode_4r call placed cond in bits 19-15
+                // (5 bits) and fk in bits 14-10, which QEMU decoded as
+                // cond=SAF (signaling always-false) for cond=1, causing
+                // every FP comparison to return false.  The correct
+                // encoding uses bits 19-16 (4 bits) for cond.
+                let word = ((OPC_FCMP_S & 0xFFF) << 20)
+                    | (((*cond & 0xF) as u32) << 16)
+                    | ((fk.encoding() as u32) << 10)
+                    | ((fj.encoding() as u32) << 5)
+                    | ((*cd & 0x1F) as u32);
+                word.to_le_bytes()
+            }
+            Instruction::FCmpD { cond, fj, fk, cd } => {
+                // fcmp.cond.d cd, fj, fk — same layout as .s, but opcode
+                // bits 31-20 = 0x0C2.
+                let word = ((OPC_FCMP_D & 0xFFF) << 20)
+                    | (((*cond & 0xF) as u32) << 16)
+                    | ((fk.encoding() as u32) << 10)
+                    | ((fj.encoding() as u32) << 5)
+                    | ((*cd & 0x1F) as u32);
+                word.to_le_bytes()
+            }
 
             // ── No-op / Break ─────────────────────────────────────
             Instruction::Nop => {

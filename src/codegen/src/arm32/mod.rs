@@ -3655,7 +3655,13 @@ impl Backend for Arm32Backend {
         /// don't use 64-bit operations on their results.
         fn ss_store_32_zero(src_reg: Gpr, offset_from_r11: i32, _frame_size: i32) -> Vec<u8> {
             let neg_off = -offset_from_r11;
-            let hi_neg_off = neg_off + 4; // high word at [R11 - (offset-4)]
+            // High word at [R11 - (offset+4)] — BELOW low word (more negative),
+            // consistent with ss_store_64 and ss_load_value_64 (which use
+            // offset+4 for the high word). The prior `neg_off + 4` placed the
+            // high word ABOVE low word (at offset-4), which ss_load_value_64
+            // does NOT read — causing 64-bit loads of 32-bit results to read
+            // garbage from the wrong slot.
+            let hi_neg_off = neg_off - 4; // high word at [R11 - (offset+4)]
             if neg_off >= -4095 && hi_neg_off >= -4095 {
                 // Both offsets fit in 12-bit immediate — no R12 needed.
                 let mut code = Vec::new();
@@ -3705,8 +3711,8 @@ impl Backend for Arm32Backend {
                 code.extend_from_slice(&encode_dp_imm(
                     Condition::Al, DP_MOV, false, 0, Gpr::R14.encoding(), 0, 0,
                 ));
-                // R12 = R11 - (offset - 4)   (high word is 4 bytes ABOVE low word)
-                let hi_offset = offset_from_r11 - 4;
+                // R12 = R11 - (offset + 4)   (high word is 4 bytes BELOW low word)
+                let hi_offset = offset_from_r11 + 4;
                 code.extend_from_slice(&load_immediate_arm32(Gpr::R12, hi_offset as u32));
                 code.extend_from_slice(&encode_dp_reg(
                     Condition::Al, DP_SUB, false,
@@ -5978,9 +5984,32 @@ impl Backend for Arm32Backend {
                                 fp_cast_done = true;
                             }
                             CastKind::UIntToFloat => {
-                                // Convert unsigned int (low 32 bits of src) to f64.
+                                // Convert unsigned 64-bit int to f64.
+                                // ARM VFP only has VCVT.F64.U32 (32-bit → f64).
+                                // We split u64 into hi:lo and compute:
+                                //   result = (double)hi * 2^32 + (double)lo
+                                // This handles the full u64 range (needed for
+                                // uint63_to_float where the input is 2^63).
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                // D0 = (double)lo
                                 code.extend_from_slice(&encode_vmov_sn_rt(0, Gpr::R0.encoding() as u8));
                                 code.extend_from_slice(&encode_vcvt_f64_u32(0, 0));
+                                // D1 = (double)hi
+                                code.extend_from_slice(&encode_vmov_sn_rt(0, Gpr::R2.encoding() as u8));
+                                code.extend_from_slice(&encode_vcvt_f64_u32(1, 0));
+                                // D2 = 2^32 as f64 (bits 0x41F0000000000000)
+                                //   low word = 0x00000000, high word = 0x41F00000
+                                code.extend_from_slice(&0xE3A00000u32.to_le_bytes());  // MOV R0, #0
+                                // MOVW R2, #0x0000: cond=E, 0011 0000, imm4=0, Rd=2, imm12=0
+                                code.extend_from_slice(&0xE3002000u32.to_le_bytes());
+                                // MOVT R2, #0x41F0: cond=E, 0011 0100, imm4=4, Rd=2, imm12=0x1F0
+                                code.extend_from_slice(&0xE34421F0u32.to_le_bytes());
+                                code.extend_from_slice(&encode_vmov_dm_rt_rt2(2, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                                // D1 = D1 * D2  (hi * 2^32)
+                                code.extend_from_slice(&encode_vmul_f64(1, 1, 2));
+                                // D0 = D0 + D1  (lo + hi * 2^32)
+                                code.extend_from_slice(&encode_vadd_f64(0, 0, 1));
+                                // Store D0 to dst
                                 code.extend_from_slice(&encode_vmov_rt_rt2_dm(Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8, 0));
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                                 fp_cast_done = true;
@@ -6003,16 +6032,39 @@ impl Backend for Arm32Backend {
                                 fp_cast_done = true;
                             }
                             CastKind::FloatToUInt => {
-                                // Convert f64 to unsigned int (u64, zero-extended).
+                                // Convert f64 to unsigned 64-bit int (u64).
+                                // ARM VFP only has VCVT.U32.F64 (f64 → u32). For
+                                // values >= 2^32, we split into hi:lo via:
+                                //   hi = trunc(value / 2^32)   (fits in u32 if value < 2^64)
+                                //   lo = trunc(value - hi * 2^32)
+                                //   result = (hi << 32) | lo
+                                // This handles the full u64 range (needed for
+                                // uint63_to_float where value = 2^63).
                                 code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
                                 code.extend_from_slice(&encode_vmov_dm_rt_rt2(0, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                                // D2 = 2^32 as f64 (bits 0x41F0000000000000)
+                                code.extend_from_slice(&0xE3A00000u32.to_le_bytes());  // MOV R0, #0
+                                // MOVW R2, #0x0000: imm4=0, Rd=2, imm12=0
+                                code.extend_from_slice(&0xE3002000u32.to_le_bytes());
+                                // MOVT R2, #0x41F0: imm4=4, Rd=2, imm12=0x1F0
+                                code.extend_from_slice(&0xE34421F0u32.to_le_bytes());
+                                code.extend_from_slice(&encode_vmov_dm_rt_rt2(2, Gpr::R0.encoding() as u8, Gpr::R2.encoding() as u8));
+                                // D1 = D0 / D2  (hi as f64 = value / 2^32)
+                                code.extend_from_slice(&encode_vdiv_f64(1, 0, 2));
+                                // S0 = VCVT.U32.F64(D1) → hi_u32
+                                code.extend_from_slice(&encode_vcvt_u32_f64(0, 1));
+                                code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R2.encoding() as u8, 0));  // R2 = hi_u32
+                                // D1 = VCVT.F64.U32(S0) → (double)hi_u32
+                                code.extend_from_slice(&encode_vcvt_f64_u32(1, 0));
+                                // D1 = D1 * D2  (hi_u32 * 2^32)
+                                code.extend_from_slice(&encode_vmul_f64(1, 1, 2));
+                                // D0 = D0 - D1  (lo as f64 = value - hi*2^32)
+                                code.extend_from_slice(&encode_vsub_f64(0, 0, 1));
+                                // S0 = VCVT.U32.F64(D0) → lo_u32
                                 code.extend_from_slice(&encode_vcvt_u32_f64(0, 0));
-                                code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R0.encoding() as u8, 0));
-                                // Zero high word: MOV R1, #0.
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                                ));
-                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                                code.extend_from_slice(&encode_vmov_rt_sn(Gpr::R0.encoding() as u8, 0));  // R0 = lo_u32
+                                // Store: R0 = lo (low 32 bits), R2 = hi (high 32 bits)
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                                 fp_cast_done = true;
                             }
                             CastKind::FloatToFloat => {
@@ -8434,10 +8486,11 @@ fn encode_vstr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
 /// Encode VCVT.F32.S32 Sd, Sm — convert signed integer to single-precision float.
 ///
 /// ARM VFP encoding (A1):
-///   cond 1110 1D11 1000 Vd 101 0 01 M 0 Vm
-///   [19:16]=1000 (int→float), [8]=0 (sz=f32), [7]=0 (signed)
+///   cond 1110 1D11 1000 Vd 101 0 11 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=0 (sz=0, f32 dest), [7:6]=11 (op2=11, SIGNED)
 ///
-/// For S0,S0: 0xEEB80A40
+/// For S0,S0: 0xEEB80AC0
+/// Verified against QEMU-arm-static: decodes as `vcvt.f32.s32 s0, s0`.
 fn encode_vcvt_f32_s32(sd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8450,8 +8503,9 @@ fn encode_vcvt_f32_s32(sd: u8, sm: u8) -> [u8; 4] {
         | 0b11 << 20
         | 0b1000 << 16
         | (vd << 12)
-        | 0b101 << 9)      // signed
-        | (1 << 6)
+        | 0b101 << 9)
+        | (1 << 7)            // op2[1]=1
+        | (1 << 6)            // op2[0]=1 → op2=11 (SIGNED)
         | (m_bit << 5))
         | vm;
     word.to_le_bytes()
@@ -8460,8 +8514,11 @@ fn encode_vcvt_f32_s32(sd: u8, sm: u8) -> [u8; 4] {
 /// Encode VCVT.F32.U32 Sd, Sm — convert unsigned integer to single-precision float.
 ///
 /// ARM VFP encoding (A1):
-///   cond 1110 1D11 1000 Vd 101 0 11 M 0 Vm
-///   [19:16]=1000 (int→float), [8]=0 (sz=f32), [7]=1 (unsigned)
+///   cond 1110 1D11 1000 Vd 101 0 01 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=0 (sz=0, f32 dest), [7:6]=01 (op2=01, UNSIGNED)
+///
+/// For S0,S0: 0xEEB80A40
+/// Verified against QEMU-arm-static: decodes as `vcvt.f32.u32 s0, s0`.
 fn encode_vcvt_f32_u32(sd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8474,21 +8531,23 @@ fn encode_vcvt_f32_u32(sd: u8, sm: u8) -> [u8; 4] {
         | 0b11 << 20
         | 0b1000 << 16
         | (vd << 12)
-        | 0b101 << 9)      // sz = 0 (f32)
-        | (1 << 7)      // unsigned
-        | (1 << 6)
+        | 0b101 << 9)
+        | (1 << 6)            // op2=01 (UNSIGNED) — bit[7]=0, bit[6]=1
         | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
 
-/// Encode VCVT.S32.F32 Sd, Sm — convert single-precision float to signed integer.
+/// Encode VCVT.S32.F32 Sd, Sm — convert single-precision float to signed integer,
+/// rounding toward zero (truncate).
 ///
 /// ARM VFP encoding (A1):
-///   cond 1110 1D11 1101 Vd 101 0 01 M 0 Vm
-///   [19:16]=1101 (float→int), [8]=0 (sz=f32), [7]=0 (signed)
+///   cond 1110 1D11 1101 Vd 101 sz 1 M 0 Vm
+///   [19:16]=1101 (S32, signed), [8]=0 (sz=0, f32 source), [7]=1 (op=1, VCVT truncate)
+///   [6]=1 (fixed)
 ///
-/// For S0,S0: 0xEEBD0A40
+/// For S0,S0: 0xEEBD0AC0
+/// Verified against QEMU-arm-static: 0xEEBD0AC0 decodes as `vcvt.s32.f32` (truncate).
 fn encode_vcvt_s32_f32(sd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8499,20 +8558,25 @@ fn encode_vcvt_s32_f32(sd: u8, sm: u8) -> [u8; 4] {
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
-        | 0b1101 << 16
+        | 0b1101 << 16      // op4=1101 (S32, signed)
         | (vd << 12)
-        | 0b101 << 9)      // signed
+        | 0b101 << 9)
+        | (1 << 7)           // op=1 (VCVT truncate, not VCVTR)
         | (1 << 6)
         | (m_bit << 5))
         | vm;
     word.to_le_bytes()
 }
 
-/// Encode VCVT.U32.F32 Sd, Sm — convert single-precision float to unsigned integer.
+/// Encode VCVT.U32.F32 Sd, Sm — convert single-precision float to unsigned integer,
+/// rounding toward zero (truncate).
 ///
 /// ARM VFP encoding (A1):
-///   cond 1110 1D11 1101 Vd 101 0 11 M 0 Vm
-///   [19:16]=1101 (float→int), [8]=0 (sz=f32), [7]=1 (unsigned)
+///   cond 1110 1D11 1100 Vd 101 sz 1 M 0 Vm
+///   [19:16]=1100 (U32, unsigned), [8]=0 (sz=0, f32 source), [7]=1 (op=1, VCVT truncate)
+///   [6]=1 (fixed)
+///
+/// For S0,S0: 0xEEBC0AC0
 fn encode_vcvt_u32_f32(sd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8523,10 +8587,10 @@ fn encode_vcvt_u32_f32(sd: u8, sm: u8) -> [u8; 4] {
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
-        | 0b1101 << 16
+        | 0b1100 << 16      // op4=1100 (U32, unsigned)
         | (vd << 12)
-        | 0b101 << 9)      // sz = 0 (f32)
-        | (1 << 7)      // unsigned
+        | 0b101 << 9)
+        | (1 << 7)           // op=1 (VCVT truncate, not VCVTR)
         | (1 << 6)
         | (m_bit << 5))
         | vm;
@@ -8548,11 +8612,11 @@ fn encode_vcvt_f64_f32(dd: u8, sm: u8) -> [u8; 4] {
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
-        | 0b0110 << 16
+        | 0b0111 << 16       // op4=0111 (VCVT between fp types)
         | (vd << 12)
-        | 0b101 << 9
-        | (1 << 8))
-        | (1 << 6)
+        | 0b101 << 9)
+        | (1 << 7)            // op2[1]=1
+        | (1 << 6)            // op2[0]=1 → op2=11
         | (m_bit << 5))
         | vm;
     word.to_le_bytes()
@@ -8561,8 +8625,12 @@ fn encode_vcvt_f64_f32(dd: u8, sm: u8) -> [u8; 4] {
 /// Encode VCVT.F32.F64 Sd, Dm — convert double-precision to single-precision.
 ///
 /// ARM VFP encoding (A1):
-///   cond 1110 1D11 0110 Vd 101 0 01 M 0 Vm
-///   [19:16]=0110 (float-to-float), [8]=0 (sz=f32 dest)
+///   cond 1110 1D11 0111 Vd 101 1 11 M 0 Vm
+///   [19:16]=0111 (float-to-float VCVT), [8]=1 (sz=1, f64 source → narrow to f32)
+///   [7:6]=11 (op2=11 for VCVT between fp types)
+///
+/// For S0,D0: 0xEEB70BC0
+/// Verified against QEMU-arm-static: decodes as `vcvt.f32.f64 s0, d0`.
 fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
@@ -8573,10 +8641,12 @@ fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
         | (1 << 23)
         | (d_bit << 22)
         | 0b11 << 20
-        | 0b0110 << 16
+        | 0b0111 << 16       // op4=0111 (VCVT between fp types)
         | (vd << 12)
-        | 0b101 << 9)
-        | (1 << 6)
+        | 0b101 << 9
+        | (1 << 8))           // sz=1 (f64 source → narrow to f32)
+        | (1 << 7)            // op2[1]=1
+        | (1 << 6)            // op2[0]=1 → op2=11
         | (m_bit << 5))
         | vm;
     word.to_le_bytes()
@@ -8774,21 +8844,14 @@ fn encode_vmov_rt_rt2_dm(rt: u8, rt2: u8, dm: u8) -> [u8; 4] {
 // ===========================================================================
 
 /// Encode VCVT.F64.S32 Dd, Sm — convert signed int32 (in Sm) to f64 (in Dd).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1000 Vd 101 1 11 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=1 (sz=1, f64 dest), [7:6]=11 (op2=11, SIGNED)
+///
+/// For D0,S0: 0xEEB80BC0
+/// Verified against QEMU-arm-static: decodes as `vcvt.f64.s32 d0, s0`.
 fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
-    let d_bit = ((dd >> 4) & 1) as u32;
-    let vd = (dd & 0xF) as u32;
-    let m_bit = ((sm >> 4) & 1) as u32;
-    let vm = (sm & 0xF) as u32;
-    let word = 0xEEB80B40u32
-        | (d_bit << 22)
-        | (vd << 12)
-        | (m_bit << 5)
-        | vm;
-    word.to_le_bytes()
-}
-
-/// Encode VCVT.F64.U32 Dd, Sm — convert unsigned int32 (in Sm) to f64 (in Dd).
-fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
     let d_bit = ((dd >> 4) & 1) as u32;
     let vd = (dd & 0xF) as u32;
     let m_bit = ((sm >> 4) & 1) as u32;
@@ -8801,14 +8864,45 @@ fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
     word.to_le_bytes()
 }
 
+/// Encode VCVT.F64.U32 Dd, Sm — convert unsigned int32 (in Sm) to f64 (in Dd).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1000 Vd 101 1 01 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=1 (sz=1, f64 dest), [7:6]=01 (op2=01, UNSIGNED)
+///
+/// For D0,S0: 0xEEB80B40
+/// Verified against QEMU-arm-static: decodes as `vcvt.f64.u32 d0, s0`.
+fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((sm >> 4) & 1) as u32;
+    let vm = (sm & 0xF) as u32;
+    let word = 0xEEB80B40u32
+        | (d_bit << 22)
+        | (vd << 12)
+        | (m_bit << 5)
+        | vm;
+    word.to_le_bytes()
+}
+
 /// Encode VCVT.S32.F64 Sd, Dm — convert f64 (in Dm) to signed int32 (in Sd),
 /// rounding toward zero (truncate).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1101 Vd 101 sz 1 M 0 Vm
+///   [19:16]=1101 (S32, signed), [8]=1 (sz=1, f64 source), [7]=1 (op=1, VCVT truncate)
+///   [6]=1 (fixed)
+///
+/// Verified against QEMU-arm-static: 0xEEBD0BC0 decodes as `vcvt.s32.f64` (truncate).
+/// The prior base 0xEEBD0B40 had bit[7]=0 which QEMU decodes as `vcvtr.s32.f64`
+/// (FPSCR rounding mode = round-to-nearest), producing floor(-2.9)=-3 instead
+/// of trunc(-2.9)=-2.
 fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = 0xEEBD0B40u32
+    let word = 0xEEBD0BC0u32
         | (d_bit << 22)
         | (vd << 12)
         | (m_bit << 5)
@@ -8818,12 +8912,21 @@ fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
 
 /// Encode VCVT.U32.F64 Sd, Dm — convert f64 (in Dm) to unsigned int32 (in Sd),
 /// rounding toward zero (truncate).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1100 Vd 101 sz 1 M 0 Vm
+///   [19:16]=1100 (U32, unsigned), [8]=1 (sz=1, f64 source), [7]=1 (op=1, VCVT truncate)
+///   [6]=1 (fixed)
+///
+/// Verified against QEMU-arm-static: 0xEEBC0BC0 decodes as `vcvt.u32.f64` (truncate).
+/// The prior base 0xEEBD0BC0 had [19:16]=1101 (S32, signed) which produced a
+/// SIGNED truncation instead of unsigned.
 fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
     let d_bit = ((sd >> 4) & 1) as u32;
     let vd = (sd & 0xF) as u32;
     let m_bit = ((dm >> 4) & 1) as u32;
     let vm = (dm & 0xF) as u32;
-    let word = 0xEEBD0BC0u32
+    let word = 0xEEBC0BC0u32
         | (d_bit << 22)
         | (vd << 12)
         | (m_bit << 5)
