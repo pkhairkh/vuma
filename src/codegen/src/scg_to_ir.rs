@@ -3468,7 +3468,14 @@ impl IRBuilder {
             .or_else(|| {
                 // G7: look up the dst temp name in the function's var_types
                 // (populated from let-binding type annotations like `let a: f64`).
-                self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
+                // Only return FLOAT types — integer types would break shift width.
+                self.fn_var_types.get(&comp.dst).and_then(|t| {
+                    match t {
+                        ScgType::F32 => Some(IRType::F32),
+                        ScgType::F64 => Some(IRType::F64),
+                        _ => None,
+                    }
+                })
             })
             .or_else(|| self.expr_ir_type(&comp.lhs))
             .or_else(|| self.expr_ir_type(&comp.rhs))
@@ -4879,9 +4886,16 @@ impl IRBuilder {
             ScgExpr::Float(_) => Some(IRType::F64),
             ScgExpr::Var(name) => {
                 // Check fn_var_types for the variable's declared type.
-                // This is critical for f32 variables: `a: f32 = 3.0` creates
-                // a Float literal (F64) but the variable is F32.
-                self.fn_var_types.get(name).map(|t| t.to_ir_type())
+                // Only return FLOAT types (F32/F64) — returning integer types
+                // here would cause op_ty to be set for integer BinOps, which
+                // breaks shift width inference and other integer-specific paths.
+                self.fn_var_types.get(name).and_then(|t| {
+                    match t {
+                        ScgType::F32 => Some(IRType::F32),
+                        ScgType::F64 => Some(IRType::F64),
+                        _ => None,
+                    }
+                })
             }
             ScgExpr::BinOp { lhs, .. } => self.expr_ir_type(lhs),
             _ => None,
