@@ -1703,48 +1703,65 @@ impl Emitter {
                         }
                     }
                     CastKind::IntToFloat => {
-                        // Signed int → float: SCVTF
+                        // Signed int → float: SCVTF D0, Xn; then STUR D0 + LDR Xd
+                        // (SCVTF writes to FPR, but rd is a GPR — must transfer)
                         self.emit_instruction(Instruction::SCVTF {
-                            rd,
+                            rd: Register::X0,
                             rn,
                             src_64: src_is_64bit_int,
                             dst_double: dst_is_f64,
                         })?;
+                        // STUR D0, [X29, #-8]; LDR Xd, [X29, #-8]
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: rd, rn: Register::X16, offset: 0 })?;
                     }
                     CastKind::UIntToFloat => {
-                        // Unsigned int → float: UCVTF
+                        // Unsigned int → float: UCVTF D0, Xn; then STUR D0 + LDR Xd
                         self.emit_instruction(Instruction::UCVTF {
-                            rd,
+                            rd: Register::X0,
                             rn,
                             src_64: src_is_64bit_int,
                             dst_double: dst_is_f64,
                         })?;
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: rd, rn: Register::X16, offset: 0 })?;
                     }
                     CastKind::FloatToInt => {
-                        // Float → signed int: FCVTZS
+                        // Float → signed int: FMOV D0, Xn; FCVTZS Xd, D0
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn })?;
                         self.emit_instruction(Instruction::FCVTZS {
                             rd,
-                            rn,
+                            rn: Register::X0,
                             dst_64: dst_is_64bit_int,
                             src_double: src_is_f64,
                         })?;
                     }
                     CastKind::FloatToUInt => {
-                        // Float → unsigned int: FCVTZU
+                        // Float → unsigned int: FMOV D0, Xn; FCVTZU Xd, D0
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn })?;
                         self.emit_instruction(Instruction::FCVTZU {
                             rd,
-                            rn,
+                            rn: Register::X0,
                             dst_64: dst_is_64bit_int,
                             src_double: src_is_f64,
                         })?;
                     }
                     CastKind::FloatToFloat => {
-                        // Float ↔ float width change: FCVT
+                        // Float ↔ float width change: FMOV D0, Xn; FCVT D0, D0; STUR D0 + LDR Xd
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn })?;
                         self.emit_instruction(Instruction::FCVT {
-                            rd,
-                            rn,
+                            rd: Register::X0,
+                            rn: Register::X0,
                             to_double: dst_is_f64,
                         })?;
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: rd, rn: Register::X16, offset: 0 })?;
                     }
                 }
             }
@@ -3712,48 +3729,63 @@ impl Emitter {
                         // No-op: just store the value
                     }
                     CastKind::IntToFloat => {
-                        // Signed int → float: SCVTF
+                        // Signed int → float: SCVTF D0, X9; STUR D0; LDR X9
                         self.emit_instruction(Instruction::SCVTF {
-                            rd: Register::X9,
+                            rd: Register::X0,
                             rn: Register::X9,
                             src_64: src_is_64bit_int,
                             dst_double: dst_is_f64,
                         })?;
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                     }
                     CastKind::UIntToFloat => {
-                        // Unsigned int → float: UCVTF
+                        // Unsigned int → float: UCVTF D0, X9; STUR D0; LDR X9
                         self.emit_instruction(Instruction::UCVTF {
-                            rd: Register::X9,
+                            rd: Register::X0,
                             rn: Register::X9,
                             src_64: src_is_64bit_int,
                             dst_double: dst_is_f64,
                         })?;
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                     }
                     CastKind::FloatToInt => {
-                        // Float → signed int: FCVTZS
+                        // Float → signed int: FMOV D0, X9; FCVTZS X9, D0
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
                         self.emit_instruction(Instruction::FCVTZS {
                             rd: Register::X9,
-                            rn: Register::X9,
+                            rn: Register::X0,
                             dst_64: dst_is_64bit_int,
                             src_double: src_is_f64,
                         })?;
                     }
                     CastKind::FloatToUInt => {
-                        // Float → unsigned int: FCVTZU
+                        // Float → unsigned int: FMOV D0, X9; FCVTZU X9, D0
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
                         self.emit_instruction(Instruction::FCVTZU {
                             rd: Register::X9,
-                            rn: Register::X9,
+                            rn: Register::X0,
                             dst_64: dst_is_64bit_int,
                             src_double: src_is_f64,
                         })?;
                     }
                     CastKind::FloatToFloat => {
-                        // Float ↔ float width change: FCVT
+                        // Float ↔ float width change: FMOV D0, X9; FCVT D0, D0; STUR D0; LDR X9
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
                         self.emit_instruction(Instruction::FCVT {
-                            rd: Register::X9,
-                            rn: Register::X9,
+                            rd: Register::X0,
+                            rn: Register::X0,
                             to_double: dst_is_f64,
                         })?;
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -8)?;
+                        self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
+                        self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                     }
                 }
                 self.ss_store_to_slot(Register::X9, dst_offset)?;
