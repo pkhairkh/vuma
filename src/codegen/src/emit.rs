@@ -1739,7 +1739,7 @@ impl Emitter {
                             src_64: src_is_64bit_int,
                             dst_double: dst_is_f64,
                         })?;
-                        // STUR D0, [X29, #-8]; LDR Xd, [X29, #-8]
+                        // STUR D0, [X29, #-16]; LDR Xd, [X29, #-16]
                         self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
                         self.emit_load_immediate(Register::X16, -8)?;
                         self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
@@ -2975,7 +2975,7 @@ impl Emitter {
                 if let Some(spill_info) = result.spilled {
                     // Spill slot offset from X29 (frame pointer).
                     // Layout: X29 points to saved FP/LR. Spill slots are at
-                    // negative offsets from X29: slot 0 at [X29, #-8],
+                    // negative offsets from X29: slot 0 at [X29, #-16],
                     // slot 1 at [X29, #-16], etc.
                     let sp_offset = 8 + (spill_info.slot as i32) * 8;
                     // Compute address using X16 as scratch (NOT X9, since X9 is
@@ -3283,7 +3283,7 @@ impl Emitter {
         // [low address]         ← SP
 
         let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = 0;
+        let mut current_offset: i32 = 8;  // Reserve [X29, #-8] for FP scratch (STUR D0)
         let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
         alloc_vreg_ids.sort();
         for &id in &alloc_vreg_ids {
@@ -3646,15 +3646,15 @@ impl Emitter {
                             "inttofloat" => {
                                 // SCVTF D0, X9; then STUR D0 + LDR X9 (FMOV_XD not supported)
                                 self.emit_instruction(Instruction::SCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
-                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
+                                self.emit_load_immediate(Register::X16, -16)?;
                                 self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
                             "uinttofloat" => {
                                 self.emit_instruction(Instruction::UCVTF { rd: Register::X0, rn: Register::X9, src_64: true, dst_double: true })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
-                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
+                                self.emit_load_immediate(Register::X16, -16)?;
                                 self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
@@ -3668,8 +3668,8 @@ impl Emitter {
                             }
                             "floattofloat" => {
                                 self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
-                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-8]
-                                self.emit_load_immediate(Register::X16, -8)?;
+                                self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;  // STUR D0, [X29, #-16]
+                                self.emit_load_immediate(Register::X16, -16)?;
                                 self.emit_instruction(Instruction::ADD { rd: Register::X16, rn: Register::X29, rm: Operand::Reg { reg: Register::X16, shift: None } })?;
                                 self.emit_instruction(Instruction::LDR { rt: Register::X9, rn: Register::X16, offset: 0 })?;
                             }
@@ -4387,9 +4387,9 @@ impl Emitter {
 
                         // FP → GPR: store D0 to scratch via STUR, then LDR into X9.
                         // (FMOV_XD encoding not supported in QEMU 7.2.)
-                        // STUR D0, [X29, #-8]: 0xFC1F83A0
-                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F83A0, mnemonic: "stur" })?;
-                        self.emit_load_immediate(Register::X16, -8)?;
+                        // STUR D0, [X29, #-16]: 0xFC1F03A0
+                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC1F03A0, mnemonic: "stur" })?;
+                        self.emit_load_immediate(Register::X16, -16)?;
                         self.emit_instruction(Instruction::ADD {
                             rd: Register::X16,
                             rn: Register::X29,
