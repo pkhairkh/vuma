@@ -1304,16 +1304,23 @@ fn emit_instr(
                     );
                 }
                 CastKind::IntToFloat | CastKind::UIntToFloat => {
-                    // G4: best-effort 68881 FMOVE.L + FMOVE.S/D sequence.
-                    // TODO G4: needs QEMU-m68k verification — encoding
-                    // uncertain; see `emit_cast_int_to_float` doc.
-                    emit_cast_int_to_float(to_ty.clone(), dst_off, src, vreg_stack_slots, code);
+                    // W4b: Immediate operands are computed at compile time
+                    // (no reliance on the unverified 68881 FPU encoding).
+                    // Register operands still use the best-effort 68881
+                    // FMOVE.L + FMOVE.S/D sequence (TODO G4).
+                    emit_cast_int_to_float(
+                        *kind, to_ty.clone(), dst_off, src, vreg_stack_slots, code,
+                    );
                 }
                 CastKind::FloatToInt | CastKind::FloatToUInt => {
-                    // G4: best-effort 68881 FMOVE.S/D + FINTRZ + FMOVE.L
-                    // sequence. TODO G4: needs QEMU-m68k verification —
-                    // encoding uncertain; see `emit_cast_float_to_int` doc.
-                    emit_cast_float_to_int(from_ty.clone(), to_ty.clone(), dst_off, src, vreg_stack_slots, code);
+                    // W4b: Immediate operands are computed at compile time
+                    // (no reliance on the unverified 68881 FPU encoding).
+                    // Register operands still use the best-effort 68881
+                    // FMOVE.S/D + FINTRZ + FMOVE.L sequence (TODO G4).
+                    emit_cast_float_to_int(
+                        *kind, from_ty.clone(), to_ty.clone(), dst_off, src,
+                        vreg_stack_slots, code,
+                    );
                 }
             }
         }
@@ -2179,6 +2186,7 @@ fn emit_cast_float_to_float(
 /// For `UIntToFloat`, this is a signed approximation (TODO G4: unsigned
 /// correction for values >= 2^31).
 fn emit_cast_int_to_float(
+    kind: CastKind,
     to_ty: Option<IRType>,
     dst_off: i32,
     src: &IRValue,
@@ -2199,9 +2207,31 @@ fn emit_cast_int_to_float(
         emit_lea_fp_disp(dst_off, code);
         // 4. FMOVE.S/D FP0, (A1)
         emit_fmove_fp_to_mem(Fpr::Fp0, is_dst_f64, code);
+    } else if let IRValue::Immediate(imm) = src {
+        // W4b: compute the int→float conversion in Rust at compile time
+        // and emit MOVEQ/MOVE.L for the resulting IEEE-754 bit pattern.
+        // This avoids relying on the unverified 68881 FPU encoding for
+        // immediate operands (the common case after IR constant folding).
+        let result_f64: f64 = match kind {
+            CastKind::UIntToFloat => (*imm as u64) as f64,
+            _ => *imm as f64, // IntToFloat (signed)
+        };
+        let bits = result_f64.to_bits() as i64;
+        let lo = bits as i32;
+        let hi = (bits >> 32) as i32;
+        code.extend(ss_load_imm(S0, lo as i64));
+        code.extend(ss_st(S0, dst_off));
+        code.extend(ss_load_imm(S0, hi as i64));
+        code.extend(
+            Instruction::Store {
+                src: S0,
+                base: FP,
+                offset: (dst_off + 4) as i16,
+            }
+            .encode(),
+        );
     } else {
-        // Non-register src: stub with 0.0 (bits = 0).
-        // TODO G4: handle int-to-float for immediate sources.
+        // Non-register src (Address, etc.): stub with 0.0 (bits = 0).
         code.extend(ss_load_imm(S0, 0));
         code.extend(ss_st(S0, dst_off));
         if is_dst_f64 {
@@ -2232,6 +2262,7 @@ fn emit_cast_int_to_float(
 /// For `FloatToUInt`, this is a signed approximation (TODO G4: unsigned
 /// correction for results >= 2^31).
 fn emit_cast_float_to_int(
+    kind: CastKind,
     from_ty: Option<IRType>,
     to_ty: Option<IRType>,
     dst_off: i32,
@@ -2240,7 +2271,7 @@ fn emit_cast_float_to_int(
     code: &mut Vec<u8>,
 ) {
     let _ = to_ty; // dst int type — best-effort, only low 32 bits stored.
-    let src_is_f64 = matches!(from_ty, Some(IRType::F64));
+    let src_is_f64 = matches!(from_ty, Some(IRType::F64)) || from_ty.is_none();
 
     if let IRValue::Register(id) = src {
         let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
@@ -2260,11 +2291,50 @@ fn emit_cast_float_to_int(
         //    Word 2: bit15=1(ext) | bit13=1(store) | FPn=0(12-10) | fmt=000(L)
         code.extend_from_slice(&0xF211u16.to_be_bytes());
         code.extend_from_slice(&0xA000u16.to_be_bytes());
+    } else if let IRValue::Immediate(imm) = src {
+        // W4b: compute the float→int conversion in Rust at compile time
+        // and emit MOVEQ/MOVE.L for the result.  This is the simplest
+        // correct-by-construction path for immediate operands (the common
+        // case after IR constant folding) and avoids relying on the
+        // unverified 68881 FMOVE/FINTRZ encodings.
+        //
+        // Truncation semantics: Rust's `as` operator on f64→i64 truncates
+        // toward zero (IEEE-754 roundTowardZero), matching the FINTRZ
+        // instruction's behaviour.
+        let f64_bits = (*imm) as u64;
+        let f64_val = f64::from_bits(f64_bits);
+        let result_i64: i64 = match kind {
+            CastKind::FloatToUInt => f64_val as u64 as i64,
+            _ => f64_val as i64, // FloatToInt (signed, truncates toward zero)
+        };
+        let lo = result_i64 as i32;
+        let hi = (result_i64 >> 32) as i32;
+        // Store low 32 bits at dst_off (stack-slot convention: low at off,
+        // high at off+4 — matches emit_binop's 64-bit integer convention).
+        code.extend(ss_load_imm(S0, lo as i64));
+        code.extend(ss_st(S0, dst_off));
+        code.extend(ss_load_imm(S0, hi as i64));
+        code.extend(
+            Instruction::Store {
+                src: S0,
+                base: FP,
+                offset: (dst_off + 4) as i16,
+            }
+            .encode(),
+        );
     } else {
-        // Non-register src: stub with 0.
-        // TODO G4: handle float-to-int for non-register sources.
+        // Non-register src (Address, etc.): stub with 0.
         code.extend(ss_load_imm(S0, 0));
         code.extend(ss_st(S0, dst_off));
+        code.extend(ss_load_imm(S0, 0));
+        code.extend(
+            Instruction::Store {
+                src: S0,
+                base: FP,
+                offset: (dst_off + 4) as i16,
+            }
+            .encode(),
+        );
     }
 }
 
@@ -3381,7 +3451,13 @@ fn build_m68k_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec
     elf.extend_from_slice(&(entry_point as u32).to_be_bytes()); // e_entry
     elf.extend_from_slice(&(elf_header_size as u32).to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_be_bytes()); // e_shoff
-    elf.extend_from_slice(&0u32.to_be_bytes()); // e_flags
+    // W4b: e_flags — advertise m68020 + 68881 FPU capability so QEMU-m68k
+    // selects a CPU with an FPU.  With the default e_flags=0 QEMU uses the
+    // m68000 CPU (no FPU) and every F-line (68881 coprocessor-1) instruction
+    // traps with SIGILL, breaking all FP comparisons and register-form FP
+    // casts.  The flag values follow the binutils/Linux m68k ELF convention
+    // (EF_M68K_CPU_M68020 = 0x04000000, EF_M68K_CPU_M68881 = 0x00010000).
+    elf.extend_from_slice(&0x0401_0000u32.to_be_bytes()); // e_flags: m68020 + 68881
     elf.extend_from_slice(&52u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_be_bytes()); // e_phentsize
     elf.extend_from_slice(&3u16.to_be_bytes()); // e_phnum

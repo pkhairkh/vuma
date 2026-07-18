@@ -4441,6 +4441,83 @@ fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     code
 }
 
+/// Whether a (possibly-unknown) IRType occupies 8 bytes in a vreg slot and
+/// therefore requires paired 32-bit Lw/Sw on RV32 (which lacks 64-bit
+/// integer load/store instructions).
+///
+/// On riscv32 every vreg slot is 8 bytes wide (see `allocate_registers` —
+/// `current_offset += 8` per vreg), so 8-byte values can be copied as two
+/// 32-bit halves without any layout change.  The bug fixed by W4d was that
+/// phi/move copies used `ss_load_value`+`ss_store_to_slot`, which transfer
+/// only the low 4 bytes (one Lw/Sw), silently truncating f64/i64/u64 values.
+fn is_8byte_type(ty: Option<&IRType>) -> bool {
+    matches!(
+        ty,
+        Some(IRType::F64) | Some(IRType::I64) | Some(IRType::U64)
+    )
+}
+
+/// Type-aware variant of `ss_load_value` for phi/move copies.
+///
+/// For 8-byte types (F64/I64/U64) on RV32, loads BOTH halves of the value
+/// into `(lo_scratch, hi_scratch)` via two Lw's (using `ss_load_value_64`).
+/// For all other types, loads only the low 4 bytes into `lo_scratch` (via
+/// `ss_load_value`) and leaves `hi_scratch` untouched.
+///
+/// Mirrors the riscv64 backend, where `ss_load_value` uses a single 64-bit
+/// `Ld` that naturally handles both 4-byte and 8-byte values.  RV32 has no
+/// 64-bit GPR load, so we dispatch to the paired-32-bit helper instead.
+fn ss_load_value_typed(
+    lo_scratch: Gpr,
+    hi_scratch: Gpr,
+    val: &IRValue,
+    slots: &HashMap<u32, i32>,
+    ty: Option<&IRType>,
+) -> Vec<u8> {
+    if is_8byte_type(ty) {
+        ss_load_value_64(lo_scratch, hi_scratch, val, slots)
+    } else {
+        ss_load_value(val, slots, lo_scratch)
+    }
+}
+
+/// Type-aware variant of `ss_store_to_slot` for phi/move copies.
+///
+/// For 8-byte types (F64/I64/U64) on RV32, stores BOTH `(lo_reg, hi_reg)`
+/// into the 8-byte slot via two Sw's (using `ss_store_64`).  For all other
+/// types, stores only `lo_reg` (the high 4 bytes of the slot are left as-is).
+///
+/// Mirrors the riscv64 backend, where `ss_store_to_slot` uses a single
+/// 64-bit `Sd`.  RV32 has no 64-bit GPR store, so we dispatch to the
+/// paired-32-bit helper instead.
+fn ss_store_to_slot_typed(
+    lo_reg: Gpr,
+    hi_reg: Gpr,
+    offset_from_s0: i32,
+    ty: Option<&IRType>,
+) -> Vec<u8> {
+    if is_8byte_type(ty) {
+        ss_store_64(lo_reg, hi_reg, offset_from_s0)
+    } else {
+        ss_store_to_slot(lo_reg, offset_from_s0)
+    }
+}
+
+// Global map of function name -> parameter types, used by the Call handler
+// to determine the RV32 ABI register layout of each argument (8-byte params
+// consume TWO consecutive arg registers: a0:a1, a2:a3, …).  Each function
+// records its own signature at the start of `allocate_registers`; the Call
+// handler looks up the callee's signature.  If the callee hasn't been
+// registered yet (race under parallel allocation) or is an extern symbol,
+// the caller falls back to inferring arg size from vreg_types / immediate
+// value.  Uses RwLock (not thread_local) because `allocate_registers` is
+// invoked in parallel by `par_collect_result` / `std::thread::scope`.
+static FUNC_PARAM_TYPES: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashMap<String, Vec<crate::ir::IRType>>>>> = std::sync::OnceLock::new();
+
+fn func_param_types() -> &'static std::sync::RwLock<Option<std::collections::HashMap<String, Vec<crate::ir::IRType>>>> {
+    FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
+}
+
 impl Backend for RiscV32Backend {
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         &self.target_info
@@ -4448,6 +4525,16 @@ impl Backend for RiscV32Backend {
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let func_name = func.name.clone();
+
+        // Record this function's param types for cross-function Call ABI.
+        // Each function records its own signature; the Call handler looks up
+        // the callee.  get_or_insert_with ensures the map is created once.
+        {
+            let lock = func_param_types();
+            let mut guard = lock.write().unwrap();
+            let map = guard.get_or_insert_with(std::collections::HashMap::new);
+            map.insert(func.name.clone(), func.param_types.clone());
+        }
 
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
@@ -4512,6 +4599,20 @@ impl Backend for RiscV32Backend {
             current_offset += 8;
             vreg_stack_slots.insert(id, current_offset);
         }
+
+        // Reserve two 8-byte scratch slots at the top of the frame (above all
+        // vreg slots and Alloc buffers) for the FP spill path used by
+        // `ss_load_fpr_from_value`, the `IRInstr::Store` F64-immediate arm,
+        // and the `IRInstr::Cast` FloatToFloat arm.  The previous code
+        // hardcoded offsets 64 and 56, which overlap with the Alloc buffer
+        // and vreg slots — causing f64 array/struct stores to silently
+        // corrupt nearby values (the remaining W4d failure in f64_array_sum).
+        // These slots are only written transiently (spill + immediate FLD),
+        // never read across calls, so they don't need to be in the save area.
+        current_offset += 8;
+        let fp_scratch_off_0 = current_offset; // primary 8-byte scratch slot
+        current_offset += 8;
+        let fp_scratch_off_1 = current_offset; // secondary 8-byte scratch slot
 
         let frame_size = ((current_offset + 15) & !15) as usize;
         let fs = frame_size as i32;
@@ -4602,16 +4703,35 @@ impl Backend for RiscV32Backend {
             });
         }
 
-        // Store function parameters from A0-A7 to their stack slots
+        // Store function parameters from A0-A7 to their stack slots.
+        // RV32 ABI: 8-byte params (F64/I64/U64) arrive in TWO consecutive
+        // arg registers (a0:a1, a2:a3, …) and must be stored as a paired
+        // Sw pair to the param's 8-byte slot.  4-byte params use a single Sw.
         let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+        let mut reg_idx = 0usize;
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
-                if i < 8 {
+                if reg_idx < 8 {
                     let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+                    let param_ty = func.param_types.get(i);
+                    let is_8byte = param_ty.map(|t| matches!(t, IRType::F64 | IRType::I64 | IRType::U64)).unwrap_or(false);
+                    let (store_code, reads) = if is_8byte && reg_idx + 1 < 8 {
+                        let code = ss_store_64(arg_regs[reg_idx], arg_regs[reg_idx + 1], offset);
+                        let reads = vec![
+                            PhysicalReg::new(RegClass::Gpr, arg_regs[reg_idx].encoding()),
+                            PhysicalReg::new(RegClass::Gpr, arg_regs[reg_idx + 1].encoding()),
+                        ];
+                        reg_idx += 2;
+                        (code, reads)
+                    } else {
+                        let code = ss_store_to_slot(arg_regs[reg_idx], offset);
+                        let reads = vec![PhysicalReg::new(RegClass::Gpr, arg_regs[reg_idx].encoding())];
+                        reg_idx += 1;
+                        (code, reads)
+                    };
                     instructions.push(AllocatedInstruction {
                         opcode: "sw".to_string(),
-                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
+                        reads,
                         writes: vec![],
                         encoded: store_code,
                     });
@@ -4640,6 +4760,210 @@ impl Backend for RiscV32Backend {
         // Build predecessor-aware phi resolution map.
         let phi_map = func.build_phi_map();
 
+        // Build a vreg → IRType map for type-aware load/store selection.
+        //
+        // The IR optimizer frequently lowers `let b: f64 = a;` (and similar
+        // moves) to `Add { dst: b, lhs: a, rhs: Imm(0), ty: None }`.  The
+        // `ty: None` loses the f64 type, so the `Add` arm cannot tell that
+        // the value is 8 bytes and uses a single 4-byte Lw/Sw, truncating
+        // the high 4 bytes (the W4d bug).  The same problem affects phi
+        // copies emitted by the Branch / CondBranch arms.
+        //
+        // We reconstruct the missing type information by scanning every
+        // instruction in the function and propagating types to a fixed
+        // point:
+        //   1. Seed from explicit type fields (Load.ty, BinOp.ty,
+        //      Cast.to_ty, Alloc→Ptr, params, results, …).
+        //   2. Phi dst ← incoming src vreg types.
+        //   3. Add/Sub/Mul/Div/Select (ty: None) dst ← lhs/rhs vreg types
+        //      (the IR optimizer only uses these for moves, so the dst
+        //      type matches the src type).
+        //   4. Cast src ← from_ty (use-side inference).
+        //   5. BinOp/UnaryOp/Cmp operand vregs ← ty (use-side inference).
+        // vregs whose type still cannot be determined are absent from the
+        // map — the load/store code then falls back to the 4-byte path,
+        // preserving the previous behaviour for those vregs.
+        let mut vreg_types: HashMap<u32, IRType> = HashMap::new();
+        for (param, ty) in func.params.iter().zip(func.param_types.iter()) {
+            if let Some(id) = param.as_register() {
+                vreg_types.insert(id, ty.clone());
+            }
+        }
+        for (result, ty) in func.results.iter().zip(func.result_types.iter()) {
+            if let Some(id) = result.as_register() {
+                vreg_types.insert(id, ty.clone());
+            }
+        }
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::Load { dst, ty, .. }
+                    | IRInstr::AtomicLoad { dst, ty, .. }
+                    | IRInstr::AtomicCas { dst, ty, .. } => {
+                        if let Some(id) = dst.as_register() {
+                            vreg_types.insert(id, ty.clone());
+                        }
+                    }
+                    IRInstr::BinOp { dst, ty, .. }
+                    | IRInstr::UnaryOp { dst, ty, .. }
+                    | IRInstr::Add { dst, ty, .. }
+                    | IRInstr::Sub { dst, ty, .. }
+                    | IRInstr::Mul { dst, ty, .. }
+                    | IRInstr::Div { dst, ty, .. }
+                    | IRInstr::Select { dst, ty, .. } => {
+                        if let Some(id) = dst.as_register() {
+                            if let Some(t) = ty {
+                                vreg_types.insert(id, t.clone());
+                            }
+                        }
+                    }
+                    IRInstr::Cast { dst, to_ty, .. } => {
+                        if let Some(id) = dst.as_register() {
+                            if let Some(t) = to_ty {
+                                vreg_types.insert(id, t.clone());
+                            }
+                        }
+                    }
+                    IRInstr::Alloc { dst, .. } | IRInstr::GetAddress { dst, .. }
+                    | IRInstr::Offset { dst, .. } => {
+                        if let Some(id) = dst.as_register() {
+                            vreg_types.insert(id, IRType::Ptr);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Fixed-point propagation for types that the first pass couldn't
+        // resolve directly (Phi dsts, untyped Add/Sub/Mul/Div/Select dsts,
+        // and Cast/BinOp/UnaryOp/Cmp operand vregs whose type can be
+        // inferred from the instruction's type field).
+        loop {
+            let mut changed = false;
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    match instr {
+                        IRInstr::Phi { dst, incoming } => {
+                            if let Some(dst_id) = dst.as_register() {
+                                if vreg_types.contains_key(&dst_id) {
+                                    continue;
+                                }
+                                for (src, _) in incoming {
+                                    if let Some(src_id) = src.as_register() {
+                                        if let Some(ty) = vreg_types.get(&src_id) {
+                                            vreg_types.insert(dst_id, ty.clone());
+                                            changed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        IRInstr::Add { dst, lhs, rhs, ty: None, .. }
+                        | IRInstr::Sub { dst, lhs, rhs, ty: None, .. }
+                        | IRInstr::Mul { dst, lhs, rhs, ty: None, .. }
+                        | IRInstr::Div { dst, lhs, rhs, ty: None, .. } => {
+                            if let Some(dst_id) = dst.as_register() {
+                                if vreg_types.contains_key(&dst_id) {
+                                    continue;
+                                }
+                                // The IR optimizer only emits these for moves
+                                // (rhs = Imm(0) for Add/Sub, Imm(1) for Mul/Div),
+                                // so the dst type matches the lhs type.  Try lhs
+                                // first, then rhs.
+                                for src in [lhs, rhs] {
+                                    if let Some(src_id) = src.as_register() {
+                                        if let Some(ty) = vreg_types.get(&src_id) {
+                                            vreg_types.insert(dst_id, ty.clone());
+                                            changed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        IRInstr::Select { dst, true_val, false_val, ty: None, .. } => {
+                            if let Some(dst_id) = dst.as_register() {
+                                if vreg_types.contains_key(&dst_id) {
+                                    continue;
+                                }
+                                // Select is a conditional move; the dst type
+                                // matches true_val / false_val.
+                                for src in [true_val, false_val] {
+                                    if let Some(src_id) = src.as_register() {
+                                        if let Some(ty) = vreg_types.get(&src_id) {
+                                            vreg_types.insert(dst_id, ty.clone());
+                                            changed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        IRInstr::Cast { src, from_ty, .. } => {
+                            // Use-side inference: the src vreg has type from_ty.
+                            if let Some(ty) = from_ty {
+                                if let Some(src_id) = src.as_register() {
+                                    if !vreg_types.contains_key(&src_id) {
+                                        vreg_types.insert(src_id, ty.clone());
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        IRInstr::BinOp { lhs, rhs, ty: Some(ty), .. } => {
+                            // Use-side: operand vregs share the instruction's type.
+                            if let Some(lhs_id) = lhs.as_register() {
+                                if !vreg_types.contains_key(&lhs_id) {
+                                    vreg_types.insert(lhs_id, ty.clone());
+                                    changed = true;
+                                }
+                            }
+                            if let Some(rhs_id) = rhs.as_register() {
+                                if !vreg_types.contains_key(&rhs_id) {
+                                    vreg_types.insert(rhs_id, ty.clone());
+                                    changed = true;
+                                }
+                            }
+                        }
+                        IRInstr::UnaryOp { operand, ty: Some(ty), .. } => {
+                            // Use-side: the operand vreg shares the instruction's type.
+                            if let Some(op_id) = operand.as_register() {
+                                if !vreg_types.contains_key(&op_id) {
+                                    vreg_types.insert(op_id, ty.clone());
+                                    changed = true;
+                                }
+                            }
+                        }
+                        IRInstr::Cmp { lhs, rhs, ty: Some(ty), .. } => {
+                            // Use-side: FP comparisons mark both operand vregs as
+                            // F32/F64 so that the producing Add/Sub/Mul/Div (which
+                            // carry ty=None for `let x = literal` moves) use the
+                            // 8-byte load/store path.  Without this, an f64 literal
+                            // used only in a Cmp (e.g. `let target = 7.0; if x == target`)
+                            // has its high 32 bits truncated by the 4-byte move, and
+                            // the FP comparison silently compares against 0.0.
+                            // (Mirrors the W3c fix for x86_32's infer_fp_vregs.)
+                            if matches!(ty, IRType::F32 | IRType::F64) {
+                                for src in [lhs, rhs] {
+                                    if let Some(src_id) = src.as_register() {
+                                        if !vreg_types.contains_key(&src_id) {
+                                            vreg_types.insert(src_id, ty.clone());
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
         for block in &func.blocks {
             // Record the byte offset for this block's label
             label_offsets.insert(block.label.clone(), current_byte_offset);
@@ -4651,6 +4975,9 @@ impl Backend for RiscV32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
+                        if std::env::var("VUMA_DBG_BINOP").is_ok() {
+                            eprintln!("[W4C-DBG] BinOp op={:?} dst_id={} dst_offset={} lhs={:?} rhs={:?} ty={:?}", op, dst_id, dst_offset, lhs, rhs, ty);
+                        }
 
                         // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic
                         let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
@@ -4663,10 +4990,10 @@ impl Backend for RiscV32Backend {
                             // immediates (spill 8 bytes to scratch + FLD for f64,
                             // FMV.W.X for f32).
                             code.extend(ss_load_fpr_from_value(
-                                Fpr::F0, lhs, &vreg_stack_slots, is_f64, 64,
+                                Fpr::F0, lhs, &vreg_stack_slots, is_f64, fp_scratch_off_0,
                             ));
                             code.extend(ss_load_fpr_from_value(
-                                Fpr::F1, rhs, &vreg_stack_slots, is_f64, 56,
+                                Fpr::F1, rhs, &vreg_stack_slots, is_f64, fp_scratch_off_1,
                             ));
                             match op {
                                 BinOpKind::Add => {
@@ -4907,59 +5234,84 @@ impl Backend for RiscV32Backend {
                     IRInstr::Add { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                        if std::env::var("VUMA_DBG_ADD").is_ok() {
+                            eprintln!("[W4C-DBG] Add dst_id={} dst_offset={} lhs={:?} rhs={:?} ty={:?}", dst_id, dst_offset, lhs, rhs, ty);
+                        }
+                        // Type-aware load/store: 8-byte values (F64/I64/U64)
+                        // use paired Lw/Sw so the high word is preserved.
+                        // The IR optimizer emits `Add { ty: None }` as a move
+                        // (rhs = Imm(0)); for real 64-bit arithmetic it uses
+                        // `BinOp { ty: Some(I64/U64) }` (handled separately
+                        // with carry propagation).  T1 holds the high word
+                        // for 8-byte values; T2 is the rhs scratch.
+                        code.extend(ss_load_value_typed(
+                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
+                        ));
                         if let IRValue::Immediate(imm) = rhs {
                             let i = *imm as i32;
                             if (-2048..=2047).contains(&i) {
                                 code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: i }.encode());
                             } else {
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                                code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                                code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
                             }
                         } else {
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
                         }
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
                     IRInstr::Sub { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code.extend(ss_load_value_typed(
+                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
+                        ));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
                     IRInstr::Mul { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                        code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code.extend(ss_load_value_typed(
+                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
+                        ));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                        code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
                     IRInstr::Div { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                        code.extend(Instruction::Div { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code.extend(ss_load_value_typed(
+                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
+                        ));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                        code.extend(Instruction::Div { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
 
                     IRInstr::UnaryOp { op, dst, operand, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(operand, &vreg_stack_slots, Gpr::T0));
+                        code.extend(ss_load_value_typed(
+                            Gpr::T0, Gpr::T1, operand, &vreg_stack_slots, ty,
+                        ));
                         match op {
                             UnaryOpKind::Neg => { code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::Zero, rs2: Gpr::T0 }.encode()); }
                             UnaryOpKind::Not => { code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: -1 }.encode()); }
@@ -4967,7 +5319,7 @@ impl Backend for RiscV32Backend {
                             UnaryOpKind::Ctz => { code.extend(emit_ctz_isel(Gpr::T0, Gpr::T0)); }
                             UnaryOpKind::Popcnt => { code.extend(emit_popcnt_isel(Gpr::T0, Gpr::T0)); }
                         }
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
 
@@ -5008,7 +5360,7 @@ impl Backend for RiscV32Backend {
                             // FMV.W.X for f32 immediates). Never use FMV.D.X
                             // (RV64-only — SIGILL on RV32).
                             let load_fpr = |fpr: Fpr, val: &IRValue| -> Vec<u8> {
-                                ss_load_fpr_from_value(fpr, val, &vreg_stack_slots, is_f64, 64)
+                                ss_load_fpr_from_value(fpr, val, &vreg_stack_slots, is_f64, fp_scratch_off_0)
                             };
                             code.extend(load_fpr(Fpr::F0, lhs));
                             code.extend(load_fpr(Fpr::F1, rhs));
@@ -5262,9 +5614,9 @@ impl Backend for RiscV32Backend {
                                     } else {
                                         // f64 immediate: spill to scratch, then FLD.
                                         code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
-                                        code.extend(ss_store_to_slot(Gpr::T0, 64));
-                                        code.extend(ss_store_to_slot(Gpr::T1, 56));
-                                        code.extend(ss_load_fpr_d_from_slot(Fpr::F0, 64));
+                                        code.extend(ss_store_to_slot(Gpr::T0, fp_scratch_off_0));
+                                        code.extend(ss_store_to_slot(Gpr::T1, fp_scratch_off_0 - 4));
+                                        code.extend(ss_load_fpr_d_from_slot(Fpr::F0, fp_scratch_off_0));
                                     }
                                     if off >= -2048 && off <= 2047 {
                                         code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: Fpr::F0, imm: off }.encode());
@@ -5433,7 +5785,7 @@ impl Backend for RiscV32Backend {
                                 // (FLD for f64, FLW/FMV.W.X for f32) — NOT
                                 // FMV.D.X which is RV64-only.
                                 code.extend(ss_load_fpr_from_value(
-                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, 64,
+                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, fp_scratch_off_0,
                                 ));
                                 if src_is_f32 {
                                     code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
@@ -5450,7 +5802,7 @@ impl Backend for RiscV32Backend {
                                 // float → unsigned int. Same RV32 constraint as
                                 // FloatToInt: use FCVT.WU.* (not FCVT.LU.*).
                                 code.extend(ss_load_fpr_from_value(
-                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, 64,
+                                    Fpr::F0, src, &vreg_stack_slots, !src_is_f32, fp_scratch_off_0,
                                 ));
                                 if src_is_f32 {
                                     code.extend(Instruction::FcvtWUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
@@ -5469,7 +5821,7 @@ impl Backend for RiscV32Backend {
                                     // f32 → f64 (widen): load f32 into F0,
                                     // FCVT.D.S, store f64 result via FSD.
                                     code.extend(ss_load_fpr_from_value(
-                                        Fpr::F0, src, &vreg_stack_slots, false, 64,
+                                        Fpr::F0, src, &vreg_stack_slots, false, fp_scratch_off_0,
                                     ));
                                     code.extend(Instruction::FcvtDS { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
                                     code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
@@ -5478,7 +5830,7 @@ impl Backend for RiscV32Backend {
                                     // f64 → f32 (narrow): load f64 into F0,
                                     // FCVT.S.D, store f32 result via FSW.
                                     code.extend(ss_load_fpr_from_value(
-                                        Fpr::F0, src, &vreg_stack_slots, true, 64,
+                                        Fpr::F0, src, &vreg_stack_slots, true, fp_scratch_off_0,
                                     ));
                                     code.extend(Instruction::FcvtSD { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
                                     code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
@@ -5486,14 +5838,14 @@ impl Backend for RiscV32Backend {
                                 } else if !src_is_f32 && !dst_is_f32 {
                                     // f64 → f64 (same-width): copy via FLD+FSD.
                                     code.extend(ss_load_fpr_from_value(
-                                        Fpr::F0, src, &vreg_stack_slots, true, 64,
+                                        Fpr::F0, src, &vreg_stack_slots, true, fp_scratch_off_0,
                                     ));
                                     code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
                                     code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
                                 } else {
                                     // f32 → f32 (same-width): copy via FLW+FSW.
                                     code.extend(ss_load_fpr_from_value(
-                                        Fpr::F0, src, &vreg_stack_slots, false, 64,
+                                        Fpr::F0, src, &vreg_stack_slots, false, fp_scratch_off_0,
                                     ));
                                     code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
                                     code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
@@ -5653,9 +6005,50 @@ impl Backend for RiscV32Backend {
                         let mut code = Vec::new();
                         let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                                             Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
-                        for (i, arg) in args.iter().enumerate() {
-                            if i >= 8 { break; }
-                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[i]));
+                        // RV32 ABI: 8-byte args (F64/I64/U64) are passed in TWO
+                        // consecutive arg registers (a0:a1, a2:a3, …).  We look
+                        // up the callee's parameter types (registered by each
+                        // function at the start of allocate_registers) to
+                        // determine each arg's size.  If unavailable (extern
+                        // symbol or parallel-alloc race), fall back to inferring
+                        // from vreg_types (Register args) or immediate value.
+                        let callee_param_types: Option<Vec<crate::ir::IRType>> = if !*is_extern {
+                            let lock = func_param_types();
+                            let guard = lock.read().unwrap();
+                            guard.as_ref()
+                                .and_then(|map| map.get(target_func))
+                                .cloned()
+                        } else {
+                            None
+                        };
+                        let mut reg_idx = 0usize;
+                        for (arg_i, arg) in args.iter().enumerate() {
+                            if reg_idx >= 8 { break; }
+                            let is_8byte = if let Some(ref types) = callee_param_types {
+                                types.get(arg_i)
+                                    .map(|t| matches!(t, IRType::F64 | IRType::I64 | IRType::U64))
+                                    .unwrap_or(false)
+                            } else if let IRValue::Register(id) = arg {
+                                vreg_types.get(id)
+                                    .map(|t| matches!(t, IRType::F64 | IRType::I64 | IRType::U64))
+                                    .unwrap_or(false)
+                            } else if let IRValue::Immediate(v) = arg {
+                                let val_sign_ext_32 = (*v as i32) as i64;
+                                *v != val_sign_ext_32
+                            } else {
+                                false
+                            };
+                            if is_8byte && reg_idx + 1 < 8 {
+                                code.extend(ss_load_value_64(
+                                    arg_reg_list[reg_idx],
+                                    arg_reg_list[reg_idx + 1],
+                                    arg, &vreg_stack_slots,
+                                ));
+                                reg_idx += 2;
+                            } else {
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[reg_idx]));
+                                reg_idx += 1;
+                            }
                         }
                         let jal_byte_offset_in_func = current_byte_offset + code.len() as u64;
                         code.extend(Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
@@ -5742,12 +6135,21 @@ impl Backend for RiscV32Backend {
                     IRInstr::Branch { target } => {
                         let mut code = Vec::new();
                         // Emit phi copies for (target, current_block) before the jump.
+                        // Use the type-aware load/store helpers so that 8-byte
+                        // values (F64/I64/U64) are copied as paired Lw/Sw
+                        // instead of being truncated to the low 4 bytes by
+                        // the default 32-bit Lw/Sw.
                         if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
                             for (dst, src) in pairs {
-                                code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                code.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                                let ty = vreg_types.get(&dst_id);
+                                code.extend(ss_load_value_typed(
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                ));
+                                code.extend(ss_store_to_slot_typed(
+                                    Gpr::T0, Gpr::T1, dst_off, ty,
+                                ));
                             }
                         }
                         // JAL x0, placeholder — will be fixed up
@@ -5775,23 +6177,36 @@ impl Backend for RiscV32Backend {
                         let instr_idx = instructions.len();
 
                         // Compute phi copies for both successors.
+                        // (See IRInstr::Branch arm for the type-aware
+                        // load/store rationale — paired Lw/Sw for 8-byte
+                        // values, single Lw/Sw otherwise.)
                         let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
                             let mut c = Vec::new();
                             for (dst, src) in pairs {
-                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                c.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                                let ty = vreg_types.get(&dst_id);
+                                c.extend(ss_load_value_typed(
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                ));
+                                c.extend(ss_store_to_slot_typed(
+                                    Gpr::T0, Gpr::T1, dst_off, ty,
+                                ));
                             }
                             c
                         } else { Vec::new() };
                         let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
                             let mut c = Vec::new();
                             for (dst, src) in pairs {
-                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                c.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                                let ty = vreg_types.get(&dst_id);
+                                c.extend(ss_load_value_typed(
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                ));
+                                c.extend(ss_store_to_slot_typed(
+                                    Gpr::T0, Gpr::T1, dst_off, ty,
+                                ));
                             }
                             c
                         } else { Vec::new() };

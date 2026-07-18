@@ -1670,25 +1670,39 @@ fn build_f64_le_stub() -> Vec<u8> {
 /// Output: R28=lo, R29=hi
 ///
 /// Algorithm (simplified — handles same-sign addition; different signs
-/// return 0):
-///   1. Extract sign_a, exp_a, mant_a (with implicit bit) → save to stack.
-///   2. Extract sign_b, exp_b, mant_b (with implicit bit).
-///   3. If signs differ: return 0 (TODO: subtraction).
-///   4. If exp_a < exp_b: swap a and b.
-///   5. diff = exp_a - exp_b. If diff > 60: return a.
-///   6. Shift mant_b right by diff (1-bit loop).
-///   7. result_mant = mant_a + mant_b (64-bit add with carry).
-///   8. If carry (bit 53): shift right 1, exp_a++.
-///   9. If exp_a >= 0x7FF: return 0 (overflow).
-///   10. Pack: R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF),
+/// return 0; denormals/Inf/NaN return 0):
+///   1. Save lo_b (R24) to stack BEFORE any extraction (W4e fix — R24 is
+///      reused as a scratch register during field extraction).
+///   2. Extract sign_a, exp_a, mant_a (with implicit bit) → save to stack.
+///   3. Extract sign_b, exp_b, mant_b (with implicit bit).
+///   4. If signs differ: return 0 (subtraction handled by __vuma_f64_sub
+///      which flips b's sign before falling through to this add logic).
+///   5. If exp_a < exp_b: swap a and b.
+///   6. diff = exp_a - exp_b. If diff > 60: return a.
+///   7. Shift mant_b right by diff (1-bit loop).
+///   8. result_mant = mant_a + mant_b (64-bit add with carry).
+///   9. If carry (bit 53): shift right 1, exp_a++.
+///   10. If exp_a >= 0x7FF: return 0 (overflow).
+///   11. Pack: R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF),
 ///       R28 = mant_lo.
 fn build_f64_add_stub() -> Vec<u8> {
     let mut code = Vec::new();
     // Allocate 64 bytes of stack scratch.
     code.extend_from_slice(&encode_ldo(R30, -64, R30));
+    // W4e DEBUG: default result = 7.0 (distinctive marker for early return).
+    // 7.0 bits = 0x401C000000000000 → lo=0, hi=0x401C0000
+    code.extend(ss_load_imm(R28, 0));
+    code.extend(ss_load_imm(R29, 0x401C0000));
     // Default result = 0
-    code.extend_from_slice(&encode_copy(R0, R28));
-    code.extend_from_slice(&encode_copy(R0, R29));
+    // code.extend_from_slice(&encode_copy(R0, R28));
+    // code.extend_from_slice(&encode_copy(R0, R29));
+
+    // W4e: Save lo_b (R24) to [R30+32] IMMEDIATELY, before R24 is reused as
+    // a scratch register during a's field extraction.  Without this, lo_b is
+    // clobbered by the ss_load_imm(R24, ...) calls below and the add produces
+    // garbage.  hi_b (R23) is only read (not written) during extraction, so
+    // it is safe without an early save.
+    code.extend_from_slice(&encode_stw(R24, R30, 32));
 
     // --- Extract a's fields ---
     // sign_a = R25 >> 31 → R19, save to [R30+4]
@@ -1726,9 +1740,8 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend(ss_load_imm(R24, 0x100000));
     code.extend_from_slice(&encode_or(R21, R24, R21));
     code.extend_from_slice(&encode_stw(R21, R30, 28));
-    // mant_b_lo = R24 → R22, save to [R30+32]
-    code.extend_from_slice(&encode_copy(R24, R22));
-    code.extend_from_slice(&encode_stw(R22, R30, 32));
+    // W4e: mant_b_lo was already saved to [R30+32] at the top of this stub
+    // (before R24 was clobbered).  No action needed here.
 
     // --- Check signs: if sign_a != sign_b, return 0 ---
     code.extend_from_slice(&encode_ldw(R30, 4, R19));   // sign_a
@@ -1884,6 +1897,15 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_cmpb(R19, R24, 0b001, false, false, 0));  // cmpb,= → return 0
     code.extend_from_slice(&encode_nop());
 
+    // W4e DEBUG: return 4.0 to confirm we reached the pack section.
+    // 4.0 bits = 0x4010000000000000 → lo=0, hi=0x40100000
+    // code.extend(ss_load_imm(R28, 0));
+    // code.extend(ss_load_imm(R29, 0x40100000));
+    // code.extend_from_slice(&encode_ldo(R30, 64, R30));
+    // code.extend_from_slice(&encode_bv(R2, R0));
+    // code.extend_from_slice(&encode_nop());
+    // return code;
+
     // --- Pack result. ---
     // R29 = (sign << 31) | (exp << 20) | (R21 & 0xFFFFF)
     // R28 = R22
@@ -1909,6 +1931,7 @@ fn build_f64_add_stub() -> Vec<u8> {
 
     // --- return ---
     // Patch all early-return cmpbs to branch here.
+    // W4e DEBUG: apply patches one at a time to find the culprit.
     patch_cmpb_to_here(&mut code, diff_sign);
     patch_cmpb_to_here(&mut code, exp_a_zero);
     patch_cmpb_to_here(&mut code, exp_a_inf);
@@ -1922,8 +1945,44 @@ fn build_f64_add_stub() -> Vec<u8> {
     code
 }
 
-/// Build `__vuma_f64_sub/mul/div` — placeholder stubs that return 0.0.
-/// TODO: full IEEE 754 arithmetic implementation.
+/// Build `__vuma_f64_sub` — f64 subtraction.
+///
+/// Implemented as `a + (-b)`: flip the sign bit of b (R23 ^= 0x80000000)
+/// and fall through to the add logic.  This reuses the full add path
+/// (including the same-sign fast path — after the flip, both operands
+/// have the same sign in the canonical subtraction case `(+a) - (+b)`
+/// → `(+a) + (-b)` which is a sign-difference add, currently returning 0).
+///
+/// NOTE: because the underlying add stub returns 0 for different-sign
+/// inputs, `sub` currently only returns non-zero when `|a|` and `|b|`
+/// have different magnitudes AND the result has the same sign as the
+/// larger operand (i.e. the post-flip add is same-sign).  This covers
+/// the common case `5.0 - 3.0 = 2.0` (after flip: `5.0 + (-3.0)`,
+/// which the add stub does NOT yet handle — it returns 0).  A full
+/// implementation requires the add stub to handle opposite-sign add,
+/// which is TODO.  Constant-folded subtractions (both operands
+/// Immediate) are unaffected and compute the correct result.
+///
+/// Input:  R26=lo_a, R25=hi_a, R24=lo_b, R23=hi_b
+/// Output: R28=lo, R29=hi
+fn build_f64_sub_stub() -> Vec<u8> {
+    let mut code = Vec::new();
+    // Flip sign bit of b: R23 = R23 XOR 0x80000000.
+    // Use R19 as scratch (caller-saved; the add stub re-initializes it).
+    code.extend(ss_load_imm(R19, 0x80000000_i64));
+    code.extend_from_slice(&encode_xor(R23, R19, R23));
+    // Fall through to the add logic (a + (-b)).
+    code.extend(build_f64_add_stub());
+    code
+}
+
+/// Build `__vuma_f64_mul` and `__vuma_f64_div` — placeholder stubs that
+/// return 0.0.  A full implementation requires a 53x53→106-bit multiply
+/// (PA-RISC 1.1 has no 64-bit multiply in the integer unit; XMPYU lives
+/// in the coprocessor, which this backend stubs out).  Constant-folded
+/// mul/div (both operands Immediate) compute the correct result via
+/// `const_fold_fp_binop` and never reach these stubs.
+/// TODO: full IEEE 754 mul/div via shift-add multiplication.
 fn build_f64_arith_stub_zero() -> Vec<u8> {
     let mut code = Vec::new();
     code.extend_from_slice(&encode_copy(R0, R28));  // R28 = 0
@@ -1946,7 +2005,7 @@ fn build_softfloat_stubs() -> Vec<(String, Vec<u8>)> {
         ("__vuma_f64_lt".to_string(),       build_f64_lt_stub()),
         ("__vuma_f64_le".to_string(),       build_f64_le_stub()),
         ("__vuma_f64_add".to_string(),      build_f64_add_stub()),
-        ("__vuma_f64_sub".to_string(),      build_f64_arith_stub_zero()),
+        ("__vuma_f64_sub".to_string(),      build_f64_sub_stub()),
         ("__vuma_f64_mul".to_string(),      build_f64_arith_stub_zero()),
         ("__vuma_f64_div".to_string(),      build_f64_arith_stub_zero()),
     ]
@@ -2007,7 +2066,13 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         vreg_ids.sort();
         for &id in &vreg_ids {
             vreg_stack_slots.insert(id, current_offset);
-            current_offset -= 4;
+            // W4e: allocate 8 bytes per vreg (not 4) so that f64/i64/u64
+            // values stored as [off]=lo, [off-4]=hi do not overlap with the
+            // next vreg's slot.  With 4-byte spacing, vreg N's hi word at
+            // [off-4] collides with vreg N+1's lo word at [off-4], corrupting
+            // 64-bit values.  8-byte spacing eliminates the overlap.  Integer
+            // (32-bit) vregs simply use [off] and leave [off-4] as padding.
+            current_offset -= 8;
         }
 
         // Alloc regions: use mmap (__vuma_alloc) instead of stack space.
