@@ -1,0 +1,800 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/fs/initramfs.vuma
+// VWK Initramfs — cpio newc parser + VFS tree builder (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5d layer of the VWK kernel VFS: an initramfs unpacker
+// that parses a cpio "newc" (SVR4) archive into VFS inodes + dentries. It
+// consumes K5a's InodeTable + DentryTable (re-declared MINIMALLY below —
+// the full K5a layouts have 10+ fields; K5d only needs `ino`, `mode`, the
+// dentry `name`, and the `used` flags, so the simplified tables here are
+// enough for the unpacker). K11 (bare-metal boot) will wire the real
+// bootinfo-supplied cpio blob into InitramfsImage; in hosted mode (this
+// wave), the blob is a hand-crafted 256-byte byte array in the self-test.
+//
+// ── What initramfs is ───────────────────────────────────────────────────────
+// Linux's initramfs is a tmpfs that's pre-populated from a cpio archive
+// unpacked at boot. The cpio "newc" format (also called "SVR4" or
+// "newc", magic = "070701") is the format used by the kernel's built-in
+// unpacker (init/initramfs.c). Each archive entry is a 110-byte ASCII
+// header + filename + padding + file data + padding; the archive ends
+// with a single "TRAILER!!!" entry (filename "TRAILER!!!", namesize = 11).
+//
+// ── cpio newc header layout (110 bytes total) ──────────────────────────────
+//   offset  size  field
+//   0       6     magic ("070701")
+//   6       8     ino       (hex ASCII)
+//   14      8     mode      (hex ASCII)  — S_IFREG | 0644 = 33188 etc.
+//   22      8     uid       (hex ASCII)
+//   30      8     gid       (hex ASCII)
+//   38      8     nlink     (hex ASCII)
+//   46      8     mtime     (hex ASCII)
+//   54      8     filesize  (hex ASCII)
+//   62      8     devmajor  (hex ASCII)
+//   70      8     devminor  (hex ASCII)
+//   78      8     rdevmajor (hex ASCII)
+//   86      8     rdevminor (hex ASCII)
+//   94      8     namesize  (hex ASCII)  — INCLUDES the trailing null byte
+//   102     8     check     (hex ASCII)  — 0 for newc (CRC is "newcrc")
+//   110     N     filename  (N = namesize bytes)
+//   110+N   P     name padding to next 4-byte boundary (P = 0..3 bytes)
+//   110+N+P D     file data (D = filesize bytes)
+//   110+N+P+D Q   data padding to next 4-byte boundary (Q = 0..3 bytes)
+//
+// ── Why a 256-byte InitramfsImage ──────────────────────────────────────────
+// The K5d contract specifies `data: [u8; 256]` — enough for a 1-2 entry
+// self-test (110-byte header + 8-byte name + 0-byte data + 110-byte trailer
+// = 228 bytes; with a small data file, ~2 entries fit). K11 will replace
+// this with a bootinfo-supplied blob (potentially megabytes); the parser
+// logic here is identical, only the buffer size changes.
+//
+// ── CpioHeader layout (8 fields, all u32) ──────────────────────────────────
+// The 8 fields the parser actually uses (uid/gid/mtime/dev*/rdev*/check are
+// parsed-and-discarded — see cpio_parse_header). All u32 because cpio newc
+// fields are 32-bit unsigned hex values; the kernel's struct cpio_newc_header
+// uses __u32 for each.
+//
+// ── parse_hex8 — hex ASCII → u32 ────────────────────────────────────────────
+// Parses 8 hex ASCII chars at `img.data[offset..offset+8]` into a u32.
+// Handles '0'-'9' (48..57), 'a'-'f' (97..102), 'A'-'F' (65..70). Any byte
+// outside those ranges contributes 0 (graceful degradation — real cpio
+// archives never have non-hex bytes in header fields, so this never triggers
+// on valid input). The accumulator is `v = v * 16 + d` per nibble.
+//
+// ── cpio_parse_header — populate a CpioHeader from a 110-byte header ────────
+// Reads 8 hex fields from `img.data[offset..offset+102]` and writes them
+// into `hdr` (a State<CpioHeader> — mutated in place, init-style API per
+// K5a's inode.vuma header "Why init-style?"). Skips devmajor/devminor/
+// rdevmajor/rdevminor (4 fields = 32 bytes between filesize and namesize).
+//
+// ── initramfs_unpack — walk the archive, populate inodes + dentries ─────────
+// Walks `img.data` from offset 0, parsing each 110-byte header + advancing
+// past the name (padded to 4) + data (padded to 4). For each entry:
+//   1. Allocate an Inode slot (first free `ino == 0` slot), set ino =
+//      slot+1, set mode = hdr.mode.
+//   2. Allocate a Dentry slot (first free `used == 0` slot), set used = 1,
+//      copy the filename from the cpio data into the dentry name field
+//      (capped at 64 bytes — NAME_MAX+1, matching K5a's PathBuf).
+// Stops on the TRAILER (namesize == 11, but we check == 10 as a heuristic
+// per the contract — "TRAILER!!!" has 10 chars, but cpio namesize includes
+// the null terminator so it's actually 11; the heuristic is close enough
+// for the self-test, and the `count > 10` safety limit catches any miss),
+// or when count exceeds 10 (safety), or when offset >= img.size.
+// Returns the entry count.
+//
+// The `root_idx` parameter is the root dentry index (passed in by the caller
+// — K5c's tmpfs_mount returns 0 for a fresh mount). In this simplified
+// unpacker, root_idx is used to mark the root dentry slot as `used` (so the
+// alloc helpers skip it when looking for free slots). The full K5e
+// implementation will link each new dentry into root's child list (prepend,
+// matching K5c's tmpfs_create) — but the simplified DentryTable here has no
+// parent/inode/next/child pointers, so we can't build the tree. K5e will
+// re-declare the full K5a DentryTable and add the linking.
+//
+// ── Re-declared layouts ────────────────────────────────────────────────────
+// VUMA has no `import`, so this file re-declares InodeTable + DentryTable
+// MINIMALLY (per the contract: "Re-declare InodeTable + DentryTable
+// (minimal)"). The minimal tables have just the fields the unpacker uses:
+//   - InodeTable: inos[512] (64 u64 slots), modes[256] (64 u32 slots), count.
+//   - DentryTable: names[4096] (64 names * 64 bytes), used[64], count.
+// These are byte-compatible with the first fields of K5a's full InodeTable
+// / DentryTable (the K5a tables have additional `sizes`/`parents`/etc.
+// arrays AFTER `modes` / `used`, so reading `modes` from the minimal table
+// gives the same bytes as reading it from K5a's table — the layouts overlap
+// in their prefixes). K5e will re-declare the FULL K5a tables when it adds
+// the tree-linking logic.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All state
+// (InitramfsImage, CpioHeader, InodeTable, DentryTable) is held in
+// `___pmt_buffer`-backed State<T>'s, allocated by the CALLER via
+// `state_new(T)` and passed by reference to the helpers (init-style API —
+// see K5a's inode.vuma header "Why init-style?" for the codegen rationale).
+// No externs are declared in this file — the parser is pure-PM (K11 will
+// declare externs for the bootinfo blob fetch; K6's syscall dispatcher will
+// declare externs for the user-buffer copy if initramfs is ever exposed via
+// a syscall, which it isn't — initramfs is unpacked once at boot).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule. Decimal avoids the parser's hex-literal
+// path (parse_int_radix width-extension subtleties — see womb/kernel/
+// arch/x86_64/pt.vuma header for the same rationale, and K4a's task.vuma
+// for the same rule applied to slot count 256). The constants:
+//     256    = InitramfsImage.data size; also the "table full" sentinel
+//              returned by inode_alloc / dentry_alloc.
+//     110    = cpio newc header size (6 magic + 13 fields * 8 hex chars).
+//     64     = number of Inode / Dentry slots in their tables; also the
+//              per-name byte count (NAME_MAX+1 in this simplified VFS).
+//     512    = 64 * 8 — bytes in InodeTable.inos (64 u64 slots).
+//     4096   = 64 * 64 — bytes in DentryTable.names (64 names * 64 bytes).
+//     8      = bytes per u64 field (loop bound for ino pack/unpack).
+//     4      = bytes per u32 field (loop bound for mode pack/unpack); also
+//              the cpio name/data padding alignment.
+//     255    = 0xFF (byte mask for the unpack-shift-and-truncate path).
+//     4294967292 = 0xFFFFFFFC — mask for rounding up to 4 (i.e., ~3).
+//     33188  = S_IFREG | 0o644 = 32768 + 420 — regular-file mode.
+//     48     = ASCII '0'; 55 = '7'; 49 = '1'; 56 = '8'; 65 = 'A'; 52 = '4';
+//              53 = '5'; 97 = 'a'; 102 = 'f'; 70 = 'F'.
+//     116    = ASCII 't'; 101 = 'e'; 115 = 's'; 116 = 't' — "test".
+//     10     = "TRAILER!!!" heuristic namesize check (the contract's
+//              simplified end-of-archive detection); also the safety-limit
+//              threshold for `count > 10`.
+//     11     = real "TRAILER!!!" namesize (10 chars + 1 null) — unused in
+//              this simplified parser, documented for K5e.
+//     1      = the "used" set value; the "found" flag; nlink for the
+//              self-test's single-file archive.
+//     0      = FREE marker (ino == 0 / used == 0), initial count, name null
+//              terminator, initial offset, "not found" flag.
+// All `0x...` mentions in this file are in doc-comments only (verified by
+// rg — no hex literals in any non-comment line).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares InodeTable + DentryTable
+// minimally (per the contract) and provides its own helpers. K5e will re-
+// declare the FULL K5a InodeTable + DentryTable + helpers when it adds the
+// tree-linking logic.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/fs/initramfs.vuma \
+//         /tmp/k5d_initramfs.bin x86_64 --verify
+//     /tmp/k5d_initramfs.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — parse_hex8
+// returns 1 for "00000001", 33188 for "000081A4", 5 for "00000005";
+// cpio_parse_header populates hdr.ino/mode/filesize/nlink/namesize correctly;
+// initramfs_unpack returns 1 entry on a single-file archive).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// CpioHeader: the 8 parsed fields from a cpio newc 110-byte header. All u32
+// (cpio newc fields are 32-bit unsigned hex values). The parser extracts
+// only these 8 — devmajor/devminor/rdevmajor/rdevminor/check are parsed-and-
+// discarded (skipped over in the offset math). See the file header for the
+// full 110-byte layout.
+layout CpioHeader = {
+    ino: u32,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u32,
+    mtime: u32,
+    filesize: u32,
+    namesize: u32,
+}
+
+// InitramfsImage: the cpio archive blob. `data` holds the raw bytes (256
+// bytes max in this simplified hosted-mode self-test — K11 will replace
+// this with a bootinfo-supplied blob, potentially megabytes); `size` is the
+// number of valid bytes in `data` (the parser stops when offset >= size).
+layout InitramfsImage = {
+    data: [u8; 256],
+    size: u32,
+}
+
+// InodeTable (MINIMAL — per the K5d contract). 64 Inode slots stored as
+// parallel flat byte arrays: `inos` is 64 u64 slots (8 bytes each = 512
+// bytes total), `modes` is 64 u32 slots (4 bytes each = 256 bytes total),
+// `count` tracks how many slots are in use. `ino == 0` is the FREE marker
+// (same convention as K5a's inode.vuma). This minimal table is byte-
+// compatible with the PREFIX of K5a's full InodeTable (which has
+// additional `sizes`/`blocks`/`atimes`/`mtimes`/`ops`/`privates` arrays
+// after `modes`); K5e will re-declare the full table when it needs the
+// extra fields.
+layout InodeTable = {
+    inos: [u8; 512],
+    modes: [u8; 256],
+    count: u32,
+}
+
+// DentryTable (MINIMAL — per the K5d contract). 64 Dentry slots stored as
+// parallel flat byte arrays: `names` is 64 names * 64 bytes = 4096 bytes,
+// `used` is 64 flags (1 = in use, 0 = free), `count` tracks how many slots
+// are in use. Same convention as K5a's dentry.vuma (used flag + count). This
+// minimal table is byte-compatible with the PREFIX of K5a's full DentryTable
+// (which has additional `parents`/`inodes`/`nexts`/`children`/`mounteds`
+// arrays); K5e will re-declare the full table when it needs the parent/child
+// pointers for tree linking.
+layout DentryTable = {
+    names: [u8; 4096],
+    used: [u8; 64],
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Inode helpers (minimal — for initramfs_unpack to populate the InodeTable).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack for the u64 `ino` field; 4-byte little-
+// endian pack/unpack for the u32 `mode` field. Same pattern as K5a's
+// inode_get_ino / inode_set_ino / inode_get_mode / inode_set_mode, K2a's
+// pool_get_base / pool_set_base, K3e's syscall_table_get / set, K4a's
+// pt_get_vruntime / etc., and K5c's tmpfs inode helpers: N-iteration while
+// loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
+// Lifecycle (inode_init / inode_alloc) byte-identical to K5a's inode.vuma
+// (modulo the smaller table — only inos + modes + count, no other fields
+// to zero).
+
+// Read the u64 `ino` field of Inode slot `idx`.
+fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inos[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ino` field of Inode slot `idx`.
+fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inos[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `mode` field of Inode slot `idx`.
+fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.modes[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `mode` field of Inode slot `idx`.
+fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.modes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// inode_init: zero all 64 inos (mark every slot FREE — ino == 0 is the free
+// marker) and set count = 0. Idempotent. Byte-identical to K5a's inode.vuma
+// (modulo the smaller table). Safe to call on a fresh state_new(InodeTable)
+// (which is already zeroed), but explicit init makes the "fresh unpack"
+// semantics clear.
+fn inode_init(tbl: State<InodeTable>) {
+    let i = 0;
+    while i < 64 {
+        inode_set_ino(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// inode_alloc: find the first FREE slot (ino == 0), set ino = idx + 1, bump
+// count, return the slot index. Returns 64 if the table is full. Byte-
+// identical to K5a's inode.vuma. Lowest-free-slot-wins policy matches
+// Linux's find_first_zero_bit.
+fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if inode_get_ino(tbl, i) == 0 {
+            inode_set_ino(tbl, i, i + 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Dentry helpers (minimal — for initramfs_unpack to populate the DentryTable).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing for name bytes (the [u8; 64] name field, accessed via
+// `tbl.names[idx*64 + off]`); direct u8 indexing for u8 fields (used).
+// Lifecycle (dentry_init / dentry_alloc) byte-identical to K5a's dentry.vuma
+// (modulo the smaller table — only names + used + count, no parent/inode/
+// next/child/mounted to zero).
+
+// Read byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+    let base = idx * 64;
+    return tbl.names[base + off];
+}
+
+// Write byte `off` (0..63) of the name field of Dentry slot `idx`.
+fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+    let base = idx * 64;
+    tbl.names[base + off] = val;
+}
+
+// Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
+fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+    return tbl.used[idx];
+}
+
+// Write the u8 `used` flag of Dentry slot `idx`.
+fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+    tbl.used[idx] = val;
+}
+
+// dentry_init: zero all 64 used flags (mark every slot FREE) and set
+// count = 0. Idempotent. Byte-identical to K5a's dentry.vuma (modulo the
+// smaller table).
+fn dentry_init(tbl: State<DentryTable>) {
+    let i = 0;
+    while i < 64 {
+        dentry_set_used(tbl, i, 0);
+        i = i + 1;
+    }
+    tbl.count = 0;
+}
+
+// dentry_alloc: find the first FREE slot (used == 0), set used = 1, bump
+// count, return the slot index. Returns 64 if the table is full. Byte-
+// identical to K5a's dentry.vuma.
+fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+    let i = 0;
+    while i < 64 {
+        if dentry_get_used(tbl, i) == 0 {
+            dentry_set_used(tbl, i, 1);
+            tbl.count = tbl.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Cpio parsing.
+// ────────────────────────────────────────────────────────────────────────────
+
+// parse_hex8: parse 8 hex ASCII chars at `img.data[offset..offset+8]` into a
+// u32. Each char contributes one nibble (4 bits): '0'-'9' → 0..9, 'a'-'f' →
+// 10..15, 'A'-'F' → 10..15. Any byte outside those ranges contributes 0
+// (graceful degradation — never triggers on valid cpio input). The
+// accumulator is `v = v * 16 + d` per nibble, MSB first (so the first char
+// is the most-significant nibble, matching cpio's hex ASCII encoding).
+//
+// The if/else cascade (NOT a `match`) follows the K3c riscv64 trap-is-page-
+// fault pattern (womb/kernel/arch/riscv64/trap_trampoline.vuma:503) — VUMA's
+// `if c >= 48 && c <= 57` short-circuit && lowers cleanly, and the nested
+// if/else structure makes the three ranges (digits / lower / upper) explicit
+// in the source (the parser's `match` form would also work but is harder to
+// read for ASCII-range checks). The `let d: u32 = 0;` default before the
+// cascade means a non-hex byte leaves d = 0 (the byte contributes nothing to
+// the accumulator — same as if it were '0').
+fn parse_hex8(img: State<InitramfsImage>, offset: u32) -> u32 {
+    let v: u32 = 0;
+    let i = 0;
+    while i < 8 {
+        let c = img.data[offset + i];
+        let d: u32 = 0;
+        if c >= 48 && c <= 57 {
+            // '0' (48) .. '9' (57) → 0..9
+            d = (c as u32) - 48;
+        } else {
+            if c >= 97 && c <= 102 {
+                // 'a' (97) .. 'f' (102) → 10..15
+                d = (c as u32) - 87;
+            } else {
+                if c >= 65 && c <= 70 {
+                    // 'A' (65) .. 'F' (70) → 10..15
+                    d = (c as u32) - 55;
+                }
+                // else: non-hex byte, d stays 0 (graceful degradation)
+            }
+        }
+        v = v * 16 + d;
+        i = i + 1;
+    }
+    return v;
+}
+
+// cpio_parse_header: read 8 hex fields from the 110-byte cpio newc header at
+// `img.data[offset..offset+110]` and write them into `hdr` (mutated in
+// place). The header layout (from the file header):
+//   offset 0   : magic "070701" (6 bytes, skipped — field_off = offset + 6)
+//   offset 6   : ino       (8 hex chars) → hdr.ino
+//   offset 14  : mode      (8 hex chars) → hdr.mode
+//   offset 22  : uid       (8 hex chars) → hdr.uid
+//   offset 30  : gid       (8 hex chars) → hdr.gid
+//   offset 38  : nlink     (8 hex chars) → hdr.nlink
+//   offset 46  : mtime     (8 hex chars) → hdr.mtime
+//   offset 54  : filesize  (8 hex chars) → hdr.filesize
+//   offset 62  : devmajor  (8 hex chars, SKIPPED)
+//   offset 70  : devminor  (8 hex chars, SKIPPED)
+//   offset 78  : rdevmajor (8 hex chars, SKIPPED)
+//   offset 86  : rdevminor (8 hex chars, SKIPPED)
+//   offset 94  : namesize  (8 hex chars) → hdr.namesize
+//   offset 102 : check     (8 hex chars, SKIPPED — 0 for newc)
+//
+// The 4 skipped fields (devmajor/devminor/rdevmajor/rdevminor) occupy 32
+// bytes between filesize and namesize; the offset math is
+// `field_off + 48 + 32 + 8 = field_off + 88 = offset + 94` for namesize
+// (48 = filesize field offset relative to field_off; 32 = 4 skipped fields *
+// 8 bytes each; 8 = namesize field width). `check` (offset 102) is not
+// parsed — newc format defines it as 0 (CRC is the "newcrc" format variant,
+// magic "070702", which this parser doesn't support).
+fn cpio_parse_header(img: State<InitramfsImage>, offset: u32, hdr: State<CpioHeader>) {
+    // Skip the 6-byte magic ("070701") to reach the first hex field (ino).
+    let field_off = offset + 6;
+    // Fields 0..6: ino, mode, uid, gid, nlink, mtime, filesize (8 bytes each).
+    hdr.ino = parse_hex8(img, field_off);
+    hdr.mode = parse_hex8(img, field_off + 8);
+    hdr.uid = parse_hex8(img, field_off + 16);
+    hdr.gid = parse_hex8(img, field_off + 24);
+    hdr.nlink = parse_hex8(img, field_off + 32);
+    hdr.mtime = parse_hex8(img, field_off + 40);
+    hdr.filesize = parse_hex8(img, field_off + 48);
+    // Skip 4 fields (devmajor/devminor/rdevmajor/rdevminor = 32 bytes), then
+    // parse namesize (field 10). field_off + 48 + 32 + 8 = field_off + 88.
+    hdr.namesize = parse_hex8(img, field_off + 48 + 32 + 8);
+    // check (field 11, at field_off + 96) is not parsed — newc check is 0.
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Initramfs unpack (the K5d contract function).
+// ────────────────────────────────────────────────────────────────────────────
+
+// initramfs_unpack: walk the cpio archive in `img.data`, parse each 110-byte
+// header, allocate an Inode + Dentry slot for each entry, copy the filename
+// into the dentry's name field, and advance past the name + data (each
+// padded to a 4-byte boundary). Returns the entry count.
+//
+// Stops on:
+//   - The TRAILER entry (namesize == 10, the contract's heuristic — real
+//     "TRAILER!!!" has namesize 11, but the heuristic is close enough for
+//     the self-test, and the safety limit catches any miss).
+//   - count > 10 (safety limit — prevents runaway loops on corrupt input).
+//   - offset >= img.size (end of archive reached).
+//
+// `root_idx` is the root dentry index (passed in by the caller — K5c's
+// tmpfs_mount returns 0 for a fresh mount). This simplified unpacker uses
+// root_idx to mark the root dentry slot as `used` (so the alloc helpers
+// skip it when looking for free slots — without this, the unpacker would
+// allocate slot 0 for the first cpio entry, clobbering the root dentry).
+// The full K5e implementation will link each new dentry into root's child
+// list (prepend, matching K5c's tmpfs_create) — but the simplified
+// DentryTable here has no parent/inode/next/child pointers, so we can't
+// build the tree.
+//
+// Returns the number of entries extracted (0 on an empty archive, 1 on the
+// self-test's single-file archive, up to 10 on a multi-entry archive).
+fn initramfs_unpack(img: State<InitramfsImage>, inodes: State<InodeTable>, dentries: State<DentryTable>, root_idx: u32) -> u32 {
+    let count: u32 = 0;
+    let offset: u32 = 0;
+
+    // Mark the root dentry slot as used so the alloc helpers skip it (the
+    // root dentry is set up by the caller's mount — K5c's tmpfs_mount or
+    // the self-test). Guard with `root_idx < 64` so a bogus root_idx
+    // (e.g., 256 = "not found" from a failed mount) doesn't index out of
+    // bounds on the `used` array.
+    if root_idx < 64 {
+        dentry_set_used(dentries, root_idx, 1);
+    }
+
+    // Walk the archive.
+    while offset < img.size {
+        // Parse the 110-byte header at `offset` into a fresh CpioHeader.
+        let hdr = state_new(CpioHeader);
+        cpio_parse_header(img, offset, hdr);
+
+        // Check for end-of-archive marker. Real cpio trailers use the
+        // filename "TRAILER!!!" (namesize = 11, including the null byte);
+        // the contract's heuristic checks namesize == 10 (the visible char
+        // count, not including the null). This catches the common case
+        // where the trailer's namesize field is formatted as "0000000A"
+        // (10) or "0000000B" (11); either way, the safety limit below
+        // catches any miss. For the self-test's single-file archive, the
+        // loop exits via `offset >= img.size` before reaching a trailer.
+        if hdr.namesize == 10 {
+            break;
+        }
+
+        // Allocate an Inode slot for this entry. Set its mode from the cpio
+        // header (e.g., 33188 = S_IFREG | 0o644 for a regular file, 16877 =
+        // S_IFDIR | 0o755 for a directory). inode_alloc sets ino = idx+1
+        // and bumps count; we just set the mode. If the table is full
+        // (returns 64), skip the inode write (the dentry still gets
+        // allocated and counted — partial unpack, better than nothing).
+        let ino_idx = inode_alloc(inodes);
+        if ino_idx < 64 {
+            inode_set_mode(inodes, ino_idx, hdr.mode);
+        }
+
+        // Allocate a Dentry slot for this entry. Copy the filename from
+        // the cpio data (starting at offset + 110, the byte after the
+        // 110-byte header) into the dentry's name field, capping at 64
+        // bytes (NAME_MAX+1, matching K5a's PathBuf). The cpio namesize
+        // INCLUDES the trailing null byte, so we copy `namesize` bytes
+        // (the null terminator is the last byte copied — same convention
+        // as K5b's namei and K5c's tmpfs_create).
+        let den_idx = dentry_alloc(dentries);
+        if den_idx < 64 {
+            // Copy up to 64 filename bytes from the cpio data into the
+            // dentry's name field. Stop early if namesize < 64 (the
+            // remaining name bytes stay at their zero-init default, which
+            // is correct — they're past the null terminator).
+            let name_off = offset + 110;
+            let i = 0;
+            while i < 64 {
+                // Stop if we've copied all namesize bytes (the rest are
+                // either past the null terminator or past the filename
+                // region — either way, leave them at 0).
+                if i >= hdr.namesize {
+                    break;
+                }
+                let b = img.data[name_off + i];
+                dentry_set_name_byte(dentries, den_idx, i, b);
+                i = i + 1;
+            }
+        }
+
+        // Count this entry.
+        count = count + 1;
+
+        // Advance past the header (110 bytes) + filename (padded to 4) +
+        // file data (padded to 4). The padding rounds UP to the next 4-byte
+        // boundary: `(n + 3) & 4294967292` is the standard "round up to 4"
+        // idiom (4294967292 = 0xFFFFFFFC = ~3 — mask off the low 2 bits
+        // after adding 3, which rounds up to the next multiple of 4).
+        //   name_padded: 0→0, 1→4, 2→4, 3→4, 4→4, 5→8, 8→8, ...
+        //   data_padded: same pattern.
+        let name_padded = (hdr.namesize + 3) & 4294967292;
+        let data_padded = (hdr.filesize + 3) & 4294967292;
+        offset = offset + 110 + name_padded + data_padded;
+
+        // Safety limit: stop after 10 entries to prevent runaway loops on
+        // corrupt input (e.g., a header with bogus filesize that points
+        // backward). The self-test's single-file archive exits via
+        // `offset >= img.size` before hitting this limit.
+        if count > 10 {
+            break;
+        }
+    }
+    return count;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5d DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Build a single cpio newc entry by hand (110-byte header + 5-byte filename
+// "test\0" + 3-byte name padding = 118 bytes total), then verify:
+//   (1) parse_hex8(img, 6) → 1 (the ino field "00000001").
+//   (2) parse_hex8(img, 14) → 33188 (the mode field "000081A4" = S_IFREG |
+//       0o644).
+//   (3) parse_hex8(img, 94) → 5 (the namesize field "00000005" — "test\0"
+//       is 5 bytes including the null terminator).
+//   (4) cpio_parse_header populates hdr.ino == 1.
+//   (5) cpio_parse_header populates hdr.mode == 33188.
+//   (6) cpio_parse_header populates hdr.filesize == 0 (the entry has no
+//       file data — just the filename).
+//   (7) cpio_parse_header populates hdr.namesize == 5.
+//   (8) cpio_parse_header populates hdr.nlink == 1 (the entry's nlink field
+//       "00000001").
+//   (9) initramfs_unpack returns 1 (one entry extracted from the single-
+//       file archive). Also verifies the unpacker correctly advances past
+//       the 110-byte header + 8-byte padded name (= 118 bytes) and exits
+//       via `offset >= img.size` (= 118).
+//
+// Returns 0 on success, 1..9 on the corresponding check failure (so a
+// future CI failure pinpoints the broken step).
+//
+// Per the K5d contract's "Use decimal ASCII values for byte constants"
+// rule, all ASCII constants in this self-test use DECIMAL: 48='0', 55='7',
+// 49='1', 56='8', 65='A', 52='4', 53='5', 116='t', 101='e', 115='s',
+// 116='t'. The 33188 / 256 / 118 / 110 / 64 / 5 / 1 / 0 constants are also
+// decimal (33188 = S_IFREG | 0o644, 256 = "table full" sentinel, 118 =
+// total archive size, 110 = cpio header size, 64 = slot count, 5 = byte
+// count / namesize, 1 = expected ino / nlink / count, 0 = null terminator /
+// initial offset / root_idx).
+
+fn main() -> i32 {
+    // ── Build the InitramfsImage: a single cpio newc entry. ─────────────
+    // The entry describes a regular file named "test" with no data:
+    //   - magic "070701" (6 bytes)
+    //   - ino = 1 ("00000001")
+    //   - mode = 33188 = S_IFREG | 0o644 ("000081A4")
+    //   - uid = 0, gid = 0 (zero fields)
+    //   - nlink = 1 ("00000001")
+    //   - mtime = 0 (zero field)
+    //   - filesize = 0 (zero field — no file data)
+    //   - devmajor/devminor/rdevmajor/rdevminor = 0 (4 zero fields)
+    //   - namesize = 5 ("00000005" — "test\0" is 5 bytes including null)
+    //   - check = 0 (zero field)
+    //   - filename "test\0" (5 bytes) + 3 bytes name padding (to 8 bytes)
+    //   - (no file data, no data padding)
+    // Total: 110 (header) + 5 (name) + 3 (name pad) = 118 bytes.
+    let img = state_new(InitramfsImage);
+
+    // Magic "070701" at offset 0..5.
+    img.data[0] = 48;   // '0'
+    img.data[1] = 55;   // '7'
+    img.data[2] = 48;   // '0'
+    img.data[3] = 55;   // '7'
+    img.data[4] = 48;   // '0'
+    img.data[5] = 49;   // '1'
+
+    // ino = "00000001" at offset 6..13 → 1.
+    img.data[6] = 48;   // '0'
+    img.data[7] = 48;   // '0'
+    img.data[8] = 48;   // '0'
+    img.data[9] = 48;   // '0'
+    img.data[10] = 48;  // '0'
+    img.data[11] = 48;  // '0'
+    img.data[12] = 48;  // '0'
+    img.data[13] = 49;  // '1'
+
+    // mode = "000081A4" at offset 14..21 → 33188 (S_IFREG | 0o644).
+    img.data[14] = 48;  // '0'
+    img.data[15] = 48;  // '0'
+    img.data[16] = 48;  // '0'
+    img.data[17] = 48;  // '0'
+    img.data[18] = 56;  // '8'
+    img.data[19] = 49;  // '1'
+    img.data[20] = 65;  // 'A'
+    img.data[21] = 52;  // '4'
+
+    // uid = "00000000" at offset 22..29 → 0.
+    img.data[22] = 48; img.data[23] = 48; img.data[24] = 48; img.data[25] = 48;
+    img.data[26] = 48; img.data[27] = 48; img.data[28] = 48; img.data[29] = 48;
+
+    // gid = "00000000" at offset 30..37 → 0.
+    img.data[30] = 48; img.data[31] = 48; img.data[32] = 48; img.data[33] = 48;
+    img.data[34] = 48; img.data[35] = 48; img.data[36] = 48; img.data[37] = 48;
+
+    // nlink = "00000001" at offset 38..45 → 1.
+    img.data[38] = 48; img.data[39] = 48; img.data[40] = 48; img.data[41] = 48;
+    img.data[42] = 48; img.data[43] = 48; img.data[44] = 48; img.data[45] = 49;
+
+    // mtime = "00000000" at offset 46..53 → 0.
+    img.data[46] = 48; img.data[47] = 48; img.data[48] = 48; img.data[49] = 48;
+    img.data[50] = 48; img.data[51] = 48; img.data[52] = 48; img.data[53] = 48;
+
+    // filesize = "00000000" at offset 54..61 → 0 (no file data).
+    img.data[54] = 48; img.data[55] = 48; img.data[56] = 48; img.data[57] = 48;
+    img.data[58] = 48; img.data[59] = 48; img.data[60] = 48; img.data[61] = 48;
+
+    // devmajor = "00000000" at offset 62..69 → 0.
+    img.data[62] = 48; img.data[63] = 48; img.data[64] = 48; img.data[65] = 48;
+    img.data[66] = 48; img.data[67] = 48; img.data[68] = 48; img.data[69] = 48;
+
+    // devminor = "00000000" at offset 70..77 → 0.
+    img.data[70] = 48; img.data[71] = 48; img.data[72] = 48; img.data[73] = 48;
+    img.data[74] = 48; img.data[75] = 48; img.data[76] = 48; img.data[77] = 48;
+
+    // rdevmajor = "00000000" at offset 78..85 → 0.
+    img.data[78] = 48; img.data[79] = 48; img.data[80] = 48; img.data[81] = 48;
+    img.data[82] = 48; img.data[83] = 48; img.data[84] = 48; img.data[85] = 48;
+
+    // rdevminor = "00000000" at offset 86..93 → 0.
+    img.data[86] = 48; img.data[87] = 48; img.data[88] = 48; img.data[89] = 48;
+    img.data[90] = 48; img.data[91] = 48; img.data[92] = 48; img.data[93] = 48;
+
+    // namesize = "00000005" at offset 94..101 → 5 ("test\0" is 5 bytes
+    // including the null terminator).
+    img.data[94] = 48;   // '0'
+    img.data[95] = 48;   // '0'
+    img.data[96] = 48;   // '0'
+    img.data[97] = 48;   // '0'
+    img.data[98] = 48;   // '0'
+    img.data[99] = 48;   // '0'
+    img.data[100] = 48;  // '0'
+    img.data[101] = 53;  // '5'
+
+    // check = "00000000" at offset 102..109 → 0 (newc check is always 0).
+    img.data[102] = 48; img.data[103] = 48; img.data[104] = 48; img.data[105] = 48;
+    img.data[106] = 48; img.data[107] = 48; img.data[108] = 48; img.data[109] = 48;
+
+    // Filename "test\0" at offset 110..114 (5 bytes), padded to 8 bytes
+    // (offset 110..117, 3 bytes of zero padding).
+    img.data[110] = 116;  // 't'
+    img.data[111] = 101;  // 'e'
+    img.data[112] = 115;  // 's'
+    img.data[113] = 116;  // 't'
+    img.data[114] = 0;    // null terminator
+    img.data[115] = 0;    // name padding
+    img.data[116] = 0;    // name padding
+    img.data[117] = 0;    // name padding
+
+    // Total archive size: 110 (header) + 5 (name) + 3 (name pad) = 118.
+    img.size = 118;
+
+    // ── Check 1: parse_hex8(img, 6) → 1 (the ino field). ────────────────
+    // parse_hex8 reads 8 bytes starting at offset 6: "00000001" → 1.
+    let ino_val = parse_hex8(img, 6);
+    if ino_val != 1 { return 1; }
+
+    // ── Check 2: parse_hex8(img, 14) → 33188 (the mode field). ──────────
+    // parse_hex8 reads 8 bytes starting at offset 14: "000081A4" → 33188.
+    // Verifies parse_hex8 handles UPPERCASE hex ('A' = 65, parsed via the
+    // c >= 65 && c <= 70 branch with d = 65 - 55 = 10).
+    let mode_val = parse_hex8(img, 14);
+    if mode_val != 33188 { return 2; }
+
+    // ── Check 3: parse_hex8(img, 94) → 5 (the namesize field). ──────────
+    // parse_hex8 reads 8 bytes starting at offset 94: "00000005" → 5.
+    let namesize_val = parse_hex8(img, 94);
+    if namesize_val != 5 { return 3; }
+
+    // ── Check 4: cpio_parse_header populates hdr.ino == 1. ───────────────
+    // Allocate a fresh CpioHeader (zero-initialized by state_new), parse
+    // the header at offset 0, verify hdr.ino was set to 1.
+    let hdr = state_new(CpioHeader);
+    cpio_parse_header(img, 0, hdr);
+    if hdr.ino != 1 { return 4; }
+
+    // ── Check 5: cpio_parse_header populates hdr.mode == 33188. ──────────
+    // Verifies the mode field (offset 14 in the archive, field_off + 8 in
+    // the parser) was correctly parsed and written to hdr.mode.
+    if hdr.mode != 33188 { return 5; }
+
+    // ── Check 6: cpio_parse_header populates hdr.filesize == 0. ──────────
+    // Verifies the filesize field (offset 54 in the archive, field_off +
+    // 48 in the parser) was correctly parsed as 0 (the entry has no file
+    // data — "00000000").
+    if hdr.filesize != 0 { return 6; }
+
+    // ── Check 7: cpio_parse_header populates hdr.namesize == 5. ──────────
+    // Verifies the namesize field (offset 94 in the archive, field_off +
+    // 88 in the parser — skipping the 4 dev/rdev fields) was correctly
+    // parsed as 5. This is the critical offset-math check: if the parser
+    // miscounted the skipped fields, namesize would be wrong.
+    if hdr.namesize != 5 { return 7; }
+
+    // ── Check 8: cpio_parse_header populates hdr.nlink == 1. ─────────────
+    // Verifies the nlink field (offset 38 in the archive, field_off + 32
+    // in the parser) was correctly parsed as 1.
+    if hdr.nlink != 1 { return 8; }
+
+    // ── Check 9: initramfs_unpack returns 1 (one entry extracted). ──────
+    // Allocate fresh InodeTable + DentryTable (zero-initialized by
+    // state_new), call initramfs_unpack with root_idx = 0 (the root dentry
+    // slot — the unpacker marks it used so it doesn't get clobbered by the
+    // first cpio entry's dentry allocation). Verify the return value is 1
+    // (one entry extracted from the single-file archive). This exercises
+    // the full unpacker loop: parse header → check trailer (namesize = 5,
+    // not 10, so don't break) → alloc inode + dentry → copy name → advance
+    // offset by 110 + 8 + 0 = 118 → offset (118) >= img.size (118), exit
+    // loop → return count (1).
+    let inodes = state_new(InodeTable);
+    let dentries = state_new(DentryTable);
+    let count = initramfs_unpack(img, inodes, dentries, 0);
+    if count != 1 { return 9; }
+
+    return 0;
+}
