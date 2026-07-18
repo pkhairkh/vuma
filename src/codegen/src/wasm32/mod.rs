@@ -2800,12 +2800,14 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.vreg_types.get(id).copied().unwrap_or(match to_ty {
                         Some(IRType::F32) => WasmType::F32,
                         Some(IRType::F64) => WasmType::F64,
+                        Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
                         _ => dst_ty_default,
                     })
                 }
                 _ => match to_ty {
                     Some(IRType::F32) => WasmType::F32,
                     Some(IRType::F64) => WasmType::F64,
+                    Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
                     _ => dst_ty_default,
                 },
             };
