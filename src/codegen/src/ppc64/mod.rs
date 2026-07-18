@@ -3488,6 +3488,8 @@ impl Backend for PPC64Backend {
                                 //    (equivalent to adding 2^63 as unsigned)
                                 code.extend(ss_load_imm(Gpr::R5, 0x8000_0000_0000_0000u64 as i64));
                                 code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
+                                // Store the corrected result back to dst slot
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToFloat => {
                                 // Direction is determined by `from_ty` / `to_ty`.
