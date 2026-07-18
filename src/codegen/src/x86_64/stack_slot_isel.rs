@@ -802,7 +802,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             | BinOpKind::SGt | BinOpKind::UGt
                             | BinOpKind::SGe | BinOpKind::UGe
                             | BinOpKind::Eq | BinOpKind::Ne => {
-                                let cc = binop_cmp_to_cc(op);
+                                // G7: remap signed cc to unsigned for FP (UCOMISD sets CF/ZF/PF, not SF/OF)
+                                let cc = match op {
+                                    BinOpKind::SLt | BinOpKind::ULt => Cc::Below,
+                                    BinOpKind::SLe | BinOpKind::ULe => Cc::BelowEqual,
+                                    BinOpKind::SGt | BinOpKind::UGt => Cc::Above,
+                                    BinOpKind::SGe | BinOpKind::UGe => Cc::AboveEqual,
+                                    BinOpKind::Eq => Cc::Equal,
+                                    BinOpKind::Ne => Cc::NotEqual,
+                                    _ => Cc::Equal,
+                                };
                                 if is_f64 {
                                     code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                 } else {
@@ -1091,6 +1100,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let cc = cmp_kind_to_cc(kind);
+                    // G7: for FP comparisons (UCOMISD/UCOMISS), remap signed
+                    // condition codes to unsigned — UCOMISD sets CF/ZF/PF only,
+                    // not SF/OF, so SETL/SETLE/SETG/SETGE are undefined.
+                    let cc_fp = match kind {
+                        crate::ir::CmpKind::SLt | crate::ir::CmpKind::ULt => Cc::Below,
+                        crate::ir::CmpKind::SLe | crate::ir::CmpKind::ULe => Cc::BelowEqual,
+                        crate::ir::CmpKind::SGt | crate::ir::CmpKind::UGt => Cc::Above,
+                        crate::ir::CmpKind::SGe | crate::ir::CmpKind::UGe => Cc::AboveEqual,
+                        crate::ir::CmpKind::Eq => Cc::Equal,
+                        crate::ir::CmpKind::Ne => Cc::NotEqual,
+                    };
 
                     // ── FP comparison dispatch ──
                     // For F32/F64 operands (declared via `ty` OR recovered
@@ -1140,7 +1160,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             crate::ir::CmpKind::Eq
                             | crate::ir::CmpKind::SLt | crate::ir::CmpKind::ULt
                             | crate::ir::CmpKind::SLe | crate::ir::CmpKind::ULe => {
-                                code.extend(encode_setcc(cc, Gpr::Rax));
+                                code.extend(encode_setcc(cc_fp, Gpr::Rax));
                                 code.extend(encode_setcc(Cc::NotParity, Gpr::Rcx));
                                 code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rcx));
                             }
@@ -1148,7 +1168,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             // compares are sign-agnostic; the signed/unsigned
                             // distinction is meaningless on bit patterns).
                             _ => {
-                                code.extend(encode_setcc(cc, Gpr::Rax));
+                                code.extend(encode_setcc(cc_fp, Gpr::Rax));
                             }
                         }
                         code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));

@@ -40,6 +40,7 @@ fn build_sha256d_like_scg() -> Scg {
         params: vec![],
         results: vec![ScgType::U32],
         body: main_body,
+        var_types: std::collections::HashMap::new(),
     }));
 
     // Compression function
@@ -64,6 +65,7 @@ fn build_sha256d_like_scg() -> Scg {
         ],
         results: vec![ScgType::U32],
         body: compress_body,
+        var_types: std::collections::HashMap::new(),
     }));
 
     Scg { nodes }

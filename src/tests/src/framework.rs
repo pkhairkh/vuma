@@ -851,6 +851,7 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> CodegenScg 
                 params,
                 results,
                 body,
+                var_types: std::collections::HashMap::new(),
             }));
         }
     }

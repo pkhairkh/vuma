@@ -127,6 +127,10 @@ pub struct ScgFunction {
     pub results: Vec<ScgType>,
     /// Body — a list of SCG statements.
     pub body: Vec<ScgStatement>,
+    /// G7: Variable type map (temp name -> declared type).  Populated by
+    /// `bridge_ast_to_codegen_scg` from let-binding type annotations.
+    /// Used by the IRBuilder to propagate F32/F64 types to BinOp/Cmp.
+    pub var_types: std::collections::HashMap<String, ScgType>,
 }
 
 /// An SCG function parameter.
@@ -729,6 +733,8 @@ pub struct IRBuilder {
     /// shift on a 32-bit value with garbage in the upper bits corrupts
     /// the result.
     vreg_types: std::collections::HashMap<u32, crate::ir::IRType>,
+    /// G7: current function's variable type map (temp name -> ScgType).
+    fn_var_types: std::collections::HashMap<String, ScgType>,
     /// Wave 8a: Set of variable names in the current function that are
     /// state-typed (i.e. produced by `let p = state_new(Layout)`). These
     /// are routed to the program-wide single buffer (`___pmt_buffer`)
@@ -768,6 +774,7 @@ impl IRBuilder {
             param_count: 0,
             current_return_type: None,
             vreg_types: std::collections::HashMap::new(),
+            fn_var_types: std::collections::HashMap::new(),
             state_vars: std::collections::HashSet::new(),
             pmt_buffer_vreg: None,
             next_state_offset: 0,
@@ -818,6 +825,8 @@ impl IRBuilder {
     fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
         self.param_types.clear();
         self.vreg_types.clear();
+        self.fn_var_types.clear();
+        self.fn_var_types.extend(func.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
         // Count the number of Load statements in this function's body.
         // Used by lower_access to decide whether to infer load width from
         // the function's return type (safe only for single-load functions
@@ -3450,14 +3459,20 @@ impl IRBuilder {
         let op_ty = lhs_val.as_register()
             .and_then(|id| self.vreg_types.get(&id).cloned())
             .or_else(|| {
-                // Fall back to checking if reassigns variable has a known type
-                // via param_types (for variables declared with type annotations)
                 if let Some(ref name) = comp.reassigns {
                     self.param_types.get(name).cloned()
                 } else {
                     None
                 }
-            });
+            })
+            .or_else(|| {
+                eprintln!("DEBUG G7: comp.dst={} fn_var_types={:?}", comp.dst, self.fn_var_types.keys().collect::<Vec<_>>());
+                // G7: look up the dst temp name in the function's var_types
+                // (populated from let-binding type annotations like `let a: f64`).
+                self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
+            })
+            .or_else(|| self.expr_ir_type(&comp.lhs))
+            .or_else(|| self.expr_ir_type(&comp.rhs));
         // Record the dst vreg's type so downstream operations can use it
         if let Some(ref ty) = op_ty {
             self.vreg_types.insert(dst_vreg, ty.clone());
@@ -3550,37 +3565,39 @@ impl IRBuilder {
         let dst = IRValue::Register(dst_vreg);
 
         match comp.op {
-            BinOpKind::Add => {
-                ir_func.current_block().push(IRInstruction::Add {
-                    dst,
-                    lhs: lhs_val,
-                    rhs: rhs_val,
-                    ty: None,
-                });
-            }
-            BinOpKind::Sub => {
-                ir_func.current_block().push(IRInstruction::Sub {
-                    dst,
-                    lhs: lhs_val,
-                    rhs: rhs_val,
-                    ty: None,
-                });
-            }
-            BinOpKind::Mul => {
-                ir_func.current_block().push(IRInstruction::Mul {
-                    dst,
-                    lhs: lhs_val,
-                    rhs: rhs_val,
-                    ty: None,
-                });
-            }
-            BinOpKind::SDiv | BinOpKind::UDiv => {
-                ir_func.current_block().push(IRInstruction::Div {
-                    dst,
-                    lhs: lhs_val,
-                    rhs: rhs_val,
-                    ty: None,
-                });
+            BinOpKind::Add
+            | BinOpKind::Sub
+            | BinOpKind::Mul
+            | BinOpKind::SDiv
+            | BinOpKind::UDiv => {
+                // G7: route FP arithmetic to IRInstr::BinOp (which has FP
+                // dispatch in all backends).  The typed Add/Sub/Mul/Div
+                // instructions are integer-only and ignore `ty`.
+                if matches!(op_ty, Some(IRType::F32) | Some(IRType::F64)) {
+                    ir_func.current_block().push(IRInstruction::BinOp {
+                        op: comp.op,
+                        dst,
+                        lhs: lhs_val,
+                        rhs: rhs_val,
+                        ty: op_ty.clone(),
+                    });
+                } else {
+                    match comp.op {
+                        BinOpKind::Add => {
+                            ir_func.current_block().push(IRInstruction::Add { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                        }
+                        BinOpKind::Sub => {
+                            ir_func.current_block().push(IRInstruction::Sub { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                        }
+                        BinOpKind::Mul => {
+                            ir_func.current_block().push(IRInstruction::Mul { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                        }
+                        BinOpKind::SDiv | BinOpKind::UDiv => {
+                            ir_func.current_block().push(IRInstruction::Div { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                        }
+                        _ => unreachable!(),
+                    }
+                }
             }
             // Comparison operations → dedicated Cmp instruction.
             BinOpKind::SLt => {
@@ -4242,7 +4259,8 @@ impl IRBuilder {
                 ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
                 // Determine type from lhs for shift width inference
                 let inline_op_ty = lhs_val.as_register()
-                    .and_then(|id| self.vreg_types.get(&id).cloned());
+                    .and_then(|id| self.vreg_types.get(&id).cloned())
+                    .or_else(|| self.expr_ir_type(lhs));
                 if let Some(ref ty) = inline_op_ty {
                     self.vreg_types.insert(dst_vreg, ty.clone());
                 }
@@ -4717,6 +4735,16 @@ impl IRBuilder {
         }
 
         (defs, uses)
+    }
+
+    /// G7: Derive the IR type of an ScgExpr.  Used to propagate F32/F64
+    /// type info to BinOp/Cmp when the lhs is an immediate (float literal).
+    fn expr_ir_type(&self, expr: &ScgExpr) -> Option<IRType> {
+        match expr {
+            ScgExpr::Float(_) => Some(IRType::F64),
+            ScgExpr::BinOp { lhs, .. } => self.expr_ir_type(lhs),
+            _ => None,
+        }
     }
 
     /// Collect variable uses from an expression.

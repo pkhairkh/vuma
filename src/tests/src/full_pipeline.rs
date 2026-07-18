@@ -399,6 +399,7 @@ fn test_full_pipeline_compile_to_elf() {
                 // Return the computed value
                 ScgStatement::Return(vec![ScgExpr::Var("value".to_string())]),
             ],
+            var_types: std::collections::HashMap::new(),
         })],
     };
 
