@@ -3589,7 +3589,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::SLe => {
@@ -3598,7 +3598,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::SGt => {
@@ -3607,7 +3607,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::SGe => {
@@ -3616,7 +3616,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::ULt => {
@@ -3625,7 +3625,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::ULe => {
@@ -3634,7 +3634,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::UGt => {
@@ -3643,7 +3643,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::UGe => {
@@ -3652,7 +3652,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::Eq => {
@@ -3661,7 +3661,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             BinOpKind::Ne => {
@@ -3670,7 +3670,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: None,
+                    ty: op_ty.clone(),
                 });
             }
             _ => {
@@ -4264,7 +4264,7 @@ impl IRBuilder {
                             dst: IRValue::Register(dst_vreg),
                             lhs: lhs_val,
                             rhs: rhs_val,
-                            ty: None,
+                            ty: inline_op_ty.clone(),
                         });
                     }
                     _ => {
