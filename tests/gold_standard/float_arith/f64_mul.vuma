@@ -1,0 +1,10 @@
+// f64_mul — f64 multiplication: 4.0 * 2.5 = 10.0 -> floattoint = 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    a: f64 = 4.0;
+    b: f64 = 2.5;
+    prod: f64 = a * b;
+    result: i64 = floattoint(prod);
+    return result;
+}

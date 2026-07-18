@@ -1,0 +1,14 @@
+// f64_struct_field — store/load a float inside a layout
+// Expected exit code: 99
+
+fn main() -> i32 {
+    layout Cell = { v: u64 }  // store f64 bits in a u64 field
+    c = state_new(Cell);
+    // Store 99.5 as f64 via a pointer cast.
+    ptr = allocate(8);
+    *(ptr) = 99.5;
+    val: f64 = *ptr;
+    free(ptr);
+    result: i64 = floattoint(val);
+    return result;
+}

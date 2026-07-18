@@ -1,0 +1,13 @@
+// f64_div_precision — 1.0 / 3.0 precision check
+// Expected exit code: 0
+//
+// 1.0/3.0 = 0.3333...  floattoint truncates to 0.  Exit 0 confirms
+// the division produced a value in (0, 1) rather than 0 or >= 1.
+
+fn main() -> i32 {
+    a: f64 = 1.0;
+    b: f64 = 3.0;
+    quot: f64 = a / b;
+    result: i64 = floattoint(quot);
+    return result;
+}

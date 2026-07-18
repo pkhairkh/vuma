@@ -1,0 +1,11 @@
+// f64_store_load — store 42.5, load back, -> 42
+// Expected exit code: 42
+
+fn main() -> i32 {
+    ptr = allocate(8);
+    *(ptr) = 42.5;
+    val: f64 = *ptr;
+    free(ptr);
+    result: i64 = floattoint(val);
+    return result;
+}

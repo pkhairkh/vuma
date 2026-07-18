@@ -1,0 +1,10 @@
+// int_to_f64 — inttofloat(7) = 7.0; 7.0 + 3.0 = 10.0 -> 10
+// Expected exit code: 10
+
+fn main() -> i32 {
+    a: f64 = inttofloat(7);
+    b: f64 = 3.0;
+    sum: f64 = a + b;
+    result: i64 = floattoint(sum);
+    return result;
+}
