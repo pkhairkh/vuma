@@ -1,0 +1,348 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/panic/kmsg.vuma
+// VWK Kernel Message Ring Buffer — kmsg / dmesg (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K12b layer of the VWK kernel: the kernel message ring
+// buffer — the in-memory log that captures every kernel-side printk-style
+// message so post-mortem analysis (and the `dmesg` userspace tool) can
+// replay what the kernel said, even after a panic.
+//
+// K12 (the final wave) rounds out the kernel with three modules:
+//   K12a — panic handler (womb/kernel/panic/panic.vuma)
+//   K12b — kmsg ring buffer (this file)
+//   K12c — power management (womb/kernel/power/pm.vuma)
+//
+// ── What K12b provides ──────────────────────────────────────────────────────
+//   kmsg_init(kmsg)                — zero head/tail/count/seq. Called once
+//                                    per KmsgBuf before any kmsg_write.
+//   kmsg_write(kmsg, msg, len)     — append `len` bytes from `msg.data`
+//                                    to the ring buffer. If the buffer is
+//                                    full, the oldest bytes are
+//                                    overwritten (head advances). Bumps
+//                                    seq by 1 per call (one "message"
+//                                    per kmsg_write invocation, even
+//                                    though the call may write multiple
+//                                    bytes — K13+ may switch to per-byte
+//                                    seq tracking for finer granularity).
+//   dmesg(kmsg)                    — drain the entire ring buffer to fd 1
+//                                    (the equivalent of running `dmesg`
+//                                    from userspace). Copies the ring
+//                                    into a linear scratch buffer first
+//                                    (so the write call sees a contiguous
+//                                    range — necessary because the ring
+//                                    may have wrapped).
+//
+// ── Why a ring buffer? ──────────────────────────────────────────────────────
+//   The kernel generates messages continuously (boot, driver probe,
+//   syscall trace, panic) but the buffer is finite. A ring buffer is the
+//   standard solution: when full, new data overwrites the oldest data,
+//   preserving the most-recent N bytes. Linux's printk_ringbuffer uses
+//   the same idea (with per-CPU lockless snapshots + variable-length
+//   records — K13+ may add those features; K12b is the byte-stream
+//   minimum viable ring buffer).
+//
+//   This K12b implementation uses a 256-byte buffer (simplified — Linux's
+//   default is 1MB; the K12b contract explicitly says "simplified: 256
+//   bytes (not 16KB)"). K13+ may grow it to 16KB or 1MB by changing the
+//   `[u8; 256]` field to `[u8; 16384]` (and the `& 255` mask to
+//   `& 16383`).
+//
+// ── Ring buffer semantics ───────────────────────────────────────────────────
+//   - head: index of the OLDEST byte still in the buffer.
+//   - tail: index where the NEXT byte will be written.
+//   - count: number of valid bytes currently in the buffer (0..256).
+//   - seq: number of kmsg_write calls so far (monotonic — never wraps).
+//
+//   kmsg_write appends `len` bytes:
+//     for each byte:
+//       buf[tail] = byte;   tail = (tail + 1) & 255;
+//       if count < 256:  count++;
+//       else:            head = (head + 1) & 255;  // overwrite oldest
+//     seq++;
+//
+//   The `& 255` mask implements the wraparound (256-byte buffer → indices
+//   are mod 256). The mask is bitwise-AND with 255 (2^8 - 1) — same
+//   pattern as K7a's pipe.vuma ring buffer (`pipe.tail = (pipe.tail + 1)
+//   & 255` — see womb/kernel/ipc/pipe.vuma).
+//
+//   dmesg reads `count` bytes starting at `head`, walking the ring:
+//     for i in 0..count:
+//       out[i] = buf[head];
+//       head = (head + 1) & 255;
+//     write(1, out_as_addr, count);
+//
+//   The copy to `out` (a separate KmsgMsg scratch buffer) is necessary
+//   because `write` expects a contiguous byte range — the ring may have
+//   wrapped, so buf[head..head+count] is not necessarily contiguous in
+//   array order. (K13+ may add a two-write dmesg variant that writes
+//   the [head..256) and [0..tail) ranges separately, avoiding the copy.)
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+//   KmsgBuf + KmsgMsg buffers are flat-byte-array layouts held in
+//   `___pmt_buffer`-backed State<T> values; the CALLER allocates them
+//   via `state_new(KmsgBuf)` / `state_new(KmsgMsg)` and passes them by
+//   reference to kmsg_init / kmsg_write / dmesg (init-style API — same
+//   convention as K2a's pmm_init, K4a's pt_init, K7a's pipe_init, etc.).
+//
+//   The `out as Address` cast inside dmesg is a pure-arena-address
+//   extraction (no pointer arithmetic, no heap allocation) — the same
+//   PMT pattern used by console_flush (`c as Address` in
+//   womb/kernel/console.vuma:114) and K12a's panic (`msg as Address` in
+//   womb/kernel/panic/panic.vuma).
+//
+// ── Extern ABI ──────────────────────────────────────────────────────────────
+//   write(fd, buf, count) — sys_write (nr 1). Pre-registered on x86_64
+//     (see build_runtime_syscall_stubs). Used by dmesg only — kmsg_init
+//     and kmsg_write are pure-state operations with no I/O.
+//
+// ── Decimal constants ──────────────────────────────────────────────────────
+//   All literals are decimal. The K12b self-test message "hi\n" is the
+//   3-byte ASCII sequence 104 105 10 ('h' 'i' '\n').
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+//   VUMA has no `import` statement yet (Open Work §7). The `write`
+//   extern is re-declared locally here, byte-identical to the canonical
+//   declaration in womb/kernel/arch/x86_64/trampoline.vuma:53 — same
+//   arg types, same order. A mismatch would silently produce different
+//   ABI at the call site.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/panic/kmsg.vuma \
+//         /tmp/kmsg.bin x86_64 --verify
+//     /tmp/kmsg.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (kmsg_init + 2× kmsg_write of "hi\n" +
+// dmesg all succeed; the 4 self-test checks — count=3 after 1st write,
+// seq=1 after 1st write, count=6 after 2nd write, seq=2 after 2nd
+// write — all pass). dmesg also writes "hi\nhi\n" (6 bytes) to stdout
+// before main returns 0.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// Mirror of womb/kernel/arch/x86_64/trampoline.vuma:53 (write only —
+// kmsg.vuma has no exit, no mmap, no read). Pre-registered on x86_64 —
+// no __ffi_fallback_stub warning emitted.
+
+extern "C" {
+    // sys_write (nr 1): write `count` bytes from `buf` to file descriptor
+    // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three already
+    // match the syscall ABI; the stub is "mov eax,#1; syscall; ret".
+    // Returns the byte count written (or a negative errno on failure).
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// KmsgMsg: 256-byte scratch buffer for kmsg_write input AND dmesg output.
+// The dual use is intentional:
+//   - As INPUT to kmsg_write: caller fills KmsgMsg.data[0..len] with the
+//     message bytes, then calls kmsg_write(kmsg, msg, len).
+//   - As OUTPUT from dmesg: dmesg allocates a fresh KmsgMsg via
+//     state_new(KmsgMsg), copies the ring into it (in head→tail order),
+//     then writes it to fd 1. The `data` field is at offset 0 so that
+//     `out as Address` yields the address of out.data[0] — the natural
+//     argument for `write(1, base, count)`. (Same offset-0-buf pattern
+//     as K1a's Console layout in womb/kernel/console.vuma:55 and K12a's
+//     PanicMsg layout in womb/kernel/panic/panic.vuma.)
+//
+// Declared BEFORE KmsgBuf because kmsg_write's signature references
+// State<KmsgMsg> — VUMA's parser accepts forward layout references in
+// function signatures, but declaring layouts before their first use is
+// the safer convention (consistent with K7a's pipe.vuma + K10b's
+// aes.vuma + K10c's sha.vuma).
+layout KmsgMsg = {
+    data: [u8; 256],  // message bytes (offset 0 — `as Address` yields &data[0])
+}
+
+// KmsgBuf: 256-byte ring buffer + head/tail/count/seq bookkeeping.
+// The simplified K12b contract says 256 bytes (NOT 16KB — the comment
+// in the original contract says "simplified: 256 bytes (not 16KB)" to
+// keep the layout manageable in the arena). K13+ may grow `buf` to
+// 16384 bytes (and switch the `& 255` masks in kmsg_write/dmesg to
+// `& 16383`).
+//
+// Field semantics:
+//   buf:   the 256-byte ring. Indexed by `head` (oldest) and `tail`
+//          (next-write). Indices are mod 256 (via `& 255`).
+//   head:  index of the OLDEST byte still in the buffer. Advanced by
+//          kmsg_write when the buffer is full (overwrite-oldest case).
+//          Read by dmesg as the starting index for the linearized
+//          output copy.
+//   tail:  index where the NEXT byte will be written. Advanced by
+//          kmsg_write on every byte. Read by no one (only written).
+//   count: number of valid bytes currently in the buffer (0..256).
+//          Bounded by 256 — once full, kmsg_write holds count at 256
+//          and advances head instead.
+//   seq:   number of kmsg_write calls. Monotonic — never wraps in
+//          practice (would require 2^64 kmsg_write calls). Used by
+//          K13+ for "show me messages since seq N" incremental dmesg.
+layout KmsgBuf = {
+    buf:   [u8; 256],  // ring buffer (simplified: 256 bytes — K13+ grows to 16KB)
+    head:  u32,        // index of oldest byte (mod 256)
+    tail:  u32,        // index of next-write slot (mod 256)
+    count: u32,        // valid bytes in buffer (0..256)
+    seq:   u64,        // total kmsg_write calls (monotonic)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// kmsg operations.
+// ────────────────────────────────────────────────────────────────────────────
+
+// kmsg_init: zero the ring buffer state. Sets head=0, tail=0, count=0,
+// seq=0. Called once per KmsgBuf before any kmsg_write. The CALLER
+// allocates the KmsgBuf via `state_new(KmsgBuf)` and passes it by
+// reference (init-style API).
+//
+// State<T> params: 1 (kmsg). Pure write — no reads, no helper calls.
+// The 4 field assignments are direct (no byte-packing needed because
+// every field is a primitive u32 or u64).
+//
+// Note: the `buf` field is NOT explicitly zeroed — state_new zero-fills
+// the entire arena slot on allocation (same convention as K7a's
+// pipe_init, K8a's spinlock_init). K12b's self-test only reads buf[i]
+// for i < count, so the stale bytes beyond count are never observed.
+fn kmsg_init(kmsg: State<KmsgBuf>) {
+    kmsg.head = 0;
+    kmsg.tail = 0;
+    kmsg.count = 0;
+    kmsg.seq = 0;
+}
+
+// kmsg_write: append `len` bytes from `msg.data` to the ring buffer.
+//
+//   kmsg: caller-allocated State<KmsgBuf> (modified in place).
+//   msg:  caller-allocated State<KmsgMsg> holding the input bytes
+//         (msg.data[0..len] are the message bytes; len <= 256).
+//   len:  number of bytes to append.
+//
+// Behavior:
+//   for each byte i in 0..len:
+//     buf[tail] = msg.data[i]
+//     tail = (tail + 1) & 255
+//     if count < 256:  count++                    // still room
+//     else:            head = (head + 1) & 255    // overwrite oldest
+//   seq++                                              // one message per call
+//
+// The `& 255` mask implements the ring wraparound (256-byte buffer →
+// indices are mod 256). Same pattern as K7a's pipe.vuma ring buffer
+// (`pipe.tail = (pipe.tail + 1) & 255` — see womb/kernel/ipc/pipe.vuma).
+//
+// State<T> params: 2 (kmsg + msg). One read (msg.data[i]) + one write
+// (kmsg.buf[tail]) per byte — pure state manipulation, no I/O.
+fn kmsg_write(kmsg: State<KmsgBuf>, msg: State<KmsgMsg>, len: u32) {
+    let i = 0;
+    while i < len {
+        kmsg.buf[kmsg.tail] = msg.data[i];
+        kmsg.tail = (kmsg.tail + 1) & 255;
+        if kmsg.count < 256 {
+            kmsg.count = kmsg.count + 1;
+        } else {
+            // Buffer full — overwrite the oldest byte (advance head).
+            kmsg.head = (kmsg.head + 1) & 255;
+        }
+        i = i + 1;
+    }
+    kmsg.seq = kmsg.seq + 1;
+}
+
+// dmesg: drain the entire ring buffer to stdout (fd 1).
+//
+//   kmsg: caller-allocated State<KmsgBuf> (read-only — not modified).
+//
+// Behavior:
+//   if count == 0: return immediately (nothing to print).
+//   Otherwise:
+//     1. Allocate a fresh KmsgMsg scratch buffer via state_new(KmsgMsg).
+//     2. Copy `count` bytes from the ring into the scratch buffer, in
+//        head→tail order (linearizing the possibly-wrapped ring).
+//     3. write(1, scratch_as_addr, count) — emit the linearized bytes.
+//
+// The copy is necessary because `write` expects a contiguous byte range,
+// but the ring may have wrapped (head > tail in array order). The
+// linearization walks i in 0..count, reading buf[(head + i) & 255] —
+// the `& 255` mask handles the wraparound.
+//
+// PMT field access (`kmsg.buf[idx]`, `out.data[i]`) is typed and endian-
+// safe by construction; no `*(addr + i)` pointer arithmetic anywhere.
+// The `out as Address` cast is the same pattern as K1a's console_flush
+// (`c as Address` in womb/kernel/console.vuma:114) — a pure arena-offset
+// extraction.
+//
+// State<T> params: 1 (kmsg). State<T> locals: 1 (out — the scratch
+// buffer). The `write(1, ...)` return value (i64) is discarded (same
+// pattern as shell.vuma:314 calling write without assignment).
+fn dmesg(kmsg: State<KmsgBuf>) {
+    if kmsg.count == 0 { return; }
+
+    // Copy the ring into a linear scratch buffer.
+    let out = state_new(KmsgMsg);
+    let i = 0;
+    let idx = kmsg.head;
+    while i < kmsg.count {
+        out.data[i] = kmsg.buf[idx];
+        idx = (idx + 1) & 255;
+        i = i + 1;
+    }
+
+    // Emit the linearized bytes to stdout.
+    let addr = out as Address;
+    write(1, addr, kmsg.count as i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// Exercises the K12b kmsg API surface end-to-end:
+//   1. kmsg_init(kmsg)              → head=0, tail=0, count=0, seq=0.
+//   2. kmsg_write(kmsg, msg, 3)     → append "hi\n" (3 bytes).
+//      After: count=3, seq=1.
+//   3. kmsg_write(kmsg, msg, 3)     → append "hi\n" again (3 more bytes).
+//      After: count=6, seq=2.
+//   4. dmesg(kmsg)                  → emit "hi\nhi\n" (6 bytes) to stdout.
+//
+// Returns 0 on success, 1..4 on the 4 individual check failures:
+//   1: count != 3 after first kmsg_write
+//   2: seq   != 1 after first kmsg_write
+//   3: count != 6 after second kmsg_write
+//   4: seq   != 2 after second kmsg_write
+//
+// dmesg is called AFTER the 4 checks pass — its stdout output ("hi\nhi\n")
+// is observable but not verified by the self-test's return code (verifying
+// stdout would require capturing fd 1, which needs K9a's socket layer or
+// a fork+pipe dance — out of scope for K12b's hosted self-test).
+fn main() -> i32 {
+    // ── Init ──
+    let kmsg = state_new(KmsgBuf);
+    kmsg_init(kmsg);
+
+    // ── Write a message: "hi\n" (3 bytes) ──
+    // Decimal ASCII: 104 = 'h', 105 = 'i', 10 = '\n'.
+    let msg = state_new(KmsgMsg);
+    msg.data[0] = 104;  // 'h'
+    msg.data[1] = 105;  // 'i'
+    msg.data[2] = 10;   // '\n'
+    kmsg_write(kmsg, msg, 3);
+
+    // After 1st write: 3 bytes in buffer, 1 message logged.
+    if kmsg.count != 3 { return 1; }
+    if kmsg.seq != 1 { return 2; }
+
+    // ── Write another message: "hi\n" again ──
+    kmsg_write(kmsg, msg, 3);
+
+    // After 2nd write: 6 bytes in buffer, 2 messages logged.
+    if kmsg.count != 6 { return 3; }
+    if kmsg.seq != 2 { return 4; }
+
+    // ── dmesg (prints "hi\nhi\n" to stdout — verify no crash) ──
+    dmesg(kmsg);
+
+    return 0;
+}
