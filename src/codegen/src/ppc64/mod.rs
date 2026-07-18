@@ -3473,14 +3473,16 @@ impl Backend for PPC64Backend {
                                 code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
 
                                 // Select: if R6 < 0 (saturated), use R3 (corrected); else R6 (direct)
+                                // Use branch-based select (isel not available on 970fx v2.02)
                                 code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1u32, ra: Gpr::R6, simm: 0 }.encode());
-                                // isel R3, R3, R6, 0: if CR0_LT, R3=R3(corrected); else R3=R6(direct)
-                                let isel_word: u32 = (31u32 << 26)
-                                    | ((Gpr::R3.encoding() as u32) << 21)
-                                    | ((Gpr::R3.encoding() as u32) << 16)
-                                    | ((Gpr::R6.encoding() as u32) << 11)
-                                    | (15u32 << 1);
-                                code.extend_from_slice(&isel_word.to_be_bytes());
+                                // If R6 >= 0 (not saturated), use R6 (direct). Branch over the move.
+                                // blt means "branch if less than" (CR0_LT set = R6 < 0 = saturated)
+                                // So: blt skip → if saturated, skip the "R3 = R6" move
+                                // If NOT saturated (R6 >= 0), fall through to R3 = R6
+                                let blt_word: u32 = (16u32 << 26) | (0u32 << 23) | (12u32 << 21) | (8u32); // blt cr0, +8 (skip 2 instructions)
+                                code.extend_from_slice(&blt_word.to_be_bytes());
+                                code.extend_from_slice(&[0x7c, 0x63, 0x33, 0x78]); // mr r3, r6 (or r3, r6, r6)
+                                // skip:
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::FloatToFloat => {
