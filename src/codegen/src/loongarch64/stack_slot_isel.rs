@@ -1441,8 +1441,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             let src_is_32 = from_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
                             );
+                            // The IR builder (scg_to_ir.rs) emits `uinttofloat`
+                            // with from_ty = Some(I64) regardless of the source
+                            // variable's nominal type -- the cast *semantics*
+                            // are unsigned.  Treat both U64 and I64 as 64-bit
+                            // unsigned sources so the MSB-set correction below
+                            // always applies.
                             let src_is_64 = from_ty.as_ref().is_some_and(|t|
-                                matches!(t, IRType::U64)
+                                matches!(t, IRType::U64 | IRType::I64)
                             );
                             let dst_is_f32 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
 
@@ -1556,7 +1562,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             let dst_is_32 = to_ty.as_ref().is_some_and(|t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
                             );
-                            let dst_is_64 = to_ty.as_ref().is_some_and(|t| matches!(t, IRType::U64));
+                            // The IR builder (scg_to_ir.rs) emits `floattouint`
+                            // with to_ty = Some(I64) -- the cast *semantics*
+                            // are unsigned.  Treat both U64 and I64 destinations
+                            // as 64-bit unsigned so the subtract-2^63-XOR
+                            // correction below is taken.
+                            let dst_is_64 = to_ty.as_ref().is_some_and(|t|
+                                matches!(t, IRType::U64 | IRType::I64)
+                            );
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
