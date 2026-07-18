@@ -12,7 +12,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-COMPILE_DUMP="$REPO_ROOT/target/release/compile_dump"
+COMPILE_DUMP="$REPO_ROOT/target/release-fast/compile_dump"
 GOLD_DIR="$REPO_ROOT/tests/gold_standard"
 # Resolve QEMU user-mode emulators. CI stages /tmp/qemu_bins/qemu-<arch>
 # symlinks via .github/workflows/vuma-tests.yml; on dev machines the
@@ -66,7 +66,7 @@ run_one() {
 
     # Compile
     local compile_out
-    compile_out=$("$COMPILE_DUMP" "$vuma_file" "$out_bin" "$backend" 2>&1)
+    compile_out=$("$COMPILE_DUMP" "$vuma_file" "$out_bin" "$backend" --opt-level=O3 2>&1)
     if [ ! -s "$out_bin" ]; then
         rm -f "$out_bin"
         printf "%s\t%s\t%s\t%s\t%s\n" "$vuma_file" "compile_fail" "-" "$expected" "-"

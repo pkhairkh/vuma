@@ -76,7 +76,7 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
-    compile_for_backend_with_path(source, kind, None, false, OptLevel::O2)
+    compile_for_backend_with_path(source, kind, None, false, OptLevel::O3) // O3 always on
 }
 
 fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool, opt_level: OptLevel) -> Result<(Vec<u8>, Option<String>), String> {
@@ -326,7 +326,7 @@ fn main() {
     // `VerificationLevel::Pmt` and the PMT layout registry is always
     // built (cheap — empty map if no `layout` items).
     let mut verify = false;
-    let mut opt_level = OptLevel::O2;
+    let mut opt_level = OptLevel::O3; // O3 is always on (default since 2026-07)
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
         else if a.starts_with("--opt-level=") {
