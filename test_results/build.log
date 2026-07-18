@@ -1,0 +1,114 @@
+   Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
+   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
+   Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
+   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+   Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
+warning: unused import: `Condition`
+    --> src/codegen/src/backend.rs:2695:60
+     |
+2695 |         use crate::arm64::{Instruction, Register, Operand, Condition};
+     |                                                            ^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
+warning: constant `FP_CMPTUN` is never used
+    --> src/codegen/src/alpha.rs:1594:7
+     |
+1594 | const FP_CMPTUN: u32 = 0x5A4; // compare unordered
+     |       ^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `encode_ld` is never used
+    --> src/codegen/src/s390x.rs:2082:4
+     |
+2082 | fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+     |    ^^^^^^^^^
+
+warning: function `encode_le` is never used
+    --> src/codegen/src/s390x.rs:2092:4
+     |
+2092 | fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+     |    ^^^^^^^^^
+
+warning: constant `FC` is never used
+   --> src/codegen/src/sparc64.rs:415:7
+    |
+415 | const FC: Fpr = Fpr::F4; // FP third scratch / zero register (even for double)
+    |       ^^
+
+warning: constant `FP_FMOVS` is never used
+   --> src/codegen/src/sparc64.rs:571:7
+    |
+571 | const FP_FMOVS: u32 = 0x001; // F32 move
+    |       ^^^^^^^^
+
+warning: constant `FP_FNEGS` is never used
+   --> src/codegen/src/sparc64.rs:572:7
+    |
+572 | const FP_FNEGS: u32 = 0x005; // F32 negate
+    |       ^^^^^^^^
+
+warning: constant `FP_FABSS` is never used
+   --> src/codegen/src/sparc64.rs:573:7
+    |
+573 | const FP_FABSS: u32 = 0x009; // F32 abs
+    |       ^^^^^^^^
+
+warning: constant `FP_FSQRTS` is never used
+   --> src/codegen/src/sparc64.rs:574:7
+    |
+574 | const FP_FSQRTS: u32 = 0x029; // F32 sqrt
+    |       ^^^^^^^^^
+
+warning: constant `FP_FSQRTD` is never used
+   --> src/codegen/src/sparc64.rs:575:7
+    |
+575 | const FP_FSQRTD: u32 = 0x02A; // F64 sqrt
+    |       ^^^^^^^^^
+
+warning: constant `FP_FCMPS` is never used
+   --> src/codegen/src/sparc64.rs:587:7
+    |
+587 | const FP_FCMPS: u32 = 0x051; // F32 compare (FPop2)
+    |       ^^^^^^^^
+
+warning: constant `FP_FCMPD` is never used
+   --> src/codegen/src/sparc64.rs:588:7
+    |
+588 | const FP_FCMPD: u32 = 0x052; // F64 compare (FPop2)
+    |       ^^^^^^^^
+
+warning: constant `FP_FSTOX` is never used
+   --> src/codegen/src/sparc64.rs:590:7
+    |
+590 | const FP_FSTOX: u32 = 0x081; // F32 → i64 (truncate toward zero)
+    |       ^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> src/ive/src/arena_bounds.rs:30:9
+   |
+30 |     let mut results = Vec::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
+warning: `vuma-ive` (lib) generated 1 warning (run `cargo fix --lib -p vuma-ive` to apply 1 suggestion)
+warning: unused import: `StructAccessNode`
+  --> src/pipeline.rs:52:78
+   |
+52 |         Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
+   |                                                                              ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma` (lib) generated 1 warning (run `cargo fix --lib -p vuma` to apply 1 suggestion)
+warning: `vuma-codegen` (lib) generated 13 warnings (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
+    Finished `release-fast` profile [optimized] target(s) in 1m 40s
