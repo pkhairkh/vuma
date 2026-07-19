@@ -1046,8 +1046,13 @@ impl LspServer {
         }
 
         // 3. Add built-in types
+        // Wave 1d: `Channel` is a built-in generic type (like `State`/`Ref`
+        // but recognised by name in the parser rather than via a keyword).
+        // Surfaced here so IDEs offer it alongside u32/i64/etc. when the
+        // user is typing a type annotation.
         for builtin in &["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
-                         "f32", "f64", "bool", "usize", "void", "ptr", "null"] {
+                         "f32", "f64", "bool", "usize", "void", "ptr", "null",
+                         "Channel"] {
             items.push(CompletionItem {
                 label: builtin.to_string(),
                 kind: Some(CompletionItemKind::TypeParameter),
@@ -1201,6 +1206,20 @@ impl LspServer {
             // Zero-width range at the requested position; the LSP
             // client already knows the word extent from the hover
             // request and will highlight it independently.
+            let range = Range::at(line as u32, character as u32);
+            return Ok(build_hover(markdown, range).to_json_value());
+        }
+
+        // Wave 1d: Channel<T> type hover.  `Channel` is a built-in generic
+        // type (not a user-defined struct), so it never appears in
+        // `DocumentInfo::structs`.  Surface its IPC semantics directly so
+        // IDE users understand what `Channel<T>` means without reading the
+        // spec.  The hover fires when the user hovers over the `Channel`
+        // identifier in a type position (e.g. `let ch: Channel<i32>`).
+        if word == "Channel" {
+            let markdown = format!(
+                "```vuma\nChannel<T>\n```\n\nTyped IPC channel for inter-process communication.\n\n                 The element type `T` is the message payload. Channel handles are\n                 pointer-sized opaque capabilities passed in general-purpose\n                 registers under the C ABI (see Wave 1)."
+            );
             let range = Range::at(line as u32, character as u32);
             return Ok(build_hover(markdown, range).to_json_value());
         }
@@ -1925,6 +1944,12 @@ fn format_type(ty: &Type) -> String {
             "f64" => "f64".to_string(), // 64-bit IEEE 754 double-precision
             _ => name.clone(),
         },
+        // Channel<T> — typed IPC channel for inter-process communication
+        // (Wave 1).  Rendered explicitly (rather than falling through to
+        // the catch-all `Display` impl) so the element type is itself run
+        // through `format_type` and picks up the f32/f64 hover enrichment
+        // for FP element types like `Channel<f32>`.
+        Type::Channel(inner) => format!("Channel<{}>", format_type(inner)),
         other => other.to_string(),
     }
 }
@@ -2134,6 +2159,9 @@ mod tests {
         assert!(labels.contains(&"fn"));
         assert!(labels.contains(&"let"));
         assert!(labels.contains(&"struct"));
+        // Wave 1d: `Channel` is surfaced as a built-in type completion so
+        // IDEs suggest it when the user is typing a type annotation.
+        assert!(labels.contains(&"Channel"));
     }
 
     #[test]
@@ -2346,6 +2374,31 @@ mod tests {
         // Regression: existing primitives still render canonically.
         assert_eq!(format_type(&Type::BDBase("u32".to_string())), "u32");
         assert_eq!(format_type(&Type::BDBase("i64".to_string())), "i64");
+    }
+
+    // Wave 1d: Channel<T> type formatting.
+    //
+    // `Channel<T>` is the typed IPC channel added by Wave 1.  The LSP
+    // `format_type` helper renders it as `Channel<inner>` so the hover
+    // tooltip shows the message payload type alongside the channel
+    // wrapper (e.g. `Channel<i32>` for an i32-message channel).  This
+    // test pins the rendering so a future refactor of `format_type`
+    // can't silently regress the Channel<T> display.
+    #[test]
+    fn test_format_type_channel() {
+        // Channel<i32> — the canonical i32-message IPC channel.
+        assert_eq!(
+            format_type(&Type::Channel(Box::new(Type::BDBase("i32".to_string())))),
+            "Channel<i32>"
+        );
+        // Nested Channel<Channel<T>> — verifies the inner type is itself
+        // run through format_type (recursion), not just `Display::to_string`.
+        assert_eq!(
+            format_type(&Type::Channel(Box::new(Type::Channel(
+                Box::new(Type::BDBase("u8".to_string()))
+            )))),
+            "Channel<Channel<u8>>"
+        );
     }
 
     #[test]

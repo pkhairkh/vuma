@@ -3482,6 +3482,20 @@ impl<'src> Parser<'src> {
             });
         }
 
+        // Wave 1b: `Channel<T>` — typed channel endpoint. The `Channel`
+        // keyword is registered in the lexer keyword table (mapped to
+        // `TokenKind::Channel`). We intercept it here, *before* the
+        // BDBase/`expect_name` path, so that `Channel<i32>` is parsed as
+        // `Type::Channel(Box<i32>)` rather than falling through to
+        // `Type::Generic { name: "Channel", ... }`.
+        if self.at(TokenKind::Channel) {
+            self.advance(); // consume 'Channel'
+            self.expect(TokenKind::Lt)?;
+            let inner = self.parse_type()?;
+            self.expect_gt_closing_generic()?;
+            return Ok(Type::Channel(Box::new(inner)));
+        }
+
         // Named type (BDBase) or Generic type: `Name<T, ...>`
         let name = self.expect_name()?;
 

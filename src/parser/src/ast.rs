@@ -1537,6 +1537,10 @@ pub enum Type {
         /// The field name being referenced.
         field: String,
     },
+    /// Wave 1b: `Channel<T>` — a typed channel endpoint carrying values
+    /// of type `T`. Surface syntax: `Channel<i32>`, `Channel<*u8>`, etc.
+    /// The inner type is the message payload type.
+    Channel(Box<Type>),
 }
 
 impl std::fmt::Display for Type {
@@ -1565,6 +1569,7 @@ impl std::fmt::Display for Type {
             Type::BdAnnot { name } => write!(f, "#bd({})", name),
             Type::State(inner) => write!(f, "State<{}>", inner),
             Type::Ref { state, field } => write!(f, "Ref<{}, {}>", state, field),
+            Type::Channel(inner) => write!(f, "Channel<{}>", inner),
         }
     }
 }

@@ -137,6 +137,8 @@ fn compile_program(
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -1241,6 +1243,8 @@ fn compile_example_for_backend(
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     match backend.encode_program(&program) {

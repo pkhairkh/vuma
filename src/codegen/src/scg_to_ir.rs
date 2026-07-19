@@ -84,6 +84,7 @@
 use crate::ir::*;
 use crate::Result;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 /// Convenience alias used throughout this module.
 type IRInstruction = IRInstr;
@@ -169,6 +170,13 @@ pub enum ScgType {
     F32,
     /// IEEE 754 double-precision floating-point.
     F64,
+    /// Wave 1: a typed channel handle `Channel<T>`.  The inner type is the
+    /// message payload type.  Channels are pointer-sized opaque handles
+    /// (4 bytes on 32-bit targets, 8 bytes on 64-bit targets) — the same
+    /// size as `Ptr` — and are passed in general-purpose registers under
+    /// the C ABI.  The inner type is carried for type-checking only; it
+    /// does not affect the runtime layout.
+    Channel(Box<ScgType>),
 }
 
 impl ScgType {
@@ -187,6 +195,59 @@ impl ScgType {
             ScgType::Void => IRType::Void,
             ScgType::F32 => IRType::F32,
             ScgType::F64 => IRType::F64,
+            ScgType::Channel(inner) => IRType::Channel(Box::new(inner.to_ir_type())),
+        }
+    }
+
+    /// Returns the byte size of this type on a 64-bit target (8-byte pointers).
+    ///
+    /// Convenience wrapper around [`ScgType::size_with_ptr_width`] that assumes
+    /// the LP64 model used by ARM64/x86_64.  Mirrors `crate::ir::size_of`.
+    pub fn size(&self) -> usize {
+        self.size_with_ptr_width(8)
+    }
+
+    /// Returns the byte size of this type for a target with the given pointer
+    /// width.
+    ///
+    /// - Integers: their bit-width / 8
+    /// - Floats: 4 (f32) or 8 (f64)
+    /// - `Ptr`: `ptr_width` (4 or 8)
+    /// - `Void`: 0
+    /// - `Channel<T>`: `ptr_width` — channel handles are pointer-sized opaque
+    ///   capabilities.  The inner payload type does not contribute to the
+    ///   runtime size; it is carried only for static type-checking.
+    pub fn size_with_ptr_width(&self, ptr_width: usize) -> usize {
+        match self {
+            ScgType::I8 | ScgType::U8 => 1,
+            ScgType::I16 | ScgType::U16 => 2,
+            ScgType::I32 | ScgType::U32 => 4,
+            ScgType::I64 | ScgType::U64 => 8,
+            ScgType::F32 => 4,
+            ScgType::F64 => 8,
+            ScgType::Ptr => ptr_width,
+            ScgType::Void => 0,
+            ScgType::Channel(_) => ptr_width,
+        }
+    }
+}
+
+impl fmt::Display for ScgType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScgType::I8 => write!(f, "i8"),
+            ScgType::I16 => write!(f, "i16"),
+            ScgType::I32 => write!(f, "i32"),
+            ScgType::I64 => write!(f, "i64"),
+            ScgType::U8 => write!(f, "u8"),
+            ScgType::U16 => write!(f, "u16"),
+            ScgType::U32 => write!(f, "u32"),
+            ScgType::U64 => write!(f, "u64"),
+            ScgType::F32 => write!(f, "f32"),
+            ScgType::F64 => write!(f, "f64"),
+            ScgType::Ptr => write!(f, "ptr"),
+            ScgType::Void => write!(f, "void"),
+            ScgType::Channel(inner) => write!(f, "Channel<{}>", inner),
         }
     }
 }
@@ -6007,6 +6068,58 @@ mod tests {
         assert_eq!(ScgType::U64.to_ir_type(), IRType::U64);
         assert_eq!(ScgType::Ptr.to_ir_type(), IRType::Ptr);
         assert_eq!(ScgType::Void.to_ir_type(), IRType::Void);
+        // Wave 1a: Channel<T> maps to IRType::Channel<T>.
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::I32)).to_ir_type(),
+            IRType::Channel(Box::new(IRType::I32))
+        );
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::Ptr)).to_ir_type(),
+            IRType::Channel(Box::new(IRType::Ptr))
+        );
+    }
+
+    // ── Wave 1a: Channel<T> type-system tests ────────────────────────
+
+    #[test]
+    fn test_scg_type_channel_size() {
+        // Pointer-sized: 8 on 64-bit (default), 4 on 32-bit.
+        assert_eq!(ScgType::Channel(Box::new(ScgType::I32)).size(), 8);
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::I32)).size_with_ptr_width(4),
+            4
+        );
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::I32)).size_with_ptr_width(8),
+            8
+        );
+        // Inner payload type does not affect size.
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::I8)).size(),
+            ScgType::Channel(Box::new(ScgType::I64)).size()
+        );
+        assert_eq!(ScgType::Channel(Box::new(ScgType::I32)).size(), ScgType::Ptr.size());
+    }
+
+    #[test]
+    fn test_scg_type_channel_display() {
+        assert_eq!(
+            format!("{}", ScgType::Channel(Box::new(ScgType::I32))),
+            "Channel<i32>"
+        );
+        assert_eq!(
+            format!("{}", ScgType::Channel(Box::new(ScgType::Ptr))),
+            "Channel<ptr>"
+        );
+        assert_eq!(
+            format!("{}", ScgType::Channel(Box::new(ScgType::F64))),
+            "Channel<f64>"
+        );
+        // Nested channels: Channel<Channel<i32>>.
+        assert_eq!(
+            format!("{}", ScgType::Channel(Box::new(ScgType::Channel(Box::new(ScgType::I32))))),
+            "Channel<Channel<i32>>"
+        );
     }
 
     // ── Test 26: Param types are mapped to IR types ──────────────────

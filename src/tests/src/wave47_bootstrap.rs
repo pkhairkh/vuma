@@ -124,6 +124,8 @@ fn compile_to_elf_x86_64(func: IRFunction) -> Vec<u8> {
         functions: vec![allocated],
         total_code_size: 0,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
     backend
         .encode_program(&program)

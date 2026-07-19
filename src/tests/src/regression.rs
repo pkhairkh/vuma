@@ -91,6 +91,8 @@ fn compile_single(backend: &dyn Backend, func: &IRFunction) -> Vec<u8> {
         functions: vec![allocated],
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
     backend.encode_program(&program).unwrap_or_else(|e| {
         panic!("{}: encode_program failed for {}: {}", backend.name(), func.name, e)
