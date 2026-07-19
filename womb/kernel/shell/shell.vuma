@@ -71,14 +71,21 @@
 // pre-W25S1 dispatch keyed off the first ASCII byte ('e' matched both
 // "echo" and "exit"), causing collisions once more built-ins were added.
 // The new dispatch order is:
-//   (1) "echo" (4 bytes) → call shell_do_echo, return.
-//   (2) "exit" (4 bytes) → set running=0, exit_code=0, return.
-//   (3) "help" (4 bytes) → print help text via string literal, return.
-//   (4) "ls"   (2 bytes) → list files (K7+ stub: prints "(no files)\n").
-//   (5) "cat"  (3 bytes) → show file (K7+ stub: prints "cat: needs K7 fs\n").
-//   (6) "pwd"  (3 bytes) → print working directory (stub: prints "/\n").
-//   (7) "ver"  (3 bytes) → print version (stub: prints "vuma 0.1\n").
-//   (8) otherwise        → print "?\n" (unknown command marker).
+//   (1) "echo"   (4 bytes) → call shell_do_echo, return.
+//   (2) "exit"   (4 bytes) → set running=0, exit_code=0, return.
+//   (3) "help"   (4 bytes) → print help text via string literal, return.
+//   (4) "ls"     (2 bytes) → list files (K7+ stub: prints "(no files)\n").
+//   (5) "cat"    (3 bytes) → show file (K7+ stub: prints "cat: needs K7 fs\n").
+//   (6) "pwd"    (3 bytes) → print working directory (stub: prints "/\n").
+//   (7) "ver"    (3 bytes) → print version (stub: prints "vuma 0.1\n").
+//   (8) "ps"     (2 bytes) → list processes (W25S2 stub: prints a fake
+//                              PID/PPID/STATE table — would call task_dump).
+//   (9) "memstat" (7 bytes) → print memory stats (W25S2 stub: prints fake
+//                              MemTotal/MemFree — would read pmm counters).
+//  (10) "clear"   (5 bytes) → emit ESC[2J ESC[H (clear screen + cursor home).
+//  (11) "true"    (4 bytes) → set exit_code=0, return (no output).
+//  (12) "false"   (5 bytes) → set exit_code=1, return (no output).
+//  (13) otherwise          → print "?\n" (unknown command marker).
 //
 // shell_match_cmd takes the State<Shell> buffer, a `name: Address` (the
 // .rodata address of a string literal like "echo"), and a `name_len: u32`.
@@ -377,14 +384,19 @@ fn shell_receive(s: State<Shell>, c: u8) {
 // shell_match_cmd.
 //
 // W25S1 dispatch order (see the file header's "Command dispatch" note):
-//   (1) "echo" (4 bytes) → call shell_do_echo, return.
-//   (2) "exit" (4 bytes) → set running=0, exit_code=0, return.
-//   (3) "help" (4 bytes) → call shell_do_help, return.
-//   (4) "ls"   (2 bytes) → call shell_do_ls, return.
-//   (5) "cat"  (3 bytes) → call shell_do_cat, return.
-//   (6) "pwd"  (3 bytes) → call shell_do_pwd, return.
-//   (7) "ver"  (3 bytes) → call shell_do_ver, return.
-//   (8) otherwise        → print "?\n" (unknown command marker).
+//   (1) "echo"   (4 bytes) → call shell_do_echo, return.
+//   (2) "exit"   (4 bytes) → set running=0, exit_code=0, return.
+//   (3) "help"   (4 bytes) → call shell_do_help, return.
+//   (4) "ls"     (2 bytes) → call shell_do_ls, return.
+//   (5) "cat"    (3 bytes) → call shell_do_cat, return.
+//   (6) "pwd"    (3 bytes) → call shell_do_pwd, return.
+//   (7) "ver"    (3 bytes) → call shell_do_ver, return.
+//   (8) "ps"     (2 bytes) → call shell_do_ps, return.
+//   (9) "memstat" (7 bytes) → call shell_do_memstat, return.
+//  (10) "clear"   (5 bytes) → call shell_do_clear, return.
+//  (11) "true"    (4 bytes) → call shell_do_true, return.
+//  (12) "false"   (5 bytes) → call shell_do_false, return.
+//  (13) otherwise          → print "?\n" (unknown command marker).
 //
 // Each shell_match_cmd call passes a Wave 1 string literal ("echo",
 // "exit", ...) which the compiler lowers to a .rodata address. The
@@ -434,6 +446,27 @@ fn shell_execute(s: State<Shell>) {
         shell_do_ver(s);
         return;
     }
+    // W25S2: five new built-ins (ps / memstat / clear / true / false).
+    if shell_match_cmd(s, "ps", 2) == 1 {
+        shell_do_ps(s);
+        return;
+    }
+    if shell_match_cmd(s, "memstat", 7) == 1 {
+        shell_do_memstat(s);
+        return;
+    }
+    if shell_match_cmd(s, "clear", 5) == 1 {
+        shell_do_clear(s);
+        return;
+    }
+    if shell_match_cmd(s, "true", 4) == 1 {
+        shell_do_true(s);
+        return;
+    }
+    if shell_match_cmd(s, "false", 5) == 1 {
+        shell_do_false(s);
+        return;
+    }
 
     // Unknown command — print "?\n" (the Unix-shell "command not found"
     // marker, simplified to just "?" for K6f's minimal UX; K7+ may add
@@ -453,7 +486,8 @@ fn shell_execute(s: State<Shell>) {
 // PMT-pure implementation: we cannot dereference `name` (no `*ptr`
 // syntax). Instead, we compare `name` to the .rodata addresses of the
 // known command-name literals — each string literal "echo" / "exit" /
-// "help" / "ls" / "cat" / "pwd" / "ver" lowers to a compile-time i64
+// "help" / "ls" / "cat" / "pwd" / "ver" / "ps" / "memstat" / "clear" /
+// "true" / "false" lowers to a compile-time i64
 // address (Wave 1 .rodata feature, see src/pipeline.rs:8733), and
 // string-literal deduplication guarantees that two occurrences of the
 // same literal text produce the SAME address program-wide. So `name ==
@@ -567,6 +601,58 @@ fn shell_match_cmd(buf: State<Shell>, name: Address, name_len: u32) -> u8 {
         if buf.buf[2] != 114 { return 0; }  // 'r'
         return 1;
     }
+    // W25S2: five new command-name matchers (ps / memstat / clear /
+    // true / false). Each follows the same pattern: verify name_len,
+    // then compare buf[0..name_len] byte-by-byte against the decimal
+    // ASCII values for that command.
+    if name == "ps" {
+        // "ps" — p=112, s=115.
+        if name_len != 2 { return 0; }
+        if buf.buf[0] != 112 { return 0; }  // 'p'
+        if buf.buf[1] != 115 { return 0; }  // 's'
+        return 1;
+    }
+    if name == "memstat" {
+        // "memstat" — m=109, e=101, m=109, s=115, t=116, a=97, t=116.
+        if name_len != 7 { return 0; }
+        if buf.buf[0] != 109 { return 0; }  // 'm'
+        if buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf[2] != 109 { return 0; }  // 'm'
+        if buf.buf[3] != 115 { return 0; }  // 's'
+        if buf.buf[4] != 116 { return 0; }  // 't'
+        if buf.buf[5] != 97  { return 0; }  // 'a'
+        if buf.buf[6] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "clear" {
+        // "clear" — c=99, l=108, e=101, a=97, r=114.
+        if name_len != 5 { return 0; }
+        if buf.buf[0] != 99  { return 0; }  // 'c'
+        if buf.buf[1] != 108 { return 0; }  // 'l'
+        if buf.buf[2] != 101 { return 0; }  // 'e'
+        if buf.buf[3] != 97  { return 0; }  // 'a'
+        if buf.buf[4] != 114 { return 0; }  // 'r'
+        return 1;
+    }
+    if name == "true" {
+        // "true" — t=116, r=114, u=117, e=101.
+        if name_len != 4 { return 0; }
+        if buf.buf[0] != 116 { return 0; }  // 't'
+        if buf.buf[1] != 114 { return 0; }  // 'r'
+        if buf.buf[2] != 117 { return 0; }  // 'u'
+        if buf.buf[3] != 101 { return 0; }  // 'e'
+        return 1;
+    }
+    if name == "false" {
+        // "false" — f=102, a=97, l=108, s=115, e=101.
+        if name_len != 5 { return 0; }
+        if buf.buf[0] != 102 { return 0; }  // 'f'
+        if buf.buf[1] != 97  { return 0; }  // 'a'
+        if buf.buf[2] != 108 { return 0; }  // 'l'
+        if buf.buf[3] != 115 { return 0; }  // 's'
+        if buf.buf[4] != 101 { return 0; }  // 'e'
+        return 1;
+    }
     // `name` doesn't match any known command literal — no match.
     return 0;
 }
@@ -646,7 +732,7 @@ fn shell_do_echo(s: State<Shell>) {
 // `help` — print a one-line summary of available commands.
 // K7+ will extend this to a per-command help (`help echo` → echo docs).
 fn shell_do_help(s: State<Shell>) {
-    write(1, "cmds: echo exit help ls cat pwd ver\n", 34);
+    write(1, "cmds: echo exit help ls cat pwd ver ps memstat clear true false\n", 64);
 }
 
 // `ls` — list files in the current directory.
@@ -678,6 +764,84 @@ fn shell_do_pwd(s: State<Shell>) {
 // the build-time VERSION constant once the build system exports one.
 fn shell_do_ver(s: State<Shell>) {
     write(1, "vuma 0.1\n", 9);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W25S2: Five more built-in command stubs (ps / memstat / clear / true /
+// false).
+// ────────────────────────────────────────────────────────────────────────────
+// Each new built-in follows the same PMT discipline as the W25S1 stubs:
+// output text is a Wave 1 string literal lowered to a .rodata address,
+// passed directly to `write` as the `buf: Address` argument (zero-copy
+// from .rodata — same "Borrowed read" pattern as shell_do_help /
+// shell_do_ls / shell_do_cat / shell_do_pwd / shell_do_ver). The `true`
+// and `false` built-ins produce NO output — they only mutate s.exit_code
+// (the shell's exit-status slot), mirroring the POSIX `true` / `false`
+// builtins used for shell conditionals and loop guards.
+//
+// `ps` and `memstat` are K7+ stubs (they print fixed fake data; K7+ will
+// replace them with real scheduler / pmm reads once those subsystems are
+// wired into the shell's view). `clear`, `true`, and `false` are NOT
+// stubs — their implementations are complete (the VT100 escape sequence
+// IS the entire side-effect for `clear`; setting exit_code IS the entire
+// side-effect for `true` / `false`).
+
+// `ps` — list processes.
+// Prints a fixed fake process table: a "PID  PPID  STATE" header followed
+// by one "1   0     READY" row (the kernel's init task, PID 1, PPID 0,
+// state READY). K7+ will replace this with a call to task_dump (K4a)
+// once the scheduler exposes a process-list iterator. Two write calls —
+// one per line — so each line is a distinct semantic unit (header vs.
+// data row), matching how the task spec frames the output ("header" +
+// "row"). Both strings are Wave 1 literals.
+fn shell_do_ps(s: State<Shell>) {
+    write(1, "PID  PPID  STATE\n", 17);
+    write(1, "1   0     READY\n", 16);
+}
+
+// `memstat` — print memory usage.
+// Prints a fixed fake /proc/meminfo-style two-line summary: MemTotal
+// 16384 kB + MemFree 8192 kB (50% free). K7+ will replace this with a
+// read of the pmm's free_pages / total_pages counters once K3p (the PMM
+// stats API) is wired in. One write call with the combined 36-byte
+// string (both lines in a single literal) — matches the task spec, which
+// frames the output as one string with an embedded newline.
+fn shell_do_memstat(s: State<Shell>) {
+    write(1, "MemTotal: 16384 kB\nMemFree: 8192 kB\n", 36);
+}
+
+// `clear` — clear the screen and home the cursor.
+// Emits the VT100 "erase entire display" (ESC[2J) + "cursor home" (ESC[H)
+// sequence — 7 bytes total: ESC(27) [(91) 2(50) J(74) ESC(27) [(91) H(72).
+// The 7-byte sequence is a single Wave 1 string literal; the lexer's
+// `\x1b` hex escape produces ESC (byte 27), and the rest is literal
+// ASCII. Same `write(1, "\x1b...", n)` pattern as console.vuma's
+// console_set_bold / console_reset_color (W23S5). This is the REAL
+// implementation — the escape sequence is the entire side-effect (no
+// K7+ replacement needed). On a terminal that doesn't understand VT100
+// escapes, the bytes are emitted as-is (no fallback — K6f assumes a
+// VT100-class terminal, same as K6c's vt100.vuma parser).
+fn shell_do_clear(s: State<Shell>) {
+    write(1, "\x1b[2J\x1b[H", 7);
+}
+
+// `true` — exit-status success.
+// Sets s.exit_code=0 and returns without output. Mirrors the POSIX
+// `true` / `:` builtin — useful for `while true; do ...; done` loops
+// once the shell gains a loop construct (K8+). Does NOT set running=0
+// (the shell keeps running; only `exit` terminates the loop). This is
+// the REAL implementation — setting exit_code IS the entire side-effect.
+fn shell_do_true(s: State<Shell>) {
+    s.exit_code = 0;
+}
+
+// `false` — exit-status failure.
+// Sets s.exit_code=1 and returns without output. Mirrors the POSIX
+// `false` builtin. Pairs with `true` for shell conditionals (e.g.
+// `if false; then ...; fi` once the shell gains an `if` construct).
+// Does NOT set running=0. This is the REAL implementation.
+fn shell_do_false(s: State<Shell>) {
+    s.exit_code = 1;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
