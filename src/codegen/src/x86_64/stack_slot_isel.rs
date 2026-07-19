@@ -2278,6 +2278,116 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_is_closed".to_string());
                                 channel_builtin_matched = true;
                             }
+                            "channel_recv_timeout" if args.len() == 2 && dst.is_some() => {
+                                // Wave 8c: channel_recv_timeout(ch, timeout_ms)
+                                // Uses poll() with timeout, then read() if ready.
+                                // Returns the message on success, -2 on timeout,
+                                // -3 on error.
+                                let ch = &args[0];
+                                let to_ms = &args[1];
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+
+                                // Step 1: load read_fd (low 32 bits of handle) into RAX
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, off));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+
+                                // Step 2: pollfd on stack (16 bytes, aligned)
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001)); // POLLIN
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx)); // events
+                                code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rcx)); // revents pad
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0)); // &pollfd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds=1
+                                // rdx = timeout_ms (load from the argument value)
+                                code.extend(load_value(to_ms, Gpr::Rdx));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 7)); // sys_poll
+                                code.extend(encode_syscall());
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 12, Gpr::Rax)); // spill poll result
+
+                                // Step 3: branch on poll result
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jg_read_patch = code.len();
+                                code.extend(&[0x0F, 0x8F, 0x00, 0x00, 0x00, 0x00]); // jg read_path
+                                let jl_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl error_path
+                                // poll == 0 → timeout (-2)
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFE));
+                                let jmp_store_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp store_result
+
+                                // read_path:
+                                let read_path_off = code.len();
+                                let read_delta = read_path_off as i64 - (jg_read_patch as i64 + 6);
+                                let bd = (read_delta as i32).to_le_bytes();
+                                code[jg_read_patch+2] = bd[0];
+                                code[jg_read_patch+3] = bd[1];
+                                code[jg_read_patch+4] = bd[2];
+                                code[jg_read_patch+5] = bd[3];
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0)); // read_fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // sys_read=0
+                                code.extend(encode_syscall());
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jle_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle error_path
+                                let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp cleanup
+
+                                // error_path: store -3
+                                let error_path_off = code.len();
+                                let err_delta_from_jl = error_path_off as i64 - (jl_err_patch as i64 + 6);
+                                let bd = (err_delta_from_jl as i32).to_le_bytes();
+                                code[jl_err_patch+2] = bd[0];
+                                code[jl_err_patch+3] = bd[1];
+                                code[jl_err_patch+4] = bd[2];
+                                code[jl_err_patch+5] = bd[3];
+                                let err_delta_from_jle = error_path_off as i64 - (jle_err_patch as i64 + 6);
+                                let bd = (err_delta_from_jle as i32).to_le_bytes();
+                                code[jle_err_patch+2] = bd[0];
+                                code[jle_err_patch+3] = bd[1];
+                                code[jle_err_patch+4] = bd[2];
+                                code[jle_err_patch+5] = bd[3];
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFD)); // -3
+
+                                // store_result: (rax = -2 or -3)
+                                let store_result_off = code.len();
+                                let store_delta = store_result_off as i64 - (jmp_store_patch as i64 + 5);
+                                let bd = (store_delta as i32).to_le_bytes();
+                                code[jmp_store_patch+1] = bd[0];
+                                code[jmp_store_patch+2] = bd[1];
+                                code[jmp_store_patch+3] = bd[2];
+                                code[jmp_store_patch+4] = bd[3];
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                                // cleanup:
+                                let cleanup_off = code.len();
+                                let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
+                                let bd = (cleanup_delta as i32).to_le_bytes();
+                                code[jmp_cleanup_patch+1] = bd[0];
+                                code[jmp_cleanup_patch+2] = bd[1];
+                                code[jmp_cleanup_patch+3] = bd[2];
+                                code[jmp_cleanup_patch+4] = bd[3];
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+
+                                instr_opcode = Some("channel_recv_timeout".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }
@@ -2642,6 +2752,136 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                     }
                     instr_opcode = Some("channel_close".to_string());
+                    code
+                }
+
+                // ChannelRecvTimeout { ch, dst, ty, timeout_ms } —
+                // Wave 8c: poll(read_fd, timeout_ms) then read() if ready.
+                //
+                // poll() syscall (x86_64 sys_poll=7):
+                //   rdi = &pollfd { fd, events, revents } (8 bytes: 4+2+2)
+                //   rsi = 1 (nfds)
+                //   rdx = timeout_ms
+                // Returns: 0=timeout, >0=ready, <0=error.
+                //
+                // On timeout: write -2 (TIMEOUT sentinel) to dst slot.
+                // On error:   write -3 (ERROR sentinel)   to dst slot.
+                // On ready:   read(read_fd, &dst, 8) — sys_read=0.
+                IRInstr::ChannelRecvTimeout { ch, dst, ty: _, timeout_ms } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_off = slot_offset(dst_id);
+
+                    // Step 1: load read_fd (low 32 bits of handle) into RAX
+                    match ch {
+                        IRValue::Register(id) => {
+                            let off = slot_offset(*id);
+                            code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, off));
+                        }
+                        _ => {
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                            code.extend(load_value(ch, Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                            code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                        }
+                    }
+
+                    // Step 2: build pollfd on stack (16 bytes, aligned) and call poll()
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001)); // POLLIN
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx)); // events
+                    code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rcx)); // revents pad
+                    code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0)); // &pollfd
+                    code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds=1
+                    code.extend(encode_mov_reg_imm64(Gpr::Rdx, *timeout_ms)); // timeout
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 7)); // sys_poll
+                    code.extend(encode_syscall());
+                    // Spill poll result to [rsp+12] (within the 16-byte block)
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 12, Gpr::Rax));
+
+                    // Step 3: branch on poll result
+                    //   poll > 0 → read_path
+                    //   poll < 0 → error_path (store -3)
+                    //   poll == 0 → timeout (store -2, fall through)
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    // jg read_path (rel32, placeholder)
+                    let jg_read_patch = code.len();
+                    code.extend(&[0x0F, 0x8F, 0x00, 0x00, 0x00, 0x00]);
+                    // jl error_path (rel32, placeholder)
+                    let jl_err_patch = code.len();
+                    code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]);
+                    // Fall through: poll == 0 → timeout sentinel
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFE)); // -2
+                    // jmp store_result (rel32, placeholder)
+                    let jmp_store_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]);
+
+                    // read_path:
+                    let read_path_off = code.len();
+                    let read_delta = read_path_off as i64 - (jg_read_patch as i64 + 6);
+                    let bd = (read_delta as i32).to_le_bytes();
+                    code[jg_read_patch+2] = bd[0];
+                    code[jg_read_patch+3] = bd[1];
+                    code[jg_read_patch+4] = bd[2];
+                    code[jg_read_patch+5] = bd[3];
+                    // read(read_fd, &dst, 8)
+                    code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // sys_read=0
+                    code.extend(encode_syscall());
+                    // if read <= 0: goto error_path
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    let jle_err_patch = code.len();
+                    code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                    // success: jmp cleanup
+                    let jmp_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]);
+
+                    // error_path: store -3
+                    let error_path_off = code.len();
+                    let err_delta_from_jl = error_path_off as i64 - (jl_err_patch as i64 + 6);
+                    let bd = (err_delta_from_jl as i32).to_le_bytes();
+                    code[jl_err_patch+2] = bd[0];
+                    code[jl_err_patch+3] = bd[1];
+                    code[jl_err_patch+4] = bd[2];
+                    code[jl_err_patch+5] = bd[3];
+                    let err_delta_from_jle = error_path_off as i64 - (jle_err_patch as i64 + 6);
+                    let bd = (err_delta_from_jle as i32).to_le_bytes();
+                    code[jle_err_patch+2] = bd[0];
+                    code[jle_err_patch+3] = bd[1];
+                    code[jle_err_patch+4] = bd[2];
+                    code[jle_err_patch+5] = bd[3];
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFD)); // -3
+
+                    // store_result: (rax = -2 or -3)
+                    let store_result_off = code.len();
+                    let store_delta = store_result_off as i64 - (jmp_store_patch as i64 + 5);
+                    let bd = (store_delta as i32).to_le_bytes();
+                    code[jmp_store_patch+1] = bd[0];
+                    code[jmp_store_patch+2] = bd[1];
+                    code[jmp_store_patch+3] = bd[2];
+                    code[jmp_store_patch+4] = bd[3];
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                    // cleanup: (success path jumps here)
+                    let cleanup_off = code.len();
+                    let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
+                    let bd = (cleanup_delta as i32).to_le_bytes();
+                    code[jmp_cleanup_patch+1] = bd[0];
+                    code[jmp_cleanup_patch+2] = bd[1];
+                    code[jmp_cleanup_patch+3] = bd[2];
+                    code[jmp_cleanup_patch+4] = bd[3];
+
+                    // Deallocate pollfd stack
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+
+                    let _ = dst_id; // already used via dst_off
+                    instr_opcode = Some("channel_recv_timeout".to_string());
                     code
                 }
             };

@@ -234,6 +234,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             dst: dst.clone(),
             ty: ty.clone(),
         },
+        IRInstr::ChannelRecvTimeout { ch, dst, ty, timeout_ms } => IRInstr::ChannelRecvTimeout {
+            ch: ch.clone(),
+            dst: dst.clone(),
+            ty: ty.clone(),
+            timeout_ms: *timeout_ms,
+        },
         IRInstr::ChannelClose { ch } => IRInstr::ChannelClose {
             ch: ch.clone(),
         },
@@ -425,6 +431,7 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::ChannelOpen { .. }
         | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelClose { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,
@@ -465,6 +472,7 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
         IRInstr::ChannelOpen { .. } => false,
         IRInstr::ChannelSend { .. } => false,
         IRInstr::ChannelRecv { .. } => false,
+        IRInstr::ChannelRecvTimeout { .. } => false,
         IRInstr::ChannelClose { .. } => false,
         _ => true,
     }
@@ -492,6 +500,7 @@ fn get_defined_value(instr: &IRInstr) -> Option<&IRValue> {
         // Send and Close write no vreg and fall through to `_ => None`.
         IRInstr::ChannelOpen { dst, .. } => Some(dst),
         IRInstr::ChannelRecv { dst, .. } => Some(dst),
+        IRInstr::ChannelRecvTimeout { dst, .. } => Some(dst),
         _ => None,
     }
 }
@@ -717,6 +726,7 @@ fn compute_expr_key(instr: &IRInstr) -> Option<ExprKey> {
         IRInstr::ChannelOpen { .. }
         | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelClose { .. } => None,
         _ => None,
     }
@@ -1023,6 +1033,7 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
         IRInstr::ChannelOpen { .. }
         | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelClose { .. } => None,
         // (Legacy) Any other instruction not handled above is not foldable.
         _ => None,
@@ -1216,6 +1227,7 @@ fn inline_cost(instr: &IRInstr) -> u32 {
         IRInstr::ChannelOpen { .. }
         | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelClose { .. } => 40,
         // Atomics: expensive and side-effecting
         IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } => 30,
@@ -2074,7 +2086,7 @@ fn detect_deadlock(program: &IRProgram) {
         for block in &func.blocks {
             for instr in &block.instructions {
                 match instr {
-                    IRInstr::ChannelRecv { ch, .. } => {
+                    IRInstr::ChannelRecv { ch, .. } | IRInstr::ChannelRecvTimeout { ch, .. } => {
                         if let IRValue::Register(_) = ch {
                             usage.recv_channels.insert(format!(
                                 "{}_ch_{:?}",
@@ -2128,7 +2140,7 @@ fn detect_deadlock(program: &IRProgram) {
 
                 for instr in &block.instructions {
                     match instr {
-                        IRInstr::ChannelRecv { ch, .. } => {
+                        IRInstr::ChannelRecv { ch, .. } | IRInstr::ChannelRecvTimeout { ch, .. } => {
                             seen_recv = true;
                             recv_channels_in_block.insert(format!(
                                 "{}_ch_{:?}",
@@ -2543,6 +2555,10 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
             sub(ch, old_vreg, &new_val);
             sub(dst, old_vreg, &new_val);
         }
+        IRInstr::ChannelRecvTimeout { ch, dst, .. } => {
+            sub(ch, old_vreg, &new_val);
+            sub(dst, old_vreg, &new_val);
+        }
         IRInstr::ChannelClose { ch } => sub(ch, old_vreg, &new_val),
         // Alloc writes a vreg (the dst), no vreg reads -- nothing to substitute.
         // Branch has no vreg operands.
@@ -2652,6 +2668,7 @@ fn compute_function_hash(func: &IRFunction) -> String {
                 IRInstr::ChannelOpen { dst, elem_ty } => format!("chopen:{:?}:{:?}", dst, elem_ty),
                 IRInstr::ChannelSend { ch, msg, .. } => format!("chsend:{:?}:{:?}", ch, msg),
                 IRInstr::ChannelRecv { ch, dst, .. } => format!("chrecv:{:?}:{:?}", ch, dst),
+                IRInstr::ChannelRecvTimeout { ch, dst, timeout_ms, .. } => format!("chrecvto:{:?}:{:?}:{}", ch, dst, timeout_ms),
                 IRInstr::ChannelClose { ch } => format!("chclose:{:?}", ch),
                 _ => "other".to_string(),
             });

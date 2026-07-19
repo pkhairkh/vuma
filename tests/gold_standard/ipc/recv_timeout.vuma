@@ -1,0 +1,14 @@
+// recv_timeout — recv with 100ms timeout on empty channel returns -2 (TIMEOUT)
+// Expected exit code: 88
+//
+// Wave 8c: channel_recv_timeout(ch, ms) uses poll() with a timeout.
+// On an empty channel with no sender, poll() returns 0 after the timeout
+// expires, and the builtin writes the sentinel -2 into the destination.
+// The program checks for -2 and exits 88 to signal "timeout detected".
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    x = channel_recv_timeout(ch, 100);
+    channel_close(ch);
+    if x == 0 - 2 { return 88; }
+    return x;
+}

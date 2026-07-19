@@ -6640,7 +6640,7 @@ impl Backend for RiscV32Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
+                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
                 };
 
                 if !encoded.is_empty() {
@@ -6704,7 +6704,7 @@ impl Backend for RiscV32Backend {
                         IRInstr::VectorOp { .. } => "vectorop",
                         IRInstr::ChannelOpen { .. } => "channel_open",
                         IRInstr::ChannelSend { .. } => "channel_send",
-                        IRInstr::ChannelRecv { .. } => "channel_recv",
+                        IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecv { .. } => "channel_recv",
                         IRInstr::ChannelClose { .. } => "channel_close",
                     };
 
