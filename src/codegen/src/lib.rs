@@ -54,6 +54,7 @@ pub mod control_flow;
 pub mod dwarf;
 pub mod emit;
 pub mod ir;
+pub mod ipc;
 pub mod loongarch64;
 /// FFI Marshal Pass (Wave 10) — flattens `State<T>` args to raw pointers
 /// at `extern` call sites and tracks whether the state is preserved
