@@ -172,6 +172,125 @@ pub fn type_hash_str(s: &str) -> u64 {
     type_hash(s)
 }
 
+// ── L1: Primitive Serialization (Wave 10c) ───────────────────────────
+
+/// Serialize a primitive value to little-endian bytes.
+///
+/// All VUMA primitive types use little-endian wire encoding:
+///   - I8/U8/Bool: 1 byte
+///   - I16/U16: 2 bytes LE
+///   - I32/U32/F32: 4 bytes LE
+///   - I64/U64/F64: 8 bytes LE
+///
+/// Returns `None` for non-primitive types (Ptr, Struct, Channel, etc.)
+/// which require a different serialization strategy.
+pub fn serialize_primitive(value: u64, byte_len: usize) -> Vec<u8> {
+    match byte_len {
+        1 => vec![value as u8],
+        2 => (value as u16).to_le_bytes().to_vec(),
+        4 => (value as u32).to_le_bytes().to_vec(),
+        8 => value.to_le_bytes().to_vec(),
+        _ => value.to_le_bytes().to_vec(),
+    }
+}
+
+/// Deserialize a primitive value from little-endian bytes.
+///
+/// `byte_len` selects the width: 1, 2, 4, or 8 bytes. The result is
+/// zero-extended to u64. Returns 0 if the buffer is too short.
+pub fn deserialize_primitive(bytes: &[u8], byte_len: usize) -> u64 {
+    if bytes.len() < byte_len {
+        return 0;
+    }
+    match byte_len {
+        1 => bytes[0] as u64,
+        2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u64,
+        4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+        8 => u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                                  bytes[4], bytes[5], bytes[6], bytes[7]]),
+        _ => 0,
+    }
+}
+
+/// Serialize an i32 to 4 little-endian bytes.
+pub fn serialize_i32(v: i32) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize an i32 from 4 little-endian bytes.
+pub fn deserialize_i32(bytes: &[u8]) -> i32 {
+    if bytes.len() < 4 { return 0; }
+    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Serialize a u32 to 4 little-endian bytes.
+pub fn serialize_u32(v: u32) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize a u32 from 4 little-endian bytes.
+pub fn deserialize_u32(bytes: &[u8]) -> u32 {
+    if bytes.len() < 4 { return 0; }
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Serialize an i64 to 8 little-endian bytes.
+pub fn serialize_i64(v: i64) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize an i64 from 8 little-endian bytes.
+pub fn deserialize_i64(bytes: &[u8]) -> i64 {
+    if bytes.len() < 8 { return 0; }
+    i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                         bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
+/// Serialize a u64 to 8 little-endian bytes.
+pub fn serialize_u64(v: u64) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize a u64 from 8 little-endian bytes.
+pub fn deserialize_u64(bytes: &[u8]) -> u64 {
+    if bytes.len() < 8 { return 0; }
+    u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                         bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
+/// Serialize an f32 to 4 little-endian bytes (IEEE 754 bits).
+pub fn serialize_f32(v: f32) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize an f32 from 4 little-endian bytes (IEEE 754 bits).
+pub fn deserialize_f32(bytes: &[u8]) -> f32 {
+    if bytes.len() < 4 { return 0.0; }
+    f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Serialize an f64 to 8 little-endian bytes (IEEE 754 bits).
+pub fn serialize_f64(v: f64) -> Vec<u8> {
+    v.to_le_bytes().to_vec()
+}
+
+/// Deserialize an f64 from 8 little-endian bytes (IEEE 754 bits).
+pub fn deserialize_f64(bytes: &[u8]) -> f64 {
+    if bytes.len() < 8 { return 0.0; }
+    f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
+                         bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
+/// Serialize a bool to 1 byte (0 or 1).
+pub fn serialize_bool(v: bool) -> Vec<u8> {
+    vec![if v { 1 } else { 0 }]
+}
+
+/// Deserialize a bool from 1 byte (0 → false, nonzero → true).
+pub fn deserialize_bool(bytes: &[u8]) -> bool {
+    bytes.first().copied().unwrap_or(0) != 0
+}
+
 // ── L1: Framing Errors ───────────────────────────────────────────────
 
 /// Errors raised by [`deframe_message`] while parsing the L1 wire format.
@@ -4473,6 +4592,96 @@ mod tests {
     fn test_crc32() {
         assert_eq!(crc32(b""), 0);  // !0xFFFFFFFF == 0
         assert_ne!(crc32(b"VUMA"), 0);
+    }
+
+    // ── Wave 10c: serialization roundtrip tests ──
+
+    #[test]
+    fn test_serialize_i32_roundtrip() {
+        let vals = [0i32, 1, -1, 42, i32::MAX, i32::MIN, 0x12345678];
+        for v in vals {
+            let bytes = serialize_i32(v);
+            assert_eq!(bytes.len(), 4);
+            assert_eq!(deserialize_i32(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_u32_roundtrip() {
+        let vals = [0u32, 1, 42, u32::MAX, 0xDEADBEEF];
+        for v in vals {
+            let bytes = serialize_u32(v);
+            assert_eq!(bytes.len(), 4);
+            assert_eq!(deserialize_u32(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_i64_roundtrip() {
+        let vals = [0i64, 1, -1, 42, i64::MAX, i64::MIN, 0x123456789ABCDEF0];
+        for v in vals {
+            let bytes = serialize_i64(v);
+            assert_eq!(bytes.len(), 8);
+            assert_eq!(deserialize_i64(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_u64_roundtrip() {
+        let vals = [0u64, 1, 42, u64::MAX, 0x123456789ABCDEF0];
+        for v in vals {
+            let bytes = serialize_u64(v);
+            assert_eq!(bytes.len(), 8);
+            assert_eq!(deserialize_u64(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_f32_roundtrip() {
+        let vals = [0.0f32, 1.0, -1.0, 3.14159, f32::INFINITY, f32::NEG_INFINITY];
+        for v in vals {
+            let bytes = serialize_f32(v);
+            assert_eq!(bytes.len(), 4);
+            assert_eq!(deserialize_f32(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_f64_roundtrip() {
+        let vals = [0.0f64, 1.0, -1.0, 3.141592653589793, f64::INFINITY];
+        for v in vals {
+            let bytes = serialize_f64(v);
+            assert_eq!(bytes.len(), 8);
+            assert_eq!(deserialize_f64(&bytes), v);
+        }
+    }
+
+    #[test]
+    fn test_serialize_bool_roundtrip() {
+        assert_eq!(serialize_bool(true), vec![1]);
+        assert_eq!(serialize_bool(false), vec![0]);
+        assert!(deserialize_bool(&[1]));
+        assert!(!deserialize_bool(&[0]));
+        assert!(deserialize_bool(&[42])); // nonzero → true
+    }
+
+    #[test]
+    fn test_serialize_primitive_widths() {
+        assert_eq!(serialize_primitive(0x42, 1), vec![0x42]);
+        assert_eq!(serialize_primitive(0x1234, 2), vec![0x34, 0x12]);
+        assert_eq!(serialize_primitive(0x12345678, 4), vec![0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(serialize_primitive(0x123456789ABCDEF0, 8),
+                   vec![0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(deserialize_primitive(&[0x42], 1), 0x42);
+        assert_eq!(deserialize_primitive(&[0x34, 0x12], 2), 0x1234);
+        assert_eq!(deserialize_primitive(&[0x78, 0x56, 0x34, 0x12], 4), 0x12345678);
+    }
+
+    #[test]
+    fn test_deserialize_short_buffer_returns_zero() {
+        assert_eq!(deserialize_i32(&[1, 2, 3]), 0); // too short
+        assert_eq!(deserialize_i64(&[1, 2, 3, 4, 5, 6, 7]), 0); // too short
+        assert_eq!(deserialize_f32(&[]), 0.0);
     }
 
     #[test]
