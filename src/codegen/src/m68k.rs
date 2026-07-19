@@ -493,13 +493,19 @@ fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
 /// constant), divu.w produces incorrect results or traps.
 ///
 /// This function implements a proper 32-bit division using the standard
-/// shift-and-subtract algorithm with LSL.L and ROXL.L instructions:
+/// shift-and-subtract algorithm. It deliberately avoids `ROXL.L` (rotate
+/// left with extend, which uses the X flag) because QEMU 7.2's m68k
+/// translator refuses to translate `ROXL.L` in certain translation-block
+/// contexts (e.g. when preceded by `CMP.L`/`SLE`/`BNE.W`), raising SIGILL.
+/// Instead it propagates the dividend's MSB into the remainder via the **C**
+/// flag (which QEMU propagates reliably from `LSL.L`) using `BCC.S` + `ORI.L`:
 ///
 /// For each of 32 iterations:
-///   1. LSL.L #1, dividend  — shift left, MSB → X (extend flag)
-///   2. ROXL.L #1, remainder — shift left, X → LSB (propagate MSB into remainder)
-///   3. LSL.L #1, quotient   — shift left (make room for new bit)
-///   4. If remainder >= divisor: subtract divisor from remainder, set quotient bit
+///   1. LSL.L #1, remainder  — shift left (LSB = 0, ready to receive bit)
+///   2. LSL.L #1, dividend   — shift left, C = old MSB of dividend
+///   3. BCC.S +6 / ORI.L #1, remainder — if C set, set remainder LSB
+///   4. LSL.L #1, quotient   — shift left (make room for new bit)
+///   5. If remainder >= divisor: subtract divisor from remainder, set quotient bit
 ///
 /// Input: S0 = dividend, S1 = divisor
 /// Output: S0 = quotient (if want_remainder=false) or remainder (if true)
@@ -528,14 +534,19 @@ fn emit_divmod_32bit(want_remainder: bool) -> Vec<u8> {
     // Loop: 32 iterations
     let div_loop = code.len() as i64;
 
-    // LSL.L #1, S0 — shift dividend left, MSB → X (extend flag)
+    // LSL.L #1, S2 — shift remainder left (LSB = 0, ready to receive bit)
     // Encoding: 1110 001 1 10 0 01 rrr = 0xE388 | r
+    code.extend_from_slice(&[0xE3, 0x88 | s2]);
+
+    // LSL.L #1, S0 — shift dividend left, C = old MSB of dividend
     code.extend_from_slice(&[0xE3, 0x88 | s0]);
 
-    // ROXL.L #1, S2 — rotate remainder left through X: S2 = (S2 << 1) | X
-    // This propagates the dividend's MSB (now in X) into the remainder's LSB
-    // Encoding: 1110 001 1 10 0 10 rrr = 0xE390 | r
-    code.extend_from_slice(&[0xE3, 0x90 | s2]);
+    // BCC.S +6 — if C clear (MSB was 0), skip the ORI (next 6 bytes)
+    code.extend_from_slice(&[0x64, 0x06]);
+
+    // ORI.L #1, S2 — set LSB of remainder (MSB of dividend was 1)
+    // Encoding: 0000 0000 10 000 ddd, 0x00000001
+    code.extend_from_slice(&[0x00, 0x80 | s2, 0x00, 0x00, 0x00, 0x01]);
 
     // LSL.L #1, S3 — shift quotient left (make room for new bit)
     code.extend_from_slice(&[0xE3, 0x88 | s3]);
@@ -1046,15 +1057,31 @@ fn emit_instr(
 ) {
     match instr {
         IRInstr::Add { dst, lhs, rhs, ty: _ } => {
+            // W8d: Handle 64-bit immediate materialization.
+            // The IR optimizer's constant_fold replaces
+            //   Cast { UIntToFloat/IntToFloat, src: Immediate(<i64>) }
+            // with
+            //   Add { lhs: Immediate(<f64 bits>), rhs: Immediate(0) }
+            // The f64 bits can be up to 64 bits wide.  The old code loaded
+            // the high word from `FP + lhs_off + 4`, but when lhs is an
+            // Immediate, lhs_off was 0, loading garbage from FP+4.
+            // Fix: when lhs is Immediate, compute the high word from
+            // (v >> 32) directly.
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
-            // 64-bit: also add high words
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            // 64-bit: also add high words.
+            // W8d: For Immediate lhs, compute hi from the immediate value
+            // (not from FP+lhs_off+4, which is garbage when lhs_off=0).
+            if let IRValue::Immediate(v) = lhs {
+                code.extend(ss_load_imm(S0, (v >> 32) as i64));
+            } else {
+                let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            }
             if let IRValue::Immediate(v) = rhs {
                 code.extend(ss_load_imm(S1, (v >> 32) as i64));
             } else {
@@ -1143,6 +1170,9 @@ fn emit_instr(
             // Otherwise fall through to integer `emit_binop`.
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
                 emit_fp_binop(&binop_kind, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code, relocations);
+            } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                // W8d: 64-bit integer comparison.
+                emit_i64_cmp(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
             } else {
                 emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
             }
@@ -1650,6 +1680,171 @@ fn emit_instr(
 }
 
 /// Emit a binary op (BinOpKind) result into dst's stack slot.
+
+/// W8d: 64-bit integer comparison for m68k.
+///
+/// Decomposes the comparison into hi-word and lo-word comparisons:
+///   lt = (hi_a <cond> hi_b) | (hi_eq & (lo_a <u lo_b))
+///   eq = hi_eq & lo_eq
+///   result = match kind {
+///     SLt/ULt => lt; SLe/ULe => lt|eq;
+///     SGt/UGt => !(lt|eq); SGe/UGe => !lt;
+///     Eq => eq; Ne => !eq }
+///
+/// Uses a branch-chain approach to materialize 0/1 into S0.
+/// Register allocation: S0=lo_a (then result), S1=hi_a, S2=lo_b, S3=hi_b.
+fn emit_i64_cmp(
+    kind: &BinOpKind,
+    dst: &IRValue,
+    lhs: &IRValue,
+    rhs: &IRValue,
+    vreg_stack_slots: &HashMap<u32, i32>,
+    code: &mut Vec<u8>,
+) {
+    let dst_id = dst.as_register().unwrap_or(0);
+    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+
+    // Load lhs: S0 = lo_a, S1 = hi_a.
+    if let IRValue::Register(id) = lhs {
+        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S0 }.encode());
+        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S1 }.encode());
+    } else if let IRValue::Immediate(v) = lhs {
+        let lo = (*v as u64 & 0xFFFFFFFF) as i32;
+        let hi = (*v as u64 >> 32) as i32;
+        code.extend(ss_load_imm(S0, lo as i64));
+        code.extend(ss_load_imm(S1, hi as i64));
+    } else {
+        code.extend(ss_load_imm(S0, 0));
+        code.extend(ss_load_imm(S1, 0));
+    }
+    // Load rhs: S2 = lo_b, S3 = hi_b.
+    if let IRValue::Register(id) = rhs {
+        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S2 }.encode());
+        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S3 }.encode());
+    } else if let IRValue::Immediate(v) = rhs {
+        let lo = (*v as u64 & 0xFFFFFFFF) as i32;
+        let hi = (*v as u64 >> 32) as i32;
+        code.extend(ss_load_imm(S2, lo as i64));
+        code.extend(ss_load_imm(S3, hi as i64));
+    } else {
+        code.extend(ss_load_imm(S2, 0));
+        code.extend(ss_load_imm(S3, 0));
+    }
+
+    // Determine if the comparison is signed or unsigned (affects hi-word Bcc).
+    let is_signed = matches!(kind,
+        BinOpKind::SLt | BinOpKind::SLe
+        | BinOpKind::SGt | BinOpKind::SGe);
+    // Bcc for hi-word less-than: BLT (signed) or BCS (unsigned).
+    let hi_lt_cc: u8 = if is_signed { 0x6D } else { 0x65 };  // BLT.S or BCS.S
+    // Bcc for hi-word greater-than: BGT (signed) or BHI (unsigned).
+    let hi_gt_cc: u8 = if is_signed { 0x6E } else { 0x62 };  // BGT.S or BHI.S
+
+    // CMP.L S3, S1 = S1 - S3 (hi_a - hi_b)
+    code.extend(Instruction::Cmp { src: S3, dst: S1 }.encode());
+
+    match kind {
+        BinOpKind::SLt | BinOpKind::ULt => {
+            // result = (hi_a < hi_b) | (hi_eq & (lo_a <u lo_b))
+            // if hi_a < hi_b → 1; if hi_a != hi_b → 0; else check lo
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
+            let b_ne = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());  // lo_a - lo_b
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
+            // fall through → set_zero
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            // set_one:
+            patch_short_branch_to_here(code, b_lt);
+            patch_short_branch_to_here(code, b_lo_lt);
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            // set_zero:
+            patch_short_branch_to_here(code, b_ne);
+            // done:
+            patch_short_branch_to_here(code, bra_done);
+        }
+        BinOpKind::SLe | BinOpKind::ULe => {
+            // result = (a <= b) = (a < b) | (a == b)
+            // if hi_a < hi_b → 1; if hi_a > hi_b → 0; else (lo_a <=u lo_b)
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
+            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S set_zero
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
+            let b_lo_eq = emit_bcc_short_placeholder(code, 0x67);   // BEQ.S set_one
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            patch_short_branch_to_here(code, b_lt);
+            patch_short_branch_to_here(code, b_lo_lt);
+            patch_short_branch_to_here(code, b_lo_eq);
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            patch_short_branch_to_here(code, b_gt);
+            patch_short_branch_to_here(code, bra_done);
+        }
+        BinOpKind::SGt | BinOpKind::UGt => {
+            // result = (a > b) = (hi_a > hi_b) | (hi_eq & (lo_a >u lo_b))
+            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);  // BLT.S set_zero
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
+            let b_lo_gt = emit_bcc_short_placeholder(code, 0x62);  // BHI.S set_one
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            patch_short_branch_to_here(code, b_gt);
+            patch_short_branch_to_here(code, b_lo_gt);
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            patch_short_branch_to_here(code, b_lt);
+            patch_short_branch_to_here(code, bra_done);
+        }
+        BinOpKind::SGe | BinOpKind::UGe => {
+            // result = !(a < b) = (a >= b)
+            // if hi_a < hi_b → 0; if hi_a > hi_b → 1; else (lo_a >=u lo_b)
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);  // BLT.S set_zero
+            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S set_one
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);   // BCS.S set_zero
+            // fall through → set_one (lo_a >=u lo_b)
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            patch_short_branch_to_here(code, b_gt);
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            patch_short_branch_to_here(code, b_lt);
+            patch_short_branch_to_here(code, b_lo_lt);
+            patch_short_branch_to_here(code, bra_done);
+        }
+        BinOpKind::Eq => {
+            // result = (hi_a == hi_b) & (lo_a == lo_b)
+            let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
+            let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            patch_short_branch_to_here(code, b_ne1);
+            patch_short_branch_to_here(code, b_ne2);
+            patch_short_branch_to_here(code, bra_done);
+        }
+        BinOpKind::Ne => {
+            // result = (hi_a != hi_b) | (lo_a != lo_b)
+            let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
+            let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            let bra_done = emit_bra_short_placeholder(code);
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            patch_short_branch_to_here(code, b_ne1);
+            patch_short_branch_to_here(code, b_ne2);
+            patch_short_branch_to_here(code, bra_done);
+        }
+        _ => {
+            // Fallback: store 0.
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+        }
+    }
+
+    code.extend(ss_st(S0, dst_off));
+}
+
 fn emit_binop(
     op: &BinOpKind,
     dst: &IRValue,
@@ -2626,6 +2821,173 @@ fn emit_cast_int_to_float(
     }
 }
 
+/// W8d: Software f64 -> u64 conversion (no FPU).
+///
+/// Decodes the IEEE-754 f64 bit pattern directly into a u64 value,
+/// avoiding the unreliable 68881 FMOVE.L instruction (which only
+/// stores 32 bits and saturates for large values).
+///
+/// Input: f64 bits at [FP + src_off] (lo) and [FP + src_off + 4] (hi).
+/// Output: u64 result at [FP + dst_off] (lo) and [FP + dst_off + 4] (hi).
+fn emit_cast_f64_to_u64_software(
+    src_off: i32,
+    dst_off: i32,
+    code: &mut Vec<u8>,
+) {
+    let s0 = S0.encoding() as u8 & 0x7;
+    let s1 = S1.encoding() as u8 & 0x7;
+    let s2 = S2.encoding() as u8 & 0x7;
+
+    // Load hi = [FP + src_off + 4] into S0, lo = [FP + src_off] into S1.
+    code.extend(Instruction::Load { base: FP, offset: (src_off + 4) as i16, dst: S0 }.encode());
+    code.extend(Instruction::Load { base: FP, offset: src_off as i16, dst: S1 }.encode());
+
+    // Check sign: if S0 is negative (bit 31 set), result = 0.
+    code.extend(Instruction::Tst { dst: S0 }.encode());
+    let bmi_sign_off = emit_bcc_short_placeholder(code, 0x6B); // BMI.S placeholder
+
+    // Extract exp: S2 = (S0 >> 20) & 0x7FF.
+    // SWAP S0 would clobber it, so copy to S2 first.
+    code.extend(Instruction::Move { src: S0, dst: S2 }.encode());
+    // SWAP S2: 0x4840 | s2
+    code.extend_from_slice(&[0x48, 0x40 | s2]);
+    // LSR.L #4, S2: shifts right by 4 to get exp in bits 10-0.
+    // LSR.L #4, S2: 1110 100 0 10 0 01 rrr = [0xE8, 0x88 | s2]
+    code.extend_from_slice(&[0xE8, 0x88 | s2]);
+    // ANDI.L #0x7FF, S2
+    code.extend_from_slice(&[0x02, 0x80 | s2, 0x00, 0x00, 0x07, 0xFF]);
+
+    // Check exp == 0: if so, result = 0.
+    code.extend(Instruction::Tst { dst: S2 }.encode());
+    let beq_zero_off = emit_bcc_short_placeholder(code, 0x67); // BEQ.S placeholder
+
+    // Check exp >= 1087 (0x43F): saturate to u64::MAX.
+    // CMPI.L #1087, S2
+    code.extend_from_slice(&[0x0C, 0x80 | s2, 0x00, 0x00, 0x04, 0x3F]);
+    let bcc_max_off = emit_bcc_short_placeholder(code, 0x64); // BCC.S (unsigned >=) placeholder
+
+    // Extract mantissa: S0 = (S0 & 0xFFFFF) | 0x100000.
+    code.extend_from_slice(&[0x02, 0x80 | s0, 0x00, 0x0F, 0xFF, 0xFF]); // ANDI.L #0xFFFFF, S0
+    code.extend_from_slice(&[0x00, 0x80 | s0, 0x00, 0x10, 0x00, 0x00]); // ORI.L #0x100000, S0
+
+    // shift = exp - 1075. S2 = S2 - 1075.
+    // SUBI.L #1075, S2: 0x0480 | s2, then imm32 = 0x00000433.
+    code.extend_from_slice(&[0x04, 0x80 | s2, 0x00, 0x00, 0x04, 0x33]);
+
+    // If shift >= 0: left shift. If shift < 0: right shift (negate first).
+    code.extend(Instruction::Tst { dst: S2 }.encode());
+    let bmi_right_off = emit_bcc_short_placeholder(code, 0x6B); // BMI.S placeholder
+
+    // === Left shift loop (shift >= 0) ===
+    let left_loop = code.len() as i64;
+    code.extend(Instruction::Tst { dst: S2 }.encode());
+    let beq_left_done_off = emit_bcc_short_placeholder(code, 0x67); // BEQ.S done
+
+    // 64-bit left shift by 1:
+    // S3 = 0 (carry)
+    code.extend(Instruction::Moveq { dst: S3, imm: 0 }.encode());
+    // LSL.L #1, S1: [0xE3, 0x88 | s1]
+    code.extend_from_slice(&[0xE3, 0x88 | s1]);
+    // BCC.S no_carry
+    let bcc_nc_l_off = emit_bcc_short_placeholder(code, 0x64);
+    code.extend(Instruction::Moveq { dst: S3, imm: 1 }.encode());
+    patch_short_branch_to_here(code, bcc_nc_l_off);
+    // LSL.L #1, S0: [0xE3, 0x88 | s0]
+    code.extend_from_slice(&[0xE3, 0x88 | s0]);
+    // OR.L S3, S0
+    code.extend(Instruction::Or { src: S3, dst: S0 }.encode());
+    // SUBQ.L #1, S2: [0x53, 0x80 | s2] (0x57 would be SUBQ.L #3!)
+    code.extend_from_slice(&[0x53, 0x80 | s2]);
+    // BRA.S left_loop
+    let bra_l_off = emit_bra_short_placeholder(code);
+    let bra_l_disp = (left_loop - bra_l_off as i64 - 2) as i8;
+    code[bra_l_off + 1] = bra_l_disp as u8;
+    // left_done:
+    patch_short_branch_to_here(code, beq_left_done_off);
+    // BRA.S store_result (skip right-shift code)
+    let bra_store1_off = emit_bra_short_placeholder(code);
+
+    // === Right shift path (shift < 0) ===
+    patch_short_branch_to_here(code, bmi_right_off);
+    // Negate shift: S2 = -S2.
+    // NEG.L S2: 0x4480 | s2
+    code.extend_from_slice(&[0x44, 0x80 | s2]);
+
+    let right_loop = code.len() as i64;
+    code.extend(Instruction::Tst { dst: S2 }.encode());
+    let beq_right_done_off = emit_bcc_short_placeholder(code, 0x67); // BEQ.S done
+
+    // 64-bit right shift by 1:
+    // S3 = 0 (carry)
+    code.extend(Instruction::Moveq { dst: S3, imm: 0 }.encode());
+    // LSR.L #1, S0: [0xE2, 0x88 | s0]
+    code.extend_from_slice(&[0xE2, 0x88 | s0]);
+    // BCC.S no_carry
+    let bcc_nc_r_off = emit_bcc_short_placeholder(code, 0x64);
+    code.extend(Instruction::Moveq { dst: S3, imm: 1 }.encode());
+    patch_short_branch_to_here(code, bcc_nc_r_off);
+    // LSR.L #1, S1: [0xE2, 0x88 | s1]
+    code.extend_from_slice(&[0xE2, 0x88 | s1]);
+    // If carry (S3=1), set MSB of S1.
+    code.extend(Instruction::Tst { dst: S3 }.encode());
+    let beq_skip_msb_off = emit_bcc_short_placeholder(code, 0x67); // BEQ.S skip
+    // ORI.L #0x80000000, S1
+    code.extend_from_slice(&[0x00, 0x80 | s1, 0x80, 0x00, 0x00, 0x00]);
+    // skip:
+    patch_short_branch_to_here(code, beq_skip_msb_off);
+    // SUBQ.L #1, S2
+    code.extend_from_slice(&[0x53, 0x80 | s2]);
+    // BRA.S right_loop
+    let bra_r_off = emit_bra_short_placeholder(code);
+    let bra_r_disp = (right_loop - bra_r_off as i64 - 2) as i8;
+    code[bra_r_off + 1] = bra_r_disp as u8;
+    // right_done:
+    patch_short_branch_to_here(code, beq_right_done_off);
+
+    // === store_result ===
+    patch_short_branch_to_here(code, bra_store1_off);
+    // Store S1 (lo) at dst_off, S0 (hi) at dst_off+4.
+    code.extend(ss_st(S1, dst_off));
+    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    // BRA.S end
+    let bra_end_off = emit_bra_short_placeholder(code);
+
+    // === store_zero ===
+    patch_short_branch_to_here(code, bmi_sign_off);
+    patch_short_branch_to_here(code, beq_zero_off);
+    code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+    code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
+    code.extend(ss_st(S1, dst_off));
+    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    // BRA.S end (but bra_end might be too far for .S; use .W)
+    // For safety, just fall through if close enough, or use BRA.W.
+    // Actually, let's just store and then the function returns.
+    // We need to skip the store_max code. Use BRA.W.
+    // BRA.W end: 0x60 0x00 0x00 0x00 (4 bytes, placeholder)
+    let bra_w_zero_off = code.len();
+    code.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+
+    // === store_max (overflow) ===
+    patch_short_branch_to_here(code, bcc_max_off);
+    code.extend(Instruction::Moveq { dst: S0, imm: -1 }.encode()); // 0xFFFFFFFF
+    code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
+    code.extend(ss_st(S1, dst_off));
+    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+
+    // === end ===
+    let end_off = code.len() as i64;
+    // Patch bra_end_off (BRA.S from store_result).
+    {
+        let disp = (end_off - bra_end_off as i64 - 2) as i8;
+        code[bra_end_off + 1] = disp as u8;
+    }
+    // Patch bra_w_zero_off (BRA.W from store_zero).
+    {
+        let disp = (end_off - bra_w_zero_off as i64 - 2) as i16;
+        code[bra_w_zero_off + 2..bra_w_zero_off + 4].copy_from_slice(&disp.to_be_bytes());
+    }
+}
+
 /// G4: `FloatToInt` / `FloatToUInt` cast — best-effort 68881 sequence.
 ///
 /// TODO G4: needs QEMU-m68k verification — encoding uncertain.
@@ -2654,6 +3016,16 @@ fn emit_cast_float_to_int(
 
     if let IRValue::Register(id) = src {
         let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+        // W8d: For FloatToUInt with 64-bit destination, use the software
+        // decode (no FPU) instead of the 68881 FMOVE.L path (which only
+        // stores 32 bits and saturates for values >= 2^31).
+        if matches!(kind, CastKind::FloatToUInt)
+            && matches!(to_ty, Some(IRType::I64) | Some(IRType::U64) | None)
+            && src_is_f64
+        {
+            emit_cast_f64_to_u64_software(src_off, dst_off, code);
+            return;
+        }
         // 1. A1 = FP + src_off
         emit_lea_fp_disp(src_off, code);
         // 2. FMOVE.S/D (A1), FP0
