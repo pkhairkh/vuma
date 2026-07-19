@@ -22,44 +22,72 @@
 //   tcp_accept_syn(tbl, idx) -> i64                — receive SYN, send
 //                                                     SYN-ACK, state →
 //                                                     SYN_RECEIVED(2).
-//   tcp_ack(tbl, idx) -> i64                       — receive ACK, state →
-//                                                     ESTABLISHED(3).
+//   tcp_ack(tbl, idx) -> i64                       — receive ACK; transitions
+//                                                     SYN_RECEIVED→ESTABLISHED,
+//                                                     FIN_WAIT_1→FIN_WAIT_2,
+//                                                     LAST_ACK→CLOSED,
+//                                                     CLOSING→TIME_WAIT.
+//   tcp_recv_fin(tbl, idx) -> i64                  — receive FIN; transitions
+//                                                     ESTABLISHED→CLOSE_WAIT,
+//                                                     FIN_WAIT_1→CLOSING,
+//                                                     FIN_WAIT_2→TIME_WAIT.
 //   tcp_send(tbl, idx, len) -> i64                 — send data on an
 //                                                     ESTABLISHED conn.
 //                                                     Returns len or -ENOTCONN.
 //   tcp_recv(tbl, idx) -> i64                      — receive data on an
 //                                                     ESTABLISHED conn (stub:
 //                                                     returns 0).
-//   tcp_close(tbl, idx) -> i64                     — initiate close (FIN),
-//                                                     state → FIN_WAIT_1(4).
+//   tcp_close(tbl, idx) -> i64                     — initiate close (FIN);
+//                                                     ESTABLISHED→FIN_WAIT_1,
+//                                                     CLOSE_WAIT→LAST_ACK.
+//   tcp_timeout(tbl, idx) -> i64                   — 2MSL timer fires;
+//                                                     TIME_WAIT→CLOSED.
 //   tcp_free(tbl, idx)                             — release the slot,
 //                                                     state → CLOSED(0),
 //                                                     used=0, count--.
 //
-// ── TCP state machine ──────────────────────────────────────────────────────
+// ── TCP state machine (all 10 states reachable as of W46) ──────────────────
 //   CLOSED=0         — initial / final state (no connection).
 //   SYN_SENT=1       — tcp_connect: sent SYN, waiting for SYN-ACK.
 //   SYN_RECEIVED=2   — tcp_accept_syn: received SYN, sent SYN-ACK, waiting
 //                      for the final ACK of the three-way handshake.
-//   ESTABLISHED=3    — tcp_ack: handshake complete, data can flow.
-//   FIN_WAIT_1=4     — tcp_close: sent FIN, waiting for ACK or FIN.
-//   FIN_WAIT_2=5     — (not exercised by K9d self-test) FIN ACKed, waiting
-//                      for peer's FIN.
-//   CLOSE_WAIT=6     — (not exercised) peer sent FIN, we still have data
-//                      to send.
-//   CLOSING=7        — (not exercised) simultaneous close (both FINs in
-//                      flight).
-//   LAST_ACK=8       — (not exercised) we sent FIN after peer's FIN,
-//                      waiting for final ACK.
-//   TIME_WAIT=9      — (not exercised) 2MSL wait before reuse.
+//   ESTABLISHED=3    — tcp_ack on SYN_RECEIVED: handshake complete, data
+//                      can flow.
+//   FIN_WAIT_1=4     — tcp_close on ESTABLISHED: sent FIN, waiting for
+//                      ACK or FIN.
+//   FIN_WAIT_2=5     — tcp_ack on FIN_WAIT_1: our FIN ACKed, waiting for
+//                      peer's FIN.
+//   TIME_WAIT=6      — tcp_recv_fin on FIN_WAIT_2 / tcp_ack on CLOSING:
+//                      2MSL wait before slot reuse.
+//   CLOSE_WAIT=7     — tcp_recv_fin on ESTABLISHED: peer sent FIN, we
+//                      still have data to send (or close).
+//   LAST_ACK=8       — tcp_close on CLOSE_WAIT: we sent FIN after peer's
+//                      FIN, waiting for final ACK.
+//   CLOSING=9        — tcp_recv_fin on FIN_WAIT_1: simultaneous close
+//                      (both FINs in flight, our FIN not yet ACKed).
 //
-// The K9d self-test exercises the happy path:
-//   CLOSED → SYN_SENT → SYN_RECEIVED → ESTABLISHED → (send) → FIN_WAIT_1
-//          → CLOSED (via tcp_free).
-// The other 6 states (5, 6, 7, 8, 9) are defined for the state enum but
-// not yet exercised by transitions — they'll be wired up by later waves
-// (K9e+ when retransmits + 2MSL timers land). Defining them now keeps the
-// state enum forward-compatible with a full TCP.
+// The W46 self-test exercises ALL 10 states via three close sequences:
+//   (A) Active close:   CLOSED → SYN_SENT → SYN_RECEIVED → ESTABLISHED
+//                          → (send) → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT
+//                          → CLOSED (via tcp_timeout)
+//   (B) Passive close:  CLOSED → SYN_SENT → SYN_RECEIVED → ESTABLISHED
+//                          → CLOSE_WAIT → LAST_ACK → CLOSED (via tcp_ack)
+//   (C) Simultaneous:   CLOSED → SYN_SENT → SYN_RECEIVED → ESTABLISHED
+//                          → FIN_WAIT_1 → CLOSING → TIME_WAIT → CLOSED
+//
+// The transitions:
+//   tcp_close on ESTABLISHED  → FIN_WAIT_1 (active close: send our FIN)
+//   tcp_close on CLOSE_WAIT   → LAST_ACK (passive close: send our FIN
+//                                after peer's FIN already received)
+//   tcp_ack on SYN_RECEIVED   → ESTABLISHED (3-way handshake complete)
+//   tcp_ack on FIN_WAIT_1     → FIN_WAIT_2 (our FIN ACKed by peer)
+//   tcp_ack on LAST_ACK       → CLOSED (peer ACKed our final FIN)
+//   tcp_ack on CLOSING        → TIME_WAIT (peer finally ACKed our FIN
+//                                after simultaneous close)
+//   tcp_recv_fin on ESTABLISHED → CLOSE_WAIT (peer started close)
+//   tcp_recv_fin on FIN_WAIT_1  → CLOSING (simultaneous close)
+//   tcp_recv_fin on FIN_WAIT_2  → TIME_WAIT (peer's FIN received)
+//   tcp_timeout on TIME_WAIT  → CLOSED (2MSL elapsed, free the slot)
 //
 // ── Connection table layout ────────────────────────────────────────────────
 // Same "parallel flat byte arrays" pattern as K9a's SocketTable, K4a's
@@ -109,8 +137,8 @@
 //             same convention as K4a's task_alloc returning 256 for its
 //             256-slot table)
 //     0..9  = TCP state values (CLOSED / SYN_SENT / SYN_RECEIVED /
-//             ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2 / CLOSE_WAIT /
-//             CLOSING / LAST_ACK / TIME_WAIT)
+//             ESTABLISHED / FIN_WAIT_1 / FIN_WAIT_2 / TIME_WAIT /
+//             CLOSE_WAIT / LAST_ACK / CLOSING)
 //     22    = EINVAL errno (returned on idx >= 64)
 //     9     = EBADF errno (returned on used[idx] == 0 — K9d uses it only
 //             in tcp_connect; other transitions accept any idx for state
@@ -154,11 +182,15 @@
 //         womb/kernel/net/tcp.vuma \
 //         /tmp/tcp.bin x86_64 --verify
 //     /tmp/tcp.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 11 self-test checks pass — tcp_alloc
+// Expected: IVE Pass, exit=0 (all 26 self-test checks pass — tcp_alloc
 // returns 0 + count=1; tcp_connect sets state=1 + stores local_port=1234
 // + remote_port=80; tcp_accept_syn sets state=2; tcp_ack sets state=3;
-// tcp_send returns 100; tcp_close sets state=4; tcp_free clears used +
-// decrements count to 0).
+// tcp_send returns 100; tcp_close sets state=4 (FIN_WAIT_1); tcp_ack on
+// FIN_WAIT_1 sets state=5 (FIN_WAIT_2); tcp_recv_fin sets state=6
+// (TIME_WAIT); tcp_timeout sets state=0 (CLOSED); the passive-close path
+// exercises CLOSE_WAIT=7 + LAST_ACK=8; the simultaneous-close path
+// exercises CLOSING=9. tcp_free clears used + decrements count to 0
+// after each sequence.)
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -332,11 +364,55 @@ fn tcp_accept_syn(tbl: State<TcpTable>, idx: u32) -> i64 {
     return 0;
 }
 
-// tcp_ack: receive ACK, move to ESTABLISHED(3).
+// tcp_ack: receive an ACK segment, transition based on current state.
+//   SYN_RECEIVED(2) → ESTABLISHED(3) — 3-way handshake complete.
+//   FIN_WAIT_1(4)   → FIN_WAIT_2(5)  — our FIN was ACKed by peer.
+//   LAST_ACK(8)     → CLOSED(0)      — peer ACKed our final FIN.
+//   CLOSING(9)      → TIME_WAIT(6)   — simultaneous close resolved: peer
+//                                       ACKed our FIN after we already
+//                                       received peer's FIN.
+// Other states: no-op (returns 0 unchanged). The 4 cases cover the
+// canonical close sequences (active / passive / simultaneous). Per
+// RFC 793, an ACK segment may also carry a FIN — that case is handled
+// by tcp_recv_fin (called separately when the FIN flag bit is set).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
 fn tcp_ack(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
-    tbl.states[idx] = 3;  // ESTABLISHED
+    let s = tbl.states[idx];
+    if s == 2 {  // SYN_RECEIVED
+        tbl.states[idx] = 3;  // ESTABLISHED
+    } else if s == 4 {  // FIN_WAIT_1
+        tbl.states[idx] = 5;  // FIN_WAIT_2
+    } else if s == 8 {  // LAST_ACK
+        tbl.states[idx] = 0;  // CLOSED
+    } else if s == 9 {  // CLOSING
+        tbl.states[idx] = 6;  // TIME_WAIT
+    }
+    return 0;
+}
+
+// tcp_recv_fin: receive a FIN segment, transition based on current state.
+//   ESTABLISHED(3) → CLOSE_WAIT(7) — peer started close; we may still
+//                                    have data to send before our own FIN.
+//   FIN_WAIT_1(4)  → CLOSING(9)    — simultaneous close: peer's FIN
+//                                    arrived before our FIN was ACKed.
+//   FIN_WAIT_2(5)  → TIME_WAIT(6)  — normal active close: our FIN was
+//                                    ACKed, now peer's FIN arrives.
+// Other states: no-op (returns 0 unchanged). Symmetric to tcp_ack: this
+// function fires on the FIN flag bit, tcp_ack fires on the ACK flag bit.
+// A real TCP segment carrying both ACK+FIN would call both in sequence
+// (K9e+ will wire the flag dispatch once the IP layer lands).
+// Returns 0 on success, 22=-EINVAL on idx >= 64.
+fn tcp_recv_fin(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    let s = tbl.states[idx];
+    if s == 3 {  // ESTABLISHED
+        tbl.states[idx] = 7;  // CLOSE_WAIT
+    } else if s == 4 {  // FIN_WAIT_1
+        tbl.states[idx] = 9;  // CLOSING
+    } else if s == 5 {  // FIN_WAIT_2
+        tbl.states[idx] = 6;  // TIME_WAIT
+    }
     return 0;
 }
 
@@ -363,13 +439,40 @@ fn tcp_recv(tbl: State<TcpTable>, idx: u32) -> i64 {
     return 0;  // stub: no data
 }
 
-// tcp_close: initiate close (send FIN), move to FIN_WAIT_1(4).
+// tcp_close: send our FIN, state-dependent transition.
+//   ESTABLISHED(3) → FIN_WAIT_1(4) — active close: we send FIN first.
+//   CLOSE_WAIT(7)  → LAST_ACK(8)   — passive close: peer already sent
+//                                     their FIN (we are in CLOSE_WAIT);
+//                                     now we send ours and wait for the
+//                                     final ACK.
+// Other states: no-op (returns 0 unchanged). Both transitions send a FIN
+// segment; the resulting state differs based on whether the peer's FIN
+// has already been received (CLOSE_WAIT → LAST_ACK) or not
+// (ESTABLISHED → FIN_WAIT_1).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-// The full FIN/ACK teardown (FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT →
-// CLOSED) is K9e+; K9d only models the entry into FIN_WAIT_1.
 fn tcp_close(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
-    tbl.states[idx] = 4;  // FIN_WAIT_1
+    let s = tbl.states[idx];
+    if s == 7 {  // CLOSE_WAIT
+        tbl.states[idx] = 8;  // LAST_ACK
+    } else if s == 3 {  // ESTABLISHED
+        tbl.states[idx] = 4;  // FIN_WAIT_1
+    }
+    return 0;
+}
+
+// tcp_timeout: 2MSL timer fired on a TIME_WAIT connection, transition
+// to CLOSED so the slot can be reused. Per RFC 793, a connection in
+// TIME_WAIT must wait 2× Maximum Segment Lifetime before reusing the
+// 4-tuple; K9d collapses the timer into a single-step "timer fired"
+// event (no actual wall-clock wait — the caller is responsible for
+// scheduling tcp_timeout after the 2MSL interval). Other states: no-op.
+// Returns 0 on success, 22=-EINVAL on idx >= 64.
+fn tcp_timeout(tbl: State<TcpTable>, idx: u32) -> i64 {
+    if idx >= 64 { return 22; }
+    if tbl.states[idx] == 6 {  // TIME_WAIT
+        tbl.states[idx] = 0;   // CLOSED
+    }
     return 0;
 }
 
@@ -388,15 +491,21 @@ fn tcp_free(tbl: State<TcpTable>, idx: u32) {
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the happy-path TCP state machine: allocate a connection,
-// run the three-way handshake (SYN_SENT → SYN_RECEIVED → ESTABLISHED),
-// send 100 bytes, close (FIN_WAIT_1), then free the slot. Returns 0 on
-// success, 1..9 on the 9 individual check failures (each check guards
-// one observable state transition + the final free).
+// Exercises ALL 10 TCP states via three close sequences:
+//   (A) Active close (we initiate FIN): walks the canonical
+//       ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED path.
+//   (B) Passive close (peer initiates FIN): walks
+//       ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED.
+//   (C) Simultaneous close (both FINs in flight): walks
+//       ESTABLISHED → FIN_WAIT_1 → CLOSING → TIME_WAIT → CLOSED.
+// Returns 0 on success, 1..26 on individual check failures (each check
+// guards one observable state transition + the per-sequence free).
 fn main() -> i32 {
     let tbl = state_new(TcpTable);
     tcp_init(tbl);
-    // Allocate a connection.
+
+    // ── (A) Active close: ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 →
+    //                    TIME_WAIT → CLOSED ─────────────────────────────
     let c = tcp_alloc(tbl);
     if c != 0 { return 1; }
     if tbl.count != 1 { return 2; }
@@ -415,12 +524,56 @@ fn main() -> i32 {
     // Send data.
     let n = tcp_send(tbl, c, 100);
     if n != 100 { return 6; }
-    // Close.
+    // Close → FIN_WAIT_1.
     tcp_close(tbl, c);
     if tbl.states[c] != 4 { return 7; }
-    // Free.
+    // Peer ACKs our FIN → FIN_WAIT_2.
+    tcp_ack(tbl, c);
+    if tbl.states[c] != 5 { return 12; }
+    // Peer sends FIN → TIME_WAIT.
+    tcp_recv_fin(tbl, c);
+    if tbl.states[c] != 6 { return 13; }
+    // 2MSL timer fires → CLOSED.
+    tcp_timeout(tbl, c);
+    if tbl.states[c] != 0 { return 14; }
+    // Free slot 0; count back to 0.
     tcp_free(tbl, c);
     if tbl.used[c] != 0 { return 8; }
     if tbl.count != 0 { return 9; }
+
+    // ── (B) Passive close: ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED ─
+    let c2 = tcp_alloc(tbl);   // reuses slot 0 (was just freed)
+    if c2 != 0 { return 15; }
+    tcp_connect(tbl, c2, 4321, 443);
+    tcp_accept_syn(tbl, c2);
+    tcp_ack(tbl, c2);          // → ESTABLISHED
+    if tbl.states[c2] != 3 { return 16; }
+    tcp_recv_fin(tbl, c2);     // ESTABLISHED → CLOSE_WAIT (peer sent FIN)
+    if tbl.states[c2] != 7 { return 17; }
+    tcp_close(tbl, c2);        // CLOSE_WAIT → LAST_ACK (we send our FIN)
+    if tbl.states[c2] != 8 { return 18; }
+    tcp_ack(tbl, c2);          // LAST_ACK → CLOSED (peer ACKs our FIN)
+    if tbl.states[c2] != 0 { return 19; }
+    tcp_free(tbl, c2);
+    if tbl.count != 0 { return 20; }
+
+    // ── (C) Simultaneous close: ESTABLISHED → FIN_WAIT_1 → CLOSING →
+    //                           TIME_WAIT → CLOSED ──────────────────────
+    let c3 = tcp_alloc(tbl);
+    if c3 != 0 { return 21; }
+    tcp_connect(tbl, c3, 5555, 22);
+    tcp_accept_syn(tbl, c3);
+    tcp_ack(tbl, c3);          // → ESTABLISHED
+    tcp_close(tbl, c3);        // → FIN_WAIT_1 (we send our FIN)
+    if tbl.states[c3] != 4 { return 22; }
+    tcp_recv_fin(tbl, c3);     // FIN_WAIT_1 → CLOSING (peer's FIN arrives
+                               // before our FIN was ACKed — simultaneous)
+    if tbl.states[c3] != 9 { return 23; }
+    tcp_ack(tbl, c3);          // CLOSING → TIME_WAIT (peer finally ACKs)
+    if tbl.states[c3] != 6 { return 24; }
+    tcp_timeout(tbl, c3);      // TIME_WAIT → CLOSED
+    if tbl.states[c3] != 0 { return 25; }
+    tcp_free(tbl, c3);
+    if tbl.count != 0 { return 26; }
     return 0;
 }
