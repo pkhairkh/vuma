@@ -2357,10 +2357,18 @@ fn build_f64_mul_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_stw(R19, R30, 36));
 
     // --- Pre-shift M_b left by 11 so MSB (bit 52) lands at bit 31 of R23 ---
-    // new_R23 = (R23:R24) >> 21, low 32 bits = (R23 << 11) | (R24 >> 21)
-    code.extend_from_slice(&encode_shrpw(R23, R24, 21, R23));
-    // new_R24 = (R24:0) >> 21, low 32 bits = R24 << 11
-    code.extend_from_slice(&encode_shrpw(R24, R0, 21, R24));
+    // R18 = R24 >> 21 (carry from low to high)
+    code.extend_from_slice(&encode_shrpw(R0, R24, 21, R18));
+    // R23 = R23 << 4
+    code.extend_from_slice(&encode_shladd(4, R23, R0, R23));
+    // R23 = R23 << 4 (= orig << 8)
+    code.extend_from_slice(&encode_shladd(4, R23, R0, R23));
+    // R23 = (R23 << 3) + carry (= orig << 11 | carry)
+    code.extend_from_slice(&encode_shladd(3, R23, R18, R23));
+    // R24 = R24 << 11 (4+4+3)
+    code.extend_from_slice(&encode_shladd(4, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(4, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(3, R24, R0, R24));
 
     // --- Init 128-bit acc (R25:R26:R28:R29) = 0, counter R19 = 53 ---
     code.extend_from_slice(&encode_copy(R0, R25));
@@ -2373,13 +2381,15 @@ fn build_f64_mul_stub() -> Vec<u8> {
     let mul_loop = code.len() as i64;
     // 1. Extract MSB of M_b: R20 = bit 31 of R23.
     code.extend_from_slice(&encode_shrpw(R0, R23, 31, R20));
-    // 2. Shift acc left by 1 (128-bit).
-    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R21));   // R21 = bit31 of R26 (temp save)
-    code.extend_from_slice(&encode_shrpw(R26, R28, 31, R26));  // R26 = (R26<<1)|(bit31 R28)
-    code.extend_from_slice(&encode_shrpw(R28, R29, 31, R28));  // R28 = (R28<<1)|(bit31 R29)
-    code.extend_from_slice(&encode_shladd(1, R29, R0, R29));   // R29 <<= 1
-    code.extend_from_slice(&encode_shladd(1, R25, R0, R25));   // R25 <<= 1
-    code.extend_from_slice(&encode_or(R25, R21, R25));          // R25 |= carry (bit31 of old R26)
+    // 2. Shift acc left by 1 (128-bit): R25:R26:R28:R29.
+    //    Use R18 as temp for carry. Process from MSB (R25) to LSB (R29).
+    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R18));   // R18 = carry from R26
+    code.extend_from_slice(&encode_shladd(1, R25, R18, R25));   // R25 = R25*2 + carry
+    code.extend_from_slice(&encode_shrpw(R0, R28, 31, R18));   // R18 = carry from R28
+    code.extend_from_slice(&encode_shladd(1, R26, R18, R26));   // R26 = R26*2 + carry
+    code.extend_from_slice(&encode_shrpw(R0, R29, 31, R18));   // R18 = carry from R29
+    code.extend_from_slice(&encode_shladd(1, R28, R18, R28));   // R28 = R28*2 + carry
+    code.extend_from_slice(&encode_shladd(1, R29, R0, R29));   // R29 = R29*2
     // 3. If R20 != 0: add M_a (R21:R22) to acc.
     let skip_add = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if R20==0, skip
@@ -2426,9 +2436,13 @@ fn build_f64_mul_stub() -> Vec<u8> {
     // skip_add:
     patch_cmpb_to_here(&mut code, skip_add);
 
-    // 4. Shift M_b left by 1 (64-bit).
-    code.extend_from_slice(&encode_shrpw(R23, R24, 31, R23));  // R23 = (R23<<1)|(bit31 R24)
-    code.extend_from_slice(&encode_shladd(1, R24, R0, R24));   // R24 <<= 1
+    // 4. Shift M_b left by 1 (64-bit): R23:R24.
+    //    R18 = R24 >> 31 (carry from low to high)
+    code.extend_from_slice(&encode_shrpw(R0, R24, 31, R18));
+    //    R23 = (R23 << 1) | carry
+    code.extend_from_slice(&encode_shladd(1, R23, R18, R23));
+    //    R24 <<= 1
+    code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
 
     // 5. R19 -= 1. If R19 != 0, loop.
     code.extend_from_slice(&encode_ldo(R19, -1, R19));
