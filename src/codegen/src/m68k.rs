@@ -1236,35 +1236,44 @@ fn emit_instr(
                 }
             }
             // Load value from (A1) into S0, using correct size based on ty.
-            let size_bits: u16 = match ty {
-                IRType::I8 | IRType::U8 => 0x1000, // byte
-                IRType::I16 | IRType::U16 => 0x3000, // word
-                _ => 0x2000, // long (default)
-            };
-            {
-                let w = size_bits | (2u16 << 3) | 1;
-                code.extend_from_slice(&w.to_be_bytes());
-            }
-            // CRITICAL: m68k MOVE.B to a data register only modifies the
-            // low byte — the upper 24 bits are UNCHANGED.  This means a
-            // byte load of 0x00 into D0 (which had 0x12345678) gives
-            // D0 = 0x12345600, NOT 0x00000000.  This breaks comparisons
-            // (CMP.L sees a non-zero value) and arithmetic.
-            //
-            // Fix: zero-extend after byte/word loads by clearing the
-            // upper bits with AND.L.
             match ty {
-                IRType::I8 | IRType::U8 => {
-                    // AND.L #0xFF, D0 — 0x0280 0x000000FF
-                    code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x00, 0xFF]);
+                IRType::F64 | IRType::I64 | IRType::U64 => {
+                    eprintln!("DEBUG m68k Load F64/U64/I64: ty={:?}", ty);
+                    // 8-byte load: two MOVE.L from (A1).
+                    // Big-endian memory: hi at [A1+0], lo at [A1+4].
+                    // Stack slot: lo at [dst_off], hi at [dst_off+4].
+                    // MOVE.L (A1), S0  — S0 = hi
+                    code.extend_from_slice(&(0x2010u16 | ((S0.encoding() as u16) << 9) | 0x01).to_be_bytes());
+                    // ADDQ.L #4, A1
+                    code.extend_from_slice(&0x5981u16.to_be_bytes());
+                    // MOVE.L (A1), S2  — S2 = lo
+                    code.extend_from_slice(&(0x2010u16 | ((S2.encoding() as u16) << 9) | 0x01).to_be_bytes());
+                    // Store lo (S2) at dst_off, hi (S0) at dst_off+4
+                    code.extend(ss_st(S2, dst_off));
+                    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
                 }
-                IRType::I16 | IRType::U16 => {
-                    // AND.L #0xFFFF, D0 — 0x0280 0x0000FFFF
-                    code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0xFF, 0xFF]);
+                _ => {
+                    let size_bits: u16 = match ty {
+                        IRType::I8 | IRType::U8 => 0x1000, // byte
+                        IRType::I16 | IRType::U16 => 0x3000, // word
+                        _ => 0x2000, // long (default)
+                    };
+                    {
+                        let w = size_bits | (2u16 << 3) | 1;
+                        code.extend_from_slice(&w.to_be_bytes());
+                    }
+                    match ty {
+                        IRType::I8 | IRType::U8 => {
+                            code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x00, 0xFF]);
+                        }
+                        IRType::I16 | IRType::U16 => {
+                            code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0xFF, 0xFF]);
+                        }
+                        _ => {}
+                    }
+                    code.extend(ss_st(S0, dst_off));
                 }
-                _ => {} // long: no masking needed
             }
-            code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Store {
             value,
@@ -1289,23 +1298,34 @@ fn emit_instr(
                     code.extend_from_slice(&w.to_be_bytes());
                 }
             }
-            // Load value into S2.
-            code.extend(ss_load_value(value, vreg_stack_slots, S2));
-            // Store S2 to (A1) using correct size based on ty.
-            // MOVE.B S2, (A1): size=01, dst=A1 mode=010, src=S2 mode=000
-            //   = 0x1000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
-            // MOVE.W S2, (A1): size=11
-            //   = 0x3000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
-            // MOVE.L S2, (A1): size=10 (default)
-            //   = 0x2000 | (1<<9) | (2<<6) | (0<<3) | S2_enc
-            let size_bits: u16 = match ty {
-                IRType::I8 | IRType::U8 => 0x1000, // byte
-                IRType::I16 | IRType::U16 => 0x3000, // word
-                _ => 0x2000, // long (default)
-            };
-            {
-                let w = size_bits | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7);
-                code.extend_from_slice(&w.to_be_bytes());
+            // Store value to (A1) using correct size based on ty.
+            match ty {
+                IRType::F64 | IRType::I64 | IRType::U64 => {
+                    // 8-byte store: two MOVE.L to (A1).
+                    // Load lo (S2) and hi (S3) from value's stack slot.
+                    code.extend(ss_load_value_64(value, vreg_stack_slots, S2, S3));
+                    // Big-endian memory: hi at [A1+0], lo at [A1+4].
+                    // MOVE.L S3, (A1) — hi to [addr+0]
+                    code.extend_from_slice(&(0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S3.encoding() as u16 & 0x7)).to_be_bytes());
+                    // ADDQ.L #4, A1
+                    code.extend_from_slice(&0x5981u16.to_be_bytes());
+                    // MOVE.L S2, (A1) — lo to [addr+4]
+                    code.extend_from_slice(&(0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7)).to_be_bytes());
+                }
+                _ => {
+                    // Load value into S2.
+                    code.extend(ss_load_value(value, vreg_stack_slots, S2));
+                    // MOVE.B/W/L S2, (A1)
+                    let size_bits: u16 = match ty {
+                        IRType::I8 | IRType::U8 => 0x1000, // byte
+                        IRType::I16 | IRType::U16 => 0x3000, // word
+                        _ => 0x2000, // long (default)
+                    };
+                    {
+                        let w = size_bits | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                    }
+                }
             }
         }
         IRInstr::Alloc { dst, size: _ } => {
@@ -2101,6 +2121,22 @@ fn emit_binop(
 ///
 /// Computes the effective address `[FP + offset]` into A1, suitable as
 /// the EA for 68881 FMOVE.S/D (A1), FPn encodings.
+/// Swap the two 32-bit words at [FP + off] and [FP + off + 4].
+///
+/// The m68k stack slot convention stores 64-bit values as lo at [off] and
+/// hi at [off+4] (little-endian within the slot).  But the 68881 FPU's
+/// FMOVE.D loads/stores 8 bytes in big-endian order (hi at [addr], lo at
+/// [addr+4]).  This helper swaps the words so the FPU can operate on the
+/// value directly.
+fn emit_swap_f64_slot(off: i32, code: &mut Vec<u8>) {
+    // S0 = [FP + off] (lo), S1 = [FP + off + 4] (hi)
+    code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S0 }.encode());
+    code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S1 }.encode());
+    // [FP + off] = S1 (hi), [FP + off + 4] = S0 (lo)
+    code.extend(Instruction::Store { src: S1, base: FP, offset: off as i16 }.encode());
+    code.extend(Instruction::Store { src: S0, base: FP, offset: (off + 4) as i16 }.encode());
+}
+
 fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
     // MOVEA.L A6, A1: word = 0x224E.
     //   Encoding: 00 10 001 001 001 110
@@ -2609,28 +2645,48 @@ fn emit_fp_binop(
     match op {
         BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
         | BinOpKind::SDiv | BinOpKind::UDiv => {
-            // ── Register operands: call compiler-rt soft-float routines ──
-            // ABI: lhs in D1(low):D2(high), rhs in D3(low):D4(high).
-            // Return: D0(low) / D1(high) — matches IRInstr::Call convention.
             if is_f64 {
-                code.extend(ss_load_value_64(lhs, vreg_stack_slots, Gpr::D1, Gpr::D2));
-                code.extend(ss_load_value_64(rhs, vreg_stack_slots, Gpr::D3, Gpr::D4));
-                let stub = match op {
-                    BinOpKind::Add => "__adddf3",
-                    BinOpKind::Sub => "__subdf3",
-                    BinOpKind::Mul => "__muldf3",
-                    BinOpKind::SDiv | BinOpKind::UDiv => "__divdf3",
-                    _ => "__adddf3",
-                };
-                emit_softfloat_call(code, relocations, stub);
-                // Store 64-bit result: D0 → dst_off (low), D1 → dst_off+4 (high).
-                code.extend(ss_st(Gpr::D0, dst_off));
-                code.extend(Instruction::Store {
-                    src: Gpr::D1,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
+                // ── f64 arithmetic via 68881 FPU ──
+                // Load lhs into FP0: swap slot to big-endian, FMOVE.D, swap back.
+                if let IRValue::Register(id) = lhs {
+                    let lhs_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                    emit_lea_fp_disp(lhs_off, code);
+                    emit_swap_f64_slot(lhs_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp0, true, code);
+                    emit_swap_f64_slot(lhs_off, code);
+                } else {
+                    // Immediate lhs: spill to dst_off (safe scratch), load.
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, Gpr::D0, Gpr::D1));
+                    code.extend(ss_st(Gpr::D0, dst_off));
+                    code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                    emit_swap_f64_slot(dst_off, code);
+                    emit_lea_fp_disp(dst_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp0, true, code);
+                    emit_swap_f64_slot(dst_off, code);
                 }
-                .encode());
+                // Load rhs into FP1: swap slot to big-endian, FMOVE.D, swap back.
+                if let IRValue::Register(id) = rhs {
+                    let rhs_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                    emit_lea_fp_disp(rhs_off, code);
+                    emit_swap_f64_slot(rhs_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp1, true, code);
+                    emit_swap_f64_slot(rhs_off, code);
+                } else {
+                    // Immediate rhs: spill to dst_off, load.
+                    code.extend(ss_load_value_64(rhs, vreg_stack_slots, Gpr::D0, Gpr::D1));
+                    code.extend(ss_st(Gpr::D0, dst_off));
+                    code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                    emit_swap_f64_slot(dst_off, code);
+                    emit_lea_fp_disp(dst_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp1, true, code);
+                    emit_swap_f64_slot(dst_off, code);
+                }
+                // FP0 = FP0 OP FP1 (result in FP0).
+                emit_fp_arith(op, Fpr::Fp0, Fpr::Fp1, code);
+                // Store FP0 to dst: FMOVE.D FP0, (A1), then swap to slot convention.
+                emit_lea_fp_disp(dst_off, code);
+                emit_fmove_fp_to_mem(Fpr::Fp0, true, code);
+                emit_swap_f64_slot(dst_off, code);
             } else {
                 // F32 with Register operand: not yet supported via soft-float
                 // (would require __addsf3 / __subsf3 / __mulsf3 / __divsf3
@@ -2699,28 +2755,59 @@ fn emit_cast_float_to_float(
     let dst_is_f64 = matches!(to_ty, Some(IRType::F64));
     let src_is_f64 = matches!(from_ty, Some(IRType::F64));
 
-    // Load source low 4 bytes into S0.
     if let IRValue::Register(id) = src {
         let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-        code.extend(ss_ld(S0, src_off));
-    } else {
-        // Non-register source: best-effort (load integer bits).
-        // TODO G4: for FP immediates this produces wrong bits.
-        code.extend(ss_load_value(src, vreg_stack_slots, S0));
-    }
-    // Store low 4 bytes to dst.
-    code.extend(ss_st(S0, dst_off));
-
-    if dst_is_f64 {
-        // Need 8 bytes at dst. If src is f64, copy high 4 bytes too;
-        // otherwise zero-extend.
+        // Use FPU for real f32↔f64 conversion.
+        // 1. A1 = FP + src_off
+        emit_lea_fp_disp(src_off, code);
+        // Swap for f64 source (FPU expects big-endian).
         if src_is_f64 {
-            if let IRValue::Register(id) = src {
-                let src_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-                code.extend(ss_ld(S0, src_off + 4));
-            } else {
-                code.extend(ss_load_imm(S0, 0));
-            }
+            emit_swap_f64_slot(src_off, code);
+        }
+        // 2. FMOVE.S/D (A1), FP0 — load source into FP0.
+        emit_fmove_mem_to_fp(Fpr::Fp0, src_is_f64, code);
+        // Swap back.
+        if src_is_f64 {
+            emit_swap_f64_slot(src_off, code);
+        }
+        // 3. A1 = FP + dst_off
+        emit_lea_fp_disp(dst_off, code);
+        // 4. FMOVE.S/D FP0, (A1) — store in destination format.
+        emit_fmove_fp_to_mem(Fpr::Fp0, dst_is_f64, code);
+        // Swap for f64 dest.
+        if dst_is_f64 {
+            emit_swap_f64_slot(dst_off, code);
+        }
+        // For f32 dest, zero the high 4 bytes of the slot.
+        if !dst_is_f64 {
+            code.extend(ss_load_imm(S0, 0));
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
+        }
+    } else {
+        // Immediate source: compute conversion in Rust at compile time.
+        let src_bits = if let IRValue::Immediate(v) = src { *v as u64 } else { 0 };
+        let result_bits = if src_is_f64 && !dst_is_f64 {
+            // f64 → f32 (narrow)
+            (f64::from_bits(src_bits) as f32).to_bits() as u64
+        } else if !src_is_f64 && dst_is_f64 {
+            // f32 → f64 (widen)
+            (f32::from_bits(src_bits as u32) as f64).to_bits()
+        } else {
+            src_bits
+        };
+        let lo = (result_bits & 0xFFFFFFFF) as i64;
+        let hi = (result_bits >> 32) as i64;
+        code.extend(ss_load_imm(S0, lo));
+        code.extend(ss_st(S0, dst_off));
+        if dst_is_f64 {
+            code.extend(ss_load_imm(S0, hi));
             code.extend(
                 Instruction::Store {
                     src: S0,
@@ -2730,7 +2817,7 @@ fn emit_cast_float_to_float(
                 .encode(),
             );
         } else {
-            // f32 → f64: zero-extend (high 4 bytes = 0).
+            // f32 dest: zero high 4 bytes.
             code.extend(ss_load_imm(S0, 0));
             code.extend(
                 Instruction::Store {
@@ -2742,7 +2829,6 @@ fn emit_cast_float_to_float(
             );
         }
     }
-    // If dst is f32, we only stored 4 bytes (truncating if src was f64).
 }
 
 /// G4: `IntToFloat` / `UIntToFloat` cast — best-effort 68881 sequence.
@@ -2781,6 +2867,10 @@ fn emit_cast_int_to_float(
         emit_lea_fp_disp(dst_off, code);
         // 4. FMOVE.S/D FP0, (A1)
         emit_fmove_fp_to_mem(Fpr::Fp0, is_dst_f64, code);
+        // Swap words for f64 (FPU stored big-endian, slot needs lo-at-[off]).
+        if is_dst_f64 {
+            emit_swap_f64_slot(dst_off, code);
+        }
     } else if let IRValue::Immediate(imm) = src {
         // W4b: compute the int→float conversion in Rust at compile time
         // and emit MOVEQ/MOVE.L for the resulting IEEE-754 bit pattern.
@@ -3028,8 +3118,16 @@ fn emit_cast_float_to_int(
         }
         // 1. A1 = FP + src_off
         emit_lea_fp_disp(src_off, code);
+        // Swap words for f64 (FPU expects big-endian, slot is lo-at-[off]).
+        if src_is_f64 {
+            emit_swap_f64_slot(src_off, code);
+        }
         // 2. FMOVE.S/D (A1), FP0
         emit_fmove_mem_to_fp(Fpr::Fp0, src_is_f64, code);
+        // Swap back.
+        if src_is_f64 {
+            emit_swap_f64_slot(src_off, code);
+        }
         // 3. FINTRZ FP0, FP0 — best-effort 68881 encoding.
         //    Word 1: 0xF200 (cp1, cpGEN, EA = D0 placeholder).
         //    Word 2: (0x03 << 8) | (FPn=0 << 4) | FPm=0 = 0x0300.
@@ -4202,13 +4300,16 @@ fn build_m68k_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec
     elf.extend_from_slice(&(entry_point as u32).to_be_bytes()); // e_entry
     elf.extend_from_slice(&(elf_header_size as u32).to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_be_bytes()); // e_shoff
-    // W4b: e_flags — advertise m68020 + 68881 FPU capability so QEMU-m68k
-    // selects a CPU with an FPU.  With the default e_flags=0 QEMU uses the
-    // m68000 CPU (no FPU) and every F-line (68881 coprocessor-1) instruction
-    // traps with SIGILL, breaking all FP comparisons and register-form FP
-    // casts.  The flag values follow the binutils/Linux m68k ELF convention
-    // (EF_M68K_CPU_M68020 = 0x04000000, EF_M68K_CPU_M68881 = 0x00010000).
-    elf.extend_from_slice(&0x0401_0000u32.to_be_bytes()); // e_flags: m68020 + 68881
+    // e_flags — advertise m68040 + 68040 FPU capability so QEMU-m68k
+    // selects a CPU with a built-in FPU.  With the wrong flags (or
+    // e_flags=0) QEMU uses the m68000 CPU (no FPU) and every F-line
+    // (68881 coprocessor-1) instruction traps with SIGILL, breaking all
+    // FP operations.  The flag values follow the Linux m68k ELF convention
+    // (arch/m68k/include/asm/elf.h):
+    //   EF_M68K_CPU_M68040 = 0x00050000
+    //   EF_M68K_FPU_M68040 = 0x00000003
+    // Combined: 0x00050003.
+    elf.extend_from_slice(&0x0005_0003u32.to_be_bytes()); // e_flags: m68040 + 68040 FPU
     elf.extend_from_slice(&52u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_be_bytes()); // e_phentsize
     elf.extend_from_slice(&3u16.to_be_bytes()); // e_phnum
