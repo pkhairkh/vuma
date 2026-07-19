@@ -1,0 +1,20 @@
+// bidirectional — Two channels, parent sends then receives
+// Expected exit code: 84
+fn main() -> i32 {
+    ch1 = channel_open<i32>();
+    ch2 = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch1);
+        channel_send(ch2, x * 2);
+        channel_close(ch1);
+        channel_close(ch2);
+        return 0;
+    }
+    channel_send(ch1, 42);
+    result = channel_recv(ch2);
+    wait_worker(pid);
+    channel_close(ch1);
+    channel_close(ch2);
+    return result;
+}

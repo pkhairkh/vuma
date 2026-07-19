@@ -1,0 +1,10 @@
+// worker_error — Child exits with error code, parent gets it via wait_worker
+// Expected exit code: 7
+fn main() -> i32 {
+    pid = spawn_worker();
+    if pid == 0 {
+        return 7;
+    }
+    status = wait_worker(pid);
+    return status;
+}
