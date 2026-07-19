@@ -2893,10 +2893,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // Full CRC verification requires an inline CRC32 loop over
                 // 52 bytes — deferred; the magic check provides basic
                 // frame integrity validation per the L1 spec.
-                IRInstr::ChannelRecv { ch, dst, ty: _ } => {
+                IRInstr::ChannelRecv { ch, dst, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = slot_offset(dst_id);
+                    // Wave 14b: compute expected type_hash at compile time
+                    // for protocol state machine verification.
+                    let expected_th = ty.as_ref()
+                        .map(|t| crate::ipc::type_hash(&t.to_string()))
+                        .unwrap_or_else(|| crate::ipc::type_hash("i64"));
 
                     // Step 1: load read_fd (low 32 bits of handle) into RDI.
                     match ch {
@@ -2948,6 +2953,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_cap_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
+                    // Step 3c (Wave 14b): protocol state machine check.
+                    // Verify the type_hash in the received frame matches the
+                    // expected type_hash for this recv site. A mismatch
+                    // indicates a protocol violation (wrong message type
+                    // received). The ProtocolStateMachine in ipc.rs tracks
+                    // allowed transitions; here we do a compile-time-known
+                    // type_hash comparison inline.
+                    //
+                    // type_hash is at [rsp+24] (8 bytes). Load it and compare
+                    // with expected_th (compile-time constant).
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 24));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, (expected_th & 0xFFFFFFFF) as i32));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    // jne proto_fail (rel32, placeholder)
+                    let jne_proto_lo_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                    // Also check high 32 bits at [rsp+28]
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 28));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, ((expected_th >> 32) & 0xFFFFFFFF) as i32));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    let jne_proto_hi_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
                     // Step 4: extract payload from [rsp+44] into dst slot.
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                     code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -2969,6 +2997,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                     // jmp cleanup (rel32, placeholder)
                     let jmp_cleanup_from_cap_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // proto_fail (Wave 14b): store -5 (PROTOCOL_VIOLATION) in dst.
+                    // Reached when the received type_hash doesn't match the
+                    // expected type_hash for this recv site.
+                    let proto_fail_off = code.len();
+                    let proto_lo_delta = proto_fail_off as i64 - (jne_proto_lo_patch as i64 + 6);
+                    let bd = (proto_lo_delta as i32).to_le_bytes();
+                    code[jne_proto_lo_patch+2] = bd[0];
+                    code[jne_proto_lo_patch+3] = bd[1];
+                    code[jne_proto_lo_patch+4] = bd[2];
+                    code[jne_proto_lo_patch+5] = bd[3];
+                    let proto_hi_delta = proto_fail_off as i64 - (jne_proto_hi_patch as i64 + 6);
+                    let bd = (proto_hi_delta as i32).to_le_bytes();
+                    code[jne_proto_hi_patch+2] = bd[0];
+                    code[jne_proto_hi_patch+3] = bd[1];
+                    code[jne_proto_hi_patch+4] = bd[2];
+                    code[jne_proto_hi_patch+5] = bd[3];
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB)); // -5
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    let jmp_cleanup_from_proto_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
                     // magic_fail: store -1 in dst slot (error sentinel).
@@ -2997,6 +3046,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code[jmp_cleanup_from_cap_patch+2] = bd[1];
                     code[jmp_cleanup_from_cap_patch+3] = bd[2];
                     code[jmp_cleanup_from_cap_patch+4] = bd[3];
+                    // Also patch the proto_fail → cleanup jump.
+                    let proto_cleanup_delta = cleanup_off as i64 - (jmp_cleanup_from_proto_patch as i64 + 5);
+                    let bd = (proto_cleanup_delta as i32).to_le_bytes();
+                    code[jmp_cleanup_from_proto_patch+1] = bd[0];
+                    code[jmp_cleanup_from_proto_patch+2] = bd[1];
+                    code[jmp_cleanup_from_proto_patch+3] = bd[2];
+                    code[jmp_cleanup_from_proto_patch+4] = bd[3];
                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
 
                     instr_opcode = Some("channel_recv".to_string());
