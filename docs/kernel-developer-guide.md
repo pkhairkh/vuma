@@ -430,7 +430,7 @@ value.
 ### Rule 2 — Use the init-style API
 
 The codegen does not propagate `State`-typedness through function return
-values (Open Work §"Pipeline: State-typedness through return values"). A
+values (Resolved Work (Phase 1+2) §"Pipeline: State-typedness through return values"). A
 `let s = make_state()` binding is NOT registered as state-typed in the
 caller; subsequent `s.field` accesses silently return 0 with a
 `WARNING: unsupported FieldAccess (not state-typed)` from `flatten_expr`.

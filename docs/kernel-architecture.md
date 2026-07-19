@@ -45,7 +45,7 @@ kernel.
 
 The VWK kernel is a four-layer system. Each layer is a complete, verifiable
 compilation unit; layers compose by **byte-identical re-declaration** (VUMA has
-no `import` yet — Open Work §7 — so each consumer of a layout or extern
+no `import` yet — Resolved Work (Phase 1+2) §7 — so each consumer of a layout or extern
 re-declares it from the canonical source).
 
 ```
@@ -227,7 +227,7 @@ connection table — all PMT-pure, all arena-bounded, all IVE-verified.
 ### The init-style API pattern
 
 Because the current codegen does not propagate `State`-typedness through
-function return values (Open Work §"Pipeline: State-typedness through return
+function return values (Resolved Work (Phase 1+2) §"Pipeline: State-typedness through return
 values"), every kernel subsystem uses the **init-style API**:
 
 ```
@@ -919,7 +919,7 @@ wrong values).
 
 ### 10.2 The no-`import` rule
 
-VUMA 2.0 has no `import` statement (Open Work §7). Every kernel module that
+VUMA 2.0 has no `import` statement (Resolved Work (Phase 1+2) §7). Every kernel module that
 wants to call another module's functions or use another module's layouts
 must **re-declare them locally**, byte-identically. The
 `byte-identical-redeclaration invariant` (K2c, extended to layouts in K3d) is

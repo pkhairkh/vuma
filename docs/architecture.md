@@ -1138,7 +1138,7 @@ it; this section consolidates them. See also
 [`kernel-architecture.md` §10](./kernel-architecture.md#10-vuma-parser-limitations)
 for the kernel-specific workarounds.
 
-### 12.1 No `import` (Open Work §7)
+### 12.1 No `import` (Resolved Work (Phase 1+2) §7)
 
 VUMA 2.0 has no `import` statement. Every module that wants to call
 another module's functions or use another module's layouts must
