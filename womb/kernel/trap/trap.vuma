@@ -2,26 +2,34 @@
 // womb/kernel/trap/trap.vuma
 // VWK Trap Dispatcher — routes traps by vector number (PMT-pure).
 // Wave R2f — migrated onto the canonical superset TrapFrame (R2a).
+// Wave W13S1 — de-stubbed trap_panic / trap_syscall / trap_irq.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the arch-independent trap dispatcher. After trap_entry (R2b/
 // R2c/R2d's per-arch trap_trampoline.vuma) saves the native save area and
 // the per-arch trap_to_superset adapter translates it into the canonical
 // superset TrapFrame (R2a's womb/kernel/trap/trap_frame.vuma — 576 bytes,
-// 8 fields), control reaches trap_handler(tf) here. The dispatcher routes
-// by `tf.vector` (the interrupt-vector / exception-cause field):
+// 8 fields), control reaches trap_handler(tf, ...) here. The dispatcher
+// routes by `tf.vector` (the interrupt-vector / exception-cause field):
 //
 //     vector 0..31   → CPU exception  → trap_panic(tf)
-//                                       (in real kernel: panic with msg;
-//                                        K12 adds real panic; hosted: nop)
+//                                       (W13S1: prints "*** KERNEL PANIC
+//                                        ***\nvector=N pc=N\n" via write(1,
+//                                        string-literal, ...) + exit(1).
+//                                        Previously a bare `return;` stub.)
 //     vector 128     → syscall (int 0x80 on x86_64, SVC #0 on aarch64,
 //                       ECALL on riscv64 — the per-arch adapter normalizes
-//                       all three into vector == 128 here) → trap_syscall(tf)
-//                                       (R4c provides the real syscall
-//                                        dispatch; hosted: nop)
-//     everything else → IRQ → trap_irq(tf)
-//                                       (irq.vuma provides the real dispatch
-//                                        via the IRQ ring buffer; hosted: nop)
+//                       all three into vector == 128 here) → trap_syscall(tf,
+//                       syscall_tbl) (W13S1: calls syscall_dispatch_from_trap
+//                       re-declared byte-identically to dispatch.vuma R4c.
+//                       Previously a bare `return;` stub.)
+//     everything else → IRQ → trap_irq(tf, irq_ring, irq_tbl)
+//                                       (W13S1: pushes tf.vector onto the
+//                                        IRQ ring via irq_ring_push, then
+//                                        drains via irq_dispatch_loop — both
+//                                        re-declared byte-identically to
+//                                        irq.vuma R2f. Previously a bare
+//                                        `return;` stub.)
 //
 // The dispatcher uses ONLY superset TrapFrame fields (tf.vector in the
 // router; tf.pc / tf.sp / tf.error_code / tf.status / tf.gpr / tf.fpu are
@@ -40,81 +48,110 @@
 // trap_trampoline.vuma files follow extends here: a mismatch in field
 // order or type would silently produce different field offsets at the
 // call site, so the layout + 3 helpers are copied verbatim from R2a's
-// canonical file. Verified via the `awk + sort | uniq -c` cross-file
-// invariant check after this wave lands (the worklog's Stage Summary
-// records the result).
+// canonical file.
 //
-// ── Why is trap_panic a stub? ───────────────────────────────────────────────
-// trap_panic is the CPU-exception path: in real kernel it would print a
-// panic message with the trap info (vector, error_code, pc) and halt.
-// K12 (the panic/log wave) adds real panic; until then, trap_panic is a
-// no-op stub (the contract says "stub — K12 provides real panic"). Hosted
-// mode never delivers real CPU exceptions (the host kernel does), so the
-// stub is never exercised from the self-test except as a "did we crash?"
-// smoke check.
+// ── W13S1: trap_panic de-stubbing ───────────────────────────────────────────
+// trap_panic is the CPU-exception path. W13S1 replaces the bare `return;`
+// stub with a real panic print:
+//   1. Read tf.vector + tf.pc into LOCAL u64's BEFORE the first extern call
+//      (the codegen conservatively invalidates State<T> on extern calls —
+//      caching the values into locals first means the extern-call invalida-
+//      tion of `tf` is harmless, same pattern as dispatch.vuma's
+//      `let nr = tf_get_gpr(tf, 0);` before `__call_indirect1(handler, tf
+//      as Address)`).
+//   2. write(1, "*** KERNEL PANIC ***\n", 21) — Wave 1 string literal lowers
+//      to a .rodata address; `write` takes it directly as `buf: Address`.
+//      Same PMT "Borrowed read" pattern as shell.vuma's `write(1, "vwk: ", 5)`.
+//   3. write(1, "vector=", 7) + trap_put_dec(buf, vec) + write(1, buf as
+//      Address, n) — decimal expansion of the vector number into a local
+//      State<PanicBuf> (32-byte data array), then write the digit bytes.
+//   4. write(1, " pc=", 4) + trap_put_dec(buf, pc) + write(1, buf as
+//      Address, n) — decimal expansion of the PC. The buf State is reused
+//      (trap_put_dec overwrites buf.data[0..n] — a fresh write, safe after
+//      the prior extern call per dispatch.vuma's post-call write pattern).
+//   5. write(1, "\n", 1) — trailing newline.
+//   6. exit(1) — halt. Does not return; `return;` below is unreachable but
+//      satisfies VUMA's parser.
 //
-// ── Why is trap_syscall a stub? ─────────────────────────────────────────────
-// trap_syscall is the syscall-path entry point: in real kernel it reads
-// the syscall number from tf (canonical GPR slot 5 = rdi on x86_64, x8 on
-// aarch64, a7 on riscv64 — the per-arch adapter sets it), indexes into a
-// syscall table, calls the handler with args 0..5 from GPR slots, and
-// writes the return value back to GPR slot 0. R4c will provide the
-// syscall table + dispatch logic. For now, trap_syscall is a no-op stub
-// (the contract says "stub — R4c provides real dispatch"). Same "not a
-// violation" rationale as trap_panic.
+// The self-test does NOT exercise trap_panic (vector=0) because exit(1)
+// would abort the test process before the remaining checks run. Same
+// pattern as panic.vuma's self-test (assert(1, msg) — the pass path only).
+// The IVE verifier still statically checks trap_panic's body.
 //
-// ── Why is trap_irq a stub? ─────────────────────────────────────────────────
-// trap_irq is the IRQ-path entry point: in real kernel it would call
-// irq_dispatch_loop from the sibling irq.vuma module — popping vectors
-// off the per-CPU IrqRing and dispatching each. But VUMA has no `import`
-// and the dispatcher doesn't have an IrqRing in hand (the IrqRing is a
-// per-CPU global allocated by kmain and passed to irq_dispatch_loop
-// explicitly). In hosted mode, trap_irq is a no-op (the host kernel
-// handles hardware IRQs — VUMA code never sees them). In bare-metal K11,
-// trap.S will load the per-CPU IrqRing + IrqTable pointers into RDI/RSI
-// before calling trap_irq, OR trap_irq will receive them as additional
-// State<T> parameters (K11 will pick one). For now, trap_irq is a no-op
-// stub (the contract says "stub — irq.vuma provides real dispatch"). The
-// real IRQ dispatch loop is in irq.vuma's irq_dispatch_loop (this wave
-// R2f) and is exercised by irq.vuma's self-test.
+// ── W13S1: trap_syscall de-stubbing ─────────────────────────────────────────
+// trap_syscall now calls syscall_dispatch_from_trap(tbl, tf) — re-declared
+// byte-identically to womb/kernel/syscall/dispatch.vuma (R4c). The
+// SyscallTable layout + syscall_table_get helper + the dispatch function
+// + the __call_indirect1 extern are all re-declared here (no import). The
+// dispatch reads nr from canonical GPR slot 0, looks up the handler,
+// invokes it via __call_indirect1 if registered (writes result to slot 7),
+// or writes 38 (-ENOSYS) to slot 7 if out-of-range / unregistered. In the
+// self-test the table is empty, so dispatch writes 38 to slot 7 and
+// returns 38 — no crash.
+//
+// ── W13S1: trap_irq de-stubbing ────────────────────────────────────────────
+// trap_irq now:
+//   1. irq_ring_push(ring, tf.vector) — enqueues the faulting vector onto
+//      the per-CPU IrqRing (re-declared byte-identically to irq.vuma R2f).
+//   2. irq_dispatch_loop(ring, tbl) — drains the ring: pops each vector,
+//      looks up the handler in the IrqTable, invokes it via
+//      __call_indirect1 if registered, sends EOI via pic_eoi. In the self-
+//      test the table is empty, so the loop pops the pushed vector, finds
+//      handler == 0 (spurious), skips EOI, pops the 9999 empty sentinel,
+//      and returns — no crash.
+// The IrqRing + IrqTable layouts + irq_ring_push + irq_ring_pop +
+// irq_get_handler + irq_dispatch_loop + the pic_eoi / __call_indirect1
+// externs are all re-declared here (no import).
 //
 // ── Why nested ifs instead of else-if? ──────────────────────────────────────
 // VUMA's if-expression syntax (K2a) supports `if cond { ... } else { ... }`
 // but not `else if` chained. The dispatcher therefore uses nested ifs:
 //     if v < 32 { panic } else { if v == 128 { syscall } else { irq } }
 // This is the same nested-if pattern K3c's trap_is_page_fault uses for
-// its range check (12 <= scause <= 15 → nested-if form) and the same
-// shape K3d's pre-R2f trap.vuma used before this wave migrated it onto
-// the superset.
+// its range check (12 <= scause <= 15 → nested-if form).
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
-// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
-// TrapFrame is a 576-byte flat typed-memory record held in a
-// `___pmt_buffer`-backed State<TrapFrame>; the CALLER allocates it via
-// `state_new(TrapFrame)` and passes it by reference to `tf_init` /
-// `trap_handler` / `trap_panic` / `trap_syscall` / `trap_irq` (init-style
-// API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for the codegen
-// rationale). No externs are declared in this file (the dispatcher and
-// its sub-handlers don't directly touch the PIC or CR2 — those are
-// R2b/R2c/R2d's trap_trampoline.vuma's externs, used by the per-arch
-// adapter and by the K3e/K11 page-fault handler). The sub-handlers
-// (trap_panic, trap_syscall, trap_irq) take State<TrapFrame> by regular
-// VUMA-fn borrow (NOT an extern #[borrow] — VUMA fn calls don't need
-// the attribute, only extern "C" calls do, because the codegen tracks
-// the State's lifetime through regular fn calls but conservatively
-// invalidates on extern calls). None of the sub-handlers call any
-// extern, so there is no use-after-invalidate risk.
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All layouts
+// (TrapFrame, PanicBuf, SyscallTable, IrqRing, IrqTable) are flat typed-
+// memory records held in `___pmt_buffer`-backed State<T>'s; the CALLER
+// allocates them via `state_new(T)` and passes them by reference to
+// trap_handler / tf_init / etc. (init-style API). trap_panic allocates
+// its own local State<PanicBuf> via state_new(PanicBuf) — same pattern as
+// panic.vuma's `let banner = state_new(PanicMsg)`.
+//
+// The `buf as Address` / `tf as Address` casts are pure arena-offset
+// extractions (no pointer arithmetic, no heap allocation) — the same PMT
+// pattern used by console_flush (`c as Address`), hw_aes_encrypt (`key as
+// Address`), and dispatch.vuma's `__call_indirect1(handler, tf as Address)`.
+//
+// The sub-handlers (trap_panic, trap_syscall, trap_irq) take State<TrapFrame>
+// by regular VUMA-fn borrow (NOT an extern #[borrow] — VUMA fn calls don't
+// need the attribute). trap_panic reads tf.vector / tf.pc into locals BEFORE
+// the first extern write call (so the post-extern invalidation of tf is
+// harmless — the locals hold the values). trap_syscall passes tf to
+// syscall_dispatch_from_trap which internally passes `tf as Address` to
+// __call_indirect1 (extern) — that invalidates tf, but the dispatch's only
+// post-extern tf access is `tf_set_gpr(tf, 7, result)` (a fresh write, safe
+// per dispatch.vuma's documented pattern). trap_irq reads tf.vector into
+// the irq_ring_push call arg before any extern fires; irq_dispatch_loop's
+// externs (__call_indirect1, pic_eoi) take only u64/u8 scalars, so neither
+// IrqRing nor IrqTable is invalidated.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. It re-declares the canonical superset
-// TrapFrame + tf_get_gpr + tf_set_gpr + tf_init byte-identically to R2a's
-// trap_frame.vuma (the self-test needs a zeroed TrapFrame to test vector
-// routing, and tf_init is the canonical way to zero one — same pattern
-// as R2a's own self-test). The sibling irq.vuma module (also R2f-updated)
-// re-declares the IrqRing layout + helpers byte-identically to R2e's
-// irq_ring.vuma; this file does NOT re-declare IrqRing because trap_irq
-// is a no-op stub (when K11 removes the stub, K11 will re-declare IrqRing
-// in this file or pass it through the call chain from kmain).
+// This file is self-contained. It re-declares:
+//   - TrapFrame + tf_get_gpr + tf_set_gpr + tf_init (byte-identical to R2a's
+//     trap_frame.vuma — the dispatcher needs its own copy).
+//   - SyscallTable + syscall_table_get + syscall_dispatch_from_trap (byte-
+//     identical to R4c's dispatch.vuma — trap_syscall needs its own copy).
+//   - IrqRing + IrqTable + irq_ring_push + irq_ring_pop + irq_get_handler +
+//     irq_dispatch_loop (byte-identical to R2f's irq.vuma — trap_irq needs
+//     its own copy).
+//   - PanicBuf + trap_put_dec (new in W13S1 — the decimal-conversion helper
+//     for trap_panic's vector/PC print).
+// A mismatch in field order or type would silently produce different field
+// offsets at the call site — the byte-identical-re-declaration invariant
+// (K2c "extern signatures MUST stay byte-identical", extended to layouts
+// in K3d) extends to all re-declared layouts + helpers here.
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
 // All non-zero constants in this file use DECIMAL per the R2f contract's
@@ -125,23 +162,21 @@
 // pc=4096). The constants:
 //     32  = 0x20  boundary between CPU exceptions (0..31) and IRQs
 //                 (32..N) — the 8259 PIC's IRQs are remapped to vectors
-//                 32..47 by the IDT setup in K11's boot path on x86_64;
-//                 on aarch64/riscv64 the value 32 is just a "high enough"
-//                 threshold that distinguishes CPU exception ECs (0..63
-//                 on aarch64, but the real IRQs go through the dedicated
-//                 irq.vuma path, not this dispatcher) from the syscall
-//                 sentinel (128).
+//                 32..47 by the IDT setup in K11's boot path on x86_64.
 //     128 = 0x80  the int 0x80 syscall vector on x86_64 (Linux's legacy
-//                 32-bit syscall ABI; modern Linux uses SYSCALL/SYSRET
-//                 but the VUMA kernel follows the simpler int 0x80
-//                 convention for portability across all three arches —
-//                 aarch64 uses SVC #0, riscv64 uses ECALL from U-mode;
-//                 the per-arch adapter normalizes all three into
-//                 vector == 128 here so the dispatcher has a single
-//                 syscall-detection check).
+//                 32-bit syscall ABI; the per-arch adapter normalizes
+//                 aarch64 SVC #0 and riscv64 ECALL into vector == 128).
 //     0   = self-test vector 0 (CPU exception — lowest valid exception
-//                 vector on all arches)
-//     256, 8, 24, 255, 0  = layout + helper constants (same as R2a)
+//                 vector on all arches).
+//     256, 8, 24, 255, 0  = layout + helper constants (same as R2a).
+//     21, 7, 4, 1 = string-literal byte counts for trap_panic's write
+//                 calls (banner / "vector=" / " pc=" / "\n").
+//     10, 48      = trap_put_dec constants (10 = decimal base, 48 = '0'
+//                   ASCII origin for digit conversion).
+//     512, 38, 7  = syscall_dispatch_from_trap constants (512 = max
+//                   syscalls / bounds-check, 38 = ENOSYS, 7 = ret slot).
+//     4096, 2048  = SyscallTable.handlers / IrqTable.handlers array sizes.
+//     9999, 31    = IrqRing empty sentinel / 32-entry wrap mask.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
 //     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
@@ -150,20 +185,63 @@
 //         womb/kernel/trap/trap.vuma \
 //         /tmp/trap.bin x86_64 --verify
 //     /tmp/trap.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (the 3 self-test dispatches all succeed
-// without crashing — vector 0 → trap_panic, vector 128 → trap_syscall,
-// vector 32 → trap_irq).
+// Expected: IVE Pass, exit=0. The self-test exercises the syscall + IRQ
+// paths (vector 128 → trap_syscall with an empty SyscallTable → dispatch
+// writes 38 to slot 7; vector 32 → trap_irq pushes 32 onto the ring then
+// drains it via irq_dispatch_loop). The panic path (vector 0) is NOT
+// exercised by the self-test (trap_panic calls exit(1) which would abort
+// the test before the remaining checks run — same pattern as panic.vuma's
+// assert(1, msg) pass-path-only self-test).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Layout — Canonical superset TrapFrame (re-declared byte-identically to
-// R2a's womb/kernel/trap/trap_frame.vuma; 576 bytes total).
+// Extern "C" trampolines.
 // ────────────────────────────────────────────────────────────────────────────
-// The 8-field superset layout. Re-declared verbatim from R2a (same field
-// names, same field types, same field order, same _pad size) per the
-// byte-identical-re-declaration invariant. See R2a's trap_frame.vuma
-// header for the full field semantics + per-arch canonical GPR slot
-// mapping (x86_64/aarch64/riscv64).
+// W13S1: trap_panic needs write + exit (same declarations as panic.vuma /
+// shell.vuma). trap_syscall's syscall_dispatch_from_trap needs
+// __call_indirect1 (same as dispatch.vuma). trap_irq's irq_dispatch_loop
+// needs __call_indirect1 + pic_eoi (same as irq.vuma). All re-declared
+// byte-identically to the canonical extern blocks.
+//
+// Hosted mode: write → sys_write (nr 1), exit → sys_exit (nr 60) — both
+// pre-registered on x86_64. __call_indirect1 → real asm stub
+// (`mov rax,rdi; mov rdi,rsi; jmp rax`). pic_eoi → __ffi_fallback_stub
+// (no-op). None emit a fallback warning.
 
+extern "C" {
+    // sys_write (nr 1): write `count` bytes from `buf` to fd `fd`. The
+    // `buf: Address` (NOT State<T>) means the FFI marshal does NOT
+    // invalidate any state on the call — the Address is just a raw u64
+    // pointer handed to the syscall. Same declaration as panic.vuma:98,
+    // shell.vuma:268.
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+
+    // sys_exit (nr 60): terminate the process with exit code `code`.
+    // Does NOT return — the stub ends with INT3 as a safety guard. Same
+    // declaration as panic.vuma:107.
+    fn exit(code: i64);
+
+    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // at `ptr` with `arg` in RDI (SysV AMD64). Used by
+    // syscall_dispatch_from_trap (to invoke per-syscall handlers) and
+    // irq_dispatch_loop (to invoke per-vector IRQ handlers). Same
+    // declaration as dispatch.vuma:226, irq.vuma:276.
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+
+    // Send End-Of-Interrupt to the 8259 PIC. K11 stub: `mov al, 0x20;
+    // out 0x20, al; ret`. Hosted: __ffi_fallback_stub (no-op). Same
+    // declaration as irq.vuma:269.
+    fn pic_eoi(irq: u8);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Canonical superset TrapFrame (576 bytes total) — re-declared byte-
+// identically to R2a's womb/kernel/trap/trap_frame.vuma. See R2a's header
+// for the field semantics (gpr 32×u64 LE-packed in 256 bytes; pc/status/
+// vector/error_code/sp are 5 scalar u64 fields; fpu is 32×u64 LE-packed
+// in 256 bytes; _pad is 24 alignment bytes).
 layout TrapFrame = {
     gpr: [u8; 256],        // 32 × 8 bytes — general-purpose registers (LE)
     pc: u64,               // program counter (rip / elr_el1 / mepc)
@@ -175,8 +253,46 @@ layout TrapFrame = {
     _pad: [u8; 24],        // alignment padding (zeroed by tf_init)
 }
 
+// W13S1: PanicBuf — 32-byte decimal digit buffer for trap_panic's vector
+// and PC print. 32 bytes is enough for any u64 in decimal (max 20 digits
+// for 18446744073709551615). The `data` field is at offset 0 so that
+// `buf as Address` yields the address of data[0] — the natural argument
+// for write(1, buf_as_addr, n). Same offset-0-buf pattern as panic.vuma's
+// PanicMsg (panic.vuma:123) and shell.vuma's ShellOut (shell.vuma:276).
+layout PanicBuf = {
+    data: [u8; 32],   // decimal digit bytes (offset 0 — `as Address` yields &data[0])
+    _pad: [u8; 4],    // alignment (zeroed by state_new)
+}
+
+// Re-declared byte-identically to R4c's dispatch.vuma (dispatch.vuma:252).
+// 512 entries × 8 bytes per entry. count tracks registered handlers
+// (incremented by syscall_register in dispatch.vuma; this file doesn't
+// re-declare syscall_register because the self-test doesn't register any
+// handlers — the empty-table path is what the self-test exercises).
+layout SyscallTable = {
+    handlers: [u8; 4096],  // 512 * 8 bytes — u64 handler addr per syscall
+    count: u32,
+}
+
+// Re-declared byte-identically to R2f's irq.vuma (irq.vuma:224). 32-entry
+// SPSC ring buffer for IRQ vectors. head = read pos, tail = write pos,
+// count = entries currently in buffer (0..32).
+layout IrqRing = {
+    buf: [u8; 256],   // 32 × 8 bytes — u64 IRQ vectors (LE-packed)
+    head: u32,        // read position (0..31, wraps via & 31)
+    tail: u32,        // write position (0..31, wraps via & 31)
+    count: u32,       // entries currently in buffer (0..32)
+}
+
+// Re-declared byte-identically to R2f's irq.vuma (irq.vuma:241). 256
+// entries (one per interrupt vector), each a u64 handler address or 0.
+layout IrqTable = {
+    handlers: [u8; 2048],  // 256 * 8 bytes — u64 handler addr per IRQ
+    count: u32,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Helpers (re-declared byte-identically to R2a's trap_frame.vuma).
+// TrapFrame helpers (re-declared byte-identically to R2a's trap_frame.vuma).
 // ────────────────────────────────────────────────────────────────────────────
 // tf_get_gpr / tf_set_gpr / tf_init — copied verbatim from R2a so this
 // file can be compiled standalone (no `import`). The self-test calls
@@ -233,15 +349,192 @@ fn tf_init(tf: State<TrapFrame>) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// PanicBuf helper (W13S1).
+// ────────────────────────────────────────────────────────────────────────────
+
+// trap_put_dec: write the decimal expansion of `val` into buf.data[0..n]
+// and return n (the digit count). For val == 0, writes a single '0' and
+// returns 1. For val > 0, counts digits by repeated division by 10, then
+// fills buf.data backwards from position n-1 down to 0 (so the digits
+// end up in the correct left-to-right order). PMT-pure: no `*ptr`, no
+// `&buf`, no `allocate` — just typed array writes via `buf.data[idx]`.
+//
+// The caller (trap_panic) passes `buf as Address` + the returned count to
+// write(1, buf_as_addr, n). 32 bytes is enough for any u64 (max 20 digits).
+fn trap_put_dec(buf: State<PanicBuf>, val: u64) -> u32 {
+    // Special case: val == 0 → single '0' digit.
+    if val == 0 {
+        buf.data[0] = 48;  // '0'
+        return 1;
+    }
+    // Count decimal digits by repeated division by 10.
+    let n: u32 = 0;
+    let v: u64 = val;
+    while v > 0 {
+        n = n + 1;
+        v = v / 10;
+    }
+    // Fill buf.data backwards from position n-1 down to 0. After the
+    // loop, buf.data[0..n] holds the decimal digits in left-to-right
+    // order. (v2 is consumed from the low end via v2 % 10, so the first
+    // digit extracted is the least-significant — placed at the highest
+    // position, then we move leftward.)
+    let v2: u64 = val;
+    let pos: u32 = n;
+    while v2 > 0 {
+        pos = pos - 1;
+        let d: u64 = v2 % 10;
+        buf.data[pos] = (48 + d) as u8;
+        v2 = v2 / 10;
+    }
+    return n;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SyscallTable helpers + dispatch (re-declared byte-identically to R4c's
+// dispatch.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// syscall_table_get + syscall_dispatch_from_trap — copied verbatim from
+// dispatch.vuma so trap_syscall can call syscall_dispatch_from_trap without
+// a cross-file import (VUMA has none). tf_get_gpr / tf_set_gpr are shared
+// with this file's own TrapFrame helpers above (byte-identical).
+
+// Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
+// Re-declared byte-identically to dispatch.vuma:321.
+fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+    let off = nr * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Syscall dispatch from the superset TrapFrame. Re-declared byte-identically
+// to dispatch.vuma:387. Reads nr from slot 0, bounds-checks (nr >= 512 →
+// -ENOSYS), looks up handler, invokes via __call_indirect1 if registered,
+// writes result to slot 7. The `tf as Address` cast on the indirect call
+// invalidates tf (conservative codegen rule), but the post-call
+// tf_set_gpr(tf, 7, result) is a fresh write — safe per dispatch.vuma's
+// documented pattern.
+fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
+    let nr = tf_get_gpr(tf, 0);
+    if nr >= 512 {
+        tf_set_gpr(tf, 7, 38);
+        return 38;
+    }
+    let handler = syscall_table_get(tbl, nr as u32);
+    if handler == 0 {
+        tf_set_gpr(tf, 7, 38);
+        return 38;
+    }
+    let result = __call_indirect1(handler, tf as Address) as u64;
+    tf_set_gpr(tf, 7, result);
+    return result;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// IrqRing + IrqTable helpers + dispatch_loop (re-declared byte-identically
+// to R2f's irq.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// irq_ring_push + irq_ring_pop + irq_get_handler + irq_dispatch_loop —
+// copied verbatim from irq.vuma so trap_irq can push the faulting vector
+// and drain the ring without a cross-file import.
+
+// Enqueue one IRQ vector into the ring. Producer side. Returns 0 on
+// success, -1 (written as `0 - 1`) if the ring is full. Re-declared
+// byte-identically to irq.vuma:308.
+fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
+    if ring.count >= 32 {
+        return 0 - 1;  // -1 (full)
+    }
+    // Write vector at tail position (8-byte LE pack).
+    let off = ring.tail * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (vector >> sh) & 255;
+        ring.buf[off + i] = b as u8;
+        i = i + 1;
+    }
+    ring.tail = (ring.tail + 1) & 31;  // wrap around 32
+    ring.count = ring.count + 1;
+    return 0;
+}
+
+// Dequeue one IRQ vector from the ring. Consumer side. Returns the u64
+// vector, or 9999 (empty sentinel) if the ring is empty. Re-declared
+// byte-identically to irq.vuma:333.
+fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
+    if ring.count == 0 {
+        return 9999;  // empty sentinel
+    }
+    // Read vector at head position (8-byte LE unpack).
+    let off = ring.head * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = ring.buf[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    ring.head = (ring.head + 1) & 31;  // wrap around 32
+    ring.count = ring.count - 1;
+    return v;
+}
+
+// Read the u64 handler address for IRQ `irq` from IrqTable.handlers.
+// Re-declared byte-identically to irq.vuma:366.
+fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
+    let off = (irq as u32) * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Drain the IRQ ring: pop vectors off the ring until it's empty, looking
+// up each in the IrqTable and (if a handler is registered) invoking it
+// via __call_indirect1 + sending EOI via pic_eoi. Re-declared byte-
+// identically to irq.vuma:461. The externs (__call_indirect1, pic_eoi)
+// take only u64/u8 scalars — neither IrqRing nor IrqTable is passed as
+// an extern arg, so neither State is invalidated across the calls.
+fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
+    while true {
+        let v = irq_ring_pop(ring);
+        if v == 9999 {
+            return;  // ring empty — drained
+        }
+        let irq = v as u8;
+        let handler = irq_get_handler(tbl, irq);
+        if handler != 0 {
+            let handler_ret = __call_indirect1(handler, irq as u64);
+            pic_eoi(irq);
+        }
+        // Spurious IRQ (handler == 0): skip EOI (K11 will add spurious EOI).
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Trap dispatcher.
 // ────────────────────────────────────────────────────────────────────────────
-// Routes by `tf.vector`. The three branches are documented in the file
-// header. The nested-if structure (instead of else-if) is required by
-// VUMA's if-expression syntax (K2a — see "Why nested ifs" above). `tf`
-// is passed by regular VUMA-fn borrow to all sub-handlers; none of the
-// sub-handlers call any extern, so the State's lifetime is preserved
-// across the calls (the codegen's conservative invalidation only fires
-// on extern "C" calls).
+// Routes by `tf.vector`. W13S1: the signature now carries the per-CPU
+// SyscallTable + IrqRing + IrqTable so trap_syscall / trap_irq can reach
+// them without globals (VUMA has no global mutable state — all shared
+// state is threaded through State<T> params). kmain will allocate these
+// once at boot and pass them down the trap_entry → trap_handler call
+// chain. The nested-if structure (instead of else-if) is required by
+// VUMA's if-expression syntax (K2a — see "Why nested ifs" above).
 //
 // The dispatcher reads ONLY tf.vector in the router itself. The sub-
 // handlers may read other fields (tf.pc, tf.sp, tf.error_code, etc.) but
@@ -254,7 +547,9 @@ fn tf_init(tf: State<TrapFrame>) {
 //   vector 0..31   → CPU exception → trap_panic
 //   vector 128     → syscall       → trap_syscall
 //   everything else → IRQ          → trap_irq
-fn trap_handler(tf: State<TrapFrame>) {
+// W13S1: syscall_tbl / irq_ring / irq_tbl threaded through so the
+// sub-handlers can reach the per-CPU dispatch state.
+fn trap_handler(tf: State<TrapFrame>, syscall_tbl: State<SyscallTable>, irq_ring: State<IrqRing>, irq_tbl: State<IrqTable>) {
     let v = tf.vector;
     if v < 32 {
         // CPU exception — panic path.
@@ -264,92 +559,130 @@ fn trap_handler(tf: State<TrapFrame>) {
             // Syscall (int 0x80 on x86_64 / SVC #0 on aarch64 / ECALL on
             // riscv64 — normalized to vector == 128 by the per-arch
             // adapter).
-            trap_syscall(tf);
+            trap_syscall(tf, syscall_tbl);
         } else {
             // Hardware IRQ.
-            trap_irq(tf);
+            trap_irq(tf, irq_ring, irq_tbl);
         }
     }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Per-vector-class sub-handlers (hosted-mode stubs — R4c/K11/K12 fill in).
+// Per-vector-class sub-handlers (W13S1: de-stubbed).
 // ────────────────────────────────────────────────────────────────────────────
 
-// CPU exception handler — just return (in real kernel: panic with msg).
-// K12 adds the real panic path (print the trap frame + halt). Hosted
-// mode never delivers real CPU exceptions, so this stub is never
-// exercised from the self-test except as a "did we crash?" check.
+// CPU exception handler — W13S1: prints the panic banner + vector + PC,
+// then halts via exit(1). Previously a bare `return;` stub.
+//
+// The vector and PC are read from tf into LOCAL u64's (vec_val / pc_val)
+// BEFORE the first extern write call — the codegen conservatively
+// invalidates State<T> on extern calls, so caching the values first means
+// the post-extern invalidation of tf is harmless (same pattern as
+// dispatch.vuma's `let nr = tf_get_gpr(tf, 0);` before the indirect call).
+//
+// The banner + labels use Wave 1 string literals (lowered to .rodata
+// addresses; `write` takes them directly as `buf: Address`). The decimal
+// expansions of vec_val / pc_val go through a local State<PanicBuf> +
+// trap_put_dec + write(1, buf as Address, n) — same PMT "Borrowed read"
+// pattern as shell.vuma's `write(1, out as Address, ...)`. The buf is
+// reused for the second number (trap_put_dec overwrites buf.data[0..n]
+// — a fresh write, safe after the prior extern call).
+//
+// The self-test does NOT call trap_panic (vector=0 would exit(1) and
+// abort the test). The IVE verifier still statically checks this body.
 fn trap_panic(tf: State<TrapFrame>) {
-    // In hosted mode, just return. K12 adds real panic.
-    return;
+    // Cache tf.vector + tf.pc into locals BEFORE the first extern call.
+    let vec_val: u64 = tf.vector;
+    let pc_val: u64 = tf.pc;
+
+    // Banner.
+    write(1, "*** KERNEL PANIC ***\n", 21);
+
+    // Vector.
+    write(1, "vector=", 7);
+    let buf = state_new(PanicBuf);
+    let n1 = trap_put_dec(buf, vec_val);
+    write(1, buf as Address, n1 as i64);
+
+    // PC.
+    write(1, " pc=", 4);
+    let n2 = trap_put_dec(buf, pc_val);
+    write(1, buf as Address, n2 as i64);
+
+    // Trailing newline.
+    write(1, "\n", 1);
+
+    // Halt.
+    exit(1);
+    return;  // unreachable — exit does not return
 }
 
-// Syscall handler stub — R4c provides the real implementation.
-// R4c will read the syscall number from GPR slot (per-arch: rdi on x86_64,
-// x8 on aarch64, a7 on riscv64 — the per-arch adapter sets it), index
-// into a syscall table, call the handler with args 0..5 from GPR slots,
-// and write the return value back to GPR slot 0. Hosted mode never
-// delivers syscalls via the trap path (the host kernel uses its own
-// syscall ABI), so this stub is never exercised from the self-test
-// except as a "did we crash?" check.
-fn trap_syscall(tf: State<TrapFrame>) {
-    // In hosted mode, just return.
-    return;
+// Syscall handler — W13S1: calls syscall_dispatch_from_trap(tbl, tf)
+// (re-declared byte-identically to dispatch.vuma R4c above). The dispatch
+// reads nr from canonical slot 0, looks up the handler in tbl, invokes
+// it via __call_indirect1 if registered (writes result to slot 7), or
+// writes 38 (-ENOSYS) to slot 7 if out-of-range / unregistered.
+// Previously a bare `return;` stub.
+fn trap_syscall(tf: State<TrapFrame>, tbl: State<SyscallTable>) {
+    syscall_dispatch_from_trap(tbl, tf);
 }
 
-// IRQ handler stub — irq.vuma provides real dispatch via irq_dispatch_loop.
-// In real kernel (K11), trap_irq would:
-//   1. Read tf.vector
-//   2. Look up the per-CPU IrqRing + IrqTable (passed by kmain or loaded
-//      from a per-CPU control block)
-//   3. Call irq_dispatch_loop(ring, tbl) from the sibling irq.vuma module
-//      (R2f) — popping vectors off the ring and dispatching each.
-// For now, just return (stub). K11 removes the stub.
-fn trap_irq(tf: State<TrapFrame>) {
-    // R2f irq.vuma provides irq_dispatch_loop.
-    // For now, just return (stub).
-    return;
+// IRQ handler — W13S1: pushes tf.vector onto the per-CPU IrqRing, then
+// drains the ring via irq_dispatch_loop (both re-declared byte-identically
+// to irq.vuma R2f above). The push is the producer side of the SPSC ring;
+// the drain is the consumer side — pops each vector, looks up the handler
+// in tbl, invokes + EOIs if registered, skips if spurious. Previously a
+// bare `return;` stub.
+fn trap_irq(tf: State<TrapFrame>, ring: State<IrqRing>, tbl: State<IrqTable>) {
+    irq_ring_push(ring, tf.vector);
+    irq_dispatch_loop(ring, tbl);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test.
 // ────────────────────────────────────────────────────────────────────────────
-// Allocate a TrapFrame via state_new, zero it via tf_init, then exercise
-// all three dispatcher branches:
-//   (1) vector 0   → trap_panic path (CPU exception)
-//   (2) vector 128 → trap_syscall path (int 0x80 / SVC #0 / ECALL)
-//   (3) vector 32  → trap_irq path (the first non-exception, non-syscall
-//                    vector — on x86_64 this is the timer IRQ, the first
-//                    PIC vector after the 8259 PIC's IRQ-base remap)
-// Each dispatch is a "did we crash?" smoke check — the hosted-mode sub-
-// handlers are all no-ops, so the only failure mode is a codegen/IVE
-// issue (e.g. invalid State<TrapFrame> access, malformed if-expression
-// lowering). If all three dispatches complete without crashing, main
-// returns 0.
+// Allocate a TrapFrame + SyscallTable + IrqRing + IrqTable via state_new,
+// zero-init the TrapFrame via tf_init, then exercise the syscall + IRQ
+// dispatcher branches:
+//   (1) vector 128 → trap_syscall (syscall path — empty table → dispatch
+//       writes 38 to slot 7, returns 38; no crash).
+//   (2) vector 32  → trap_irq (IRQ path — push 32 onto the ring, drain
+//       via irq_dispatch_loop; spurious (handler == 0), no EOI; no crash).
+//
+// The panic path (vector 0 → trap_panic → exit(1)) is NOT exercised —
+// exit(1) would abort the test process before the remaining checks run.
+// Same pass-path-only pattern as panic.vuma's self-test (assert(1, msg)
+// — cond=1 → no-op, panic NOT called). The IVE verifier still statically
+// checks trap_panic's body for PMT purity + memory safety.
 //
 // Per the R2f contract's "Use decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (32, 128) — decimal avoids the
-// parser's hex-literal path (parse_int_radix width-extension subtleties
-// — see womb/kernel/arch/x86_64/pt.vuma header for the same rationale,
-// and R2a's trap_frame.vuma for the same rule applied to vector=14 and
-// pc=4096).
+// constants in the self-test use DECIMAL (32, 128).
 
 fn main() -> i32 {
     let tf = state_new(TrapFrame);
+    let syscall_tbl = state_new(SyscallTable);
+    let irq_ring = state_new(IrqRing);
+    let irq_tbl = state_new(IrqTable);
     tf_init(tf);
+    // state_new zero-fills, so syscall_tbl.count / irq_ring.count /
+    // irq_ring.head / irq_ring.tail / irq_tbl.count are all 0, and the
+    // handlers / buf arrays are all zero bytes. The empty-table paths
+    // are what the self-test exercises (no registered handlers).
 
-    // Test 1: vector 0 (CPU exception) → trap_panic (no crash).
-    tf.vector = 0;
-    trap_handler(tf);
-
-    // Test 2: vector 128 (syscall) → trap_syscall (no crash).
+    // Test 1: vector 128 (syscall) → trap_syscall (no crash).
+    // syscall_dispatch_from_trap reads nr from slot 0 (= 0 from tf_init),
+    // 0 < 512 so bounds-check passes, looks up handler for syscall 0 in
+    // the empty table → handler == 0 → writes 38 to slot 7, returns 38.
     tf.vector = 128;
-    trap_handler(tf);
+    trap_handler(tf, syscall_tbl, irq_ring, irq_tbl);
 
-    // Test 3: vector 32 (IRQ) → trap_irq (no crash).
+    // Test 2: vector 32 (IRQ) → trap_irq (no crash).
+    // irq_ring_push(ring, 32) enqueues 32 (ring.count 0→1). Then
+    // irq_dispatch_loop pops 32, looks up handler for IRQ 32 in the
+    // empty table → handler == 0 (spurious) → skip EOI, pop again →
+    // 9999 (empty) → return. ring.count back to 0.
     tf.vector = 32;
-    trap_handler(tf);
+    trap_handler(tf, syscall_tbl, irq_ring, irq_tbl);
 
     return 0;
 }
