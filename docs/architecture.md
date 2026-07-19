@@ -1159,7 +1159,7 @@ A future wave will add a real `import` mechanism (likely
 `import fs.inode;` bringing `InodeTable` + its helpers into scope);
 until then, every kernel contributor does the copy-paste.
 
-### 12.2 No string-literal lowering
+### 12.2 String literal lowering (resolved W1)
 
 The lexer recognises string literals (`"hello"`) and produces
 `Lit::String(String)`, but the codegen bridge does not lower them to
@@ -1225,7 +1225,7 @@ This pattern is used by `pmm_init`, `vmm_init`, `trap_frame_init`,
 `pm_init`, and every other stateful kernel subsystem. See
 [`kernel-architecture.md` §3](./kernel-architecture.md#3-pmt-in-the-kernel-design).
 
-### 12.4 Array index is byte-granular for non-`u8` element types
+### 12.4 Array index element-size scaling (resolved W4) for non-`u8` element types
 
 The codegen only lowers `state.array[idx]` correctly for `[u8; N]`
 arrays. For `[u16; N]`, `[u32; N]`, or `[u64; N]` arrays, the
