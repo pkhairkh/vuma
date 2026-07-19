@@ -18,6 +18,10 @@
 //                                  in-progress escape buffer (0 if absent).
 //   vt100_param_count(s)        — count ';' -separated params in esc_buf
 //                                  (W23S1 — used by the multi-param SGR loop).
+//   vt100_scroll(s)             — scroll the glyph buffer up one row + clear
+//                                  the last row + leave cursor at the bottom
+//                                  (W23S2 — called by vt100_feed on LF / wrap
+//                                  at the bottom row).
 //
 // ── Byte classification (decimal ASCII values, per the K6c contract) ───────
 // All non-zero constants use DECIMAL (carried forward through K5a–K6b — see
@@ -99,24 +103,28 @@
 // parameter before storing. Bounds:
 //   - col wraps to 0 and row++ when a printable byte would push col past
 //     s.cols - 1 (line wrap — matches VT100 autowrap behavior).
-//   - row clamps at s.rows - 1 when it would exceed the bottom (no scroll —
-//     see the "Scrolling is a stub" note below).
+//   - row scrolls the glyph buffer up by one row when it would exceed the
+//     bottom (W23S2 — see vt100_scroll + the "Scrolling (W23S2)" note
+//     below; previously this was a clamp).
 //   - cursor up/left use `if cur >= n { cur -= n } else { cur = 0 }` to
 //     avoid u32 underflow (0 - 1 = 4294967295 in u32 — would crash the
 //     bounds check on the next operation).
 //
-// ── Scrolling is simplified to clamping ─────────────────────────────────────
+// ── Scrolling (W23S2) ──────────────────────────────────────────────────────
 // A real VT100 scrolls the screen up one row when the cursor would move past
 // the bottom: every row's glyph buffer is memmoved up by one row, the bottom
-// row is cleared, and the cursor stays on the bottom row. K6c doesn't have
-// a glyph buffer (only cursor + color state), so "scrolling" degenerates to
-// "clamp the cursor at the bottom row". This is the same simplification the
-// K6c contract specifies (the contract's `// scroll (stub: just clamp)`
-// comment). A later wave (K6d serial console, or K8 framebuffer console)
-// will add a glyph buffer at the call site and implement real scrolling
-// THERE — K6c's parser will feed it bytes via vt100_feed, and the console
-// layer will handle the actual screen update. K6c is purely the byte→state
-// translation; it has no opinion about how the state gets rendered.
+// row is cleared, and the cursor stays on the bottom row. W23S2 added a
+// glyph buffer (`glyphs: [u8; 2000]` — 80 cols × 25 rows) to Vt100State and
+// implemented real scrolling in vt100_scroll: when the cursor would exceed
+// the bottom row (via LF or autowrap), the buffer is shifted up by one row
+// (rows 1..24 → rows 0..23 — the top row is discarded), the last row is
+// cleared (filled with ASCII space, byte 32), and s.row is left at s.rows-1
+// (the cursor stays on the bottom row). Printable bytes are stored into the
+// glyph buffer at s.glyphs[s.row * 80 + s.col] as they're fed, so a scroll
+// preserves the on-screen text (shifted up by one row) — matching real VT100
+// scroll behavior. Explicit cursor-positioning commands (CUP/CUD/RCP) that
+// target an out-of-range row still CLAMP to the nearest in-range row (no
+// scroll — those are explicit moves, not implicit downward motion).
 //
 // ── SGR (color + attributes) — expanded in W23S1 ───────────────────────────
 // The SGR (Select Graphic Rendition) sequence `ESC [ N m` sets a graphic
@@ -141,8 +149,9 @@
 //
 // ── Layout (Vt100State) ─────────────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file declares its own layout.
-// Vt100State is NEW in K6c (no prior wave uses it). The layout (W23S1
-// added bold/underline/reverse + save_row/save_col after `cols`):
+// Vt100State is NEW in K6c (no prior wave uses it). The layout (W23S2 added
+// the glyphs buffer after `save_col`; W23S1 added bold/underline/reverse +
+// save_row/save_col after `cols`):
 //
 //   Vt100State (size verified by IVE Pass at compile time):
 //     row       @ 0    u32        — cursor row (0-based, 0..rows-1).
@@ -159,12 +168,14 @@
 //     cols      @ 40   u32        — terminal width (default 80).
 //     save_row  @ 44   u32        — saved cursor row (SCP/RCP) [W23S1].
 //     save_col  @ 48   u32        — saved cursor col (SCP/RCP) [W23S1].
+//     glyphs    @ 52   [u8; 2000] — glyph buffer (80 cols × 25 rows) [W23S2].
 //   (The [u8; 16] field forces a 16-byte start offset for esc_buf; the
 //   struct size + trailing padding to the largest field alignment is
 //   verified by the IVE Pass layout verifier at compile time. W23S1's
-//   new fields are appended after `cols` so existing field offsets
-//   (row/col/fg/bg/esc/esc_buf/esc_len/rows/cols) are UNCHANGED — any
-//   external code reading those offsets is unaffected.)
+//   fields are appended after `cols` and W23S2's glyphs is appended after
+//   `save_col`, so existing field offsets (row/col/fg/bg/esc/esc_buf/
+//   esc_len/rows/cols/save_row/save_col) are UNCHANGED — any external
+//   code reading those offsets is unaffected.)
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Vt100State
@@ -205,6 +216,9 @@
 //   (7) ESC [ 2J / ESC [ K / ESC [ L / ESC [ M  → recognized-but-no-op
 //       dispatches (W23S1 — verifies the parser consumes each final byte
 //       and returns cleanly to NORMAL mode without corrupting state).
+//   (8) ESC [ 25 ; 1 H, 'X', '\n'  → scroll (W23S2 — verifies the glyph
+//       store at the bottom row, then vt100_scroll shifts the glyph up
+//       one row and clears the last row).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layout.
@@ -229,6 +243,7 @@ layout Vt100State = {
     cols: u32,          // terminal width (e.g. 80)
     save_row: u32,      // saved cursor row for SCP/RCP (ESC [ s / ESC [ u)
     save_col: u32,      // saved cursor col for SCP/RCP (ESC [ s / ESC [ u)
+    glyphs: [u8; 2000], // glyph buffer (80 cols × 25 rows) — W23S2
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -255,6 +270,20 @@ fn vt100_init(s: State<Vt100State>) {
     s.cols = 80;  // classic VT100 width
     s.save_row = 0;  // SCP/RCP origin (W23S1)
     s.save_col = 0;  // SCP/RCP origin (W23S1)
+    // Zero the glyph buffer to ASCII spaces (byte 32). W23S2. Unlike
+    // esc_buf (which is left uninitialized because esc_len=0 prevents any
+    // read), the glyphs buffer IS read on every scroll — vt100_scroll
+    // copies rows 1..24 → 0..23 unconditionally, so any uninitialized
+    // bytes would leak into the visible rows on the first scroll. Filling
+    // with spaces (not 0) matches the "cleared screen" semantic: a freshly
+    // initialized terminal shows blank space, matching what a real VT100
+    // displays on power-up (and matching what vt100_scroll writes when it
+    // clears the last row).
+    let g = 0;
+    while g < 2000 {
+        s.glyphs[g] = 32;  // ASCII space
+        g = g + 1;
+    }
 }
 
 // Feed one byte to the VT100 parser. Updates cursor position / color /
@@ -281,11 +310,12 @@ fn vt100_feed(s: State<Vt100State>, c: u8) {
             // LF '\n' — line feed. Move cursor down one row. Column stays
             // (matches VT100 LF behavior — Unix terminals typically also
             // do CR on LF, but the VT100 spec is LF-only; CR is a separate
-            // control byte). At the bottom row, clamp (no scroll — see the
-            // file header's "Scrolling is simplified to clamping" note).
+            // control byte). At the bottom row, scroll the glyph buffer up
+            // by one row (W23S2 — see vt100_scroll + the file header's
+            // "Scrolling (W23S2)" note; previously this was a clamp).
             s.row = s.row + 1;
             if s.row >= s.rows {
-                s.row = s.rows - 1;  // clamp (no scroll in K6c)
+                vt100_scroll(s);  // W23S2: scroll up + stay at bottom row
             }
             return;
         }
@@ -303,20 +333,25 @@ fn vt100_feed(s: State<Vt100State>, c: u8) {
             }
             return;
         }
-        // Printable character (or unhandled control byte) — advance cursor.
-        // The VT100 spec says any byte >= 0x20 (32) is printable; K6c is
-        // permissive and also lets other control bytes through (they
-        // advance the cursor without rendering anything in the caller's
-        // glyph buffer — the caller is responsible for the glyph).
+        // Printable character (or unhandled control byte) — store the glyph
+        // at the current cursor position, then advance the cursor. The VT100
+        // spec says any byte >= 0x20 (32) is printable; K6c is permissive
+        // and also lets other control bytes through (they get stored in the
+        // glyph buffer too — W23S2 made K6c own the glyph buffer instead
+        // of delegating to the caller; previously the comment said "the
+        // caller is responsible for the glyph", but with glyphs now in
+        // Vt100State the store happens here).
+        s.glyphs[s.row * 80 + s.col] = c;  // store glyph at (row, col) [W23S2]
         s.col = s.col + 1;
         if s.col >= s.cols {
             // Line wrap — VT100 autowrap: at the right edge, wrap to the
-            // next line (col=0, row++). At the bottom row, clamp row
-            // (no scroll in K6c).
+            // next line (col=0, row++). At the bottom row, scroll the
+            // glyph buffer up by one row (W23S2 — see vt100_scroll;
+            // previously this was a clamp).
             s.col = 0;
             s.row = s.row + 1;
             if s.row >= s.rows {
-                s.row = s.rows - 1;  // clamp (no scroll in K6c)
+                vt100_scroll(s);  // W23S2: scroll up + stay at bottom row
             }
         }
         return;
@@ -693,6 +728,52 @@ fn vt100_param_count(s: State<Vt100State>) -> u32 {
     return count;
 }
 
+// Scroll the glyph buffer up by one row. W23S2. Called by vt100_feed when
+// the cursor would exceed the bottom row (via LF or autowrap) — replaces
+// the previous "clamp at bottom row" stub with real VT100 scroll behavior.
+// The scroll has three steps:
+//   (a) Copy rows 1..24 → rows 0..23 (shift every row up by one row; the
+//       top row — row 0 — is discarded, overwritten by row 1's contents).
+//   (b) Clear the last row (row 24) — fill with ASCII space (byte 32),
+//       matching the "cleared line" semantic of a real VT100.
+//   (c) Keep s.row at s.rows - 1 (stay at the bottom row — the cursor
+//       doesn't move past the bottom; it stays on the now-blank last row).
+// The column is NOT changed by the scroll (the caller's wrap-or-not
+// decision is independent of the scroll). The 80-byte row stride is
+// hardcoded (matching the glyphs buffer's 80-col sizing — K6c doesn't
+// support terminal resize, so s.cols is always 80 when glyphs is in use).
+//
+// PMT-pure: the row-shift is a byte-by-byte copy loop (no memmove / no
+// pointer arithmetic — same State<T> field-array pattern as kernel.vuma's
+// history-shift `h.cmds[s * 256 + k] = h.cmds[(s + 1) * 256 + k]`).
+fn vt100_scroll(s: State<Vt100State>) {
+    // (a) Shift rows 1..24 up to rows 0..23 (24 rows copied).
+    let r = 0;
+    while r < 24 {
+        let k = 0;
+        while k < 80 {
+            // Copy byte at (r+1, k) → (r, k). Source row r+1 is the row
+            // below dest row r; after the loop, row 0 = old row 1, row 1
+            // = old row 2, ..., row 23 = old row 24. Old row 0 is gone.
+            s.glyphs[r * 80 + k] = s.glyphs[(r + 1) * 80 + k];
+            k = k + 1;
+        }
+        r = r + 1;
+    }
+    // (b) Clear the last row (row 24) — fill with ASCII space (byte 32).
+    let k = 0;
+    while k < 80 {
+        s.glyphs[24 * 80 + k] = 32;
+        k = k + 1;
+    }
+    // (c) Keep the cursor at the bottom row (s.rows - 1 = 24 for the
+    // default 25-row terminal). The scroll was triggered because the
+    // cursor would have exceeded the bottom; after the scroll the cursor
+    // stays on the now-blank bottom row, ready for the next printable
+    // byte to overwrite the space at (24, col).
+    s.row = s.rows - 1;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6c DoD).
 // ────────────────────────────────────────────────────────────────────────────
@@ -726,8 +807,13 @@ fn vt100_param_count(s: State<Vt100State>) -> u32 {
 //       state-only NO-OP. W23S1. Verifies the parser consumes each final
 //       byte and returns cleanly to NORMAL mode (s.esc == 0 after each)
 //       without corrupting cursor position.
+//   (8) ESC [ 25 ; 1 H, 'X', '\n' → scroll (W23S2). Moves cursor to the
+//       bottom row, feeds a printable 'X' (verifies the new glyph-store
+//       path: s.glyphs[24*80+0] = 88), then feeds '\n' which triggers
+//       vt100_scroll (verifies: cursor stays at row=24, the 'X' moves up
+//       to row 23, and row 24 is cleared to ASCII space byte 32).
 //
-// All assertions return distinct non-zero codes (1..16) so a failure
+// All assertions return distinct non-zero codes (1..38) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 
 fn main() -> i32 {
@@ -889,6 +975,46 @@ fn main() -> i32 {
     if s.esc != 0 { return 28; }       // W23S1: parser back to NORMAL
     if s.row != 9 { return 29; }       // cursor preserved
     if s.col != 19 { return 30; }      // cursor preserved
+
+    // ── Sub-test (8): LF at bottom row → scroll ─────────────────────────────
+    // W23S2. After sub-test (7), the cursor is at (row=9, col=19). Move it
+    // to the bottom row (row=24, col=0) via ESC [ 25 ; 1 H, then:
+    //   - Feed 'X' (88) — a printable byte. The new W23S2 glyph-store path
+    //     writes s.glyphs[24*80+0] = 88, then advances col to 1.
+    //   - Feed '\n' (10) — LF. s.row becomes 25, which is >= s.rows (25),
+    //     so vt100_scroll fires: rows 1..24 are copied to rows 0..23
+    //     (so the 'X' at row 24 moves to row 23), row 24 is cleared (all
+    //     bytes set to 32 = space), and s.row is set back to 24 (stay at
+    //     the bottom row).
+    // The sub-test verifies: (a) the cursor moved to the bottom-left via
+    // CUP (return 31/32 — sanity check the CUP still works after the W23S2
+    // layout change), (b) the glyph was stored before the scroll advanced
+    // the cursor (return 33 — verifies the printable-path glyph store
+    // `s.glyphs[s.row * 80 + s.col] = c`), (c) the cursor is still at the
+    // bottom row + col=1 after the 'X' (return 34/35 — verifies the normal
+    // printable advance still works), (d) the cursor stayed at row=24
+    // after the scroll (return 36 — verifies step (c) of vt100_scroll),
+    // (e) the 'X' moved from row 24 to row 23 (return 37 — verifies step
+    // (a) of vt100_scroll: rows 1..24 → 0..23), and (f) row 24 was cleared
+    // to spaces (return 38 — verifies step (b) of vt100_scroll: last row
+    // filled with byte 32).
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 50);   // '2'
+    vt100_feed(s, 53);   // '5'
+    vt100_feed(s, 59);   // ';'
+    vt100_feed(s, 49);   // '1'
+    vt100_feed(s, 72);   // 'H' — CUP to (25, 1) → (row=24, col=0)
+    if s.row != 24 { return 31; }  // cursor at bottom row
+    if s.col != 0 { return 32; }   // cursor at leftmost column
+    vt100_feed(s, 88);   // 'X' — printable, stores glyphs[24*80+0]=88
+    if s.glyphs[24 * 80 + 0] != 88 { return 33; }  // W23S2: glyph stored
+    if s.row != 24 { return 34; }                  // still bottom row
+    if s.col != 1 { return 35; }                   // col advanced to 1
+    vt100_feed(s, 10);   // '\n' — LF triggers scroll at bottom row
+    if s.row != 24 { return 36; }                  // W23S2: stayed at bottom
+    if s.glyphs[23 * 80 + 0] != 88 { return 37; }  // W23S2: 'X' moved up
+    if s.glyphs[24 * 80 + 0] != 32 { return 38; }  // W23S2: last row cleared
 
     return 0;
 }
