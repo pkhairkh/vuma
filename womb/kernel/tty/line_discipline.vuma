@@ -46,6 +46,10 @@
 //   - Ctrl-D (byte 4)   → EOF   — push a single 0 byte to signal end-of-input.
 //   - Backspace (8 or 127) → delete the last byte in the buffer (retreat tail).
 //   - CR (byte 13)     → translate to LF (byte 10).
+//   - Ctrl-L (byte 12)  → set clear_pending flag (screen clear requested). W23S3.
+//   - Ctrl-R (byte 18)  → set reprint_pending flag (reprint line requested). W23S3.
+//   - Ctrl-U (byte 21)  → KILL — erase entire line (head=tail, count=0). W23S3.
+//   - Ctrl-W (byte 23)  → WERASE — erase last word (skip spaces, then non-spaces). W23S3.
 //   - Any other byte   → push as-is.
 // Raw mode (`tty.raw == 1`):
 //   - Bytes are pushed directly to the buffer with no editing / translation.
@@ -58,7 +62,11 @@
 //     4   = Ctrl-D  (0x04) — EOF, push 0 byte.
 //     8   = BS      (0x08) — backspace (PC-style).
 //     10  = LF      (0x0A) — newline, end-of-line.
+//     12  = Ctrl-L  (0x0C) — clear screen (sets clear_pending). W23S3.
 //     13  = CR      (0x0D) — carriage return → translated to LF.
+//     18  = Ctrl-R  (0x12) — reprint line (sets reprint_pending). W23S3.
+//     21  = Ctrl-U  (0x15) — KILL, erase entire line. W23S3.
+//     23  = Ctrl-W  (0x17) — WERASE, erase last word. W23S3.
 //     127 = DEL     (0x7F) — backspace (Unix/Mac-style).
 // All other byte values pass through unchanged.
 //
@@ -101,16 +109,18 @@
 // layout it uses. The two layouts are NEW (K6b introduces them — they
 // don't exist in any prior wave):
 //
-//   TtyLine (268 bytes total):
-//     buf   @ 0    [u8; 256]  — the ring buffer (256 bytes).
-//     head  @ 256  u32        — read cursor (4 bytes).
-//     tail  @ 260  u32        — write cursor (4 bytes).
-//     count @ 264  u32        — bytes currently buffered (4 bytes).
-//     raw   @ 268  u8         — 1 = raw mode, 0 = cooked (line) mode.
-//     echo  @ 269  u8         — 1 = echo input to output, 0 = silent.
-//   (Plus 6 bytes of trailing padding to align the struct to 8 bytes — the
-//   VUMA layout pads to the largest field's alignment, which is 4 bytes
-//   for the u32 fields. The u8 fields pack tight at the end.)
+//   TtyLine (272 bytes total — 272 is divisible by both 4 and 8, so no
+//   trailing padding is added):
+//     buf              @ 0    [u8; 256]  — the ring buffer (256 bytes).
+//     head             @ 256  u32        — read cursor (4 bytes).
+//     tail             @ 260  u32        — write cursor (4 bytes).
+//     count            @ 264  u32        — bytes currently buffered (4 bytes).
+//     raw              @ 268  u8         — 1 = raw mode, 0 = cooked (line) mode.
+//     echo             @ 269  u8         — 1 = echo input to output, 0 = silent.
+//     reprint_pending  @ 270  u8         — W23S3: 1 = Ctrl-R received.
+//     clear_pending    @ 271  u8         — W23S3: 1 = Ctrl-L received.
+//   (The 4 u8 fields pack tight at the end; 272 mod 8 == 0, so the struct
+//   is already maximally aligned — no trailing padding bytes.)
 //
 //   LineBuf (256 bytes total):
 //     data  @ 0    [u8; 256]  — output buffer for tty_readline.
@@ -143,7 +153,12 @@
 //   4    = Ctrl-D (EOF — push 0 byte).
 //   8    = BS (PC-style backspace).
 //   10   = LF (newline — end-of-line in readline).
+//   12   = Ctrl-L (form feed / clear screen). W23S3.
 //   13   = CR (carriage return → translate to LF).
+//   18   = Ctrl-R (reprint line). W23S3.
+//   21   = Ctrl-U (KILL — erase entire line). W23S3.
+//   23   = Ctrl-W (WERASE — erase last word). W23S3.
+//   32   = ASCII space (word boundary for WERASE). W23S3.
 //   127  = DEL (Unix/Mac-style backspace).
 //   255  = ring-wrap mask (= 256 - 1).
 //   256  = ring-buffer size + empty-buffer sentinel.
@@ -185,21 +200,28 @@
 //   (1) "hello\n" → tty_readline returns 5, out = "hello".
 //   (2) "abc\b\n" → tty_readline returns 2, out = "ab" (backspace deletes 'c').
 //   (3) "xy" + Ctrl-C → tty.count == 0 (Ctrl-C flushes the buffer).
+//   (4) "abc" + Ctrl-U + "de\n" → readline returns 2, "de" (Ctrl-U kills "abc"). W23S3.
+//   (5) "hi  " + Ctrl-W → count=0; "ab cd" + Ctrl-W + "\n" → returns 3, "ab ". W23S3.
+//   (6) Ctrl-R → reprint_pending == 1 (Ctrl-R consumed, not pushed). W23S3.
+//   (7) Ctrl-L → clear_pending == 1 (Ctrl-L consumed, not pushed). W23S3.
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
-// TtyLine: the line-discipline state for one TTY device. 268 bytes total
-// (256-byte ring + 3×u32 cursors + 2×u8 mode flags, with trailing padding
-// to 4-byte alignment). See the file header for the byte-offset map.
+// TtyLine: the line-discipline state for one TTY device. 272 bytes total
+// (256-byte ring + 3×u32 cursors + 4×u8 mode/flag fields, no trailing
+// padding — 272 is already 4-byte and 8-byte aligned). See the file
+// header for the byte-offset map.
 layout TtyLine = {
-    buf: [u8; 256],   // ring buffer (256 bytes)
-    head: u32,        // read position (next byte tty_pop returns)
-    tail: u32,        // write position (next byte tty_push stores)
-    count: u32,       // bytes currently in buffer (head..tail mod 256)
-    raw: u8,          // 1 = raw mode (passthrough), 0 = cooked (line) mode
-    echo: u8,         // 1 = echo input to output, 0 = silent (unused in K6b)
+    buf: [u8; 256],        // ring buffer (256 bytes)
+    head: u32,             // read position (next byte tty_pop returns)
+    tail: u32,             // write position (next byte tty_push stores)
+    count: u32,            // bytes currently in buffer (head..tail mod 256)
+    raw: u8,               // 1 = raw mode (passthrough), 0 = cooked (line) mode
+    echo: u8,              // 1 = echo input to output, 0 = silent (unused in K6b)
+    reprint_pending: u8,   // W23S3: 1 = Ctrl-R received, line should be reprinted
+    clear_pending: u8,     // W23S3: 1 = Ctrl-L received, screen should be cleared
 }
 
 // LineBuf: a 256-byte output buffer for tty_readline. The caller allocates
@@ -225,15 +247,20 @@ fn tty_init(tty: State<TtyLine>) {
     tty.count = 0;
     tty.raw = 0;   // cooked mode (line editing on)
     tty.echo = 1;  // echo on (unused in K6b — no UART output path here)
+    tty.reprint_pending = 0;  // W23S3: no reprint requested
+    tty.clear_pending = 0;    // W23S3: no screen clear requested
 }
 
 // Receive a byte from the UART. Process it according to the line discipline:
 //   - Raw mode:     push directly, no translation.
 //   - Cooked mode:  handle Ctrl-C (flush), Ctrl-D (EOF byte), BS / DEL
-//                   (backspace), CR (→ LF), then push.
+//                   (backspace), CR (→ LF), Ctrl-L (clear flag), Ctrl-R
+//                   (reprint flag), Ctrl-U (kill line), Ctrl-W (werase),
+//                   then push.
 // The byte is consumed exactly once — either by being pushed to the ring
 // (raw / regular / LF / Ctrl-D) or by triggering a side-effect-only action
-// (Ctrl-C flush, BS retreat). The function returns void; callers that want
+// (Ctrl-C flush, BS retreat, Ctrl-U kill, Ctrl-W werase, Ctrl-R/L flag
+// set). The function returns void; callers that want
 // echo can call uart_putc_8250(base, c) themselves if tty.echo == 1 (K6b
 // doesn't wire this — it's a K6d concern, see the file header's "No
 // externs" note).
@@ -286,6 +313,72 @@ fn tty_receive(tty: State<TtyLine>, c: u8) {
         // real terminal hitting Enter typically sends CR (or CR+LF), so
         // this translation is required for POSIX correctness.
         tty_push(tty, 10);
+        return;
+    }
+    if c == 12 {
+        // Ctrl-L (0x0C): form feed / clear screen. W23S3. Set the
+        // clear_pending flag; the console layer (K6d/K8) reads and
+        // clears it to perform the actual screen clear (the discipline
+        // only sets the flag — it has no framebuffer to clear itself,
+        // same glyph-buffer caveat as the K6c VT100 ED/EL handlers).
+        // The byte is consumed (not pushed to the ring).
+        tty.clear_pending = 1;
+        return;
+    }
+    if c == 18 {
+        // Ctrl-R (0x12): reprint the current input line. W23S3. Set the
+        // reprint_pending flag; the console layer reads and clears it to
+        // re-echo the in-progress line (POSIX `reprint` / VREPRINT termios
+        // flag). The byte is consumed (not pushed).
+        tty.reprint_pending = 1;
+        return;
+    }
+    if c == 21 {
+        // Ctrl-U (0x15): KILL — erase the entire current line. W23S3.
+        // Set head = tail (the readable region becomes empty) and
+        // count = 0. Unlike Ctrl-C (which resets head = tail = 0),
+        // Ctrl-U preserves the ring cursor position — functionally
+        // equivalent (count = 0 means no bytes are readable) but doesn't
+        // rewind the write cursor to slot 0. The byte is consumed (not
+        // pushed).
+        tty.head = tty.tail;
+        tty.count = 0;
+        return;
+    }
+    if c == 23 {
+        // Ctrl-W (0x17): WERASE — erase the last word. W23S3. Walk tail
+        // backward past trailing spaces (if any), then past the last
+        // non-space run (the word). ASCII space = 32. The `tty.count > 0`
+        // guard in each loop prevents retreating on an empty buffer
+        // (which would corrupt tail with a phantom retreat). The retreat
+        // expression `(tty.tail + 255) & 255` is `(tail - 1) mod 256`
+        // (same modular-arithmetic trick as the BS handler — avoids u32
+        // underflow: 0 - 1 would be 4294967295; 0 + 255 = 255, & 255 = 255).
+        //
+        // Two-phase walk per POSIX VREPRINT/WERASE semantics:
+        //   (1) skip trailing whitespace (so "foo   " + Ctrl-W erases
+        //       the 3 spaces AND "foo", leaving the line empty),
+        //   (2) then erase the non-space word (so "foo bar" + Ctrl-W
+        //       erases "bar", leaving "foo ").
+        // The `let prev` / `let b` locals are needed because we must
+        // PEEK at buf[tail-1] before retreating — retreating first would
+        // lose the byte we need to test. The `as u32` cast on the array
+        // load matches the tty_pop pattern (u8 array element → u32 local
+        // for comparison against 32 without a separate cast in the `if`).
+        while tty.count > 0 {
+            let prev = (tty.tail + 255) & 255;  // = (tail - 1) mod 256
+            let b = tty.buf[prev] as u32;
+            if b != 32 { break; }  // not a space — stop skipping whitespace
+            tty.tail = prev;
+            tty.count = tty.count - 1;
+        }
+        while tty.count > 0 {
+            let prev = (tty.tail + 255) & 255;
+            let b = tty.buf[prev] as u32;
+            if b == 32 { break; }  // space — word boundary reached
+            tty.tail = prev;
+            tty.count = tty.count - 1;
+        }
         return;
     }
     // Regular character (printable or other control): push as-is.
@@ -375,7 +468,7 @@ fn tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6b DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// Three sub-tests, each exercising one cooked-mode code path:
+// Seven sub-tests, each exercising one cooked-mode code path:
 //   (1) Plain line: receive "hello\n", readline → returns 5, out = "hello".
 //       Verifies: regular byte push, LF termination, byte-for-byte copy.
 //   (2) Backspace: receive "abc\b\n", readline → returns 2, out = "ab".
@@ -383,11 +476,21 @@ fn tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
 //       is pushed; readline then pops 'a', 'b', LF (break) → 2 bytes.
 //   (3) Ctrl-C flush: receive "xy" + Ctrl-C, check tty.count == 0.
 //       Verifies: Ctrl-C resets head/tail/count to 0, discarding "xy".
+//   (4) Ctrl-U kill: receive "abc" + Ctrl-U + "de\n" → returns 2, "de". W23S3.
+//       Verifies: Ctrl-U sets head=tail, count=0 (discards "abc");
+//       subsequent "de\n" is received normally.
+//   (5) Ctrl-W werase: "hi  " + Ctrl-W → count=0; "ab cd" + Ctrl-W →
+//       count=3 ("ab "); "\n" → returns 3. W23S3. Verifies BOTH the
+//       space-skipping loop (5a) and the non-space erasure loop (5b).
+//   (6) Ctrl-R reprint: flag 0→1, count stays 0. W23S3.
+//   (7) Ctrl-L clear: flag 0→1, count stays 0. W23S3.
 //
-// All assertions return distinct non-zero codes (1, 2, 3, 4, 5, 6, 7) so
+// All assertions return distinct non-zero codes (1..22) so
 // a failure pinpoints exactly which check failed (e.g. return 4 = the
 // backspace test's byte-count check failed, return 5 = the backspace
-// test's first-byte check failed, etc.). Exit 0 = all checks passed.
+// test's first-byte check failed, return 12 = the Ctrl-W trailing-space
+// erasure check failed, return 18 = the Ctrl-R flag-set check failed,
+// etc.). Exit 0 = all checks passed.
 
 fn main() -> i32 {
     let tty = state_new(TtyLine);
@@ -436,6 +539,93 @@ fn main() -> i32 {
     tty_receive(tty, 121);  // 'y'
     tty_receive(tty, 3);    // Ctrl-C → flush
     if tty.count != 0 { return 7; }
+
+    // ── Sub-test (4): Ctrl-U kills the entire line ──────────────────────────
+    // W23S3. After sub-test (3), head=0, tail=0, count=0 (Ctrl-C reset
+    // everything to 0). Receive "abc" → buf[0..2], tail=3, count=3. Ctrl-U
+    // sets head=tail=3, count=0 — the "abc" is discarded (head caught up
+    // to tail, so the readable region is empty). Then receive "de\n" →
+    // buf[3..5], tail=6, count=3. readline pops 'd', 'e' (2 bytes), then
+    // LF (break) → returns 2. out.data[0..2] = "de". This verifies that
+    // Ctrl-U erases the WHOLE line (not just the last word like Ctrl-W)
+    // and that subsequent input is received normally after the kill.
+    tty_receive(tty, 97);   // 'a'
+    tty_receive(tty, 98);   // 'b'
+    tty_receive(tty, 99);   // 'c'
+    tty_receive(tty, 21);   // Ctrl-U → kill line
+    if tty.count != 0 { return 8; }
+    tty_receive(tty, 100);  // 'd'
+    tty_receive(tty, 101);  // 'e'
+    tty_receive(tty, 10);   // '\n'
+    let n3 = tty_readline(tty, line, 256);
+    if n3 != 2 { return 9; }
+    if line.data[0] != 100 { return 10; }  // 'd'
+    if line.data[1] != 101 { return 11; }  // 'e'
+
+    // ── Sub-test (5): Ctrl-W erases the last word ────────────────────────────
+    // W23S3. After sub-test (4), head=6, tail=6, count=0. Two Ctrl-W
+    // scenarios are exercised:
+    //
+    //   (5a) "hi  " + Ctrl-W → count==0. Receive 'h','i',' ',' ' →
+    //        buf[6..9], tail=10, count=4. Ctrl-W first walks backward past
+    //        the 2 trailing spaces (tail 10→8, count 4→2), then past the
+    //        non-space run "hi" (tail 8→6, count 2→0). count==0 verifies
+    //        BOTH loops ran (the space-skipping loop AND the non-space
+    //        erasure loop). This is the "trailing whitespace" case.
+    //
+    //   (5b) "ab cd" + Ctrl-W → count==3 ("ab "). Receive 'a','b',' ',
+    //        'c','d' → buf[6..10], tail=11, count=5. Ctrl-W walks past no
+    //        trailing spaces ('d' is last, not a space), then past "cd"
+    //        (tail 11→9, count 5→3), stopping at the space before 'c'.
+    //        count==3 = "ab " (with trailing space — POSIX WERASE preserves
+    //        the word-separator space). This is the "word boundary" case.
+    //
+    // Then "\n" → buf[9]=10, tail=10, count=4. readline pops 'a', 'b',
+    // ' ' (3 bytes), then LF (break) → returns 3. out.data[0..3] = "ab ".
+    tty_receive(tty, 104);  // 'h'
+    tty_receive(tty, 105);  // 'i'
+    tty_receive(tty, 32);   // ' '
+    tty_receive(tty, 32);   // ' '
+    tty_receive(tty, 23);   // Ctrl-W → erase last word ("hi  " → empty)
+    if tty.count != 0 { return 12; }  // (5a) both loops ran
+    tty_receive(tty, 97);   // 'a'
+    tty_receive(tty, 98);   // 'b'
+    tty_receive(tty, 32);   // ' '
+    tty_receive(tty, 99);   // 'c'
+    tty_receive(tty, 100);  // 'd'
+    tty_receive(tty, 23);   // Ctrl-W → erase last word ("ab cd" → "ab ")
+    if tty.count != 3 { return 13; }  // (5b) word boundary
+    tty_receive(tty, 10);   // '\n'
+    let n4 = tty_readline(tty, line, 256);
+    if n4 != 3 { return 14; }
+    if line.data[0] != 97 { return 15; }   // 'a'
+    if line.data[2] != 32 { return 16; }   // ' '
+
+    // ── Sub-test (6): Ctrl-R sets the reprint flag ──────────────────────────
+    // W23S3. After sub-test (5), head=10, tail=10, count=0. The
+    // reprint_pending and clear_pending flags should still be 0 (set in
+    // tty_init, never touched by sub-tests 1-5). Receive Ctrl-R →
+    // reprint_pending=1, count unchanged (Ctrl-R is consumed, not pushed).
+    // Verify the flag transitions 0→1 and that the buffer count stays 0
+    // (the control byte is NOT pushed to the ring).
+    if tty.reprint_pending != 0 { return 17; }  // sanity: 0 from init
+    tty_receive(tty, 18);   // Ctrl-R → set reprint_pending
+    if tty.reprint_pending != 1 { return 18; }
+    if tty.count != 0 { return 19; }  // Ctrl-R doesn't push a byte
+
+    // ── Sub-test (7): Ctrl-L sets the clear-screen flag ─────────────────────
+    // W23S3. Receive Ctrl-L → clear_pending=1, count unchanged. Verify
+    // the flag transitions 0→1 and that the buffer count stays 0. (The
+    // reprint_pending flag is still 1 from sub-test 6 — the flags are
+    // STICKY: the discipline only sets them, never clears. The consumer
+    // (readline / console layer) is responsible for reading and clearing
+    // them after handling. This matches the POSIX termios model where
+    // VREPRINT / VDISCARD are consumed by the line discipline and the
+    // side effect is performed by the terminal driver.)
+    if tty.clear_pending != 0 { return 20; }  // sanity: 0 from init
+    tty_receive(tty, 12);   // Ctrl-L → set clear_pending
+    if tty.clear_pending != 1 { return 21; }
+    if tty.count != 0 { return 22; }  // Ctrl-L doesn't push a byte
 
     return 0;
 }
