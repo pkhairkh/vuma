@@ -412,7 +412,11 @@ impl BDInferenceEngine {
             | NodeType::ArenaNew
             | NodeType::ArenaAlloc
             | NodeType::ArenaGrow
-            | NodeType::ArenaFree => self.compute_phantom_bd(scg, node_id, bd_map),
+            | NodeType::ArenaFree
+            | NodeType::ChannelOpen
+            | NodeType::ChannelSend
+            | NodeType::ChannelRecv
+            | NodeType::ChannelClose => self.compute_phantom_bd(scg, node_id, bd_map),
         }
     }
 
@@ -891,7 +895,11 @@ impl BDInferenceEngine {
             | NodeType::ArenaNew
             | NodeType::ArenaAlloc
             | NodeType::ArenaGrow
-            | NodeType::ArenaFree => None,
+            | NodeType::ArenaFree
+            | NodeType::ChannelOpen
+            | NodeType::ChannelSend
+            | NodeType::ChannelRecv
+            | NodeType::ChannelClose => None,
         }
     }
 

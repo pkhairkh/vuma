@@ -2411,6 +2411,34 @@ impl<'src> Parser<'src> {
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
 
+        // Wave 2c: Channel-open builtin `channel_open<T>(args)` — parse the
+        // type parameter in angle brackets BEFORE entering the postfix
+        // loop.  Without this interception the `<` would be consumed by
+        // the binary-expression parser as a less-than operator
+        // (`channel_open < i32 > ()`), which is nonsensical.  We mirror
+        // the existing `Channel<T>` type-parsing path (parse_type +
+        // expect_gt_closing_generic) so nested types like
+        // `channel_open<Channel<i32>>` parse correctly via `>>`-splitting.
+        //
+        // The type parameter is parsed (and validated syntactically) but
+        // not retained on the resulting `Expr::Call` — Wave 3 codegen
+        // will recover it from the channel's runtime descriptor.  This
+        // matches the task spec ("parsed as regular function calls, just
+        // like allocate/free/state_new"): the callee is
+        // `Var("channel_open")` and the subsequent `(` arm of the
+        // postfix loop builds the `Expr::Call` with zero arguments.
+        //
+        // channel_send/recv/close have no type parameter and parse as
+        // plain `Expr::Call` via the generic LParen arm below — no
+        // special handling required.
+        if let Expr::Var { name, .. } = &expr {
+            if name == "channel_open" && self.at(TokenKind::Lt) {
+                self.advance(); // consume '<'
+                let _inner_ty = self.parse_type()?;
+                self.expect_gt_closing_generic()?;
+            }
+        }
+
         loop {
             match self.current.kind {
                 TokenKind::LParen => {

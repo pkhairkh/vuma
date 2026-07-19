@@ -6885,6 +6885,10 @@ impl Backend for Arm32Backend {
                     // arm32 (ARMv7 NEON) has no SIMD encoder in the Wave 29
                     // suite (only x86_64 and aarch64 do); emit nothing.
                     crate::ir::IRInstr::VectorOp { .. } => Vec::new(),
+                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // Backend lowering not yet implemented; emit no bytes.
+                    crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
+                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelClose { .. } => Vec::new(),
                 };
 
                 let encoded_len = encoded.len() as u64;

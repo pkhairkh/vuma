@@ -2266,6 +2266,20 @@ impl AstToScg {
 
     // -- 10. Function calls → FunctionEntry/FunctionReturn nodes -------------
     //    Enhanced: per-argument DataFlow edges; return value DataFlow.
+    //
+    //    Wave 2c: channel builtins (`channel_open`, `channel_send`,
+    //    `channel_recv`, `channel_close`) are parsed as regular
+    //    `Expr::Call` nodes (the `channel_open<T>` type parameter is
+    //    consumed by the parser but not retained on the AST — see
+    //    `parse_postfix`).  They flow through this generic lowering
+    //    path and produce SCG FunctionEntry/FunctionReturn ControlNodes
+    //    labelled `call_channel_open`, `call_channel_send`,
+    //    `call_channel_recv`, `call_channel_close` respectively.
+    //    Task 2b did not add a dedicated ChannelNode variant to the
+    //    parser SCG, so CallNode-shaped lowering (FunctionEntry/Return
+    //    pair) is the correct SCG representation.  Wave 3 codegen will
+    //    recognise these callee names and emit the appropriate runtime
+    //    calls.
 
     fn emit_call_nodes(
         &self,

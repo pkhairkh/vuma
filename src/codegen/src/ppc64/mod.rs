@@ -4027,6 +4027,10 @@ impl Backend for PPC64Backend {
                     // ppc64 (AltiVec/VSX) has no SIMD encoder in the Wave 29
                     // suite; emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
+                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // Backend lowering not yet implemented; emit no bytes.
+                    IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic

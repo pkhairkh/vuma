@@ -290,6 +290,18 @@ pub enum ScgStatement {
     /// (linearity error on subsequent read/write). Mirrors the semantic
     /// SCG's ForeignConsumeNode.
     ForeignConsume(ForeignConsumeStmt),
+    /// Wave 2b: channel open — `let ch = channel_open<T>()`.
+    /// Lowers to `IRInstr::ChannelOpen`.
+    ChannelOpen(ChannelOpenStmt),
+    /// Wave 2b: channel send — `channel_send(ch, msg)`.
+    /// Lowers to `IRInstr::ChannelSend`.
+    ChannelSend(ChannelSendStmt),
+    /// Wave 2b: channel recv — `let msg = channel_recv(ch)`.
+    /// Lowers to `IRInstr::ChannelRecv`.
+    ChannelRecv(ChannelRecvStmt),
+    /// Wave 2b: channel close — `channel_close(ch)`.
+    /// Lowers to `IRInstr::ChannelClose`.
+    ChannelClose(ChannelCloseStmt),
 }
 
 /// Wave 5: a foreign-consume marker. Marks `state_var` as consumed by a
@@ -300,6 +312,59 @@ pub struct ForeignConsumeStmt {
     pub state_var: String,
     /// The layout name of the State (for diagnostics).
     pub layout_name: String,
+}
+
+// ── Channel operation statements (Wave 2b) ───────────────────────────────
+
+/// Channel-open statement (Wave 2b).
+///
+/// `let ch = channel_open<T>()` — allocates a fresh kernel channel handle
+/// and stores the pointer-sized opaque capability in `dst`.  Lowers to
+/// [`IRInstr::ChannelOpen`].
+#[derive(Debug, Clone)]
+pub struct ChannelOpenStmt {
+    /// Destination variable name (receives the channel handle).
+    pub dst: String,
+    /// Element type the channel carries.
+    pub elem_ty: ScgType,
+}
+
+/// Channel-send statement (Wave 2b).
+///
+/// `channel_send(ch, msg)` — enqueues `msg` on `ch`.  Lowers to
+/// [`IRInstr::ChannelSend`].
+#[derive(Debug, Clone)]
+pub struct ChannelSendStmt {
+    /// Channel handle expression.
+    pub channel: ScgExpr,
+    /// Message expression to send.
+    pub message: ScgExpr,
+    /// Message type (selects backend store width).
+    pub ty: ScgType,
+}
+
+/// Channel-recv statement (Wave 2b).
+///
+/// `let msg = channel_recv(ch)` — dequeues a message from `ch` into `dst`.
+/// Lowers to [`IRInstr::ChannelRecv`].
+#[derive(Debug, Clone)]
+pub struct ChannelRecvStmt {
+    /// Destination variable name (receives the message).
+    pub dst: String,
+    /// Channel handle expression.
+    pub channel: ScgExpr,
+    /// Message type (selects backend load width).
+    pub ty: ScgType,
+}
+
+/// Channel-close statement (Wave 2b).
+///
+/// `channel_close(ch)` — releases the channel's runtime resource.  Lowers
+/// to [`IRInstr::ChannelClose`].
+#[derive(Debug, Clone)]
+pub struct ChannelCloseStmt {
+    /// Channel handle expression.
+    pub channel: ScgExpr,
 }
 
 /// Control-flow node.
@@ -1515,6 +1580,18 @@ impl IRBuilder {
             }
             ScgStatement::GetAddress(ga) => {
                 self.lower_get_address(ga, ir_func, names)?;
+            }
+            ScgStatement::ChannelOpen(co) => {
+                self.lower_channel_open(co, ir_func, names)?;
+            }
+            ScgStatement::ChannelSend(cs) => {
+                self.lower_channel_send(cs, ir_func, names)?;
+            }
+            ScgStatement::ChannelRecv(cr) => {
+                self.lower_channel_recv(cr, ir_func, names)?;
+            }
+            ScgStatement::ChannelClose(cc) => {
+                self.lower_channel_close(cc, ir_func, names)?;
             }
         }
         Ok(())
@@ -4384,6 +4461,94 @@ impl IRBuilder {
     }
 
     // =======================================================================
+    // Channel operation lowering (Wave 2b)
+    // =======================================================================
+
+    /// Lower a `ChannelOpen` statement to `IRInstr::ChannelOpen`.
+    ///
+    /// Allocates a fresh vreg for the channel handle, registers it under
+    /// the destination name, and emits the IR instruction.  The element
+    /// type is carried through to the IR for type-checking only (channels
+    /// are pointer-sized opaque handles).
+    fn lower_channel_open(
+        &mut self,
+        co: &ChannelOpenStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let dst_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &co.dst));
+        names.insert(co.dst.clone(), dst_vreg);
+
+        ir_func.current_block().push(IRInstruction::ChannelOpen {
+            dst: IRValue::Register(dst_vreg),
+            elem_ty: co.elem_ty.to_ir_type(),
+        });
+        Ok(())
+    }
+
+    /// Lower a `ChannelSend` statement to `IRInstr::ChannelSend`.
+    ///
+    /// Resolves the channel handle and message expressions to IRValues,
+    /// then emits the send instruction.  The message type is carried
+    /// through as `Some(ty)` so backends can select the store width.
+    fn lower_channel_send(
+        &mut self,
+        cs: &ChannelSendStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let ch = self.resolve_expr(&cs.channel, names, ir_func)?;
+        let msg = self.resolve_expr(&cs.message, names, ir_func)?;
+        ir_func.current_block().push(IRInstruction::ChannelSend {
+            ch,
+            msg,
+            ty: Some(cs.ty.to_ir_type()),
+        });
+        Ok(())
+    }
+
+    /// Lower a `ChannelRecv` statement to `IRInstr::ChannelRecv`.
+    ///
+    /// Resolves the channel handle, allocates a fresh vreg for the
+    /// destination, registers it under the destination name, and emits
+    /// the recv instruction.  The message type is carried through as
+    /// `Some(ty)` so backends can select the load width.
+    fn lower_channel_recv(
+        &mut self,
+        cr: &ChannelRecvStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let ch = self.resolve_expr(&cr.channel, names, ir_func)?;
+        let dst_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &cr.dst));
+        names.insert(cr.dst.clone(), dst_vreg);
+        ir_func.current_block().push(IRInstruction::ChannelRecv {
+            ch,
+            dst: IRValue::Register(dst_vreg),
+            ty: Some(cr.ty.to_ir_type()),
+        });
+        Ok(())
+    }
+
+    /// Lower a `ChannelClose` statement to `IRInstr::ChannelClose`.
+    ///
+    /// Resolves the channel handle and emits the close instruction.  The
+    /// channel is consumed (linear) — subsequent operations on the same
+    /// handle are a linearity error (enforced by the IVE, not the codegen).
+    fn lower_channel_close(
+        &mut self,
+        cc: &ChannelCloseStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let ch = self.resolve_expr(&cc.channel, names, ir_func)?;
+        ir_func.current_block().push(IRInstruction::ChannelClose { ch });
+        Ok(())
+    }
+
+    // =======================================================================
     // Helpers
     // =======================================================================
 
@@ -4956,6 +5121,24 @@ impl IRBuilder {
                 // The State variable is "used" (consumed) by the foreign call.
                 uses.insert(fc.state_var.clone());
             },
+            ScgStatement::ChannelOpen(co) => {
+                // Defines the destination variable; uses nothing.
+                defs.insert(co.dst.clone());
+            },
+            ScgStatement::ChannelSend(cs) => {
+                // Uses the channel handle and the message expression.
+                Self::expr_uses(&cs.channel, &mut uses);
+                Self::expr_uses(&cs.message, &mut uses);
+            },
+            ScgStatement::ChannelRecv(cr) => {
+                // Defines the destination variable; uses the channel handle.
+                defs.insert(cr.dst.clone());
+                Self::expr_uses(&cr.channel, &mut uses);
+            },
+            ScgStatement::ChannelClose(cc) => {
+                // Uses the channel handle (consumed).
+                Self::expr_uses(&cc.channel, &mut uses);
+            },
         }
 
         (defs, uses)
@@ -5026,6 +5209,7 @@ mod tests {
             params,
             results: vec![],
             body,
+            var_types: std::collections::HashMap::new(),
         })])
     }
 
@@ -5683,12 +5867,14 @@ mod tests {
                 params: vec![],
                 results: vec![],
                 body: vec![ScgStatement::Return(vec![])],
+                var_types: std::collections::HashMap::new(),
             }),
             ScgNode::Function(ScgFunction {
                 name: "bar".into(),
                 params: vec![],
                 results: vec![],
                 body: vec![ScgStatement::Return(vec![])],
+                var_types: std::collections::HashMap::new(),
             }),
         ]);
         let mut builder = IRBuilder::new();
@@ -6512,6 +6698,7 @@ mod tests {
                 ScgExpr::Int(42),
                 ScgExpr::Int(0),
             ])],
+            var_types: std::collections::HashMap::new(),
         })]);
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
@@ -6774,6 +6961,7 @@ mod tests {
                 body: vec![ScgStatement::Return(vec![ScgExpr::Var(
                     "undefined_var".to_string(),
                 )])],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 
@@ -6816,6 +7004,7 @@ mod tests {
                     tail_call: false,
                     reassigns: None,
                 })],
+                var_types: std::collections::HashMap::new(),
             })],
         };
 

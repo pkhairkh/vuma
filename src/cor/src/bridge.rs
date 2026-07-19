@@ -98,6 +98,14 @@ fn map_node_type(
         | vuma_scg::NodeType::ArenaAlloc
         | vuma_scg::NodeType::ArenaGrow
         | vuma_scg::NodeType::ArenaFree => NodeKind::Memory,
+
+        // Wave 2b: channel operations are I/O-like side-effecting ops
+        // (kernel channel send/recv may block) — map to Call, the same
+        // kind used for Effect / FuturePoll / WakerRegistration.
+        vuma_scg::NodeType::ChannelOpen
+        | vuma_scg::NodeType::ChannelSend
+        | vuma_scg::NodeType::ChannelRecv
+        | vuma_scg::NodeType::ChannelClose => NodeKind::Call,
     }
 }
 

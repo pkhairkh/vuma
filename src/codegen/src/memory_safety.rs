@@ -605,6 +605,13 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::EnumAccess(_) => {}
                 ScgStatement::GetAddress(_) => {}
                 ScgStatement::ForeignConsume(_) => {}
+                // Wave 2b: channel operations don't deallocate VUMA-tracked
+                // allocations, so there is nothing to record here. Treated
+                // like Syscall/ForeignConsume (no-op for memory-safety).
+                ScgStatement::ChannelOpen(_) => {}
+                ScgStatement::ChannelSend(_) => {}
+                ScgStatement::ChannelRecv(_) => {}
+                ScgStatement::ChannelClose(_) => {}
             }
         }
     }

@@ -3312,6 +3312,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         // The vectorizer still produces the IR; this backend just cannot
         // lower it to SIMD wasm instructions.
         IRInstr::VectorOp { .. } => {}
+        // ── Channel operations (Wave 1d / Task 2a) ──
+        // Backend lowering not yet implemented; emit nothing (no frontend
+        // generates channel IR yet).  Will be lowered to runtime calls.
+        IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => {}
     }
     Ok(())
 }

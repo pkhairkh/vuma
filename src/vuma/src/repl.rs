@@ -180,6 +180,13 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::ArenaAlloc(s) => format!("arena_alloc({})", s.layout_name),
         NodePayload::ArenaGrow(_) => "arena_grow".to_string(),
         NodePayload::ArenaFree(_) => "arena_free".to_string(),
+        // Wave 2b: channel operation labels.
+        NodePayload::ChannelOpen(c) => format!("channel_open<{}>", c.elem_type),
+        NodePayload::ChannelSend(c) => {
+            format!("channel_send({}, {})", c.channel, c.message)
+        }
+        NodePayload::ChannelRecv(c) => format!("channel_recv({})", c.channel),
+        NodePayload::ChannelClose(c) => format!("channel_close({})", c.channel),
     }
 }
 

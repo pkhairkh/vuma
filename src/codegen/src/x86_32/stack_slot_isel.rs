@@ -3297,6 +3297,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // x86_32 has no SIMD encoder in the Wave 29 suite (only x86_64
                 // and aarch64 do); emit nothing.
                 IRInstr::VectorOp { .. } => Vec::new(),
+                // ── Channel operations (Wave 1d / Task 2a) ──
+                // Backend lowering not yet implemented; emit no bytes.
+                IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
             };
 
             if !encoded.is_empty() {
