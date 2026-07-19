@@ -3674,6 +3674,47 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__call_indirect1".to_string(), code));
     }
 
+    // Wave 7: __vuma_load_u32(addr: u64) -> u32
+    // Loads a 32-bit value from an arbitrary memory address.
+    // Used by futex (compare *uaddr), VFS (read inode fields), etc.
+    // Encoding: mov eax, [rdi] ; ret = 8B 07 C3 (3 bytes)
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x8B, 0x07]); // mov eax, [rdi]
+        code.extend(&[0xC3]);       // ret
+        stubs.push(("__vuma_load_u32".to_string(), code));
+    }
+
+    // Wave 7: __vuma_store_u32(addr: u64, val: u32)
+    // Stores a 32-bit value to an arbitrary memory address.
+    // Encoding: mov [rdi], esi ; ret = 89 37 C3 (3 bytes)
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x89, 0x37]); // mov [rdi], esi
+        code.extend(&[0xC3]);       // ret
+        stubs.push(("__vuma_store_u32".to_string(), code));
+    }
+
+    // Wave 7: __vuma_load_u64(addr: u64) -> u64
+    // Loads a 64-bit value from an arbitrary memory address.
+    // Encoding: mov rax, [rdi] ; ret = 48 8B 07 C3 (4 bytes)
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
+        code.extend(&[0xC3]);              // ret
+        stubs.push(("__vuma_load_u64".to_string(), code));
+    }
+
+    // Wave 7: __vuma_store_u64(addr: u64, val: u64)
+    // Stores a 64-bit value to an arbitrary memory address.
+    // Encoding: mov [rdi], rsi ; ret = 48 89 37 C3 (4 bytes)
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x48, 0x89, 0x37]); // mov [rdi], rsi
+        code.extend(&[0xC3]);              // ret
+        stubs.push(("__vuma_store_u64".to_string(), code));
+    }
+
     stubs
 }
 
