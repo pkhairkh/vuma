@@ -1,0 +1,1174 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/fs/devfs.vuma
+// VWK Devfs — virtual filesystem providing device files (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the K5h layer of the VWK kernel VFS: a devfs. Like procfs
+// (K5g — content generated on demand by a per-file read_fn), devfs files
+// do NOT exist on any backing store — they are synthetic device nodes
+// whose read/write ops are dispatched to per-device handler functions.
+// This matches Linux's fs/devfs/base.c architecture: each /dev/<name>
+// entry has an associated `struct file_operations` whose read / write
+// handlers invoke the underlying device driver (e.g. /dev/console →
+// tty_write, /dev/null → null_write, /dev/zero → zero_read).
+//
+// ── What W21S5 provides ────────────────────────────────────────────────────
+//   devfs_data_init(data)                                    — zero all slots.
+//   devfs_register(data, name, read_fn, write_fn) -> u32     — register a
+//       device. Returns the slot index 0..15, or 16 if the table is full.
+//   devfs_find_by_name(data, name) -> u32                    — look up a
+//       device by name. Returns the slot index 0..15, or 16 if not found
+//       (same "not found" sentinel convention as K5g's procfs_find_by_ino
+//       returning 16, K6d's chardev_lookup returning 32).
+//   devfs_init(data)                                         — register the 3
+//       canonical /dev entries (console / null / zero) with their
+//       read_fn / write_fn sentinels.
+//   devfs_write(data, idx, buf, count) -> i64                — look up the
+//       write_fn for slot `idx`, dispatch via direct switch on `idx` to
+//       the matching devfs_<name>_write handler. Returns -ENOSYS
+//       (0 - 38) if write_fn == 0 (no write handler) or if `idx` is
+//       outside {0, 1, 2} (defensive — devfs_init wires all 3, but a
+//       future caller might register a slot with no handler).
+//   devfs_read(data, idx, buf, count) -> i64                 — symmetric
+//       dispatch for read_fn. Same direct-switch pattern. Returns
+//       -ENOSYS if read_fn == 0 (e.g. /dev/console has read_fn = 0 —
+//       reading from the console is a K11+ concern; K5h only writes).
+//   devfs_console_write(buf, count) -> i64                   — call
+//       write(1, buf, count) (stdout). Returns the byte count.
+//   devfs_null_write(buf, count) -> i64                      — return count
+//       (discard — matches Linux's drivers/char/mem.c null_write).
+//   devfs_null_read(buf, count) -> i64                       — return 0
+//       (EOF — matches Linux's null_read).
+//   devfs_zero_read(buf, count) -> i64                       — return count
+//       (stub — would zero-fill buf; matches Linux's zero_read, which
+//       memset's the user buffer to 0 and returns count. PMT forbids
+//       pointer deref, so this K5h stub returns count without filling;
+//       K11+ will replace the body with a real zero-fill via the bpf/
+//       page-zero helper).
+//
+//   Plus the 8 pack/unpack/accessor helpers used by register/find/write
+//   and exposed for future waves (K7+ will add devfs_open / devfs_readdir
+//   / devfs_stat dispatch wrappers).
+//
+// ── Why a registry, not a flat array of DevfsEntry structs? ────────────────
+// VUMA's parser DOES accept `entries: [DevfsEntry; 16]` as a layout
+// field (verified by K5g's procfs.vuma test), BUT the codegen's
+// `flatten_expr` (see src/pipeline.rs:9200-9300) only lowers
+// `FieldAccess` chains rooted at a state-typed Var — i.e.
+// `data.field1.field2...`. The chain walk does NOT descend through
+// `Index` expressions, so `data.entries[i].field` lowers to "unsupported
+// FieldAccess (not state-typed); using 0" — writes silently no-op, reads
+// return 0, array-element writes segfault. This is the SAME limitation
+// K5g's procfs.vuma documented for `[[u8; 256]; 64]` (nested arrays).
+//
+// So DevfsData follows the canonical VWK pattern (established in K4a's
+// ProcessTable, K5a's InodeTable / DentryTable / FileTable, K5c's
+// TmpfsData, K5g's ProcfsData, K6d's CharDevTable): each FIELD of the
+// struct is stored in its own parallel flat byte array, indexed by
+// slot. DevfsEntry is declared as a documentation layout (mirrors the
+// field set; K11+ may pass `base as Address` cast to a DevfsEntry
+// pointer for typed field access), but DevfsData itself uses parallel
+// arrays:
+//     names:      [u8; 128]   — 16 slots × 8 bytes   (the device name)
+//     read_fns:   [u8; 128]   — 16 slots × 8 bytes   (u64 read_fn
+//                                                   sentinel, LE-packed)
+//     write_fns:  [u8; 128]   — 16 slots × 8 bytes   (u64 write_fn
+//                                                   sentinel, LE-packed)
+//     used:       [u8; 16]    — 16 slots × 1 byte    (1 = in use, 0 = free)
+//     count:      u32         — live slot count (0..16)
+//
+// DEVIATION FROM W21S5 TASK SPEC: the task spec literally specifies
+// `read_fns: [u64; 16]` and `write_fns: [u64; 16]` (NOT `[u8; 128]`).
+// VUMA's parser DOES accept `[u64; 16]` as a layout field, and K10a's
+// crypto/api.vuma uses `[u64; 8]` successfully. HOWEVER, in this file
+// the `[u64; 16]` form causes the codegen to miscompute the layout
+// offsets of the trailing `used` and `count` fields — the self-test
+// fails at check 1 (`data.count != 3` after devfs_init) because
+// `data.count = data.count + 1` writes to the wrong offset and the
+// count field never increments. The root cause appears to be a
+// codegen layout-size discrepancy: `[u64; 16]` is supposed to be 128
+// bytes (16 × 8), but the codegen may be allocating a different size,
+// shifting all subsequent fields. Using `[u8; 128]` (which is
+// semantically identical — 128 bytes of byte-granular storage) sidesteps
+// the issue entirely. This matches the established VWK pattern:
+// K5g's procfs.vuma uses `[u8; 128]` for `read_fns` (16 × 8 bytes),
+// K6d's char.vuma uses `[u8; 256]` for its 5 fn-pointer arrays (32 × 8),
+// K7b's signal.vuma uses `[u8; 256]` instead of `[u64; 32]`, and K7c's
+// futex.vuma uses `[u8; 512]` instead of `[u64; 64]`. The byte-granular
+// accessors (devfs_get_read_fn / devfs_set_read_fn / devfs_get_write_fn
+// / devfs_set_write_fn) pack/unpack the u64 sentinel value via an
+// 8-iteration LE loop, byte-identical to K5g's procfs_get_read_fn /
+// procfs_set_read_fn and K6d's cdev_get_read_fn / cdev_set_read_fn.
+// When the codegen grows correct `[u64; N]` layout sizing, this file
+// can collapse `read_fns: [u8; 128]` back to `read_fns: [u64; 16]`
+// (the W21S5 task spec form) without changing any accessor — the
+// byte-granular indexing makes the element-type irrelevant at runtime.
+//
+// When the codegen grows full `[Struct; N]` element field access, this
+// file can collapse back to `entries: [DevfsEntry; 16], count: u32` —
+// the DevfsEntry layout is already byte-identical to what that future
+// form would need.
+//
+// ── The 16 sentinel ─────────────────────────────────────────────────────────
+// devfs_register / devfs_find_by_name return 16 (one past the last valid
+// slot index 0..15) when the table is full / the name is not found. 16
+// is the natural sentinel because:
+//   (a) it fits in u32 without overflow,
+//   (b) it's distinct from every valid slot index [0, 15],
+//   (c) the comparison `slot == 16` lowers to a single CMP + JE.
+// This mirrors K5g's ProcfsData returning 16, K6d's CharDevTable
+// returning 32, K5c's tmpfs returning 256, and K4a's ProcessTable
+// returning 256.
+//
+// ── Hosted vs bare-metal dispatch ───────────────────────────────────────────
+// devfs is the second VWK filesystem whose READ/WRITE op is dispatched
+// via a per-entry function pointer (read_fn / write_fn). VUMA has no
+// first-class fn-ptr type and no `&function` syntax — there is no way
+// to take the address of `devfs_console_write` in source. So in hosted
+// mode:
+//   - devfs_init stores read_fn / write_fn = 1 (a non-zero SENTINEL —
+//     NOT a real function pointer) for each slot that HAS a handler,
+//     and read_fn / write_fn = 0 for slots that DON'T (e.g. /dev/console
+//     has read_fn = 0 — no read handler). The sentinel value 1 is
+//     arbitrary; any non-zero value would work. K11+ will replace the
+//     sentinels with real function-pointer addresses (resolved at link
+//     time, packed via devfs_set_read_fn / devfs_set_write_fn).
+//   - devfs_write / devfs_read checks `write_fn != 0` / `read_fn != 0`;
+//     if false, returns -ENOSYS (0 - 38). If true, dispatches via a
+//     direct switch on `idx` that calls the matching devfs_<name>_write
+//     / devfs_<name>_read function directly. This is the path the
+//     self-test exercises.
+//
+// Why direct switch instead of __call_indirect1? Two reasons:
+//   (1) The W21S5 task spec explicitly says "Use direct switch dispatch
+//       (not __call_indirect1) since the handlers are in the same file."
+//       Direct switch is simpler, avoids the runtime trampoline, and
+//       lets the compiler constant-fold the dispatch when `idx` is a
+//       compile-time constant.
+//   (2) The 3 canonical devfs handlers (devfs_console_write /
+//       devfs_null_write / devfs_null_read / devfs_zero_read) are
+//       declared in this same file, so the switch can call them
+//       directly. K11+ may swap the switch for __call_indirect1 once
+//       the handlers move to their own driver files (drivers/char.vuma,
+//       drivers/console.vuma, etc.) and the registration packs real
+//       function-pointer addresses. The devfs_write / devfs_read API
+//       contract (function name + signature) stays the same — K7+
+//       callers will not need to change.
+//
+// K11+ will populate read_fn / write_fn with real function-pointer
+// addresses (resolved at link time) — at that point the `write_fn != 0`
+// / `read_fn != 0` guard fires for non-zero addresses and the switch
+// dispatches to the matching handler. The 3-way switch stays in source
+// as the hosted-mode self-test path (the sentinels are 1, not 0, so
+// the guard always fires and the switch is always reached — unlike
+// procfs.vuma where read_fn = 0 means the switch is the fallback).
+//
+// ── Wave 1 string literals for write content ───────────────────────────────
+// The devfs_console_write handler and the self-test pass content to
+// `write(1, "lit", n)` as `buf: Address`. Wave 1 lowers a string literal
+// to a .rodata address (see src/pipeline.rs:8733 — Lit::String →
+// ScgExpr::Int(rodata_vaddr + offset)), and `write` accepts the Address
+// directly (same PMT "Borrowed read" pattern as shell.vuma's `write(1,
+// "vwk: ", 5)` and trap.vuma's `write(1, "*** KERNEL PANIC ***\n", 21)`).
+//
+// This is PMT-pure: NO `*ptr`, NO `&x`, NO `allocate`, NO `free`. The
+// content bytes live in .rodata (read-only, kernel-visible, never
+// aliased by C). The `buf` and `count` parameters in the read_fn /
+// write_fn signatures are part of the API contract (matching char.vuma's
+// chardev_read / chardev_write `buf, count` params and procfs.vuma's
+// procfs_read_<name> `buf, count` params). For devfs_console_write, the
+// `buf` IS used (passed through to `write(1, buf, count)` — the user-
+// supplied buffer is written to stdout). For devfs_null_write /
+// devfs_null_read / devfs_zero_read, the `buf` is intentionally unused
+// (the body returns count or 0 without inspecting buf — PMT forbids
+// pointer deref, and the null device discards writes / returns EOF for
+// reads, and the zero device's "zero-fill buf" is a K11+ concern).
+//
+// ── Why write to fd 1 (stdout)? ─────────────────────────────────────────────
+// /dev/console in Linux is the system console — typically the active TTY
+// (e.g. /dev/tty1 or /dev/ttyS0). On bare metal (K11+), devfs_console_write
+// will route to the UART driver (K6a's uart_putc_8250 / uart_putc_pl011),
+// which writes to the serial port. In hosted mode (this file), the
+// simplest "console" is stdout (fd 1) — same fd K3f's sys_write routes
+// to for fd == 1. So devfs_console_write calls `write(1, buf, count)`,
+// producing observable output for the self-test (the bytes appear on
+// stdout) AND returning the byte count (which the self-test verifies).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All
+// state (DevfsData, DevfsName) is held in `___pmt_buffer`-backed
+// State<T> slots, allocated by the CALLER via `state_new(DevfsData)` /
+// `state_new(DevfsName)` (in main()'s self-test). The State<T> handles
+// are passed by reference to all helpers and to register/find/write,
+// which mutate the State in place (no copy-out, no move semantics —
+// VUMA's State<T> is a borrow of the ___pmt_buffer slot). The
+// `data.count = data.count + 1` syntax is State-field self-update
+// (lowered to a load-modify-store through the State pointer — the K4a
+// task.vuma `tbl.count = tbl.count + 1` pattern).
+//
+// The two externs (`write` + `read`) are declared in ONE extern block —
+// same category as K1a's trampoline.vuma, K3f's io.vuma, K12a's
+// panic.vuma, and W21S4's procfs.vuma. `write` is a hosted syscall
+// stub (nr 1 on x86_64); `read` is a hosted syscall stub (nr 0 on
+// x86_64). The `read` extern is declared per the W21S5 task spec —
+// devfs_console_write would in principle use read(0, buf, count) to
+// read from stdin in a future K11+ console_read, but the W21S5 self-
+// test only exercises write paths (console_write, null_write, null_read,
+// zero_read — all of which do NOT call the read extern). The `read`
+// extern is part of the API surface for K11+ console_read wiring; it
+// is currently unused in the body but declared so K7+ callers can be
+// added without re-declaring the extern.
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K5a contract's
+// "Use decimal constants" rule (carried forward through K5b/K5c/K5d/K5e/
+// K5f/K5g/K6a/K6b/K6c/K6d). Decimal avoids the parser's hex-literal path
+// (parse_int_radix width-extension subtleties — see K5a's file.vuma
+// header for the same rationale). The constants:
+//     16     = number of DevfsEntry slots in DevfsData (and the
+//              "table full" / "not found" sentinel returned by
+//              devfs_register / devfs_find_by_name).
+//     8      = bytes per DevfsEntry name (also the per-slot stride in
+//              the names array, and the loop bound for name copy in
+//              devfs_register / name compare in devfs_find_by_name).
+//     128    = 16 * 8 — total bytes in DevfsData.names.
+//     255    = 0xFF byte mask for the unpack-shift-and-truncate path.
+//     1      = the "used" set value (slot in use); also the read_fn /
+//              write_fn SENTINEL value (non-zero, indicates "has a
+//              handler" — direct-switch dispatch fires for any non-zero
+//              value).
+//     0      = FREE marker (used == 0), initial count, NUL terminator,
+//              hosted-mode "no handler" stub value (read_fn = 0 for
+//              /dev/console — no read handler).
+//     99     = ASCII 'c' (console byte 0).
+//     111    = ASCII 'o' (console byte 1 / byte 5; zero byte 3).
+//     110    = ASCII 'n' (console byte 2).
+//     115    = ASCII 's' (console byte 3).
+//     108    = ASCII 'l' (console byte 6; null bytes 2 + 3).
+//     101    = ASCII 'e' (console byte 7; zero byte 1).
+//     117    = ASCII 'u' (null byte 1).
+//     122    = ASCII 'z' (zero byte 0).
+//     114    = ASCII 'r' (zero byte 2).
+//     24, 21, 20 = byte counts of the 3 self-test write literals
+//              ("devfs: console write ok\n" / "devfs: null write ok\n"
+//              / "devfs: zero read ok\n" — verified by `wc -c`).
+//     1, 2, 3 = the 3 canonical /dev slot indices (console / null /
+//              zero). 0 is also valid (the first slot).
+//     38     = ENOSYS errno (the W21S5 task spec returns 0 - 38 for
+//              no-handler cases — matches K6d's chardev_read returning
+//              0 - 38 when read_fn == 0).
+// All `0x...` mentions in this file are in doc-comments only.
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares DevfsEntry + DevfsData +
+// DevfsName + the accessors + the dispatch helpers. K7+ (syscall layer)
+// will re-declare DevfsData byte-identically when it wires sys_open →
+// devfs_find_by_name → devfs_read / devfs_write on /dev inodes. K11
+// (bare-metal boot) will swap the read_fn = 1 / write_fn = 1 sentinels
+// for real function pointers and the dispatch stays the same.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && ./target/release-fast/compile_dump \
+//         womb/kernel/fs/devfs.vuma \
+//         /tmp/devfs.bin x86_64 --verify
+//     /tmp/devfs.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0. The self-test exercises:
+//   (1) devfs_init registers 3 entries → data.count == 3.
+//   (2) devfs_find_by_name(data, "console") → 0 (console slot).
+//   (3) devfs_find_by_name(data, "null") → 1 (null slot).
+//   (4) devfs_find_by_name(data, "zero") → 2 (zero slot).
+//   (5) devfs_find_by_name(data, "nope") → 16 (not-found sentinel).
+//   (6) devfs_write(data, 0, ..., 24) → 24 (console write — 24-byte
+//       literal "devfs: console write ok\n" printed to stdout).
+//   (7) devfs_write(data, 1, ..., 21) → 21 (null write — 21-byte
+//       literal discarded, returns count).
+//   (8) devfs_read(data, 1, ..., 21) → 0 (null read — EOF).
+//   (9) devfs_read(data, 2, ..., 20) → 20 (zero read — stub returns
+//       count).
+//   (10) devfs_read(data, 0, ..., 20) → -38 (-ENOSYS — console has
+//        read_fn = 0).
+// Each console_write also prints its content to stdout via write(1,
+// lit, n), so running `/tmp/devfs.bin` produces the console-write
+// content on stdout (the null/zero reads produce no output).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" declarations.
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted mode: `write` is sys_write (syscall nr 1 on x86_64) — pre-
+// registered in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_
+// stubs. Takes (fd, buf, count) in RDI/RSI/RDX, returns byte count in
+// RAX. The `buf: Address` (NOT State<T>) means the FFI marshal does NOT
+// invalidate any state on the call — the Address is just a raw u64
+// pointer handed to the syscall. Same declaration as io.vuma:167,
+// trap.vuma:216, panic.vuma:98, procfs.vuma:275.
+//
+// `read` is sys_read (syscall nr 0 on x86_64) — same call signature as
+// `write`. Declared per the W21S5 task spec; currently unused in the
+// body (the 4 devfs handlers — devfs_console_write, devfs_null_write,
+// devfs_null_read, devfs_zero_read — none of them call `read`). K11+
+// will use `read` in devfs_console_read (read from stdin / UART for an
+// interactive console); K7+ may use `read` in a future test path. The
+// extern is declared now so K7+ callers can be added without re-
+// declaring it.
+//
+// NOTE: this file does NOT declare `__call_indirect1`. The W21S5 task
+// spec explicitly says "Use direct switch dispatch (not
+// __call_indirect1) since the handlers are in the same file." So the
+// dispatch path is a plain `if idx == 0 { ... } else if idx == 1 { ... }
+// else if idx == 2 { ... } else { return 0 - 38; }` chain — no
+// trampoline, no indirect call, no NULL-deref risk. The Wave 5
+// `__call_indirect1` extern (declared in dispatch.vuma / irq.vuma /
+// char.vuma / procfs.vuma) is intentionally omitted.
+
+extern "C" {
+    // sys_write (nr 1): write `count` bytes from `buf` to fd `fd`. Used
+    // by devfs_console_write to emit the user-supplied buffer to stdout
+    // (fd 1 — the hosted-mode "console"). The `buf: Address` accepts a
+    // .rodata literal address directly (no State<T> marshal) OR a u64
+    // value cast to Address (e.g. `buf as Address` from a State<T>
+    // borrow — though the W21S5 self-test passes a string literal).
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+
+    // sys_read (nr 0): read up to `count` bytes from fd `fd` into `buf`.
+    // Declared per the W21S5 task spec but UNUSED in the W21S5 body —
+    // the 4 devfs handlers don't call `read`. K11+ devfs_console_read
+    // will use `read(0, buf, count)` to read from stdin (the hosted-mode
+    // "console input"), matching how devfs_console_write uses
+    // `write(1, buf, count)` for stdout.
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// DevfsEntry: the documentation layout for a single devfs device entry.
+// Declared byte-identically to the W21S5 task spec's conceptual model.
+// Stored as a layout for documentation + future K11 use (the bare-metal
+// dispatch may pass `base as Address` cast to a DevfsEntry pointer for
+// typed field access). DevfsData does NOT use this layout directly — it
+// uses parallel flat byte arrays (see "Why a registry, not a flat
+// array of DevfsEntry structs?" in the file header). K7+ will re-
+// declare this layout byte-identically when it wires sys_open →
+// devfs_find_by_name → devfs_read / devfs_write.
+//
+// Field byte offsets within a DevfsEntry (24 bytes + 0 padding = 24
+// bytes — already 8-byte aligned for the trailing u64 fields):
+//   name       @  0   [u8; 8]  — device name (e.g. "console\0")
+//   read_fn    @  8   u64      — read function sentinel (0 = none)
+//   write_fn   @ 16   u64      — write function sentinel
+//   used       @ 24   u8       — 1 = in use, 0 = free
+//   (padding)  @ 25   [u8; 7]  — align next entry to 8 bytes (if embedded)
+layout DevfsEntry = {
+    name: [u8; 8],        // device name (NUL-terminated, e.g. "console\0")
+    read_fn: u64,         // read function sentinel (0 = no handler, 1 = has)
+    write_fn: u64,        // write function sentinel (0 = no handler, 1 = has)
+    used: u8,             // 1 = in use, 0 = free
+}
+
+// DevfsData: 16 DevfsEntry slots stored as parallel flat byte arrays
+// (VUMA's codegen does not yet support `[DevfsEntry; 16]` element field
+// access — see "Why a registry, not a flat array of DevfsEntry structs?"
+// in the file header). Each FIELD is a separate array sized for
+// 16 slots × the field's byte width. `used` is the in-use flag
+// (1 = registered, 0 = free). `count` tracks how many slots are in use
+// (0..16).
+//
+// DevfsData uses `[u8; 128]` (NOT the W21S5 task spec's `[u64; 16]`)
+// for the read_fns / write_fns fields — see the file header's
+// "DEVIATION FROM W21S5 TASK SPEC" block for the rationale (the
+// `[u64; 16]` form miscomputes layout offsets, breaking the self-test;
+// `[u8; 128]` is semantically identical and matches the procfs.vuma /
+// char.vuma / signal.vuma / futex.vuma pattern). The u64 read_fn /
+// write_fn sentinels are packed/unpacked via the 8-iteration LE loop
+// in devfs_get_read_fn / devfs_set_read_fn / devfs_get_write_fn /
+// devfs_set_write_fn — byte-identical to K5g's procfs_get_read_fn /
+// procfs_set_read_fn (procfs.vuma:383-407) and K6d's cdev_get_read_fn
+// / cdev_set_read_fn (char.vuma:434-458).
+//
+// Total size: 128 + 128 + 128 + 16 + 4 = 404 bytes (plus padding to
+// align `count: u32` to 4 bytes — already satisfied since 400 is
+// divisible by 4; the trailing 4 bytes are the count field itself).
+layout DevfsData = {
+    names: [u8; 128],       // 16 * 8 bytes — device names (NUL-terminated)
+    read_fns: [u8; 128],    // 16 * 8 bytes — u64 read_fn sentinel per slot (LE-packed, byte-granular access)
+    write_fns: [u8; 128],   // 16 * 8 bytes — u64 write_fn sentinel per slot (LE-packed, byte-granular access)
+    used: [u8; 16],         // 16 * 1 byte  — u8 used flag per slot
+    count: u32,             // live slot count (0..16)
+}
+
+// DevfsName: an 8-byte name buffer, matching DevfsEntry.name's width.
+// Callers allocate one via state_new(DevfsName), fill in name.data[0..n]
+// with the NUL-terminated name, then pass it to devfs_register /
+// devfs_find_by_name. The 8-byte width matches DevfsEntry.name exactly
+// so the byte-by-byte copy in devfs_register and the byte-by-byte
+// compare in devfs_find_by_name can iterate up to 8 without bounds-
+// checking (a name longer than 7 chars + NUL would silently truncate —
+// same behavior as Linux's kernel name buffers, which are also fixed-
+// width 8 / 16 / 32 / 64 bytes). "console\0" is exactly 8 bytes — the
+// longest canonical /dev name (console / null / zero — all ≤ 7 chars +
+// NUL). Same pattern as K6d's DevName (char.vuma:307, 16-byte width)
+// and K5g's ProcfsName (procfs.vuma:349, 32-byte width).
+layout DevfsName = { data: [u8; 8] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 name-byte accessors (names array — 2D index).
+// ────────────────────────────────────────────────────────────────────────────
+// Direct u8 indexing with a 2D index `idx * 8 + off`. Each DevfsEntry
+// slot occupies 8 contiguous bytes in the names array (slot 0 at bytes
+// 0..7, slot 1 at bytes 8..15, ..., slot 15 at bytes 120..127). Same
+// pattern as K6d's cdev_get_name_byte / cdev_set_name_byte (char.vuma:
+// 321-328), K5g's procfs_get_name_byte / procfs_set_name_byte
+// (procfs.vuma:362-369), and K5a's dentry_get_name_byte /
+// dentry_set_name_byte.
+
+// Read byte `off` (0..7) of slot `idx`'s name from DevfsData.names.
+fn devfs_get_name_byte(data: State<DevfsData>, idx: u32, off: u32) -> u8 {
+    return data.names[idx * 8 + off];
+}
+
+// Write byte `off` (0..7) of slot `idx`'s name into DevfsData.names.
+fn devfs_set_name_byte(data: State<DevfsData>, idx: u32, off: u32, val: u8) {
+    data.names[idx * 8 + off] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u64 pack/unpack helpers (read_fn, write_fn).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte little-endian pack/unpack. Same pattern as K5g's
+// procfs_get_read_fn / procfs_set_read_fn (procfs.vuma:383-407), K5a's
+// file_get_dentry / file_set_dentry / file_get_pos / file_set_pos /
+// file_get_ops / file_set_ops / file_get_private / file_set_private
+// (file.vuma), K2a's pool_get_base / pool_set_base (pmm.vuma), and K6d's
+// cdev_get_read_fn / cdev_set_read_fn (char.vuma): 8-iteration while
+// loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
+//
+// Two pairs (read_fn + write_fn) — byte-identical except for the field
+// array.
+//
+// NOTE: the layout uses `[u8; 128]` for read_fns (NOT the W21S5 task
+// spec's `[u64; 16]` — see the file header's "DEVIATION FROM W21S5
+// TASK SPEC" block). The accessors below treat `data.read_fns[idx * 8
+// + i]` as a u8 cell, and the pack/unpack loops reconstruct the u64
+// sentinel value from 8 contiguous byte cells.
+
+// Read the u64 `read_fn` field of DevfsEntry slot `idx` from
+// DevfsData.read_fns.
+fn devfs_get_read_fn(data: State<DevfsData>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = data.read_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `read_fn` field of DevfsEntry slot `idx` into
+// DevfsData.read_fns.
+fn devfs_set_read_fn(data: State<DevfsData>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        data.read_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `write_fn` field of DevfsEntry slot `idx` from
+// DevfsData.write_fns.
+fn devfs_get_write_fn(data: State<DevfsData>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = data.write_fns[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `write_fn` field of DevfsEntry slot `idx` into
+// DevfsData.write_fns.
+fn devfs_set_write_fn(data: State<DevfsData>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        data.write_fns[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// u8 field accessor (used) — direct array index, no pack/unpack.
+// ────────────────────────────────────────────────────────────────────────────
+// Same pattern as K4a's pt_get_state / pt_set_state (task.vuma), K5a's
+// file_get_used / file_set_used (file.vuma), K5a's dentry_get_used /
+// dentry_set_used (dentry.vuma), K5g's procfs_get_used / procfs_set_used
+// (procfs.vuma), and K6d's cdev_get_used / cdev_set_used (char.vuma) —
+// direct u8 indexing, no pack/unpack loop. The byte IS the value.
+
+// Read the u8 `used` flag of DevfsEntry slot `idx` from DevfsData.used.
+fn devfs_get_used(data: State<DevfsData>, idx: u32) -> u8 {
+    return data.used[idx];
+}
+
+// Write the u8 `used` flag of DevfsEntry slot `idx` into DevfsData.used.
+fn devfs_set_used(data: State<DevfsData>, idx: u32, val: u8) {
+    data.used[idx] = val;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Lifecycle + lookup.
+// ────────────────────────────────────────────────────────────────────────────
+
+// devfs_data_init: zero all 16 used flags (mark every slot FREE) and
+// set count = 0. Idempotent. Called by devfs_init before the first
+// devfs_register. Does NOT zero the other DevfsEntry fields (names,
+// read_fns, write_fns) — those are populated by devfs_register's
+// caller, so zeroing them here would be wasted work (and VUMA has no
+// memset). The stale contents are unreachable (devfs_get_used == 0
+// guarantees no slot will be read until devfs_register populates it).
+// Same pattern as K6d's cdev_table_init (char.vuma:573) and K5g's
+// procfs_data_init (procfs.vuma:506).
+fn devfs_data_init(data: State<DevfsData>) {
+    let i = 0;
+    while i < 16 {
+        devfs_set_used(data, i, 0);
+        i = i + 1;
+    }
+    data.count = 0;
+}
+
+// devfs_find_by_name: walk all 16 slots, return the index of the first
+// USED slot whose name matches `name`. Returns 16 if no slot matches
+// (the "not found" sentinel — same convention as K5g's procfs_find_by_ino
+// returning 16, K6d's chardev_lookup_name returning 32). The walk is
+// O(16) — fine for devfs's small fixed-size table. K7+ may add a hash
+// index if devfs grows beyond 16 entries (Linux's devfs uses a per-UID
+// radix tree for /dev/<pid> style entries, but the static /dev/<name>
+// entries use a small linear array — same as this).
+//
+// The name compare is byte-by-byte (no strcmp builtin):
+//   - Walk j = 0..7.
+//   - If slot's name byte a == 0:
+//       * If query's name byte b == 0 → match (both ended at the same
+//         position) → break with match_ok = 1.
+//       * Else → query is longer than slot → match_ok = 0, break.
+//   - Else if b == 0:
+//       * Slot's name is longer than query → match_ok = 0, break.
+//   - Else if a != b:
+//       * Byte mismatch → match_ok = 0, break.
+//   - Else (a != 0 && b != 0 && a == b): continue.
+//   - If the loop completes all 8 iterations without breaking, all 8
+//     bytes matched — match_ok stays 1 (the no-NUL-terminator case for
+//     8-byte names like "console\0" — though "console" is 7 chars +
+//     NUL = 8 bytes, the NUL terminates the compare at j=7).
+//
+// The match logic is symmetric in a and b for the equal-length path
+// (a == 0 && b == 0 → match), and asymmetric only for the length-
+// mismatch path (a == 0 && b != 0 → query longer; b == 0 && a != 0 →
+// slot longer — both are "no match"). This matches POSIX strcmp
+// semantics: two NUL-terminated strings are equal iff they have the
+// same length and the same bytes. Byte-identical to K6d's
+// chardev_lookup_name (char.vuma:686-720), except the name width is 8
+// (vs. K6d's 16) and the slot count is 16 (vs. K6d's 32).
+fn devfs_find_by_name(data: State<DevfsData>, name: State<DevfsName>) -> u32 {
+    let i = 0;
+    while i < 16 {
+        if devfs_get_used(data, i) == 1 {
+            // Compare name byte-by-byte.
+            let match_ok = 1;
+            let j = 0;
+            while j < 8 {
+                let a = devfs_get_name_byte(data, i, j);
+                let b = name.data[j];
+                if a == 0 {
+                    if b == 0 {
+                        break;  // match
+                    }
+                    match_ok = 0;
+                    break;
+                }
+                if b == 0 {
+                    match_ok = 0;
+                    break;
+                }
+                if a != b {
+                    match_ok = 0;
+                    break;
+                }
+                j = j + 1;
+            }
+            if match_ok == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 16;
+}
+
+// devfs_register: register a devfs entry. Finds the first FREE slot
+// (used == 0), copies the name byte-by-byte (8 bytes — full width,
+// including the NUL terminator and any trailing garbage; the caller is
+// responsible for NUL-terminating name.data before calling), packs the
+// read_fn / write_fn fields, marks the slot used, bumps count, and
+// returns the slot index. Returns 16 if the table is full (the caller
+// MUST check — K7's sys_mknod returns -ENOSPC in that case, or
+// whatever errno the syscall layer picks).
+//
+// The name copy loop walks j = 0..7 and copies name.data[j] verbatim
+// into the slot's name field. Unlike K6d's chardev_register (which
+// breaks at NUL), this loop copies ALL 8 bytes — the NUL terminator IS
+// copied (so the slot's name is NUL-terminated if the source was), and
+// any trailing bytes after the NUL are also copied (harmless — they're
+// past the NUL, so string comparisons stop at the NUL). This matches
+// K5g's procfs_register name-copy pattern (full-width copy, no early
+// break) — procfs.vuma:560-565.
+//
+// The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
+// and K5c's tmpfs_create / K5g's procfs_register / K6d's chardev_register.
+//
+// The `read_fn` and `write_fn` parameters are u64 sentinels (NOT real
+// function pointers — VUMA has no `&function` syntax). The W21S5
+// convention: pass 1 (any non-zero value) for slots that HAVE a handler,
+// 0 for slots that DON'T. devfs_write / devfs_read dispatch on `idx`
+// via a direct switch — the sentinel value is only checked for "is it
+// zero" (no handler → -ENOSYS). K11+ will pack real function-pointer
+// addresses here, and the sentinel check becomes "is there a real
+// handler" (any non-zero address).
+fn devfs_register(data: State<DevfsData>, name: State<DevfsName>, read_fn: u64, write_fn: u64) -> u32 {
+    let i = 0;
+    while i < 16 {
+        if devfs_get_used(data, i) == 0 {
+            // Copy all 8 name bytes (full width — includes NUL + trailing).
+            let j = 0;
+            while j < 8 {
+                devfs_set_name_byte(data, i, j, name.data[j]);
+                j = j + 1;
+            }
+            devfs_set_read_fn(data, i, read_fn);
+            devfs_set_write_fn(data, i, write_fn);
+            devfs_set_used(data, i, 1);
+            data.count = data.count + 1;
+            return i;
+        }
+        i = i + 1;
+    }
+    return 16;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// devfs_init — register the 3 canonical /dev entries.
+// ────────────────────────────────────────────────────────────────────────────
+// Initializes the DevfsData (via devfs_data_init) and registers 3
+// entries:
+//   idx=0  "console"  read_fn=0  write_fn=1  → devfs_console_write
+//   idx=1  "null"     read_fn=1  write_fn=1  → devfs_null_read / devfs_null_write
+//   idx=2  "zero"     read_fn=1  write_fn=1  → devfs_zero_read / devfs_null_write
+//
+// `read_fn` is 0 for /dev/console (no read handler in K5h — reading
+// from the console is a K11+ concern; K5h only writes). `read_fn` is 1
+// for /dev/null and /dev/zero (both have read handlers in K5h —
+// devfs_null_read returns 0 / EOF, devfs_zero_read returns count).
+// `write_fn` is 1 for all 3 (all have write handlers — devfs_console_write
+// for /dev/console, devfs_null_write for both /dev/null and /dev/zero,
+// since /dev/zero discards writes just like /dev/null).
+//
+// The sentinel value 1 (any non-zero value would work — the dispatch
+// only checks `!= 0`) marks "has a handler". K11+ will replace these
+// with real function-pointer addresses (resolved at link time, packed
+// via devfs_set_read_fn / devfs_set_write_fn). The dispatch stays the
+// same — the `read_fn != 0` / `write_fn != 0` guard fires for any
+// non-zero value, and the direct-switch on `idx` invokes the matching
+// handler.
+//
+// Per the K5a contract's "Use decimal ASCII values for byte constants"
+// rule, all ASCII constants in the name bytes use DECIMAL: 99='c',
+// 111='o', 110='n', 115='s', 108='l', 101='e', 117='u', 122='z',
+// 114='r'. The 1/0 sentinels and the 16 slot count are also decimal.
+//
+// NOTE on "use string literals for device names" (W21S5 task spec's
+// PMT-pure guidance): VUMA's parser does not accept string literals in
+// expression position (only as direct extern-call args — see K9e's
+// dns.vuma note: "VUMA's parser does not accept string literals in
+// expression position"). So the device names "console" / "null" /
+// "zero" are written to the names array byte-by-byte using decimal
+// ASCII values — same convention as K6d's char.vuma ("null" → 110 117
+// 108 108 0) and K5g's procfs.vuma ("/proc/meminfo" → 47 112 114 111
+// 99 47 109 101 109 105 110 102 111 0). The string literals "console"
+// / "null" / "zero" appear in source comments (this block + the
+// devfs_init body) for documentation; the runtime bytes come from the
+// decimal ASCII constants. This is PMT-pure: no `&x`, no `*ptr`, no
+// pointer syntax. The write content in the self-test DOES use string
+// literals directly (e.g. `write(1, "devfs: console write ok\n", 24)`)
+// — Wave 1 lowers the literal to a .rodata address, passed as Address.
+
+fn devfs_init(data: State<DevfsData>) {
+    devfs_data_init(data);
+
+    // ── Entry 0: /dev/console (idx=0) → devfs_console_write ──────────
+    // "console\0" = 7 chars + NUL = 8 bytes (exactly fills the 8-byte
+    // name slot — no trailing zeros needed). Bytes 0..7 are the name,
+    // no extra NUL padding.
+    //
+    // Bytes: 'c' 'o' 'n' 's' 'o' 'l' 'e' '\0'
+    //      = 99 111 110 115 111 108 101 0
+    //
+    // read_fn = 0 (no read handler in K5h — /dev/console is write-only
+    // until K11+ adds devfs_console_read via the read extern). write_fn
+    // = 1 (sentinel — devfs_console_write exists; direct-switch in
+    // devfs_write dispatches to it for idx == 0).
+    let name0 = state_new(DevfsName);
+    name0.data[0] = 99;   // 'c'
+    name0.data[1] = 111;  // 'o'
+    name0.data[2] = 110;  // 'n'
+    name0.data[3] = 115;  // 's'
+    name0.data[4] = 111;  // 'o'
+    name0.data[5] = 108;  // 'l'
+    name0.data[6] = 101;  // 'e'
+    name0.data[7] = 0;    // NUL
+    devfs_register(data, name0, 0, 1);
+
+    // ── Entry 1: /dev/null (idx=1) → devfs_null_read / devfs_null_write
+    // "null\0" = 4 chars + NUL = 5 bytes; bytes 5..7 stay 0 (state_new
+    // zero-fill on the DevfsName — devfs_register copies all 8 bytes, so
+    // the trailing zeros come along for the ride).
+    //
+    // Bytes: 'n' 'u' 'l' 'l' '\0'
+    //      = 110 117 108 108 0
+    //
+    // read_fn = 1 (sentinel — devfs_null_read exists; returns 0 / EOF).
+    // write_fn = 1 (sentinel — devfs_null_write exists; returns count,
+    // discarding the bytes).
+    let name1 = state_new(DevfsName);
+    name1.data[0] = 110;  // 'n'
+    name1.data[1] = 117;  // 'u'
+    name1.data[2] = 108;  // 'l'
+    name1.data[3] = 108;  // 'l'
+    name1.data[4] = 0;    // NUL
+    devfs_register(data, name1, 1, 1);
+
+    // ── Entry 2: /dev/zero (idx=2) → devfs_zero_read / devfs_null_write
+    // "zero\0" = 4 chars + NUL = 5 bytes; bytes 5..7 stay 0.
+    //
+    // Bytes: 'z' 'e' 'r' 'o' '\0'
+    //      = 122 101 114 111 0
+    //
+    // read_fn = 1 (sentinel — devfs_zero_read exists; returns count —
+    // stub, would zero-fill buf in K11+). write_fn = 1 (sentinel —
+    // /dev/zero discards writes just like /dev/null, so devfs_null_write
+    // handles both).
+    let name2 = state_new(DevfsName);
+    name2.data[0] = 122;  // 'z'
+    name2.data[1] = 101;  // 'e'
+    name2.data[2] = 114;  // 'r'
+    name2.data[3] = 111;  // 'o'
+    name2.data[4] = 0;    // NUL
+    devfs_register(data, name2, 1, 1);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// devfs_write — look up write_fn, dispatch via direct switch on idx.
+// ────────────────────────────────────────────────────────────────────────────
+// Fetches the write_fn sentinel for slot `idx` via devfs_get_write_fn.
+// If write_fn == 0 (no handler registered — e.g. a future slot for a
+// read-only device), returns -ENOSYS (0 - 38). Otherwise dispatches via
+// a direct switch on `idx` to the matching devfs_<name>_write function:
+//
+//   idx == 0  →  devfs_console_write(buf, count) — calls write(1, buf,
+//                count) to emit the user-supplied buffer to stdout.
+//   idx == 1  →  devfs_null_write(buf, count) — returns count (discard).
+//   idx == 2  →  devfs_null_write(buf, count) — returns count (discard;
+//                /dev/zero discards writes just like /dev/null).
+//   default   →  -ENOSYS (defensive — devfs_init wires all 3 slots, so
+//                this branch is unreachable for idx in {0, 1, 2}, but a
+//                future caller might register a slot with idx >= 3 and
+//                write_fn = 1 — the switch would fall through to here).
+//
+// Why direct switch (not __call_indirect1)?
+//   (1) The W21S5 task spec explicitly mandates direct switch dispatch.
+//   (2) The 3 handlers are declared in this same file, so the switch
+//       can call them directly — no indirect call needed.
+//   (3) Direct switch avoids the Wave 5 __call_indirect1 trampoline
+//       (`mov rax, rdi; mov rdi, rsi; jmp rax`) — no NULL-deref risk,
+//       no indirect-call gadget, simpler generated code.
+//
+// The `data` (State<DevfsData>) is passed to devfs_get_write_fn (a
+// regular VUMA-fn borrow — no extern call invalidates it). The `buf`
+// and `count` are forwarded to the matched handler. The handler's i64
+// return is returned to the caller (bytes written or negative errno).
+//
+// Return values (i64, matching vfs_write in K5f):
+//   -ENOSYS (0 - 38)   — write_fn == 0 (no handler) OR idx outside
+//                        {0, 1, 2} (defensive default branch).
+//   <handler result>   — the i64 returned by devfs_console_write /
+//                        devfs_null_write (bytes written or negative
+//                        errno).
+
+fn devfs_write(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
+    // Fetch the write_fn sentinel. In hosted mode this is 1 (devfs_init
+    // stores 1 for slots with handlers — VUMA has no `&function` syntax,
+    // so we use a non-zero sentinel). K11+ will pack real function-
+    // pointer addresses here.
+    let write_fn = devfs_get_write_fn(data, idx);
+    if write_fn == 0 {
+        return 0 - 38;  // -ENOSYS: no write handler registered
+    }
+
+    // Direct-switch dispatch on `idx`. The W21S5 task spec mandates
+    // direct switch (not __call_indirect1) because the handlers are in
+    // this same file. K11+ may swap the switch for __call_indirect1 once
+    // the handlers move to their own driver files (drivers/char.vuma,
+    // drivers/console.vuma) and devfs_register packs real function-
+    // pointer addresses — the API contract stays the same.
+    if idx == 0 { return devfs_console_write(buf, count); }
+    if idx == 1 { return devfs_null_write(buf, count); }
+    if idx == 2 { return devfs_null_write(buf, count); }
+    return 0 - 38;  // -ENOSYS: defensive default (idx outside {0,1,2})
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// devfs_read — look up read_fn, dispatch via direct switch on idx.
+// ────────────────────────────────────────────────────────────────────────────
+// Symmetric to devfs_write. Fetches the read_fn sentinel for slot `idx`
+// via devfs_get_read_fn. If read_fn == 0 (no handler — e.g. /dev/console
+// has read_fn = 0 in K5h), returns -ENOSYS (0 - 38). Otherwise dispatches
+// via a direct switch on `idx`:
+//
+//   idx == 0  →  -ENOSYS (defensive — /dev/console has read_fn = 0, so
+//                the guard above already short-circuited. This branch
+//                is unreachable for the canonical 3 devices, but kept
+//                for symmetry with devfs_write's switch).
+//   idx == 1  →  devfs_null_read(buf, count) — returns 0 (EOF).
+//   idx == 2  →  devfs_zero_read(buf, count) — returns count (stub —
+//                would zero-fill buf in K11+ via the page-zero helper).
+//   default   →  -ENOSYS (defensive — same as devfs_write's default).
+//
+// Not strictly required by the W21S5 task spec (which only lists
+// devfs_write among the dispatch functions), but added for symmetry —
+// the registration stores read_fns, so a devfs_read dispatch is the
+// natural counterpart. The self-test exercises both devfs_read (checks
+// 8, 9, 10) and devfs_write (checks 6, 7).
+//
+// Return values (i64, matching vfs_read in K5f):
+//   -ENOSYS (0 - 38)   — read_fn == 0 (no handler — e.g. /dev/console)
+//                        OR idx outside {0, 1, 2} (defensive default).
+//   <handler result>   — the i64 returned by devfs_null_read (0 / EOF)
+//                        or devfs_zero_read (count).
+
+fn devfs_read(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
+    // Fetch the read_fn sentinel. /dev/console has read_fn = 0 in K5h
+    // (no read handler — the guard short-circuits to -ENOSYS). /dev/null
+    // and /dev/zero have read_fn = 1 (sentinel — handlers exist).
+    let read_fn = devfs_get_read_fn(data, idx);
+    if read_fn == 0 {
+        return 0 - 38;  // -ENOSYS: no read handler registered
+    }
+
+    // Direct-switch dispatch on `idx` — symmetric to devfs_write.
+    if idx == 0 { return 0 - 38; }  // defensive (console read_fn=0 short-circuited above)
+    if idx == 1 { return devfs_null_read(buf, count); }
+    if idx == 2 { return devfs_zero_read(buf, count); }
+    return 0 - 38;  // -ENOSYS: defensive default (idx outside {0,1,2})
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-device write / read handlers.
+// ────────────────────────────────────────────────────────────────────────────
+// Each handler takes `(buf: Address, count: u64) -> i64` — the API
+// signature per the W21S5 task spec, matching char.vuma's chardev_read
+// / chardev_write `buf, count` params and procfs.vuma's procfs_read_<name>
+// `buf, count` params. The handlers are dispatched directly from
+// devfs_write / devfs_read (no __call_indirect1 trampoline).
+//
+// devfs_console_write USES `buf` (passes it through to `write(1, buf,
+// count)` — the user-supplied buffer is written to stdout). The other
+// 3 handlers (devfs_null_write, devfs_null_read, devfs_zero_read) do
+// NOT use `buf` — PMT forbids pointer deref, and the null device
+// discards writes / returns EOF for reads, and the zero device's
+// "zero-fill buf" is a K11+ concern. The `buf` and `count` params are
+// part of the API signature for K7+ wiring (sys_read → vfs_read →
+// devfs_read → devfs_<name>_read) but are unused in the body where
+// noted.
+
+// devfs_console_write: write `count` bytes from `buf` to fd 1 (stdout —
+// the hosted-mode "console"). Returns the byte count written (from the
+// `write` extern's i64 return). Matches Linux's console_write
+// (drivers/tty/vt/vt.c) — the user-supplied buffer is emitted to the
+// console device. On bare metal (K11+), this will route to the UART
+// driver (K6a's uart_putc_8250 / uart_putc_pl011) instead of stdout.
+//
+// The `write` extern is sys_write (nr 1 on x86_64) — pre-registered in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs. Takes
+// (fd, buf, count) in RDI/RSI/RDX, returns byte count in RAX. The
+// `buf: Address` accepts a .rodata literal address directly (Wave 1
+// lowers string literals to .rodata addresses — see src/pipeline.rs:
+// 8733) OR a u64 value cast to Address. The self-test passes a string
+// literal; K7+ will pass the user-space buffer address from the trap
+// frame (sys_write → vfs_write → devfs_write → devfs_console_write).
+fn devfs_console_write(buf: Address, count: u64) -> i64 {
+    let n = write(1, buf, count as i64);
+    return n;
+}
+
+// devfs_null_write: discard the bytes — return `count` as i64 (pretend
+// the write succeeded). Matches Linux's null_write (drivers/char/mem.c)
+// — /dev/null is a "data sink"; writes appear to succeed but the bytes
+// are discarded. The `buf` param is part of the API signature (matching
+// devfs_console_write) but is intentionally unused — PMT forbids
+// pointer deref, and /dev/null doesn't read the buffer contents anyway.
+fn devfs_null_write(buf: Address, count: u64) -> i64 {
+    return count as i64;
+}
+
+// devfs_null_read: return 0 (EOF — end-of-file on /dev/null). Matches
+// Linux's null_read (drivers/char/mem.c) — /dev/null is a "data source
+// of EOF"; reads return 0 bytes (EOF signal). The `buf` and `count`
+// params are part of the API signature but are intentionally unused —
+// there's nothing to read, so no buffer fill happens.
+fn devfs_null_read(buf: Address, count: u64) -> i64 {
+    // /dev/null is a data source of EOF — reads return 0 bytes. The
+    // body invokes the `read` extern with count=0 to perform a
+    // canonical 0-byte read, which returns 0 immediately per POSIX
+    // (a read with count=0 short-circuits to 0 without blocking,
+    // regardless of fd). The `buf` is passed through for symmetry
+    // with devfs_console_write (which forwards buf to write); the
+    // 0-byte read never dereferences buf.
+    //
+    // CODEGEN NOTE: a function whose body is a bare `return 0;` (no
+    // extern call) can return a stale value when called via a tail
+    // call from another function (`return devfs_null_read(buf, count);`
+    // in devfs_read). The codegen's tail-call site appears to require
+    // an extern call in the callee's body to anchor the prologue/
+    // epilogue around a real syscall — without it, the return-value
+    // register (RAX) is not properly preserved across the call. Adding
+    // `read(0, buf, 0)` gives the codegen a real syscall to anchor
+    // the frame; the call's natural return value (0) matches the EOF
+    // semantics. K11+ may revisit this once the codegen grows proper
+    // constant-return handling. Same workaround category as procfs.vuma's
+    // procfs_read_<name> functions, which all invoke `write(1, lit, n)`
+    // before returning their constant byte count.
+    return read(0, buf, 0);
+}
+
+// devfs_zero_read: return `count` as i64 (stub — would zero-fill `buf`
+// with `count` zero bytes). Matches Linux's zero_read (drivers/char/
+// mem.c) — /dev/zero is a "data source of zero bytes"; reads fill the
+// user buffer with 0x00 bytes and return `count`. The K5h STUB returns
+// `count` WITHOUT actually zero-filling `buf` — PMT forbids pointer
+// deref (`*buf = 0`), so the buffer is left untouched. K11+ will
+// replace the body with a real zero-fill via the bpf/page-zero helper
+// (or a memset-like runtime stub). The signature stays the same.
+//
+// The `buf` param is part of the API signature but is intentionally
+// unused in the K5h stub. The `count` param IS used (returned as the
+// byte count).
+fn devfs_zero_read(buf: Address, count: u64) -> i64 {
+    return count as i64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the W21S5 DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a DevfsData via state_new, init it via devfs_init (which
+// registers the 3 canonical /dev entries: console / null / zero), then
+// verify:
+//   (1) devfs_init registered 3 entries → data.count == 3.
+//   (2) devfs_find_by_name(data, "console") → 0 (console is the first
+//       registered entry, so it lands in slot 0).
+//   (3) devfs_find_by_name(data, "null") → 1 (null is the second
+//       registered entry, so it lands in slot 1).
+//   (4) devfs_find_by_name(data, "zero") → 2 (zero is the third
+//       registered entry, so it lands in slot 2).
+//   (5) devfs_find_by_name(data, "nope") → 16 (not found — no entry
+//       with name "nope"; the "not found" sentinel).
+//   (6) devfs_write(data, 0, "devfs: console write ok\n", 24) → 24
+//       (console write — the W21S5 task spec's "writes to /dev/console"
+//       check; the 24-byte literal "devfs: console write ok\n" is
+//       printed to stdout via write(1, lit, 24), and the byte count is
+//       returned).
+//   (7) devfs_write(data, 1, "devfs: null write ok\n", 21) → 21 (null
+//       write — the W21S5 task spec's "writes to /dev/null" check; the
+//       21-byte literal is discarded, devfs_null_write returns count).
+//   (8) devfs_read(data, 1, 0, 21) → 0 (null read — EOF; devfs_null_read
+//       returns 0).
+//   (9) devfs_read(data, 2, 0, 20) → 20 (zero read — stub returns
+//       count; devfs_zero_read returns 20 without actually zero-filling
+//       the buf).
+//   (10) devfs_read(data, 0, 0, 20) → -38 (-ENOSYS — /dev/console has
+//        read_fn = 0; the guard short-circuits before the switch).
+//
+// Each console_write (check 6) prints its content to stdout via
+// write(1, lit, n), so running `/tmp/devfs.bin` produces the
+// console-write content on stdout (24 bytes). The null/zero reads
+// (checks 8, 9) produce no output (devfs_null_read returns 0;
+// devfs_zero_read returns count without filling buf). The null write
+// (check 7) also produces no output (devfs_null_write discards the
+// bytes).
+//
+// The fn-pointer sentinels (read_fn / write_fn) are 0 or 1 in this
+// self-test (hosted mode — direct-switch dispatch on `idx`, NOT
+// __call_indirect1). K11+ will register real fn pointers with non-zero
+// addresses and the dispatch stays the same (the `write_fn != 0` /
+// `read_fn != 0` guard fires for any non-zero value, and the switch
+// invokes the matching handler).
+//
+// Returns 0 on success, 1..10 on the corresponding check failure (so a
+// future CI failure pinpoints the broken step).
+//
+// Per the W21S5 contract's "Use decimal ASCII values for byte
+// constants" rule: all ASCII constants in the self-test use DECIMAL
+// (carried forward from devfs_init — 99='c', 111='o', etc.). The
+// 24 / 21 / 20 / 16 / 0 / 1 / 2 / 38 constants are also decimal. The
+// "devfs: console write ok\n" / "devfs: null write ok\n" / "devfs:
+// zero read ok\n" string literals are passed directly as Address to
+// devfs_write (Wave 1 lowers them to .rodata addresses) — this is
+// PMT-pure (no `&x`, no `*ptr`, no `allocate`, no `free`).
+
+fn main() -> i32 {
+    // Allocate the DevfsData via state_new (zero-initialized by the
+    // ___pmt_buffer). devfs_init re-initializes it explicitly via
+    // devfs_data_init (idempotent — safe on a fresh table).
+    let data = state_new(DevfsData);
+
+    // ── Check 1: devfs_init registers 3 entries → data.count == 3. ────
+    // devfs_init calls devfs_data_init (zeros used flags, count=0) then
+    // devfs_register 3 times. Each register finds the first free slot
+    // (lowest-index-wins), copies the name, packs read_fn / write_fn,
+    // marks used=1, bumps count. After 3 registers, count should be 3.
+    devfs_init(data);
+    if data.count != 3 { return 1; }
+
+    // ── Check 2: devfs_find_by_name(data, "console") → 0. ─────────────
+    // console was the first entry registered, so it lands in slot 0
+    // (lowest-free-slot-wins). devfs_find_by_name walks slots 0..15,
+    // finds slot 0 has used=1 and name "console", returns 0.
+    //
+    // Per the W21S5 task spec's "use string literals for device names"
+    // guidance: VUMA's parser does not accept string literals in
+    // expression position, so the query name is built byte-by-byte
+    // from decimal ASCII values (same convention as devfs_init).
+    let q_console = state_new(DevfsName);
+    q_console.data[0] = 99;   // 'c'
+    q_console.data[1] = 111;  // 'o'
+    q_console.data[2] = 110;  // 'n'
+    q_console.data[3] = 115;  // 's'
+    q_console.data[4] = 111;  // 'o'
+    q_console.data[5] = 108;  // 'l'
+    q_console.data[6] = 101;  // 'e'
+    q_console.data[7] = 0;    // NUL
+    let idx_console = devfs_find_by_name(data, q_console);
+    if idx_console != 0 { return 2; }
+
+    // ── Check 3: devfs_find_by_name(data, "null") → 1. ────────────────
+    // null was the second entry registered, so it lands in slot 1.
+    let q_null = state_new(DevfsName);
+    q_null.data[0] = 110;  // 'n'
+    q_null.data[1] = 117;  // 'u'
+    q_null.data[2] = 108;  // 'l'
+    q_null.data[3] = 108;  // 'l'
+    q_null.data[4] = 0;    // NUL
+    let idx_null = devfs_find_by_name(data, q_null);
+    if idx_null != 1 { return 3; }
+
+    // ── Check 4: devfs_find_by_name(data, "zero") → 2. ────────────────
+    // zero was the third entry registered, so it lands in slot 2.
+    let q_zero = state_new(DevfsName);
+    q_zero.data[0] = 122;  // 'z'
+    q_zero.data[1] = 101;  // 'e'
+    q_zero.data[2] = 114;  // 'r'
+    q_zero.data[3] = 111;  // 'o'
+    q_zero.data[4] = 0;    // NUL
+    let idx_zero = devfs_find_by_name(data, q_zero);
+    if idx_zero != 2 { return 4; }
+
+    // ── Check 5: devfs_find_by_name(data, "nope") → 16 (not found). ───
+    // No entry has name "nope". devfs_find_by_name walks all 16 slots,
+    // none match, returns 16 (the "not found" sentinel).
+    let q_nope = state_new(DevfsName);
+    q_nope.data[0] = 110;  // 'n'
+    q_nope.data[1] = 111;  // 'o'
+    q_nope.data[2] = 112;  // 'p'
+    q_nope.data[3] = 101;  // 'e'
+    q_nope.data[4] = 0;    // NUL
+    let idx_missing = devfs_find_by_name(data, q_nope);
+    if idx_missing != 16 { return 5; }
+
+    // ── Check 6: devfs_write(data, 0, "devfs: console write ok\n", 24)
+    //   → 24 (console write — the W21S5 task spec's "writes to
+    //   /dev/console" check). ─────────────────────────────────────────
+    // THE TASK'S "writes to /dev/console" CHECK. devfs_write looks up
+    // slot 0's write_fn=1 (sentinel — non-zero, so dispatch proceeds),
+    // hits the `idx == 0` branch, calls devfs_console_write(buf, 24).
+    // The handler calls write(1, "devfs: console write ok\n", 24) —
+    // emitting the 24-byte literal to stdout — and returns 24 (the
+    // byte count from the write extern).
+    //
+    // Byte count verification for "devfs: console write ok\n":
+    //   "devfs: "           = 7  (d-e-v-f-s-:-space)
+    //   "console write ok"  = 16 (c-o-n-s-o-l-e-space-w-r-i-t-e-space-o-k)
+    //   "\n"                = 1
+    //   total               = 24
+    let n_console = devfs_write(data, 0, "devfs: console write ok\n" as Address, 24);
+    if n_console != 24 { return 6; }
+
+    // ── Check 7: devfs_write(data, 1, "devfs: null write ok\n", 21)
+    //   → 21 (null write — the W21S5 task spec's "writes to /dev/null"
+    //   check). ──────────────────────────────────────────────────────
+    // THE TASK'S "writes to /dev/null" CHECK. devfs_write looks up
+    // slot 1's write_fn=1, hits the `idx == 1` branch, calls
+    // devfs_null_write(buf, 21). The handler returns 21 (count as i64 —
+    // the bytes are discarded; no stdout output, no crash).
+    //
+    // Byte count verification for "devfs: null write ok\n":
+    //   "devfs: "        = 7  (d-e-v-f-s-:-space)
+    //   "null write ok"  = 13 (n-u-l-l-space-w-r-i-t-e-space-o-k)
+    //   "\n"             = 1
+    //   total            = 21
+    let n_null = devfs_write(data, 1, "devfs: null write ok\n" as Address, 21);
+    if n_null != 21 { return 7; }
+
+    // ── Check 8: devfs_read(data, 1, 0, 21) → 0 (null read — EOF). ────
+    // devfs_read looks up slot 1's read_fn=1, hits the `idx == 1`
+    // branch, calls devfs_null_read(buf, 21). The handler returns 0
+    // (EOF — /dev/null is a data source of EOF). The `buf` (0 as
+    // Address) is intentionally unused by devfs_null_read.
+    let n_null_read = devfs_read(data, 1, 0 as Address, 21);
+    if n_null_read != 0 { return 8; }
+
+    // ── Check 9: devfs_read(data, 2, 0, 20) → 20 (zero read — stub). ──
+    // devfs_read looks up slot 2's read_fn=1, hits the `idx == 2`
+    // branch, calls devfs_zero_read(buf, 20). The handler returns 20
+    // (count as i64 — the K5h STUB returns count WITHOUT actually
+    // zero-filling buf; K11+ will replace the body with a real
+    // zero-fill via the page-zero helper).
+    //
+    // The 20-byte count is arbitrary (any non-zero count would do for
+    // the stub verification); it matches the "devfs: zero read ok\n"
+    // literal's length for symmetry with the other checks, but no
+    // actual read of that literal happens here.
+    let n_zero_read = devfs_read(data, 2, 0 as Address, 20);
+    if n_zero_read != 20 { return 9; }
+
+    // ── Check 10: devfs_read(data, 0, 0, 20) → -38 (-ENOSYS). ─────────
+    // /dev/console has read_fn = 0 (no read handler in K5h — reading
+    // from the console is a K11+ concern). devfs_read fetches
+    // read_fn=0, the guard short-circuits with `return 0 - 38`
+    // (-ENOSYS) before reaching the switch. Verifies the no-handler
+    // path returns the correct errno.
+    let n_console_read = devfs_read(data, 0, 0 as Address, 20);
+    if n_console_read != 0 - 38 { return 10; }
+
+    return 0;
+}
