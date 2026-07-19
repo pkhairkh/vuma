@@ -1,0 +1,17 @@
+// sandbox — Wave 17: verify prctl(PR_SET_NO_NEW_PRIVS) sandbox_apply.
+//
+// The child process calls sandbox_apply() which emits prctl(38, 1)
+// (PR_SET_NO_NEW_PRIVS). This prevents the process from gaining
+// privileges via setuid binaries. The syscall returns 0 on success.
+// The child checks the return and exits 1 if sandbox was applied.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    pid = spawn_worker();
+    if pid == 0 {
+        sandbox_apply();
+        return 1;
+    }
+    status = wait_worker(pid);
+    return status;
+}

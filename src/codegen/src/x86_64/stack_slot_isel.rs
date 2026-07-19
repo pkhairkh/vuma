@@ -2548,6 +2548,46 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("shared_memory_read".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 17c: sandbox_apply() — emit prctl(PR_SET_NO_NEW_PRIVS, 1)
+                            // to prevent the worker from gaining privileges via setuid
+                            // binaries. This is the first half of seccomp sandbox setup;
+                            // full BPF filter installation requires the WorkerSandbox
+                            // runtime (ipc.rs) which is not linked into emitted binaries.
+                            // prctl is sys_prctl=157 on x86_64.
+                            // PR_SET_NO_NEW_PRIVS = 38.
+                            "sandbox_apply" if args.is_empty() => {
+                                // rdi = PR_SET_NO_NEW_PRIVS = 38
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 38));
+                                // rsi = 1 (enable)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));
+                                // rax = 157 (sys_prctl)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 157));
+                                code.extend(encode_syscall());
+                                instr_opcode = Some("sandbox_apply".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 18b: set_resource_limit(resource, limit)
+                            // setrlimit(resource, &rlimit) — sys_setrlimit=160.
+                            // rlimit struct: { rlim_cur: u64, rlim_max: u64 } = 16 bytes.
+                            // args[0] = resource ID (e.g., RLIMIT_CPU=0, RLIMIT_AS=9)
+                            // args[1] = limit value (bytes or seconds)
+                            "set_resource_limit" if args.len() == 2 => {
+                                // rdi = resource
+                                code.extend(load_value(&args[0], Gpr::Rdi));
+                                // Build rlimit struct on stack: { rlim_cur=limit, rlim_max=limit }
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
+                                code.extend(load_value(&args[1], Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax)); // rlim_cur
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax)); // rlim_max
+                                // rsi = &rlimit
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                // rax = 160 (sys_setrlimit)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 160));
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+                                instr_opcode = Some("set_resource_limit".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }
