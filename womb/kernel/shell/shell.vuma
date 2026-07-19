@@ -35,7 +35,8 @@
 //   shell_prompt(s)               — write "vwk: " (5 bytes) to stdout.
 //   shell_receive(s, c)           — push one byte through the shell: buffer
 //                                   it, on newline call shell_execute and
-//                                   reset the buffer.
+//                                   reset the buffer, on Tab (byte 9)
+//                                   call shell_tab_complete (W26S1).
 //   shell_execute(s)              — parse the buffered line and dispatch to
 //                                   the matching built-in (or print "?\n").
 //   shell_match_cmd(s,name,n)     — W25S1 tokenizer: return 1 iff
@@ -46,6 +47,14 @@
 //                                   W25S1 shell_buf_starts_with helper.
 //   shell_do_echo(s)              — implement `echo`: print everything after
 //                                   "echo " (or "echo") + a trailing newline.
+//   shell_tab_complete(s)         — W26S1: complete the partial command in
+//                                   buf[0..buf_len]. Walks the 12 known
+//                                   command names; if exactly 1 starts with
+//                                   the partial, appends the rest + a space;
+//                                   if >1, prints all candidates on a new
+//                                   line; if 0, does nothing. Helpers:
+//                                   shell_name_has_prefix (prefix check) +
+//                                   shell_complete_name (append rest + space).
 //
 // ── Shell line-buffer geometry ─────────────────────────────────────────────
 // The shell's line buffer is a flat [u8; 256] array with one cursor:
@@ -248,12 +257,11 @@
 //         womb/kernel/shell/shell.vuma \
 //         /tmp/shell.bin x86_64 --verify
 //     /tmp/shell.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0, stdout = "\nhello\n\n" (the leading "\n" is
-// shell_execute's newline echo before the echo command runs; "hello\n" is
-// the echo output; the trailing "\n" is shell_execute's newline echo
-// before the exit command runs — exit sets running=0 and returns without
-// further output, so no third newline). The self-test also asserts:
+// Expected: IVE Pass, exit=0. The self-test runs 4 sub-tests (echo,
+// tab-single, tab-multi, exit) and asserts:
 //   (1) After "echo hello\n", s.running == 1 (shell still running).
+//   (1.5) After "ec"+Tab, s.buf_len == 5 and buf == "echo " (W26S1).
+//   (1.6) After "e"+Tab, s.buf_len == 1 and buf == "e" (W26S1 multi).
 //   (2) After "exit\n", s.running == 0 (shell exited).
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -345,7 +353,8 @@ fn shell_prompt(s: State<Shell>) {
 }
 
 // Receive a byte from the console. Buffer it; on newline, parse and
-// execute the command, then reset the buffer.
+// execute the command, then reset the buffer. On Tab (byte 9, W26S1),
+// attempt tab completion instead of buffering the Tab byte.
 //
 // The newline (LF, byte 10) is the line terminator: it does NOT get
 // stored in the buffer (the `if c == 10` check fires BEFORE the store).
@@ -353,6 +362,14 @@ fn shell_prompt(s: State<Shell>) {
 // "commit" signal, not part of the line content. (Same pattern as K6b's
 // tty_readline, which pops the LF but doesn't copy it to the output
 // buffer.)
+//
+// The Tab (HT, byte 9) is the completion trigger (W26S1): it does NOT
+// get stored in the buffer (the `if c == 9` check fires BEFORE the
+// store). Instead, shell_tab_complete is called, which either appends
+// the remainder of the unique matching command name + a space (1 match),
+// or prints all candidates on a new line (>1 matches), or does nothing
+// (0 matches). The Tab byte itself never enters the line buffer — same
+// "control byte is a signal, not content" philosophy as the newline.
 //
 // The bounds check `s.buf_len < 255` guards the store: if buf_len is
 // already 255, the byte is silently dropped (a 256th byte would overflow
@@ -369,6 +386,11 @@ fn shell_receive(s: State<Shell>, c: u8) {
         // Newline — execute the command.
         shell_execute(s);
         s.buf_len = 0;
+        return;
+    }
+    if c == 9 {
+        // Tab (W26S1) — attempt tab completion instead of buffering.
+        shell_tab_complete(s);
         return;
     }
     if s.buf_len < 255 {
@@ -845,9 +867,376 @@ fn shell_do_false(s: State<Shell>) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// W26S1: Tab completion.
+// ────────────────────────────────────────────────────────────────────────────
+// When the user presses Tab (byte 9), shell_receive calls shell_tab_complete
+// instead of buffering the byte. The completer walks the 12 known command
+// names ("echo", "exit", "help", "ls", "cat", "pwd", "ver", "ps", "memstat",
+// "clear", "true", "false") and checks, for each, whether the command name
+// STARTS WITH the current partial input (buf[0..buf_len]).
+//
+//   • Exactly 1 match  → append the rest of the name + a space to the buffer.
+//     E.g. buf="ec" + Tab → buf="echo " (appends "ho "). The trailing space
+//     positions the cursor for the first argument, matching bash/readline UX.
+//   • 0 matches         → do nothing (the buffer is left unchanged; the user
+//     can keep typing).
+//   • >1 matches        → print a newline, then all candidate names each
+//     followed by a space, then a trailing newline. E.g. buf="e" + Tab →
+//     prints "\necho exit \n". The buffer is left unchanged so the user can
+//     type another character to disambiguate.
+//
+// PMT-pure implementation: the command-name bytes are inlined as decimal
+// ASCII constants (per the file's "Decimal-constants discipline" rule).
+// We cannot dereference a string literal's .rodata address (no `*ptr`
+// syntax), so — exactly like shell_match_cmd — we dispatch on the .rodata
+// ADDRESS of the `name` parameter (each `name == "echo"` / `name == "exit"`
+// / ... comparison is a compile-time-resolvable equality between two i64
+// constants, thanks to Wave 1 .rodata + string-literal deduplication). Once
+// we've identified which command `name` refers to, we compare / append the
+// known ASCII bytes for that command.
+//
+// Three functions:
+//   shell_name_has_prefix(buf, name, name_len) → u8
+//     Returns 1 iff buf[0..buf_len] is a PREFIX of the named command
+//     (buf_len <= name_len AND buf[0..buf_len] == name[0..buf_len]).
+//     This is the "does this command start with what the user typed?"
+//     check. Note: this is the OPPOSITE direction from shell_match_cmd,
+//     which checks whether the buffer STARTS WITH the command name (and
+//     verifies a word boundary). shell_name_has_prefix checks whether the
+//     command name starts with the buffer — i.e. the buffer is a prefix
+//     of the command. An empty buffer (buf_len == 0) matches ALL commands
+//     (the empty string is a prefix of every string).
+//   shell_complete_name(s, name, name_len)
+//     Appends the remaining bytes of the named command (positions
+//     buf_len..name_len-1) + a trailing space (byte 32) to the buffer.
+//     Called only when exactly one command matches. Uses a snapshot of
+//     buf_len (`start`) to skip bytes the user already typed.
+//   shell_tab_complete(s)
+//     Counts matches across all 12 commands, then dispatches to the
+//     0 / 1 / >1 branch as described above.
+
+// shell_name_has_prefix: is buf[0..buf_len] a prefix of the named command?
+//
+// Returns 1 iff (a) buf_len <= name_len (the buffer is no longer than the
+// command name — if the user typed MORE than the command name, the name
+// can't be a completion) AND (b) buf[0..buf_len] equals name[0..buf_len]
+// (every typed byte matches the corresponding byte of the command name).
+//
+// PMT-pure: dispatch on the .rodata address of `name` (same pattern as
+// shell_match_cmd). When `name` matches a known literal, compare buf's
+// bytes against the known ASCII bytes for that command. Each byte
+// comparison is guarded by `buf.buf_len >= N` so we never read a byte
+// the user hasn't typed (though reading past buf_len is safe in VUMA
+// — the buffer is a fixed 256-byte array — the value would be stale
+// garbage; the guard ensures correctness, not safety).
+//
+// Edge case: buf_len == 0 (empty buffer) → every `buf.buf_len >= N`
+// guard is false, so no byte comparison fires, and the function returns
+// 1. The empty string is a prefix of every command name. This means
+// pressing Tab on an empty line matches all 12 commands → the >1 branch
+// prints all 12. (Matches bash behavior: Tab on empty input lists all
+// completions or does nothing depending on configuration; K6f lists all.)
+fn shell_name_has_prefix(buf: State<Shell>, name: Address, name_len: u32) -> u8 {
+    // (a) If the buffer is longer than the command name, the command name
+    // can't be a completion of the buffer — no match.
+    if buf.buf_len > name_len {
+        return 0;
+    }
+    // (b) Compare buf[0..buf_len] against the bytes of `name`.
+    if name == "echo" {
+        // "echo" — e=101, c=99, h=104, o=111.
+        if buf.buf_len >= 1 && buf.buf[0] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 2 && buf.buf[1] != 99  { return 0; }  // 'c'
+        if buf.buf_len >= 3 && buf.buf[2] != 104 { return 0; }  // 'h'
+        if buf.buf_len >= 4 && buf.buf[3] != 111 { return 0; }  // 'o'
+        return 1;
+    }
+    if name == "exit" {
+        // "exit" — e=101, x=120, i=105, t=116.
+        if buf.buf_len >= 1 && buf.buf[0] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 2 && buf.buf[1] != 120 { return 0; }  // 'x'
+        if buf.buf_len >= 3 && buf.buf[2] != 105 { return 0; }  // 'i'
+        if buf.buf_len >= 4 && buf.buf[3] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "help" {
+        // "help" — h=104, e=101, l=108, p=112.
+        if buf.buf_len >= 1 && buf.buf[0] != 104 { return 0; }  // 'h'
+        if buf.buf_len >= 2 && buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 3 && buf.buf[2] != 108 { return 0; }  // 'l'
+        if buf.buf_len >= 4 && buf.buf[3] != 112 { return 0; }  // 'p'
+        return 1;
+    }
+    if name == "ls" {
+        // "ls" — l=108, s=115.
+        if buf.buf_len >= 1 && buf.buf[0] != 108 { return 0; }  // 'l'
+        if buf.buf_len >= 2 && buf.buf[1] != 115 { return 0; }  // 's'
+        return 1;
+    }
+    if name == "cat" {
+        // "cat" — c=99, a=97, t=116.
+        if buf.buf_len >= 1 && buf.buf[0] != 99  { return 0; }  // 'c'
+        if buf.buf_len >= 2 && buf.buf[1] != 97  { return 0; }  // 'a'
+        if buf.buf_len >= 3 && buf.buf[2] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "pwd" {
+        // "pwd" — p=112, w=119, d=100.
+        if buf.buf_len >= 1 && buf.buf[0] != 112 { return 0; }  // 'p'
+        if buf.buf_len >= 2 && buf.buf[1] != 119 { return 0; }  // 'w'
+        if buf.buf_len >= 3 && buf.buf[2] != 100 { return 0; }  // 'd'
+        return 1;
+    }
+    if name == "ver" {
+        // "ver" — v=118, e=101, r=114.
+        if buf.buf_len >= 1 && buf.buf[0] != 118 { return 0; }  // 'v'
+        if buf.buf_len >= 2 && buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 3 && buf.buf[2] != 114 { return 0; }  // 'r'
+        return 1;
+    }
+    if name == "ps" {
+        // "ps" — p=112, s=115.
+        if buf.buf_len >= 1 && buf.buf[0] != 112 { return 0; }  // 'p'
+        if buf.buf_len >= 2 && buf.buf[1] != 115 { return 0; }  // 's'
+        return 1;
+    }
+    if name == "memstat" {
+        // "memstat" — m=109, e=101, m=109, s=115, t=116, a=97, t=116.
+        if buf.buf_len >= 1 && buf.buf[0] != 109 { return 0; }  // 'm'
+        if buf.buf_len >= 2 && buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 3 && buf.buf[2] != 109 { return 0; }  // 'm'
+        if buf.buf_len >= 4 && buf.buf[3] != 115 { return 0; }  // 's'
+        if buf.buf_len >= 5 && buf.buf[4] != 116 { return 0; }  // 't'
+        if buf.buf_len >= 6 && buf.buf[5] != 97  { return 0; }  // 'a'
+        if buf.buf_len >= 7 && buf.buf[6] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "clear" {
+        // "clear" — c=99, l=108, e=101, a=97, r=114.
+        if buf.buf_len >= 1 && buf.buf[0] != 99  { return 0; }  // 'c'
+        if buf.buf_len >= 2 && buf.buf[1] != 108 { return 0; }  // 'l'
+        if buf.buf_len >= 3 && buf.buf[2] != 101 { return 0; }  // 'e'
+        if buf.buf_len >= 4 && buf.buf[3] != 97  { return 0; }  // 'a'
+        if buf.buf_len >= 5 && buf.buf[4] != 114 { return 0; }  // 'r'
+        return 1;
+    }
+    if name == "true" {
+        // "true" — t=116, r=114, u=117, e=101.
+        if buf.buf_len >= 1 && buf.buf[0] != 116 { return 0; }  // 't'
+        if buf.buf_len >= 2 && buf.buf[1] != 114 { return 0; }  // 'r'
+        if buf.buf_len >= 3 && buf.buf[2] != 117 { return 0; }  // 'u'
+        if buf.buf_len >= 4 && buf.buf[3] != 101 { return 0; }  // 'e'
+        return 1;
+    }
+    if name == "false" {
+        // "false" — f=102, a=97, l=108, s=115, e=101.
+        if buf.buf_len >= 1 && buf.buf[0] != 102 { return 0; }  // 'f'
+        if buf.buf_len >= 2 && buf.buf[1] != 97  { return 0; }  // 'a'
+        if buf.buf_len >= 3 && buf.buf[2] != 108 { return 0; }  // 'l'
+        if buf.buf_len >= 4 && buf.buf[3] != 115 { return 0; }  // 's'
+        if buf.buf_len >= 5 && buf.buf[4] != 101 { return 0; }  // 'e'
+        return 1;
+    }
+    // `name` doesn't match any known command literal — no match.
+    return 0;
+}
+
+// shell_complete_name: append the remaining bytes of the named command + a
+// trailing space to the buffer.
+//
+// Called by shell_tab_complete when exactly one command matches the partial
+// input. The buffer currently holds buf[0..buf_len] which is a prefix of the
+// named command; this function appends bytes buf_len..name_len-1 of the
+// command name (the "rest of the name") followed by a space (byte 32).
+//
+// Implementation: snapshot buf_len into `start` BEFORE any appends (because
+// each append increments s.buf_len, and we need the original value to decide
+// which bytes to skip). For each byte position i in 0..name_len-1, append
+// the byte iff `start <= i` (meaning byte i was NOT already in the buffer
+// when we started). The `s.buf_len < 255` guard on each append is the same
+// overflow-protection pattern as shell_receive / K6e's console_putc.
+//
+// After appending the name bytes, append a single trailing space (byte 32)
+// — also guarded by `s.buf_len < 255`. The space positions the cursor for
+// the first argument (e.g. "echo" + Tab → "echo " ready for the user to
+// type the argument), matching bash/readline single-completion UX.
+//
+// PMT-pure: dispatch on the .rodata address of `name` to get the bytes
+// (same pattern as shell_match_cmd / shell_name_has_prefix).
+fn shell_complete_name(s: State<Shell>, name: Address, name_len: u32) {
+    let start = s.buf_len;
+    if name == "echo" {
+        // "echo" — e=101, c=99, h=104, o=111.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 99;  s.buf_len = s.buf_len + 1; }  // 'c'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 104; s.buf_len = s.buf_len + 1; }  // 'h'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 111; s.buf_len = s.buf_len + 1; }  // 'o'
+    }
+    if name == "exit" {
+        // "exit" — e=101, x=120, i=105, t=116.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 120; s.buf_len = s.buf_len + 1; }  // 'x'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 105; s.buf_len = s.buf_len + 1; }  // 'i'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 116; s.buf_len = s.buf_len + 1; }  // 't'
+    }
+    if name == "help" {
+        // "help" — h=104, e=101, l=108, p=112.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 104; s.buf_len = s.buf_len + 1; }  // 'h'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 108; s.buf_len = s.buf_len + 1; }  // 'l'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 112; s.buf_len = s.buf_len + 1; }  // 'p'
+    }
+    if name == "ls" {
+        // "ls" — l=108, s=115.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 108; s.buf_len = s.buf_len + 1; }  // 'l'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 115; s.buf_len = s.buf_len + 1; }  // 's'
+    }
+    if name == "cat" {
+        // "cat" — c=99, a=97, t=116.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 99;  s.buf_len = s.buf_len + 1; }  // 'c'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 97;  s.buf_len = s.buf_len + 1; }  // 'a'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 116; s.buf_len = s.buf_len + 1; }  // 't'
+    }
+    if name == "pwd" {
+        // "pwd" — p=112, w=119, d=100.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 112; s.buf_len = s.buf_len + 1; }  // 'p'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 119; s.buf_len = s.buf_len + 1; }  // 'w'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 100; s.buf_len = s.buf_len + 1; }  // 'd'
+    }
+    if name == "ver" {
+        // "ver" — v=118, e=101, r=114.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 118; s.buf_len = s.buf_len + 1; }  // 'v'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 114; s.buf_len = s.buf_len + 1; }  // 'r'
+    }
+    if name == "ps" {
+        // "ps" — p=112, s=115.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 112; s.buf_len = s.buf_len + 1; }  // 'p'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 115; s.buf_len = s.buf_len + 1; }  // 's'
+    }
+    if name == "memstat" {
+        // "memstat" — m=109, e=101, m=109, s=115, t=116, a=97, t=116.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 109; s.buf_len = s.buf_len + 1; }  // 'm'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 109; s.buf_len = s.buf_len + 1; }  // 'm'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 115; s.buf_len = s.buf_len + 1; }  // 's'
+        if start <= 4 && s.buf_len < 255 { s.buf[s.buf_len] = 116; s.buf_len = s.buf_len + 1; }  // 't'
+        if start <= 5 && s.buf_len < 255 { s.buf[s.buf_len] = 97;  s.buf_len = s.buf_len + 1; }  // 'a'
+        if start <= 6 && s.buf_len < 255 { s.buf[s.buf_len] = 116; s.buf_len = s.buf_len + 1; }  // 't'
+    }
+    if name == "clear" {
+        // "clear" — c=99, l=108, e=101, a=97, r=114.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 99;  s.buf_len = s.buf_len + 1; }  // 'c'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 108; s.buf_len = s.buf_len + 1; }  // 'l'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 97;  s.buf_len = s.buf_len + 1; }  // 'a'
+        if start <= 4 && s.buf_len < 255 { s.buf[s.buf_len] = 114; s.buf_len = s.buf_len + 1; }  // 'r'
+    }
+    if name == "true" {
+        // "true" — t=116, r=114, u=117, e=101.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 116; s.buf_len = s.buf_len + 1; }  // 't'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 114; s.buf_len = s.buf_len + 1; }  // 'r'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 117; s.buf_len = s.buf_len + 1; }  // 'u'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+    }
+    if name == "false" {
+        // "false" — f=102, a=97, l=108, s=115, e=101.
+        if start <= 0 && s.buf_len < 255 { s.buf[s.buf_len] = 102; s.buf_len = s.buf_len + 1; }  // 'f'
+        if start <= 1 && s.buf_len < 255 { s.buf[s.buf_len] = 97;  s.buf_len = s.buf_len + 1; }  // 'a'
+        if start <= 2 && s.buf_len < 255 { s.buf[s.buf_len] = 108; s.buf_len = s.buf_len + 1; }  // 'l'
+        if start <= 3 && s.buf_len < 255 { s.buf[s.buf_len] = 115; s.buf_len = s.buf_len + 1; }  // 's'
+        if start <= 4 && s.buf_len < 255 { s.buf[s.buf_len] = 101; s.buf_len = s.buf_len + 1; }  // 'e'
+    }
+    // Append the trailing space — positions the cursor for the first
+    // argument. Always appended (regardless of which command matched).
+    if s.buf_len < 255 {
+        s.buf[s.buf_len] = 32;  // ' '
+        s.buf_len = s.buf_len + 1;
+    }
+}
+
+// shell_tab_complete: the entry point called by shell_receive on Tab (byte 9).
+//
+// Walks all 12 known command names, counts how many have buf[0..buf_len] as
+// a prefix, then dispatches:
+//   count == 0 → return (do nothing; the buffer is unchanged).
+//   count == 1 → find the single match, call shell_complete_name to append
+//                the rest of its name + a space.
+//   count  > 1 → print "\n", then for each matching command print its name
+//                + a space, then print "\n". The buffer is left unchanged.
+//
+// The count == 1 branch re-checks each command with shell_name_has_prefix
+// (only one will return 1, since count == 1) and calls shell_complete_name
+// for the first match — the `return` after each shell_complete_name call
+// ensures we don't fall through to the next check.
+//
+// The count > 1 branch uses separate write() calls per match (one for the
+// name + space). Each write uses a Wave 1 string literal lowered to a
+// .rodata address — same PMT "Borrowed read" pattern as shell_do_help /
+// shell_do_ls / etc. The matches are printed in the same canonical order
+// as the dispatch in shell_execute (echo, exit, help, ls, cat, pwd, ver,
+// ps, memstat, clear, true, false) so the listing is stable.
+fn shell_tab_complete(s: State<Shell>) {
+    // Count how many known commands have buf[0..buf_len] as a prefix.
+    let count = 0;
+    if shell_name_has_prefix(s, "echo", 4) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "exit", 4) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "help", 4) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "ls", 2) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "cat", 3) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "pwd", 3) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "ver", 3) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "ps", 2) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "memstat", 7) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "clear", 5) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "true", 4) == 1 { count = count + 1; }
+    if shell_name_has_prefix(s, "false", 5) == 1 { count = count + 1; }
+
+    // 0 matches — do nothing.
+    if count == 0 {
+        return;
+    }
+
+    // 1 match — append the rest of the name + a space.
+    if count == 1 {
+        if shell_name_has_prefix(s, "echo", 4) == 1 { shell_complete_name(s, "echo", 4); return; }
+        if shell_name_has_prefix(s, "exit", 4) == 1 { shell_complete_name(s, "exit", 4); return; }
+        if shell_name_has_prefix(s, "help", 4) == 1 { shell_complete_name(s, "help", 4); return; }
+        if shell_name_has_prefix(s, "ls", 2) == 1 { shell_complete_name(s, "ls", 2); return; }
+        if shell_name_has_prefix(s, "cat", 3) == 1 { shell_complete_name(s, "cat", 3); return; }
+        if shell_name_has_prefix(s, "pwd", 3) == 1 { shell_complete_name(s, "pwd", 3); return; }
+        if shell_name_has_prefix(s, "ver", 3) == 1 { shell_complete_name(s, "ver", 3); return; }
+        if shell_name_has_prefix(s, "ps", 2) == 1 { shell_complete_name(s, "ps", 2); return; }
+        if shell_name_has_prefix(s, "memstat", 7) == 1 { shell_complete_name(s, "memstat", 7); return; }
+        if shell_name_has_prefix(s, "clear", 5) == 1 { shell_complete_name(s, "clear", 5); return; }
+        if shell_name_has_prefix(s, "true", 4) == 1 { shell_complete_name(s, "true", 4); return; }
+        if shell_name_has_prefix(s, "false", 5) == 1 { shell_complete_name(s, "false", 5); return; }
+        return;
+    }
+
+    // >1 matches — print a newline + all matches (each followed by a space)
+    // + a trailing newline. The buffer is left unchanged so the user can
+    // type another character to disambiguate.
+    write(1, "\n", 1);
+    if shell_name_has_prefix(s, "echo", 4) == 1 { write(1, "echo ", 5); }
+    if shell_name_has_prefix(s, "exit", 4) == 1 { write(1, "exit ", 5); }
+    if shell_name_has_prefix(s, "help", 4) == 1 { write(1, "help ", 5); }
+    if shell_name_has_prefix(s, "ls", 2) == 1 { write(1, "ls ", 3); }
+    if shell_name_has_prefix(s, "cat", 3) == 1 { write(1, "cat ", 4); }
+    if shell_name_has_prefix(s, "pwd", 3) == 1 { write(1, "pwd ", 4); }
+    if shell_name_has_prefix(s, "ver", 3) == 1 { write(1, "ver ", 4); }
+    if shell_name_has_prefix(s, "ps", 2) == 1 { write(1, "ps ", 3); }
+    if shell_name_has_prefix(s, "memstat", 7) == 1 { write(1, "memstat ", 8); }
+    if shell_name_has_prefix(s, "clear", 5) == 1 { write(1, "clear ", 6); }
+    if shell_name_has_prefix(s, "true", 4) == 1 { write(1, "true ", 5); }
+    if shell_name_has_prefix(s, "false", 5) == 1 { write(1, "false ", 6); }
+    write(1, "\n", 1);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6f DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// Two sub-tests, each exercising one shell command path:
+// Four sub-tests, each exercising one shell code path:
 //   (1) "echo hello\n" — verify the echo built-in runs and the shell
 //       stays running. Feeds the bytes 'e','c','h','o',' ','h','e','l',
 //       'l','o','\n' (11 bytes) one at a time through shell_receive.
@@ -857,6 +1246,22 @@ fn shell_do_false(s: State<Shell>) {
 //       still be running (s.running == 1) — echo doesn't exit.
 //       Verifies: shell_receive buffering + newline-triggered execute
 //       + "echo" prefix match + shell_do_echo arg scan + write path.
+//   (1.5) "ec" + Tab (W26S1) — verify single-match tab completion.
+//       Feeds 'e','c',Tab (byte 9). The Tab triggers shell_tab_complete,
+//       which finds exactly one match ("echo"), appends "ho " (the rest
+//       of "echo" + a space), and leaves buf = "echo " (5 bytes).
+//       Asserts buf_len == 5, buf[0]='e', buf[2]='h', buf[4]=' '.
+//       Then feeds '\n' to execute "echo" (no args) and clear the buffer.
+//       Verifies: byte-9 dispatch + shell_name_has_prefix prefix check +
+//       count==1 branch + shell_complete_name append-rest + space.
+//   (1.6) "e" + Tab (W26S1) — verify multi-match tab completion.
+//       Feeds 'e',Tab. The Tab triggers shell_tab_complete, which finds
+//       two matches ("echo" + "exit"), prints "\necho exit \n", and
+//       leaves buf unchanged ("e", 1 byte). Asserts buf_len == 1,
+//       buf[0]='e'. Then feeds '\n' to execute "e" (unknown command)
+//       and clear the buffer.
+//       Verifies: byte-9 dispatch + multi-match count + count>1 branch
+//       (prints candidates, leaves buf unchanged).
 //   (2) "exit\n" — verify the exit built-in terminates the shell. Feeds
 //       'e','x','i','t','\n' (5 bytes). The newline triggers
 //       shell_execute, which prints "\n" (leading newline) then matches
@@ -865,15 +1270,16 @@ fn shell_do_false(s: State<Shell>) {
 //       Verifies: shell_receive buffering + newline-triggered execute
 //       + "exit" prefix match + running/exit_code state mutation.
 //
-// All assertions return distinct non-zero codes (1, 2) so a failure
+// All assertions return distinct non-zero codes (1-10) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 //
-// Visible stdout side-effect: the test emits "\nhello\n\n" — leading
-// "\n" from echo's shell_execute newline, "hello\n" from the echo
-// output, then "\n" from exit's shell_execute newline. (The exit
-// command itself produces no further output — it just sets running=0
-// and returns.) Visible if the test is run interactively, but doesn't
-// affect the exit code.
+// Visible stdout side-effect: the test emits "\nhello\n" (sub-test 1:
+// leading "\n" + "hello\n"), then "\n\n" (sub-test 1.5: leading "\n"
+// from shell_execute + "\n" from echo-of-empty-args), then "\necho exit
+// \n\n?\n" (sub-test 1.6: "\necho exit \n" from multi-match tab +
+// "\n?\n" from executing unknown "e"), then "\n" (sub-test 2: leading
+// "\n" from shell_execute before exit sets running=0). Total visible
+// output doesn't affect the exit code.
 
 fn main() -> i32 {
     let s = state_new(Shell);
@@ -916,6 +1322,71 @@ fn main() -> i32 {
     shell_receive(s, 10);   // '\n'
     // Shell should still be running.
     if s.running != 1 { return 1; }
+
+    // ── Sub-test (1.5): Tab completion — single match (W26S1) ────────────
+    // After sub-test (1): buf_len=0, running=1. Feed "ec" (2 bytes) +
+    // Tab (byte 9) = 3 bytes total.
+    // Each shell_receive (non-newline, non-Tab): buf_len < 255 → store
+    // at buf[buf_len], buf_len++. After 2 receives: buf[0..2]="ec",
+    // buf_len=2.
+    // 3rd receive (Tab = 9): c == 9 → shell_tab_complete(s).
+    //   shell_name_has_prefix(s, "echo", 4): buf_len=2 <= 4.
+    //     buf[0]='e'(101)==101 ✓, buf[1]='c'(99)==99 ✓ → returns 1.
+    //   shell_name_has_prefix(s, "exit", 4): buf_len=2 <= 4.
+    //     buf[0]='e'(101)==101 ✓, buf[1]='c'(99)!=120('x') → returns 0.
+    //   (all other commands: buf[0] != first byte → returns 0.)
+    //   count = 1 (only "echo").
+    //   count == 1 → shell_complete_name(s, "echo", 4):
+    //     start = 2 (snapshot of buf_len).
+    //     start <= 0? No → skip byte 0 ('e', already in buf).
+    //     start <= 1? No → skip byte 1 ('c', already in buf).
+    //     start <= 2? Yes → buf[2]=104('h'), buf_len=3.
+    //     start <= 3? Yes → buf[3]=111('o'), buf_len=4.
+    //     Append space: buf[4]=32(' '), buf_len=5.
+    //   buf is now "echo " (5 bytes), buf_len=5.
+    // The Tab byte itself was NOT buffered (shell_receive returned after
+    // calling shell_tab_complete). Verifies: byte-9 dispatch in
+    // shell_receive + shell_name_has_prefix prefix check + count==1
+    // branch + shell_complete_name append-rest + trailing space.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 9);    // Tab → shell_tab_complete
+    // buf should now be "echo " (5 bytes).
+    if s.buf_len != 5 { return 3; }
+    if s.buf[0] != 101 { return 4; }  // 'e' (original)
+    if s.buf[2] != 104 { return 5; }  // 'h' (appended by completion)
+    if s.buf[4] != 32  { return 6; }  // ' ' (trailing space)
+    // Clear the buffer by sending a newline — executes "echo" with no
+    // args. shell_execute prints "\n" (leading newline) then
+    // shell_do_echo prints "\n" (echo of empty args). running stays 1.
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 7; }
+
+    // ── Sub-test (1.6): Tab completion — multiple matches (W26S1) ────────
+    // After sub-test (1.5): buf_len=0, running=1. Feed "e" (1 byte) +
+    // Tab (byte 9) = 2 bytes total.
+    // 1st receive ('e' = 101): buf[0]='e', buf_len=1.
+    // 2nd receive (Tab = 9): c == 9 → shell_tab_complete(s).
+    //   shell_name_has_prefix(s, "echo", 4): buf_len=1 <= 4.
+    //     buf[0]='e'(101)==101 ✓ → returns 1.
+    //   shell_name_has_prefix(s, "exit", 4): buf_len=1 <= 4.
+    //     buf[0]='e'(101)==101 ✓ → returns 1.
+    //   (all other commands: buf[0] != first byte → returns 0.)
+    //   count = 2 (echo + exit).
+    //   count > 1 → write "\n", write "echo ", write "exit ", write "\n".
+    //     stdout gets "\necho exit \n".
+    //   buf is UNCHANGED: buf[0]='e', buf_len=1.
+    // Verifies: byte-9 dispatch + shell_name_has_prefix multi-match +
+    // count>1 branch (prints candidates, leaves buf unchanged).
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 9);    // Tab → shell_tab_complete (multi-match)
+    // buf should still be "e" (1 byte, unchanged).
+    if s.buf_len != 1 { return 8; }
+    if s.buf[0] != 101 { return 9; }  // 'e' (unchanged)
+    // Clear the buffer by sending a newline — executes "e" (unknown
+    // command). shell_execute prints "\n" then "?\n". running stays 1.
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 10; }
 
     // ── Sub-test (2): "exit\n" — exit built-in ────────────────────────────
     // Feed "exit" (4 bytes) + '\n' (1 byte) = 5 bytes total.
