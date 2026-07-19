@@ -70,7 +70,7 @@
 // design, the page would be in the Inode's page list and shared; this
 // simplified one-page-per-open-file model is enough for K5c.)
 //
-// ── Tmpfs operations (the 6 contract functions) ────────────────────────────
+// ── Tmpfs operations (the 6 original K5c contract functions) ────────────────
 //   tmpfs_mount(inodes, dentries, data) -> u32
 //       Initialize the InodeTable, DentryTable, and TmpfsData; allocate
 //       the root inode (S_IFDIR | 0o755 = 16877) + root dentry (name "/",
@@ -101,6 +101,25 @@
 //       `file.pos`; advance `file.pos` by `count`; return `count` (or a
 //       negative errno on error — same caveat as read).
 //
+// ── Tmpfs operations (the 3 W20S2-S4 additions) ─────────────────────────────
+//   tmpfs_unlink(inodes, dentries, data, parent_idx, name) -> u32
+//       Delete a file under `parent_idx` matching `name`: free its data
+//       page (read from inode.private via the +1 encoding), mark its
+//       inode free (ino = 0), mark its dentry free (used = 0), and
+//       unlink the dentry from its parent's child list. Returns 0 on
+//       success, 256 if no matching dentry was found.
+//   tmpfs_readdir(dentries, parent_idx, out: State<DirentBuf>) -> u32
+//       List directory contents — walk all 64 dentry slots, copy names
+//       of children (parent == parent_idx, used, not the dir itself)
+//       into `out.names`, return the count (also stored in `out.count`).
+//       At most 8 entries (DirentBuf capacity); extras are dropped.
+//   tmpfs_open(inodes, dentries, data, parent_idx, name, flags) -> u32
+//       Create or open a file: find an existing dentry via tmpfs_lookup;
+//       if not found and O_CREAT (64) is set in `flags`, create a new
+//       file via tmpfs_create. Ensure the inode has a data page
+//       allocated (page_idx + 1 stored in inode.private). Returns the
+//       dentry index, or 256 on failure (ENOENT / ENOMEM / ENOSPC).
+//
 // ── Re-declared layouts + helpers ──────────────────────────────────────────
 // VUMA has no `import`, so this file re-declares everything it consumes:
 //   - PathBuf (1 field, 64 bytes) — re-declared byte-identically to K5b's
@@ -109,6 +128,9 @@
 //   - ByteBuf (1 field, 256 bytes) — NEW in this file (K5b doesn't have
 //     it). 256 bytes matches one tmpfs page, so a single tmpfs_read /
 //     tmpfs_write can transfer an entire page in one call.
+//   - DirentBuf (2 fields, 516 bytes) — NEW in W20S2-S4. Holds up to 8
+//     directory-entry names (64 bytes each) plus a count. Used as the
+//     `out` parameter for tmpfs_readdir.
 //   - Inode + InodeTable + 12 inode helpers — re-declared byte-identically
 //     to K5a's inode.vuma (init + alloc + ino/mode/size/private get/set).
 //   - Dentry + DentryTable + 14 dentry helpers — re-declared byte-
@@ -124,14 +146,14 @@
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All state
-// (InodeTable, DentryTable, FileTable, TmpfsData, PathBuf, ByteBuf, File)
-// is held in `___pmt_buffer`-backed State<T>'s, allocated by the CALLER
-// via `state_new(T)` and passed by reference to the helpers (init-style
-// API — see K5a's inode.vuma header "Why init-style?" for the codegen
-// rationale). No externs are declared in this file — the tmpfs primitives
-// are pure-PM (K5c's sys_open will declare its own externs for the user-
-// buffer copy; K6's syscall dispatcher will declare externs for the
-// trap-frame access).
+// (InodeTable, DentryTable, FileTable, TmpfsData, PathBuf, ByteBuf,
+// DirentBuf, File) is held in `___pmt_buffer`-backed State<T>'s,
+// allocated by the CALLER via `state_new(T)` and passed by reference to
+// the helpers (init-style API — see K5a's inode.vuma header "Why init-
+// style?" for the codegen rationale). No externs are declared in this
+// file — the tmpfs primitives are pure-PM (K5c's sys_open will declare
+// its own externs for the user-buffer copy; K6's syscall dispatcher
+// will declare externs for the trap-frame access).
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
 // All non-zero constants in this file use DECIMAL per the K5a contract's
@@ -161,6 +183,15 @@
 //     493    = 0o755 — rwxr-xr-x permission bits.
 //     420    = 0o644 — rw-r--r-- permission bits.
 //     2      = O_RDWR — read/write access mode (the low 2 bits of flags).
+//     64     = O_CREAT — file-create flag (bitmask, <fcntl.h> 0100 octal);
+//              reused as the slot/page count and "table full" sentinel,
+//              but in tmpfs_open it's used as a bitmask (`flags & 64`)
+//              not a comparison, so the two uses don't conflict.
+//     8      = DirentBuf capacity (max entries filled by tmpfs_readdir).
+//     110    = ASCII 'n'; 101 = 'e'; 119 = 'w'; 102 = 'f'; 105 = 'i';
+//              108 = 'l'; 101 = 'e' — "newfile" (W20S2-S4 self-test).
+//     110    = ASCII 'n'; 111 = 'o'; 101 = 'e'; 120 = 'x'; 105 = 'i';
+//              115 = 's'; 116 = 't' — "noexist" (W20S2-S4 self-test).
 //     47     = ASCII '/' (root dentry name byte 0).
 //     116    = ASCII 't'; 101 = 'e'; 115 = 's'; 116 = 't' — "test".
 //     104    = ASCII 'h'; 101 = 'e'; 108 = 'l'; 108 = 'l'; 111 = 'o' — "hello".
@@ -183,9 +214,14 @@
 //         womb/kernel/fs/tmpfs.vuma \
 //         /tmp/k5c_tmpfs.bin x86_64 --verify
 //     /tmp/k5c_tmpfs.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — mount returns
-// 0, create returns 1, lookup returns 1, page alloc returns 0, write
-// returns 5, read returns 5, read bytes match "hello").
+// Expected: IVE Pass, exit=0 (all 16 self-test checks pass — the 7
+// original K5c checks: mount returns 0, create returns 1, lookup
+// returns 1, page alloc returns 0, write returns 5, read returns 5,
+// read bytes match "hello"; plus the 9 W20S2-S4 checks: open existing
+// returns 1, open create returns 2, open missing returns 256, readdir
+// returns 2, dirent slot 0 == "test", dirent slot 1 == "newfile",
+// unlink returns 0, lookup-after-unlink returns 256, readdir-after-
+// unlink returns 1).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -312,6 +348,27 @@ layout FileTable = {
 layout TmpfsData = {
     pages: [u8; 16384],
     page_used: [u8; 64],
+    count: u32,
+}
+
+// DirentBuf: a buffer for tmpfs_readdir to fill with directory entry
+// names. Holds up to 8 entries × 64 bytes each = 512 bytes of name
+// data, plus a `count` of how many entries were filled. NEW in this
+// file (W20S2-S4 contract wave). Used as the `out` parameter type for
+// tmpfs_readdir — the caller allocates it via state_new(DirentBuf) and
+// passes it by reference; tmpfs_readdir zeroes `count`, walks the
+// dentry table, copies matching names into `names`, and returns the
+// number of entries filled (also stored in `count`).
+//
+// Why 8 entries: 64 bytes per name × 8 entries = 512 bytes, the same
+// per-field size as InodeTable.inos / DentryTable.parents. 8 entries
+// is enough for the W20S2-S4 self-test (which creates at most 2 files
+// in one directory); a real readdir would paginate via a seek offset
+// (getdents(2) style) — simplified here to "fill until full, drop the
+// rest" because VUMA has no dynamic allocation and the K5c self-test
+// only needs to verify the walk + name-copy path.
+layout DirentBuf = {
+    names: [u8; 512],
     count: u32,
 }
 
@@ -1123,14 +1180,240 @@ fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, c
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K5c DoD).
+// Tmpfs operations (W20S2-S4 additions: unlink / readdir / open).
+// ────────────────────────────────────────────────────────────────────────────
+// Three operations added by the W20S2-S4 contract wave to close the
+// gaps called out in the W20 stage-2 critical review:
+//   - tmpfs_unlink  — delete a file (free its page, mark inode free,
+//     mark dentry free, unlink from parent's child list).
+//   - tmpfs_readdir — list directory contents (walk the dentry table,
+//     copy names of children into an output DirentBuf).
+//   - tmpfs_open    — create/open a file (find or create inode +
+//     dentry; ensure the inode has a data page allocated).
+//
+// All three are PMT-pure (State<T> params, no pointer syntax) and
+// follow the same conventions as the original 6 contract functions:
+// decimal constants only, 256 = "not found / failure" sentinel, 64 =
+// "table full" sentinel, 8-byte LE pack/unpack via the re-declared
+// inode/dentry helpers.
+//
+// ── inode.private as the page index (+1 encoding) ─────────────────────────
+// The original K5c contract left inode.private at 0 (zero-init default)
+// and stored the page index in file.private instead (one page per open
+// file description). The W20S2-S4 tmpfs_open / tmpfs_unlink pair uses
+// inode.private to store the page index so a file's backing page
+// survives across open/close cycles (matching real tmpfs semantics
+// where the page cache is inode-backed, not file-description-backed).
+//
+// To avoid the ambiguity between "page 0 allocated" and "no page
+// allocated" (both would be the zero-init default 0 if we stored the
+// page index directly), we store `page_idx + 1` in inode.private:
+//   - 0       = no page allocated (zero-init default — never written).
+//   - 1..64   = page (private - 1) is allocated, in the range 0..63.
+// tmpfs_open sets inode.private = page_idx + 1 when it allocates a
+// page; tmpfs_unlink reads inode.private, frees page (private - 1) if
+// private > 0, then zeroes inode.private as part of marking the inode
+// free (inode_set_ino(idx, 0) — the FREE marker — also conceptually
+// invalidates private, but we rely on ino == 0 as the liveness check,
+// not private).
+
+// tmpfs_unlink: delete a file under `parent_idx` whose name matches
+// `name`. Walks parent's child list (same pattern as tmpfs_lookup),
+// and on a match: frees the file's data page (if one was allocated —
+// read from inode.private via the +1 encoding), marks the inode free
+// (ino = 0), marks the dentry free (used = 0), and unlinks the dentry
+// from its parent's child list (so subsequent tmpfs_lookup /
+// tmpfs_readdir walks don't stop at a freed slot). Returns 0 on
+// success, 256 if no matching dentry was found.
+//
+// The sibling-list unlink keeps the child list consistent. `prev ==
+// 256` is the sentinel for "matching dentry is the first child" — in
+// that case we update parent's child pointer to the matched dentry's
+// next sibling; otherwise we splice prev.next around the matched
+// dentry. (Without this unlink, a freed dentry in the middle of the
+// sibling list would cause tmpfs_lookup to stop early at the freed
+// slot, since its loop condition checks `dentry_get_used(next) == 1`.)
+fn tmpfs_unlink(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+    // Walk parent's child list, tracking `prev` for the splice.
+    // prev == 256 means "next is the first child" (no previous sibling
+    // yet) — we'll update parent's child pointer in that case.
+    let next = dentry_get_child(dentries, parent_idx) as u32;
+    let prev: u32 = 256;
+    while next != 256 && dentry_get_used(dentries, next) == 1 {
+        if name_matches(dentries, next, name) == 1 {
+            // Found the dentry to unlink. Read its inode index.
+            let ino_idx = dentry_get_inode(dentries, next) as u32;
+            // Free the data page if one was allocated (+1 encoding:
+            // private == 0 means no page; private > 0 means page
+            // (private - 1) is allocated).
+            let cur = inode_get_private(inodes, ino_idx);
+            if cur > 0 {
+                let page = (cur - 1) as u32;
+                data.page_used[page] = 0;
+                data.count = data.count - 1;
+            }
+            // Mark the inode free (ino == 0 is the FREE marker —
+            // matches inode_alloc's "find first ino == 0" scan).
+            inode_set_ino(inodes, ino_idx, 0);
+            inodes.count = inodes.count - 1;
+            // Mark the dentry free (used == 0 is the FREE marker —
+            // matches dentry_alloc's "find first used == 0" scan).
+            dentry_set_used(dentries, next, 0);
+            dentries.count = dentries.count - 1;
+            // Unlink from the sibling list. `n` is the matched
+            // dentry's next sibling (0 = end of list).
+            let n = dentry_get_next(dentries, next);
+            if prev == 256 {
+                // Matched dentry was the first child — update
+                // parent's child pointer to skip it.
+                dentry_set_child(dentries, parent_idx, n);
+            } else {
+                // Splice prev.next around the matched dentry.
+                dentry_set_next(dentries, prev, n);
+            }
+            return 0;
+        }
+        // Not a match — advance to the next sibling.
+        let n = dentry_get_next(dentries, next);
+        if n == 0 {
+            return 256;  // end of sibling list, not found
+        }
+        prev = next;
+        next = n as u32;
+    }
+    return 256;  // not found (empty child list or hit the 256 sentinel)
+}
+
+// tmpfs_readdir: list the contents of directory `parent_idx` — walk
+// all 64 dentry slots, find entries whose `parent` field matches
+// `parent_idx` (and that are in use, and aren't the directory
+// itself), copy their names into `out.names`, and return the count.
+// At most 8 entries are filled (the DirentBuf capacity); extra
+// entries are silently dropped (a real getdents(2) would paginate via
+// a seek offset — simplified here for the K5c self-test).
+//
+// The walk is a linear scan of the dentry table, not a child-list
+// walk. This is O(64) regardless of directory size, but the table is
+// small (64 slots) and the scan is simple and correct. A child-list
+// walk (like tmpfs_lookup's) would be O(children) but requires
+// tracking prev/next for splice — overkill for a listing operation.
+//
+// The `i != parent_idx` check skips the directory itself: the root
+// dentry's `parent` field points to itself (mirrors Linux's
+// dentry->d_parent == &root_dentry convention), so without this check
+// root would be listed as its own child. Non-root directories don't
+// have this self-reference, but the check is harmless for them and
+// keeps the function correct for all directories.
+fn tmpfs_readdir(dentries: State<DentryTable>, parent_idx: u32, out: State<DirentBuf>) -> u32 {
+    // Zero the output count up front (idempotent — safe even if the
+    // caller pre-zeroed the DirentBuf via state_new).
+    out.count = 0;
+    let i = 0;
+    while i < 64 {
+        // Skip free dentries and the directory itself.
+        if dentry_get_used(dentries, i) == 1 {
+            if i != parent_idx {
+                if dentry_get_parent(dentries, i) == parent_idx as u64 {
+                    // Match. Copy the name into the next output slot
+                    // (if there's room — at most 8 entries).
+                    if out.count < 8 {
+                        let slot = out.count * 64;
+                        let j = 0;
+                        while j < 64 {
+                            let b = dentry_get_name_byte(dentries, i, j);
+                            out.names[slot + j] = b;
+                            if b == 0 {
+                                break;  // stop at null terminator
+                            }
+                            j = j + 1;
+                        }
+                        out.count = out.count + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return out.count;
+}
+
+// tmpfs_open: create or open a file under `parent_idx` whose name
+// matches `name`. First tries tmpfs_lookup to find an existing
+// dentry; if not found and O_CREAT is set in `flags`, creates a new
+// file via tmpfs_create. Ensures the resulting inode has a data page
+// allocated (allocating one if needed, via the +1 encoding described
+// above). Returns the dentry index, or 256 on failure (file not found
+// and O_CREAT not set; or table / page allocation failed).
+//
+// O_CREAT = 64 (decimal) per Linux <fcntl.h> (0100 octal). Note: 64
+// is also the "table full" sentinel, but here it's used as a bitmask
+// (`(flags & 64) == 64`), not a comparison — the two uses don't
+// conflict.
+//
+// The page-allocation step extends the original K5c contract's
+// "find or create inode + dentry" description: allocating the page
+// here (rather than in tmpfs_create) keeps tmpfs_create's signature
+// unchanged (no `data` parameter) and matches the original design
+// intent documented in tmpfs_create's header: "the page is allocated
+// when the file is opened (tmpfs_open in K5c ...)". The page is
+// stored in inode.private (page_idx + 1) so tmpfs_unlink can find and
+// free it later.
+fn tmpfs_open(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>, flags: u32) -> u32 {
+    // Try to find an existing dentry under parent with this name.
+    let found = tmpfs_lookup(dentries, parent_idx, name);
+    if found == 256 {
+        // Not found. If O_CREAT isn't set, fail.
+        if (flags & 64) != 64 {
+            return 256;  // ENOENT — not found, no O_CREAT
+        }
+        // O_CREAT is set — create a new file (inode + dentry, linked
+        // into parent's child list). tmpfs_create returns 256 if
+        // either table is full.
+        let new_den = tmpfs_create(inodes, dentries, parent_idx, name);
+        if new_den == 256 {
+            return 256;  // table full (ENOMEM)
+        }
+        // Allocate a data page for the new file's inode and store it
+        // via the +1 encoding (page_idx + 1).
+        let new_ino = dentry_get_inode(dentries, new_den) as u32;
+        let new_page = tmpfs_data_alloc_page(data);
+        if new_page == 64 {
+            return 256;  // page pool full (ENOSPC)
+        }
+        inode_set_private(inodes, new_ino, new_page as u64 + 1);
+        return new_den;
+    }
+    // Existing dentry found. Ensure its inode has a data page (a file
+    // created via tmpfs_create directly — bypassing tmpfs_open — has
+    // private == 0; a file previously opened via tmpfs_open already
+    // has private > 0 and we skip the allocation).
+    let found_ino = dentry_get_inode(dentries, found) as u32;
+    let cur = inode_get_private(inodes, found_ino);
+    if cur == 0 {
+        let page = tmpfs_data_alloc_page(data);
+        if page == 64 {
+            return 256;  // page pool full (ENOSPC)
+        }
+        inode_set_private(inodes, found_ino, page as u64 + 1);
+    }
+    return found;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K5c DoD + W20S2-S4 additions).
 // ────────────────────────────────────────────────────────────────────────────
 // Mount a fresh tmpfs, create a file "test" under root, allocate a data
 // page for it, write "hello" (5 bytes), read it back, verify the bytes
-// match. Returns 0 on success, 1..7 on the corresponding check failure
-// (so a future CI failure pinpoints the broken step).
+// match (K5c checks 1-7). Then exercise the W20S2-S4 additions: open
+// the existing "test" file, create "newfile" via tmpfs_open(O_CREAT),
+// attempt to open a non-existent file without O_CREAT, list root's
+// children via tmpfs_readdir (verifying both names), unlink "newfile",
+// re-lookup to confirm it's gone, and re-readdir to confirm the count
+// dropped (W20S2-S4 checks 8-16). Returns 0 on success, 1..16 on the
+// corresponding check failure (so a future CI failure pinpoints the
+// broken step).
 //
-// The 7 checks:
+// The 16 checks:
 //   (1) tmpfs_mount → returns 0 (root dentry = 0 on a fresh mount).
 //   (2) tmpfs_create(root, "test") → returns 1 (first non-root dentry).
 //   (3) tmpfs_lookup(root, "test") → returns 1 (finds the dentry we
@@ -1143,6 +1426,23 @@ fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, c
 //       reads 5 bytes from the file's data page).
 //   (7) buf bytes == "hello" (104, 101, 108, 108, 111) — verifies the
 //       write → read round-trip preserved every byte.
+//   (8) tmpfs_open(root, "test", O_CREAT) → returns 1 (finds existing
+//       dentry; allocates page 1 for inode 1; stores 1+1=2 in
+//       inode.private via the +1 encoding).
+//   (9) tmpfs_open(root, "newfile", O_CREAT) → returns 2 (creates new
+//       inode 2 + dentry 2 via tmpfs_create; allocates page 2; stores
+//       2+1=3 in inode 2's private).
+//   (10) tmpfs_open(root, "noexist", 0) → returns 256 (not found,
+//        O_CREAT not set — ENOENT path).
+//   (11) tmpfs_readdir(root, dirents) → returns 2 ("test" + "newfile").
+//   (12) dirents.names[0..4] == "test" (116, 101, 115, 116).
+//   (13) dirents.names[64..70] == "newfile" (110, 101, 119, 102, 105,
+//        108, 101).
+//   (14) tmpfs_unlink(root, "newfile") → returns 0 (frees page 2,
+//        marks inode 2 free, marks dentry 2 free, splices root.child
+//        from 2 → 1).
+//   (15) tmpfs_lookup(root, "newfile") → returns 256 (unlinked — gone).
+//   (16) tmpfs_readdir(root, dirents2) → returns 1 (only "test" left).
 //
 // Per the K5c contract's "Use decimal ASCII values for byte constants"
 // rule, all ASCII constants in this self-test use DECIMAL: 47='/', 116=
@@ -1259,6 +1559,113 @@ fn main() -> i32 {
     if read_buf.data[2] != 108 { return 7; }  // 'l'
     if read_buf.data[3] != 108 { return 7; }  // 'l'
     if read_buf.data[4] != 111 { return 7; }  // 'o'
+
+    // ────────────────────────────────────────────────────────────────────
+    // W20S2-S4 self-test checks (8-16): exercise tmpfs_open /
+    // tmpfs_readdir / tmpfs_unlink. State at this point:
+    //   - inodes:  slot 0 = root (dir),  slot 1 = "test" (file, private=0).
+    //     count = 2.
+    //   - dentries: slot 0 = root (child=1), slot 1 = "test" (next=0).
+    //     count = 2.
+    //   - data:    page 0 allocated (page_used[0]=1, count=1),
+    //     pages[0..5] = "hello".
+    // ────────────────────────────────────────────────────────────────────
+
+    // ── Check 8: tmpfs_open(root, "test", O_CREAT) → returns 1. ────────
+    // Opening the existing "test" dentry. tmpfs_lookup finds it at slot
+    // 1; the inode's private is 0 (tmpfs_create never set it), so
+    // tmpfs_open allocates a fresh page (page 1 — page 0 is already
+    // taken by the check-4 manual alloc) and stores 1+1 = 2 in
+    // inode.private via the +1 encoding. Returns the dentry index (1).
+    let open_existing = tmpfs_open(inodes, dentries, data, root, name, 64);
+    if open_existing != 1 { return 8; }
+
+    // ── Check 9: tmpfs_open(root, "newfile", O_CREAT) → returns 2. ─────
+    // "newfile" doesn't exist → tmpfs_lookup returns 256 → O_CREAT is
+    // set → tmpfs_create allocates inode 2 + dentry 2, links dentry 2
+    // into root's child list (root.child goes 1 → 2, dentry 2.next = 1),
+    // then tmpfs_open allocates page 2 and stores 2+1 = 3 in inode 2's
+    // private. Returns the new dentry index (2).
+    //
+    // "newfile" bytes: 'n' 'e' 'w' 'f' 'i' 'l' 'e' '\0'
+    //                = 110 101 119 102 105 108 101 0
+    let name2 = state_new(PathBuf);
+    name2.data[0] = 110;  // 'n'
+    name2.data[1] = 101;  // 'e'
+    name2.data[2] = 119;  // 'w'
+    name2.data[3] = 102;  // 'f'
+    name2.data[4] = 105;  // 'i'
+    name2.data[5] = 108;  // 'l'
+    name2.data[6] = 101;  // 'e'
+    name2.data[7] = 0;    // null terminator
+    let open_created = tmpfs_open(inodes, dentries, data, root, name2, 64);
+    if open_created != 2 { return 9; }
+
+    // ── Check 10: tmpfs_open(root, "noexist", 0) → returns 256. ─────────
+    // "noexist" doesn't exist, O_CREAT not set (flags = 0) → return 256
+    // (ENOENT). Verifies the no-O_CREAT path fails on a missing file.
+    //
+    // "noexist" bytes: 'n' 'o' 'e' 'x' 'i' 's' 't' '\0'
+    //                = 110 111 101 120 105 115 116 0
+    let name3 = state_new(PathBuf);
+    name3.data[0] = 110;  // 'n'
+    name3.data[1] = 111;  // 'o'
+    name3.data[2] = 101;  // 'e'
+    name3.data[3] = 120;  // 'x'
+    name3.data[4] = 105;  // 'i'
+    name3.data[5] = 115;  // 's'
+    name3.data[6] = 116;  // 't'
+    name3.data[7] = 0;    // null terminator
+    let open_missing = tmpfs_open(inodes, dentries, data, root, name3, 0);
+    if open_missing != 256 { return 10; }
+
+    // ── Check 11: tmpfs_readdir(root, dirents) → returns 2. ────────────
+    // Root now has two children: "test" (slot 1) and "newfile" (slot 2).
+    // The walk skips slot 0 (root itself — i == parent_idx) and finds
+    // both children. Returns 2.
+    let dirents = state_new(DirentBuf);
+    let nentries = tmpfs_readdir(dentries, root, dirents);
+    if nentries != 2 { return 11; }
+
+    // ── Check 12: dirents slot 0 name == "test". ───────────────────────
+    // The first child found is "test" (slot 1, since the walk scans
+    // 0..63 in order). Verify the name bytes.
+    if dirents.names[0] != 116 { return 12; }   // 't'
+    if dirents.names[1] != 101 { return 12; }   // 'e'
+    if dirents.names[2] != 115 { return 12; }   // 's'
+    if dirents.names[3] != 116 { return 12; }   // 't'
+
+    // ── Check 13: dirents slot 1 name == "newfile". ────────────────────
+    // The second child found is "newfile" (slot 2). Slot offset = 1*64.
+    if dirents.names[64] != 110 { return 13; }  // 'n'
+    if dirents.names[65] != 101 { return 13; }  // 'e'
+    if dirents.names[66] != 119 { return 13; }  // 'w'
+    if dirents.names[67] != 102 { return 13; }  // 'f'
+    if dirents.names[68] != 105 { return 13; }  // 'i'
+    if dirents.names[69] != 108 { return 13; }  // 'l'
+    if dirents.names[70] != 101 { return 13; }  // 'e'
+
+    // ── Check 14: tmpfs_unlink(root, "newfile") → returns 0. ───────────
+    // Walks root's child list: root.child = 2 ("newfile"), match. Frees
+    // page (private-1 = 3-1 = 2), marks inode 2 free (ino=0), marks
+    // dentry 2 free (used=0), splices root.child = dentry 2.next = 1
+    // (the "test" dentry). Returns 0.
+    let unlink_rc = tmpfs_unlink(inodes, dentries, data, root, name2);
+    if unlink_rc != 0 { return 14; }
+
+    // ── Check 15: tmpfs_lookup(root, "newfile") → returns 256. ─────────
+    // After unlink, "newfile" should be gone. root.child is now 1
+    // ("test"), which doesn't match "newfile", and dentry 1.next = 0
+    // (end of list). Returns 256.
+    let lookup_after_unlink = tmpfs_lookup(dentries, root, name2);
+    if lookup_after_unlink != 256 { return 15; }
+
+    // ── Check 16: tmpfs_readdir(root, dirents2) → returns 1. ───────────
+    // After unlink, root has only one child ("test"). The walk finds
+    // slot 1 ("test") and skips slot 2 (now used=0). Returns 1.
+    let dirents2 = state_new(DirentBuf);
+    let nentries2 = tmpfs_readdir(dentries, root, dirents2);
+    if nentries2 != 1 { return 16; }
 
     return 0;
 }
