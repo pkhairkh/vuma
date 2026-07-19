@@ -1,0 +1,15 @@
+// simple_send — Parent sends 42, child receives and exits with 42
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x;
+    }
+    channel_send(ch, 42);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
