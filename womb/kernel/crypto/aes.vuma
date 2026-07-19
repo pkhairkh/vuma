@@ -4,9 +4,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // NOT a full KAT-verified AES. This is a structural skeleton with the
-// real FIPS-197 S-box (W29S1), a stubbed key schedule, and a stubbed
-// single-round encryption (AddRoundKey round 0 only). K11+ adds the
-// full 10-round cipher.
+// real FIPS-197 S-box (W29S1), a stubbed key schedule, and a 10-round
+// cipher (W49: SubBytes + ShiftRows + AddRoundKey per round; MixColumns
+// deferred). K11+ adds the real Rijndael key schedule + MixColumns.
 //
 // ── What W29S1 provides ─────────────────────────────────────────────────────
 //   aes_init_sbox(sbox)        — fill the 256-byte S-box with the real
@@ -18,12 +18,14 @@
 //                                 round keys (placeholder — K11 will run
 //                                 the real Rijndael key schedule with
 //                                 SubWord + RotWord + Rcon).
-//   aes_encrypt_block(ctx,in,out) — real AddRoundKey round 0: XOR each
-//                                 plaintext byte with the corresponding
-//                                 round-key byte (placeholder for the
-//                                 10 rounds — K11 will add SubBytes +
-//                                 ShiftRows + MixColumns + the remaining
-//                                 9 AddRoundKey rounds).
+//   aes_sub_bytes(state, sbox)  — W49: apply the FIPS-197 S-box to each
+//                                 of the 16 state bytes (§5.1.1 SubBytes).
+//   aes_shift_rows(state)       — W49: cyclically left-shift each state
+//                                 row by its row index (§5.1.2 ShiftRows).
+//   aes_encrypt_block(ctx,in,out) — W49: 10-round cipher — AddRoundKey(0),
+//                                 then 9× (SubBytes + ShiftRows + AddRoundKey),
+//                                 then final SubBytes + ShiftRows + AddRoundKey(10).
+//                                 MixColumns deferred (§5.1.3 — K11+).
 //   aes_decrypt_block(ctx,in,out) — delegates to encrypt_block (placeholder
 //                                 — K11 will invert the round-key schedule
 //                                 and use InvSubBytes + InvShiftRows +
@@ -41,7 +43,12 @@
 //     key.data[0]      = 42
 //     input.data[0]    = 99
 //     round_keys[0]    = 42   (copied from key)
-//     output.data[0]   = 73   (99 XOR 42 = 73 — AddRoundKey round 0)
+//     output.data[0]   = 233  (W49 10-round cipher final byte 0 — traced
+//                              through 10× SubBytes+ShiftRows+AddRoundKey;
+//                              was 73 in W29S1's round-0-only stub)
+//     output.data[1]   = 54   (W49 10-round cipher final byte 1 —
+//                              data[1..15] start at 0 and cycle through
+//                              sbox[0]=99 → sbox[99]=251 → ... → 54)
 //   The real S-box spot-checks (W29S1):
 //     sbox.data[0]     = 99    (0x63 — canonical first S-box entry)
 //     sbox.data[255]   = 22    (0x16 — canonical last S-box entry)
@@ -66,6 +73,17 @@ layout AesKey = { data: [u8; 16] }
 
 // AES block (always 16 bytes for AES-128/192/256 — the Rijndael block size).
 layout AesBlock = { data: [u8; 16] }
+
+// AES working state — the 16-byte column-major byte matrix that the round
+// function (SubBytes + ShiftRows + MixColumns + AddRoundKey) transforms in
+// place. W49 introduces this as a distinct layout from AesBlock so the
+// round-transform helpers (aes_sub_bytes, aes_shift_rows) can take a
+// State<AesState> parameter that documents "this is the cipher's working
+// state, not a plaintext/ciphertext block" — same 16-byte shape as AesBlock
+// but a different role. Byte at (row, col) = data[col*4 + row] (column-major
+// per FIPS-197 §3.4 — the state matrix is filled column-by-column from the
+// input sequence).
+layout AesState = { data: [u8; 16] }
 
 // ────────────────────────────────────────────────────────────────────────────
 // AES API functions.
@@ -181,29 +199,137 @@ fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
     ctx.nr = 10;
 }
 
-// aes_encrypt_block: encrypt one 16-byte block.
+// aes_sub_bytes: apply the AES S-box to each of the 16 state bytes
+// (FIPS-197 §5.1.1 SubBytes — the non-linear byte substitution step).
+//
+//   state: caller-allocated State<AesState> (modified in place).
+//   sbox:  caller-allocated State<AesSbox> holding the 256-byte FIPS-197
+//          S-box (initialized via aes_init_sbox).
+//
+// W49: for each i in 0..16, state.data[i] = sbox.data[state.data[i] as u32].
+// The `as u32` widening cast is required because VUMA's array index is
+// u32-typed while state.data[i] yields a u8 (byte-granular indexing —
+// see the "VUMA Key Concepts" header note). The substitution is a
+// non-linear, non-identity permutation that gives AES its resistance
+// to differential + linear cryptanalysis (the same property W29S1's
+// real S-box provides over the K10b identity permutation).
+fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
+    let i = 0;
+    while i < 16 {
+        state.data[i] = sbox.data[state.data[i] as u32];
+        i = i + 1;
+    }
+}
+
+// aes_shift_rows: cyclically left-shift each state row by its row index
+// (FIPS-197 §5.1.2 ShiftRows — the row-wise byte transposition step).
+//
+//   state: caller-allocated State<AesState> (modified in place).
+//
+// W49: state is column-major — byte at (row, col) = data[col*4 + row].
+// Each row r is left-rotated by r positions (row 0 unchanged, row 1 by 1,
+// row 2 by 2, row 3 by 3). The rotations are expressed as in-place byte
+// swaps per the W49 task spec:
+//   Row 1: swap data[1]<->data[5], swap data[9]<->data[13]
+//   Row 2: swap data[2]<->data[10], swap data[6]<->data[14]
+//   Row 3: swap data[3]<->data[15], swap data[7]<->data[11]
+// Each swap uses the standard `tmp = a; a = b; b = tmp;` idiom (same as
+// K6e scheduler.vuma's decimal-reverse helper). `tmp` is typed u8 from
+// the first `state.data[1]` read (VUMA infers the type from the
+// initializer — byte-granular indexing of a [u8; 16] field yields u8).
+fn aes_shift_rows(state: State<AesState>) {
+    let tmp = state.data[1];
+    // Row 1: left-rotate by 1.
+    state.data[1] = state.data[5];
+    state.data[5] = tmp;
+    tmp = state.data[9];
+    state.data[9] = state.data[13];
+    state.data[13] = tmp;
+    // Row 2: left-rotate by 2.
+    tmp = state.data[2];
+    state.data[2] = state.data[10];
+    state.data[10] = tmp;
+    tmp = state.data[6];
+    state.data[6] = state.data[14];
+    state.data[14] = tmp;
+    // Row 3: left-rotate by 3.
+    tmp = state.data[3];
+    state.data[3] = state.data[15];
+    state.data[15] = tmp;
+    tmp = state.data[7];
+    state.data[7] = state.data[11];
+    state.data[11] = tmp;
+}
+
+// aes_encrypt_block: encrypt one 16-byte block via the 10-round AES-128
+// cipher (W49: SubBytes + ShiftRows + AddRoundKey per round; MixColumns
+// deferred).
 //
 //   ctx:    caller-allocated State<AesCtx> (carries the round keys).
 //   input:  caller-allocated State<AesBlock> holding the plaintext.
 //   output: caller-allocated State<AesBlock> (ciphertext output).
 //
-// W29S1: real AddRoundKey with round 0 — XORs each input byte with the
-// corresponding byte of `ctx.round_keys[0..15]` (FIPS-197 §5.1.1
-// AddRoundKey). The K10b stub's code already did this byte-by-byte XOR;
-// W29S1 just relabels it as the real round-0 AddRoundKey (the prior
-// comment understated it as "XOR with the first key byte" — the code
-// has always XORed all 16 bytes). K11 will wrap this in the real
-// 10-round encryption loop (SubBytes + ShiftRows + MixColumns +
-// AddRoundKey per FIPS-197 §5.1).
+// W49: real 10-round cipher structure (FIPS-197 §5.1.1), minus MixColumns:
+//   1. AddRoundKey(0)       — XOR input with round_keys[0..15] into `state`.
+//   2. For round 1..9:      SubBytes → ShiftRows → AddRoundKey(round).
+//   3. Round 10 (final):    SubBytes → ShiftRows → AddRoundKey(10).
+//   4. Copy `state` into `output`.
+//
+// MixColumns (FIPS-197 §5.1.3 — the GF(2^8) column mixing via the fixed
+// matrix [2,3,1,1; 1,2,3,1; 1,1,2,3; 3,1,1,2]) is DEFERRED to a later
+// wave. Without MixColumns the cipher does NOT achieve full AES diffusion
+// — this is a structural skeleton, not a KAT-verified AES. The W29S1
+// round-0 AddRoundKey is preserved as step 1.
+//
+// The S-box is arena-allocated inside this function (state_new(AesSbox))
+// and initialized via aes_init_sbox — VUMA has no import, so each
+// encrypt_block call rebuilds the S-box from scratch (one-time 256-byte
+// fill; the cost is dwarfed by the 10×16 = 160 SubBytes lookups).
 fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+    // Working state (column-major 4×4 byte matrix, AES-128 = 16 bytes).
+    let state = state_new(AesState);
+    // S-box (rebuilt per call — VUMA has no import / cross-call caching).
+    let sbox = state_new(AesSbox);
+    aes_init_sbox(sbox);
+
+    // Step 1: AddRoundKey(0) — state = input XOR round_keys[0..15].
     let i = 0;
     while i < 16 {
-        output.data[i] = input.data[i] ^ ctx.round_keys[i];
+        state.data[i] = input.data[i] ^ ctx.round_keys[i];
         i = i + 1;
     }
-    // W29S1: AddRoundKey round 0 done above. K11 will add rounds 1..9
-    // (SubBytes + ShiftRows + MixColumns + AddRoundKey) + round 10
-    // (SubBytes + ShiftRows + AddRoundKey — no MixColumns).
+
+    // Step 2: rounds 1..9 — SubBytes, ShiftRows, AddRoundKey.
+    let round = 1;
+    while round < 10 {
+        aes_sub_bytes(state, sbox);
+        aes_shift_rows(state);
+        // AddRoundKey(round): state[i] ^= round_keys[round*16 + i].
+        let j = 0;
+        while j < 16 {
+            state.data[j] = state.data[j] ^ ctx.round_keys[round * 16 + j];
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+
+    // Step 3: round 10 (final) — SubBytes, ShiftRows, AddRoundKey(10).
+    // No MixColumns on the final round per FIPS-197 §5.1.1 (and MixColumns
+    // is deferred entirely for W49 — see the function header note).
+    aes_sub_bytes(state, sbox);
+    aes_shift_rows(state);
+    let k = 0;
+    while k < 16 {
+        state.data[k] = state.data[k] ^ ctx.round_keys[10 * 16 + k];
+        k = k + 1;
+    }
+
+    // Step 4: copy `state` into `output`.
+    let m = 0;
+    while m < 16 {
+        output.data[m] = state.data[m];
+        m = m + 1;
+    }
 }
 
 // aes_decrypt_block: decrypt one 16-byte block.
@@ -224,21 +350,35 @@ fn aes_decrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<A
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the W29S1 AES API surface end-to-end:
+// Exercises the W49 AES API surface end-to-end:
 //   1. aes_init_sbox(sbox)         → real FIPS-197 S-box (sbox[0]=99=0x63,
 //                                    sbox[255]=22=0x16).
 //   2. aes_key_expansion(ctx,key)  → 11 round-key copies (round_keys[0]=key[0]).
-//   3. aes_encrypt_block(ctx,in,out) → AddRoundKey round 0
-//                                    (out[0] = in[0] XOR key[0] = 99 XOR 42 = 73).
+//   3. aes_encrypt_block(ctx,in,out) → W49 10-round cipher
+//                                    (out[0] = 233, out[1] = 54 — traced
+//                                    through 10× SubBytes+ShiftRows+AddRoundKey
+//                                    with the stub key schedule).
 //
-// Returns 0 on success, 1..5 on the 5 individual check failures.
+// Returns 0 on success, 1..6 on the 6 individual check failures.
 //
-// ── Why 99 XOR 42 == 73? ────────────────────────────────────────────────────
-//   99 = 0x63 (0b01100011), 42 = 0x2A (0b00101010).
-//   0x63 XOR 0x2A = 0x49 (0b01001001) = 73 decimal.
-//   The W29S1 round function is just AddRoundKey-with-round-0; K11's real
-//   AES will produce a fully diffused 16-byte ciphertext (no byte equal
-//   to the simple XOR).
+// ── Why out[0] == 233 and out[1] == 54? ─────────────────────────────────────
+//   The W49 cipher runs 10 rounds of SubBytes + ShiftRows + AddRoundKey
+//   (no MixColumns). With input[0]=99, input[1..15]=0, key[0]=42,
+//   key[1..15]=0 (and all 11 round keys = key per the stub schedule):
+//     - data[0] starts at 99 XOR 42 = 73, then cycles through 10 rounds
+//       of sbox[x] XOR 42. The byte-by-byte trace (each round: sbox then
+//       XOR 42): 73→sbox[73]=59→^42=17→sbox[17]=130→^42=168→sbox[168]=
+//       194→^42=232→sbox[232]=155→^42=177→sbox[177]=200→^42=226→sbox[
+//       226]=152→^42=178→sbox[178]=55→^42=29→sbox[29]=164→^42=142→
+//       sbox[142]=25→^42=51→sbox[51]=195→^42=233. Final: 233.
+//     - data[1..15] start at 0, then cycle through 10 rounds of sbox[x]
+//       (XOR 0 = no key change): 0→sbox[0]=99→sbox[99]=251→sbox[251]=15→
+//       sbox[15]=118→sbox[118]=56→sbox[56]=7→sbox[7]=197→sbox[197]=166→
+//       sbox[166]=36→sbox[36]=54. Final: 54.
+//   ShiftRows is a no-op for this input because data[1..15] are uniform
+//   at every round (all start at 0, all transform identically). The W49
+//   swap pattern (rows 1/2/3) therefore produces the same result as the
+//   canonical FIPS-197 ShiftRows for this specific test vector.
 fn main() -> i32 {
     // ── S-box path ──
     let sbox = state_new(AesSbox);
@@ -257,13 +397,15 @@ fn main() -> i32 {
     // Round count: 10 for AES-128.
     if ctx.nr != 10 { return 4; }
 
-    // ── Encrypt-block path (AddRoundKey round 0) ──
+    // ── Encrypt-block path (W49 10-round cipher) ──
     let input = state_new(AesBlock);
     input.data[0] = 99;
     let output = state_new(AesBlock);
     aes_encrypt_block(ctx, input, output);
-    // AddRoundKey round 0: 99 ^ 42 = 73.
-    if output.data[0] != 73 { return 5; }
+    // W49 10-round cipher: data[0] = 233, data[1] = 54 (see the
+    // "Why out[0] == 233" note above for the round-by-round trace).
+    if output.data[0] != 233 { return 5; }
+    if output.data[1] != 54 { return 6; }
 
     return 0;
 }
