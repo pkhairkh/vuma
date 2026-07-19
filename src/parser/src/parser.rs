@@ -35,6 +35,14 @@ use std::collections::HashSet;
 /// Default maximum recursion depth for expression parsing.
 const MAX_EXPR_DEPTH: u32 = 256;
 
+// Wave 12: Channel builtins (channel_open, channel_send, channel_recv,
+// channel_close, channel_try_recv, channel_recv_timeout) are parsed as
+// regular Call expressions and intercepted by the codegen. The L1 frame
+// format carries capability tokens (crate::capability::CapabilityToken)
+// in the cap_count section of each message; the parser does not need to
+// parse capability literals because capabilities are granted at runtime
+// by the kernel, not expressed in .vuma source.
+
 /// A recursive-descent parser that turns a token stream into an AST.
 pub struct Parser<'src> {
     /// Underlying lexer.
