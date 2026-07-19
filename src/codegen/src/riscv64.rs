@@ -4659,6 +4659,24 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
     }
 }
 
+/// Compute the address of a stack slot into `dst_reg`.
+///
+/// The slot is at `[S0 - offset_from_s0]`; we emit `dst_reg = S0 - offset`.
+/// For large offsets that don't fit in `ADDI`'s 12-bit signed immediate,
+/// `T3` is clobbered as a scratch register.
+fn ss_emit_slot_addr(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Addi { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }.encode().to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Addi { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code
+    }
+}
+
 impl Backend for RiscV64Backend {
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         &self.target_info
@@ -5527,23 +5545,149 @@ impl Backend for RiscV64Backend {
 
                     IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
-                        let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
-                                            Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
-                        for (i, arg) in args.iter().enumerate() {
-                            if i >= 8 { break; }
-                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[i]));
-                        }
-                        let jal_byte_offset_in_func = current_byte_offset + code.len() as u64;
-                        code.extend(Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
-                        relocations.push(RelocationEntry {
-                            offset: jal_byte_offset_in_func,
-                            symbol: target_func.clone(),
-                            reloc_type: "R_RISCV_JAL".to_string(),
-                        });
-                        if let Some(d) = dst {
-                            let dst_id = d.as_register().unwrap_or(0);
-                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+
+                        // ── Channel builtins (Wave 4ab / Task 4ab) ──
+                        // `channel_open`/`send`/`recv`/`close` are parsed as
+                        // ordinary `Expr::Call` and reach the backend as
+                        // `IRInstr::Call { func: "channel_open", .. }`.
+                        // Intercept them here and inline the corresponding
+                        // Linux syscalls (pipe2=59, write=64, read=63,
+                        // close=57 on RISC-V's asm-generic ABI).  The
+                        // dedicated `IRInstr::Channel*` arms (no-op below)
+                        // handle the future SCG-NodePayload path which is
+                        // currently unreachable from surface syntax.
+                        //
+                        // Channel handle layout (8 bytes, little-endian):
+                        //   bits [0:31]   = read_fd   (low 32 bits)
+                        //   bits [32:63]  = write_fd  (high 32 bits)
+                        // This matches the `int fds[2]` written by pipe2, so
+                        // channel_open can pass the destination stack slot
+                        // directly to pipe2 and skip any temporary buffer.
+                        //
+                        // NOTE: the task spec lists riscv64 pipe2 as 293,
+                        // but that's the x86_64 number; RISC-V uses the
+                        // asm-generic value 59 (matches the existing
+                        // `pipe` stub in this file).  Verified by
+                        // `qemu-riscv64-static` running the channel test
+                        // (exit 42).
+                        let channel_builtin_matched = match (target_func.as_str(), args.len(), dst.is_some()) {
+                            ("channel_open", 0, true) => {
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // a0 = &dst_slot — pipe2 writes fds[2] there
+                                // (becomes the 8-byte channel handle).
+                                code.extend(ss_emit_slot_addr(Gpr::A0, dst_offset));
+                                // a1 = 0 (flags)
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());
+                                // a7 = 59 (sys_pipe2)
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 59 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                true
+                            }
+                            ("channel_send", 2, _) => {
+                                let ch = &args[0];
+                                let msg = &args[1];
+                                // t0 = full channel handle (64 bits).
+                                code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
+                                // a0 = write_fd = high 32 bits (zero-extended).
+                                code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                // Allocate 16 bytes of scratch on SP
+                                // (keeps 16-byte alignment for ecall).  Store
+                                // the 8-byte message there and pass its
+                                // address to write().
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
+                                // t1 = msg value.
+                                code.extend(ss_load_value(msg, &vreg_stack_slots, Gpr::T1));
+                                // [SP] = msg
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T1, imm: 0 }.encode());
+                                // a1 = SP (buf)
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());
+                                // a2 = 8 (count)
+                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode());
+                                // a7 = 64 (sys_write)
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                // Restore SP.
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
+                                // write() returns the byte count (8) on
+                                // success — store it for callers that inspect
+                                // the call's nominal return value.
+                                if let Some(d) = dst {
+                                    if let Some(dst_id) = d.as_register() {
+                                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                        code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                                    }
+                                }
+                                true
+                            }
+                            ("channel_recv", 1, true) => {
+                                let ch = &args[0];
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // t0 = full channel handle.
+                                code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
+                                // a0 = read_fd = low 32 bits, zero-extended.
+                                //   SLLI t0, t0, 32 ; SRLI a0, t0, 32
+                                //   (T0 is preserved across syscalls per the
+                                //   Linux RISC-V ABI, but we don't need T0
+                                //   again — write the result into a0 via T0.)
+                                code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                // a1 = &dst_slot — read() writes the message
+                                // directly into the destination vreg slot.
+                                code.extend(ss_emit_slot_addr(Gpr::A1, dst_offset));
+                                // a2 = 8 (count)
+                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode());
+                                // a7 = 63 (sys_read)
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 63 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                true
+                            }
+                            ("channel_close", 1, _) => {
+                                let ch = &args[0];
+                                // t0 = full channel handle.
+                                code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
+                                // a0 = read_fd (low 32, zero-extended):
+                                //   SLLI t0, t0, 32 ; SRLI a0, t0, 32
+                                code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                // a7 = 57 (sys_close)
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 57 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                // Re-load ch into t0 (defensive — T0 is
+                                // preserved per the Linux ABI but re-arm
+                                // anyway in case future kernels change).
+                                code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
+                                // a0 = write_fd (high 32, zero-extended).
+                                code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                // a7 = 57 (sys_close)
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 57 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                true
+                            }
+                            _ => false,
+                        };
+
+                        if !channel_builtin_matched {
+                            // Load arguments from stack into SystemV arg registers
+                            let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
+                                                Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+                            for (i, arg) in args.iter().enumerate() {
+                                if i >= 8 { break; }
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[i]));
+                            }
+                            let jal_byte_offset_in_func = current_byte_offset + code.len() as u64;
+                            code.extend(Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
+                            relocations.push(RelocationEntry {
+                                offset: jal_byte_offset_in_func,
+                                symbol: target_func.clone(),
+                                reloc_type: "R_RISCV_JAL".to_string(),
+                            });
+                            if let Some(d) = dst {
+                                let dst_id = d.as_register().unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                            }
                         }
                         code
                     }

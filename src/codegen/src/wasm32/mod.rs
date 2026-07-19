@@ -2659,6 +2659,194 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 return Ok(());
             }
 
+            // ── Channel builtins (Wave 4 / Task 4cd) ──
+            // wasm32 has no pipe() syscall — use a ring buffer in linear
+            // memory instead.  Layout (4112 bytes total):
+            //   [base+0]  head     (i32, read cursor)
+            //   [base+4]  tail     (i32, write cursor)
+            //   [base+8]  capacity (i32, = 4096)
+            //   [base+12] reserved
+            //   [base+16..base+4112] data (4096 bytes = 512 × 8-byte slots)
+            // The channel handle is the base address (i32).
+            match func.as_str() {
+                "channel_open" if args.is_empty() && dst.is_some() => {
+                    // Allocate 4112 bytes from the bump allocator.
+                    let chan_size: i32 = 4112; // 16-byte header + 4096-byte data
+                    // Get current heap ptr → channel base address
+                    ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+                    ctx.stack_depth += 1;
+                    // Store base to dst vreg
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    }
+                    // Advance __heap_ptr by chan_size
+                    ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(chan_size));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::GlobalSet(HEAP_PTR_GLOBAL_IDX));
+                    ctx.stack_depth -= 1;
+                    // Initialize header fields using dst vreg as base.
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        if let Some(base_local) = ctx.get_local(*id) {
+                            // head = 0 at [base+0]
+                            ctx.emit(WasmInstr::LocalGet(base_local));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Const(0));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                            ctx.stack_depth -= 2;
+                            // tail = 0 at [base+4]
+                            ctx.emit(WasmInstr::LocalGet(base_local));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Const(0));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Store { align: 2, offset: 4 });
+                            ctx.stack_depth -= 2;
+                            // capacity = 4096 at [base+8]
+                            ctx.emit(WasmInstr::LocalGet(base_local));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Const(4096));
+                            ctx.stack_depth += 1;
+                            ctx.emit(WasmInstr::I32Store { align: 2, offset: 8 });
+                            ctx.stack_depth -= 2;
+                        }
+                    }
+                    return Ok(());
+                }
+                "channel_send" if args.len() == 2 => {
+                    let ch = &args[0];
+                    let msg = &args[1];
+                    // Push base address and save to a temp local.
+                    ctx.push_value(ch, Some(&WasmType::I32));
+                    ctx.stack_depth += 1;
+                    let base_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(base_local));
+                    ctx.stack_depth -= 1;
+                    // Load tail from [base+4] and save to a temp local.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 4 });
+                    let tail_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(tail_local));
+                    ctx.stack_depth -= 1;
+                    // Compute addr = base + 16 + tail, store 8-byte msg.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(16));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    // Push msg as i64 and store 8 bytes at [addr].
+                    ctx.push_value(msg, Some(&WasmType::I64));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 });
+                    ctx.stack_depth -= 2;
+                    // Update tail: new_tail = (tail + 8) % capacity.
+                    // Push base (store address) first, then compute new_tail on top.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(8));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 8 });
+                    ctx.emit(WasmInstr::I32RemU);
+                    ctx.stack_depth -= 1;
+                    // Store new_tail at [base+4].  Stack: [base, new_tail]
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 4 });
+                    ctx.stack_depth -= 2;
+                    // No return value for channel_send in the IR (dst is None
+                    // for statement-form calls).  If dst is present, store 0.
+                    if let Some(IRValue::Register(id)) = dst {
+                        ctx.emit(WasmInstr::I32Const(0));
+                        ctx.stack_depth += 1;
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    }
+                    return Ok(());
+                }
+                "channel_recv" if args.len() == 1 && dst.is_some() => {
+                    let ch = &args[0];
+                    // Push base address and save to a temp local.
+                    ctx.push_value(ch, Some(&WasmType::I32));
+                    ctx.stack_depth += 1;
+                    let base_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(base_local));
+                    ctx.stack_depth -= 1;
+                    // Load head from [base+0] and save to a temp local.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
+                    let head_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(head_local));
+                    ctx.stack_depth -= 1;
+                    // Compute addr = base + 16 + head, load 8-byte msg.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(16));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    // Load 8 bytes, wrap to i32, store to dst.
+                    ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
+                    ctx.emit(WasmInstr::I32WrapI64);
+                    // I32WrapI64: pops 1 (i64), pushes 1 (i32) — net 0 on depth
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                    // Update head: new_head = (head + 8) % capacity.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(8));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 8 });
+                    ctx.emit(WasmInstr::I32RemU);
+                    ctx.stack_depth -= 1;
+                    // Store new_head at [base+0].  Stack: [base, new_head]
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2;
+                    return Ok(());
+                }
+                "channel_close" if args.len() == 1 => {
+                    // No-op: linear memory is automatically freed (bump
+                    // allocator never reclaims, but the channel's ring
+                    // buffer is simply abandoned).
+                    return Ok(());
+                }
+                _ => {}
+            }
+
             let num_args = args.len();
             for arg in args {
                 ctx.push_value(arg, None);
