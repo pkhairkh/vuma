@@ -3684,6 +3684,147 @@ impl Emitter {
                     }
                 }
 
+                // ── Channel builtins (Wave 4ab / Task 4ab) ──
+                // `channel_open`/`send`/`recv`/`close` are parsed as ordinary
+                // `Expr::Call` and reach the backend as
+                // `IRInstr::Call { func: "channel_open", .. }`.  Intercept
+                // them here and inline the corresponding Linux syscalls
+                // (pipe2=59, write=64, read=63, close=57 on AArch64).
+                // The dedicated `IRInstr::Channel*` arms (no-op below) handle
+                // the future SCG-NodePayload path which is currently
+                // unreachable from surface syntax.
+                //
+                // Channel handle layout (8 bytes, little-endian):
+                //   bits [0:31]   = read_fd   (low 32 bits)
+                //   bits [32:63]  = write_fd  (high 32 bits)
+                // This matches the `int fds[2]` written by pipe2, so
+                // channel_open can pass the destination stack slot directly
+                // to pipe2 and skip any temporary buffer.
+                {
+                    let builtin = target_name.as_str();
+                    let matched = match (builtin, args.len(), dst.is_some()) {
+                        ("channel_open", 0, true) => {
+                            let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                            let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                            // X0 = &dst_slot — pipe2 writes fds[2] there
+                            // (becomes the 8-byte channel handle).
+                            self.ss_emit_slot_addr(Register::X0, dst_offset)?;
+                            // X1 = 0 (flags)
+                            self.emit_load_immediate(Register::X1, 0)?;
+                            // X8 = 59 (sys_pipe2)
+                            self.emit_load_immediate(Register::X8, 59)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            true
+                        }
+                        ("channel_send", 2, _) => {
+                            let ch = &args[0];
+                            let msg = &args[1];
+                            // X9 = full channel handle (64 bits).
+                            self.ss_load_value(ch, Register::X9, slots)?;
+                            // X0 = write_fd = high 32 bits of handle.
+                            self.emit_instruction(Instruction::LSR {
+                                rd: Register::X0,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(32),
+                            })?;
+                            // Allocate 16 bytes of scratch on SP (must stay
+                            // 16-byte aligned for SVC).  Store the 8-byte
+                            // message there and pass its address to write().
+                            self.emit_instruction(Instruction::SUB {
+                                rd: Register::SP,
+                                rn: Register::SP,
+                                rm: Operand::Imm12(16),
+                            })?;
+                            // X10 = msg value.
+                            self.ss_load_value(msg, Register::X10, slots)?;
+                            // [SP] = msg
+                            self.emit_instruction(Instruction::STR {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 0,
+                            })?;
+                            // X1 = SP (buf) — MOV Xd, SP lowers to ADD Xd, SP, #0.
+                            self.emit_instruction(Instruction::MOV {
+                                rd: Register::X1,
+                                rm: Register::SP,
+                            })?;
+                            // X2 = 8 (count)
+                            self.emit_load_immediate(Register::X2, 8)?;
+                            // X8 = 64 (sys_write)
+                            self.emit_load_immediate(Register::X8, 64)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            // Restore SP.
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::SP,
+                                rn: Register::SP,
+                                rm: Operand::Imm12(16),
+                            })?;
+                            // write() returns the byte count (8) on success —
+                            // store it for callers that inspect the call's
+                            // nominal return value.
+                            if let Some(d) = dst {
+                                if let Some(dst_id) = d.as_register() {
+                                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                                    self.ss_store_to_slot(Register::X0, dst_offset)?;
+                                }
+                            }
+                            true
+                        }
+                        ("channel_recv", 1, true) => {
+                            let ch = &args[0];
+                            let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                            let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                            // X9 = full channel handle.
+                            self.ss_load_value(ch, Register::X9, slots)?;
+                            // X0 = read_fd = low 32 bits (zero-extended via UBFM).
+                            self.emit_instruction(Instruction::UBFM {
+                                rd: Register::X0,
+                                rn: Register::X9,
+                                immr: 0,
+                                imms: 31,
+                            })?;
+                            // X1 = &dst_slot — read() writes the message
+                            // directly into the destination vreg slot.
+                            self.ss_emit_slot_addr(Register::X1, dst_offset)?;
+                            // X2 = 8 (count)
+                            self.emit_load_immediate(Register::X2, 8)?;
+                            // X8 = 63 (sys_read)
+                            self.emit_load_immediate(Register::X8, 63)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            true
+                        }
+                        ("channel_close", 1, _) => {
+                            let ch = &args[0];
+                            // X9 = full channel handle.
+                            self.ss_load_value(ch, Register::X9, slots)?;
+                            // X0 = read_fd (low 32 bits, zero-extended).
+                            self.emit_instruction(Instruction::UBFM {
+                                rd: Register::X0,
+                                rn: Register::X9,
+                                immr: 0,
+                                imms: 31,
+                            })?;
+                            // X8 = 57 (sys_close)
+                            self.emit_load_immediate(Register::X8, 57)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            // X0 = write_fd (high 32 bits).
+                            self.emit_instruction(Instruction::LSR {
+                                rd: Register::X0,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(32),
+                            })?;
+                            // X8 already = 57 (sys_close); re-arm to be safe.
+                            self.emit_load_immediate(Register::X8, 57)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if matched {
+                        return Ok(());
+                    }
+                }
+
                 let arg_regs = [
                     Register::X0, Register::X1, Register::X2, Register::X3,
                     Register::X4, Register::X5, Register::X6, Register::X7,
