@@ -5470,8 +5470,101 @@ impl Backend for RiscV32Backend {
                                     }
                                 }
                             }
+                        } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                            // 64-bit integer comparison.
+                            // Load hi/lo for both operands.
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots)); // T0=lo, T1=hi
+                            code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, rhs, &vreg_stack_slots)); // T2=lo, T3=hi
+                            // T4 = result (default 0)
+                            code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Zero, imm: 0 }.encode());
+                            let is_signed = matches!(kind, CmpKind::SLt | CmpKind::SLe | CmpKind::SGt | CmpKind::SGe);
+                            match kind {
+                                CmpKind::Eq | CmpKind::Ne => {
+                                    // Eq: hi_eq AND lo_eq. Ne: hi_ne OR lo_ne.
+                                    // T4 = (T1 == T3) ? 1 : 0
+                                    code.extend(Instruction::Sub { rd: Gpr::T5, rs1: Gpr::T1, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T5, imm: 1 }.encode()); // T4 = (T5 == 0)
+                                    // T5 = (T0 == T2) ? 1 : 0
+                                    code.extend(Instruction::Sub { rd: Gpr::T5, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                                    code.extend(Instruction::Sltiu { rd: Gpr::T5, rs1: Gpr::T5, imm: 1 }.encode());
+                                    // T4 = T4 AND T5 (for Eq)
+                                    code.extend(Instruction::And { rd: Gpr::T4, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                                    if matches!(kind, CmpKind::Ne) {
+                                        // Ne = !Eq
+                                        code.extend(Instruction::Xori { rd: Gpr::T4, rs1: Gpr::T4, imm: 1 }.encode());
+                                    }
+                                }
+                                CmpKind::SLt | CmpKind::ULt | CmpKind::SLe | CmpKind::ULe
+                                | CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe => {
+                                    let is_gt = matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe);
+                                    let is_eq = matches!(kind, CmpKind::SLe | CmpKind::ULe | CmpKind::SGe | CmpKind::UGe);
+                                    // hi_lt = (T1 < T3) [signed or unsigned]
+                                    if is_signed {
+                                        code.extend(Instruction::Slt { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T3 }.encode());
+                                    } else {
+                                        code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T3 }.encode());
+                                    }
+                                    // hi_gt = (T3 < T1) [same signedness]
+                                    if is_signed {
+                                        code.extend(Instruction::Slt { rd: Gpr::T5, rs1: Gpr::T3, rs2: Gpr::T1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::Sltu { rd: Gpr::T5, rs1: Gpr::T3, rs2: Gpr::T1 }.encode());
+                                    }
+                                    // If hi_lt or hi_gt, result is determined by hi comparison.
+                                    // For Lt/Le: result = hi_lt OR (hi_eq AND lo_lt_or_le)
+                                    // For Gt/Ge: result = hi_gt OR (hi_eq AND lo_gt_or_ge)
+                                    // hi_eq = !(hi_lt OR hi_gt) = !(T4 | T5)
+                                    code.extend(Instruction::Or { rd: Gpr::T4, rs1: Gpr::T4, rs2: Gpr::T5 }.encode()); // T4 = hi_lt OR hi_gt
+                                    // If T4 != 0 (hi differs), the primary direction result is in the original hi_lt/hi_gt.
+                                    // We need to recompute. Let me use a different approach:
+                                    // result = (is_gt ? hi_gt : hi_lt) OR (hi_eq AND lo_cmp)
+                                    // Recompute hi_lt and hi_gt in separate regs.
+                                    if is_signed {
+                                        code.extend(Instruction::Slt { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T3 }.encode()); // T4 = hi_lt
+                                    } else {
+                                        code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T3 }.encode());
+                                    }
+                                    if is_signed {
+                                        code.extend(Instruction::Slt { rd: Gpr::T5, rs1: Gpr::T3, rs2: Gpr::T1 }.encode()); // T5 = hi_gt
+                                    } else {
+                                        code.extend(Instruction::Sltu { rd: Gpr::T5, rs1: Gpr::T3, rs2: Gpr::T1 }.encode());
+                                    }
+                                    // hi_eq = !(T4 | T5)
+                                    code.extend(Instruction::Or { rd: Gpr::T6, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                                    code.extend(Instruction::Xori { rd: Gpr::T6, rs1: Gpr::T6, imm: 1 }.encode()); // T6 = hi_eq
+                                    // lo_cmp: for Lt → lo_lt (unsigned). For Le → lo_le. For Gt → lo_gt. For Ge → lo_ge.
+                                    if is_eq {
+                                        if is_gt {
+                                            // lo_ge = !(lo_lt) = !(T0 < T2)
+                                            code.extend(Instruction::Sltu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                                            code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+                                        } else {
+                                            // lo_le = !(lo_gt) = !(T2 < T0)
+                                            code.extend(Instruction::Sltu { rd: Gpr::T0, rs1: Gpr::T2, rs2: Gpr::T0 }.encode());
+                                            code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+                                        }
+                                    } else {
+                                        if is_gt {
+                                            // lo_gt = T2 < T0
+                                            code.extend(Instruction::Sltu { rd: Gpr::T0, rs1: Gpr::T2, rs2: Gpr::T0 }.encode());
+                                        } else {
+                                            // lo_lt = T0 < T2
+                                            code.extend(Instruction::Sltu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                                        }
+                                    }
+                                    // lo_result = hi_eq AND lo_cmp
+                                    code.extend(Instruction::And { rd: Gpr::T0, rs1: Gpr::T6, rs2: Gpr::T0 }.encode());
+                                    // primary = is_gt ? hi_gt : hi_lt
+                                    if is_gt {
+                                        code.extend(Instruction::Or { rd: Gpr::T4, rs1: Gpr::T5, rs2: Gpr::T0 }.encode()); // T4 = hi_gt OR lo_result
+                                    } else {
+                                        code.extend(Instruction::Or { rd: Gpr::T4, rs1: Gpr::T4, rs2: Gpr::T0 }.encode()); // T4 = hi_lt OR lo_result
+                                    }
+                                }
+                            }
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T4, imm: 0 }.encode());
                         } else {
-                            // Integer comparison path (unchanged).
+                            // 32-bit integer comparison path.
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
                             code.extend(emit_cmp_isel(kind, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
@@ -5792,8 +5885,23 @@ impl Backend for RiscV32Backend {
                                     if src_is_32bit {
                                         code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                     } else {
-                                        vuma_log!(warn, "riscv32: U64→FP cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
-                                        code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                        // U64 → F64: RV32 has no fcvt.d.lu.
+                                        // Split into hi:lo, convert each to double, combine:
+                                        //   F0 = fcvt.d.wu(hi) * 2^32 + fcvt.d.wu(lo)
+                                        code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, src, &vreg_stack_slots));
+                                        // F0 = fcvt.d.wu(T3) = hi as double
+                                        code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T3 }.encode());
+                                        // F1 = 2^32 as double (f64 bits = 0x41F0000000000000)
+                                        code.extend(ss_load_fpr_from_value(
+                                            Fpr::F1, &IRValue::Immediate(0x41F0000000000000),
+                                            &vreg_stack_slots, true, fp_scratch_off_0,
+                                        ));
+                                        // F0 = F0 * F1 = hi * 2^32
+                                        code.extend(Instruction::FmulD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                        // F1 = fcvt.d.wu(T2) = lo as double
+                                        code.extend(Instruction::FcvtDWU { rd: Fpr::F1, rs1: Gpr::T2 }.encode());
+                                        // F0 = F0 + F1 = hi * 2^32 + lo
+                                        code.extend(Instruction::FaddD { rd: Fpr::F0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
                                     }
                                     // Store f64 result: FSD F0 then LD T0
                                     code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
@@ -5828,12 +5936,49 @@ impl Backend for RiscV32Backend {
                                     Fpr::F0, src, &vreg_stack_slots, !src_is_f32, fp_scratch_off_0,
                                 ));
                                 if src_is_f32 {
+                                    // f32 → u32: direct fcvt.wu.s
                                     code.extend(Instruction::FcvtWUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                } else {
+                                } else if dst_is_32bit {
+                                    // f64 → u32: direct fcvt.wu.d
                                     code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
-                                }
-                                if !dst_is_32bit {
-                                    vuma_log!(warn, "riscv32: FP→U64 cast truncated to 32-bit (RV32 has no 64-bit FP conversion)");
+                                } else {
+                                    // f64 → u64: RV32 has no fcvt.lu.d.
+                                    // Branchless algorithm: split into hi:lo via division by 2^32.
+                                    //   F1 = F0 / 2^32
+                                    //   hi = fcvt.wu.d(F1)
+                                    //   F2 = fcvt.d.wu(hi) * 2^32
+                                    //   F3 = F0 - F2
+                                    //   lo = fcvt.wu.d(F3)
+                                    //   result = hi:lo
+                                    // Load 2^32 as double (0x41F0000000000000)
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F1, &IRValue::Immediate(0x41F0000000000000),
+                                        &vreg_stack_slots, true, fp_scratch_off_0,
+                                    ));
+                                    // F1 = F0 / 2^32
+                                    code.extend(Instruction::FdivD { rd: Fpr::F1, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    // T0 = hi = fcvt.wu.d(F1)
+                                    code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F1 }.encode());
+                                    // Save T0 (hi) to T3 — ss_load_fpr_from_value clobbers T0/T1.
+                                    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T0, imm: 0 }.encode());
+                                    // F1 = fcvt.d.wu(T0) = hi as double
+                                    code.extend(Instruction::FcvtDWU { rd: Fpr::F1, rs1: Gpr::T0 }.encode());
+                                    // F2 = 2^32 (reload — F1 was clobbered; also clobbers T0/T1)
+                                    code.extend(ss_load_fpr_from_value(
+                                        Fpr::F2, &IRValue::Immediate(0x41F0000000000000),
+                                        &vreg_stack_slots, true, fp_scratch_off_0,
+                                    ));
+                                    // F1 = F1 * F2 = hi * 2^32
+                                    code.extend(Instruction::FmulD { rd: Fpr::F1, rs1: Fpr::F1, rs2: Fpr::F2 }.encode());
+                                    // F2 = F0 - F1 = lo as double
+                                    code.extend(Instruction::FsubD { rd: Fpr::F2, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    // T2 = lo = fcvt.wu.d(F2)
+                                    code.extend(Instruction::FcvtWUD { rd: Gpr::T2, rs1: Fpr::F2 }.encode());
+                                    // Store lo (T2) to dst_offset, hi (T3) to dst_offset-4
+                                    code.extend(ss_store_to_slot(Gpr::T2, dst_offset));
+                                    code.extend(ss_store_to_slot(Gpr::T3, dst_offset - 4));
+                                    // T0 = lo (for the trailing ss_store_to_slot)
+                                    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
                                 }
                             }
                             CastKind::FloatToFloat => {
