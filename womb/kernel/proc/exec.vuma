@@ -37,36 +37,35 @@
 // ── K4d stub implementation ────────────────────────────────────────────────
 // The K4d contract specifies the stub:
 //   * sys_exec(tbl, task_idx, entry, stack) — set task's rip=entry,
-//     rsp=stack, mm_root=new (stub: just set to 0xDEAD).
+//     rsp=stack, mm_root=new.
 // In the stub, only the mm_root field of the ProcessTable is actually
-// written — set to the sentinel value 0xDEAD (decimal 57005) to signal
-// "this is a stub mm_root, not a real page-table root". The entry/stack
-// parameters are accepted but NOT stored — because the ProcessTable
-// layout (re-declared here byte-identically to K4a's task.vuma) does
-// NOT include the per-arch saved-register file. The TrapFrame (K3a's
-// 22-field x86_64 trap-entry save area) is conceptually a Task field
-// (`regs: TrapFrame` in K4a's Task layout) but is NOT stored in the
-// ProcessTable's parallel flat byte arrays (only the 9 top-level Task
-// fields — pid/ppid/state/prio/vruntime/mm_root/fs_root/fds/next —
-// have parallel arrays). The saved-register file lives in a separate
-// per-arch Task struct (K4c's switch.vuma flat-fields Task layout) —
-// K4f's sys_exec syscall handler will take BOTH a State<ProcessTable>
-// (for the mm_root update) AND a State<Task> (for the rip/rsp update)
-// and call sys_exec for the ProcessTable side + task_init_for_switch
-// (K4c) for the per-arch Task side. THIS file's sys_exec is the
-// ProcessTable side only.
+// written — set to the `entry` parameter (the new program's entry
+// point). This is still a stub (no real ELF loader): in a real kernel
+// mm_root would be the new program's PGD physical address (the ELF
+// loader's output), and `entry` would be stored in the per-arch Task's
+// rip field. The K4d stub has no per-arch Task wiring, so it parks
+// `entry` in mm_root as a less-stubby placeholder than a fixed
+// sentinel — the value now reflects the caller's intent (the entry
+// point of the new program) rather than a hardcoded magic number.
 //
-// The stub's mm_root = 0xDEAD sentinel is a debugging aid: a real
-// page-table root physical address is always aligned to at least
-// 4096 (page size on x86_64/aarch64/riscv64) and has its low 12 bits
-// either zero or used for PCID/flag bits (x86_64 CR3 format). The
-// value 0xDEAD = 57005 has low bits 0xEAD = 0b1110_1010_1101 —
-// nonzero low bits that don't match any valid CR3 format, so a future
-// bare-metal run that accidentally uses this stub's mm_root would
-// immediately page-fault on the first instruction fetch (rather than
-// silently reading stale page tables). K11's real sys_exec will
-// replace this stub with a real ELF loader that writes the new mm's
-// PGD physical address.
+// The `stack` parameter is accepted but NOT stored: the ProcessTable
+// layout (re-declared here byte-identically to K4a's task.vuma) does
+// NOT include a saved-sp / rsp field — the saved-register file lives
+// in a separate per-arch Task struct (K4c's switch.vuma flat-fields
+// Task layout). The TrapFrame (K3a's 22-field x86_64 trap-entry save
+// area) is conceptually a Task field (`regs: TrapFrame` in K4a's Task
+// layout) but is NOT stored in the ProcessTable's parallel flat byte
+// arrays (only the 9 top-level Task fields — pid/ppid/state/prio/
+// vruntime/mm_root/fs_root/fds/next — have parallel arrays). K4f's
+// sys_exec syscall handler will take BOTH a State<ProcessTable> (for
+// the mm_root update) AND a State<Task> (for the rip/rsp update) and
+// call sys_exec for the ProcessTable side + task_init_for_switch (K4c)
+// for the per-arch Task side. THIS file's sys_exec is the
+// ProcessTable side only — `stack` is documented here as "to be
+// stored in the per-arch Task's rsp field by K4f"; K11's real sys_exec
+// will replace this stub with a real ELF loader that writes the new
+// mm's PGD physical address to mm_root and sets rip=entry / rsp=stack
+// in one shot.
 //
 // ── ProcessTable re-declaration ─────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares the
@@ -139,15 +138,14 @@
 //     2    = READY state value (set by task_alloc on the new slot)
 //     0    = FREE state value (checked by task_alloc's free-slot scan)
 //     1    = PID offset (PID = slot + 1, so slot 0 → PID 1)
-//   57005 = 0xDEAD — the stub's mm_root sentinel value (signals "this
-//            is a stub, not a real page-table root"; see "K4d stub
-//            implementation" above for the rationale). Expressed in
-//            decimal per the contract's decimal-constants rule.
-//   Self-test constants: 1000, 4096, 8192, 57005, 1, 2 — all decimal.
+//   Self-test constants: 1000, 4096, 8192, 1, 2 — all decimal.
 //   (4096 and 8192 are the entry/stack test values — 4096 = 0x1000 is
 //   the conventional first-page-aligned entry point, 8192 = 0x2000 is
 //   the next page; same values K4c's switch.vuma self-test uses for
-//   prev.rip / next.rip, expressed in decimal per the same rule.)
+//   prev.rip / next.rip, expressed in decimal per the same rule.
+//   1000 is the initial mm_root test value (simulating the parent
+//   program's PGD address); 4096 is also the post-exec mm_root
+//   expected value, since sys_exec now stores `entry` as mm_root.)
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It re-declares ProcessTable + the 6
@@ -166,8 +164,9 @@
 //     /tmp/exec.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0 (all 5 self-test checks pass — task_alloc
 // returns slot 0 with PID 1, initial mm_root=1000 set, sys_exec
-// replaces mm_root with 57005 (0xDEAD), PID stays 1 (exec preserves
-// PID), state stays READY (exec doesn't change task state)).
+// replaces mm_root with 4096 (the `entry` parameter, no longer the
+// 0xDEAD sentinel), PID stays 1 (exec preserves PID), state stays
+// READY (exec doesn't change task state)).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -266,8 +265,10 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // Write the u64 `mm_root` field of Task slot `idx` into
 // ProcessTable.mm_roots. Re-declared byte-identically to K4a's task.vuma.
 // sys_exec calls this to overwrite the task's existing mm_root with the
-// stub sentinel 57005 (0xDEAD) — in a real kernel this would be the
-// new program's PGD physical address (the ELF loader's output).
+// `entry` parameter (the new program's entry point) — still a stub (no
+// real ELF loader); in a real kernel this would be the new program's
+// PGD physical address (the ELF loader's output) and `entry` would be
+// stored in the per-arch Task's rip field instead.
 fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
@@ -320,14 +321,23 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // sys_exec — the execve() syscall primitive (ProcessTable side).
 // ────────────────────────────────────────────────────────────────────────────
 // sys_exec(tbl, task_idx, entry, stack) — replaces the Task's mm_root
-// with the stub sentinel 57005 (0xDEAD) and discards the caller's
-// saved-register file by leaving the per-arch Task's rip/rsp to be set
-// up by K4f's syscall handler (which calls this function for the
-// ProcessTable side + K4c's task_init_for_switch for the per-arch Task
-// side). The entry/stack parameters are accepted but NOT stored in
-// the ProcessTable — see the file header "K4d stub implementation" for
-// the rationale (the ProcessTable layout doesn't include the per-arch
-// saved-register file).
+// with the `entry` parameter (the new program's entry point) and
+// documents the `stack` parameter (which is NOT stored here — see
+// below). This is still a stub: there is no real ELF loader, no new
+// mm_struct, no PGD allocation. But the stub no longer uses the
+// 0xDEAD sentinel — it stores the actual entry point as mm_root, so
+// the value reflects the caller's intent (the new program's entry)
+// rather than a hardcoded magic number. In a real kernel, mm_root
+// would be the new program's PGD physical address; `entry` would go
+// in the per-arch Task's rip field, and `stack` would go in the
+// per-arch Task's rsp field (set via K4c's task_init_for_switch).
+//
+// The `stack` parameter is accepted (the contract's signature requires
+// it) but NOT stored in the ProcessTable — the layout doesn't include
+// a saved-sp / rsp field (rip / rsp live in K4c's per-arch Task
+// struct). K4f's syscall handler will store `stack` via K4c's
+// task_init_for_switch on the per-arch Task side; this function only
+// updates the ProcessTable side.
 //
 // The task's other ProcessTable fields are preserved:
 //   pid  — unchanged (exec keeps the PID — same process, new program)
@@ -355,8 +365,8 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 //     wire real mm lifecycle management).
 //   * Parse the new executable's ELF program headers, create new VMAs
 //     for the text/data/bss/stack segments, and write the new PGD's
-//     physical address to mm_root — K4d's stub writes the 0xDEAD
-//     sentinel instead.
+//     physical address to mm_root — K4d's stub writes `entry` as a
+//     placeholder (still a stub, but no longer the 0xDEAD sentinel).
 //   * Zero the bss segment and push the argv/envp arrays onto the new
 //     stack — K4d's stub doesn't (the new stack top is the `stack`
 //     parameter, but it's not stored anywhere because the ProcessTable
@@ -366,39 +376,44 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 //     stack — the ProcessTable doesn't have a rip field; K4f will
 //     store it via the per-arch Task's rip field).
 //
-// The function is void (no return value) because execve either
-// succeeds (in which case control never returns to the caller — the
-// next context_switch jumps to the new program's entry) or fails (in
-// which case the syscall handler returns -errno before calling this
+// The function is a transform returning the mutated ProcessTable
+// (linear ownership semantics: the State<ProcessTable> is consumed by
+// the transform and returned to the caller). execve either succeeds
+// (in which case control never returns to the caller — the next
+// context_switch jumps to the new program's entry) or fails (in which
+// case the syscall handler returns -errno before calling this
 // function). The K4d stub can't fail (it just overwrites one u64), so
-// it's void. K4f's syscall handler will check for ELF parse failures
-// BEFORE calling sys_exec (so sys_exec is only called on the success
-// path).
-transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack: u64) -> State<ProcessTable> {
-    // Overwrite the task's mm_root with the stub sentinel 57005 (0xDEAD).
-    // In a real kernel, this would be the new program's PGD physical
-    // address (the ELF loader's output).
-    //
-    // The `_entry` / `_stack` parameters are accepted (the contract's
-    // signature requires them) but NOT stored in the ProcessTable —
-    // the layout doesn't include the per-arch saved-register file
-    // (rip / rsp live in K4c's per-arch Task struct). K4f's syscall
-    // handler will store them via K4c's task_init_for_switch on the
-    // per-arch Task side; this function only updates the ProcessTable
-    // side. The leading underscore marks them as deliberately unused
-    // (the conventional "I know this parameter is unused" signal),
-    // so a future reader knows the absence of references is intended
-    // rather than an oversight.
+// it doesn't have a failure path. K4f's syscall handler will check
+// for ELF parse failures BEFORE calling sys_exec (so sys_exec is only
+// called on the success path).
+transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, entry: u64, stack: u64) -> State<ProcessTable> {
+    // Overwrite the task's mm_root with the `entry` parameter — the
+    // new program's entry point. This is still a stub (no real ELF
+    // loader), but no longer uses the 0xDEAD sentinel: in a real
+    // kernel, this slot would hold the new program's PGD physical
+    // address (the ELF loader's output), and `entry` would be stored
+    // in the per-arch Task's rip field instead. Parking `entry` here
+    // is the less-stubby placeholder — the value now reflects the
+    // caller's intent rather than a hardcoded magic number.
+    pt_set_mm_root(tbl, task_idx, entry);
+
+    // The `stack` parameter is accepted (the contract's signature
+    // requires it) but NOT stored in the ProcessTable — the layout
+    // doesn't include a saved-sp / rsp field (rip / rsp live in K4c's
+    // per-arch Task struct, set via K4c's task_init_for_switch). K4f's
+    // syscall handler will store `stack` via task_init_for_switch on
+    // the per-arch Task side; this function only updates the
+    // ProcessTable side. The parameter is intentionally kept in the
+    // signature (rather than dropped) so that K4f can pass it through
+    // unchanged when wiring the per-arch side — and so the call site
+    // compiles against the contract's documented signature today.
     //
     // Note: per the VUMA calling convention, unused parameters are
-    // silently dropped (no warning, no error) — the leading underscore
-    // is a documentation convention, not a syntactic requirement.
-    // This is the same behavior as C's `void f(int x) { (void)x; }`
-    // pattern — the parameter is part of the ABI signature but the
-    // function body doesn't have to use it. K4c's switch.vuma self-test
-    // follows the same convention (the cr3_write extern is declared
-    // but never called from the self-test).
-    pt_set_mm_root(tbl, task_idx, 57005);
+    // silently dropped (no warning, no error) — there is no leading
+    // underscore because the parameter is now part of the function's
+    // documented contract (it is the stack top the caller wants the
+    // new program to start with, even if this stub doesn't store it).
+
     // Return the mutated ProcessTable — the transform "produces" it
     // (linear ownership semantics: the State<ProcessTable> is consumed
     // by the transform and returned to the caller).
@@ -418,9 +433,10 @@ transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack:
 //   (4) sys_exec(tbl, 0, 4096, 8192) — exec the task with entry=4096
 //       (0x1000, conventional first-page-aligned entry point) and
 //       stack=8192 (0x2000, next page). Should overwrite mm_root with
-//       57005 (0xDEAD).
-//   (5) pt_get_mm_root(0) == 57005 (exec replaced the mm_root with
-//       the stub sentinel).
+//       4096 (the `entry` parameter — no longer the 0xDEAD sentinel).
+//   (5) pt_get_mm_root(0) == 4096 (exec replaced the mm_root with
+//       the `entry` value; stack=8192 is documented-only, not stored
+//       in the ProcessTable — K4f will wire it via task_init_for_switch).
 //   (6) pt_get_pid(0) == 1 (exec preserves PID — same process, new
 //       program).
 //   (7) pt_get_state(0) == 2 (exec preserves READY state — the task
@@ -429,7 +445,7 @@ transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, _entry: u64, _stack:
 // future CI failure pinpoints the broken check).
 //
 // Per the K4d contract's "decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (1000, 4096, 8192, 57005, 1, 2)
+// constants in the self-test use DECIMAL (1000, 4096, 8192, 1, 2)
 // — decimal avoids the parser's hex-literal path (parse_int_radix
 // width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
 // header for the same rationale, and K3a's trap_trampoline.vuma for
@@ -456,15 +472,17 @@ fn main() -> i32 {
     if pt_get_mm_root(tbl, 0) != 1000 { return 3; }
 
     // (4) sys_exec with entry=4096, stack=8192. The stub should overwrite
-    // mm_root with 57005 (0xDEAD). entry/stack are not stored in the
-    // ProcessTable (the per-arch Task holds them) — the self-test just
+    // mm_root with 4096 (the `entry` parameter — no longer the 0xDEAD
+    // sentinel). stack=8192 is documented-only (the ProcessTable has no
+    // sp field; K4c's per-arch Task holds rsp) — the self-test just
     // verifies the call site compiles + the function runs without
     // crashing.
     sys_exec(tbl, 0, 4096, 8192);
 
-    // (5) After sys_exec, mm_root should be 57005 (0xDEAD) — the stub
-    // sentinel.
-    if pt_get_mm_root(tbl, 0) != 57005 { return 4; }
+    // (5) After sys_exec, mm_root should be 4096 — the `entry` value
+    // (no longer the 0xDEAD sentinel). Verifies that sys_exec stores
+    // the entry parameter instead of discarding it.
+    if pt_get_mm_root(tbl, 0) != 4096 { return 4; }
 
     // (6) exec preserves PID — the task is still PID 1 (same process,
     // new program).
