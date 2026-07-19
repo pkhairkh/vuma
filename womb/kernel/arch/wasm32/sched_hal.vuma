@@ -163,12 +163,17 @@ layout TrapFrame = {
 
 // Runqueue: head/tail are Task indices (0..255) or 256 (empty). count is
 // the number of tasks currently in the runqueue (0..256). The next-link
-// field lives in ProcessTable.nexts (not here). Re-declared byte-
-// identically to R4a+b's scheduler.vuma.
+// field lives in ProcessTable.nexts (not here). need_resched is the
+// W11S2 preemption flag (set by sched_tick when the current task's
+// vruntime drifts > PREEMPT_THRESHOLD above the runqueue min — unused
+// on wasm32 since wasm is cooperative-only, but the field is present
+// to keep this layout byte-identical to R4a+b's scheduler.vuma).
+// Re-declared byte-identically to R4a+b's scheduler.vuma.
 layout Runqueue = {
     head: u32,
     tail: u32,
     count: u32,
+    need_resched: u32,
 }
 
 // ProcessTable: re-declared byte-identically to K4a's task.vuma and
