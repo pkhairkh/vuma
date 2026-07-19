@@ -4072,6 +4072,10 @@ fn scg_type_to_name(ty: &ScgType) -> &'static str {
         ScgType::Void => "void",
         ScgType::F32 => "f32",
         ScgType::F64 => "f64",
+        // Wave 1c: Channel<T> — opaque IPC handle.  Use "channel" as the
+        // canonical name (the inner payload type is not part of the runtime
+        // representation).
+        ScgType::Channel(_) => "channel",
     }
 }
 
@@ -8303,6 +8307,18 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
         },
         Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
         Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
+        // Wave 1c: Bridge `Channel<T>` through the pipeline.  Channel values
+        // are opaque IPC handles — pointer-sized — but we preserve the inner
+        // payload type via `ScgType::Channel` so downstream stages can
+        // recover it when lowering send/recv operations.
+        Some(vuma_parser::ast::Type::Channel(inner)) => {
+            // `inner: &Box<Type>` (match ergonomics on `&Option<Type>`).
+            // Recursively bridge the payload type so ScgType::Channel
+            // carries the inner type for downstream type-checking.
+            ScgType::Channel(Box::new(bridge_type_to_codegen_scg(&Some(
+                inner.as_ref().clone(),
+            ))))
+        }
         // FIX1: a `State<L>` value is represented at runtime as a pointer
         // to a stack-allocated buffer (see `state_new` lowering →
         // `AllocationNode::Stack` with `ty: ScgType::Ptr`). Mapping
@@ -8333,6 +8349,12 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
             _ => vuma_codegen::ir::IRType::U64,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => vuma_codegen::ir::IRType::U64,
+        // Wave 1c: `Channel<T>` → `IRType::Channel` (pointer-sized opaque
+        // capability handle; inner payload type carried for type-checking
+        // only).
+        Type::Channel(inner) => {
+            vuma_codegen::ir::IRType::Channel(Box::new(bridge_type_to_ir_type(inner)))
+        }
         _ => vuma_codegen::ir::IRType::U64,
     }
 }
@@ -8350,6 +8372,9 @@ fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
             _ => 8,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit) —
+        // same as Ptr.
+        Type::Channel(_) => 8,
         Type::Array { element, size } => bridge_type_size(element) * (*size as u64),
         _ => 8,
     }
@@ -8381,6 +8406,8 @@ fn bridge_type_size_with_layouts(
             }
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit).
+        Type::Channel(_) => 8,
         Type::Array { element, size } => {
             bridge_type_size_with_layouts(element, layout_sizes) * (*size as u64)
         }
@@ -8401,6 +8428,9 @@ fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
             _ => 8,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
+        // Wave 1c: `Channel<T>` alignment is pointer-sized (8 on 64-bit, 4 on
+        // 32-bit) — same as Ptr.
+        Type::Channel(_) => 8,
         Type::Array { element, .. } => bridge_type_align(element),
         _ => 8,
     }

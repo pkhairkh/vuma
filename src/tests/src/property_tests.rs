@@ -1003,6 +1003,8 @@ fn prop_abi_varying_arg_counts_compile() {
                         functions: vec![allocated],
                         total_code_size: 0,
                         total_data_size: 0,
+                    rodata_data: Vec::new(),
+                    function_names: std::collections::HashSet::new(),
                     };
                     // Encoding should also not panic.
                     let encode_result = backend.encode_program(&program);
@@ -1036,11 +1038,15 @@ fn prop_abi_same_arg_count_same_size() {
                     functions: vec![a],
                     total_code_size: 0,
                     total_data_size: 0,
+                rodata_data: Vec::new(),
+                function_names: std::collections::HashSet::new(),
                 };
                 let prog_b = AllocatedProgram {
                     functions: vec![b],
                     total_code_size: 0,
                     total_data_size: 0,
+                rodata_data: Vec::new(),
+                function_names: std::collections::HashSet::new(),
                 };
                 if let (Ok(bin_a), Ok(bin_b)) =
                     (backend.encode_program(&prog_a), backend.encode_program(&prog_b))
@@ -1555,6 +1561,8 @@ fn fuzz_arg_count_edge_cases() {
                         functions: vec![allocated],
                         total_code_size: 0,
                         total_data_size: 0,
+                    rodata_data: Vec::new(),
+                    function_names: std::collections::HashSet::new(),
                     };
                     let encode_result = backend.encode_program(&program);
                     assert!(

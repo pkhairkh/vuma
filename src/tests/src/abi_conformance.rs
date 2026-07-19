@@ -733,6 +733,8 @@ fn test_all_backends_full_program() {
             functions: vec![af1, af2],
             total_code_size: 0,
             total_data_size: 0,
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
         };
 
         let result = backend.encode_program(&program);

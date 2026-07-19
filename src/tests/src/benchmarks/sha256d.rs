@@ -131,6 +131,8 @@ fn benchmark_backend(scg: &Scg, kind: BackendKind, name: &str) -> Option<Benchma
             functions: allocated,
             total_code_size: 0,
             total_data_size: 0,
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
         };
         backend.encode_program(&prog).map(|b| b.len()).unwrap_or(0)
     } else {

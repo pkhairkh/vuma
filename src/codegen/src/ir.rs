@@ -94,6 +94,13 @@ pub enum IRType {
         /// Number of variants.
         variant_count: usize,
     },
+    /// Wave 1: a typed channel handle `Channel<T>`.  The inner type is the
+    /// message payload type.  Channels are pointer-sized opaque capability
+    /// handles (4 bytes on 32-bit targets, 8 bytes on 64-bit targets) — the
+    /// same size as `Ptr` — and are passed in general-purpose registers under
+    /// AAPCS64.  The inner type is carried for type-checking only; it does
+    /// not affect the runtime layout.
+    Channel(Box<IRType>),
 }
 
 impl IRType {
@@ -132,7 +139,8 @@ impl IRType {
             | IRType::F32
             | IRType::F64
             | IRType::Ptr
-            | IRType::Func => true,
+            | IRType::Func
+            | IRType::Channel(_) => true,
             IRType::Void => false,
             IRType::Struct { fields, .. } => size_of(self) <= 16 && !fields.is_empty(),
             IRType::Array { .. } => size_of(self) <= 16,
@@ -212,6 +220,7 @@ impl fmt::Display for IRType {
             IRType::TaggedUnion { name, .. } => {
                 write!(f, "enum {}", name)
             }
+            IRType::Channel(inner) => write!(f, "Channel<{}>", inner),
         }
     }
 }
@@ -274,6 +283,10 @@ pub fn size_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
                 total
             }
         }
+        // Channel<T>: pointer-sized opaque capability handle.  The inner
+        // payload type T is for static type-checking only — it does not
+        // contribute to the runtime size.
+        IRType::Channel(_) => ptr_width,
     }
 }
 
@@ -311,6 +324,9 @@ pub fn alignment_of_with_ptr_width(t: &IRType, ptr_width: usize) -> usize {
             let tag_align = alignment_of_with_ptr_width(tag_type, ptr_width);
             tag_align.max(4)
         }
+        // Channel<T>: pointer-sized opaque handle, so its alignment matches
+        // the target pointer width.
+        IRType::Channel(_) => ptr_width,
     }
 }
 
@@ -407,6 +423,8 @@ pub fn classify_arg(t: &IRType) -> ArgClass {
                 }
             }
         }
+        // Channel<T>: pointer-sized opaque handle passed in an X register.
+        IRType::Channel(_) => ArgClass::Integer,
     }
 }
 
@@ -2774,6 +2792,60 @@ mod tests {
         assert_eq!(size_of_with_ptr_width(&IRType::Ptr, 8), 8); // 64-bit target
         assert_eq!(size_of_with_ptr_width(&IRType::Func, 4), 4);
         assert_eq!(size_of_with_ptr_width(&IRType::I32, 4), 4); // integers unchanged
+
+        // Wave 1a: Channel<T> is pointer-sized.
+        assert_eq!(size_of(&IRType::Channel(Box::new(IRType::I32))), 8);
+        assert_eq!(size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 4), 4);
+        assert_eq!(size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 8), 8);
+        // Inner payload type does not affect size.
+        assert_eq!(
+            size_of(&IRType::Channel(Box::new(IRType::I8))),
+            size_of(&IRType::Channel(Box::new(IRType::I64)))
+        );
+        assert_eq!(
+            size_of(&IRType::Channel(Box::new(IRType::I32))),
+            size_of(&IRType::Ptr)
+        );
+
+        // Alignment matches pointer width.
+        assert_eq!(alignment_of(&IRType::Channel(Box::new(IRType::I32))), 8);
+        assert_eq!(
+            alignment_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 4),
+            4
+        );
+    }
+
+    #[test]
+    fn irtype_channel_display_and_classify() {
+        // Display: Channel<inner>
+        assert_eq!(
+            format!("{}", IRType::Channel(Box::new(IRType::I32))),
+            "Channel<i32>"
+        );
+        assert_eq!(
+            format!("{}", IRType::Channel(Box::new(IRType::Ptr))),
+            "Channel<ptr>"
+        );
+        assert_eq!(
+            format!("{}", IRType::Channel(Box::new(IRType::F64))),
+            "Channel<f64>"
+        );
+        // Nested.
+        assert_eq!(
+            format!(
+                "{}",
+                IRType::Channel(Box::new(IRType::Channel(Box::new(IRType::I32))))
+            ),
+            "Channel<Channel<i32>>"
+        );
+
+        // Channels are register-passable (pointer-sized).
+        assert!(IRType::Channel(Box::new(IRType::I32)).is_register_passable());
+        // Classify as Integer (X register under AAPCS64).
+        assert_eq!(
+            classify_arg(&IRType::Channel(Box::new(IRType::I32))),
+            ArgClass::Integer
+        );
     }
 
     #[test]

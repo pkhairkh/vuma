@@ -179,6 +179,8 @@ fn compile_scg_for_backend(backend: &dyn Backend, scg: &Scg, label: &str) -> Vec
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -422,6 +424,8 @@ fn test_full_pipeline_sha256d_aarch64() {
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     let binary = backend.encode_program(&program).expect("AArch64 encode should succeed");
@@ -504,6 +508,8 @@ fn test_full_pipeline_sha256d_all_backends() {
             functions: allocated_functions,
             total_code_size,
             total_data_size: 0,
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
         };
 
         match backend.encode_program(&program) {
