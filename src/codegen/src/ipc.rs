@@ -356,14 +356,14 @@ pub mod capability {
         Channel(u64),
     }
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct MemoryPermissions {
         pub read: bool,
         pub write: bool,
         pub execute: bool,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct CapabilityToken {
         pub id: u128,
         pub source_pid: u64,
@@ -376,9 +376,162 @@ pub mod capability {
         pub signature: [u8; 32],
     }
 
-    pub const CAPABILITY_TOKEN_SIZE: usize = 96;
+    // ── Wire format (Wave 11) ──────────────────────────────────────────
+    //
+    // The on-the-wire layout of a CapabilityToken is a fixed-size record
+    // (CAPABILITY_TOKEN_SIZE bytes, little-endian) so the L1 framer can
+    // slice `cap_count` tokens out of a frame by simple arithmetic:
+    //
+    //   [  0.. 16] id              u128 LE
+    //   [ 16.. 24] source_pid      u64  LE
+    //   [ 24.. 32] target_pid      u64  LE
+    //   [ 32.. 40] created_at      u64  LE
+    //   [ 40.. 48] expires_at      u64  LE
+    //   [ 48.. 80] signature       [u8; 32]
+    //   [    80 ] delegation_depth u8
+    //   [    81 ] read             u8 (0/1)
+    //   [    82 ] write            u8 (0/1)
+    //   [    83 ] execute          u8 (0/1)
+    //   [ 84..160] resource        RESOURCE_FIELD_SIZE bytes (see Resource::encode)
+    //
+    // The resource field is itself a tagged fixed-size buffer so that all
+    // five Resource variants round-trip through a fixed-size slot — the
+    // previous implementation dropped `resource` on encode and substituted
+    // `Resource::Memory(0, 0)` on decode (a lossy placeholder).
+
+    pub const CAPABILITY_TOKEN_SIZE: usize = 160;
+    pub const RESOURCE_OFFSET: usize = 84;
+    pub const RESOURCE_FIELD_SIZE: usize = 76; // 84..160
+    pub const MAX_RESOURCE_STRING: usize = 64; // cap for File / Network host strings
+
+    const TAG_FILE: u8 = 1;
+    const TAG_NETWORK: u8 = 2;
+    const TAG_MEMORY: u8 = 3;
+    const TAG_MMIO: u8 = 4;
+    const TAG_CHANNEL: u8 = 5;
+    // Network port is fixed at offset 66 within the resource field (after
+    // the 64-byte string slot + 2-byte tag/len header), so encode/decode
+    // don't need to walk a length prefix to find it.
+    const NETWORK_PORT_OFFSET: usize = 66;
+
+    impl Resource {
+        /// Serialise the resource into a fixed-width
+        /// `RESOURCE_FIELD_SIZE`-byte buffer. String variants are truncated
+        /// to `MAX_RESOURCE_STRING` bytes; the truncation is recorded in
+        /// the length byte so the decode side recovers exactly the bytes
+        /// that were stored (no silent re-padding).
+        pub fn encode(&self) -> [u8; RESOURCE_FIELD_SIZE] {
+            let mut buf = [0u8; RESOURCE_FIELD_SIZE];
+            match self {
+                Resource::File(s) => {
+                    buf[0] = TAG_FILE;
+                    let bytes = s.as_bytes();
+                    let len = bytes.len().min(MAX_RESOURCE_STRING);
+                    buf[1] = len as u8;
+                    buf[2..2 + len].copy_from_slice(&bytes[..len]);
+                }
+                Resource::Network(s, port) => {
+                    buf[0] = TAG_NETWORK;
+                    let bytes = s.as_bytes();
+                    let len = bytes.len().min(MAX_RESOURCE_STRING);
+                    buf[1] = len as u8;
+                    buf[2..2 + len].copy_from_slice(&bytes[..len]);
+                    buf[NETWORK_PORT_OFFSET..NETWORK_PORT_OFFSET + 2]
+                        .copy_from_slice(&port.to_le_bytes());
+                }
+                Resource::Memory(base, size) => {
+                    buf[0] = TAG_MEMORY;
+                    buf[1..9].copy_from_slice(&base.to_le_bytes());
+                    buf[9..17].copy_from_slice(&size.to_le_bytes());
+                }
+                Resource::Mmio(base, size) => {
+                    buf[0] = TAG_MMIO;
+                    buf[1..9].copy_from_slice(&base.to_le_bytes());
+                    buf[9..17].copy_from_slice(&size.to_le_bytes());
+                }
+                Resource::Channel(id) => {
+                    buf[0] = TAG_CHANNEL;
+                    buf[1..9].copy_from_slice(&id.to_le_bytes());
+                }
+            }
+            buf
+        }
+
+        /// Parse a resource from a buffer that is at least
+        /// `RESOURCE_FIELD_SIZE` bytes long. Returns an error string on
+        /// unknown tag, truncated UTF-8, or short buffer.
+        pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+            if bytes.len() < RESOURCE_FIELD_SIZE {
+                return Err(format!(
+                    "resource field too short: {} < {}",
+                    bytes.len(),
+                    RESOURCE_FIELD_SIZE
+                ));
+            }
+            let tag = bytes[0];
+            match tag {
+                TAG_FILE => {
+                    let len = bytes[1] as usize;
+                    if len > MAX_RESOURCE_STRING {
+                        return Err(format!(
+                            "file string length {} exceeds {}",
+                            len, MAX_RESOURCE_STRING
+                        ));
+                    }
+                    let s = std::str::from_utf8(&bytes[2..2 + len])
+                        .map_err(|e| format!("invalid utf-8 in File resource: {}", e))?;
+                    Ok(Resource::File(s.to_string()))
+                }
+                TAG_NETWORK => {
+                    let len = bytes[1] as usize;
+                    if len > MAX_RESOURCE_STRING {
+                        return Err(format!(
+                            "network host length {} exceeds {}",
+                            len, MAX_RESOURCE_STRING
+                        ));
+                    }
+                    let s = std::str::from_utf8(&bytes[2..2 + len])
+                        .map_err(|e| format!("invalid utf-8 in Network resource: {}", e))?;
+                    let port = u16::from_le_bytes(
+                        bytes[NETWORK_PORT_OFFSET..NETWORK_PORT_OFFSET + 2]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    Ok(Resource::Network(s.to_string(), port))
+                }
+                TAG_MEMORY => {
+                    let base = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
+                    let size = u64::from_le_bytes(bytes[9..17].try_into().unwrap());
+                    Ok(Resource::Memory(base, size))
+                }
+                TAG_MMIO => {
+                    let base = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
+                    let size = u64::from_le_bytes(bytes[9..17].try_into().unwrap());
+                    Ok(Resource::Mmio(base, size))
+                }
+                TAG_CHANNEL => {
+                    let id = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
+                    Ok(Resource::Channel(id))
+                }
+                other => Err(format!("unknown resource tag: {}", other)),
+            }
+        }
+    }
+
+    impl MemoryPermissions {
+        /// True iff every permission set in `required` is also set in
+        /// `self`. Used by [`verify_capability`] to enforce least-privilege
+        /// checks: the token must grant *at least* the requested rights.
+        pub fn contains(&self, required: &MemoryPermissions) -> bool {
+            (!required.read || self.read)
+                && (!required.write || self.write)
+                && (!required.execute || self.execute)
+        }
+    }
 
     impl CapabilityToken {
+        /// Serialise the token to a fixed-width `CAPABILITY_TOKEN_SIZE`
+        /// byte vector (little-endian). Inverse of [`decode`].
         pub fn encode(&self) -> Vec<u8> {
             let mut buf = Vec::with_capacity(CAPABILITY_TOKEN_SIZE);
             buf.extend_from_slice(&self.id.to_le_bytes());
@@ -391,16 +544,32 @@ pub mod capability {
             buf.push(if self.permissions.read { 1 } else { 0 });
             buf.push(if self.permissions.write { 1 } else { 0 });
             buf.push(if self.permissions.execute { 1 } else { 0 });
+            buf.extend_from_slice(&self.resource.encode());
+            // Defensive: pad (or trim) to the advertised size in case the
+            // layout above ever drifts away from CAPABILITY_TOKEN_SIZE.
             while buf.len() < CAPABILITY_TOKEN_SIZE {
                 buf.push(0);
             }
+            buf.truncate(CAPABILITY_TOKEN_SIZE);
             buf
         }
 
+        /// Parse a token from a byte slice. Requires at least
+        /// `CAPABILITY_TOKEN_SIZE` bytes; extra trailing bytes are ignored
+        /// (so callers can hand in a slice of a larger frame without first
+        /// trimming it). Returns an error string on short buffer or
+        /// malformed resource field.
         pub fn decode(bytes: &[u8]) -> Result<Self, String> {
             if bytes.len() < CAPABILITY_TOKEN_SIZE {
-                return Err("token too short".into());
+                return Err(format!(
+                    "token too short: {} < {}",
+                    bytes.len(),
+                    CAPABILITY_TOKEN_SIZE
+                ));
             }
+            let resource = Resource::decode(
+                &bytes[RESOURCE_OFFSET..RESOURCE_OFFSET + RESOURCE_FIELD_SIZE],
+            )?;
             Ok(Self {
                 id: u128::from_le_bytes(bytes[0..16].try_into().unwrap()),
                 source_pid: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
@@ -414,7 +583,7 @@ pub mod capability {
                     write: bytes[82] != 0,
                     execute: bytes[83] != 0,
                 },
-                resource: Resource::Memory(0, 0), // placeholder
+                resource,
             })
         }
     }
@@ -445,6 +614,224 @@ pub mod capability {
             if now > token.expires_at { return false; }
             true
         }
+    }
+
+    // ── Grant / Verify (Wave 11) ───────────────────────────────────────
+    //
+    // `grant_capability` mints a fresh token whose `signature` field is a
+    // deterministic 32-byte digest of every other field in the token,
+    // keyed by `signing_key`. `verify_capability` recomputes that digest
+    // and rejects the token if any field has been tampered with, if the
+    // token is outside its validity window, if the resource doesn't match
+    // the one the caller expected, or if the token's permissions don't
+    // cover the ones the caller needs.
+    //
+    // SECURITY NOTE: the digest is built from FNV-1a, a *non-cryptographic*
+    // hash. It is NOT HMAC, NOT a MAC, and NOT resistant to a determined
+    // adversary with access to `signing_key` (or to the source). It exists
+    // so that grant/verify round-trips work end-to-end without pulling in
+    // a crypto crate, and so that accidental byte-flips in transit are
+    // detected. A production deployment MUST replace `compute_signature`
+    // with HMAC-SHA256 (or BLAKE2s) over a real per-domain secret key.
+
+    /// Error returned by [`verify_capability`]. Each variant names the
+    /// specific check that failed so callers can distinguish "tampered
+    /// token" from "expired token" from "wrong resource" from
+    /// "insufficient permissions" without parsing a string.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CapabilityError {
+        /// The recomputed signature does not match the one stored in the
+        /// token — at least one field has been altered since grant time.
+        InvalidSignature,
+        /// `now` is outside `[created_at, expires_at]`.
+        Expired { now: u64, created_at: u64, expires_at: u64 },
+        /// `token.resource` does not equal the resource the caller asked
+        /// to be bound to. Carries both sides for diagnostics.
+        ResourceMismatch { expected: Resource, actual: Resource },
+        /// The token's permissions are missing one or more of the
+        /// required bits.
+        InsufficientPermissions {
+            required: MemoryPermissions,
+            actual: MemoryPermissions,
+        },
+    }
+
+    impl std::fmt::Display for CapabilityError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                CapabilityError::InvalidSignature => {
+                    write!(f, "invalid capability signature")
+                }
+                CapabilityError::Expired { now, created_at, expires_at } => write!(
+                    f,
+                    "capability expired: now={} not in [{}, {}]",
+                    now, created_at, expires_at
+                ),
+                CapabilityError::ResourceMismatch { expected, actual } => write!(
+                    f,
+                    "capability resource mismatch: expected {:?}, got {:?}",
+                    expected, actual
+                ),
+                CapabilityError::InsufficientPermissions { required, actual } => write!(
+                    f,
+                    "insufficient permissions: required {:?}, got {:?}",
+                    required, actual
+                ),
+            }
+        }
+    }
+
+    impl std::error::Error for CapabilityError {}
+
+    /// FNV-1a 64-bit over `data`. Pure, allocation-free, deterministic.
+    /// Used as the building block for [`compute_signature`].
+    fn fnv1a_64(data: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in data {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Serialise every field of `token` *except* `signature` into a flat
+    /// byte vector, in the same order `encode()` writes them on the wire.
+    /// The signature is excluded so that recomputing it over the
+    /// just-minted token is well-defined (otherwise we'd be hashing the
+    /// empty `[0u8; 32]` placeholder, which would make the digest useless
+    /// for detecting post-grant tampering of the signature field itself).
+    fn signature_input(token: &CapabilityToken, signing_key: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(256);
+        buf.extend_from_slice(signing_key);
+        buf.extend_from_slice(&token.id.to_le_bytes());
+        buf.extend_from_slice(&token.source_pid.to_le_bytes());
+        buf.extend_from_slice(&token.target_pid.to_le_bytes());
+        buf.extend_from_slice(&token.created_at.to_le_bytes());
+        buf.extend_from_slice(&token.expires_at.to_le_bytes());
+        buf.push(token.delegation_depth);
+        buf.push(if token.permissions.read { 1 } else { 0 });
+        buf.push(if token.permissions.write { 1 } else { 0 });
+        buf.push(if token.permissions.execute { 1 } else { 0 });
+        buf.extend_from_slice(&token.resource.encode());
+        buf
+    }
+
+    /// Compute the 32-byte signature for `token` under `signing_key`.
+    ///
+    /// Strategy: run FNV-1a four times over the same input, each time
+    /// prefixing a different 1-byte salt (0, 1, 2, 3). Each pass yields a
+    /// u64; concatenating the four little-endian u64s gives 32 bytes. The
+    /// salt prevents the four passes from producing identical 8-byte
+    /// halves, which they otherwise would (FNV-1a is deterministic).
+    ///
+    /// See the module-level SECURITY NOTE for why this is acceptable as a
+    /// tamper-detection checksum but NOT as a real MAC.
+    pub fn compute_signature(token: &CapabilityToken, signing_key: &[u8]) -> [u8; 32] {
+        let base = signature_input(token, signing_key);
+        let mut sig = [0u8; 32];
+        for i in 0..4u8 {
+            let mut chunk = Vec::with_capacity(base.len() + 1);
+            chunk.push(i);
+            chunk.extend_from_slice(&base);
+            let h = fnv1a_64(&chunk);
+            sig[(i as usize) * 8..(i as usize + 1) * 8]
+                .copy_from_slice(&h.to_le_bytes());
+        }
+        sig
+    }
+
+    /// Mint a new capability token.
+    ///
+    /// * `id` — caller-supplied unique identifier (e.g. a counter or a
+    ///   UUID). `grant_capability` does not generate one itself so that
+    ///   the same `(id, source_pid, target_pid, resource, created_at,
+    ///   signing_key)` inputs always produce a byte-identical token, which
+    ///   makes round-trip tests deterministic.
+    /// * `created_at` / `ttl_seconds` — the token is valid in
+    ///   `[created_at, created_at + ttl_seconds]` (saturating add).
+    /// * `signing_key` — opaque bytes mixed into the signature. Two
+    ///   different keys produce different signatures for the same token
+    ///   fields, so a token minted under one key will fail verification
+    ///   under another.
+    pub fn grant_capability(
+        id: u128,
+        source_pid: u64,
+        target_pid: u64,
+        resource: Resource,
+        permissions: MemoryPermissions,
+        delegation_depth: u8,
+        created_at: u64,
+        ttl_seconds: u64,
+        signing_key: &[u8],
+    ) -> CapabilityToken {
+        let expires_at = created_at.saturating_add(ttl_seconds);
+        let mut token = CapabilityToken {
+            id,
+            source_pid,
+            target_pid,
+            resource,
+            permissions,
+            delegation_depth,
+            created_at,
+            expires_at,
+            signature: [0u8; 32],
+        };
+        token.signature = compute_signature(&token, signing_key);
+        token
+    }
+
+    /// Verify a capability token against a set of requirements.
+    ///
+    /// Returns `Ok(())` iff *all* of the following hold:
+    ///
+    /// 1. **Signature** — `compute_signature(token, signing_key)` equals
+    ///    `token.signature`. Catches any tampering with `id`, pids,
+    ///    timestamps, delegation depth, permissions, or resource after
+    ///    the token was minted by [`grant_capability`].
+    /// 2. **Validity window** — `created_at <= now <= expires_at`.
+    /// 3. **Resource** — if `expected_resource` is `Some(r)`, then
+    ///    `token.resource == r`. Pass `None` to skip this check (e.g.
+    ///    when verifying a token whose resource is implied by context).
+    /// 4. **Permissions** — `token.permissions` is a superset of
+    ///    `required_perms` (i.e. every bit set in `required_perms` is
+    ///    also set in the token).
+    ///
+    /// Returns the specific [`CapabilityError`] variant on failure so
+    /// callers can distinguish the four failure modes without parsing
+    /// strings.
+    pub fn verify_capability(
+        token: &CapabilityToken,
+        signing_key: &[u8],
+        now: u64,
+        expected_resource: Option<&Resource>,
+        required_perms: &MemoryPermissions,
+    ) -> Result<(), CapabilityError> {
+        let recomputed = compute_signature(token, signing_key);
+        if recomputed != token.signature {
+            return Err(CapabilityError::InvalidSignature);
+        }
+        if now < token.created_at || now > token.expires_at {
+            return Err(CapabilityError::Expired {
+                now,
+                created_at: token.created_at,
+                expires_at: token.expires_at,
+            });
+        }
+        if let Some(expected) = expected_resource {
+            if &token.resource != expected {
+                return Err(CapabilityError::ResourceMismatch {
+                    expected: expected.clone(),
+                    actual: token.resource.clone(),
+                });
+            }
+        }
+        if !token.permissions.contains(required_perms) {
+            return Err(CapabilityError::InsufficientPermissions {
+                required: required_perms.clone(),
+                actual: token.permissions.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -789,17 +1176,22 @@ impl capability::CapabilitySet {
             return Err(IpcError::PermissionDenied);
         }
 
-        let child = capability::CapabilityToken {
+        let mut child = capability::CapabilityToken {
             id: rand_u128(),
             source_pid: parent.target_pid, // delegator becomes source
             target_pid: new_target_pid,
             resource: parent.resource.clone(),
             permissions: subset_perms,
             delegation_depth: parent.delegation_depth + 1,
-            created_at: 0, // would be now()
+            created_at: 0, // delegate does not yet receive a wall-clock; see grant_capability
             expires_at: parent.expires_at,
-            signature: [0u8; 32], // would be HMAC(signing_key, ...)
+            signature: [0u8; 32],
         };
+        // Sign the delegated child so verify_capability can validate it
+        // like any other token. NOTE: this is the same FNV-1a-based
+        // non-cryptographic digest used by grant_capability — see the
+        // SECURITY NOTE in the capability module above.
+        child.signature = capability::compute_signature(&child, signing_key);
 
         self.tokens.insert(child.id, child.clone());
         Ok(child)
@@ -1245,6 +1637,13 @@ mod tests {
         assert_eq!(decoded.target_pid, 2);
         assert!(decoded.permissions.read);
         assert!(!decoded.permissions.write);
+        // Wave 11: resource must now round-trip too (previously it was
+        // dropped on encode and replaced with Memory(0,0) on decode).
+        assert_eq!(decoded.resource, capability::Resource::Memory(0x1000, 0x1000));
+        assert_eq!(decoded.signature, [0xAB; 32]);
+        assert_eq!(decoded.created_at, 1000);
+        assert_eq!(decoded.expires_at, 2000);
+        assert_eq!(decoded.delegation_depth, 0);
     }
 
     // ── Wave 10: Channel-send/recv framing integration tests ───────────
@@ -1426,5 +1825,494 @@ mod tests {
 
         // Stream must be fully consumed (no trailing bytes).
         assert_eq!(offset, stream.len());
+    }
+
+    // ── Wave 11: Capability grant/verify/encode/decode tests ───────────
+    //
+    // The pre-Wave-11 capability module had two stubs:
+    //   (a) `CapabilityToken::encode` dropped the `resource` field entirely
+    //       and padded with zeros;
+    //   (b) `CapabilityToken::decode` always returned `Resource::Memory(0, 0)`
+    //       as a "placeholder", so encode→decode was lossy for `resource`.
+    // There was also no `grant_capability` / `verify_capability` pair, so
+    // tokens had no signature validation path. The tests below pin the new
+    // real implementation: every Resource variant round-trips; encode is
+    // exactly CAPABILITY_TOKEN_SIZE bytes; short input is rejected; bad
+    // resource tags are rejected; grant produces a deterministic signature
+    // that verify accepts; and verify rejects every tampering mode
+    // (signature, expiry, resource mismatch, insufficient permissions).
+
+    #[test]
+    fn test_capability_encode_size_matches_constant() {
+        // The framer multiplies cap_count by CAPABILITY_TOKEN_SIZE, so
+        // encode() must produce *exactly* that many bytes — no more, no
+        // fewer, regardless of which Resource variant is in the token.
+        let perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let cases = vec![
+            capability::Resource::File("/etc/passwd".into()),
+            capability::Resource::Network("10.0.0.1".into(), 443),
+            capability::Resource::Memory(0x1000, 0x2000),
+            capability::Resource::Mmio(0xFE00_0000, 0x1000),
+            capability::Resource::Channel(0xCAFE),
+        ];
+        for resource in cases {
+            let token = capability::CapabilityToken {
+                id: 1,
+                source_pid: 1,
+                target_pid: 2,
+                resource,
+                permissions: perms.clone(),
+                delegation_depth: 0,
+                created_at: 0,
+                expires_at: 0,
+                signature: [0u8; 32],
+            };
+            let encoded = token.encode();
+            assert_eq!(
+                encoded.len(),
+                capability::CAPABILITY_TOKEN_SIZE,
+                "encode() must produce exactly CAPABILITY_TOKEN_SIZE bytes for every Resource variant"
+            );
+        }
+    }
+
+    #[test]
+    fn test_capability_encode_decode_all_resource_variants() {
+        // Each Resource variant must survive a full encode→decode round
+        // trip with byte-exact equality on every field. This is the test
+        // the old stub failed (it always decoded to Memory(0,0)).
+        let perms = capability::MemoryPermissions { read: true, write: false, execute: true };
+        let cases: Vec<capability::Resource> = vec![
+            capability::Resource::File("/var/log/vuma.log".into()),
+            capability::Resource::Network("127.0.0.1".into(), 8080),
+            capability::Resource::Memory(0xDEAD_BEEF_0000_1000, 0x4000),
+            capability::Resource::Mmio(0xFE00_0000, 0x1000),
+            capability::Resource::Channel(0x1234_5678_9ABC_DEF0),
+        ];
+        for (i, resource) in cases.into_iter().enumerate() {
+            let token = capability::CapabilityToken {
+                id: 100 + i as u128,
+                source_pid: 10 + i as u64,
+                target_pid: 20 + i as u64,
+                resource: resource.clone(),
+                permissions: perms.clone(),
+                delegation_depth: i as u8,
+                created_at: 1000 + i as u64,
+                expires_at: 2000 + i as u64,
+                signature: [(i as u8 + 1).wrapping_mul(7); 32],
+            };
+            let encoded = token.encode();
+            let decoded = capability::CapabilityToken::decode(&encoded)
+                .expect("decode must succeed for a valid encoding");
+            // Whole-token equality is the strongest round-trip check.
+            assert_eq!(decoded, token, "full token must round-trip for {:?}", resource);
+        }
+    }
+
+    #[test]
+    fn test_capability_decode_too_short() {
+        // The deframer hands decode() a slice of exactly
+        // CAPABILITY_TOKEN_SIZE bytes; anything shorter must be rejected
+        // rather than panicking on slice indexing.
+        let short = vec![0u8; capability::CAPABILITY_TOKEN_SIZE - 1];
+        let err = capability::CapabilityToken::decode(&short).unwrap_err();
+        assert!(err.contains("too short"), "unexpected error message: {}", err);
+    }
+
+    #[test]
+    fn test_capability_decode_bad_resource_tag() {
+        // Forge a token whose resource field has an unknown tag byte.
+        // The header fields are valid, but the resource decoder must
+        // refuse it rather than silently returning a wrong variant.
+        let token = capability::CapabilityToken {
+            id: 1,
+            source_pid: 1,
+            target_pid: 2,
+            resource: capability::Resource::Channel(7),
+            permissions: capability::MemoryPermissions::default(),
+            delegation_depth: 0,
+            created_at: 0,
+            expires_at: 0,
+            signature: [0u8; 32],
+        };
+        let mut encoded = token.encode();
+        // Clobber the resource tag byte (first byte of the resource field).
+        encoded[capability::RESOURCE_OFFSET] = 0xFF;
+        let err = capability::CapabilityToken::decode(&encoded).unwrap_err();
+        assert!(err.contains("unknown resource tag"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_capability_decode_truncated_string_in_file_resource() {
+        // Forge a File resource whose stored length byte claims more
+        // bytes than MAX_RESOURCE_STRING. Decode must reject it.
+        let token = capability::CapabilityToken {
+            id: 1,
+            source_pid: 1,
+            target_pid: 2,
+            resource: capability::Resource::File("x".into()),
+            permissions: capability::MemoryPermissions::default(),
+            delegation_depth: 0,
+            created_at: 0,
+            expires_at: 0,
+            signature: [0u8; 32],
+        };
+        let mut encoded = token.encode();
+        // Set the length byte just past the cap.
+        encoded[capability::RESOURCE_OFFSET + 1] = (capability::MAX_RESOURCE_STRING + 1) as u8;
+        let err = capability::CapabilityToken::decode(&encoded).unwrap_err();
+        assert!(err.contains("exceeds"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_capability_perms_contains() {
+        let rwx = capability::MemoryPermissions { read: true, write: true, execute: true };
+        let r_only = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let rw = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let none = capability::MemoryPermissions { read: false, write: false, execute: false };
+
+        // rwx contains every subset.
+        assert!(rwx.contains(&rwx));
+        assert!(rwx.contains(&r_only));
+        assert!(rwx.contains(&rw));
+        assert!(rwx.contains(&none));
+
+        // r_only contains only r_only and none.
+        assert!(r_only.contains(&r_only));
+        assert!(r_only.contains(&none));
+        assert!(!r_only.contains(&rw));        // missing write
+        assert!(!r_only.contains(&rwx));       // missing write+execute
+
+        // none contains only none.
+        assert!(none.contains(&none));
+        assert!(!none.contains(&r_only));
+    }
+
+    #[test]
+    fn test_grant_capability_signature_is_deterministic() {
+        // Same inputs → byte-identical signature. This is what makes the
+        // grant/verify round-trip work: verify recomputes the signature
+        // and compares, so any non-determinism would make valid tokens
+        // fail verification.
+        let resource = capability::Resource::Memory(0x4000, 0x1000);
+        let perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let key = b"vuma-test-signing-key-2024";
+
+        let t1 = capability::grant_capability(
+            42, 1, 2, resource.clone(), perms.clone(), 0, 1_000, 500, key,
+        );
+        let t2 = capability::grant_capability(
+            42, 1, 2, resource.clone(), perms.clone(), 0, 1_000, 500, key,
+        );
+        assert_eq!(t1.signature, t2.signature, "same inputs must produce same signature");
+        assert_eq!(t1, t2, "whole tokens must be identical");
+
+        // Different signing key → different signature (the key is mixed
+        // into the hash input first, so any byte change cascades).
+        let other_key = b"vuma-test-signing-key-9999";
+        let t3 = capability::grant_capability(
+            42, 1, 2, resource, perms, 0, 1_000, 500, other_key,
+        );
+        assert_ne!(t1.signature, t3.signature, "different signing keys must produce different signatures");
+    }
+
+    #[test]
+    fn test_grant_capability_sets_expires_at() {
+        // ttl_seconds is added to created_at (saturating) to produce
+        // expires_at. Verify the arithmetic and the saturating edge.
+        let token = capability::grant_capability(
+            1, 1, 2,
+            capability::Resource::Channel(1),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 500, b"k",
+        );
+        assert_eq!(token.created_at, 1_000);
+        assert_eq!(token.expires_at, 1_500);
+
+        // Saturating add: u64::MAX + 1 must not wrap to 0.
+        let sat = capability::grant_capability(
+            2, 1, 2,
+            capability::Resource::Channel(1),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, u64::MAX, 1, b"k",
+        );
+        assert_eq!(sat.expires_at, u64::MAX, "ttl add must saturate at u64::MAX");
+    }
+
+    #[test]
+    fn test_verify_capability_succeeds_after_grant() {
+        // Happy path: grant a token, then verify it with the same key,
+        // the same resource, and a strictly-subset permission set. All
+        // four checks (signature, expiry, resource, perms) must pass.
+        let resource = capability::Resource::Network("10.0.0.1".into(), 443);
+        let granted_perms = capability::MemoryPermissions {
+            read: true, write: true, execute: false,
+        };
+        let key = b"secret-key";
+        let token = capability::grant_capability(
+            7, 1, 2, resource.clone(), granted_perms, 0, 1_000, 500, key,
+        );
+
+        // now=1_200 is inside [1_000, 1_500].
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let result = capability::verify_capability(&token, key, 1_200, Some(&resource), &required);
+        assert!(result.is_ok(), "verify must succeed for a freshly-granted token: {:?}", result.err());
+
+        // Empty required perms always passes the perms check.
+        let none = capability::MemoryPermissions::default();
+        let result2 = capability::verify_capability(&token, key, 1_000, Some(&resource), &none);
+        assert!(result2.is_ok());
+
+        // now exactly == expires_at must still be valid (inclusive upper bound).
+        let result3 = capability::verify_capability(&token, key, 1_500, Some(&resource), &required);
+        assert!(result3.is_ok());
+
+        // now exactly == created_at must be valid (inclusive lower bound).
+        let result4 = capability::verify_capability(&token, key, 1_000, Some(&resource), &required);
+        assert!(result4.is_ok());
+    }
+
+    #[test]
+    fn test_verify_capability_skips_resource_check_when_none() {
+        // When the caller passes None for expected_resource, the resource
+        // check is skipped. This is the path for callers that don't care
+        // which resource the token is bound to (e.g. a generic capability
+        // auditor that just wants to know the token is well-formed and
+        // unexpired).
+        let resource = capability::Resource::File("/tmp/foo".into());
+        let key = b"k";
+        let token = capability::grant_capability(
+            1, 1, 2, resource, capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 1_000, key,
+        );
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let result = capability::verify_capability(&token, key, 500, None, &required);
+        assert!(result.is_ok(), "None expected_resource must skip the resource check: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_verify_capability_fails_wrong_resource() {
+        // Token is granted for Memory(0x1000, 0x1000) but the caller asks
+        // to verify it against Memory(0x2000, 0x1000). The signature
+        // check passes (the token is internally consistent), but the
+        // resource-mismatch check must fire.
+        let granted_resource = capability::Resource::Memory(0x1000, 0x1000);
+        let wrong_resource = capability::Resource::Memory(0x2000, 0x1000);
+        let key = b"k";
+        let token = capability::grant_capability(
+            1, 1, 2, granted_resource.clone(),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 1_000, key,
+        );
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key, 500, Some(&wrong_resource), &required)
+            .expect_err("wrong resource must fail verify");
+        match err {
+            capability::CapabilityError::ResourceMismatch { expected, actual } => {
+                assert_eq!(expected, wrong_resource);
+                assert_eq!(actual, granted_resource);
+            }
+            other => panic!("expected ResourceMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_capability_fails_insufficient_perms() {
+        // Token grants read-only; caller requires read+write.
+        let resource = capability::Resource::Channel(42);
+        let key = b"k";
+        let granted_perms = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required_perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let token = capability::grant_capability(
+            1, 1, 2, resource, granted_perms.clone(), 0, 100, 1_000, key,
+        );
+        let err = capability::verify_capability(&token, key, 500, None, &required_perms)
+            .expect_err("insufficient perms must fail verify");
+        match err {
+            capability::CapabilityError::InsufficientPermissions { required, actual } => {
+                assert_eq!(required, required_perms);
+                assert_eq!(actual, granted_perms);
+            }
+            other => panic!("expected InsufficientPermissions, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_capability_fails_expired() {
+        // now > expires_at.
+        let resource = capability::Resource::Channel(1);
+        let key = b"k";
+        let token = capability::grant_capability(
+            1, 1, 2, resource,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 500, key,
+        ); // valid in [100, 600]
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key, 601, None, &required)
+            .expect_err("now > expires_at must fail verify");
+        match err {
+            capability::CapabilityError::Expired { now, created_at, expires_at } => {
+                assert_eq!(now, 601);
+                assert_eq!(created_at, 100);
+                assert_eq!(expires_at, 600);
+            }
+            other => panic!("expected Expired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_capability_fails_not_yet_valid() {
+        // now < created_at — the token was minted for a future window.
+        let resource = capability::Resource::Channel(1);
+        let key = b"k";
+        let token = capability::grant_capability(
+            1, 1, 2, resource,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 500, key,
+        ); // valid in [1_000, 1_500]
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key, 999, None, &required)
+            .expect_err("now < created_at must fail verify");
+        assert!(matches!(err, capability::CapabilityError::Expired { .. }));
+    }
+
+    #[test]
+    fn test_verify_capability_fails_tampered_signature() {
+        // Flip a single byte in the signature. The recomputed signature
+        // will not match → InvalidSignature.
+        let resource = capability::Resource::Channel(1);
+        let key = b"k";
+        let mut token = capability::grant_capability(
+            1, 1, 2, resource,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 1_000, key,
+        );
+        token.signature[0] ^= 0xFF;
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key, 500, None, &required)
+            .expect_err("tampered signature must fail verify");
+        assert_eq!(err, capability::CapabilityError::InvalidSignature);
+    }
+
+    #[test]
+    fn test_verify_capability_fails_tampered_resource() {
+        // Tamper with the resource *after* grant. The signature no longer
+        // matches the (new) resource, so the signature check fires before
+        // the resource-mismatch check even runs.
+        let resource = capability::Resource::Channel(1);
+        let key = b"k";
+        let mut token = capability::grant_capability(
+            1, 1, 2, resource,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 1_000, key,
+        );
+        // Swap resource without re-signing.
+        token.resource = capability::Resource::Channel(2);
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key, 500, None, &required)
+            .expect_err("tampered resource must fail verify (signature mismatch)");
+        assert_eq!(err, capability::CapabilityError::InvalidSignature);
+    }
+
+    #[test]
+    fn test_verify_capability_fails_wrong_signing_key() {
+        // Token minted under key A, verified under key B. The recomputed
+        // signature differs because the key is the first thing mixed
+        // into the hash input.
+        let resource = capability::Resource::Channel(1);
+        let key_a = b"key-a";
+        let key_b = b"key-b";
+        let token = capability::grant_capability(
+            1, 1, 2, resource,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 100, 1_000, key_a,
+        );
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let err = capability::verify_capability(&token, key_b, 500, None, &required)
+            .expect_err("verifying under the wrong key must fail");
+        assert_eq!(err, capability::CapabilityError::InvalidSignature);
+    }
+
+    #[test]
+    fn test_grant_then_encode_then_decode_then_verify() {
+        // End-to-end: grant a token, serialise it to the wire format,
+        // parse it back, and verify the parsed token. This pins the
+        // contract that the signature survives the wire round-trip
+        // (i.e. encode/decode don't drop or mangle any field that
+        // participates in the signature).
+        let resource = capability::Resource::File("/etc/vuma.conf".into());
+        let key = b"vuma-wave-11-integration-key";
+        let original = capability::grant_capability(
+            0xABCD_1234,
+            7,
+            9,
+            resource.clone(),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0,
+            5_000,
+            10_000,
+            key,
+        );
+
+        let wire = original.encode();
+        assert_eq!(wire.len(), capability::CAPABILITY_TOKEN_SIZE);
+        let parsed = capability::CapabilityToken::decode(&wire)
+            .expect("decode of a valid encode must succeed");
+        assert_eq!(parsed, original, "encode→decode must be lossless");
+
+        // Now verify the parsed token. now=7_500 is inside [5_000, 15_000].
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let result = capability::verify_capability(&parsed, key, 7_500, Some(&resource), &required);
+        assert!(result.is_ok(), "parsed token must verify: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_grant_then_frame_then_deframe_then_verify() {
+        // Full IPC integration: grant a token, attach it to an
+        // EncapsulatedMessage, frame the message, deframe it, and verify
+        // the recovered capability. This proves the L1 framer's
+        // cap_count * CAPABILITY_TOKEN_SIZE arithmetic still works after
+        // the constant changed from 96 → 160 in Wave 11.
+        let resource = capability::Resource::Channel(0xCAFE);
+        let key = b"ipc-integration-key";
+        let cap = capability::grant_capability(
+            0xDEAD_BEEF_CAFE_BABE_0123_4567_89AB_CDEF,
+            1,
+            2,
+            resource.clone(),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0,
+            1_000,
+            2_000,
+            key,
+        );
+
+        let mut msg = EncapsulatedMessage::new(
+            0xCAFE,
+            0xBEEF,
+            type_hash("Vec<u8>"),
+            vec![1, 2, 3, 4],
+        );
+        msg.header.flags = MessageFlags::HAS_CAPS;
+        msg.capabilities = vec![cap.clone()];
+
+        let framed = frame_message(&msg);
+        // Expected layout: header + payload + 1 cap token + CRC32.
+        assert_eq!(
+            framed.len(),
+            HEADER_SIZE + msg.payload.len()
+                + capability::CAPABILITY_TOKEN_SIZE
+                + CRC32_SIZE
+        );
+
+        let decoded = deframe_message(&framed).expect("deframe should succeed");
+        assert_eq!(decoded.capabilities.len(), 1);
+        let recovered = &decoded.capabilities[0];
+        assert_eq!(recovered, &cap, "framed capability must survive deframe");
+
+        // The recovered token must still verify.
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let result = capability::verify_capability(recovered, key, 1_500, Some(&resource), &required);
+        assert!(result.is_ok(), "recovered capability must verify: {:?}", result.err());
     }
 }
