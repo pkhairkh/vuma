@@ -3022,20 +3022,88 @@ impl ProcessTable {
     }
 }
 
-// ── Supervisor (Fault Tolerance) ─────────────────────────────────────
+// ── Supervisor (Fault Tolerance — W65-68) ────────────────────────────
 
+/// Per-worker bookkeeping the supervisor holds for one live (or recently
+/// exited) worker process. This is the L7 fault-containment record: it
+/// captures enough of the worker's exit history that
+/// [`Supervisor::handle_worker_exit`] can apply the [`should_restart`]
+/// policy *per worker* rather than against a single global budget.
+///
+/// Field semantics:
+///   * `pid` — the OS process id (or a synthetic 64-bit handle in tests).
+///   * `is_alive` — true iff the supervisor currently believes the worker
+///     is running. `register_worker` sets it true; `handle_worker_exit`
+///     sets it false. A subsequent successful restart flips it back true.
+///   * `restart_count` — how many restarts this specific worker has
+///     already consumed in the current window. The per-worker budget
+///     check compares this against [`Supervisor::max_restarts`].
+///   * `last_exit_code` — the most recent `WEXITSTATUS(status)` (or
+///     `128 + WTERMSIG(status)` per the shell convention, see
+///     [`WorkerError`]). `0` for a freshly registered worker that has
+///     not yet exited.
+///   * `last_signal` — the most recent `WTERMSIG(status)` (`0` for a
+///     normal exit, or 11/9/6 for `SIGSEGV`/`SIGKILL`/`SIGABRT`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerState {
+    pub pid: u64,
+    pub is_alive: bool,
+    pub restart_count: u32,
+    pub last_exit_code: i32,
+    pub last_signal: i32,
+}
+
+impl WorkerState {
+    /// Construct a fresh, alive worker state with no exit history. The
+    /// caller is responsible for assigning a meaningful `pid`.
+    pub fn new(pid: u64) -> Self {
+        Self {
+            pid,
+            is_alive: true,
+            restart_count: 0,
+            last_exit_code: 0,
+            last_signal: 0,
+        }
+    }
+}
+
+/// L7 fault-containment supervisor.
+///
+/// Tracks the per-worker exit history in `workers` and applies the
+/// [`should_restart`] policy (the stateless exit-code → bool decision)
+/// *per worker*, gated by the supervisor's restart budget. The original
+/// two fields (`max_restarts`, `timeout_ms`) are retained as the policy
+/// inputs; `restart_count` is retained as the legacy global budget that
+/// [`Supervisor::should_restart`] (the inherent method) consumes.
+///
+/// The new `workers: HashMap<u64, WorkerState>` map is the per-worker
+/// view that [`Supervisor::handle_worker_exit`] consults. Both views
+/// coexist so the existing free function `should_restart(config, code)`
+/// and the inherent `Supervisor::should_restart(&mut self)` continue to
+/// work for callers that have not been migrated to the per-worker API.
 #[derive(Clone, Debug)]
 pub struct Supervisor {
     pub max_restarts: u32,
     pub timeout_ms: u64,
     pub restart_count: u32,
+    pub workers: HashMap<u64, WorkerState>,
 }
 
 impl Supervisor {
     pub fn new(max_restarts: u32, timeout_ms: u64) -> Self {
-        Self { max_restarts, timeout_ms, restart_count: 0 }
+        Self {
+            max_restarts,
+            timeout_ms,
+            restart_count: 0,
+            workers: HashMap::new(),
+        }
     }
 
+    /// Legacy budget-consuming predicate. Returns true if the global
+    /// restart budget still has room, false otherwise. Each `true`
+    /// answer consumes one unit of budget. Existing callers (e.g. the
+    /// FFI worker lifecycle) continue to use this; new code should
+    /// prefer [`Supervisor::handle_worker_exit`] for per-worker tracking.
     pub fn should_restart(&mut self) -> bool {
         if self.restart_count >= self.max_restarts {
             return false;
@@ -3047,9 +3115,230 @@ impl Supervisor {
     pub fn reset(&mut self) {
         self.restart_count = 0;
     }
+
+    /// Register a new worker pid. The worker is marked alive with zero
+    /// restart history. If `pid` is already registered, this is a no-op
+    /// (re-registering an already-tracked pid does not clobber its exit
+    /// history — the supervisor's bookkeeping is the source of truth).
+    pub fn register_worker(&mut self, pid: u64) {
+        self.workers.entry(pid).or_insert_with(|| WorkerState::new(pid));
+    }
+
+    /// Unregister a worker pid. Returns `Ok(())` if the worker was
+    /// present, `Err(IpcError::WorkerNotFound)` if it was not tracked.
+    /// Unregistering a worker discards its exit history — the slot is
+    /// freed for a future `register_worker` of the same pid.
+    pub fn unregister_worker(&mut self, pid: u64) -> Result<(), IpcError> {
+        if self.workers.remove(&pid).is_some() {
+            Ok(())
+        } else {
+            Err(IpcError::WorkerNotFound)
+        }
+    }
+
+    /// Apply the L7 fault-containment policy to a worker that has just
+    /// exited. Records the exit code/signal in the worker's state, then
+    /// decides a [`RecoveryAction`]:
+    ///
+    ///   * If the worker is not tracked → `Err(WorkerNotFound)`. The
+    ///     supervisor can only act on workers it has previously
+    ///     registered; an exit for an unknown pid is a state-machine bug.
+    ///   * If `should_restart(config, exit_code)` returns false (clean
+    ///     exit, or budget exhausted) → [`RecoveryAction::Terminate`] for
+    ///     `exit_code == 0`, [`RecoveryAction::Escalate`] otherwise.
+    ///   * If the policy says restart *and* the per-worker budget still
+    ///     has room (`state.restart_count < max_restarts`) →
+    ///     [`RecoveryAction::Restart`], the budget is consumed, and the
+    ///     worker is marked alive again (the supervisor's restart-retry
+    ///     path).
+    ///   * If the policy says restart but the per-worker budget is
+    ///     exhausted → [`RecoveryAction::Escalate`] (do not silently
+    ///     spin on a restart loop).
+    ///
+    /// The `exit_code` follows the shell convention (128 + signal for
+    /// signal deaths; see [`WorkerError`]). `signal` is the raw
+    /// `WTERMSIG(status)` (0 for a normal exit, 11 for `SIGSEGV`, etc.).
+    pub fn handle_worker_exit(
+        &mut self,
+        pid: u64,
+        exit_code: i32,
+        signal: i32,
+    ) -> Result<RecoveryAction, IpcError> {
+        let state = self
+            .workers
+            .get_mut(&pid)
+            .ok_or(IpcError::WorkerNotFound)?;
+
+        // Record the exit history first — the audit log needs this even
+        // if we end up escalating.
+        state.is_alive = false;
+        state.last_exit_code = exit_code;
+        state.last_signal = signal;
+
+        // Build a WorkerConfig so we can reuse the stateless policy.
+        let config = WorkerConfig {
+            max_restarts: self.max_restarts,
+            timeout_ms: self.timeout_ms,
+            ..Default::default()
+        };
+
+        // Clean exit → terminal, no restart attempt.
+        if exit_code == 0 {
+            return Ok(RecoveryAction::Terminate);
+        }
+
+        // Non-clean exit: ask the stateless policy whether the exit code
+        // is restartable at all (it returns false for max_restarts == 0
+        // or for exit_code == 0, the latter already handled above).
+        if !should_restart(&config, exit_code) {
+            return Ok(RecoveryAction::Escalate);
+        }
+
+        // The exit code is restartable — gate on the per-worker budget.
+        if state.restart_count >= self.max_restarts {
+            return Ok(RecoveryAction::Escalate);
+        }
+
+        // Budget available: consume one unit, mark the worker alive
+        // again (the supervisor's restart-retry path), and tell the
+        // caller to restart.
+        state.restart_count += 1;
+        state.is_alive = true;
+        Ok(RecoveryAction::Restart)
+    }
+
+    /// Number of workers currently believed alive. This is the L5/L7
+    /// liveness probe: the supervisor polls it between IPC turns to
+    /// decide whether to spawn replacements for the dead. A worker
+    /// counts as alive iff [`WorkerState::is_alive`] is true *and* it
+    /// is still tracked in `workers`.
+    pub fn alive_count(&self) -> u32 {
+        self.workers.values().filter(|w| w.is_alive).count() as u32
+    }
 }
 
-// ── Hot Reloading ────────────────────────────────────────────────────
+// ── Circuit Breaker (Fault Tolerance — W69-72) ───────────────────────
+
+/// Three-state circuit-breaker state machine. The breaker sits in front
+/// of any fallible IPC operation (e.g. a remote worker call, a hot-swap
+/// attempt) and prevents caller threads from hammering a known-failing
+/// dependency. This is the L7 fault-containment counterpart to the
+/// supervisor's restart budget: the supervisor bounds the *worker's*
+/// restart attempts, the breaker bounds the *caller's* retry attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CircuitState {
+    /// Closed = traffic flows normally. Failures are counted; once the
+    /// count exceeds `threshold` the breaker trips to `Open`.
+    #[default]
+    Closed,
+    /// Open = traffic is short-circuited. `can_proceed()` returns false
+    /// and the caller must back off. The breaker transitions to
+    /// `HalfOpen` after an out-of-band reset (e.g. a timer or an
+    /// explicit `reset()` from the supervisor).
+    Open,
+    /// HalfOpen = a single trial request is allowed through. A success
+    /// closes the breaker; a failure re-opens it. This is the standard
+    /// "probe" state from the Release It! / Hystrix literature.
+    HalfOpen,
+}
+
+/// L7 circuit breaker. The breaker wraps a fallible operation and
+/// tracks its failure count against a threshold. Once the threshold is
+/// exceeded the breaker opens and `can_proceed()` returns false until
+/// an out-of-band reset transitions it through `HalfOpen` back to
+/// `Closed`.
+///
+/// The state machine is intentionally small:
+///
+///   * `record_success()` resets the failure count and transitions to
+///     `Closed` from any state (a successful probe in `HalfOpen`
+///     closes the breaker; a success in `Closed` is a no-op besides
+///     clearing the count).
+///   * `record_failure()` increments the count. In `Closed`, if the
+///     count exceeds `threshold`, the breaker opens. In `Open`, the
+///     call is a no-op (the breaker is already open). In `HalfOpen`,
+///     a single failure re-opens the breaker.
+///   * `can_proceed()` returns true in `Closed` and `HalfOpen`, false
+///     in `Open`. The `HalfOpen` arm is the "one trial" semantics:
+///     exactly one probe request is allowed through after a reset.
+///   * `reset()` transitions `Open` → `HalfOpen` (the next
+///     `can_proceed()` will allow one trial). It is a no-op in the
+///     other states.
+#[derive(Clone, Debug)]
+pub struct CircuitBreaker {
+    pub failure_count: u32,
+    pub threshold: u32,
+    pub state: CircuitState,
+}
+
+impl CircuitBreaker {
+    /// Construct a breaker with the given failure threshold. The
+    /// breaker starts in `Closed` with zero failures recorded.
+    pub fn new(threshold: u32) -> Self {
+        Self {
+            failure_count: 0,
+            threshold,
+            state: CircuitState::Closed,
+        }
+    }
+
+    /// Record a successful operation. Resets the failure count to zero
+    /// and transitions the breaker to `Closed` from any state. In
+    /// `HalfOpen` this is the probe-success path that closes the
+    /// breaker; in `Closed` it just clears the count.
+    pub fn record_success(&mut self) {
+        self.failure_count = 0;
+        self.state = CircuitState::Closed;
+    }
+
+    /// Record a failed operation. Increments the failure count and, in
+    /// `Closed`, trips the breaker to `Open` once the count exceeds
+    /// `threshold`. In `HalfOpen`, a single failure re-opens the
+    /// breaker. In `Open`, the call is a no-op (the breaker is already
+    /// open; further failures do not extend the open period).
+    pub fn record_failure(&mut self) {
+        match self.state {
+            CircuitState::Closed => {
+                self.failure_count = self.failure_count.saturating_add(1);
+                if self.failure_count > self.threshold {
+                    self.state = CircuitState::Open;
+                }
+            }
+            CircuitState::HalfOpen => {
+                // A single failure during the probe re-opens the breaker.
+                self.failure_count = self.failure_count.saturating_add(1);
+                self.state = CircuitState::Open;
+            }
+            CircuitState::Open => {
+                // Already open; the count is preserved for diagnostics
+                // but the state does not change.
+            }
+        }
+    }
+
+    /// Whether the caller should proceed with the operation. Returns
+    /// true in `Closed` (normal traffic) and `HalfOpen` (one trial
+    /// allowed), false in `Open` (short-circuit).
+    pub fn can_proceed(&self) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => false,
+            CircuitState::HalfOpen => true,
+        }
+    }
+
+    /// Reset the breaker from `Open` to `HalfOpen`, allowing exactly
+    /// one trial request through `can_proceed()`. No-op in the other
+    /// states — a `Closed` breaker is already proceeding, and a
+    /// `HalfOpen` breaker is already mid-probe.
+    pub fn reset(&mut self) {
+        if self.state == CircuitState::Open {
+            self.state = CircuitState::HalfOpen;
+        }
+    }
+}
+
+// ── Hot Reloading (W73-80) ───────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct HotSwapRequest {
@@ -3058,14 +3347,211 @@ pub struct HotSwapRequest {
     pub transfer_state: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct HotSwapResult {
-    pub success: bool,
-    pub new_pid: u64,
-    pub state_transferred: bool,
+/// Configuration for a hot-swap operation. The hot-swap manager uses
+/// this to decide which module to swap, whether to transfer state from
+/// the old version to the new one, and whether to roll back to the old
+/// version if the new one fails its post-swap health check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotSwapConfig {
+    /// Logical name of the module being swapped (e.g. `"crypto.aes"`).
+    /// The manager tracks `active_versions: HashMap<String, u32>` keyed
+    /// by this name.
+    pub module_name: String,
+    /// Version the manager believes is currently active. The manager
+    /// cross-checks this against `active_versions[module_name]` and
+    /// refuses the swap if they disagree (a concurrent swap raced us).
+    pub old_version: u32,
+    /// Version the swap is moving to. Must be strictly greater than
+    /// `old_version` (the manager does not support downgrades via
+    /// `perform_swap` — downgrades go through `rollback`).
+    pub new_version: u32,
+    /// If true, the manager attempts to transfer live state (channel
+    /// buffers, open capabilities, checkpoint slots) from the old
+    /// version to the new one. If false, the new version starts from a
+    /// clean slate.
+    pub state_transfer: bool,
+    /// If true, the manager rolls back to `old_version` if the new
+    /// version's post-swap health check fails. If false, the new
+    /// version is left in place even if it is unhealthy (the caller
+    /// decides what to do).
+    pub rollback_on_failure: bool,
 }
 
-// ── Distributed Channels ─────────────────────────────────────────────
+impl HotSwapConfig {
+    pub fn new(
+        module_name: impl Into<String>,
+        old_version: u32,
+        new_version: u32,
+        state_transfer: bool,
+        rollback_on_failure: bool,
+    ) -> Self {
+        Self {
+            module_name: module_name.into(),
+            old_version,
+            new_version,
+            state_transfer,
+            rollback_on_failure,
+        }
+    }
+}
+
+/// Result of a hot-swap operation. The fields are designed so the
+/// caller can reconstruct the full swap history: which pid was swapped
+/// out, which pid was swapped in, whether state was transferred, and —
+/// on failure — a human-readable error message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotSwapResult {
+    /// True iff the swap completed and the new version is now active.
+    /// False if the swap was rejected (version mismatch, unknown
+    /// module, downgrade attempt) or rolled back.
+    pub success: bool,
+    /// Pid of the worker that was running the old version. `0` if the
+    /// swap was rejected before any worker was touched.
+    pub old_pid: u64,
+    /// Pid of the worker that is now running the new version. `0` if
+    /// the swap failed and no new worker was spawned, or if a
+    /// rollback reverted to the old pid (in which case `old_pid`
+    /// equals `new_pid` after rollback).
+    pub new_pid: u64,
+    /// True iff state was transferred from the old worker to the new
+    /// one. Always false when `config.state_transfer` is false, or
+    /// when `success` is false.
+    pub state_transferred: bool,
+    /// Human-readable error message if `success` is false. `None` if
+    /// `success` is true. Carries the reason for rejection or the
+    /// rollback cause so the caller can log it without re-deriving it.
+    pub error: Option<String>,
+}
+
+/// L6/L7 hot-swap manager. Tracks the active version of each module
+/// and performs in-place version upgrades without stopping the
+/// supervisor. The swap is a **documented mock**: it does not actually
+/// spawn processes or copy state, but it does update the
+/// `active_versions` map and return a structurally correct
+/// [`HotSwapResult`] so the supervisor's swap-then-health-check-then-
+/// maybe-rollback state machine can be exercised end-to-end.
+///
+/// Replacing this with a real swap is a drop-in: keep the
+/// `perform_swap` / `rollback` signatures, swap the body for the real
+/// spawn-and-state-transfer calls.
+#[derive(Clone, Debug)]
+pub struct HotSwapManager {
+    /// Map from module name → currently active version. Populated by
+    /// `perform_swap`; consulted to detect version-mismatch races and
+    /// to support `rollback`.
+    pub active_versions: HashMap<String, u32>,
+    /// Monotonic pid counter for the mock — each `perform_swap` that
+    /// actually spawns a new worker increments this. Real code would
+    /// get the pid from the process spawn.
+    next_pid: u64,
+}
+
+impl Default for HotSwapManager {
+    fn default() -> Self {
+        Self {
+            active_versions: HashMap::new(),
+            next_pid: 1_000,
+        }
+    }
+}
+
+impl HotSwapManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-register a module's initial active version. This is how a
+    /// module that was loaded at supervisor startup (not via a hot
+    /// swap) enters the manager's bookkeeping. Returns the previous
+    /// version if one was already registered, `None` otherwise.
+    pub fn register_module(&mut self, module_name: impl Into<String>, version: u32) -> Option<u32> {
+        self.active_versions.insert(module_name.into(), version)
+    }
+
+    /// Perform a hot-swap from `config.old_version` to
+    /// `config.new_version`. The swap is a mock: it validates the
+    /// version constraint, updates `active_versions`, and returns a
+    /// successful [`HotSwapResult`] with a synthetic new pid. On
+    /// failure, returns `Err(IpcError)` with the cause.
+    ///
+    /// Failure modes:
+    ///   * `new_version <= old_version` → `ProtocolViolation` (the
+    ///     manager does not support downgrades via `perform_swap`).
+    ///   * The module is registered but `active_versions[name] !=
+    ///     old_version` → `ProtocolViolation` (a concurrent swap raced
+    ///     us; the caller's view of "current version" is stale).
+    ///   * `rollback_on_failure` is true and the simulated post-swap
+    ///     health check fails → the manager rolls back to
+    ///     `old_version` and returns a `HotSwapResult` with
+    ///     `success == false` and an error message. (The mock never
+    ///     fails the health check, so this path is not exercised in
+    ///     the default flow, but the contract is documented.)
+    pub fn perform_swap(
+        &mut self,
+        config: &HotSwapConfig,
+    ) -> Result<HotSwapResult, IpcError> {
+        // Version constraint: new_version must be strictly greater.
+        if config.new_version <= config.old_version {
+            return Err(IpcError::ProtocolViolation {
+                expected: format!(
+                    "new_version > old_version (got new={}, old={})",
+                    config.new_version, config.old_version
+                ),
+                got: config.module_name.clone(),
+            });
+        }
+
+        // If the module is already registered, the caller's view of
+        // old_version must match the manager's record. A mismatch means
+        // a concurrent swap raced us.
+        if let Some(&active) = self.active_versions.get(&config.module_name) {
+            if active != config.old_version {
+                return Err(IpcError::ProtocolViolation {
+                    expected: format!(
+                        "old_version matches active version {} (got {})",
+                        active, config.old_version
+                    ),
+                    got: config.module_name.clone(),
+                });
+            }
+        }
+
+        // Mock: allocate a new pid, "transfer" state if requested, and
+        // update the active version. Real code would spawn a new
+        // worker, copy channel buffers / capabilities / checkpoint
+        // slots, and run a post-swap health check here.
+        let old_pid = self.next_pid;
+        self.next_pid = self.next_pid.saturating_add(1);
+        let new_pid = self.next_pid;
+        self.active_versions
+            .insert(config.module_name.clone(), config.new_version);
+
+        Ok(HotSwapResult {
+            success: true,
+            old_pid,
+            new_pid,
+            state_transferred: config.state_transfer,
+            error: None,
+        })
+    }
+
+    /// Roll back a module to a previously active version. The mock
+    /// simply updates `active_versions` and returns `Ok(())`; real code
+    /// would kill the new-version worker, restore the old-version
+    /// worker from its checkpoint, and re-route IPC to it.
+    ///
+    /// Returns `Err(WorkerNotFound)` if the module is not registered.
+    pub fn rollback(&mut self, config: &HotSwapConfig) -> Result<(), IpcError> {
+        if !self.active_versions.contains_key(&config.module_name) {
+            return Err(IpcError::WorkerNotFound);
+        }
+        self.active_versions
+            .insert(config.module_name.clone(), config.old_version);
+        Ok(())
+    }
+}
+
+// ── Distributed Channels (W81-88) ────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct RemoteWorker {
@@ -3097,6 +3583,7 @@ impl NoiseChannel {
     /// Initiate Noise_XX handshake (stub).
     pub fn initiate(&mut self, remote_addr: &str) -> Result<(), IpcError> {
         // Real implementation: exchange ephemeral + static keys
+        let _ = remote_addr;
         self.handshake_complete = true;
         Ok(())
     }
@@ -3108,6 +3595,154 @@ impl NoiseChannel {
         }
         let mut crypto = CryptoState::new(self.cipher_key);
         Ok(crypto.encrypt(msg))
+    }
+}
+
+/// A channel whose endpoints may live on different nodes. The
+/// distributed channel is the L4 wrapper that hides whether a peer is
+/// local (in-process, fast path) or remote (networked, slow path)
+/// behind a uniform `connect` / `is_connected` / `disconnect` contract.
+///
+/// The connect/disconnect cycle is a **documented mock**: it does not
+/// open a real TCP socket, it just flips the `connected` flag. The
+/// supervisor's routing logic exercises the real state machine
+/// (unconnected → connected → unconnected) without depending on a
+/// network. Replacing this with a real `TcpStream` is a drop-in: keep
+/// the field set, swap the `connect` body for `TcpStream::connect`.
+#[derive(Clone, Debug)]
+pub struct DistributedChannel {
+    /// Pid of the local endpoint. For a channel whose peer is on a
+    /// remote node, this is the local worker that owns the channel.
+    pub local_pid: u64,
+    /// Remote address in `host:port` form (e.g. `"10.0.0.5:4242"`).
+    /// Empty string for a purely local channel (`is_local == true`).
+    pub remote_addr: String,
+    /// Channel id — unique within a supervisor. Used as the routing
+    /// key in the L4 channel table.
+    pub channel_id: u64,
+    /// True iff both endpoints live on this node (in-process fast
+    /// path). False iff the peer is on a remote node (`remote_addr` is
+    /// meaningful).
+    pub is_local: bool,
+    /// True iff the channel is currently connected. `connect` flips it
+    /// true; `disconnect` flips it false. The supervisor polls this
+    /// before sending to decide whether to enqueue or drop.
+    connected: bool,
+}
+
+impl DistributedChannel {
+    /// Construct a new distributed channel. The channel starts
+    /// disconnected regardless of `is_local` — the caller must invoke
+    /// `connect` before sending.
+    pub fn new(
+        local_pid: u64,
+        remote_addr: impl Into<String>,
+        channel_id: u64,
+        is_local: bool,
+    ) -> Self {
+        Self {
+            local_pid,
+            remote_addr: remote_addr.into(),
+            channel_id,
+            is_local,
+            connected: false,
+        }
+    }
+
+    /// Connect the channel. For a local channel (`is_local == true`),
+    /// this is a no-op besides flipping `connected` true. For a remote
+    /// channel, the mock also just flips `connected` true — real code
+    /// would open a TCP connection to `remote_addr` here.
+    ///
+    /// Returns `Err(IpcError::ChannelTimeout)` if the channel is
+    /// already connected (a second `connect` without an intervening
+    /// `disconnect` is a state-machine bug, surfaced as a timeout so
+    /// the caller's retry logic kicks in).
+    pub fn connect(&mut self) -> Result<(), IpcError> {
+        if self.connected {
+            return Err(IpcError::ChannelTimeout);
+        }
+        self.connected = true;
+        Ok(())
+    }
+
+    /// True iff the channel is currently connected. The supervisor
+    /// polls this before sending to decide whether to enqueue or drop.
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    /// Disconnect the channel. For a local channel, this is a no-op
+    /// besides flipping `connected` false. For a remote channel, real
+    /// code would close the TCP connection here.
+    ///
+    /// Returns `Err(IpcError::ChannelClosed)` if the channel is
+    /// already disconnected (a double-`disconnect` is a state-machine
+    /// bug; surfacing it as `ChannelClosed` lets the caller distinguish
+    /// it from a fresh `connect` failure).
+    pub fn disconnect(&mut self) -> Result<(), IpcError> {
+        if !self.connected {
+            return Err(IpcError::ChannelClosed);
+        }
+        self.connected = false;
+        Ok(())
+    }
+}
+
+/// L4 worker discovery service. Maps worker pids to network addresses
+/// so the supervisor's routing layer can find the node that owns a
+/// given pid. The registry is the distributed counterpart to the
+/// in-process `ProcessTable`: where `ProcessTable` answers "is this
+/// pid local?", `WorkerDiscovery` answers "where is this pid?".
+///
+/// The registry is intentionally simple — a flat `HashMap<u64, String>`
+/// — because the supervisor polls it lazily: a miss means "unknown
+/// worker", not "worker does not exist". Real distributed systems
+/// would back this with a gossip protocol or a coordination service;
+/// the in-process map is the test-friendly mock.
+#[derive(Clone, Debug, Default)]
+pub struct WorkerDiscovery {
+    /// Map from worker pid → `host:port` address. Empty for a fresh
+    /// registry. A worker is "known" iff it appears in this map.
+    pub known_workers: HashMap<u64, String>,
+}
+
+impl WorkerDiscovery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a worker pid at a network address. If the pid is
+    /// already known, the address is updated (a worker that migrated
+    /// to a new node re-registers with the new address). This is the
+    /// distributed analogue of `Supervisor::register_worker`.
+    pub fn register(&mut self, pid: u64, addr: impl Into<String>) {
+        self.known_workers.insert(pid, addr.into());
+    }
+
+    /// Discover all known worker pids. Returns the pids in arbitrary
+    /// (HashMap iteration) order — callers that need a stable order
+    /// must sort. This is the routing-table dump the supervisor uses
+    /// to broadcast a fan-out message.
+    pub fn discover(&self) -> Vec<u64> {
+        self.known_workers.keys().copied().collect()
+    }
+
+    /// Look up the network address of a worker pid. Returns `None` if
+    /// the worker is not known to this registry. The supervisor calls
+    /// this when routing a message to a pid it does not own locally.
+    pub fn lookup(&self, pid: u64) -> Option<String> {
+        self.known_workers.get(&pid).cloned()
+    }
+
+    /// Number of workers currently known. Convenience for diagnostics.
+    pub fn len(&self) -> usize {
+        self.known_workers.len()
+    }
+
+    /// True iff the registry knows about no workers.
+    pub fn is_empty(&self) -> bool {
+        self.known_workers.is_empty()
     }
 }
 
@@ -6804,5 +7439,481 @@ mod tests {
         // Non-empty input at limit 0: rejected.
         let err = c2.hash(&[1u8]).unwrap_err();
         assert!(matches!(err, IpcError::PayloadTooLarge(0)));
+    }
+
+    // ── W65-72: Supervisor + CircuitBreaker tests ───────────────────
+
+    #[test]
+    fn test_worker_state_new_is_alive_with_zero_history() {
+        // A freshly constructed WorkerState is alive, with no exit
+        // history and zero consumed restarts. This pins the default
+        // state for `register_worker`.
+        let s = WorkerState::new(4242);
+        assert_eq!(s.pid, 4242);
+        assert!(s.is_alive);
+        assert_eq!(s.restart_count, 0);
+        assert_eq!(s.last_exit_code, 0);
+        assert_eq!(s.last_signal, 0);
+    }
+
+    #[test]
+    fn test_supervisor_register_unregister_and_alive_count() {
+        // Register three workers — all alive. alive_count tracks the
+        // alive subset as workers exit and get restarted.
+        let mut sup = Supervisor::new(3, 1_000);
+        assert_eq!(sup.alive_count(), 0, "fresh supervisor has no workers");
+
+        sup.register_worker(100);
+        sup.register_worker(200);
+        sup.register_worker(300);
+        assert_eq!(sup.alive_count(), 3, "three registered → three alive");
+
+        // Re-registering an existing pid is a no-op (does not clobber
+        // state, does not duplicate the entry).
+        sup.register_worker(100);
+        assert_eq!(sup.workers.len(), 3, "re-register does not duplicate");
+
+        // Unregistering a tracked pid succeeds and frees its slot.
+        assert!(sup.unregister_worker(200).is_ok());
+        assert_eq!(sup.alive_count(), 2, "unregister removes from alive set");
+        assert_eq!(sup.workers.len(), 2);
+
+        // Unregistering an unknown pid is a WorkerNotFound error, not
+        // a silent no-op — the supervisor's bookkeeping is strict.
+        let err = sup.unregister_worker(999).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound),
+            "unregister unknown pid must be WorkerNotFound, got {:?}", err);
+    }
+
+    #[test]
+    fn test_supervisor_handle_worker_exit_clean_exit_terminates() {
+        // exit(0) → Terminate, worker marked dead, no restart consumed.
+        // The supervisor's bookkeeping records the exit code even
+        // though no restart is attempted.
+        let mut sup = Supervisor::new(3, 1_000);
+        sup.register_worker(42);
+
+        let action = sup.handle_worker_exit(42, 0, 0).expect("clean exit");
+        assert_eq!(action, RecoveryAction::Terminate,
+            "exit(0) must Terminate");
+
+        let state = sup.workers.get(&42).expect("worker still tracked");
+        assert!(!state.is_alive, "clean-exit worker is dead");
+        assert_eq!(state.restart_count, 0, "no restart consumed");
+        assert_eq!(state.last_exit_code, 0);
+        assert_eq!(state.last_signal, 0);
+        assert_eq!(sup.alive_count(), 0, "dead worker not counted");
+    }
+
+    #[test]
+    fn test_supervisor_handle_worker_exit_crash_restarts_within_budget() {
+        // SIGSEGV (signal 11, exit_code 139 per shell convention) with
+        // a budget → Restart, worker marked alive again, budget
+        // consumed. Three restarts fit in max_restarts=3; the fourth
+        // crash escalates.
+        let mut sup = Supervisor::new(3, 1_000);
+        sup.register_worker(7);
+
+        // Restart #1: within budget.
+        let a1 = sup.handle_worker_exit(7, 139, 11).expect("crash #1");
+        assert_eq!(a1, RecoveryAction::Restart, "crash #1 must Restart");
+        let s = sup.workers.get(&7).expect("worker tracked");
+        assert_eq!(s.restart_count, 1);
+        assert!(s.is_alive, "restart marks worker alive again");
+        assert_eq!(s.last_exit_code, 139);
+        assert_eq!(s.last_signal, 11);
+
+        // Restart #2: still within budget.
+        let a2 = sup.handle_worker_exit(7, 139, 11).expect("crash #2");
+        assert_eq!(a2, RecoveryAction::Restart, "crash #2 must Restart");
+        assert_eq!(sup.workers.get(&7).unwrap().restart_count, 2);
+
+        // Restart #3: the last allowed restart.
+        let a3 = sup.handle_worker_exit(7, 139, 11).expect("crash #3");
+        assert_eq!(a3, RecoveryAction::Restart, "crash #3 must Restart");
+        assert_eq!(sup.workers.get(&7).unwrap().restart_count, 3);
+
+        // Crash #4: budget exhausted → Escalate, worker stays dead.
+        let a4 = sup.handle_worker_exit(7, 139, 11).expect("crash #4");
+        assert_eq!(a4, RecoveryAction::Escalate,
+            "crash #4 with exhausted budget must Escalate");
+        let s = sup.workers.get(&7).unwrap();
+        assert_eq!(s.restart_count, 3, "escalate does not consume budget");
+        assert!(!s.is_alive, "escalated worker stays dead");
+        assert_eq!(sup.alive_count(), 0);
+    }
+
+    #[test]
+    fn test_supervisor_handle_worker_exit_unknown_pid_rejected() {
+        // An exit for a pid the supervisor never registered is a
+        // state-machine bug — WorkerNotFound, not a silent no-op.
+        let mut sup = Supervisor::new(3, 1_000);
+        let err = sup.handle_worker_exit(404, 1, 0).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound),
+            "exit for unknown pid must be WorkerNotFound, got {:?}", err);
+    }
+
+    #[test]
+    fn test_supervisor_handle_worker_exit_zero_budget_escalates() {
+        // max_restarts == 0 disables the restart policy entirely — any
+        // crash escalates rather than spinning on a restart loop.
+        let mut sup = Supervisor::new(0, 1_000);
+        sup.register_worker(11);
+
+        let action = sup.handle_worker_exit(11, 139, 11).expect("escalate");
+        assert_eq!(action, RecoveryAction::Escalate,
+            "max_restarts == 0 must Escalate on crash");
+
+        let s = sup.workers.get(&11).unwrap();
+        assert_eq!(s.restart_count, 0, "no restart consumed");
+        assert!(!s.is_alive);
+    }
+
+    #[test]
+    fn test_circuit_breaker_starts_closed_and_can_proceed() {
+        // Fresh breaker is Closed, allows traffic, has zero failures.
+        let cb = CircuitBreaker::new(5);
+        assert_eq!(cb.state, CircuitState::Closed);
+        assert!(cb.can_proceed(), "Closed breaker must allow traffic");
+        assert_eq!(cb.failure_count, 0);
+        assert_eq!(cb.threshold, 5);
+    }
+
+    #[test]
+    fn test_circuit_breaker_trips_open_after_threshold_exceeded() {
+        // threshold=3: failures 1, 2, 3 stay Closed (count <=
+        // threshold); failure 4 trips Open. can_proceed then returns
+        // false. This pins the `>` (strictly-greater) semantics: the
+        // breaker opens when count EXCEEDS threshold, not when it
+        // equals it.
+        let mut cb = CircuitBreaker::new(3);
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Closed, "1 <= 3 stays Closed");
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Closed, "2 <= 3 stays Closed");
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Closed, "3 <= 3 stays Closed");
+        assert_eq!(cb.failure_count, 3);
+
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Open, "4 > 3 trips Open");
+        assert!(!cb.can_proceed(), "Open breaker blocks traffic");
+    }
+
+    #[test]
+    fn test_circuit_breaker_record_success_resets_to_closed() {
+        // A success at any time resets the failure count and closes
+        // the breaker. This is the probe-success path from HalfOpen
+        // and the "all clear" path from Closed.
+        let mut cb = CircuitBreaker::new(2);
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_failure(); // trips Open
+        assert_eq!(cb.state, CircuitState::Open);
+
+        cb.record_success();
+        assert_eq!(cb.state, CircuitState::Closed, "success closes");
+        assert_eq!(cb.failure_count, 0, "success resets count");
+        assert!(cb.can_proceed());
+    }
+
+    #[test]
+    fn test_circuit_breaker_reset_transitions_open_to_half_open() {
+        // reset() on an Open breaker → HalfOpen (one trial allowed).
+        // reset() on a Closed breaker is a no-op (already proceeding).
+        // reset() on a HalfOpen breaker is a no-op (already mid-probe).
+        let mut cb = CircuitBreaker::new(1);
+        cb.record_failure();
+        cb.record_failure(); // trips Open
+        assert_eq!(cb.state, CircuitState::Open);
+
+        cb.reset();
+        assert_eq!(cb.state, CircuitState::HalfOpen, "reset → HalfOpen");
+        assert!(cb.can_proceed(), "HalfOpen allows one trial");
+
+        // Resetting again while HalfOpen is a no-op.
+        cb.reset();
+        assert_eq!(cb.state, CircuitState::HalfOpen, "double-reset no-op");
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_failure_reopens() {
+        // In HalfOpen, a single failure re-opens the breaker. This is
+        // the "probe failed" path — the dependency is still sick, so
+        // go back to blocking traffic.
+        let mut cb = CircuitBreaker::new(1);
+        cb.record_failure();
+        cb.record_failure(); // Open
+        cb.reset();          // HalfOpen
+        assert_eq!(cb.state, CircuitState::HalfOpen);
+
+        cb.record_failure();
+        assert_eq!(cb.state, CircuitState::Open, "HalfOpen failure re-opens");
+        assert!(!cb.can_proceed());
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_success_closes() {
+        // In HalfOpen, a single success closes the breaker. This is
+        // the "probe succeeded" path — the dependency has recovered,
+        // so resume normal traffic.
+        let mut cb = CircuitBreaker::new(1);
+        cb.record_failure();
+        cb.record_failure(); // Open
+        cb.reset();          // HalfOpen
+
+        cb.record_success();
+        assert_eq!(cb.state, CircuitState::Closed, "HalfOpen success closes");
+        assert_eq!(cb.failure_count, 0);
+        assert!(cb.can_proceed());
+    }
+
+    // ── W73-80: HotSwapConfig / HotSwapResult / HotSwapManager tests ──
+
+    #[test]
+    fn test_hot_swap_config_new_round_trips_fields() {
+        // The constructor must populate every field — no defaults
+        // hidden behind the constructor.
+        let cfg = HotSwapConfig::new("crypto.aes", 1, 2, true, false);
+        assert_eq!(cfg.module_name, "crypto.aes");
+        assert_eq!(cfg.old_version, 1);
+        assert_eq!(cfg.new_version, 2);
+        assert!(cfg.state_transfer);
+        assert!(!cfg.rollback_on_failure);
+    }
+
+    #[test]
+    fn test_hot_swap_manager_perform_swap_basic_success() {
+        // A straightforward upgrade v1 → v2 on a fresh manager
+        // succeeds: the new version becomes active, a new pid is
+        // allocated, state_transfer flag is echoed in the result,
+        // and there is no error.
+        let mut mgr = HotSwapManager::new();
+        let cfg = HotSwapConfig::new("net.tls", 1, 2, true, false);
+
+        let result = mgr.perform_swap(&cfg).expect("swap must succeed");
+        assert!(result.success);
+        assert!(result.old_pid > 0, "old_pid must be allocated");
+        assert!(result.new_pid > result.old_pid, "new_pid must advance");
+        assert!(result.state_transferred, "state_transfer=true echoes");
+        assert!(result.error.is_none());
+
+        assert_eq!(mgr.active_versions.get("net.tls"), Some(&2),
+            "active_versions must record the new version");
+    }
+
+    #[test]
+    fn test_hot_swap_manager_rejects_downgrade() {
+        // new_version <= old_version is a ProtocolViolation — the
+        // manager does not support downgrades via perform_swap (those
+        // go through rollback).
+        let mut mgr = HotSwapManager::new();
+        let cfg = HotSwapConfig::new("net.tls", 5, 4, false, false);
+
+        let err = mgr.perform_swap(&cfg).unwrap_err();
+        assert!(matches!(err, IpcError::ProtocolViolation { .. }),
+            "downgrade must be ProtocolViolation, got {:?}", err);
+        assert!(!mgr.active_versions.contains_key("net.tls"),
+            "rejected swap must not mutate active_versions");
+    }
+
+    #[test]
+    fn test_hot_swap_manager_rejects_stale_old_version() {
+        // If the module is registered with version N, a swap claiming
+        // old_version != N is a ProtocolViolation — a concurrent swap
+        // raced us, the caller's view is stale.
+        let mut mgr = HotSwapManager::new();
+        mgr.register_module("net.tls", 3);
+
+        // Caller thinks old_version is 1, but manager recorded 3.
+        let cfg = HotSwapConfig::new("net.tls", 1, 2, false, false);
+        let err = mgr.perform_swap(&cfg).unwrap_err();
+        assert!(matches!(err, IpcError::ProtocolViolation { .. }),
+            "stale old_version must be ProtocolViolation, got {:?}", err);
+        assert_eq!(mgr.active_versions.get("net.tls"), Some(&3),
+            "rejected swap must not bump the version");
+    }
+
+    #[test]
+    fn test_hot_swap_manager_chained_swaps_advance_version() {
+        // Two sequential swaps v1→v2 then v2→v3 both succeed, each
+        // time consuming one pid and bumping the recorded version.
+        // This is the canonical "rolling upgrade" flow.
+        let mut mgr = HotSwapManager::new();
+        let cfg1 = HotSwapConfig::new("mod", 1, 2, false, false);
+        let r1 = mgr.perform_swap(&cfg1).expect("swap 1");
+        assert_eq!(mgr.active_versions.get("mod"), Some(&2));
+
+        let cfg2 = HotSwapConfig::new("mod", 2, 3, true, false);
+        let r2 = mgr.perform_swap(&cfg2).expect("swap 2");
+        assert_eq!(mgr.active_versions.get("mod"), Some(&3));
+        assert!(r2.new_pid > r1.new_pid, "second swap allocates a new pid");
+    }
+
+    #[test]
+    fn test_hot_swap_manager_rollback_reverts_version() {
+        // After a swap v1→v2, rollback reverts the recorded version
+        // to v1. The contract is just "flip the active version back"
+        // — the real kill-and-restore logic is the runtime's job.
+        let mut mgr = HotSwapManager::new();
+        let cfg = HotSwapConfig::new("mod", 1, 2, false, true);
+        mgr.perform_swap(&cfg).expect("swap");
+        assert_eq!(mgr.active_versions.get("mod"), Some(&2));
+
+        mgr.rollback(&cfg).expect("rollback");
+        assert_eq!(mgr.active_versions.get("mod"), Some(&1),
+            "rollback reverts active version to old_version");
+    }
+
+    #[test]
+    fn test_hot_swap_manager_rollback_unknown_module_rejected() {
+        // Rolling back a module the manager has never heard of is a
+        // WorkerNotFound error — there is no recorded version to
+        // revert to.
+        let mut mgr = HotSwapManager::new();
+        let cfg = HotSwapConfig::new("never_loaded", 1, 2, false, false);
+        let err = mgr.rollback(&cfg).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound),
+            "rollback unknown module must be WorkerNotFound, got {:?}", err);
+    }
+
+    #[test]
+    fn test_hot_swap_result_failure_shape_carries_error_message() {
+        // The failure shape of HotSwapResult is success=false, pids=0,
+        // state_transferred=false, error=Some(reason). The fields are
+        // constructed directly here because the mock perform_swap
+        // never fails after passing validation — the failure shape is
+        // what rollback_on_failure would produce if the health check
+        // failed, and is documented for callers building it by hand.
+        let r = HotSwapResult {
+            success: false,
+            old_pid: 0,
+            new_pid: 0,
+            state_transferred: false,
+            error: Some(String::from("post-swap health check failed")),
+        };
+        assert!(!r.success);
+        assert_eq!(r.old_pid, 0);
+        assert_eq!(r.new_pid, 0);
+        assert!(!r.state_transferred);
+        assert_eq!(r.error.as_deref(), Some("post-swap health check failed"));
+    }
+
+    // ── W81-88: DistributedChannel + WorkerDiscovery tests ───────────
+
+    #[test]
+    fn test_distributed_channel_new_starts_disconnected() {
+        // A freshly constructed channel is disconnected regardless of
+        // is_local — connect() must be called before is_connected()
+        // returns true. This pins the "no implicit connect on new"
+        // contract.
+        let local = DistributedChannel::new(1, "", 100, true);
+        assert!(!local.is_connected(), "local channel starts disconnected");
+        assert!(local.is_local);
+        assert_eq!(local.local_pid, 1);
+        assert_eq!(local.channel_id, 100);
+        assert_eq!(local.remote_addr, "");
+
+        let remote = DistributedChannel::new(2, "10.0.0.5:4242", 101, false);
+        assert!(!remote.is_connected(), "remote channel starts disconnected");
+        assert!(!remote.is_local);
+        assert_eq!(remote.remote_addr, "10.0.0.5:4242");
+    }
+
+    #[test]
+    fn test_distributed_channel_connect_disconnect_cycle() {
+        // The full connect → disconnect → connect cycle. Each
+        // transition flips is_connected; a second connect without an
+        // intervening disconnect is a ChannelTimeout (state-machine
+        // bug surfaced as a timeout so retry logic kicks in); a
+        // double-disconnect is a ChannelClosed.
+        let mut ch = DistributedChannel::new(1, "peer:1234", 7, false);
+        assert!(!ch.is_connected());
+
+        ch.connect().expect("connect #1");
+        assert!(ch.is_connected());
+
+        // Double-connect is rejected.
+        let err = ch.connect().unwrap_err();
+        assert!(matches!(err, IpcError::ChannelTimeout),
+            "double-connect must be ChannelTimeout, got {:?}", err);
+
+        ch.disconnect().expect("disconnect");
+        assert!(!ch.is_connected());
+
+        // Double-disconnect is rejected.
+        let err = ch.disconnect().unwrap_err();
+        assert!(matches!(err, IpcError::ChannelClosed),
+            "double-disconnect must be ChannelClosed, got {:?}", err);
+
+        // Re-connect after disconnect works (the cycle is reusable).
+        ch.connect().expect("reconnect");
+        assert!(ch.is_connected());
+    }
+
+    #[test]
+    fn test_distributed_channel_local_path_connects_without_addr() {
+        // A local channel (is_local=true) has an empty remote_addr but
+        // still goes through the same connect/disconnect cycle. This
+        // is the in-process fast path: the supervisor routes directly
+        // without touching the network.
+        let mut ch = DistributedChannel::new(5, "", 42, true);
+        assert!(ch.is_local);
+        assert_eq!(ch.remote_addr, "");
+        ch.connect().expect("local connect");
+        assert!(ch.is_connected());
+        ch.disconnect().expect("local disconnect");
+        assert!(!ch.is_connected());
+    }
+
+    #[test]
+    fn test_worker_discovery_register_lookup_discover() {
+        // Register three workers at distinct addresses; lookup
+        // returns the address; discover returns all pids; lookup of
+        // an unknown pid returns None.
+        let mut wd = WorkerDiscovery::new();
+        assert!(wd.is_empty(), "fresh registry is empty");
+
+        wd.register(100, "10.0.0.1:4000");
+        wd.register(200, "10.0.0.2:4000");
+        wd.register(300, "10.0.0.3:4000");
+        assert_eq!(wd.len(), 3);
+        assert!(!wd.is_empty());
+
+        assert_eq!(wd.lookup(100).as_deref(), Some("10.0.0.1:4000"));
+        assert_eq!(wd.lookup(200).as_deref(), Some("10.0.0.2:4000"));
+        assert_eq!(wd.lookup(300).as_deref(), Some("10.0.0.3:4000"));
+        assert_eq!(wd.lookup(999), None, "unknown pid → None");
+
+        let mut pids = wd.discover();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![100, 200, 300], "discover lists all pids");
+    }
+
+    #[test]
+    fn test_worker_discovery_register_updates_existing_address() {
+        // Re-registering an existing pid with a new address updates
+        // the entry — this is the migration path (a worker moved to
+        // a new node re-registers with the new address).
+        let mut wd = WorkerDiscovery::new();
+        wd.register(42, "old:1000");
+        assert_eq!(wd.lookup(42).as_deref(), Some("old:1000"));
+
+        wd.register(42, "new:2000");
+        assert_eq!(wd.lookup(42).as_deref(), Some("new:2000"),
+            "re-register updates the address");
+        assert_eq!(wd.len(), 1, "re-register does not duplicate");
+    }
+
+    #[test]
+    fn test_worker_discovery_default_is_empty_map() {
+        // Default construction yields an empty registry. This pins
+        // the Default impl so callers can rely on `WorkerDiscovery::default()`.
+        let wd = WorkerDiscovery::default();
+        assert!(wd.known_workers.is_empty());
+        assert_eq!(wd.len(), 0);
+        assert!(wd.is_empty());
+        assert!(wd.discover().is_empty());
+        assert_eq!(wd.lookup(1), None);
     }
 }
