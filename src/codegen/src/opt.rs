@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRType, IRTerminator, IRValue, UnaryOpKind,
+    BinOpKind, CastKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRType, IRTerminator, IRValue, UnaryOpKind,
 };
 
 // ===========================================================================
@@ -863,6 +863,56 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             }
             let dst_id = dst.as_register()?;
             l.checked_div(r).map(|v| (dst_id, v))
+        }
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+            let v = src.as_immediate()?;
+            let dst_id = dst.as_register()?;
+            // G7: fold Cast with Immediate operand. This is critical for
+            // backends that can't do FP arithmetic with Register operands
+            // (hppa, m68k) — without this, Cast results stay as Registers
+            // and downstream BinOps can't be folded.
+            match kind {
+                CastKind::IntToFloat => {
+                    // i64 → f64
+                    let f = v as f64;
+                    Some((dst_id, f.to_bits() as i64))
+                }
+                CastKind::UIntToFloat => {
+                    // u64 → f64
+                    let f = v as u64 as f64;
+                    Some((dst_id, f.to_bits() as i64))
+                }
+                CastKind::FloatToInt => {
+                    // f64 → i64 (truncate toward zero)
+                    let f = f64::from_bits(v as u64);
+                    Some((dst_id, f as i64))
+                }
+                CastKind::FloatToUInt => {
+                    // f64 → u64 (truncate toward zero)
+                    let f = f64::from_bits(v as u64);
+                    Some((dst_id, f as u64 as i64))
+                }
+                CastKind::FloatToFloat => {
+                    // f32 ↔ f64
+                    match (from_ty, to_ty) {
+                        (Some(IRType::F32), Some(IRType::F64)) => {
+                            // f32 → f64 (widen)
+                            let f = f32::from_bits(v as u32) as f64;
+                            Some((dst_id, f.to_bits() as i64))
+                        }
+                        (Some(IRType::F64), Some(IRType::F32)) => {
+                            // f64 → f32 (narrow)
+                            let f = f64::from_bits(v as u64) as f32;
+                            Some((dst_id, f.to_bits() as i64))
+                        }
+                        _ => {
+                            // Same type or unknown — pass through
+                            Some((dst_id, v))
+                        }
+                    }
+                }
+                _ => None,
+            }
         }
         IRInstr::Cmp {
             kind,
