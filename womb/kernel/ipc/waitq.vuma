@@ -15,33 +15,50 @@
 // use it for FUTEX_WAIT; K7d (shm) may use it for in-page contention.
 //
 // ── What K7e provides ──────────────────────────────────────────────────────
-//   waitq_init(wq)                 — head=256, tail=256, count=0 (empty).
+//   waitq_init(wq)                 — head=256, tail=256, next=256,
+//                                     count=0 (empty).
 //   waitq_add(wq, task_idx)        — append task_idx to the tail of the
-//                                     queue; bump count. (Simplified — see
-//                                     "Simplified linked-list management"
-//                                     below.)
+//                                     queue; bump count; maintain `next`
+//                                     (head's successor) when transitioning
+//                                     1→2 waiters. (See "Simplified
+//                                     linked-list management" below.)
 //   waitq_remove(wq, task_idx)     — remove task_idx from the queue;
 //                                     returns 0 on success, -1 if not
 //                                     found / queue empty. (Simplified —
 //                                     only the head path is exact.)
 //   waitq_wake_one(wq)             — pop the head task; return its index,
-//                                     or 256 if the queue was empty.
+//                                     or 256 if the queue was empty. For
+//                                     multi-waiter queues, ADVANCES head to
+//                                     the next waiter (W18S4 fix — was
+//                                     clearing head/tail and losing the
+//                                     remaining waiters).
 //   waitq_wake_all(wq)             — drain the entire queue; return the
 //                                     number of tasks that were woken.
 //
-// ── WaitQueue layout (NEW in K7e) ──────────────────────────────────────────
+// ── WaitQueue layout (NEW in K7e; `next` added in W18S4) ───────────────────
 //   layout WaitQueue = {
 //       head:   u64,   // task index of first waiter, or 256 = empty
 //       tail:   u64,   // task index of last waiter,  or 256 = empty
+//       next:   u64,   // task index of head's successor, or 256 = none
 //       count:  u32,   // number of waiters
 //   }
 //
-// 3 fields, 8 + 8 + 4 = 20 bytes (padded to 24 for 8-byte alignment of the
-// trailing u64-pair block — the codegen rounds State<T> footprints up to a
-// multiple of the largest field's alignment; here that's 8, so 20 → 24).
-// head/tail are u64 (not u32 like K4e's WaitQueue) because the K7e contract
-// specifies task_idx: u64 in waitq_add / waitq_remove / waitq_wake_one —
-// using u64 for head/tail avoids a u32↔u64 cast on every field touch.
+// 4 fields, 8 + 8 + 8 + 4 = 28 bytes (padded to 32 for 8-byte alignment of
+// the head/tail/next u64 block — the codegen rounds State<T> footprints up
+// to a multiple of the largest field's alignment; here that's 8, so
+// 28 → 32). head/tail/next are u64 (not u32 like K4e's WaitQueue) because
+// the K7e contract specifies task_idx: u64 in waitq_add / waitq_remove /
+// waitq_wake_one — using u64 for head/tail/next avoids a u32↔u64 cast on
+// every field touch.
+//
+// The `next` field was added in Wave 18S4 to fix the documented multi-
+// waiter bug in waitq_wake_one (see "Simplified linked-list management"
+// below). It tracks head's IMMEDIATE successor — the one waiter that
+// waitq_wake_one needs to advance head to when popping the head of a
+// multi-waiter queue. A single `next` field (rather than a full per-task
+// `nexts` array like ProcessTable.nexts) is sufficient for the 2- and
+// 3-waiter cases via queue invariants; deeper chains still need
+// ProcessTable access (K8+).
 //
 // NOTE on byte-identical-redeclaration: K4e's wait.vuma declares a WaitQueue
 // layout with u32 head/tail/count. This file's WaitQueue (u64 head/tail +
@@ -54,7 +71,7 @@
 // there's no risk of cross-file symbol collision — each file's layout is
 // file-local).
 //
-// ── Simplified linked-list management ──────────────────────────────────────
+// ── Simplified linked-list management (updated in W18S4) ───────────────────
 // A real kernel's wait queue is a true doubly-linked list, where each
 // Task struct has a `next`/`prev` pair that the queue's head/tail thread
 // through. Operations:
@@ -72,38 +89,54 @@
 // array inside ProcessTable.nexts (K4a). That means a TRUE wait queue
 // would need to take BOTH State<WaitQueue> AND State<ProcessTable> on
 // every operation — waitq_add would be `fn waitq_add(wq, tbl, task_idx)`.
-// The K7e contract deliberately simplifies this: the WaitQueue tracks
-// ONLY head/tail/count, NOT the middle of the linked list. The caller
-// (K7a/K7b/K7c/K7d) is responsible for managing the Task.next field
-// via ProcessTable helpers — waitq_add just updates wq.tail + count;
-// waitq_wake_one just reads wq.head + bumps head to 256 (the contract
-// notes: "in real kernel: head = task.next"). This means:
-//   * A queue with 1 waiter: head == tail, count == 1. wake_one returns
-//     head, sets head=256, tail=256, count=0. Correct.
-//   * A queue with 2 waiters: head != tail, count == 2. wake_one returns
-//     head, sets head=256, tail=256 (incorrect — should set head=tail,
-//     the second waiter), count=1. The second waiter is "lost" — its
-//     task_idx is still in tail but head says empty.
+// The K7e contract deliberately avoids that coupling: the WaitQueue
+// tracks head/tail/count PLUS a single `next` field (head's immediate
+// successor) — NOT a full per-task next array. waitq_add maintains
+// `next` when transitioning from 1 to 2 waiters (the new task becomes
+// head's successor); waitq_wake_one advances head = next when popping
+// from a multi-waiter queue. The caller (K7a/K7b/K7c/K7d) is NOT
+// required to manage Task.next via ProcessTable helpers for the 2- and
+// 3-waiter cases. Behavior:
+//   * A queue with 1 waiter: head == tail, count == 1, next == 256.
+//     wake_one returns head, sets head=256, tail=256, next=256, count=0.
+//     Correct.
+//   * A queue with 2 waiters: head != tail, count == 2, next == tail
+//     (set by waitq_add when the 2nd waiter was appended). wake_one
+//     returns head, sets head = next (= the 2nd waiter), count=1, then
+//     next = 256 (count==1 → head == tail). Correct — the 2nd waiter
+//     is preserved (W18S4 fix; the pre-fix code cleared head/tail and
+//     lost the 2nd waiter).
+//   * A queue with 3 waiters: head != tail, count == 3, next == the
+//     2nd waiter. wake_one returns head, sets head = next (the 2nd
+//     waiter), count=2, then next = tail (count==2 → head's successor
+//     is tail). Correct for 3 waiters (W18S4 fix). A subsequent
+//     wake_one returns the 2nd waiter, head = tail (the 3rd), count=1.
+//   * A queue with 4+ waiters: the first wake_one is correct (head =
+//     next, the 2nd waiter); but `next` goes stale when count drops to
+//     3+ (head's new successor can't be derived without per-task next
+//     pointers). head/tail/count stay consistent; a subsequent
+//     wake_one on a 4+-deep chain needs ProcessTable.nexts (K8+).
 //   * wake_all is correct in all cases (it just drains everything).
 //
-// Why is this acceptable for K7e? Because:
-//   (1) The self-test only checks the 1-waiter path (add 3, wake 1, wake
-//       all returns 2 — the wake_all just reads count=2 before zeroing).
-//   (2) The K7a/K7b/K7c/K7d callers will ALL be single-waiter in their
-//       self-tests (a pipe with 1 blocked reader, a futex with 1 waiter,
-//       etc.). Multi-waiter correctness is a K8+ concern (a real
-//       scheduler + ProcessTable walk).
-//   (3) The contract's waitq_remove is similarly simplified ("in real
-//       kernel: walk the list — here, simplified"). The full linked-list
-//       walk would require ProcessTable access, which the contract
-//       explicitly defers to K8+.
+// Why is the `next` field (not a full `nexts` array) sufficient for K7e?
+//   (1) The self-test checks add 3, wake 1 (head advances to the 2nd
+//       waiter — verified by the new `if wq.head != 10` check), wake
+//       all returns 2 — all pass.
+//   (2) The K7a/K7b/K7c/K7d callers will be 1- or 2-waiter in their
+//       self-tests (a pipe with 1 blocked reader, a futex with 1
+//       waiter, etc.). The `next` field fully covers these.
+//   (3) waitq_remove is still simplified (the head-removal path clears
+//       head rather than advancing to next — see waitq_remove's body
+//       comment). The contract explicitly defers the full linked-list
+//       walk to K8+. waitq_remove is not on the K7e critical path.
 //
 // When K8+ adds the true linked-list walk, this file's waitq_add /
-// waitq_remove / waitq_wake_one will need to take State<ProcessTable>
-// as a second parameter and touch tbl.nexts via pt_get_next /
-// pt_set_next (re-declared byte-identically to K4a's task.vuma). Until
-// then, the simplified version satisfies the K7e DoD and unblocks K7a/
-// K7b/K7c/K7d.
+// waitq_remove / waitq_wake_one will take State<ProcessTable> as a
+// second parameter and touch tbl.nexts via pt_get_next / pt_set_next
+// (re-declared byte-identically to K4a's task.vuma). The `next` field
+// can then be dropped (or kept as a cache). Until then, the `next`-
+// field version fixes the documented multi-waiter bug and satisfies
+// the K7e DoD while unblocking K7a/K7b/K7c/K7d.
 //
 // ── "wake_one" semantics: head-only, FIFO ──────────────────────────────────
 // waitq_wake_one pops the HEAD of the queue (FIFO — first waiter woken
@@ -191,32 +224,43 @@
 //         womb/kernel/ipc/waitq.vuma \
 //         /tmp/waitq.bin x86_64 --verify
 //     /tmp/waitq.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 8 self-test checks pass — waitq_init
+// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — waitq_init
 // zeroes the queue, waitq_add 3× lands head=5/count=3, waitq_wake_one
-// returns 5 and drops count to 2, waitq_wake_all returns 2 and zeroes
-// the queue, waitq_wake_one on empty returns 256).
+// returns 5 and ADVANCES head to 10 (W18S4 fix — was 256 pre-fix) with
+// count=2, waitq_wake_all returns 2 and zeroes the queue, waitq_wake_one
+// on empty returns 256).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layout.
 // ────────────────────────────────────────────────────────────────────────────
 
 // WaitQueue: a linked list of task indices waiting for an event.
-// 3 fields × (8 + 8 + 4) = 20 bytes (padded to 24 for 8-byte alignment
-// of the head/tail u64 pair — see "WaitQueue layout" in the file header
-// for the rationale). head/tail are u64 because the K7e contract's API
-// uses u64 task_idx everywhere (avoiding u32↔u64 casts on every field
-// touch); count is u32 (256 max waiters per queue — matches the
-// ProcessTable's 256-slot limit, so count fits comfortably in u32).
+// 4 fields × (8 + 8 + 8 + 4) = 28 bytes (padded to 32 for 8-byte
+// alignment of the head/tail/next u64 triple — see "WaitQueue layout"
+// in the file header for the rationale). head/tail/next are u64
+// because the K7e contract's API uses u64 task_idx everywhere
+// (avoiding u32↔u64 casts on every field touch); count is u32 (256
+// max waiters per queue — matches the ProcessTable's 256-slot limit,
+// so count fits comfortably in u32).
+//
+// `next` (W18S4): head's immediate successor, or 256 if head is the
+// only waiter (head == tail). Maintained by waitq_add (set when
+// appending to a 1-waiter queue) and waitq_wake_one (advanced/cleared
+// via queue invariants after popping head). A single `next` field —
+// rather than a full per-task `nexts` array — is sufficient for the
+// 2- and 3-waiter cases that the K7e callers exercise; deeper chains
+// need ProcessTable.nexts (K8+).
 //
 // 256 = empty sentinel: a valid task_idx is 0..255 (256 slots in the
 // ProcessTable), so 256 is "one past the end" — a clean "invalid"
-// marker (same as Linux's NULL for list_head). Both head and tail use
-// 256 for "no waiter" — when head == 256 the queue is empty (tail is
-// also 256 in that case, per the invariant maintained by waitq_init /
-// waitq_wake_one / waitq_wake_all).
+// marker (same as Linux's NULL for list_head). head, tail, and next
+// all use 256 for "no waiter" — when head == 256 the queue is empty
+// (tail and next are also 256 in that case, per the invariant
+// maintained by waitq_init / waitq_wake_one / waitq_wake_all).
 layout WaitQueue = {
     head:  u64,  // task index of first waiter, or 256 = empty
     tail:  u64,  // task index of last waiter,  or 256 = empty
+    next:  u64,  // task index of head's successor, or 256 = none
     count: u32,  // number of waiters (0 = empty queue)
 }
 
@@ -236,37 +280,53 @@ layout WaitQueue = {
 fn waitq_init(wq: State<WaitQueue>) {
     wq.head = 256;  // empty
     wq.tail = 256;
+    wq.next = 256;  // head has no successor
     wq.count = 0;
 }
 
 // waitq_add: append task_idx to the tail of the wait queue. Bumps count.
 //
-// Simplified — see "Simplified linked-list management" in the file
-// header. A real kernel would set the OLD tail task's `next` field to
-// task_idx (linking it into the list); THIS file just updates wq.tail
-// and wq.count. The caller (K7a/K7b/K7c/K7d) is responsible for the
-// Task.next field via ProcessTable helpers.
+// Updated in W18S4 to maintain the `next` field (head's immediate
+// successor) so waitq_wake_one can advance head without losing
+// waiters — see "Simplified linked-list management" in the file header.
+// A real kernel would set the OLD tail task's `next` field to task_idx
+// (linking it into the list via ProcessTable.nexts); THIS file can't
+// do that without State<ProcessTable> access, so it tracks ONLY head's
+// successor in the `next` field. The caller (K7a/K7b/K7c/K7d) is NOT
+// required to manage Task.next for the 2- and 3-waiter cases.
 //
 // Two cases:
 //   (1) Empty queue (wq.head == 256): task_idx becomes both head and
-//       tail. (In a real kernel, head=tail=task_idx; task_idx.next=256.)
-//   (2) Non-empty queue: wq.tail = task_idx (the old tail's .next
-//       field is NOT touched — see the simplification note). count
-//       still bumps by 1.
+//       tail; next = 256 (head has no successor yet).
+//   (2) Non-empty queue: wq.tail = task_idx. If next == 256 (queue was
+//       1 waiter: head == tail), the new task becomes head's immediate
+//       successor — set next = task_idx. For 2+ waiter queues, next
+//       already tracks head's successor and is left unchanged (the
+//       old tail's .next would need ProcessTable access to link —
+//       deferred to K8+; next still correctly points to head's
+//       successor). count always bumps by 1.
 //
-// State<T> params: 1 (wq). Pure write — reads wq.head for the empty
-// check, writes wq.head / wq.tail / wq.count.
+// State<T> params: 1 (wq). Reads wq.head / wq.next for the empty +
+// successor checks; writes wq.head / wq.tail / wq.next / wq.count.
 fn waitq_add(wq: State<WaitQueue>, task_idx: u64) {
     if wq.head == 256 {
-        // Empty queue — task_idx becomes both head and tail.
+        // Empty queue — task_idx becomes both head and tail. Head has
+        // no successor yet (next = 256).
         wq.head = task_idx;
         wq.tail = task_idx;
+        wq.next = 256;
     } else {
-        // Non-empty queue — append to tail. (In a real kernel, this
-        // would set the old tail task's `next` field to task_idx via
-        // pt_set_next(tbl, old_tail, task_idx). Here we just update
-        // the tail pointer — the Task.next management is the caller's
-        // responsibility since we don't have a ProcessTable here.)
+        // Non-empty queue — append to tail. If head had no successor
+        // yet (queue was 1 waiter: head == tail, next == 256), the
+        // new task becomes head's immediate successor — record it in
+        // `next` so waitq_wake_one can advance head without losing
+        // the remaining waiters. For 2+ waiter queues, linking the
+        // old tail's .next would require ProcessTable access
+        // (deferred to K8+); `next` still correctly tracks head's
+        // immediate successor, which is all waitq_wake_one needs.
+        if wq.next == 256 {
+            wq.next = task_idx;
+        }
         wq.tail = task_idx;
     }
     wq.count = wq.count + 1;
@@ -309,13 +369,16 @@ fn waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
         return 0 - 1;  // -1 (empty queue)
     }
     if wq.head == task_idx {
-        // Remove head. (In a real kernel: wq.head = pt_get_next(tbl,
-        // task_idx). Here, simplified to wq.head = 256 — the contract
-        // notes "in real kernel: head = task.next". This means a
-        // multi-waiter queue loses its second waiter after a head
-        // removal — see "Simplified linked-list management" in the
-        // file header.)
+        // Remove head. Same multi-waiter simplification as the
+        // pre-fix waitq_wake_one: sets head=256, which loses any
+        // remaining waiters. The K7e contract explicitly defers the
+        // true linked-list walk (head = pt_get_next(tbl, task_idx))
+        // to K8+. The `next` field is cleared here for state
+        // consistency with the new layout; waitq_remove is not on
+        // the K7e critical path (the K7a/K7b/K7c/K7d callers use
+        // wake_one / wake_all, not remove).
         wq.head = 256;
+        wq.next = 256;
         if wq.head == 256 {
             wq.tail = 256;  // queue is now empty
         }
@@ -342,33 +405,73 @@ fn waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
 // first waiter (head) is woken first, matching Linux's __wake_up
 // default behavior.
 //
-// Implementation:
+// Implementation (W18S4 fix — no longer loses multi-waiter queues):
 //   (1) If wq.head == 256 (empty), return 256 (no task woken).
 //   (2) Capture the head task index into a local `task`.
-//   (3) Set wq.head = 256 (in a real kernel: head = task.next — the
-//       contract notes this; the simplified version just empties the
-//       head, which loses the second waiter in a multi-waiter queue —
-//       see "Simplified linked-list management" in the file header).
-//   (4) If wq.head == 256 (queue now empty), also reset wq.tail = 256
-//       (maintain the empty-queue invariant — head == tail == 256).
-//   (5) Decrement count.
-//   (6) Return the captured task index.
+//   (3) If count <= 1: the queue had a single waiter — clear it
+//       (head=256, tail=256, next=256, count=0).
+//   (4) If count > 1: advance head to wq.next (head's immediate
+//       successor, maintained by waitq_add) and decrement count —
+//       the remaining waiters are preserved. Then maintain `next`
+//       for the new head using queue invariants:
+//         count == 1 → next = 256 (head == tail, no successor).
+//         count == 2 → next = tail (only 2 waiters left, so head's
+//                      successor is tail).
+//         count >= 3 → next is stale (head's new successor can't be
+//                      derived without ProcessTable.nexts, K8+).
+//   (5) Return the captured task index.
 //
-// State<T> params: 1 (wq). Reads wq.head; writes wq.head / wq.tail /
-// wq.count. The `let task = wq.head;` local-capture pattern is the
-// same as K4b's scheduler.vuma `let min_idx = rq.head;` — direct
-// field read into a u64 local (verified to work by scheduler.vuma's
-// self-test).
+// The pre-W18S4 code unconditionally set head=256, tail=256 (and only
+// decremented count), which lost all waiters after the first in any
+// 2+ waiter queue — see "Simplified linked-list management" in the
+// file header for the documented bug and the W18S4 fix rationale.
+//
+// State<T> params: 1 (wq). Reads wq.head / wq.count; writes wq.head /
+// wq.tail / wq.next / wq.count. The `let task = wq.head;` local-capture
+// pattern is the same as K4b's scheduler.vuma `let min_idx = rq.head;`
+// — direct field read into a u64 local (verified to work by
+// scheduler.vuma's self-test).
 fn waitq_wake_one(wq: State<WaitQueue>) -> u64 {
     if wq.head == 256 {
         return 256;  // empty
     }
     let task = wq.head;
-    wq.head = 256;  // (in real kernel: wq.head = pt_get_next(tbl, task))
-    if wq.head == 256 {
+    if wq.count <= 1 {
+        // Single waiter (or defensive count==0) — clear the queue.
+        // This is the correct path for a 1-waiter queue: head == tail,
+        // so after popping head the queue is empty.
+        wq.head = 256;
         wq.tail = 256;
+        wq.next = 256;
+        wq.count = 0;
+    } else {
+        // Multiple waiters — advance head to the next waiter instead
+        // of clearing the queue. This is the documented multi-waiter
+        // bug fix: the old code unconditionally set head=256, tail=256,
+        // losing all remaining waiters. Now head = wq.next (head's
+        // immediate successor, maintained by waitq_add), and count is
+        // decremented (NOT zeroed) to preserve the remaining waiters.
+        wq.head = wq.next;
+        wq.count = wq.count - 1;
+        // Maintain `next` for the new head using queue invariants:
+        //   count == 1 -> head == tail, no successor (next = 256).
+        //   count == 2 -> only two waiters left, so head's successor
+        //                is tail (next = tail).
+        //   count >= 3 -> head's new successor can't be derived without
+        //                per-task next pointers (ProcessTable.nexts,
+        //                deferred to K8+); next is stale, but head,
+        //                tail, and count remain consistent. A
+        //                subsequent wake_one on a 3+-deep chain needs
+        //                ProcessTable access (see the file header's
+        //                "Simplified linked-list management" note).
+        if wq.count == 1 {
+            wq.next = 256;
+        } else {
+            if wq.count == 2 {
+                wq.next = wq.tail;
+            }
+        }
     }
-    wq.count = wq.count - 1;
     return task;
 }
 
@@ -394,33 +497,39 @@ fn waitq_wake_all(wq: State<WaitQueue>) -> u32 {
     let n = wq.count;
     wq.head = 256;
     wq.tail = 256;
+    wq.next = 256;
     wq.count = 0;
     return n;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K7e DoD).
+// Self-test (the K7e DoD; W18S4 added the head-advance check).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a WaitQueue via state_new, init it via waitq_init, then:
-//   (1) waitq_add(wq, 5)  — queue: head=5, tail=5, count=1.
-//   (2) waitq_add(wq, 10) — queue: head=5, tail=10, count=2 (head
-//       unchanged — non-empty path).
-//   (3) waitq_add(wq, 15) — queue: head=5, tail=15, count=3.
+//   (1) waitq_add(wq, 5)  — queue: head=5, tail=5, next=256, count=1.
+//   (2) waitq_add(wq, 10) — queue: head=5, tail=10, next=10, count=2
+//       (next set to 10 — head's successor — when transitioning 1→2
+//       waiters; head unchanged — non-empty path).
+//   (3) waitq_add(wq, 15) — queue: head=5, tail=15, next=10, count=3
+//       (next unchanged — head's successor is still 10).
 //   (4) Check wq.count == 3.
 //   (5) Check wq.head == 5.
-//   (6) waitq_wake_one(wq) — returns 5 (head), queue: head=256,
-//       tail=256, count=2 (the simplified path empties head AND tail
-//       — see "Simplified linked-list management" in the file header).
+//   (6) waitq_wake_one(wq) — returns 5 (head), queue: head=10,
+//       count=2, next=15 (count==2 → next=tail). This is the W18S4
+//       fix: head ADVANCES to the next waiter instead of being
+//       cleared to 256. The pre-fix code left head=256, tail=256,
+//       losing waiters 10 and 15.
 //   (7) Check t == 5.
-//   (8) Check wq.count == 2.
-//   (9) waitq_wake_all(wq) — returns 2 (count before drain), queue:
-//       head=256, tail=256, count=0.
-//   (10) Check n == 2.
-//   (11) Check wq.count == 0.
-//   (12) Check wq.head == 256.
-//   (13) waitq_wake_one(wq) on empty — returns 256 (no task woken).
-//   (14) Check t2 == 256.
-//   (15) Return 0 (success).
+//   (8) Check wq.head == 10 (W18S4 NEW check — verifies head advanced).
+//   (9) Check wq.count == 2.
+//   (10) waitq_wake_all(wq) — returns 2 (count before drain), queue:
+//        head=256, tail=256, next=256, count=0.
+//   (11) Check n == 2.
+//   (12) Check wq.count == 0.
+//   (13) Check wq.head == 256.
+//   (14) waitq_wake_one(wq) on empty — returns 256 (no task woken).
+//   (15) Check t2 == 256.
+//   (16) Return 0 (success).
 //
 // Returns 0 on success, 1..N on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
@@ -457,21 +566,24 @@ fn main() -> i32 {
     if wq.count != 3 { return 1; }
     if wq.head != 5 { return 2; }
 
-    // (6-8) Wake one — should return 5 (head), count drops to 2.
+    // (6-9) Wake one — should return 5 (head), head advances to 10
+    // (the bug fix: previously head was cleared to 256, losing the
+    // remaining waiters 10 and 15), count drops to 2.
     let t = waitq_wake_one(wq);
     if t != 5 { return 3; }
-    if wq.count != 2 { return 4; }
+    if wq.head != 10 { return 4; }  // head advanced to next waiter
+    if wq.count != 2 { return 5; }
 
-    // (9-12) Wake all — should return 2 (count before drain), queue
+    // (10-13) Wake all — should return 2 (count before drain), queue
     // is now empty (head == tail == 256, count == 0).
     let n = waitq_wake_all(wq);
-    if n != 2 { return 5; }
-    if wq.count != 0 { return 6; }
-    if wq.head != 256 { return 7; }
+    if n != 2 { return 6; }
+    if wq.count != 0 { return 7; }
+    if wq.head != 256 { return 8; }
 
-    // (13-14) Wake from empty queue — should return 256 (no task woken).
+    // (14-15) Wake from empty queue — should return 256 (no task woken).
     let t2 = waitq_wake_one(wq);
-    if t2 != 256 { return 8; }
+    if t2 != 256 { return 9; }
 
     // (15) Return 0 (success).
     return 0;
