@@ -2263,6 +2263,562 @@ fn build_f64_sub_stub() -> Vec<u8> {
 /// in the coprocessor, which this backend stubs out).  Constant-folded
 /// mul/div (both operands Immediate) compute the correct result via
 /// `const_fold_fp_binop` and never reach these stubs.
+/// Build `__vuma_f64_mul` — f64 multiplication (IEEE 754 for normal numbers,
+/// truncation rounding toward zero).
+///
+/// Input:  R26=lo_a, R25=hi_a, R24=lo_b, R23=hi_b
+/// Output: R28=lo, R29=hi
+///
+/// Algorithm:
+///   1. Extract sign, exponent, mantissa from each operand (add implicit bit).
+///   2. Handle special cases (zero -> 0, Inf/NaN -> return that operand).
+///   3. result_sign = sign_a XOR sign_b.
+///   4. result_exp = exp_a + exp_b - 1023.
+///   5. Pre-shift M_b left by 11 so its MSB (bit 52) lands at bit 31 of R23,
+///      enabling single-SHRPW MSB extraction each iteration.
+///   6. Compute P = mant_a * mant_b using a 128-bit shift-add accumulator.
+///      Process M_b from MSB to LSB; each iteration: extract MSB of M_b,
+///      shift acc left by 1, conditionally add M_a, shift M_b left by 1.
+///      (First shift is a no-op since acc=0; last add lands at position 0.)
+///   7. Extract result = P >> 52 (54 bits, including carry bit at position 53).
+///   8. If carry (bit 53 set): shift result right by 1, result_exp += 1.
+///   9. Handle overflow (result_exp >= 0x7FF -> Inf) and underflow
+///      (result_exp <= 0 -> 0).
+///  10. Pack result.
+fn build_f64_mul_stub() -> Vec<u8> {
+    let mut code = Vec::new();
+    // Stack frame: 48 bytes.
+    code.extend_from_slice(&encode_ldo(R30, -48, R30));
+
+    // Save original a/b bits for Inf/NaN handlers.
+    code.extend_from_slice(&encode_stw(R26, R30, 0));   // a_lo
+    code.extend_from_slice(&encode_stw(R25, R30, 4));   // a_hi
+    code.extend_from_slice(&encode_stw(R24, R30, 8));   // b_lo
+    code.extend_from_slice(&encode_stw(R23, R30, 12));  // b_hi
+
+    // --- Extract a: sign, exp, mant ---
+    code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 16));  // sign_a
+    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    code.extend_from_slice(&encode_and(R20, R19, R20));
+    code.extend_from_slice(&encode_stw(R20, R30, 20));  // exp_a
+    code.extend(ss_load_imm(R19, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R25, R19, R21));
+    code.extend(ss_load_imm(R19, 0x100000));
+    code.extend_from_slice(&encode_or(R21, R19, R21));  // mant_a_hi (with implicit bit)
+    code.extend_from_slice(&encode_copy(R26, R22));     // mant_a_lo
+
+    // --- Extract b: sign, exp, mant ---
+    code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 24));  // sign_b
+    code.extend_from_slice(&encode_shrpw(R0, R23, 19, R20));
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    code.extend_from_slice(&encode_and(R20, R19, R20));
+    code.extend_from_slice(&encode_stw(R20, R30, 28));  // exp_b
+    code.extend(ss_load_imm(R19, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R23, R19, R23));
+    code.extend(ss_load_imm(R19, 0x100000));
+    code.extend_from_slice(&encode_or(R23, R19, R23));  // mant_b_hi (with implicit bit)
+
+    // --- Special cases ---
+    code.extend_from_slice(&encode_ldw(R30, 20, R20));
+    let a_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    let b_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    code.extend_from_slice(&encode_ldw(R30, 20, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    let a_inf = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R19, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    let b_inf = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R19, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- result_sign = sign_a XOR sign_b -> [R30+32] ---
+    code.extend_from_slice(&encode_ldw(R30, 16, R19));
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    code.extend_from_slice(&encode_xor(R19, R20, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 32));
+
+    // --- result_exp = exp_a + exp_b - 1023 -> [R30+36] ---
+    code.extend_from_slice(&encode_ldw(R30, 20, R19));
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    code.extend_from_slice(&encode_add(R19, R20, R19));
+    code.extend(ss_load_imm(R20, 1023));
+    code.extend_from_slice(&encode_sub(R19, R20, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 36));
+
+    // --- Pre-shift M_b left by 11 so MSB (bit 52) lands at bit 31 of R23 ---
+    // new_R23 = (R23:R24) >> 21, low 32 bits = (R23 << 11) | (R24 >> 21)
+    code.extend_from_slice(&encode_shrpw(R23, R24, 21, R23));
+    // new_R24 = (R24:0) >> 21, low 32 bits = R24 << 11
+    code.extend_from_slice(&encode_shrpw(R24, R0, 21, R24));
+
+    // --- Init 128-bit acc (R25:R26:R28:R29) = 0, counter R19 = 53 ---
+    code.extend_from_slice(&encode_copy(R0, R25));
+    code.extend_from_slice(&encode_copy(R0, R26));
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend_from_slice(&encode_copy(R0, R29));
+    code.extend(ss_load_imm(R19, 53));
+
+    // --- Multiply loop (process M_b from MSB to LSB) ---
+    let mul_loop = code.len() as i64;
+    // 1. Extract MSB of M_b: R20 = bit 31 of R23.
+    code.extend_from_slice(&encode_shrpw(R0, R23, 31, R20));
+    // 2. Shift acc left by 1 (128-bit).
+    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R21));   // R21 = bit31 of R26 (temp save)
+    code.extend_from_slice(&encode_shrpw(R26, R28, 31, R26));  // R26 = (R26<<1)|(bit31 R28)
+    code.extend_from_slice(&encode_shrpw(R28, R29, 31, R28));  // R28 = (R28<<1)|(bit31 R29)
+    code.extend_from_slice(&encode_shladd(1, R29, R0, R29));   // R29 <<= 1
+    code.extend_from_slice(&encode_shladd(1, R25, R0, R25));   // R25 <<= 1
+    code.extend_from_slice(&encode_or(R25, R21, R25));          // R25 |= carry (bit31 of old R26)
+    // 3. If R20 != 0: add M_a (R21:R22) to acc.
+    let skip_add = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if R20==0, skip
+    code.extend_from_slice(&encode_nop());
+    // Add M_a to acc with full carry chain. Spill R19 (counter) to stack; use R19 as temp.
+    code.extend_from_slice(&encode_stw(R19, R30, 40));
+    code.extend_from_slice(&encode_add(R29, R22, R29));  // R29 += R22 (low)
+    // carry0 = (R29 < R22) -> R19
+    code.extend_from_slice(&encode_copy(R0, R19));
+    let c0 = code.len();
+    code.extend_from_slice(&encode_cmpb(R29, R22, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let c0s = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, c0);
+    code.extend_from_slice(&encode_ldi(1, R19));
+    patch_forward_branch_to_here(&mut code, c0s);
+    // R20 = R21 + carry0 (effective high operand; R21 = mant_a_hi)
+    code.extend_from_slice(&encode_add(R21, R19, R20));
+    // R28 += R20
+    code.extend_from_slice(&encode_add(R28, R20, R28));
+    // carry1 = (R28 < R20) -> R19
+    code.extend_from_slice(&encode_copy(R0, R19));
+    let c1 = code.len();
+    code.extend_from_slice(&encode_cmpb(R28, R20, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let c1s = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, c1);
+    code.extend_from_slice(&encode_ldi(1, R19));
+    patch_forward_branch_to_here(&mut code, c1s);
+    // R26 += carry1
+    code.extend_from_slice(&encode_add(R26, R19, R26));
+    // carry2 = (R26 < carry1=R19) -> R20
+    code.extend_from_slice(&encode_copy(R0, R20));
+    let c2 = code.len();
+    code.extend_from_slice(&encode_cmpb(R26, R19, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let c2s = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, c2);
+    code.extend_from_slice(&encode_ldi(1, R20));
+    patch_forward_branch_to_here(&mut code, c2s);
+    // R25 += carry2
+    code.extend_from_slice(&encode_add(R25, R20, R25));
+    code.extend_from_slice(&encode_ldw(R30, 40, R19));  // reload counter
+    // skip_add:
+    patch_cmpb_to_here(&mut code, skip_add);
+
+    // 4. Shift M_b left by 1 (64-bit).
+    code.extend_from_slice(&encode_shrpw(R23, R24, 31, R23));  // R23 = (R23<<1)|(bit31 R24)
+    code.extend_from_slice(&encode_shladd(1, R24, R0, R24));   // R24 <<= 1
+
+    // 5. R19 -= 1. If R19 != 0, loop.
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));
+    let loop_back = code.len() as i64;
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> -> loop
+    code.extend_from_slice(&encode_nop());
+    {
+        let disp = ((mul_loop - (loop_back + 8)) as i32) & !3;
+        let off = loop_back as usize;
+        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
+        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+    }
+
+    // --- Extract result = P >> 52 (54 bits) into R26:R28 ---
+    // R28 = (R26:R28) >> 20  [sa=20 = 19 + 1]
+    code.extend_from_slice(&encode_shrpw(R26, R28, 19, R28));
+    code.extend_from_slice(&encode_shrpw(R0, R28, 1, R28));
+    // R26 = (R25:R26) >> 20
+    code.extend_from_slice(&encode_shrpw(R25, R26, 19, R26));
+    code.extend_from_slice(&encode_shrpw(R0, R26, 1, R26));
+    // Now R26:R28 = P[105:52] (54 bits). R26 = high 22 bits, R28 = low 32 bits.
+
+    // Check carry: R20 = R26 >> 21 = P[105].
+    code.extend_from_slice(&encode_shrpw(R0, R26, 21, R20));
+    let no_carry = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if R20==0, skip
+    code.extend_from_slice(&encode_nop());
+    // Carry: result_mant = (R26:R28) >> 1. exp += 1.
+    code.extend_from_slice(&encode_shrpw(R26, R28, 1, R28));  // R28 = result[32:1]
+    code.extend_from_slice(&encode_shrpw(R0, R26, 1, R26));   // R26 = result[53:33]
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));
+    code.extend_from_slice(&encode_ldo(R19, 1, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 36));
+    // no_carry:
+    patch_cmpb_to_here(&mut code, no_carry);
+
+    // Now R26 = result_mant_hi (21 bits, bit 20 = implicit), R28 = result_mant_lo.
+
+    // Check overflow: if exp >= 0x7FF, return Inf.
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));
+    code.extend(ss_load_imm(R20, 0x7FF));
+    let overflow = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+
+    // Check underflow: if exp <= 0, return 0.
+    let underflow = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0));  // signed <=
+    code.extend_from_slice(&encode_nop());
+
+    // --- Pack result ---
+    // R28 = result_mant_lo (already in R28).
+    // R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF).
+    code.extend(ss_load_imm(R20, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R26, R20, R29));  // R29 = mant_hi & 0xFFFFF
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));   // R19 = exp
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R20));  // R20 = exp << 3
+    for _ in 0..17 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // total 20
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // R19 = sign
+    code.extend_from_slice(&encode_copy(R19, R20));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // sign << 31
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+
+    // Return (normal).
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return_zero (a_zero, b_zero, underflow) ---
+    patch_cmpb_to_here(&mut code, a_zero);
+    patch_cmpb_to_here(&mut code, b_zero);
+    patch_cmpb_to_here(&mut code, underflow);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend_from_slice(&encode_copy(R0, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return_a (a_inf) ---
+    patch_cmpb_to_here(&mut code, a_inf);
+    code.extend_from_slice(&encode_ldw(R30, 0, R28));
+    code.extend_from_slice(&encode_ldw(R30, 4, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return_b (b_inf) ---
+    patch_cmpb_to_here(&mut code, b_inf);
+    code.extend_from_slice(&encode_ldw(R30, 8, R28));
+    code.extend_from_slice(&encode_ldw(R30, 12, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: overflow -> Inf with sign ---
+    patch_cmpb_to_here(&mut code, overflow);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend(ss_load_imm(R29, 0x7FF00000));
+    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_copy(R19, R20));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    code
+}
+
+/// Build `__vuma_f64_div` — f64 division (IEEE 754 for normal numbers,
+/// truncation rounding toward zero).
+///
+/// Input:  R26=lo_a, R25=hi_a, R24=lo_b, R23=hi_b
+/// Output: R28=lo, R29=hi
+///
+/// Algorithm:
+///   1. Extract sign, exponent, mantissa from each operand.
+///   2. Handle special cases (a==0 -> 0, b==0 -> Inf, Inf/Inf -> NaN(a),
+///      Inf/x -> Inf(a), x/Inf -> 0).
+///   3. result_sign = sign_a XOR sign_b.
+///   4. result_exp = exp_a - exp_b + 1023.
+///   5. Long division: Q = (mant_a << 52) / mant_b, using shift-and-subtract.
+///      remainder starts as mant_a; each iteration: Q <<= 1, compare remainder
+///      with mant_b, subtract if >= and set Q bit, shift remainder left
+///      (except last iteration).
+///   6. Normalize: if Q < 2^52 (mant_a < mant_b), shift Q left by 1, exp--.
+///   7. Handle overflow/underflow.
+///   8. Pack result.
+fn build_f64_div_stub() -> Vec<u8> {
+    let mut code = Vec::new();
+    // Stack frame: 48 bytes.
+    code.extend_from_slice(&encode_ldo(R30, -48, R30));
+
+    // Save original a/b bits.
+    code.extend_from_slice(&encode_stw(R26, R30, 0));   // a_lo
+    code.extend_from_slice(&encode_stw(R25, R30, 4));   // a_hi
+    code.extend_from_slice(&encode_stw(R24, R30, 8));   // b_lo
+    code.extend_from_slice(&encode_stw(R23, R30, 12));  // b_hi
+
+    // --- Extract a: sign, exp, mant ---
+    code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 16));  // sign_a
+    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    code.extend_from_slice(&encode_and(R20, R19, R20));
+    code.extend_from_slice(&encode_stw(R20, R30, 20));  // exp_a
+    code.extend(ss_load_imm(R19, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R25, R19, R21));
+    code.extend(ss_load_imm(R19, 0x100000));
+    code.extend_from_slice(&encode_or(R21, R19, R21));  // mant_a_hi
+    code.extend_from_slice(&encode_copy(R26, R22));     // mant_a_lo
+
+    // --- Extract b: sign, exp, mant ---
+    code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 24));  // sign_b
+    code.extend_from_slice(&encode_shrpw(R0, R23, 19, R20));
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    code.extend_from_slice(&encode_and(R20, R19, R20));
+    code.extend_from_slice(&encode_stw(R20, R30, 28));  // exp_b
+    code.extend(ss_load_imm(R19, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R23, R19, R23));
+    code.extend(ss_load_imm(R19, 0x100000));
+    code.extend_from_slice(&encode_or(R23, R19, R23));  // mant_b_hi
+
+    // --- Special cases ---
+    // If exp_a == 0x7FF (a is Inf/NaN): return a (Inf/x = Inf, Inf/Inf = NaN).
+    code.extend_from_slice(&encode_ldw(R30, 20, R20));
+    code.extend(ss_load_imm(R19, 0x7FF));
+    let a_inf = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R19, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    // If exp_b == 0x7FF (b is Inf/NaN): return 0 (x/Inf = 0).
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    let b_inf = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R19, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    // If exp_b == 0 (b is zero): return Inf with sign (x/0 = Inf).
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    let b_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    // If exp_a == 0 (a is zero): return 0 (0/x = 0).
+    code.extend_from_slice(&encode_ldw(R30, 20, R20));
+    let a_zero = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- result_sign = sign_a XOR sign_b -> [R30+32] ---
+    code.extend_from_slice(&encode_ldw(R30, 16, R19));
+    code.extend_from_slice(&encode_ldw(R30, 24, R20));
+    code.extend_from_slice(&encode_xor(R19, R20, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 32));
+
+    // --- result_exp = exp_a - exp_b + 1023 -> [R30+36] ---
+    code.extend_from_slice(&encode_ldw(R30, 20, R19));
+    code.extend_from_slice(&encode_ldw(R30, 28, R20));
+    code.extend_from_slice(&encode_sub(R19, R20, R19));  // R19 = exp_a - exp_b
+    code.extend(ss_load_imm(R20, 1023));
+    code.extend_from_slice(&encode_add(R19, R20, R19));  // R19 += 1023
+    code.extend_from_slice(&encode_stw(R19, R30, 36));
+
+    // --- Init: remainder (R21:R22) = mant_a, Q (R25:R26) = 0, counter R19 = 53 ---
+    code.extend_from_slice(&encode_copy(R0, R25));
+    code.extend_from_slice(&encode_copy(R0, R26));
+    code.extend(ss_load_imm(R19, 53));
+
+    // --- Division loop (53 iterations) ---
+    let div_loop = code.len() as i64;
+    // Q <<= 1 (64-bit shift of R25:R26).
+    code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25));  // R25 = (R25<<1)|(bit31 R26)
+    code.extend_from_slice(&encode_shladd(1, R26, R0, R26));   // R26 <<= 1
+
+    // Compare remainder (R21:R22) >= mant_b (R23:R24).
+    let ge_hi = code.len();
+    code.extend_from_slice(&encode_cmpb(R23, R21, 0b100, false, false, 0));  // R23 < R21 -> do_sub
+    code.extend_from_slice(&encode_nop());
+    let lt_hi = code.len();
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0));  // R21 < R23 -> skip
+    code.extend_from_slice(&encode_nop());
+    let lt_lo = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // R22 < R24 -> skip
+    code.extend_from_slice(&encode_nop());
+    // Fall through: remainder >= mant_b -> do_subtract.
+
+    // do_subtract label:
+    let do_sub_label = code.len();
+    patch_cmpb_to_here(&mut code, ge_hi);
+
+    // 64-bit subtract: R21:R22 -= R23:R24.
+    // borrow = (R22 < R24) -> R20
+    code.extend_from_slice(&encode_copy(R0, R20));
+    let borrow_cmpb = code.len();
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    let borrow_skip = emit_forward_branch_placeholder(&mut code);
+    patch_cmpb_to_here(&mut code, borrow_cmpb);
+    code.extend_from_slice(&encode_ldi(1, R20));
+    patch_forward_branch_to_here(&mut code, borrow_skip);
+    code.extend_from_slice(&encode_sub(R22, R24, R22));  // R22 -= R24
+    code.extend_from_slice(&encode_sub(R21, R23, R21));  // R21 -= R23
+    code.extend_from_slice(&encode_sub(R21, R20, R21));  // R21 -= borrow
+    // Q |= 1 (set bit 0 of Q_lo = R26).
+    code.extend_from_slice(&encode_ldi(1, R20));
+    code.extend_from_slice(&encode_or(R26, R20, R26));
+
+    // skip_subtract label:
+    let skip_sub_label = code.len();
+    patch_cmpb_to_here(&mut code, lt_hi);
+    patch_cmpb_to_here(&mut code, lt_lo);
+
+    // R19 -= 1.
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));
+    // If R19 == 0: exit loop (don't shift remainder).
+    let exit_loop = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+    // Shift remainder left by 1 (64-bit: R21:R22).
+    code.extend_from_slice(&encode_shrpw(R21, R22, 31, R21));  // R21 = (R21<<1)|(bit31 R22)
+    code.extend_from_slice(&encode_shladd(1, R22, R0, R22));   // R22 <<= 1
+    // Loop back.
+    let loop_back = code.len() as i64;
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));
+    code.extend_from_slice(&encode_nop());
+    {
+        let disp = ((div_loop - (loop_back + 8)) as i32) & !3;
+        let off = loop_back as usize;
+        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
+        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+    }
+    // Exit loop:
+    patch_cmpb_to_here(&mut code, exit_loop);
+    // (do_sub_label and skip_sub_label are no longer needed as patch targets,
+    // but keep them for clarity — they're just code.len() snapshots.)
+
+    // --- Normalize Q ---
+    // Q is in R25:R26 (53 bits). bit 52 = bit 20 of R25 (implicit bit).
+    // If bit 20 of R25 is 0 (Q < 2^52, mant_a < mant_b): shift Q left by 1, exp--.
+    code.extend(ss_load_imm(R20, 0x100000));  // 1 << 20
+    code.extend_from_slice(&encode_and(R25, R20, R20));  // R20 = R25 & 0x100000
+    let q_normalized = code.len();
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if bit set, skip
+    code.extend_from_slice(&encode_nop());
+    // Q <<= 1 (64-bit shift).
+    code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25));
+    code.extend_from_slice(&encode_shladd(1, R26, R0, R26));
+    // exp--.
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));
+    code.extend_from_slice(&encode_ldo(R19, -1, R19));
+    code.extend_from_slice(&encode_stw(R19, R30, 36));
+    // q_normalized:
+    patch_cmpb_to_here(&mut code, q_normalized);
+
+    // Now R25:R26 = result_mant (53 bits, bit 52 = implicit). R25 = high 21 bits, R26 = low 32 bits.
+
+    // Check overflow: if exp >= 0x7FF, return Inf.
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));
+    code.extend(ss_load_imm(R20, 0x7FF));
+    let overflow = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b001, false, false, 0));
+    code.extend_from_slice(&encode_nop());
+
+    // Check underflow: if exp <= 0, return 0.
+    let underflow = code.len();
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0));  // signed <=
+    code.extend_from_slice(&encode_nop());
+
+    // --- Pack result ---
+    // R28 = result_mant_lo = R26.
+    code.extend_from_slice(&encode_copy(R26, R28));
+    // R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF).
+    code.extend(ss_load_imm(R20, 0xFFFFF));
+    code.extend_from_slice(&encode_and(R25, R20, R29));  // R29 = mant_hi & 0xFFFFF
+    code.extend_from_slice(&encode_ldw(R30, 36, R19));   // R19 = exp
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R20));  // R20 = exp << 3
+    for _ in 0..17 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // total 20
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // R19 = sign
+    code.extend_from_slice(&encode_copy(R19, R20));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // sign << 31
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+
+    // Return (normal).
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return_zero (a_zero, b_inf, underflow) ---
+    patch_cmpb_to_here(&mut code, a_zero);
+    patch_cmpb_to_here(&mut code, b_inf);
+    patch_cmpb_to_here(&mut code, underflow);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend_from_slice(&encode_copy(R0, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return_a (a_inf) ---
+    patch_cmpb_to_here(&mut code, a_inf);
+    code.extend_from_slice(&encode_ldw(R30, 0, R28));
+    code.extend_from_slice(&encode_ldw(R30, 4, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: return Inf (b_zero — x/0 = Inf with sign) ---
+    patch_cmpb_to_here(&mut code, b_zero);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend(ss_load_imm(R29, 0x7FF00000));
+    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_copy(R19, R20));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    // --- Handler: overflow -> Inf with sign ---
+    patch_cmpb_to_here(&mut code, overflow);
+    code.extend_from_slice(&encode_copy(R0, R28));
+    code.extend(ss_load_imm(R29, 0x7FF00000));
+    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_copy(R19, R20));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
+    }
+    code.extend_from_slice(&encode_or(R29, R20, R29));
+    code.extend_from_slice(&encode_ldo(R30, 48, R30));
+    code.extend_from_slice(&encode_bv(R2, R0));
+    code.extend_from_slice(&encode_nop());
+
+    code
+}
+
 /// TODO: full IEEE 754 mul/div via shift-add multiplication.
 fn build_f64_arith_stub_zero() -> Vec<u8> {
     let mut code = Vec::new();
@@ -2292,8 +2848,8 @@ fn build_softfloat_stubs() -> Vec<(String, Vec<u8>)> {
         ("__vuma_f64_le".to_string(),       build_f64_le_stub()),
         ("__vuma_f64_add".to_string(),      build_f64_add_stub()),
         ("__vuma_f64_sub".to_string(),      build_f64_sub_stub()),
-        ("__vuma_f64_mul".to_string(),      build_f64_arith_stub_zero()),
-        ("__vuma_f64_div".to_string(),      build_f64_arith_stub_zero()),
+        ("__vuma_f64_mul".to_string(),      build_f64_mul_stub()),
+        ("__vuma_f64_div".to_string(),      build_f64_div_stub()),
     ]
 }
 
