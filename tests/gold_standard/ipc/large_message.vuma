@@ -1,0 +1,22 @@
+// large_message — Send a large i64 value (0x123456789ABCDEF0) via channel
+// and verify the full 8 bytes round-trip correctly.
+// Expected exit code: 1
+//
+// Wave 8d: exercises the full 8-byte write/read path. The value
+// 0x123456789ABCDEF0 has all 8 bytes distinct, so any byte-swap or
+// truncation bug would produce a wrong exit code. The program computes
+// (sent == recv) ? 1 : 0 and exits that value.
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        if x == 1311768467463790320 { return 1; }
+        return 0;
+    }
+    channel_send(ch, 1311768467463790320);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
