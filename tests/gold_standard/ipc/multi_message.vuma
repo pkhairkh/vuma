@@ -1,0 +1,19 @@
+// multi_message — Send 3 messages, recv 3 in order
+// Expected exit code: 63
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x1 = channel_recv(ch);
+        x2 = channel_recv(ch);
+        x3 = channel_recv(ch);
+        channel_close(ch);
+        return (x1 + x2 + x3) as i32;
+    }
+    channel_send(ch, 10);
+    channel_send(ch, 20);
+    channel_send(ch, 33);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
