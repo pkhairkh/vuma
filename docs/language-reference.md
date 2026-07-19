@@ -1476,7 +1476,7 @@ layout SyscallArgs = { nr: u64, a0: u64, a1: u64, a2: u64,
 **Workaround:** copy-paste the declaration, byte-identically. A
 future wave will add a real `import` mechanism.
 
-### 17.2 No string-literal lowering
+### 17.2 String literal lowering (resolved W1)
 
 The lexer recognises string literals (`"hello"`) but the codegen
 bridge does not lower them to data — there is no `.rodata` emission,
@@ -1499,7 +1499,7 @@ subsequent `s.field` accesses silently return 0 with a
 allocates the state with `state_new(...)` and passes it by reference
 to a function that populates it in place.
 
-### 17.4 Array index is byte-granular for non-`u8` element types
+### 17.4 Array index element-size scaling (resolved W4) for non-`u8` element types
 
 The codegen only lowers `state.array[idx]` correctly for `[u8; N]`
 arrays. For `[u16; N]`, `[u32; N]`, or `[u64; N]` arrays, the
