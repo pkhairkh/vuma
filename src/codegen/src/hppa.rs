@@ -2987,10 +2987,23 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
                 match instr {
                     IRInstr::Add { dst: _, lhs, rhs, ty: _ } => {
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
-                        code.extend_from_slice(&encode_add(S0, S1, S0));
-                        code.extend(ss_st(S0, dst_off));
+                        // Check if this is a copy (rhs = Immediate(0)).
+                        // CSE, constant folding, and inlining insert
+                        // `Add { lhs: val, rhs: 0, ty: None }` as a universal
+                        // copy.  For 64-bit values (f64/i64/u64), the copy
+                        // must preserve BOTH the lo word ([off]) and the hi
+                        // word ([off-4]).  Since each vreg has an 8-byte slot
+                        // (see stack layout), copying [off-4] → [dst_off-4]
+                        // is safe (both are within their own vreg's allocation).
+                        if let IRValue::Immediate(0) = rhs {
+                            code.extend(ss_load_value_64(lhs, &vreg_stack_slots, S0, S1));
+                            ss_store_64(S0, S1, dst_off, &mut code);
+                        } else {
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
+                            code.extend_from_slice(&encode_add(S0, S1, S0));
+                            code.extend(ss_st(S0, dst_off));
+                        }
                     }
                     IRInstr::Sub { dst: _, lhs, rhs, ty: _ } => {
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
@@ -3537,15 +3550,45 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // with the byte in the MSB position, giving 0xXX000000
                         // instead of 0x000000XX. Default to LDB (byte load)
                         // for safety, since most loads are byte-level.
+                        let d_id = dst.as_register().unwrap_or(0);
+                        let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         match ty {
                             crate::ir::IRType::U8 | crate::ir::IRType::I8 => {
                                 code.extend_from_slice(&encode_ldb(S0, 0, S1));
+                                code.extend(ss_st(S1, d_off));
                             }
                             crate::ir::IRType::U16 | crate::ir::IRType::I16 => {
                                 code.extend_from_slice(&encode_ldh(S0, 0, S1));
+                                code.extend(ss_st(S1, d_off));
                             }
                             crate::ir::IRType::U32 | crate::ir::IRType::I32 => {
                                 code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                                code.extend(ss_st(S1, d_off));
+                            }
+                            crate::ir::IRType::F64 => {
+                                // F64: load 8 bytes as two 32-bit words.
+                                // Big-endian memory layout: hi at [addr+0], lo at [addr+4].
+                                // Stack slot layout: lo at [d_off], hi at [d_off-4].
+                                code.extend_from_slice(&encode_ldw(S0, 0, S1));   // S1 = hi word
+                                code.extend_from_slice(&encode_ldo(S0, 4, S2));   // S2 = addr + 4
+                                code.extend_from_slice(&encode_ldw(S2, 0, S3));   // S3 = lo word
+                                code.extend(ss_st(S3, d_off));       // lo at [d_off]
+                                code.extend(ss_st(S1, d_off - 4));   // hi at [d_off-4]
+                            }
+                            crate::ir::IRType::F32 => {
+                                // F32: load 4 bytes (the f32 value).
+                                code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                                code.extend(ss_st(S1, d_off));
+                            }
+                            crate::ir::IRType::U64 | crate::ir::IRType::I64 => {
+                                // 64-bit integer: load 8 bytes as two 32-bit words.
+                                // Big-endian memory: hi at [addr+0], lo at [addr+4].
+                                // Stack slot: lo at [d_off], hi at [d_off-4].
+                                code.extend_from_slice(&encode_ldw(S0, 0, S1));   // S1 = hi word
+                                code.extend_from_slice(&encode_ldo(S0, 4, S2));   // S2 = addr + 4
+                                code.extend_from_slice(&encode_ldw(S2, 0, S3));   // S3 = lo word
+                                code.extend(ss_st(S3, d_off));       // lo at [d_off]
+                                code.extend(ss_st(S1, d_off - 4));   // hi at [d_off-4]
                             }
                             _ => {
                                 // Default: use LDW (32-bit word load).
@@ -3556,11 +3599,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 // common case in VUMA tests), this gives the
                                 // correct result. LDW zero-extends to 64 bits.
                                 code.extend_from_slice(&encode_ldw(S0, 0, S1));
+                                code.extend(ss_st(S1, d_off));
                             }
                         }
-                        let d_id = dst.as_register().unwrap_or(0);
-                        let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
-                        code.extend(ss_st(S1, d_off));
                     }
                     IRInstr::Store { value, addr, offset, ty } => {
                         code.extend(ss_load_value(addr, &vreg_stack_slots, S0));
@@ -3568,16 +3609,40 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_imm(S1, *offset as i64));
                             code.extend_from_slice(&encode_add(S0, S1, S0));
                         }
-                        code.extend(ss_load_value(value, &vreg_stack_slots, S1));
-                        // Use typed store based on the IR type.
                         match ty {
+                            crate::ir::IRType::F64 => {
+                                // F64: store 8 bytes as two 32-bit words.
+                                // Load value's lo (S1) and hi (S2) from stack slot.
+                                code.extend(ss_load_value_64(value, &vreg_stack_slots, S1, S2));
+                                // Big-endian memory: hi at [addr+0], lo at [addr+4].
+                                code.extend_from_slice(&encode_stw(S2, S0, 0));   // hi at [addr+0]
+                                code.extend_from_slice(&encode_ldo(S0, 4, S3));   // S3 = addr + 4
+                                code.extend_from_slice(&encode_stw(S1, S3, 0));   // lo at [addr+4]
+                            }
+                            crate::ir::IRType::F32 => {
+                                // F32: store 4 bytes (the f32 value).
+                                code.extend(ss_load_value(value, &vreg_stack_slots, S1));
+                                code.extend_from_slice(&encode_stw(S1, S0, 0));
+                            }
+                            crate::ir::IRType::U64 | crate::ir::IRType::I64 => {
+                                // 64-bit integer: store 8 bytes as two 32-bit words.
+                                // Load value's lo (S1) and hi (S2) from stack slot.
+                                code.extend(ss_load_value_64(value, &vreg_stack_slots, S1, S2));
+                                // Big-endian memory: hi at [addr+0], lo at [addr+4].
+                                code.extend_from_slice(&encode_stw(S2, S0, 0));   // hi at [addr+0]
+                                code.extend_from_slice(&encode_ldo(S0, 4, S3));   // S3 = addr + 4
+                                code.extend_from_slice(&encode_stw(S1, S3, 0));   // lo at [addr+4]
+                            }
                             crate::ir::IRType::U8 | crate::ir::IRType::I8 => {
+                                code.extend(ss_load_value(value, &vreg_stack_slots, S1));
                                 code.extend_from_slice(&encode_stb(S1, S0, 0));
                             }
                             crate::ir::IRType::U16 | crate::ir::IRType::I16 => {
+                                code.extend(ss_load_value(value, &vreg_stack_slots, S1));
                                 code.extend_from_slice(&encode_sth(S1, S0, 0));
                             }
                             _ => {
+                                code.extend(ss_load_value(value, &vreg_stack_slots, S1));
                                 code.extend_from_slice(&encode_stw(S1, S0, 0));
                             }
                         }
