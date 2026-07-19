@@ -23,53 +23,153 @@
  *   TrapFrame.vector = vector (offset 272)
  *   TrapFrame.error_code = error (offset 280)
  *   TrapFrame.sp     = rsp   (offset 288)
+ *
+ * Boot sequence (16-bit real → 32-bit prot → 64-bit long):
+ *   1. Multiboot2 loader hands control to _start in 32-bit protected mode.
+ *   2. Set up stack, load GDT (null + 64-bit code + 64-bit data).
+ *   3. Far jump to 64-bit code segment (CS=0x08) — still in 32-bit paging-off.
+ *   4. Disable paging, enable PAE, build identity-mapped 4-level page tables
+ *      (PML4 → PDPT → PD with 512 × 2MB huge pages = first 1GB identity-mapped).
+ *   5. Load CR3, set LME in EFER MSR, re-enable paging in CR0.
+ *   6. Far jump to 64-bit code segment again — now CPU is in long mode.
+ *   7. Call VUMA main(); halt on return.
  */
 
-    .section .multiboot
-    .align 8
-multiboot_header:
-    .long 0xE85250D6          /* magic */
-    .long 0                    /* architecture: i386 */
-    .long multiboot_header_end - multiboot_header  /* header length */
-    .long 0x100000000 - 0xE85250D6 - (multiboot_header_end - multiboot_header)  /* checksum */
-    /* end tag */
+.set MB2_HEADER_MAGIC, 0xE85250D6
+.set MB2_ARCH_TYPE, 0    /* i386 */
+.set MB2_HEADER_LENGTH, 24
+.set MB2_CHECKSUM, -(MB2_HEADER_MAGIC + 0 + MB2_HEADER_LENGTH)
+
+.section .multiboot
+.align 8
+mb2_header:
+    .long MB2_HEADER_MAGIC
+    .long MB2_ARCH_TYPE
+    .long MB2_HEADER_LENGTH
+    .long MB2_CHECKSUM
+    /* End tag */
     .short 0
     .short 0
     .long 8
-multiboot_header_end:
 
-    .section .text
-    .global _start
+.section .bss
+.align 16
+stack_bottom:
+    .skip 16384  /* 16 KB stack */
+stack_top:
+
+.align 4096
+pml4_table:
+    .skip 4096
+pdpt_table:
+    .skip 4096
+pd_table:
+    .skip 4096
+
+.section .text
+.global _start
+.type _start, @function
 _start:
     /* Set up stack */
-    movq $0x90000, %rsp
+    mov $stack_top, %esp
 
-    /* Zero BSS */
-    leaq bss_start(%rip), %rdi
-    leaq bss_end(%rip), %rcx
-    xorq %rax, %rax
+    /* Save multiboot info (eax=magic, ebx=mbi_ptr) */
+    mov %eax, %edi
+    mov %ebx, %esi
+
+    /* Set up GDT */
+    lgdt gdt_descriptor
+
+    /* Load segment registers */
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    mov %ax, %ss
+
+    /* Far jump to 64-bit code segment */
+    ljmp $0x08, $long_mode_setup
+
+long_mode_setup:
+    /* Disable paging */
+    mov %cr0, %eax
+    and $0x7FFFFFFF, %eax
+    mov %eax, %cr0
+
+    /* Enable PAE */
+    mov %cr4, %eax
+    or $1 << 5, %eax
+    mov %eax, %cr4
+
+    /* Set up identity-mapped page tables (first 1GB) */
+    /* PML4[0] -> PDPT */
+    mov $(pdpt_table), %eax
+    or $0x3, %eax  /* present + writable */
+    mov %eax, (pml4_table)
+
+    /* PDPT[0] -> PD */
+    mov $(pd_table), %eax
+    or $0x3, %eax
+    mov %eax, (pdpt_table)
+
+    /* PD[0..511] -> 2MB pages (identity map first 1GB) */
+    mov $pd_table, %edi
+    mov $0x83, %eax  /* present + writable + huge page */
+    mov $512, %ecx
 1:
-    cmpq %rcx, %rdi
-    jge 2f
-    movq %rax, (%rdi)
-    addq $8, %rdi
-    jmp 1b
-2:
+    mov %eax, (%edi)
+    add $8, %edi
+    add $0x200000, %eax  /* next 2MB */
+    loop 1b
 
-    /* rdi = multiboot2 magic (already in eax), rsi = multiboot2 info */
-    /* VUMA main() takes no args in the PMT model; boot stub handles BootInfo */
+    /* Load CR3 */
+    mov $(pml4_table), %eax
+    mov %eax, %cr3
 
-    /* Call VUMA main() */
+    /* Set LME bit in EFER MSR */
+    mov $0xC0000080, %ecx
+    rdmsr
+    or $1 << 8, %eax
+    wrmsr
+
+    /* Enable paging */
+    mov %cr0, %eax
+    or $0x80000000, %eax
+    mov %eax, %cr0
+
+    /* Now in 64-bit mode! Jump to 64-bit code */
+    ljmp $0x08, $long_mode_start
+
+long_mode_start:
+    /* Call kmain (the VUMA main function) */
     call main
 
     /* Halt on return */
-3:
     cli
+2:
     hlt
-    jmp 3b
+    jmp 2b
 
-    .section .bss
-    .align 16
-bss_start:
-    .skip 65536
-bss_end:
+/* GDT */
+.section .rodata
+gdt:
+    .quad 0  /* null descriptor */
+    /* 64-bit code segment */
+    .word 0
+    .word 0
+    .byte 0
+    .byte 0x9A  /* present, code, execute/read */
+    .byte 0xAF  /* 64-bit, granularity */
+    .byte 0
+    /* 64-bit data segment */
+    .word 0
+    .word 0
+    .byte 0
+    .byte 0x92  /* present, data, read/write */
+    .byte 0xAF  /* 64-bit, granularity */
+    .byte 0
+
+gdt_descriptor:
+    .word gdt_descriptor - gdt - 1
+    .quad gdt
