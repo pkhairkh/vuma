@@ -17,8 +17,8 @@
 //   tcp_init(tbl)                                  — zero all 64 conn slots.
 //   tcp_alloc(tbl) -> u32                          — find a free slot, mark
 //                                                     used, bump count.
-//   tcp_connect(tbl, idx, lp, rp) -> i64           — send SYN, state →
-//                                                     SYN_SENT(1).
+//   tcp_connect(tbl, idx, lp, rp) -> i64           — send SYN, store lp+rp,
+//                                                     state → SYN_SENT(1).
 //   tcp_accept_syn(tbl, idx) -> i64                — receive SYN, send
 //                                                     SYN-ACK, state →
 //                                                     SYN_RECEIVED(2).
@@ -87,18 +87,17 @@
 //   total: 900 bytes, padded to 900 (4-aligned: last field end at 899+1=900
 //   is 4-aligned).
 //
-// ── Why no pack/unpack helpers? ────────────────────────────────────────────
+// ── Pack/unpack helpers for port fields ────────────────────────────────────
 // K9a's socket.vuma implements 26 helpers (13 getters + 13 setters) for
-// the multi-byte fields. K9d's contract does NOT require them: the
-// self-test only checks states[] + used[] + count, and the simplified
-// tcp_connect / tcp_accept_syn / tcp_ack / tcp_send / tcp_recv / tcp_close
-// transitions only manipulate `tbl.states[idx]` (a u8 direct-index field).
-// The port arguments to tcp_connect are accepted (per the contract
-// signature) but not yet stored — K9e will add tcp_set_local_port /
-// tcp_set_remote_port helpers (the same 2-byte pack/unpack loop as K9a's
-// sock_set_local_port) when it wires the IP layer to look up connections
-// by 4-tuple. Keeping the helper set minimal here matches the K9d
-// contract's "simplified PMT-native TCP" scope.
+// the multi-byte Socket fields. K9d's contract originally deferred the
+// port helpers to K9e — W28S1 pulls the 2-byte port pack/unpack forward
+// into K9d because tcp_connect MUST store its local_port + remote_port
+// args (previously they were discarded). Four helpers ship now:
+// tcp_get_local_port / tcp_set_local_port / tcp_get_remote_port /
+// tcp_set_remote_port — the same 2-byte little-endian pack/unpack loop
+// as K9a's sock_get_local_port (womb/kernel/net/socket.vuma:585-634).
+// The u32 helpers for snd_nxts / rcv_nxts are still deferred to K9e
+// (no K9d function reads or writes sequence numbers yet).
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
 // All non-zero constants use DECIMAL per the K9d contract's "Use decimal
@@ -155,10 +154,11 @@
 //         womb/kernel/net/tcp.vuma \
 //         /tmp/tcp.bin x86_64 --verify
 //     /tmp/tcp.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 9 self-test checks pass — tcp_alloc
-// returns 0 + count=1; tcp_connect sets state=1; tcp_accept_syn sets
-// state=2; tcp_ack sets state=3; tcp_send returns 100; tcp_close sets
-// state=4; tcp_free clears used + decrements count to 0).
+// Expected: IVE Pass, exit=0 (all 11 self-test checks pass — tcp_alloc
+// returns 0 + count=1; tcp_connect sets state=1 + stores local_port=1234
+// + remote_port=80; tcp_accept_syn sets state=2; tcp_ack sets state=3;
+// tcp_send returns 100; tcp_close sets state=4; tcp_free clears used +
+// decrements count to 0).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -194,11 +194,13 @@ layout TcpConn = {
 // TcpConn fields (local_addr, remote_addr, snd_una, window) live in the
 // TcpConn layout for documentation + will be added to TcpTable by K9e+
 // when the IP layer needs 4-tuple lookup. u8 fields (states, used) are
-// accessed directly as `tbl.states[idx]` / `tbl.used[idx]`; multi-byte
-// fields (local_ports, remote_ports, snd_nxts, rcv_nxts) are present in
-// the table for K9e+ but NOT YET ACCESSED by K9d's functions — keeping
-// them in the layout now means K9e can add pack/unpack helpers without
-// resizing the table.
+// accessed directly as `tbl.states[idx]` / `tbl.used[idx]`; the u16 port
+// fields (local_ports, remote_ports) are accessed via the
+// tcp_get_local_port / tcp_set_local_port / tcp_get_remote_port /
+// tcp_set_remote_port 2-byte pack/unpack helpers added in W28S1. The u32
+// sequence-number arrays (snd_nxts, rcv_nxts) are still NOT YET ACCESSED
+// by K9d's functions — keeping them in the layout now means K9e can add
+// u32 pack/unpack helpers without resizing the table.
 layout TcpTable = {
     states: [u8; 64],       // 64 * 1 byte  (u8 — direct index)
     local_ports: [u8; 128], // 64 * 2 bytes (u16)
@@ -242,17 +244,82 @@ fn tcp_alloc(tbl: State<TcpTable>) -> u32 {
     return 64;
 }
 
-// tcp_connect: send SYN, move to SYN_SENT(1).
-// The local_port + remote_port args are accepted (per the K9d contract
-// signature) but not yet stored — K9e will add tcp_set_local_port /
-// tcp_set_remote_port helpers when it wires the IP layer to look up
-// connections by 4-tuple.
+// ── Pack/unpack helpers for the multi-byte port fields ─────────────────────
+// 2-byte little-endian pack/unpack, identical in shape to K9a's
+// sock_set_local_port / sock_get_local_port / sock_set_remote_port /
+// sock_get_remote_port (womb/kernel/net/socket.vuma:585-634). The loop
+// bound is 2 because u16 fits in 2 bytes; bytes 2..3 would be zero-shifted
+// out. K9d's K9e successor will reuse these helpers when it wires the IP
+// layer's 4-tuple lookup — the byte-identical-redeclaration invariant (K2c
+// extended to layouts in K3d, re-applied in K4a/K7a/K8a/K8e/K8f/K9a) means
+// K9e re-declares these helper signatures verbatim.
+
+// Read the u16 `local_port` field of connection slot `idx` from
+// TcpTable.local_ports.
+fn tcp_get_local_port(tbl: State<TcpTable>, idx: u32) -> u16 {
+    let off = idx * 2;
+    let v: u16 = 0;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = tbl.local_ports[off + i] as u16;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u16 `local_port` field of connection slot `idx` into
+// TcpTable.local_ports.
+fn tcp_set_local_port(tbl: State<TcpTable>, idx: u32, val: u16) {
+    let off = idx * 2;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = ((val >> sh) & 255) as u8;
+        tbl.local_ports[off + i] = b;
+        i = i + 1;
+    }
+}
+
+// Read the u16 `remote_port` field of connection slot `idx` from
+// TcpTable.remote_ports.
+fn tcp_get_remote_port(tbl: State<TcpTable>, idx: u32) -> u16 {
+    let off = idx * 2;
+    let v: u16 = 0;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = tbl.remote_ports[off + i] as u16;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u16 `remote_port` field of connection slot `idx` into
+// TcpTable.remote_ports.
+fn tcp_set_remote_port(tbl: State<TcpTable>, idx: u32, val: u16) {
+    let off = idx * 2;
+    let i = 0;
+    while i < 2 {
+        let sh = i * 8;
+        let b = ((val >> sh) & 255) as u8;
+        tbl.remote_ports[off + i] = b;
+        i = i + 1;
+    }
+}
+
+// tcp_connect: send SYN, move to SYN_SENT(1). Stores the local_port +
+// remote_port args into TcpTable.local_ports / TcpTable.remote_ports via
+// the 2-byte little-endian pack helpers above (the same pattern K9a's
+// sys_bind uses for sock_set_local_port).
 // Returns 0 on success, 22=-EINVAL on idx >= 64, 9=-EBADF on unused slot.
 fn tcp_connect(tbl: State<TcpTable>, idx: u32, local_port: u16, remote_port: u16) -> i64 {
     if idx >= 64 { return 22; }
     if tbl.used[idx] == 0 { return 9; }
-    // Set ports (simplified — use direct state access). K9e will store
-    // these via tcp_set_local_port / tcp_set_remote_port helpers.
+    tcp_set_local_port(tbl, idx, local_port);
+    tcp_set_remote_port(tbl, idx, remote_port);
     tbl.states[idx] = 1;  // SYN_SENT
     return 0;
 }
@@ -336,6 +403,9 @@ fn main() -> i32 {
     // Connect (SYN_SENT).
     tcp_connect(tbl, c, 1234, 80);
     if tbl.states[c] != 1 { return 3; }
+    // Verify ports were actually stored (W28S1).
+    if tcp_get_local_port(tbl, c) != 1234 { return 10; }
+    if tcp_get_remote_port(tbl, c) != 80 { return 11; }
     // Receive SYN-ACK → SYN_RECEIVED.
     tcp_accept_syn(tbl, c);
     if tbl.states[c] != 2 { return 4; }
