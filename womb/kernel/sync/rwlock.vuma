@@ -17,24 +17,36 @@
 // instead of serialized (one at a time, like a mutex).
 //
 // ── What K8d provides ──────────────────────────────────────────────────────
-//   rwlock_init(l)                 — readers=0, writer=0, write_waitq=0.
-//                                       Called once per rwlock before any
-//                                       acquire.
-//   rwlock_read_acquire(l)         — acquire for reading. Spins while a
-//                                       writer is active, then atomically
-//                                       increments `readers`. Multiple
-//                                       readers may hold simultaneously.
+//   rwlock_init(l)                 — readers=0, writer=0, write_waitq=0,
+//                                       waitq_count=0. Called once per
+//                                       rwlock before any acquire.
+//   rwlock_read_acquire(l) -> i32  — acquire for reading. Bounded-retry
+//                                       (W43) spins while a writer is
+//                                       active (max 1000 polls), then
+//                                       atomically increments `readers`.
+//                                       Multiple readers may hold
+//                                       simultaneously. Returns 0 on
+//                                       success, -EAGAIN (0 - 11) on
+//                                       retry-cap exhaustion.
 //   rwlock_read_release(l)         — release a read hold. Atomically
-//                                       decrements `readers`.
-//   rwlock_write_acquire(l)        — acquire for writing. Spins while any
-//                                       reader or writer is active, then
-//                                       atomically sets the writer bit.
-//                                       Exclusive — no concurrent reader
-//                                       or writer.
+//                                       decrements `readers`, then (W43)
+//                                       if waitq_count > 0 decrements it
+//                                       (wake_one simulation).
+//   rwlock_write_acquire(l) -> i32 — acquire for writing. Bounded-retry
+//                                       (W43) spins while any reader or
+//                                       writer is active (max 1000 polls),
+//                                       then atomically sets the writer
+//                                       bit. Exclusive — no concurrent
+//                                       reader or writer. Returns 0 on
+//                                       success, -EAGAIN (0 - 11) on
+//                                       retry-cap exhaustion.
 //   rwlock_write_release(l)        — release the write hold. Atomically
 //                                       stores 0, clearing the writer bit
 //                                       AND the reader count (defensive —
-//                                       readers should already be 0).
+//                                       readers should already be 0), then
+//                                       (W43) if waitq_count > 0
+//                                       decrements it (wake_one
+//                                       simulation).
 //
 // ── Reader/writer semantics ────────────────────────────────────────────────
 //   The classic reader/writer invariant: AT MOST ONE writer OR AT LEAST
@@ -92,26 +104,32 @@
 //   return 4 and fail).
 //
 //   This file therefore uses the SEMANTICALLY CORRECT 4-field layout:
-//     { readers: u32, writer: u32, write_waitq: u32, _pad1: u32 }
+//     { readers: u32, writer: u32, write_waitq: u32, waitq_count: u32 }
 //   which puts `writer` at offset 4 (the high 32 bits of the CAS word),
 //   matching the contract's atomic semantics. The contract's `_pad0`
 //   field is dropped — it served no purpose other than to (incorrectly)
-//   pad the CAS window. `_pad1` is retained as padding to round the
-//   layout up to 16 bytes (4 × u32) for alignment. The `write_waitq`
-//   field (diagnostic counter of waiting writers) is at offset 8,
+//   pad the CAS window. The 4th slot (offset 12) was originally `_pad1`
+//   (pure padding to round the layout up to 16 bytes); W43 re-purposes
+//   it as `waitq_count` — the simplified WaitQueue counter (same
+//   re-purposing W16S1 made to Mutex's `waitq_count` and W42 made to
+//   Semaphore's `waitq_count`). The `write_waitq` field (diagnostic
+//   counter of waiting writers, unchanged from pre-W43) is at offset 8,
 //   outside the CAS window — it is only modified by direct field writes
 //   (init sets it to 0; the hosted self-test never bumps it because the
-//   slow path is never taken). This matches the K8b/K8c convention of
-//   keeping the "diagnostic" fields (owner, waitq_count) outside the
-//   CAS window.
+//   slow path is never taken). `waitq_count` (offset 12, also outside
+//   the CAS window) is modified by rwlock_read_acquire /
+//   rwlock_write_acquire (slow-path entry +1, -EAGAIN bailout -1) and
+//   by rwlock_read_release / rwlock_write_release (wake_one -1 if > 0)
+//   — matching the K8b/K8c convention of keeping the wait-queue counter
+//   outside the CAS window.
 //
 //   Field offset map (verified against the codegen's sequential-offset
 //   layout model — same model as K8a's Spinlock, K8b's Mutex, K8c's
 //   Semaphore):
 //     offset  0: readers      (u32) — low 32 bits of CAS word
 //     offset  4: writer       (u32) — high 32 bits of CAS word
-//     offset  8: write_waitq  (u32) — outside CAS window
-//     offset 12: _pad1        (u32) — padding
+//     offset  8: write_waitq  (u32) — outside CAS window (diagnostic)
+//     offset 12: waitq_count  (u32) — outside CAS window (W43 WaitQueue)
 //     total: 16 bytes
 //
 // ── AtomicCas / AtomicStore / AtomicLoad syntax ────────────────────────────
@@ -445,103 +463,198 @@
 //                  Outside the CAS window (offset 8). Modified ONLY by
 //                  rwlock_init (sets to 0). Never bumped in the hosted
 //                  self-test (the write_acquire CAS always succeeds on
-//                  the first try — no contention).
-//   _pad1        — padding to round the layout up to 16 bytes. Always 0.
-//                  Never modified by any function (state_new zero-fills,
-//                  and no atomic op or field write touches offset 12).
+//                  the first try — no contention). Retained from pre-W43
+//                  for diagnostic value; W43 does NOT touch this field
+//                  (the W43 wait-queue bookkeeping uses `waitq_count`
+//                  below — a unified counter for both waiting readers
+//                  and waiting writers, matching W16S1/W42's naming).
+//   waitq_count  — number of waiters (W43 simplified WaitQueue counter).
+//                  Outside the CAS window (offset 12). Modified by:
+//                    - rwlock_init (sets to 0).
+//                    - rwlock_read_acquire / rwlock_write_acquire slow-
+//                      path ENTRY: +1 (waitq_add simulation).
+//                    - rwlock_read_acquire / rwlock_write_acquire
+//                      -EAGAIN bailout: -1 if > 0 (cleanup — no one
+//                      will wake_one us since we're giving up).
+//                    - rwlock_read_release / rwlock_write_release
+//                      wake_one simulation: -1 if > 0 (after the CAS /
+//                      atomic_store that drops the lock).
+//                  The acquirer does NOT decrement on success — the
+//                  unlocker's wake_one simulation handles that (matching
+//                  W16S1 mutex + W42 semaphore + Linux's `up()` /
+//                  `wake_up_one` semantics). In the hosted single-
+//                  threaded self-test, this field stays at 0 (the slow
+//                  path is never taken).
 layout RwLock = {
     readers:     u32,  // count of active readers (low 32 bits of CAS word)
     writer:      u32,  // 0 = no writer, 1 = writer active (high 32 bits of CAS word)
     write_waitq: u32,  // number of waiting writers (diagnostic, outside CAS window)
-    _pad1:       u32,  // padding to 16 bytes
+    waitq_count: u32,  // number of waiters (W43 simplified WaitQueue, outside CAS window)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // RwLock operations.
 // ────────────────────────────────────────────────────────────────────────────
 
-// rwlock_init: zero the rwlock. Sets readers=0, writer=0, write_waitq=0.
-// Called once per rwlock before any acquire. The CALLER allocates the
-// RwLock via `state_new(RwLock)` and passes it by reference (init-style
-// API — same as K8a/K8b/K8c).
+// rwlock_init: zero the rwlock. Sets readers=0, writer=0, write_waitq=0,
+// waitq_count=0. Called once per rwlock before any acquire. The CALLER
+// allocates the RwLock via `state_new(RwLock)` and passes it by reference
+// (init-style API — same as K8a/K8b/K8c).
 //
 // State<T> params: 1 (l). Pure write — no reads, no helper calls, no
-// atomics. The 3 field assignments are direct (no byte-packing needed
+// atomics. The 4 field assignments are direct (no byte-packing needed
 // because every field is a primitive u32, not a nested layout).
 //
-// _pad1 is NOT explicitly set — it relies on state_new's zero-fill
-// (same as K8c's sema_init not setting any padding field). The K8b
-// mutex's mutex_init DOES explicitly set _pad0 = 0, but that's because
-// mutex_init's _pad0 is INSIDE the CAS window and the convention is to
-// make the "all zero" state self-evident. K8d's _pad1 is OUTSIDE the
-// CAS window (offset 12) and never touched by any atomic op, so the
-// implicit zero-fill is sufficient (and matches K8c's pattern).
+// waitq_count is explicitly set to 0 (W43) — even though state_new
+// zero-fills, the explicit zero makes the "all zero" state self-evident
+// and matches K8b's mutex_init explicitly setting _pad0 = 0 (K8b's _pad0
+// is INSIDE the CAS window; K8d's waitq_count is OUTSIDE the CAS window
+// at offset 12, but the same "make zero self-evident" convention
+// applies). The pre-W43 `_pad1` field (pure padding) is gone — replaced
+// by `waitq_count` (a real field with semantic purpose).
 fn rwlock_init(l: State<RwLock>) {
     l.readers = 0;
     l.writer = 0;
     l.write_waitq = 0;
+    l.waitq_count = 0;
 }
 
 // rwlock_read_acquire: acquire for reading. Spins while a writer is
-// active (inner loop), then atomically increments `readers` via CAS
-// (outer loop). Multiple readers may hold simultaneously — the CAS
-// increments `readers` without touching `writer`, so concurrent readers
-// just race the CAS and the loser retries.
+// active (inner loop — W43: bounded retry, no infinite spin), then
+// atomically increments `readers` via CAS (outer loop). Multiple readers
+// may hold simultaneously — the CAS increments `readers` without
+// touching `writer`, so concurrent readers just race the CAS and the
+// loser retries.
+//
+// W43 — same bounded-retry pattern as W16S1's mutex fix and W42's
+// semaphore fix. Returns `i32`: 0 on success, `0 - 11` (-EAGAIN) on
+// retry-cap exhaustion. -EAGAIN is encoded as `0 - 11` per the K7e
+// "negative literal via Sub" discipline (avoids the lexer's negative-
+// number path — same convention as W16S1 + W42 + K4e's wait.vuma +
+// K7c's futex.vuma).
 //
 //   l: the RwLock to acquire for reading.
 //
-// State<T> params: 1 (l). Reads l.writer (inner spin). Calls two IR
-// builtins (atomic_load, atomic_cas).
+// State<T> params: 1 (l). Reads l.writer (inner spin), l.waitq_count
+// (slow-path bailout guard). Writes l.waitq_count (slow-path entry +
+// bailout). Calls two IR builtins (atomic_load, atomic_cas).
+//
+// Wait-queue bookkeeping (W43, mirrors W16S1's mutex + W42's semaphore
+// pattern):
+//   - Slow-path ENTRY (writer active): l.waitq_count = l.waitq_count + 1
+//     (waitq_add simulation — we're now a waiter).
+//   - Slow-path EXIT-on-success (writer released, CAS succeeded): do
+//     NOT decrement waitq_count here — the unlocker's wake_one
+//     simulation handles that (matching W16S1 mutex_acquire + W42
+//     sema_down + Linux's `__down_read` which leaves the waiter on the
+//     queue until `up_read`'s `wake_up` pops it).
+//   - Slow-path EXIT-on-bailout (retry cap hit): if l.waitq_count > 0,
+//     l.waitq_count = l.waitq_count - 1 (cleanup — no one will wake_one
+//     us since we're giving up).
 //
 // The two nested loops:
 //   OUTER (CAS retry): `while success == 0` — retry the CAS until it
 //     succeeds. Handles the race where another reader increments
 //     `readers` between our atomic_load and our atomic_cas (in that
 //     case old != cur, we loop back and re-load cur).
-//   INNER (writer spin): `while l.writer != 0` — wait for any active
-//     writer to release. A plain field read of `l.writer` (offset 4) is
-//     safe because u32 loads are atomic on all supported targets.
+//   INNER (writer spin, W43 bounded): if `l.writer != 0`, enter a
+//     bounded retry loop that polls `l.writer` up to 1000 times. If
+//     the writer releases within 1000 polls, exit the inner loop and
+//     try the CAS. If the cap is hit, decrement waitq_count (cleanup)
+//     and return -EAGAIN.
 //
-// After the inner spin exits (writer == 0), we do an atomic_load to get
-// a fresh `cur = readers | (writer << 32)`, re-check `writer_part == 0`
-// (defensive — in case a writer raced in between the inner spin's read
-// and the atomic_load), then CAS(cur → cur + 1) to increment `readers`.
-// The `cur + 1` preserves `writer`'s high 4 bytes (which are 0 in `cur`
-// — we just checked writer_part == 0) while incrementing `readers`.
+// After the inner bounded retry exits (writer == 0), we do an
+// atomic_load to get a fresh `cur = readers | (writer << 32)`, re-check
+// `writer_part == 0` (defensive — in case a writer raced in between
+// the inner loop's last poll and the atomic_load), then CAS(cur → cur
+// + 1) to increment `readers`. The `cur + 1` preserves `writer`'s
+// high 4 bytes (which are 0 in `cur` — we just checked writer_part ==
+// 0) while incrementing `readers`.
 //
-// The busy-wait loops terminate because:
+// The loops terminate because:
 //   - In hosted mode, only one task is running (single-threaded self-
-//     test), so the inner spin is never entered (writer is always 0
-//     when read_acquire is called) and the outer CAS always succeeds
-//     on the first try (no other CPU can change `readers` between our
-//     load and our CAS).
+//     test), so the inner bounded retry is never entered (writer is
+//     always 0 when read_acquire is called) and the outer CAS always
+//     succeeds on the first try (no other CPU can change `readers`
+//     between our load and our CAS).
 //   - In a real SMP/preemptive kernel, the inner loop terminates when
-//     the writer calls write_release (atomic_store(0) clears `writer`).
-//     The outer loop terminates when the CAS succeeds (old == cur) —
-//     either on the first try (no contention) or after a few retries
-//     (other readers racing the CAS).
-fn rwlock_read_acquire(l: State<RwLock>) {
+//     the writer calls write_release (atomic_store(0) clears `writer`)
+//     — OR after 1000 polls (retry cap → -EAGAIN). The outer loop
+//     terminates when the CAS succeeds (old == cur) — either on the
+//     first try (no contention) or after a few retries (other readers
+//     racing the CAS).
+fn rwlock_read_acquire(l: State<RwLock>) -> i32 {
     // `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
     let success = 0;
     while success == 0 {
-        // Inner spin: wait until no writer is active.
-        //   `l.writer` is a plain field read of offset 4. u32 loads are
-        //   atomic on all supported targets, so this is safe (we might
-        //   see a stale value, but the subsequent atomic_load + CAS
-        //   will catch any race — if a writer grabbed the lock between
-        //   this read and the CAS, the CAS's `old != cur` branch
-        //   retries the outer loop, which re-enters the inner spin).
-        //   In a real kernel: this is where we'd call sleep_on(waitq)
-        //   to yield the CPU instead of busy-waiting — but we don't
-        //   have a scheduler yet (K9 builds it), so we spin.
-        while l.writer != 0 {
-            // spin (in real kernel: sleep)
+        // Inner bounded retry: if a writer is active, wait for it to
+        //   release — but bound the wait to 1000 polls (W43). A plain
+        //   field read of `l.writer` (offset 4) is safe because u32
+        //   loads are atomic on all supported targets. In a real
+        //   kernel: this is where we'd call sleep_on(waitq) to yield
+        //   the CPU instead of busy-waiting — but we don't have a
+        //   scheduler yet (K9 builds it), so we poll. The 1000-poll
+        //   cap is the hosted-mode safety net: prevents a deadlocked
+        //   or very slow writer from hanging the reader forever.
+        //   Before W43 this was an unbounded `while l.writer != 0 { }`
+        //   busy-wait that would lock up the hosted runtime if the
+        //   slow path were ever taken (though in the single-threaded
+        //   self-test it never is).
+        if l.writer != 0 {
+            // Slow path — writer is active. waitq_add simulation:
+            //   increment the wait-queue counter (we're now a waiter).
+            //   In a real kernel this would be
+            //   `waitq_add(&l.waitq, current_task_idx)`; here it's
+            //   just `l.waitq_count = l.waitq_count + 1`.
+            l.waitq_count = l.waitq_count + 1;
+            // Bounded retry loop (W43). `retries` counts writer polls
+            //   that returned non-zero since entering the slow path.
+            //   `ready` is 0 until a poll returns 0 (writer released —
+            //   exit to retry the outer CAS loop). The loop exits via
+            //   either `ready == 1` (writer released — try CAS) or
+            //   `retries >= 1000` (gave up — return -EAGAIN).
+            let retries = 0;
+            let ready = 0;
+            while ready == 0 {
+                if l.writer == 0 {
+                    // Writer released — exit the bounded retry loop
+                    //   and fall through to the atomic_load + CAS.
+                    ready = 1;
+                } else {
+                    // Still active — bump the retry counter. If
+                    //   we've hit the cap, give up: simulate
+                    //   removing ourselves from the wait queue
+                    //   (decrement waitq_count — no one will
+                    //   wake_one us since we're bailing), then
+                    //   return -EAGAIN (-11 = `0 - 11` — see K7e's
+                    //   waitq.vuma header for the "negative literal
+                    //   via Sub" discipline) so the caller can
+                    //   retry, queue work for later, or surface
+                    //   "Resource temporarily unavailable" to user-
+                    //   space.
+                    retries = retries + 1;
+                    if retries >= 1000 {
+                        if l.waitq_count > 0 {
+                            l.waitq_count = l.waitq_count - 1;
+                        }
+                        return 0 - 11;  // -EAGAIN
+                    }
+                }
+            }
+            // ready == 1 → writer released. Fall through to the
+            //   atomic_load + CAS. Note (W43): we do NOT decrement
+            //   waitq_count here. rwlock_write_release's wake_one
+            //   simulation handles that — matching W16S1 mutex's
+            //   pattern where the unlocker pops the waiter from the
+            //   queue, not the acquirer. In the hosted single-
+            //   threaded self-test this branch is never reached (the
+            //   slow path itself is never taken).
         }
         // Fresh snapshot of the 8-byte CAS word.
         //   atomic_load(addr) returns readers | (writer << 32).
-        //   After the inner spin exits, writer should be 0 — but we
-        //   re-check via `writer_part == 0` below in case a writer
-        //   raced in.
+        //   After the inner bounded retry exits, writer should be 0
+        //   — but we re-check via `writer_part == 0` below in case a
+        //   writer raced in.
         let cur = atomic_load(l as Address);
         // Extract the high 32 bits (writer field).
         //   `(cur >> 32) & 4294967295` shifts the writer byte down to
@@ -551,8 +664,9 @@ fn rwlock_read_acquire(l: State<RwLock>) {
         let writer_part = (cur >> 32) & 4294967295;
         // Only attempt the CAS if no writer is active.
         //   If writer_part != 0, a writer grabbed the lock between the
-        //   inner spin and the atomic_load — fall through to the outer
-        //   loop's re-iteration, which re-enters the inner spin.
+        //   inner bounded retry's last poll and the atomic_load — fall
+        //   through to the outer loop's re-iteration, which re-enters
+        //   the inner bounded retry.
         if writer_part == 0 {
             // CAS(cur → cur + 1): atomically increment `readers`.
             //   atomic_cas(addr, expected, desired) returns the OLD
@@ -579,17 +693,21 @@ fn rwlock_read_acquire(l: State<RwLock>) {
         }
         // If writer_part != 0, a writer is active — fall through to
         // the outer loop's re-iteration, which re-enters the inner
-        // spin (waiting for the writer to release).
+        // bounded retry (waiting for the writer to release).
     }
+    return 0;
 }
 
 // rwlock_read_release: release a read hold. Atomically decrements
 // `readers` via CAS loop. If `readers` is already 0 (defensive — we're
-// releasing a read lock we don't hold), silently succeed.
+// releasing a read lock we don't hold), silently succeed. After the
+// CAS loop, (W43) if waitq_count > 0, decrement it — the
+// wake_one(waitq) simulation.
 //
 //   l: the RwLock to release.
 //
-// State<T> params: 1 (l). Calls two IR builtins (atomic_load, atomic_cas).
+// State<T> params: 1 (l). Reads l.waitq_count (wake_one guard). Writes
+// l.waitq_count. Calls two IR builtins (atomic_load, atomic_cas).
 //
 // This is the canonical "atomic decrement via CAS" loop (same shape as
 // K8c's sema_down fast path):
@@ -598,6 +716,7 @@ fn rwlock_read_acquire(l: State<RwLock>) {
 //   3. Else (cur == 0), we're releasing a read lock we don't hold —
 //      silently succeed (defensive — matches the contract's reference
 //      code: "else: success = 1 (already 0)").
+//   4. (W43) If waitq_count > 0, decrement it (wake_one simulation).
 //
 // The `cur - 1` preserves `writer`'s high 4 bytes (which are 0 — readers
 // and writers are mutually exclusive, so if we hold a read lock, writer
@@ -612,6 +731,22 @@ fn rwlock_read_acquire(l: State<RwLock>) {
 // didn't acquire. This is a known limitation of the basic rwlock design
 // (matches Linux's struct rw_semaphore). A "owned rwlock" variant would
 // add a reader-count-per-task map, which is left for a future wave.
+//
+// wake_one simulation (W43): after the CAS-loop decrement succeeds,
+//   `if l.waitq_count > 0 { l.waitq_count = l.waitq_count - 1 }`.
+//   This is the hosted-mode stand-in for waitq_wake_one(&l.waitq) —
+//   in a real kernel we'd pop exactly one waiter from the queue
+//   (avoiding thundering herd) and mark it RUNNABLE. The decrement
+//   happens AFTER the CAS-loop decrement so a contended writer's next
+//   atomic_load sees readers == 0 (or one closer to 0) first. The
+//   `if > 0` guard prevents underflow in the uncontended case (no
+//   waiters — the fast path was taken, waitq_count is still 0). This
+//   matches the W16S1 mutex pattern (mutex_release's wake_one
+//   simulation) + W42 semaphore pattern (sema_up's wake_one
+//   simulation) + Linux's `up_read()` which wakes one waiting writer
+//   if readers dropped to 0. In the hosted single-threaded self-test,
+//   this branch is never taken (waitq_count stays at 0 because the
+//   slow path is never entered).
 fn rwlock_read_release(l: State<RwLock>) {
     // `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur)
     // OR we hit the `cur == 0` defensive path.
@@ -646,16 +781,53 @@ fn rwlock_read_release(l: State<RwLock>) {
             success = 1;  // already 0
         }
     }
+    // wake_one simulation (W43): if there are waiters, decrement
+    //   waitq_count to simulate popping one waiter from the queue.
+    //   The `if > 0` guard prevents underflow in the uncontended
+    //   case (no waiters — the fast path was taken, waitq_count is
+    //   still 0). The decrement happens AFTER the CAS-loop decrement
+    //   so a contended writer's next atomic_load sees the updated
+    //   readers count first. Matches W16S1 mutex_release + W42
+    //   sema_up wake_one patterns. In the hosted single-threaded
+    //   self-test this branch is never taken (waitq_count stays at 0
+    //   because the slow path is never entered); a real SMP kernel
+    //   with concurrent waiters would decrement once per release,
+    //   matching wake_one's "pop one" semantics.
+    if l.waitq_count > 0 {
+        l.waitq_count = l.waitq_count - 1;  // simulate waitq_wake_one
+    }
 }
 
 // rwlock_write_acquire: acquire for writing. Spins while ANY reader or
-// writer is active, then atomically sets the writer bit via CAS. The
-// writer is EXCLUSIVE — no concurrent reader or writer.
+// writer is active (W43: bounded retry, no infinite spin), then
+// atomically sets the writer bit via CAS. The writer is EXCLUSIVE — no
+// concurrent reader or writer.
+//
+// W43 — same bounded-retry pattern as W16S1's mutex fix and W42's
+// semaphore fix. Returns `i32`: 0 on success, `0 - 11` (-EAGAIN) on
+// retry-cap exhaustion. -EAGAIN is encoded as `0 - 11` per the K7e
+// "negative literal via Sub" discipline (avoids the lexer's negative-
+// number path — same convention as W16S1 + W42 + K4e's wait.vuma +
+// K7c's futex.vuma).
 //
 //   l: the RwLock to acquire for writing.
 //
-// State<T> params: 1 (l). No plain field reads or writes. Calls two IR
+// State<T> params: 1 (l). Reads l.waitq_count (slow-path bailout guard).
+// Writes l.waitq_count (slow-path entry + bailout). Calls two IR
 // builtins (atomic_load, atomic_cas).
+//
+// Wait-queue bookkeeping (W43, mirrors W16S1's mutex + W42's semaphore
+// pattern):
+//   - Slow-path ENTRY (lock busy): l.waitq_count = l.waitq_count + 1
+//     (waitq_add simulation — we're now a waiter).
+//   - Slow-path EXIT-on-success (lock became free, CAS succeeded): do
+//     NOT decrement waitq_count here — the unlocker's wake_one
+//     simulation handles that (matching W16S1 mutex_acquire + W42
+//     sema_down + Linux's `__down_write` which leaves the waiter on
+//     the queue until `up_write`'s `wake_up` pops it).
+//   - Slow-path EXIT-on-bailout (retry cap hit): if l.waitq_count > 0,
+//     l.waitq_count = l.waitq_count - 1 (cleanup — no one will wake_one
+//     us since we're giving up).
 //
 // The loop:
 //   1. atomic_load → cur.
@@ -667,14 +839,17 @@ fn rwlock_read_release(l: State<RwLock>) {
 //      Else (someone raced in and grabbed a read or write lock between
 //      our load and our CAS), retry the outer loop.
 //   6. If readers_part != 0 OR writer_part != 0, the lock is busy —
-//      spin (retry the outer loop, which re-loads cur).
+//      enter the bounded retry loop (W43): poll atomic_load up to 1000
+//      times waiting for the lock to become free. If it becomes free
+//      within 1000 polls, retry the outer CAS. If the cap is hit,
+//      decrement waitq_count (cleanup) and return -EAGAIN.
 //
 // The CAS expected value is the CONSTANT 0 (not `cur`), because we
 // only attempt the CAS when `cur == 0` (both readers and writer are
 // 0). The desired value 4294967296 = 0x100000000 = `writer=1,
 // readers=0` — sets the writer bit (bit 32) while keeping readers at 0.
 //
-// The busy-wait loop terminates because:
+// The loop terminates because:
 //   - In hosted mode, only one task is running (single-threaded self-
 //     test), so the CAS always succeeds on the first try (readers and
 //     writer are both 0 after init or after the prior release's
@@ -682,13 +857,16 @@ fn rwlock_read_release(l: State<RwLock>) {
 //   - In a real SMP/preemptive kernel, the loop terminates when all
 //     readers have called read_release (draining `readers` to 0) AND
 //     any prior writer has called write_release (clearing `writer` to
-//     0). At that point our CAS(0 → 1<<32) succeeds.
+//     0). At that point our CAS(0 → 1<<32) succeeds — OR after 1000
+//     polls (retry cap → -EAGAIN).
 //
-// Note: write_acquire does NOT increment `write_waitq`. The K8d
-// contract's reference code doesn't either — the field is diagnostic
-// only and never bumped. See "write_waitq: diagnostic only" in the
-// file header.
-fn rwlock_write_acquire(l: State<RwLock>) {
+// Note: write_acquire does NOT increment `write_waitq` (the diagnostic
+// counter at offset 8 — see "write_waitq: diagnostic only" in the file
+// header). The K8d contract's reference code doesn't either — that
+// field is diagnostic-only and never bumped. W43's wait-queue
+// bookkeeping uses `waitq_count` (offset 12) instead — the unified
+// counter matching W16S1/W42 naming.
+fn rwlock_write_acquire(l: State<RwLock>) -> i32 {
     // `success` is 0 until the CAS(0 → 1<<32) succeeds (old == 0).
     let success = 0;
     while success == 0 {
@@ -725,13 +903,83 @@ fn rwlock_write_acquire(l: State<RwLock>) {
             // In hosted single-threaded mode, this branch is never
             // taken (no other CPU can change the word between our
             // load and our CAS).
+        } else {
+            // SLOW PATH — lock is busy (W43: bounded retry, no infinite
+            //   spin). readers_part != 0 (readers active) OR writer_part
+            //   != 0 (writer active). In a real kernel: this is where
+            //   we'd call sleep_on(waitq) to yield the CPU instead of
+            //   busy-waiting — but we don't have a scheduler yet (K9
+            //   builds it), so we poll. The 1000-poll cap is the
+            //   hosted-mode safety net: prevents a deadlocked or very
+            //   slow holder from hanging the writer forever. Before
+            //   W43 this was an unbounded `while success == 0 { ... }`
+            //   busy-wait that would lock up the hosted runtime if the
+            //   slow path were ever taken (though in the single-
+            //   threaded self-test it never is).
+            //   waitq_add simulation: increment the wait-queue counter
+            //   (we're now a waiter). In a real kernel this would be
+            //   `waitq_add(&l.waitq, current_task_idx)`; here it's
+            //   just `l.waitq_count = l.waitq_count + 1`.
+            l.waitq_count = l.waitq_count + 1;
+            // Bounded retry loop (W43). `retries` counts atomic_load
+            //   attempts that returned a busy state since entering the
+            //   slow path. `ready` is 0 until an atomic_load returns
+            //   cur == 0 (lock is free — exit to retry the outer CAS
+            //   loop). The loop exits via either `ready == 1` (lock
+            //   free — try CAS) or `retries >= 1000` (gave up — return
+            //   -EAGAIN). This is the hosted-mode stand-in for
+            //   sleep_on(waitq) + schedule(): in a real kernel we'd
+            //   sleep and be woken by the unlocker's wake_one; here we
+            //   just retry atomic_load up to 1000 times.
+            let retries = 0;
+            let ready = 0;
+            while ready == 0 {
+                // Re-load the 8-byte CAS word.
+                //   cur2 = readers | (writer << 32). If both parts are
+                //   0, the lock is free — exit the bounded retry loop
+                //   and fall through to the outer loop's re-iteration
+                //   (which re-loads cur and tries the CAS).
+                let cur2 = atomic_load(l as Address);
+                let readers_part2 = cur2 & 4294967295;
+                let writer_part2 = (cur2 >> 32) & 4294967295;
+                if readers_part2 == 0 && writer_part2 == 0 {
+                    // Lock is now free — exit the bounded retry loop.
+                    ready = 1;
+                } else {
+                    // Still busy — bump the retry counter. If we've
+                    //   hit the cap, give up: simulate removing
+                    //   ourselves from the wait queue (decrement
+                    //   waitq_count — no one will wake_one us since
+                    //   we're bailing), then return -EAGAIN
+                    //   (-11 = `0 - 11` — see K7e's waitq.vuma header
+                    //   for the "negative literal via Sub" discipline)
+                    //   so the caller can retry, queue work for
+                    //   later, or surface "Resource temporarily
+                    //   unavailable" to user-space.
+                    retries = retries + 1;
+                    if retries >= 1000 {
+                        if l.waitq_count > 0 {
+                            l.waitq_count = l.waitq_count - 1;
+                        }
+                        return 0 - 11;  // -EAGAIN
+                    }
+                }
+            }
+            // ready == 1 → lock is now free. Fall through to the
+            //   outer loop's re-iteration, which re-loads cur (now 0)
+            //   and tries the CAS(0 → 1<<32). If that CAS succeeds,
+            //   success = 1 and we exit the outer loop with the writer
+            //   bit set.
+            //   Note (W43): we do NOT decrement waitq_count here. The
+            //   unlocker's wake_one simulation handles that —
+            //   matching W16S1 mutex's pattern where the unlocker
+            //   pops the waiter from the queue, not the acquirer.
+            //   In the hosted single-threaded self-test this branch
+            //   is never reached (the slow path itself is never
+            //   taken).
         }
-        // else: spin — readers_part != 0 (readers active) OR writer_part
-        // != 0 (writer active). Fall through to the outer loop's
-        // re-iteration, which re-loads cur and re-checks. In a real
-        // kernel: this is where we'd call sleep_on(waitq) to yield the
-        // CPU instead of busy-waiting.
     }
+    return 0;
 }
 
 // rwlock_write_release: release the write hold. A single atomic_store(0)
@@ -740,12 +988,13 @@ fn rwlock_write_acquire(l: State<RwLock>) {
 // succeeded because readers was 0, and no reader could have acquired
 // while writer=1), so clearing it again is a no-op — but the
 // atomic_store clears the whole 8-byte word, so it's a single
-// instruction either way.
+// instruction either way. After the atomic_store, (W43) if
+// waitq_count > 0, decrement it — the wake_one(waitq) simulation.
 //
 //   l: the RwLock to release.
 //
-// State<T> params: 1 (l). No plain field reads or writes. Calls one IR
-// builtin (atomic_store).
+// State<T> params: 1 (l). Reads l.waitq_count (wake_one guard). Writes
+// l.waitq_count. Calls one IR builtin (atomic_store).
 //
 // The atomic_store writes 0 to bytes [0..7], clearing `readers` AND
 // `writer`. A waiting reader's atomic_load will now see `writer_part ==
@@ -765,12 +1014,28 @@ fn rwlock_write_acquire(l: State<RwLock>) {
 // rw_semaphore. A real kernel would panic on a non-holder release
 // (kernel bug) — here we silently succeed (stub error path).
 //
-// Note: write_release does NOT clear `write_waitq`. The waiting writers
-// (if any) are responsible for decrementing their own count after their
-// CAS succeeds (same pattern as K8b's mutex_release not decrementing
-// waitq_count — the woken acquirer does). But since the K8d contract
-// never bumps write_waitq anyway (see "write_waitq: diagnostic only"),
-// this is moot.
+// Note: write_release does NOT clear `write_waitq` (the diagnostic
+// counter at offset 8). The waiting writers (if any) are responsible
+// for decrementing their own count after their CAS succeeds (same
+// pattern as K8b's mutex_release not decrementing waitq_count — the
+// woken acquirer does). But since the K8d contract never bumps
+// write_waitq anyway (see "write_waitq: diagnostic only"), this is
+// moot.
+//
+// wake_one simulation (W43): after the atomic_store(0), `if
+// l.waitq_count > 0 { l.waitq_count = l.waitq_count - 1 }`. This is
+// the hosted-mode stand-in for waitq_wake_one(&l.waitq) — in a real
+// kernel we'd pop exactly one waiter from the queue (avoiding
+// thundering herd) and mark it RUNNABLE. The decrement happens AFTER
+// atomic_store(0) so a contended acquirer's next atomic_load sees the
+// cleared word first. The `if > 0` guard prevents underflow in the
+// uncontended case (no waiters — the fast path was taken, waitq_count
+// is still 0). This matches the W16S1 mutex pattern (mutex_release's
+// wake_one simulation) + W42 semaphore pattern (sema_up's wake_one
+// simulation) + Linux's `up_write()` which wakes one waiting reader or
+// writer. In the hosted single-threaded self-test, this branch is
+// never taken (waitq_count stays at 0 because the slow path is never
+// entered).
 fn rwlock_write_release(l: State<RwLock>) {
     // atomic_store(addr, val): store `val` atomically to [addr].
     //   On x86_64 this is a plain MOV (already atomic for aligned
@@ -781,6 +1046,21 @@ fn rwlock_write_release(l: State<RwLock>) {
     //   on its next iteration.
     //   In a real kernel: this is where we'd call wake_one(waitq).
     atomic_store(l as Address, 0);
+    // wake_one simulation (W43): if there are waiters, decrement
+    //   waitq_count to simulate popping one waiter from the queue.
+    //   The `if > 0` guard prevents underflow in the uncontended
+    //   case (no waiters — the fast path was taken, waitq_count is
+    //   still 0). The decrement happens AFTER atomic_store(0) so a
+    //   contended acquirer's next atomic_load sees the cleared word
+    //   first. Matches W16S1 mutex_release + W42 sema_up wake_one
+    //   patterns. In the hosted single-threaded self-test this branch
+    //   is never taken (waitq_count stays at 0 because the slow path
+    //   is never entered); a real SMP kernel with concurrent waiters
+    //   would decrement once per release, matching wake_one's "pop
+    //   one" semantics.
+    if l.waitq_count > 0 {
+        l.waitq_count = l.waitq_count - 1;  // simulate waitq_wake_one
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -795,31 +1075,57 @@ fn rwlock_write_release(l: State<RwLock>) {
 //   5. One write release — writer should be 0.
 // Exit 0 on all-pass, exit 1..5 on the corresponding check failure.
 //
+// rwlock_read_acquire and rwlock_write_acquire now return i32 (W43 — 0
+// on success, `0 - 11` (-EAGAIN) on retry-cap exhaustion). The return
+// values are discarded in `main` because the self-test never hits the
+// slow path (single-threaded hosted mode → the fast-path CAS always
+// succeeds on the first try, so waitq_count stays at 0 throughout and
+// the -EAGAIN / wake_one-decrement paths are never exercised). A real
+// caller would check `if ret != 0 { ... }` — same discard pattern
+// W16S1's mutex self-test uses for `mutex_acquire`'s i32 return and
+// W42's semaphore self-test uses for `sema_down`'s i32 return.
+//
 // The self-test runs single-threaded in hosted mode, so:
-//   - The read_acquire inner spin (`while l.writer != 0`) is never
-//     entered (writer is always 0 when read_acquire is called in the
-//     self-test — the write_acquire happens AFTER all read operations
-//     complete).
+//   - The read_acquire inner bounded retry (W43 — `if l.writer != 0`)
+//     is never entered (writer is always 0 when read_acquire is called
+//     in the self-test — the write_acquire happens AFTER all read
+//     operations complete).
 //   - The read_acquire outer CAS always succeeds on the first try (no
 //     other CPU can change `readers` between our load and our CAS).
 //   - The read_release CAS always succeeds on the first try.
+//   - The read_release wake_one guard evaluates false (waitq_count
+//     still 0 — no waiters ever queued).
 //   - The write_acquire CAS always succeeds on the first try (readers
 //     and writer are both 0 after the read releases complete).
+//   - The write_acquire slow path / bounded retry is never entered.
+//   - The write_release wake_one guard evaluates false (waitq_count
+//     still 0 — no waiters ever queued).
 //   - The write_waitq counter stays at 0 throughout (never bumped —
-//     the contract's reference code doesn't bump it).
+//     the contract's reference code doesn't bump it; W43 doesn't
+//     either — W43 uses `waitq_count` instead).
+//   - The waitq_count counter stays at 0 throughout (the slow path is
+//     never taken).
 //
 // The test exercises:
 //   - Multiple concurrent readers (read_acquire twice → readers=2).
-//   - Reader release (read_release decrements readers via CAS).
+//   - Reader release (read_release decrements readers via CAS,
+//     wake_one guard evaluates false).
 //   - Writer exclusivity (write_acquire only succeeds when readers=0
 //     AND writer=0).
-//   - Writer release (write_release's atomic_store(0) clears writer).
+//   - Writer release (write_release's atomic_store(0) clears writer,
+//     wake_one guard evaluates false).
 // It does NOT exercise:
-//   - The read_acquire inner spin (would require a writer to be active
-//     when read_acquire is called — K8e covers this with the SMP IPI
-//     test infrastructure).
-//   - The write_acquire spin (would require readers or a writer to be
-//     active when write_acquire is called — K8e covers).
+//   - The read_acquire inner bounded retry / slow path (would require
+//     a writer to be active when read_acquire is called — K8e covers
+//     this with the SMP IPI test infrastructure).
+//   - The write_acquire slow path / bounded retry (would require
+//     readers or a writer to be active when write_acquire is called —
+//     K8e covers).
+//   - The -EAGAIN return on retry-cap exhaustion (would require a
+//     deadlocked holder — could add as a 6th check, but the contract
+//     specifies 5).
+//   - The waitq_count increment / decrement / wake_one (would require
+//     the slow path to be taken — same reason).
 //   - The CAS retry loops (old != cur — would require SMP contention).
 //   - The `cur == 0` defensive path in read_release (would require a
 //     buggy caller releasing a read lock they don't hold).
@@ -833,25 +1139,34 @@ fn main() -> i32 {
     //     CAS(0 → 1) succeeds, readers becomes 1.
     //   Second read_acquire: cur=1 (readers=1, writer=0), writer_part=0,
     //     CAS(1 → 2) succeeds, readers becomes 2.
+    //   Return value (0 on success) discarded — self-test never hits
+    //   the slow path, so -EAGAIN is impossible here.
     rwlock_read_acquire(l);
     rwlock_read_acquire(l);
     // Verify readers count is 2.
     if l.readers != 2 { return 1; }
     // Release one read lock — readers should drop to 1.
     //   cur=2, CAS(2 → 1) succeeds, readers becomes 1.
+    //   wake_one guard evaluates false (waitq_count still 0 — no
+    //   waiters ever queued).
     rwlock_read_release(l);
     if l.readers != 1 { return 2; }
     // Release the other read lock — readers should drop to 0.
     //   cur=1, CAS(1 → 0) succeeds, readers becomes 0.
+    //   wake_one guard evaluates false (waitq_count still 0).
     rwlock_read_release(l);
     if l.readers != 0 { return 3; }
     // Writer (exclusive) — acquire should succeed immediately (no
     // readers, no writer). CAS(0 → 4294967296) sets writer=1, readers=0.
+    //   Return value (0 on success) discarded — self-test never hits
+    //   the slow path, so -EAGAIN is impossible here.
     rwlock_write_acquire(l);
     // Verify writer flag is set.
     if l.writer != 1 { return 4; }
     // Release the write lock — atomic_store(0) clears both readers and
     // writer. writer should be 0.
+    //   wake_one guard evaluates false (waitq_count still 0 — no
+    //   waiters ever queued).
     rwlock_write_release(l);
     if l.writer != 0 { return 5; }
     return 0;

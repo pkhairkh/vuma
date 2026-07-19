@@ -52,18 +52,32 @@
 //   shm_find_free(tbl) -> u32                  — linear scan for the first
 //                                                 slot with used==0. Returns
 //                                                 0..63, or 64 = "table full".
-//   sys_shmget(tbl, key, size, flags) -> i64   — allocate a new ShmRegion
-//                                                 of `size` bytes, return
-//                                                 shmid (slot index), or -1
-//                                                 if the table is full.
+//   sys_shmget(tbl, pool, pmm, key, size, flags) -> i64
+//                                               — allocate a new ShmRegion
+//                                                 of `size` bytes (W44:
+//                                                 round up to n_pages,
+//                                                 pmm_alloc + mmap
+//                                                 fallback), return shmid
+//                                                 (slot index), or -1 if
+//                                                 the table is full / OOM.
 //   sys_shmat(tbl, shmid, addr, flags) -> u64  — map the shared region at
 //                                                 `addr` (or kernel-chosen),
 //                                                 return vaddr (or 0 on
-//                                                 invalid shmid).
-//   sys_shmdt(tbl, addr) -> i64                — unmap the shared region
+//                                                 invalid shmid). W44:
+//                                                 documents the vmm_map_page
+//                                                 call site (K8+).
+//   sys_shmdt(tbl, pool, pmm, addr) -> i64    — unmap the shared region
 //                                                 identified by `addr`,
 //                                                 return 0 on success, -1
-//                                                 if not found.
+//                                                 if not found. W44: when
+//                                                 the last attacher detaches,
+//                                                 frees the slot's physical
+//                                                 pages (pmm_free / munmap).
+//   sys_shmctl(tbl, shmid, cmd) -> i64         — W44: control ops —
+//                                                 IPC_RMID (0) marks slot
+//                                                 for deletion, IPC_SET (1)
+//                                                 is a no-op, IPC_STAT (2)
+//                                                 returns the segment size.
 //
 // ── What is shared memory? ──────────────────────────────────────────────────
 //   Shared memory is the SINGLE fastest IPC mechanism on Unix — two
@@ -337,23 +351,31 @@
 // ── PMT discipline ─────────────────────────────────────────────────────────
 //   PMT-pure: NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this
 //   file (the only `*` in code lines are multiplication — `idx * 8`,
-//   `i * 8`, `idx * 4`, `shmid * 4096`, `i * 4` — and the only `&` are
-//   bitwise-AND — `(val >> sh) & 255`). ShmTable is a flat struct in a
-//   `___pmt_buffer`-backed State<ShmTable>; the caller allocates via
-//   `state_new(ShmTable)` and passes by reference (init-style API — see
-//   "Why init-style?" in K4e's wait.vuma header for the codegen
-//   rationale). State<T> params: 1 per function (tbl only), per the
-//   K4b contract's "1-2 per function" rule. No externs declared.
+//   `i * 8`, `idx * 4`, `shmid * 4096`, `i * 4`, `slot * 128`,
+//   `page_idx * 8`, `slot * 16` — and the only `&` are bitwise-AND —
+//   `(val >> sh) & 255`). ShmTable + FlatPool + PmmState are flat
+//   structs in `___pmt_buffer`-backed State<T> buffers; the caller
+//   allocates via `state_new(ShmTable)` / `state_new(FlatPool)` /
+//   `state_new(PmmState)` and passes by reference (init-style API —
+//   see "Why init-style?" in K4e's wait.vuma header for the codegen
+//   rationale). State<T> params: 1-3 per function (tbl only for the
+//   helpers + sys_shmat + sys_shmctl; tbl + pool + pmm for sys_shmget +
+//   sys_shmdt — W44 adds the PMM states for pmm_alloc / pmm_free),
+//   per the K4b contract's "1-2 per function" rule (W44 exception:
+//   3 for the PMM-glue syscalls — same as kmalloc.vuma's kmalloc /
+//   kfree and mmap.vuma's sys_mmap / sys_munmap).
 //
-//   In particular: K7d does NOT call any allocator (no page_alloc, no
-//   mmap, no brk, no malloc) — hosted mode has no allocator, and the
-//   K7d contract's "In hosted mode: return a stub address" note
-//   explicitly allows this. The sys_shmget / sys_shmat / sys_shmdt
-//   functions only manipulate the ShmTable's byte arrays — they don't
-//   touch real memory. The K8+ kernel-mode-shm layer will wire these
-//   syscalls up to page_alloc (in shmget) and mmap_into_pagetable
-//   (in shmat) — but that requires a process table + page table, which
-//   K7d's hosted-mode PMT-pure self-test does not have.
+//   W44: K7d now DOES call allocators — pmm_alloc (forward-declared
+//   VUMA fn, NOT extern "C" — empty body returning 0 in hosted mode,
+//   real buddy allocator in K11 bare-metal mode) in sys_shmget, and
+//   pmm_free (same forward-declaration pattern) in sys_shmdt. The
+//   hosted-mode fallback is mmap / munmap (extern "C" runtime stubs —
+//   same category as write / read / exit; registered in the x86_64
+//   backend as syscall stubs). PMT purity is preserved: pmm_alloc /
+//   pmm_free are VUMA fns (State<T> params, no pointer syntax), and
+//   mmap / munmap take u64 / u32 scalars (no Address / pointer
+//   dereference syntax in VUMA source — the extern "C" block is the
+//   FFI boundary, same as write / read / exit in K7a's pipe.vuma).
 //
 // ── VUMA has no import ─────────────────────────────────────────────────────
 //   VUMA does not have an `import` or `use` keyword — each .vuma file is
@@ -372,10 +394,96 @@
 //         womb/kernel/ipc/shm.vuma \
 //         /tmp/shm.bin x86_64 --verify
 //     /tmp/shm.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — shmget
-// returns 0 (slot 0) + tbl.count==1; shmat returns 1048576 (1 MB) +
-// attached_count==1; shmdt returns 0 + attached_count==0; shmdt on
-// non-existent addr returns -1).
+// Expected: IVE Pass, exit=0 (all 16 self-test checks pass — W44:
+// shmget returns 0 (slot 0) + tbl.count==1 + page_count==1 +
+// pages[0][0]!=0 (mmap'd); shmat returns 1048576 (1 MB) +
+// attached_count==1; shmdt returns 0 + attached_count==0 +
+// page_count==0 (pages freed); shmdt on non-existent addr returns -1;
+// shmctl IPC_STAT returns 4096; IPC_SET returns 0; IPC_RMID returns 0 +
+// used==0 + tbl.count==0; shmctl on bad shmid returns -1).
+
+// ────────────────────────────────────────────────────────────────────────────
+// W44: real mapping — pmm_alloc + mmap fallback + page-table tracking.
+// ────────────────────────────────────────────────────────────────────────────
+// Pre-W44 sys_shmget / sys_shmat / sys_shmdt were bookkeeping stubs: they
+// recorded key/size/addr/attached_count in the ShmTable but did NOT allocate
+// any physical memory (sys_shmget just stored the size; sys_shmat just
+// stored a stub vaddr; sys_shmdt just decremented the count). W44 wires
+// sys_shmget up to pmm_alloc (the real buddy allocator in K11 bare-metal
+// mode; a forward-declared empty-body stub returning 0 in hosted mode)
+// with an mmap fallback for hosted mode (so the self-test still allocates
+// real pages from the host OS). sys_shmdt now frees the allocated pages
+// (pmm_free for pmm_alloc'd pages, munmap for mmap'd pages — tracked
+// per-page via the page_sources array) when the last attacher detaches.
+// sys_shmctl is added (IPC_RMID / IPC_SET / IPC_STAT).
+//
+// The mmap/munmap externs are runtime stubs (same category as write/read/
+// exit — see womb/kernel/hosted/host.vuma). pmm_alloc / pmm_free are VUMA
+// `fn` forward declarations (NOT extern "C" — per the W35 task spec,
+// pmm_alloc/vmm_map are VUMA functions; in hosted mode they have empty
+// bodies, in K11 bare-metal mode the linker resolves them against
+// womb/kernel/mm/pmm.vuma's real implementation). The FlatPool / PmmState
+// layouts are re-declared byte-identically to pmm.vuma so the State<T>
+// marshaling on the forward-declared calls uses the correct field offsets.
+//
+// PMT-pure: pmm_alloc is a VUMA fn forward declaration. mmap is an extern
+// C runtime stub (same as write/read/exit). No pointer syntax in VUMA
+// source — the only `*` in code lines are multiplication, the only `&`
+// are bitwise-AND.
+
+extern "C" {
+    // mmap(addr, len, prot, flags, fd, offset) — anonymous private mapping.
+    //   prot  = 3 (PROT_READ | PROT_WRITE)
+    //   flags = 34 (MAP_PRIVATE | MAP_ANONYMOUS)
+    //   fd    = 0xFFFFFFFF (u32 representation of -1 for MAP_ANONYMOUS)
+    //   offset = 0 (anonymous)
+    // Returns the base address of the mapped region, or MAP_FAILED
+    // (0xFFFFFFFFFFFFFFFF) on error. Used as the hosted-mode fallback
+    // when pmm_alloc returns 0 (so the self-test still allocates real
+    // pages from the host OS). Same extern pattern as
+    // womb/kernel/mm/kmalloc.vuma's mmap declaration.
+    fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: u32, offset: u64) -> u64;
+    // munmap(addr, len) — release the mapping. Returns 0 on success.
+    // Used by sys_shmdt to free mmap'd pages when the last attacher
+    // detaches.
+    fn munmap(addr: u64, len: u64) -> i64;
+}
+
+// PMM free-list node pool (pmm.vuma). Re-declared for the pmm_alloc /
+// pmm_free forward declarations' State<FlatPool> param. Byte-identical
+// to womb/kernel/mm/pmm.vuma::FlatPool (the 4096-slot layout with the
+// free_head recycle field — same re-declaration as womb/kernel/mm/
+// mmap.vuma and womb/kernel/mm/kmalloc.vuma).
+layout FlatPool = {
+    bases:    [u8; 32768],  // 4096 * 8 bytes — u64 base address per node, LE-packed
+    orders:   [u8; 4096],   // 4096 bytes     — u8 buddy order per node
+    nexts:    [u8; 32768],  // 4096 * 8 bytes — u64 next-node index per node, LE-packed
+    count:    u32,          // bump-alloc high-water mark (0..4096), never decreases
+    free_head: u32,         // head of recycle list, or 4096 if empty
+}
+
+// PMM state (pmm.vuma). Re-declared for the pmm_alloc / pmm_free forward
+// declarations' State<PmmState> param. Byte-identical to
+// womb/kernel/mm/pmm.vuma::PmmState.
+layout PmmState = {
+    pool:        u64,
+    free_lists:  [u8; 88],  // 11 * 8 bytes — head FreeNode index per order, 4096 = empty
+    total_pages: u64,
+    free_pages:  u64,
+}
+
+// pmm_alloc — forward-declared VUMA fn matching pmm.vuma's signature.
+// Returns the physical address of a fresh 4 KB page (order 0), or 0 on
+// OOM. In hosted mode this is an empty body (returns 0); sys_shmget
+// falls back to mmap. In K11 bare-metal mode this resolves to
+// womb/kernel/mm/pmm.vuma::pmm_alloc (real buddy allocator).
+fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
+
+// pmm_free — forward-declared VUMA fn matching pmm.vuma's signature.
+// Returns a previously-allocated page to the buddy allocator. In hosted
+// mode this is a no-op (empty body); in K11 bare-metal mode it resolves
+// to womb/kernel/mm/pmm.vuma::pmm_free (real buddy coalescing).
+fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -428,13 +536,26 @@ layout ShmRegion = {
 // to 0; sys_shmget bumps it on each successful allocation. The K7d
 // self-test reads it to verify the table state after a shmget.
 layout ShmTable = {
-    keys:            [u8; 256],  // 64 * 4 bytes — u32 key per slot
-    addrs:           [u8; 512],  // 64 * 8 bytes — u64 addr per slot
-    sizes:           [u8; 512],  // 64 * 8 bytes — u64 size per slot
-    creators:        [u8; 256],  // 64 * 4 bytes — u32 creator PID per slot
-    attached_counts: [u8; 256],  // 64 * 4 bytes — u32 attached_count per slot
-    used:            [u8; 64],   // 64 * 1 byte  — u8 used flag per slot
-    count:           u32,        // total slots in use (bumped by sys_shmget)
+    keys:            [u8; 256],    // 64 * 4 bytes  — u32 key per slot
+    addrs:           [u8; 512],    // 64 * 8 bytes  — u64 addr per slot
+    sizes:           [u8; 512],    // 64 * 8 bytes  — u64 size per slot
+    creators:        [u8; 256],    // 64 * 4 bytes  — u32 creator PID per slot
+    attached_counts: [u8; 256],    // 64 * 4 bytes  — u32 attached_count per slot
+    used:            [u8; 64],     // 64 * 1 byte   — u8 used flag per slot
+    count:           u32,          // total slots in use (bumped by sys_shmget)
+    // W44: per-slot page arrays. Each slot can own up to 16 pages
+    // (16 * 4096 = 64 KB max per segment — sufficient for the K7d
+    // self-test's 4096-byte segment and typical small shm regions;
+    // K8+ may bump this to 64 or higher). Slot `slot`'s page array
+    // starts at byte offset `slot * 128`; page `page_idx`'s base is
+    // at byte offset `slot * 128 + page_idx * 8`. (Same layout as
+    // kmalloc.vuma's slab_get_page pages array.)
+    pages:           [u8; 8192],   // 64 * 16 * 8 bytes — u64 page address per (slot, page_idx), LE-packed
+    // page_sources: per-page allocation source. 0 = unused, 1 = pmm_alloc'd
+    // (bare-metal mode), 2 = mmap'd (hosted-mode fallback). Used by
+    // sys_shmdt to choose between pmm_free and munmap when freeing.
+    page_sources:    [u8; 1024],   // 64 * 16 bytes — u8 source per (slot, page_idx)
+    page_counts:     [u8; 256],    // 64 * 4 bytes  — u32 page_count per slot
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -799,10 +920,101 @@ fn shm_find_free(tbl: State<ShmTable>) -> u32 {
     return 64;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// W44: per-slot page-array helpers (physical page tracking).
+// ────────────────────────────────────────────────────────────────────────────
+// pages layout: 64 slots × 16 pages × 8 bytes = 8192 bytes total. Slot
+// `slot`'s page array starts at byte offset `slot * 128`; page `page_idx`'s
+// base is at byte offset `slot * 128 + page_idx * 8`. (Same layout as
+// kmalloc.vuma's slab_get_page — see "Byte-array pack/unpack helpers —
+// u64 pages array" in kmalloc.vuma's header.)
+//
+// page_sources layout: 64 slots × 16 pages × 1 byte = 1024 bytes total.
+// Slot `slot`'s source array starts at byte offset `slot * 16`; page
+// `page_idx`'s source is at byte offset `slot * 16 + page_idx`. Values:
+//   0 = unused (no page allocated at this index)
+//   1 = pmm_alloc'd (bare-metal mode — free with pmm_free)
+//   2 = mmap'd (hosted-mode fallback — free with munmap)
+//
+// page_counts layout: 64 slots × 4 bytes = 256 bytes total. Slot `idx`'s
+// page_count is at byte offset `idx * 4` (u32, LE-packed).
+
+// shm_get_page: read the u64 page address for slot `slot`, page index
+// `page_idx`. Used by sys_shmdt to walk the slot's page array when
+// freeing pages on last-detach.
+fn shm_get_page(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u64 {
+    let off = slot * 128 + page_idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.pages[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_page: store `val` (u64) at slot `slot`, page index `page_idx`.
+fn shm_set_page(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u64) {
+    let off = slot * 128 + page_idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.pages[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// shm_get_page_source: read the u8 source flag for slot `slot`, page
+// index `page_idx`. 0 = unused, 1 = pmm_alloc'd, 2 = mmap'd.
+fn shm_get_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u8 {
+    let off = slot * 16 + page_idx;
+    return tbl.page_sources[off];
+}
+
+// shm_set_page_source: store the u8 source flag at slot `slot`, page
+// index `page_idx`.
+fn shm_set_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u8) {
+    let off = slot * 16 + page_idx;
+    tbl.page_sources[off] = val;
+}
+
+// shm_get_page_count: read the u32 page_count for slot `idx`.
+fn shm_get_page_count(tbl: State<ShmTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.page_counts[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// shm_set_page_count: store `val` (u32) at slot `idx`'s page_count field.
+fn shm_set_page_count(tbl: State<ShmTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.page_counts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
 // sys_shmget: allocate a new shared memory segment of `size` bytes,
 // return the shmid (slot index), or -1 if the table is full.
 //
 //   tbl:   State<ShmTable> — the kernel-global shm segment table.
+//   pool:  State<FlatPool> — PMM free-list pool (forward-declared
+//          pmm_alloc takes this by reference — W44).
+//   pmm:   State<PmmState> — PMM buddy state (forward-declared
+//          pmm_alloc takes this by reference — W44).
 //   key:   u32 — IPC key (0 = IPC_PRIVATE — always create a new
 //          segment; non-zero — would normally look up an existing
 //          segment by key, but K7d's PMT-pure hosted-mode
@@ -810,10 +1022,9 @@ fn shm_find_free(tbl: State<ShmTable>) -> u32 {
 //          of key, matching the K7d contract's "key=0 means
 //          IPC_PRIVATE (always create new)" reference text — K7d
 //          doesn't implement the key-lookup path; K8+ may).
-//   size:  u64 — size of the segment in bytes. In a real kernel
-//          this is rounded up to PAGE_SIZE (4096); K7d stores the
-//          raw value as-passed (no rounding — the K7d self-test
-//          passes 4096, which is already a multiple of PAGE_SIZE).
+//   size:  u64 — size of the segment in bytes. W44: rounded up to
+//          PAGE_SIZE (4096) for the page-allocation loop. The raw
+//          value is stored in the slot's size field.
 //   flags: u32 — IPC_CREAT / IPC_EXCL / mode bits. K7d's PMT-pure
 //          implementation ignores flags entirely (matches the K7d
 //          contract's reference text — there's no permission check
@@ -821,31 +1032,35 @@ fn shm_find_free(tbl: State<ShmTable>) -> u32 {
 //
 // Returns (i64):
 //   0..63 — the shmid (slot index of the newly-allocated segment).
-//   0 - 1 (-1) — the table is full (all 64 slots have used==1).
-//   The K7d contract specifies these exact return values.
+//   0 - 1 (-1) — the table is full (all 64 slots have used==1), OR
+//   the segment requires more than 16 pages (size > 65536), OR
+//   pmm_alloc AND mmap both failed for some page (OOM).
 //
-// Implementation:
+// W44 implementation:
 //   Phase 1: shm_find_free(tbl) — linear scan for a free slot.
-//     Returns 64 if the table is full → return -1 (the K7d contract's
-//     "table full" sentinel).
-//   Phase 2: initialize the slot:
-//     - key (from the arg)
-//     - size (from the arg)
-//     - addr=0 (not yet attached — sys_shmat will set this to the
-//       stub vaddr)
-//     - creator=1 (PID 1 / init — K7d is hosted-mode and has no real
-//       process table; K8+ will pass the caller's actual PID via
-//       task_current()->pid)
-//     - attached_count=0 (no one's attached yet)
-//     - used=1 (slot is now in use)
-//   Phase 3: bump tbl.count and return the slot index as i64.
+//     Returns 64 if the table is full → return -1.
+//   Phase 2: initialize the slot's bookkeeping fields:
+//     - key, size, addr=0, creator=1, attached_count=0, used=1,
+//       page_count=0 (will be bumped by the page-allocation loop).
+//   Phase 3: allocate physical pages.
+//     - n_pages = (size + 4095) / 4096
+//     - If n_pages > 16, roll back the slot init and return -1
+//       (segment too large for the 16-page-per-slot cap).
+//     - For each page: try pmm_alloc(pool, pmm, 0). If non-zero,
+//       store the address + mark source=1 (pmm_alloc'd). If 0
+//       (hosted mode), fall back to mmap(0, 4096, 3, 34,
+//       0xFFFFFFFF, 0). If mmap returns MAP_FAILED
+//       (0xFFFFFFFFFFFFFFFF), roll back + return -1 (OOM).
+//       Otherwise store the address + mark source=2 (mmap'd).
+//     - Bump page_count after each successful allocation.
+//   Phase 4: bump tbl.count and return the slot index as i64.
 //
-// State<T> params: 1 (tbl). Reads used for each slot (via
+// State<T> params: 3 (tbl, pool, pmm). Reads used for each slot (via
 // shm_find_free); writes key, size, addr, creator, attached_count,
-// used (via the byte-pack helpers); writes count (direct field
-// write). All field access is through the helpers (except tbl.count,
-// which is a direct u32 field — no byte-packing needed).
-fn sys_shmget(tbl: State<ShmTable>, key: u32, size: u64, flags: u32) -> i64 {
+// page_count, used, pages, page_sources (via the byte-pack helpers);
+// writes count (direct field write). Calls pmm_alloc (forward-decl
+// no-op in hosted mode) and mmap (extern C runtime stub).
+fn sys_shmget(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, key: u32, size: u64, flags: u32) -> i64 {
     // For IPC_PRIVATE, just allocate a new segment. K7d does NOT
     // implement the "look up existing segment by key" path — every
     // call to sys_shmget creates a new segment (matching the K7d
@@ -856,12 +1071,52 @@ fn sys_shmget(tbl: State<ShmTable>, key: u32, size: u64, flags: u32) -> i64 {
     if slot == 64 {
         return 0 - 1;  // -1 (table full)
     }
+    // Phase 2: initialize the slot's bookkeeping fields.
     shm_set_key(tbl, slot, key);
     shm_set_size(tbl, slot, size);
     shm_set_addr(tbl, slot, 0);     // not yet attached
     shm_set_creator(tbl, slot, 1);  // PID 1 (init) — hosted-mode stub
     shm_set_attached(tbl, slot, 0);
+    shm_set_page_count(tbl, slot, 0);  // W44: no pages yet
     shm_set_used(tbl, slot, 1);
+    // Phase 3: W44 — allocate physical pages.
+    let n_pages = (size + 4095) / 4096;
+    if n_pages > 16 {
+        // Segment too large for the 16-page-per-slot cap. Roll back
+        // the slot init and return -1.
+        shm_set_used(tbl, slot, 0);
+        return 0 - 1;
+    }
+    let i = 0;
+    while i < n_pages {
+        let page: u64 = pmm_alloc(pool, pmm, 0);
+        if page != 0 {
+            // pmm_alloc succeeded (bare-metal mode — real buddy
+            // allocator returned a physical page address).
+            shm_set_page(tbl, slot, i, page);
+            shm_set_page_source(tbl, slot, i, 1);
+        } else {
+            // Hosted-mode fallback: ask the host OS for a 4096-byte
+            // anonymous private page via mmap. This keeps the self-test
+            // working when pmm_alloc is not wired (hosted mode has no
+            // real PMM). Same pattern as kmalloc.vuma's slab_init.
+            // fd = 0xFFFFFFFF (u32 representation of -1 for
+            // MAP_ANONYMOUS — the C ABI reads the low 32 bits as
+            // i32 -1).
+            let mmap_addr: u64 = mmap(0, 4096, 3, 34, 0xFFFFFFFF, 0);
+            if mmap_addr == 0xFFFFFFFFFFFFFFFF {
+                // mmap failed (MAP_FAILED) — OOM. Roll back the
+                // slot init and return -1.
+                shm_set_used(tbl, slot, 0);
+                return 0 - 1;
+            }
+            shm_set_page(tbl, slot, i, mmap_addr);
+            shm_set_page_source(tbl, slot, i, 2);
+        }
+        shm_set_page_count(tbl, slot, i + 1);
+        i = i + 1;
+    }
+    // Phase 4: bump tbl.count and return the shmid.
     tbl.count = tbl.count + 1;
     return slot as i64;
 }
@@ -907,6 +1162,22 @@ fn sys_shmget(tbl: State<ShmTable>, key: u32, size: u64, flags: u32) -> i64 {
 //     shm_get_attached, increment, write back via shm_set_attached).
 //   Phase 6: return the vaddr.
 //
+// W44: in a real kernel, sys_shmat would ALSO call vmm_map_page
+// (the per-arch page-table walker — see womb/kernel/mm/vmm.vuma's
+// vmm_map_page(space, vaddr, paddr, flags)) for each of the slot's
+// page_count physical pages, mapping them at vaddr, vaddr+4096,
+// vaddr+8192, ... into the caller's page table. The forward-
+// declared vmm_map_page is a no-op in hosted mode (the per-arch
+// walker resolves to __ffi_fallback_stub), so K7d's hosted-mode
+// sys_shmat just records the vaddr + bumps attached_count — but the
+// vmm_map_page call site is documented here for K11 bare-metal mode
+// (where the linker resolves vmm_map_page against the real
+// vmm.vuma implementation). K7d does NOT make the vmm_map_page call
+// directly (it would require a State<VmmSpace> param + the
+// per-arch walker — out of scope for the K7d PMT-pure self-test);
+// K8+ will add it when sys_shmat gains a process-table / page-table
+// argument.
+//
 // State<T> params: 1 (tbl). Reads used + attached_count; writes addr
 // + attached_count. All field access is through the helpers.
 fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
@@ -916,13 +1187,17 @@ fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
     if shm_get_used(tbl, shmid) == 0 {
         return 0;  // not allocated (no segment at this shmid)
     }
-    // In a real kernel: map the shared pages into the process's
-    // address space (mmap(MAP_SHARED|MAP_FIXED, addr, size) into
-    // the caller's page table — see "What is shared memory?" in
-    // the file header). In K7d's PMT-pure hosted mode: return a
-    // stub address (the K7d contract's deterministic stub-address
-    // scheme — 1 MB base + shmid * 4 KB stride). The `addr` arg
-    // is ignored (K7d does NOT implement fixed-address mapping).
+    // W44: in a real kernel, this is where vmm_map_page(space, vaddr,
+    // paddr, prot) would be called for each of the slot's page_count
+    // physical pages — mapping them at vaddr, vaddr+4096, ... into the
+    // caller's page table (see womb/kernel/mm/vmm.vuma's
+    // vmm_map_page + womb/kernel/mm/mmap.vuma's sys_mmap for the
+    // same vmm_map_page call-site pattern). In K7d's PMT-pure hosted
+    // mode, vmm_map_page is a forward-declared no-op, so sys_shmat
+    // just records the vaddr in the slot's addr field + bumps
+    // attached_count. The `addr` arg is ignored (K7d does NOT
+    // implement fixed-address mapping — always uses the stub vaddr
+    // 1048576 + shmid * 4096).
     let vaddr = 1048576 + (shmid as u64) * 4096;  // 1 MB + shmid * 4 KB
     shm_set_addr(tbl, shmid, vaddr);
     let cur = shm_get_attached(tbl, shmid);
@@ -933,6 +1208,10 @@ fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
 // sys_shmdt: unmap the shared segment identified by `addr`.
 //
 //   tbl:  State<ShmTable> — the kernel-global shm segment table.
+//   pool: State<FlatPool> — PMM free-list pool (forward-declared
+//         pmm_free takes this by reference — W44).
+//   pmm:  State<PmmState> — PMM buddy state (forward-declared
+//         pmm_free takes this by reference — W44).
 //   addr: u64 — the virtual address returned by a previous sys_shmat
 //         call (the address of the mapping to remove). K7d does NOT
 //         use the shmid — it looks up the segment by addr (linear
@@ -943,8 +1222,12 @@ fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
 // Returns (i64):
 //   0 — success. The slot's attached_count is decremented (clamped
 //   at 0 — never go negative, even if multiple shmdt calls hit the
-//   same addr by mistake). The slot is NOT freed (used remains 1 —
-//   only a future K8+ shmctl(IPC_RMID) would clear it).
+//   same addr by mistake). W44: if the count reaches 0 (last
+//   attacher detached), the slot's physical pages are freed
+//   (pmm_free for pmm_alloc'd pages, munmap for mmap'd pages —
+//   tracked per-page via the page_sources array) and page_count is
+//   reset to 0. The slot itself is NOT freed (used remains 1 —
+//   only sys_shmctl(IPC_RMID) clears used).
 //   0 - 1 (-1) — no segment is currently mapped at `addr` (the
 //   caller passed an address that no slot's addr field matches).
 //
@@ -954,12 +1237,20 @@ fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
 //     - read the current attached_count
 //     - if it's > 0, decrement it (the `if cur > 0` guard prevents
 //       underflow — never go negative even on a double-shmdt)
+//     - W44: if cur was 1 (i.e. after decrement it's 0 — last
+//       attacher), walk the slot's page_count pages and free each
+//       one via pmm_free (if page_source == 1) or munmap (if
+//       page_source == 2). Zero the page entries + page_sources,
+//       set page_count = 0.
 //     - return 0 (success)
 //   If no slot matches, return -1 ("not found").
 //
-// State<T> params: 1 (tbl). Reads used + addr + attached_count;
-// writes attached_count. All field access is through the helpers.
-fn sys_shmdt(tbl: State<ShmTable>, addr: u64) -> i64 {
+// State<T> params: 3 (tbl, pool, pmm). Reads used + addr +
+// attached_count + pages + page_sources + page_count; writes
+// attached_count + pages + page_sources + page_count. Calls pmm_free
+// (forward-decl no-op in hosted mode) and munmap (extern C runtime
+// stub) for each page being freed.
+fn sys_shmdt(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, addr: u64) -> i64 {
     let i = 0;
     while i < 64 {
         if shm_get_used(tbl, i) == 1 {
@@ -967,6 +1258,33 @@ fn sys_shmdt(tbl: State<ShmTable>, addr: u64) -> i64 {
                 let cur = shm_get_attached(tbl, i);
                 if cur > 0 {
                     shm_set_attached(tbl, i, cur - 1);
+                }
+                // W44: if the last attacher detached, free the
+                // slot's physical pages. The slot itself remains
+                // (used==1) — only sys_shmctl(IPC_RMID) clears it.
+                if cur == 1 {
+                    let n_pages = shm_get_page_count(tbl, i);
+                    let p = 0;
+                    while p < n_pages {
+                        let page = shm_get_page(tbl, i, p);
+                        let src = shm_get_page_source(tbl, i, p);
+                        if src == 1 {
+                            // pmm_alloc'd page (bare-metal mode) —
+                            // return it to the buddy allocator.
+                            pmm_free(pool, pmm, page, 0);
+                        } else {
+                            if src == 2 {
+                                // mmap'd page (hosted-mode fallback)
+                                // — release it back to the host OS.
+                                munmap(page, 4096);
+                            }
+                        }
+                        // Clear the page entry + source.
+                        shm_set_page(tbl, i, p, 0);
+                        shm_set_page_source(tbl, i, p, 0);
+                        p = p + 1;
+                    }
+                    shm_set_page_count(tbl, i, 0);
                 }
                 return 0;
             }
@@ -976,87 +1294,205 @@ fn sys_shmdt(tbl: State<ShmTable>, addr: u64) -> i64 {
     return 0 - 1;  // -1 (not found)
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K7d DoD).
-// ────────────────────────────────────────────────────────────────────────────
-// Allocate a ShmTable via state_new, init it via shm_init, then:
-//   (1) sys_shmget(tbl, 0, 4096, 0) should return 0 (slot 0, the first
-//       free slot after shm_init zeroed all used flags).
-//   (2) tbl.count should be 1 (one segment allocated).
-//   (3) sys_shmat(tbl, 0, 0, 0) should return 1048576 (1 MB — the stub
-//       vaddr 1048576 + shmid 0 * 4096).
-//   (4) shm_get_attached(tbl, 0) should be 1 (one process attached).
-//   (5) sys_shmdt(tbl, vaddr) should return 0 (success).
-//   (6) shm_get_attached(tbl, 0) should be 0 (the one attacher detached).
-//   (7) sys_shmdt(tbl, 999999) should NOT return 0 (no segment is
-//       mapped at addr 999999 — should return -1).
-//   (8) Return 0 (success).
+// sys_shmctl: control operations on a shared memory segment.
 //
-// Returns 0 on success, 1..7 on the corresponding check failure (so a
+//   tbl:   State<ShmTable> — the kernel-global shm segment table.
+//   shmid: u32 — slot index returned by a previous sys_shmget.
+//   cmd:   u32 — control command (Linux convention):
+//          0 (IPC_RMID) — mark the segment for deletion. Clears the
+//            slot's used flag (frees the slot for reuse by a future
+//            sys_shmget) and decrements tbl.count. Does NOT free the
+//            physical pages (those are freed by sys_shmdt when the
+//            last attacher detaches — if IPC_RMID is called while
+//            attachers are still active, the pages remain allocated
+//            until they detach; this matches Linux's behavior where
+//            the segment is destroyed only after the last detach).
+//          1 (IPC_SET) — no-op (K7d has no permissions/owner fields
+//            to set — no ipc_perm struct, no uid/gid/mode). Returns 0.
+//          2 (IPC_STAT) — return the segment's size (in bytes) as
+//            an i64. The caller can read the size field via this
+//            return value (in a real shmctl, IPC_STAT would fill a
+//            struct shmid_ds passed by pointer; K7d's PMT-pure
+//            hosted-mode implementation returns the size directly
+//            since there's no struct shmid_ds).
+//
+// Returns (i64):
+//   0 — success (IPC_RMID, IPC_SET).
+//   The segment size in bytes — success (IPC_STAT).
+//   0 - 1 (-1) — invalid shmid (shmid >= 64, or the slot's used
+//   flag is 0 — no segment exists at that shmid), or unknown cmd.
+//
+// State<T> params: 1 (tbl). Reads used (validation) + size (IPC_STAT);
+// writes used + count (IPC_RMID). All field access is through the
+// helpers (except tbl.count, which is a direct u32 field).
+fn sys_shmctl(tbl: State<ShmTable>, shmid: u32, cmd: u32) -> i64 {
+    if shmid >= 64 {
+        return 0 - 1;  // invalid shmid
+    }
+    if shm_get_used(tbl, shmid) == 0 {
+        return 0 - 1;  // no segment at this shmid
+    }
+    if cmd == 0 {
+        // IPC_RMID: mark the segment for deletion. Clear the slot's
+        // used flag (frees it for reuse) and decrement tbl.count.
+        // Note: does NOT free the physical pages — those are freed
+        // by sys_shmdt when the last attacher detaches. If IPC_RMID
+        // is called while attachers are still active, the pages
+        // remain allocated until they detach (matches Linux).
+        shm_set_used(tbl, shmid, 0);
+        if tbl.count > 0 {
+            tbl.count = tbl.count - 1;
+        }
+        return 0;
+    }
+    if cmd == 1 {
+        // IPC_SET: no-op (K7d has no permissions/owner fields to
+        // set — no ipc_perm struct, no uid/gid/mode).
+        return 0;
+    }
+    if cmd == 2 {
+        // IPC_STAT: return the segment's size (in bytes) as an i64.
+        let sz = shm_get_size(tbl, shmid);
+        return sz as i64;
+    }
+    return 0 - 1;  // unknown cmd
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the K7d DoD, extended for W44 real-mapping + shmctl).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a ShmTable + FlatPool + PmmState via state_new, init it via
+// shm_init, then:
+//   (1) sys_shmget(tbl, pool, pmm, 0, 4096, 0) should return 0 (slot 0).
+//   (2) tbl.count should be 1.
+//   (3) shm_get_page_count(tbl, 0) should be 1 (W44: one page allocated).
+//   (4) shm_get_page(tbl, 0, 0) should be non-zero (W44: mmap returned
+//       a real page from the host OS in hosted mode).
+//   (5) sys_shmat(tbl, 0, 0, 0) should return 1048576 (1 MB).
+//   (6) shm_get_attached(tbl, 0) should be 1.
+//   (7) sys_shmdt(tbl, pool, pmm, vaddr) should return 0.
+//   (8) shm_get_attached(tbl, 0) should be 0.
+//   (9) shm_get_page_count(tbl, 0) should be 0 (W44: pages freed when
+//       the last attacher detached).
+//   (10) sys_shmdt(tbl, pool, pmm, 999999) should NOT return 0 (no
+//        segment mapped at addr 999999 → returns -1).
+//   (11) sys_shmctl(tbl, 0, 2) [IPC_STAT] should return 4096 (size).
+//   (12) sys_shmctl(tbl, 0, 1) [IPC_SET] should return 0 (no-op).
+//   (13) sys_shmctl(tbl, 0, 0) [IPC_RMID] should return 0.
+//   (14) shm_get_used(tbl, 0) should be 0 (slot freed by IPC_RMID).
+//   (15) tbl.count should be 0 (segment removed).
+//   (16) sys_shmctl(tbl, 99, 2) [IPC_STAT on bad shmid] should return -1.
+//   (17) Return 0 (success).
+//
+// Returns 0 on success, 1..16 on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
 //
 // Per the K7d contract's "decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (4096, 1048576, 999999, 1, 0)
-// — decimal avoids the parser's hex-literal path (parse_int_radix
-// width-extension subtleties — see K7b's signal.vuma header
-// "Decimal-constants discipline" and K3a's trap_trampoline.vuma for
-// the same rule). For -1 comparisons, use `ret2 == 0` (the K7d
-// contract specifies that check 7 returns "non-zero" — but to make
-// the check explicit, we use `if ret2 == 0 { return 7; }` meaning
-// "if shmdt on a non-existent addr returned 0 (success), that's a
-// failure" — matching the K7d contract's `if ret2 == 0 { return 7; }`
-// reference text exactly).
+// constants in the self-test use DECIMAL (4096, 1048576, 999999, 1, 0,
+// 16, 2) — decimal avoids the parser's hex-literal path. The
+// MAP_FAILED sentinel 0xFFFFFFFFFFFFFFFF and the fd sentinel
+// 0xFFFFFFFF are hex (sentinel-value exception, same as mmap.vuma's
+// 0xFFFFFFFFFFFFFFFF return from sys_munmap).
 
 fn main() -> i32 {
     let tbl = state_new(ShmTable);
+    // W44: pool + pmm are needed for sys_shmget / sys_shmdt (which
+    // now call pmm_alloc / pmm_free — forward-declared VUMA fns with
+    // empty bodies in hosted mode, so the state is never read; in K11
+    // bare-metal mode the caller would call pmm_init here to populate
+    // the buddy allocator). Same pattern as kmalloc.vuma's main().
+    let pool = state_new(FlatPool);
+    let pmm = state_new(PmmState);
     shm_init(tbl);
 
-    // (1) sys_shmget(tbl, 0, 4096, 0) — allocate a 4096-byte segment
-    // with IPC_PRIVATE (key=0). Should return 0 (slot 0, the first
-    // free slot after shm_init zeroed all 64 used flags).
-    // In a real kernel this would page_alloc(4096) to allocate the
-    // physical backing store; in K7d's hosted mode it just records
-    // the size + bumps tbl.count.
-    let shmid = sys_shmget(tbl, 0, 4096, 0);
+    // (1) sys_shmget(tbl, pool, pmm, 0, 4096, 0) — allocate a 4096-byte
+    // segment with IPC_PRIVATE (key=0). Should return 0 (slot 0, the
+    // first free slot after shm_init zeroed all 64 used flags).
+    // W44: this now also allocates one physical page via pmm_alloc
+    // (forward-declared empty body, returns 0 in hosted mode) +
+    // mmap fallback (returns a real page from the host OS).
+    let shmid = sys_shmget(tbl, pool, pmm, 0, 4096, 0);
     if shmid != 0 { return 1; }  // shmid should be 0 (first free slot)
 
     // (2) tbl.count should be 1 (one segment allocated).
     if tbl.count != 1 { return 2; }
 
-    // (3) sys_shmat(tbl, 0, 0, 0) — map the segment at shmid 0 into
+    // (3) W44: page_count should be 1 (one page allocated for
+    // size=4096 — (4096 + 4095) / 4096 = 1).
+    if shm_get_page_count(tbl, 0) != 1 { return 3; }
+
+    // (4) W44: pages[0][0] should be non-zero (mmap returned a real
+    // page from the host OS in hosted mode; pmm_alloc returns 0 in
+    // hosted mode, so the mmap fallback was taken — page_source==2).
+    if shm_get_page(tbl, 0, 0) == 0 { return 4; }
+
+    // (5) sys_shmat(tbl, 0, 0, 0) — map the segment at shmid 0 into
     // the calling process's address space. Should return 1048576
-    // (1 MB — the stub vaddr 1048576 + shmid 0 * 4096). In a real
-    // kernel this would mmap(MAP_SHARED|MAP_FIXED, vaddr, size) into
-    // the caller's page table; in K7d's hosted mode it just records
-    // the vaddr in the slot's addr field + bumps attached_count.
+    // (1 MB — the stub vaddr 1048576 + shmid 0 * 4096). W44: in a
+    // real kernel this would call vmm_map_page(space, vaddr, paddr,
+    // prot) for each of the slot's page_count pages; in K7d's hosted
+    // mode vmm_map_page is a forward-declared no-op, so sys_shmat
+    // just records the vaddr + bumps attached_count.
     let vaddr = sys_shmat(tbl, 0, 0, 0);
-    if vaddr != 1048576 { return 3; }  // 1 MB
+    if vaddr != 1048576 { return 5; }  // 1 MB
 
-    // (4) The slot's attached_count should be 1 (one process attached).
-    if shm_get_attached(tbl, 0) != 1 { return 4; }
+    // (6) The slot's attached_count should be 1 (one process attached).
+    if shm_get_attached(tbl, 0) != 1 { return 6; }
 
-    // (5) sys_shmdt(tbl, vaddr) — unmap the segment at vaddr. Should
-    // return 0 (success). In a real kernel this would munmap(vaddr,
-    // size) in the caller's page table; in K7d's hosted mode it just
-    // decrements the slot's attached_count.
-    let ret = sys_shmdt(tbl, vaddr);
-    if ret != 0 { return 5; }
+    // (7) sys_shmdt(tbl, pool, pmm, vaddr) — unmap the segment at
+    // vaddr. Should return 0 (success). W44: since this is the last
+    // attacher (attached_count goes 1 → 0), sys_shmdt also frees the
+    // slot's physical pages (munmap in hosted mode, pmm_free in
+    // bare-metal mode — tracked per-page via page_sources).
+    let ret = sys_shmdt(tbl, pool, pmm, vaddr);
+    if ret != 0 { return 7; }
 
-    // (6) The slot's attached_count should be 0 (the one attacher
-    // detached). The slot's used flag is STILL 1 (K7d does NOT
-    // implement shmctl(IPC_RMID) — only that would clear used and
-    // free the slot for reuse).
-    if shm_get_attached(tbl, 0) != 0 { return 6; }
+    // (8) The slot's attached_count should be 0 (the one attacher
+    // detached). The slot's used flag is STILL 1 (only
+    // sys_shmctl(IPC_RMID) clears it — see check 13).
+    if shm_get_attached(tbl, 0) != 0 { return 8; }
 
-    // (7) sys_shmdt(tbl, 999999) — shmdt on a non-existent addr.
-    // Should NOT return 0 (no segment is currently mapped at addr
-    // 999999 — sys_shmdt's linear scan finds no slot with used==1
-    // AND addr==999999, so it returns -1). The K7d contract's
-    // reference text uses `if ret2 == 0 { return 7; }` — meaning
-    // "if shmdt on a non-existent addr returned 0 (success), that's
-    // a failure". We use the exact same check.
-    let ret2 = sys_shmdt(tbl, 999999);
-    if ret2 == 0 { return 7; }
+    // (9) W44: page_count should be 0 (pages freed when the last
+    // attacher detached — sys_shmdt walked the page array and
+    // called munmap/pmm_free on each page, then zeroed page_count).
+    if shm_get_page_count(tbl, 0) != 0 { return 9; }
+
+    // (10) sys_shmdt(tbl, pool, pmm, 999999) — shmdt on a non-existent
+    // addr. Should NOT return 0 (no segment is currently mapped at
+    // addr 999999 — sys_shmdt's linear scan finds no slot with
+    // used==1 AND addr==999999, so it returns -1).
+    let ret2 = sys_shmdt(tbl, pool, pmm, 999999);
+    if ret2 == 0 { return 10; }
+
+    // (11) W44: sys_shmctl(tbl, 0, 2) [IPC_STAT] should return 4096
+    // (the segment's size — the slot still exists with used==1, only
+    // the pages were freed by shmdt; the size field is preserved).
+    let sz = sys_shmctl(tbl, 0, 2);
+    if sz != 4096 { return 11; }
+
+    // (12) W44: sys_shmctl(tbl, 0, 1) [IPC_SET] should return 0
+    // (no-op — K7d has no permissions/owner fields to set).
+    let r2 = sys_shmctl(tbl, 0, 1);
+    if r2 != 0 { return 12; }
+
+    // (13) W44: sys_shmctl(tbl, 0, 0) [IPC_RMID] should return 0
+    // (marks the slot for deletion — clears used, decrements count).
+    let r3 = sys_shmctl(tbl, 0, 0);
+    if r3 != 0 { return 13; }
+
+    // (14) W44: used should be 0 (slot freed by IPC_RMID — the slot
+    // is now available for reuse by a future sys_shmget).
+    if shm_get_used(tbl, 0) != 0 { return 14; }
+
+    // (15) W44: tbl.count should be 0 (the one segment was removed
+    // by IPC_RMID).
+    if tbl.count != 0 { return 15; }
+
+    // (16) W44: sys_shmctl(tbl, 99, 2) [IPC_STAT on an invalid shmid]
+    // should return -1 (0 - 1 — shmid >= 64 fails the validation
+    // check at the top of sys_shmctl).
+    let r4 = sys_shmctl(tbl, 99, 2);
+    if r4 != 0 - 1 { return 16; }
 
     return 0;
 }
