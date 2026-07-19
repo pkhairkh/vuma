@@ -55,7 +55,7 @@ use super::{
     encode_idiv_reg,
     encode_imul_reg_reg,
     encode_jcc_rel32, encode_jmp_rel32,
-    encode_lea_reg_mem,
+    encode_lea_reg_mem, encode_lea_rip_rel,
     encode_mov_mem16_reg16, encode_mov_mem32_reg32, encode_mov_mem8_reg8,
     encode_mov_mem_reg,
     encode_mov_reg32_mem,
@@ -2086,7 +2086,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         // Load register args (after stack setup to avoid clobbering)
                         for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                            code.extend(load_value(arg, call_arg_regs[i]));
+                            // Wave 5: Handle IRValue::Label (function address) by
+                            // emitting a RIP-relative LEA + R_X86_64_PC32 relocation.
+                            if let crate::ir::IRValue::Label(name) = arg {
+                                code.extend(encode_lea_rip_rel(call_arg_regs[i], 0));
+                                let reloc_offset = byte_offset + code.len() - 4;
+                                relocations.push(RelocationEntry {
+                                    offset: reloc_offset as u64,
+                                    symbol: name.clone(),
+                                    reloc_type: "R_X86_64_PC32".to_string(),
+                                });
+                            } else {
+                                code.extend(load_value(arg, call_arg_regs[i]));
+                            }
                         }
                         // For variadic functions, AL should contain the number of
                         // XMM registers used (0 for integer-only calls).

@@ -7868,6 +7868,17 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         })
         .collect();
 
+    // Wave 5: Collect ALL function names (extern + user-defined) so flatten_expr
+    // can detect when a Var refers to a function address (e.g., `my_fn as u64`).
+    let mut function_names: HashSet<String> = extern_fns.clone();
+    for item in &program.items {
+        match item {
+            Item::FnDef(fn_def) => { function_names.insert(fn_def.name.clone()); }
+            Item::TransformDef(td) => { function_names.insert(td.name.clone()); }
+            _ => {}
+        }
+    }
+
     // FIX1: build a map of `fn/transform name → State<L> layout name` for
     // every function or transform whose return type is `State<LayoutName>`.
     // When a `let c = add_points(p, q);` call binds the result of such a
@@ -7917,6 +7928,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         tl_ctx.extern_fn_decls = extern_fn_decls.clone();
         tl_ctx.layout_decls = layout_decls.clone();
         tl_ctx.state_returning_fns = state_returning_fns.clone();
+        tl_ctx.function_names = function_names.clone();
         tl_ctx.string_table = shared_string_table.clone();
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
@@ -7984,6 +7996,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.extern_fn_decls = extern_fn_decls.clone();
             ctx.layout_decls = layout_decls.clone();
             ctx.state_returning_fns = state_returning_fns.clone();
+            ctx.function_names = function_names.clone();
             ctx.string_table = shared_string_table.clone();
             // PMT (Wave 2): register state-typed params (those with
             // `State<L>` type annotation) so `param.field` accesses inside
@@ -8147,6 +8160,10 @@ pub struct BridgeCtx {
     /// The table is drained after all functions are processed and emitted
     /// as a single ScgNode::Data (ReadOnly) section.
     pub string_table: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>,
+    /// Wave 5: Set of all function names (extern + user-defined). Used by
+    /// flatten_expr to detect when a Var refers to a function (not a variable)
+    /// and produce ScgExpr::Label for function-address expressions.
+    pub function_names: HashSet<String>,
 }
 
 impl Default for BridgeCtx {
@@ -8171,6 +8188,7 @@ impl BridgeCtx {
             layout_decls: HashMap::new(),
             state_returning_fns: HashMap::new(),
             string_table: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            function_names: HashSet::new(),
         }
     }
 
@@ -8698,6 +8716,11 @@ pub fn flatten_expr(
             // reference that would be unresolved during IR lowering.
             if let Some(&val) = ctx.global_constants.get(name) {
                 ScgExpr::Int(val)
+            } else if ctx.function_names.contains(name) {
+                // Wave 5: The name refers to a function (not a variable).
+                // Produce a Label so the backend emits a RIP-relative LEA
+                // with a relocation to the function's address.
+                ScgExpr::Label(name.clone())
             } else {
                 ScgExpr::Var(name.clone())
             }

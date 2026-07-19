@@ -681,6 +681,24 @@ pub fn encode_lea_reg_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     code
 }
 
+/// Encode LEA r64, [RIP + disp32] — PC-relative address load (7 bytes).
+/// Used for loading function addresses and string literals via relocations.
+/// The disp32 is a placeholder that gets patched by a relocation.
+pub fn encode_lea_rip_rel(dst: Gpr, disp32: i32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(7);
+    let r = dst.needs_rex();
+    if r {
+        code.push(0x4C); // REX.WR
+    } else {
+        code.push(0x48); // REX.W
+    }
+    code.push(0x8D); // LEA opcode
+    // ModRM: mod=00, reg=dst, r/m=101 (RIP-relative)
+    code.push(0x05 | ((dst.encoding() & 7) << 3));
+    code.extend_from_slice(&disp32.to_le_bytes());
+    code
+}
+
 /// Encode MOVZX r64, r8 (REX.W + 0F B6 /r) — zero-extend byte to 64 bits
 pub fn encode_movzx_reg8(dst: Gpr, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
@@ -3636,6 +3654,26 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__arena_overflow".to_string(), code));
     }
 
+    // Wave 5: __call_indirect1(ptr: u64, arg: u64) -> u64
+    // Indirect function call trampoline for syscall/IRQ/IPI dispatch.
+    // Args: RDI = function pointer, RSI = argument to pass to the callee.
+    // The callee receives arg in RDI (standard SysV calling convention).
+    // Uses a tail call (jmp rax) so the callee returns directly to the
+    // caller of __call_indirect1 — no extra stack frame needed.
+    //
+    // Encoding:
+    //   mov rax, rdi    ; 48 89 F8  (3 bytes) — save function pointer
+    //   mov rdi, rsi    ; 48 89 F7  (3 bytes) — move arg to first arg register
+    //   jmp rax         ; FF E0     (2 bytes) — tail call
+    // Total: 8 bytes
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x48, 0x89, 0xF8]); // mov rax, rdi
+        code.extend(&[0x48, 0x89, 0xF7]); // mov rdi, rsi
+        code.extend(&[0xFF, 0xE0]);       // jmp rax
+        stubs.push(("__call_indirect1".to_string(), code));
+    }
+
     stubs
 }
 
@@ -4061,6 +4099,36 @@ impl Backend for X86_64Backend {
                             );
                             continue;
                         }
+                    }
+                } else if reloc.reloc_type == "R_X86_64_PC32" {
+                    // Wave 5: R_X86_64_PC32 — 32-bit PC-relative relocation for
+                    // LEA rip+disp32 (function address loading). Same formula
+                    // as PLT32: disp32 = S + A - P - 4.
+                    if abs_offset + 4 > all_code.len() {
+                        continue;
+                    }
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        let current_val = i32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let s = target_offset as i64;
+                        let a = current_val as i64;
+                        let p = abs_offset as i64;
+                        let resolved = (s + a - p - 4) as i32;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&resolved.to_le_bytes());
                     }
                 } else if reloc.reloc_type == R_X86_64_64 {
                     // R_X86_64_64 — absolute 64-bit address relocation.
