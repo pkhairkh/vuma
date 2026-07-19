@@ -440,6 +440,21 @@
 // non-existent uaddr returns 0).
 
 // ────────────────────────────────────────────────────────────────────────────
+// External runtime stub (PMT-pure memory read).
+// ────────────────────────────────────────────────────────────────────────────
+// __vuma_load_u32(addr: u64) -> u32 is a 3-byte runtime stub emitted by the
+// x86_64 codegen (src/codegen/src/x86_64/mod.rs, Wave 7) whose body is
+// literally `mov eax, [rdi] ; ret` (8B 07 C3). It reads a 32-bit value
+// from any address without requiring pointer syntax in VUMA source — the
+// same PMT-purity category as the write/read/exit externs declared in
+// womb/kernel/kernel.vuma and womb/kernel/hosted/host.vuma. sys_futex's
+// FUTEX_WAIT arm uses it to perform the "compare *uaddr with val" check
+// that real Linux futex(2) does via atomic load before sleeping.
+extern "C" {
+    fn __vuma_load_u32(addr: u64) -> u32;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -767,14 +782,30 @@ fn futex_find_or_create(tbl: State<FutexTable>, uaddr: u64) -> u32 {
 fn sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
     if op == 0 {
         // FUTEX_WAIT.
-        // In a real kernel: AtomicLoad(uaddr), if == val, sleep on
-        // the wait queue keyed by uaddr (holding the wait-queue lock
-        // across the load+enqueue to avoid lost-wakeup races — see
-        // "FUTEX_WAIT (op == 0)" in the file header). In K7c's PMT-
-        // pure hosted mode: just record the waiter in the FutexTable
-        // (no AtomicLoad — pointer syntax is forbidden by the
-        // contract) and return -EAGAIN to tell the caller "would
-        // have blocked".
+        // Real futex(2) semantics: atomically load *uaddr and compare
+        // to `val`; if they differ, return -EAGAIN immediately WITHOUT
+        // sleeping (the value changed between the caller's cmpxchg and
+        // the syscall — the caller should retry its user-space loop).
+        // Only if *uaddr == val do we enqueue on the wait queue and
+        // block. Holding the wait-queue lock across the load+enqueue
+        // closes the lost-wakeup race (see "FUTEX_WAIT (op == 0)" in
+        // the file header).
+        //
+        // The load is done via the __vuma_load_u32 runtime stub
+        // (declared extern "C" above) — a 3-byte `mov eax,[rdi]; ret`
+        // trampoline emitted by the x86_64 codegen (Wave 7). This reads
+        // *uaddr without any pointer syntax in VUMA source, preserving
+        // PMT purity (same category as the write/read/exit externs in
+        // womb/kernel/kernel.vuma).
+        let current_val = __vuma_load_u32(uaddr);
+        if current_val != val {
+            return 0 - 11;  // -EAGAIN: *uaddr != val, do not sleep
+        }
+        // *uaddr == val — record the waiter in the FutexTable and
+        // return -EAGAIN to tell the hosted-mode caller "would have
+        // blocked" (K7c has no scheduler, so there is no real sleep —
+        // the caller's user-space retry loop is the hosted-mode stand-
+        // in for the kernel wait queue).
         let idx = futex_find_or_create(tbl, uaddr);
         if idx == 64 {
             return 12;  // -ENOMEM (table full)
