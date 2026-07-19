@@ -1952,8 +1952,29 @@ impl CryptoState {
 }
 
 // ── FFI Process Isolation (extern "process") ─────────────────────────
+//
+// Wave 25-32: real auto-marshalling, worker lifecycle, seccomp wiring,
+// and crash-recovery for `extern "process"` call sites. The actual
+// `fork()`/`exec()` and IPC socket plumbing live in the runtime
+// backend (W33+); this module provides the in-process types and a
+// simulated lifecycle the supervisor exercises against the same code
+// paths, so the spawn → call → kill → restart state machine can be
+// unit-tested without spawning a real child process.
 
-/// Configuration for an FFI worker process.
+/// Header prepended to every marshalled FFI payload: a u32 LE length
+/// followed by a u64 LE return-type hash. The payload proper follows
+/// immediately after. Kept as a `pub const` so [`FfiCall::marshal`]
+/// and [`FfiCall::unmarshal`] agree on the offset, and so the
+/// supervisor can size its receive buffers without re-deriving it.
+pub const FFI_MARSHAL_HEADER_SIZE: usize = 4 + 8;
+
+/// Configuration for an FFI worker process. Bundles the library path
+/// + symbol the worker will `dlopen`/`dlsym`, the [`TrustLevel`] used
+/// to derive the seccomp filter, the restart/timeout budget, and the
+/// prepared [`WorkerSandbox`] (W17-18) the forked child installs
+/// before `exec()`. Built via [`FfiWorkerConfig::new`] which derives
+/// the sandbox from the trust level so callers cannot forget the L5
+/// wire-up.
 #[derive(Clone, Debug)]
 pub struct FfiWorkerConfig {
     pub library_path: String,
@@ -1961,35 +1982,383 @@ pub struct FfiWorkerConfig {
     pub trust_level: TrustLevel,
     pub max_restarts: u32,
     pub timeout_ms: u64,
+    pub sandbox_config: WorkerSandbox,
 }
 
-impl Default for FfiWorkerConfig {
-    fn default() -> Self {
+impl FfiWorkerConfig {
+    /// Construct an FFI worker config from its scalar fields,
+    /// deriving the [`WorkerSandbox`] from `trust_level` and a
+    /// conservative [`ResourceLimits`] profile for untrusted FFI.
+    /// Callers needing a bespoke sandbox can overwrite the
+    /// `sandbox_config` field directly after construction.
+    pub fn new(
+        library_path: impl Into<String>,
+        function_name: impl Into<String>,
+        trust_level: TrustLevel,
+        max_restarts: u32,
+        timeout_ms: u64,
+    ) -> Self {
+        let worker_config = WorkerConfig {
+            trust_level: trust_level.clone(),
+            max_restarts,
+            timeout_ms,
+        };
+        // FFI workers are untrusted by default: cap CPU at the call
+        // timeout, cap RSS at 64 MiB (enough for crypto bignums but
+        // not for a heap spray), and limit FDs/IPC messages so a
+        // runaway worker cannot exhaust supervisor resources.
+        let limits = ResourceLimits {
+            cpu_time_ms: timeout_ms,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_ipc_messages: 1024,
+            max_file_descriptors: 32,
+        };
         Self {
-            library_path: String::new(),
-            function_name: String::new(),
-            trust_level: TrustLevel::Untrusted,
-            max_restarts: 3,
-            timeout_ms: 10000,
+            library_path: library_path.into(),
+            function_name: function_name.into(),
+            trust_level,
+            max_restarts,
+            timeout_ms,
+            sandbox_config: WorkerSandbox::new(worker_config, limits),
         }
+    }
+
+    /// Every FFI worker config is, by construction, an FFI worker.
+    /// The `is_ffi` predicate exists so a later wave can route
+    /// `WorkerConfig` vs `FfiWorkerConfig` through a shared trait
+    /// without churning every call site.
+    pub fn is_ffi(&self) -> bool {
+        true
     }
 }
 
-/// Marshal a function call for IPC transport.
-/// The worker process receives this and calls the actual C function.
+/// A marshalled FFI call envelope. `args` is the already-serialized
+/// argument blob the worker will hand to the C function;
+/// `return_type_hash` is the type hash of the declared return type
+/// (the same `type_hash` used by the L1 message layer) — the worker
+/// uses it to type-check the reply before unmarshalling.
+/// `function_name` is metadata carried alongside the envelope for
+/// diagnostics and dispatch; it is **not** serialized by
+/// [`marshal`](FfiCall::marshal).
 #[derive(Clone, Debug)]
 pub struct FfiCall {
     pub function_name: String,
-    pub args: Vec<Vec<u8>>,  // serialized arguments
+    pub args: Vec<u8>,
     pub return_type_hash: u64,
 }
 
-/// Result of an FFI call from a worker process.
+impl FfiCall {
+    /// Construct a call envelope for `function_name` returning a value
+    /// of type `return_type_hash`, with `args` as the marshalled
+    /// argument blob.
+    pub fn new(
+        function_name: impl Into<String>,
+        args: Vec<u8>,
+        return_type_hash: u64,
+    ) -> Self {
+        Self {
+            function_name: function_name.into(),
+            args,
+            return_type_hash,
+        }
+    }
+
+    /// Marshal `args` into the on-the-wire FFI call frame:
+    ///
+    /// ```text
+    ///   +----4 bytes----+----8 bytes----+----N bytes----+
+    ///   | payload len   | type hash     | payload       |
+    ///   | (u32 LE)      | (u64 LE)      | (raw args)    |
+    ///   +---------------+---------------+---------------+
+    /// ```
+    ///
+    /// `self.return_type_hash` supplies the type hash; the `args`
+    /// parameter is the payload proper. The parameter — rather than
+    /// `self.args` — lets callers re-frame a previously cached blob
+    /// without mutating the envelope, which the supervisor does when
+    /// it retries a call after a worker restart.
+    pub fn marshal(&self, args: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(FFI_MARSHAL_HEADER_SIZE + args.len());
+        out.extend_from_slice(&(args.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.return_type_hash.to_le_bytes());
+        out.extend_from_slice(args);
+        out
+    }
+
+    /// Inverse of [`marshal`](FfiCall::marshal): parse the length
+    /// header, the type hash, and extract the payload. Returns
+    /// [`IpcError::TruncatedMessage`] if `data` is shorter than the
+    /// header or shorter than the declared payload length, and
+    /// [`IpcError::PayloadTooLarge`] if the declared length would
+    /// overflow `usize`. The returned [`FfiCall`] has an empty
+    /// `function_name` — the name is not on the wire, and the worker
+    /// that receives the frame already knows which symbol it is
+    /// dispatching to.
+    pub fn unmarshal(data: &[u8]) -> Result<FfiCall, IpcError> {
+        if data.len() < FFI_MARSHAL_HEADER_SIZE {
+            return Err(IpcError::TruncatedMessage);
+        }
+        let payload_len = u32::from_le_bytes([
+            data[0], data[1], data[2], data[3],
+        ]) as usize;
+        let type_hash = u64::from_le_bytes([
+            data[4], data[5], data[6], data[7],
+            data[8], data[9], data[10], data[11],
+        ]);
+        let end = FFI_MARSHAL_HEADER_SIZE
+            .checked_add(payload_len)
+            .ok_or(IpcError::PayloadTooLarge(payload_len as u64))?;
+        if data.len() < end {
+            return Err(IpcError::TruncatedMessage);
+        }
+        let payload = data[FFI_MARSHAL_HEADER_SIZE..end].to_vec();
+        Ok(FfiCall {
+            function_name: String::new(),
+            args: payload,
+            return_type_hash: type_hash,
+        })
+    }
+}
+
+/// Result of an FFI call from a worker process. `return_value` is the
+/// marshalled return blob (empty on failure); `error` carries the
+/// human-readable diagnostic when `success` is false; `elapsed_ms` is
+/// the wall-clock time spent in the worker, measured by the
+/// supervisor around the IPC round-trip and used for SLO accounting.
 #[derive(Clone, Debug)]
 pub struct FfiResult {
     pub success: bool,
     pub return_value: Vec<u8>,
     pub error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+impl FfiResult {
+    /// Construct a success result carrying `return_value` and the
+    /// measured `elapsed_ms`.
+    pub fn ok(return_value: Vec<u8>, elapsed_ms: u64) -> Self {
+        Self {
+            success: true,
+            return_value,
+            error: None,
+            elapsed_ms,
+        }
+    }
+
+    /// Construct a failure result carrying an error message and the
+    /// measured `elapsed_ms` (the time spent before the failure was
+    /// detected).
+    pub fn err(message: impl Into<String>, elapsed_ms: u64) -> Self {
+        Self {
+            success: false,
+            return_value: Vec::new(),
+            error: Some(message.into()),
+            elapsed_ms,
+        }
+    }
+
+    /// True iff the worker returned successfully.
+    pub fn is_success(&self) -> bool {
+        self.success
+    }
+
+    /// The error message if the call failed, or an empty string if it
+    /// succeeded. Returning `&str` (rather than `Option<&str>`)
+    /// keeps the call site ergonomic for `format!("{}", r.error_message())`
+    /// style diagnostics.
+    pub fn error_message(&self) -> &str {
+        self.error.as_deref().unwrap_or("")
+    }
+}
+
+/// Per-worker bookkeeping the supervisor holds for one live FFI
+/// worker. `restart_count` is incremented every time
+/// [`FfiWorkerLifecycle::restart_ffi_worker`] respawns the worker; it
+/// is checked against [`FfiWorkerConfig::max_restarts`] before each
+/// respawn. `alive` is set false by [`FfiWorkerLifecycle::kill_ffi_worker`]
+/// so subsequent calls return [`IpcError::WorkerCrashed`].
+#[derive(Clone, Debug)]
+struct FfiWorkerEntry {
+    config: FfiWorkerConfig,
+    restart_count: u32,
+    alive: bool,
+}
+
+/// In-process supervisor for FFI worker processes. The real
+/// `fork()`/`exec()` + Unix-socket IPC lives in the runtime backend
+/// (W33+); this struct provides the simulated lifecycle the
+/// supervisor's state machine exercises against, so the
+/// spawn → call → kill → restart code paths can be tested without a
+/// real child process.
+///
+/// PIDs are assigned from a monotonically increasing counter starting
+/// at `1000` (chosen to avoid colliding with the test runner's own
+/// low PIDs, which makes test output readable).
+pub struct FfiWorkerLifecycle {
+    workers: HashMap<u32, FfiWorkerEntry>,
+    next_pid: u32,
+}
+
+impl FfiWorkerLifecycle {
+    /// Construct an empty lifecycle supervisor.
+    pub fn new() -> Self {
+        Self {
+            workers: HashMap::new(),
+            next_pid: 1000,
+        }
+    }
+
+    /// Simulate spawning an FFI worker for `config`. Returns the
+    /// assigned PID. The real `fork()` + `exec()` + seccomp
+    /// installation happens in the runtime backend; here we just
+    /// record the worker as alive so [`call_ffi`](Self::call_ffi) and
+    /// [`kill_ffi_worker`](Self::kill_ffi_worker) can validate the
+    /// PID. Returns [`IpcError::TooManyProcesses`] if the PID counter
+    /// wraps (2^32 workers spawned in one process — a supervisor bug).
+    pub fn spawn_ffi_worker(&mut self, config: &FfiWorkerConfig) -> Result<u32, IpcError> {
+        let pid = self.next_pid;
+        self.next_pid = self
+            .next_pid
+            .checked_add(1)
+            .ok_or(IpcError::TooManyProcesses)?;
+        self.workers.insert(
+            pid,
+            FfiWorkerEntry {
+                config: config.clone(),
+                restart_count: 0,
+                alive: true,
+            },
+        );
+        Ok(pid)
+    }
+
+    /// Simulate an IPC call to `pid`. Marshals `call` the same way the
+    /// real IPC layer would, "sends" it to the worker, and returns a
+    /// success [`FfiResult`] whose `return_value` echoes the
+    /// marshalled frame — this is the loopback contract the backend
+    /// uses for its smoke-test RPC and the one the supervisor's
+    /// restart path uses to verify a freshly-respawned worker is
+    /// responsive. `timeout_ms` is honored as a sanity ceiling: if it
+    /// is `0` the call is treated as an immediate timeout (the
+    /// backend interprets `0` as "no waiting room allocated", i.e.
+    /// `poll(2)` returns `EAGAIN`).
+    ///
+    /// Returns [`IpcError::WorkerNotFound`] if `pid` was never
+    /// spawned, [`IpcError::WorkerCrashed`] if it was spawned but has
+    /// since been killed, and [`IpcError::WorkerTimeout`] if
+    /// `timeout_ms == 0`.
+    pub fn call_ffi(
+        &mut self,
+        pid: u32,
+        call: &FfiCall,
+        timeout_ms: u64,
+    ) -> Result<FfiResult, IpcError> {
+        let entry = self.workers.get_mut(&pid).ok_or(IpcError::WorkerNotFound)?;
+        if !entry.alive {
+            return Err(IpcError::WorkerCrashed(0));
+        }
+        if timeout_ms == 0 {
+            return Err(IpcError::WorkerTimeout);
+        }
+        // Marshal the call the same way the real IPC layer would, so
+        // the wire format is exercised end-to-end on every simulated
+        // call. The loopback return value is the marshalled frame.
+        let frame = call.marshal(&call.args);
+        // Simulated elapsed time: bounded by both the call timeout
+        // and a 10 ms floor, so SLO accounting tests can assert
+        // `0 < elapsed <= timeout_ms`.
+        let elapsed = if timeout_ms < 10 { timeout_ms } else { 10 };
+        Ok(FfiResult::ok(frame, elapsed))
+    }
+
+    /// Simulate killing the worker `pid`. Marks it dead so subsequent
+    /// [`call_ffi`](Self::call_ffi) calls return
+    /// [`IpcError::WorkerCrashed`]. Returns
+    /// [`IpcError::WorkerNotFound`] if `pid` was never spawned. The
+    /// real backend would `kill(pid, SIGKILL)` and `waitpid()` the
+    /// corpse; here we only flip the `alive` flag so the bookkeeping
+    /// stays intact for [`restart_ffi_worker`](Self::restart_ffi_worker).
+    pub fn kill_ffi_worker(&mut self, pid: u32) -> Result<(), IpcError> {
+        let entry = self.workers.get_mut(&pid).ok_or(IpcError::WorkerNotFound)?;
+        entry.alive = false;
+        Ok(())
+    }
+
+    /// Restart a crashed worker for `config`. Looks up the most
+    /// recent worker for this config (matched on `library_path` +
+    /// `function_name`), and if its `restart_count` is below
+    /// `config.max_restarts`, spawns a fresh worker with the restart
+    /// counter carried forward + incremented. Returns
+    /// [`IpcError::MaxRestartsExceeded`] if the budget is exhausted,
+    /// or [`IpcError::WorkerNotFound`] if no prior worker for this
+    /// config exists (callers must `spawn_ffi_worker` first).
+    ///
+    /// The old worker entry is retained in the map (marked dead) so
+    /// the supervisor's audit log can reconstruct the crash history;
+    /// the new worker gets a fresh PID.
+    pub fn restart_ffi_worker(&mut self, config: &FfiWorkerConfig) -> Result<u32, IpcError> {
+        // Find the highest restart_count among prior workers for this
+        // (library_path, function_name) pair. Iterating all workers is
+        // O(n) but n is small (one entry per live or dead FFI worker
+        // since process start); the backend will index by
+        // (library_path, function_name) when it needs to.
+        let prev_restart_count = self
+            .workers
+            .values()
+            .filter(|e| {
+                e.config.library_path == config.library_path
+                    && e.config.function_name == config.function_name
+            })
+            .map(|e| e.restart_count)
+            .max()
+            .ok_or(IpcError::WorkerNotFound)?;
+
+        if prev_restart_count >= config.max_restarts {
+            return Err(IpcError::MaxRestartsExceeded);
+        }
+
+        let pid = self.next_pid;
+        self.next_pid = self
+            .next_pid
+            .checked_add(1)
+            .ok_or(IpcError::TooManyProcesses)?;
+        self.workers.insert(
+            pid,
+            FfiWorkerEntry {
+                config: config.clone(),
+                restart_count: prev_restart_count + 1,
+                alive: true,
+            },
+        );
+        Ok(pid)
+    }
+
+    /// Number of workers currently tracked (alive or dead). Exposed
+    /// for tests and supervisor introspection — the count never
+    /// decreases because dead entries are retained for crash-history
+    /// audits.
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Restart count for `pid`, or `None` if unknown. Exposed for
+    /// tests so the restart budget can be asserted directly without
+    /// driving a full crash cycle.
+    pub fn restart_count(&self, pid: u32) -> Option<u32> {
+        self.workers.get(&pid).map(|e| e.restart_count)
+    }
+
+    /// True iff `pid` is alive (spawned and not yet killed). Returns
+    /// `false` for unknown pids.
+    pub fn is_alive(&self, pid: u32) -> bool {
+        self.workers.get(&pid).map(|e| e.alive).unwrap_or(false)
+    }
+}
+
+impl Default for FfiWorkerLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Capability Delegation ────────────────────────────────────────────
@@ -4333,5 +4702,276 @@ mod tests {
         // CryptoState to call decrypt.
         let recovered = CryptoState::decrypt(&aead, &framed).expect("alias roundtrip");
         assert_eq!(recovered, b"alias check");
+    }
+
+    // ── W25-32: FFI process isolation tests ───────────────────────────
+
+    #[test]
+    fn test_ffi_call_marshal_unmarshal_roundtrip() {
+        // Wire format: [u32 LE len][u64 LE type_hash][payload].
+        // marshal → unmarshal must reproduce the original args + type
+        // hash exactly. function_name is metadata not on the wire, so
+        // it does NOT roundtrip.
+        let call = FfiCall::new("foreign_add", vec![0xDE, 0xAD, 0xBE, 0xEF], 0xCAFEBABE);
+        let frame = call.marshal(&call.args);
+
+        // Header sanity: 4 + 8 bytes of header + 4 bytes of payload.
+        assert_eq!(frame.len(), FFI_MARSHAL_HEADER_SIZE + 4);
+        let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+        assert_eq!(len as usize, 4);
+        let hash = u64::from_le_bytes([
+            frame[4], frame[5], frame[6], frame[7],
+            frame[8], frame[9], frame[10], frame[11],
+        ]);
+        assert_eq!(hash, 0xCAFEBABE);
+
+        let decoded = FfiCall::unmarshal(&frame).expect("roundtrip must succeed");
+        assert_eq!(decoded.args, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(decoded.return_type_hash, 0xCAFEBABE);
+        // function_name is not on the wire — it comes back empty.
+        assert_eq!(decoded.function_name, "");
+    }
+
+    #[test]
+    fn test_ffi_call_marshal_empty_payload() {
+        // A zero-length payload is a valid frame (e.g. a void()
+        // foreign function): only the 12-byte header is emitted, and
+        // unmarshal must accept it.
+        let call = FfiCall::new("foreign_void", Vec::new(), 0x0);
+        let frame = call.marshal(&call.args);
+        assert_eq!(frame.len(), FFI_MARSHAL_HEADER_SIZE);
+        let decoded = FfiCall::unmarshal(&frame).expect("empty roundtrip");
+        assert!(decoded.args.is_empty());
+        assert_eq!(decoded.return_type_hash, 0);
+    }
+
+    #[test]
+    fn test_ffi_call_marshal_uses_parameter_args() {
+        // marshal(&self, args) must encode the *parameter* args, not
+        // self.args — this lets callers re-frame a cached blob without
+        // mutating the envelope (the supervisor's restart-retry path).
+        let call = FfiCall::new("f", vec![0xAA; 4], 1);
+        let frame = call.marshal(&[0xBB; 2]);
+        let decoded = FfiCall::unmarshal(&frame).expect("roundtrip");
+        assert_eq!(decoded.args, vec![0xBB, 0xBB]);
+    }
+
+    #[test]
+    fn test_ffi_call_unmarshal_rejects_truncated_header() {
+        // A buffer shorter than the 12-byte header must be rejected
+        // with TruncatedMessage, not panic on slicing.
+        let short = [0u8; 4];
+        let err = FfiCall::unmarshal(&short).unwrap_err();
+        assert!(matches!(err, IpcError::TruncatedMessage), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_call_unmarshal_rejects_truncated_payload() {
+        // Header claims 16 bytes of payload but only 4 are present.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&16u32.to_le_bytes());
+        bad.extend_from_slice(&0u64.to_le_bytes());
+        bad.extend_from_slice(&[1, 2, 3, 4]); // only 4 of 16 bytes
+        let err = FfiCall::unmarshal(&bad).unwrap_err();
+        assert!(matches!(err, IpcError::TruncatedMessage), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_result_success() {
+        let r = FfiResult::ok(vec![1, 2, 3], 42);
+        assert!(r.is_success());
+        assert!(r.success);
+        assert_eq!(r.return_value, vec![1, 2, 3]);
+        assert_eq!(r.elapsed_ms, 42);
+        assert!(r.error.is_none());
+        assert_eq!(r.error_message(), "");
+    }
+
+    #[test]
+    fn test_ffi_result_failure() {
+        let r = FfiResult::err("segfault in foreign code", 99);
+        assert!(!r.is_success());
+        assert!(!r.success);
+        assert!(r.return_value.is_empty());
+        assert_eq!(r.elapsed_ms, 99);
+        assert_eq!(r.error_message(), "segfault in foreign code");
+        assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn test_ffi_result_error_message_empty_on_success() {
+        // error_message() on a success result must return "" (not
+        // panic on None unwrap).
+        let r = FfiResult::ok(vec![], 0);
+        assert_eq!(r.error_message(), "");
+    }
+
+    #[test]
+    fn test_ffi_worker_config_is_ffi_always_true() {
+        // The is_ffi() predicate is the routing hook a later wave uses
+        // to distinguish FfiWorkerConfig from WorkerConfig through a
+        // shared trait — it must be unconditionally true.
+        let cfg = FfiWorkerConfig::new(
+            "/lib/libx.so", "f", TrustLevel::Untrusted, 1, 100,
+        );
+        assert!(cfg.is_ffi());
+    }
+
+    #[test]
+    fn test_ffi_worker_config_sandbox_matches_trust_level() {
+        // The sandbox baked into the config must reflect the trust
+        // level — this is the L5 wire-up for FFI workers: the forked
+        // child calls sandbox_config.apply() before exec(). Sandboxed
+        // → exit-only syscalls → shortest possible filter.
+        let cfg = FfiWorkerConfig::new(
+            "/lib/libpriv.so", "foreign_privileged",
+            TrustLevel::Sandboxed, 1, 100,
+        );
+        assert_eq!(cfg.sandbox_config.config.trust_level, TrustLevel::Sandboxed);
+        assert_eq!(cfg.sandbox_config.config.max_restarts, 1);
+        assert_eq!(cfg.sandbox_config.config.timeout_ms, 100);
+        // Resource limits derived from the config: CPU ceiling mirrors
+        // the call timeout.
+        assert_eq!(cfg.sandbox_config.limits.cpu_time_ms, 100);
+        let filter = cfg.sandbox_config.seccomp_filter();
+        assert_eq!(filter.len() % 8, 0, "BPF instructions are 8 bytes each");
+    }
+
+    #[test]
+    fn test_ffi_worker_spawn_call_kill_lifecycle() {
+        // The happy path: spawn a worker, call it (verifying the
+        // loopback return value), kill it, then verify subsequent
+        // calls fail with WorkerCrashed.
+        let mut life = FfiWorkerLifecycle::new();
+        let config = FfiWorkerConfig::new(
+            "/lib/libfoo.so", "foreign_add",
+            TrustLevel::Untrusted, 3, 1_000,
+        );
+
+        let pid = life.spawn_ffi_worker(&config).expect("spawn");
+        assert!(pid >= 1000, "PIDs start at 1000 for readability");
+        assert!(life.is_alive(pid));
+        assert_eq!(life.worker_count(), 1);
+        assert_eq!(life.restart_count(pid), Some(0));
+
+        let call = FfiCall::new("foreign_add", vec![0x01, 0x02, 0x03], 0x1234);
+        let result = life.call_ffi(pid, &call, 1_000).expect("call");
+        assert!(result.is_success());
+        assert!(result.elapsed_ms > 0 && result.elapsed_ms <= 1_000);
+        // Loopback contract: return_value is the marshalled frame.
+        let decoded = FfiCall::unmarshal(&result.return_value).expect("loopback frame");
+        assert_eq!(decoded.args, call.args);
+        assert_eq!(decoded.return_type_hash, 0x1234);
+
+        life.kill_ffi_worker(pid).expect("kill");
+        assert!(!life.is_alive(pid));
+
+        // After kill, calls must fail with WorkerCrashed (not
+        // WorkerNotFound — the entry is retained for crash history).
+        let err = life.call_ffi(pid, &call, 1_000).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerCrashed(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_call_unknown_pid_rejected() {
+        // A call to a PID the supervisor never spawned must return
+        // WorkerNotFound, not silently succeed.
+        let mut life = FfiWorkerLifecycle::new();
+        let call = FfiCall::new("f", Vec::new(), 0);
+        let err = life.call_ffi(9999, &call, 100).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_call_zero_timeout_rejected() {
+        // timeout_ms == 0 is treated as "no waiting room" — the
+        // backend would return EAGAIN immediately.
+        let mut life = FfiWorkerLifecycle::new();
+        let config = FfiWorkerConfig::new("/lib/x.so", "f", TrustLevel::Untrusted, 1, 0);
+        let pid = life.spawn_ffi_worker(&config).expect("spawn");
+        let call = FfiCall::new("f", vec![1], 0);
+        let err = life.call_ffi(pid, &call, 0).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerTimeout), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_kill_unknown_pid_rejected() {
+        // Killing a PID the supervisor never spawned is a bug — it
+        // must be reported, not ignored.
+        let mut life = FfiWorkerLifecycle::new();
+        let err = life.kill_ffi_worker(4242).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_restart_on_crash() {
+        // A crashed worker can be restarted up to max_restarts times;
+        // each restart gets a fresh PID and an incremented counter.
+        // The (n+1)th restart exceeds the budget and returns
+        // MaxRestartsExceeded.
+        let mut life = FfiWorkerLifecycle::new();
+        let config = FfiWorkerConfig::new(
+            "/lib/libcrash.so", "foreign_crashy",
+            TrustLevel::Sandboxed, 2, 500,
+        );
+
+        let pid0 = life.spawn_ffi_worker(&config).expect("spawn");
+        assert_eq!(life.restart_count(pid0), Some(0));
+
+        // Crash + restart #1.
+        life.kill_ffi_worker(pid0).expect("kill");
+        let pid1 = life.restart_ffi_worker(&config).expect("restart #1");
+        assert!(pid1 != pid0, "restart must allocate a fresh PID");
+        assert_eq!(life.restart_count(pid1), Some(1));
+        assert!(life.is_alive(pid1));
+        // The freshly respawned worker must be callable.
+        let call = FfiCall::new("foreign_crashy", vec![0x42], 0x1);
+        let r = life.call_ffi(pid1, &call, 500).expect("post-restart call");
+        assert!(r.is_success());
+
+        // Crash + restart #2 — still within budget (max_restarts=2).
+        life.kill_ffi_worker(pid1).expect("kill");
+        let pid2 = life.restart_ffi_worker(&config).expect("restart #2");
+        assert_eq!(life.restart_count(pid2), Some(2));
+
+        // Third restart exceeds max_restarts=2.
+        life.kill_ffi_worker(pid2).expect("kill");
+        let err = life.restart_ffi_worker(&config).unwrap_err();
+        assert!(matches!(err, IpcError::MaxRestartsExceeded), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_restart_unknown_config_rejected() {
+        // restart_ffi_worker for a config that was never spawned must
+        // return WorkerNotFound — the supervisor can only restart
+        // workers it has previously tracked.
+        let mut life = FfiWorkerLifecycle::new();
+        let config = FfiWorkerConfig::new(
+            "/lib/never_spawned.so", "f",
+            TrustLevel::Untrusted, 3, 1_000,
+        );
+        let err = life.restart_ffi_worker(&config).unwrap_err();
+        assert!(matches!(err, IpcError::WorkerNotFound), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_ffi_worker_distinct_configs_tracked_separately() {
+        // Two workers for different (library, symbol) pairs must get
+        // distinct PIDs and independent restart counters.
+        let mut life = FfiWorkerLifecycle::new();
+        let cfg_a = FfiWorkerConfig::new("/lib/a.so", "f", TrustLevel::Untrusted, 1, 100);
+        let cfg_b = FfiWorkerConfig::new("/lib/b.so", "f", TrustLevel::Untrusted, 1, 100);
+
+        let pid_a = life.spawn_ffi_worker(&cfg_a).expect("spawn a");
+        let pid_b = life.spawn_ffi_worker(&cfg_b).expect("spawn b");
+        assert_ne!(pid_a, pid_b);
+        assert_eq!(life.worker_count(), 2);
+
+        // Crashing and restarting a must not affect b's bookkeeping.
+        life.kill_ffi_worker(pid_a).expect("kill a");
+        let pid_a2 = life.restart_ffi_worker(&cfg_a).expect("restart a");
+        assert_eq!(life.restart_count(pid_a2), Some(1));
+        assert_eq!(life.restart_count(pid_b), Some(0));
+        assert!(life.is_alive(pid_b));
     }
 }
