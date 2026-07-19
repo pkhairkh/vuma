@@ -1171,7 +1171,7 @@ impl Default for ProtocolStateMachine {
 
 // ── L5-L8: Worker, State, Error, Crypto (stubs for now) ────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerConfig {
     pub trust_level: TrustLevel,
     pub max_restarts: u32,
@@ -1233,6 +1233,268 @@ pub fn generate_seccomp_filter(config: &WorkerConfig) -> Vec<u8> {
     // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL)
     filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     filter
+}
+
+// ── L5 (cont.): ResourceLimits + WorkerSandbox ───────────────────────
+
+/// Measured resource usage of a worker — the right-hand side of
+/// [`ResourceLimits::check_limits`]. Each field is the current observed
+/// value as reported by `getrusage(2)` (cpu_time_ms, memory_bytes), the
+/// IPC layer (ipc_messages), or `/proc/self/fd` (file_descriptors).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResourceUsage {
+    /// Wall-clock CPU time consumed, in milliseconds.
+    pub cpu_time_ms: u64,
+    /// Peak resident-set size, in bytes.
+    pub memory_bytes: u64,
+    /// Cumulative count of IPC messages sent + received.
+    pub ipc_messages: u64,
+    /// Number of currently-open file descriptors.
+    pub file_descriptors: u64,
+}
+
+/// Per-worker resource ceilings. When [`ResourceLimits::check_limits`]
+/// returns false the supervisor terminates the worker and, if
+/// [`should_restart`] agrees, respawns it within the `max_restarts`
+/// budget from [`WorkerConfig`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Max CPU time in milliseconds (0 = unlimited).
+    pub cpu_time_ms: u64,
+    /// Max resident memory in bytes (0 = unlimited).
+    pub max_memory_bytes: u64,
+    /// Max cumulative IPC messages (0 = unlimited).
+    pub max_ipc_messages: u64,
+    /// Max open file descriptors (0 = unlimited).
+    pub max_file_descriptors: u64,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            cpu_time_ms: 5_000,                    // 5 s CPU budget
+            max_memory_bytes: 256 * 1024 * 1024,   // 256 MiB RSS
+            max_ipc_messages: 10_000,
+            max_file_descriptors: 64,
+        }
+    }
+}
+
+impl ResourceLimits {
+    /// Returns true iff every measured resource in `usage` is at or
+    /// below its configured ceiling. A ceiling of `0` disables that
+    /// particular check (treated as "unlimited"), so a zeroed
+    /// [`ResourceUsage`] always passes against any limits.
+    ///
+    /// This is the L5 resource-limit half of the sandbox: the supervisor
+    /// polls it between IPC turns and kills the worker if it returns
+    /// false, mirroring the seccomp filter's syscall-level containment.
+    pub fn check_limits(&self, usage: &ResourceUsage) -> bool {
+        if self.cpu_time_ms != 0 && usage.cpu_time_ms > self.cpu_time_ms {
+            return false;
+        }
+        if self.max_memory_bytes != 0 && usage.memory_bytes > self.max_memory_bytes {
+            return false;
+        }
+        if self.max_ipc_messages != 0 && usage.ipc_messages > self.max_ipc_messages {
+            return false;
+        }
+        if self.max_file_descriptors != 0 && usage.file_descriptors > self.max_file_descriptors {
+            return false;
+        }
+        true
+    }
+}
+
+/// A fully-prepared L5 sandbox for one worker: the seccomp BPF program
+/// derived from `config.trust_level` (via [`generate_seccomp_filter`])
+/// plus the [`ResourceLimits`] the supervisor enforces on top.
+///
+/// This is the object the runtime constructs when it evaluates a
+/// `spawn_worker("path")` call site: the parent builds the sandbox,
+/// `fork()`s, and the child calls [`WorkerSandbox::apply`] before
+/// `exec()`-ing the worker binary so the filter is in force before any
+/// worker code runs.
+#[derive(Clone, Debug)]
+pub struct WorkerSandbox {
+    pub config: WorkerConfig,
+    pub limits: ResourceLimits,
+}
+
+impl WorkerSandbox {
+    pub fn new(config: WorkerConfig, limits: ResourceLimits) -> Self {
+        Self { config, limits }
+    }
+
+    /// The BPF bytecode that [`apply`] installs. Exposed so callers and
+    /// tests can inspect the generated program (length, structure,
+    /// allowed-syscall count) without trapping themselves.
+    pub fn seccomp_filter(&self) -> Vec<u8> {
+        generate_seccomp_filter(&self.config)
+    }
+
+    /// Install the seccomp filter on the *current* process.
+    ///
+    /// On x86_64 Linux this issues the real
+    /// `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` followed by
+    /// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &sock_fprog, 0, 0)`
+    /// via raw `syscall` number 157 (the x86_64 `__NR_prctl`). On any
+    /// other target the BPF program is still generated (so
+    /// [`seccomp_filter`] remains useful) but the kernel trap is
+    /// skipped and `Ok(0)` is returned.
+    ///
+    /// Returns `Ok(rc)` (rc >= 0) on success or
+    /// `Err(IpcError::KernelError)` if the kernel rejected the filter.
+    ///
+    /// # Safety of the call site
+    /// Calling this from the test process on x86_64 Linux would install
+    /// a real seccomp filter on the test runner (and a `Sandboxed`
+    /// filter would kill it on the next syscall). Unit tests therefore
+    /// only exercise [`seccomp_filter`]; `apply` is invoked in
+    /// production only from the forked child of `spawn_worker`.
+    pub fn apply(&self) -> Result<i32, IpcError> {
+        let filter = self.seccomp_filter();
+        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+        {
+            // SAFETY: `filter` is a well-formed BPF program (8-byte
+            // instructions, length a multiple of 8) produced by
+            // `generate_seccomp_filter`. The `sock_fprog` / `sock_filter`
+            // structs below match the kernel ABI on x86_64 Linux. The
+            // Vec `prog` (and therefore `fprog.filter`) outlives both
+            // syscalls because it is dropped only at function return.
+            let rc = unsafe { install_seccomp_filter_bpf(&filter) };
+            if rc < 0 {
+                return Err(IpcError::KernelError);
+            }
+            Ok(rc)
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+        {
+            // Non-x86_64 / non-Linux targets: the BPF program is still
+            // generated and inspectable via seccomp_filter(); the kernel
+            // prctl is x86_64-Linux only.
+            let _ = filter.len();
+            Ok(0)
+        }
+    }
+}
+
+/// Issue `prctl(PR_SET_NO_NEW_PRIVS, 1)` then
+/// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog)` via the raw
+/// x86_64 syscall ABI (nr 157). Returns the raw kernel return value:
+/// `0` on success, a negative `-errno` on failure.
+///
+/// # Safety
+/// `filter` must be a well-formed BPF program whose length is a
+/// multiple of 8 (each instruction is 8 bytes). Callers must ensure the
+/// program is safe to install on the current process.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+unsafe fn install_seccomp_filter_bpf(filter: &[u8]) -> i32 {
+    // Kernel ABI: struct sock_filter { u16 code; u8 jt; u8 jf; u32 k; }
+    //             struct sock_fprog  { u16 len; struct sock_filter __user *filter; }
+    #[repr(C)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+
+    const PR_SET_NO_NEW_PRIVS: usize = 38;
+    const PR_SET_SECCOMP: usize = 22;
+    const SECCOMP_MODE_FILTER: usize = 2;
+    const SYS_PRCTL: usize = 157; // __NR_prctl on x86_64
+
+    let mut prog: Vec<SockFilter> = Vec::with_capacity(filter.len() / 8);
+    for chunk in filter.chunks_exact(8) {
+        prog.push(SockFilter {
+            code: u16::from_le_bytes([chunk[0], chunk[1]]),
+            jt: chunk[2],
+            jf: chunk[3],
+            k: u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+        });
+    }
+    let fprog = SockFprog {
+        len: prog.len() as u16,
+        filter: prog.as_ptr(),
+    };
+
+    let mut rc: i64;
+
+    // prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) — required before
+    // SECCOMP_MODE_FILTER for unprivileged processes; a no-op for root.
+    //
+    // SAFETY: syscall ABI on x86_64 — rax=nr, rdi/rsi/rdx/r10/r8/r9 are
+    // args 1-6, return in rax, rcx and r11 are clobbered.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") SYS_PRCTL => rc,
+            in("rdi") PR_SET_NO_NEW_PRIVS,
+            in("rsi") 1usize,
+            in("rdx") 0usize,
+            in("r10") 0usize,
+            in("r8")  0usize,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    if rc < 0 {
+        return rc as i32; // -errno
+    }
+
+    // prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog, 0, 0)
+    let fprog_ptr: *const SockFprog = &fprog;
+    // SAFETY: same ABI as above; `fprog` (and the `prog` Vec it points
+    // into) are alive until function return, so the kernel sees a valid
+    // sock_fprog during the syscall.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") SYS_PRCTL => rc,
+            in("rdi") PR_SET_SECCOMP,
+            in("rsi") SECCOMP_MODE_FILTER,
+            in("rdx") fprog_ptr as usize,
+            in("r10") 0usize,
+            in("r8")  0usize,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    rc as i32
+}
+
+/// Decide whether a worker that exited with `exit_code` should be
+/// restarted, given its [`WorkerConfig`].
+///
+/// # Policy
+///   * A clean exit (`exit_code == 0`) is terminal — the worker
+///     finished its job and must not be restarted.
+///   * A config with `max_restarts == 0` disables the restart policy
+///     entirely; any exit (clean or crash) is terminal.
+///   * Any other exit code — a positive non-zero status from `exit(n)`,
+///     or a negative value as reported by `waitpid(2)` when `WIFSIGNALED`
+///     is true (e.g. `-11` for `SIGSEGV`) — is treated as a crash and is
+///     restartable.
+///
+/// The stateful restart *budget* (how many restarts have already been
+/// consumed) is tracked by [`Supervisor`]; this function is the
+/// stateless policy decision that feeds `Supervisor::should_restart`.
+pub fn should_restart(config: &WorkerConfig, exit_code: i32) -> bool {
+    if exit_code == 0 {
+        return false;
+    }
+    if config.max_restarts == 0 {
+        return false;
+    }
+    true
 }
 
 // ── L6: State Encapsulation (checkpointing) ──────────────────────────
@@ -3053,5 +3315,255 @@ mod tests {
 
         let closed = format!("{}", ProtocolError::Closed);
         assert!(closed.contains("closed"), "Closed msg must mention closed: {}", closed);
+    }
+
+    // ── W17-18: ResourceLimits + WorkerSandbox + should_restart ──────
+
+    #[test]
+    fn test_resource_limits_check_passes_within_limits() {
+        // Every measured resource strictly below its ceiling → pass.
+        let limits = ResourceLimits {
+            cpu_time_ms: 1_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_ipc_messages: 500,
+            max_file_descriptors: 32,
+        };
+        let usage = ResourceUsage {
+            cpu_time_ms: 500,
+            memory_bytes: 32 * 1024 * 1024,
+            ipc_messages: 250,
+            file_descriptors: 16,
+        };
+        assert!(
+            limits.check_limits(&usage),
+            "usage strictly below every ceiling must pass"
+        );
+    }
+
+    #[test]
+    fn test_resource_limits_check_passes_at_exact_ceiling() {
+        // <= is allowed: a worker at exactly its budget is still within
+        // limits (the supervisor kills on the *next* allocation).
+        let limits = ResourceLimits {
+            cpu_time_ms: 1_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_ipc_messages: 500,
+            max_file_descriptors: 32,
+        };
+        let usage = ResourceUsage {
+            cpu_time_ms: 1_000,
+            memory_bytes: 64 * 1024 * 1024,
+            ipc_messages: 500,
+            file_descriptors: 32,
+        };
+        assert!(limits.check_limits(&usage), "usage at the ceiling must pass");
+    }
+
+    #[test]
+    fn test_resource_limits_check_fails_when_cpu_exceeded() {
+        let limits = ResourceLimits {
+            cpu_time_ms: 1_000,
+            max_memory_bytes: u64::MAX,
+            max_ipc_messages: u64::MAX,
+            max_file_descriptors: u64::MAX,
+        };
+        let usage = ResourceUsage {
+            cpu_time_ms: 1_001,
+            ..Default::default()
+        };
+        assert!(!limits.check_limits(&usage), "cpu over budget must fail");
+    }
+
+    #[test]
+    fn test_resource_limits_check_fails_when_memory_exceeded() {
+        let limits = ResourceLimits {
+            cpu_time_ms: u64::MAX,
+            max_memory_bytes: 1024,
+            max_ipc_messages: u64::MAX,
+            max_file_descriptors: u64::MAX,
+        };
+        let usage = ResourceUsage {
+            memory_bytes: 1025,
+            ..Default::default()
+        };
+        assert!(!limits.check_limits(&usage), "memory over budget must fail");
+    }
+
+    #[test]
+    fn test_resource_limits_check_fails_when_ipc_exceeded() {
+        let limits = ResourceLimits {
+            cpu_time_ms: u64::MAX,
+            max_memory_bytes: u64::MAX,
+            max_ipc_messages: 10,
+            max_file_descriptors: u64::MAX,
+        };
+        let usage = ResourceUsage {
+            ipc_messages: 11,
+            ..Default::default()
+        };
+        assert!(!limits.check_limits(&usage), "ipc count over budget must fail");
+    }
+
+    #[test]
+    fn test_resource_limits_check_fails_when_fd_exceeded() {
+        let limits = ResourceLimits {
+            cpu_time_ms: u64::MAX,
+            max_memory_bytes: u64::MAX,
+            max_ipc_messages: u64::MAX,
+            max_file_descriptors: 4,
+        };
+        let usage = ResourceUsage {
+            file_descriptors: 5,
+            ..Default::default()
+        };
+        assert!(!limits.check_limits(&usage), "fd count over budget must fail");
+    }
+
+    #[test]
+    fn test_resource_limits_zero_ceiling_means_unlimited() {
+        // A ceiling of 0 disables that check, so even maximal usage must
+        // pass — this is the documented "unlimited" sentinel.
+        let limits = ResourceLimits {
+            cpu_time_ms: 0,
+            max_memory_bytes: 0,
+            max_ipc_messages: 0,
+            max_file_descriptors: 0,
+        };
+        let usage = ResourceUsage {
+            cpu_time_ms: u64::MAX,
+            memory_bytes: u64::MAX,
+            ipc_messages: u64::MAX,
+            file_descriptors: u64::MAX,
+        };
+        assert!(limits.check_limits(&usage), "zero ceilings must mean unlimited");
+    }
+
+    #[test]
+    fn test_should_restart_restarts_on_nonzero_exit_code() {
+        // exit(n) with n != 0 is a crash — restart (within budget).
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert!(should_restart(&config, 1),   "exit(1) is a crash — restart");
+        assert!(should_restart(&config, 134), "exit(134) (SIGABRT 128+6) — restart");
+        assert!(should_restart(&config, 137), "exit(137) (SIGKILL 128+9) — restart");
+        assert!(should_restart(&config, 139), "exit(139) (SIGSEGV 128+11) — restart");
+    }
+
+    #[test]
+    fn test_should_restart_restarts_on_signal_death() {
+        // waitpid(2) with WIFSIGNALED reports the negated signal number.
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert!(should_restart(&config, -11), "killed by SIGSEGV — restart");
+        assert!(should_restart(&config, -9),  "killed by SIGKILL — restart");
+        assert!(should_restart(&config, -6),  "killed by SIGABRT — restart");
+    }
+
+    #[test]
+    fn test_should_restart_does_not_restart_on_clean_exit() {
+        // exit(0) means the worker finished its job — never restart.
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert!(!should_restart(&config, 0), "clean exit must not restart");
+    }
+
+    #[test]
+    fn test_should_restart_disabled_when_max_restarts_zero() {
+        // max_restarts == 0 disables the restart policy entirely, even
+        // for crashes and signals.
+        let config = WorkerConfig { max_restarts: 0, ..Default::default() };
+        assert!(!should_restart(&config, 0),   "clean exit, no restart");
+        assert!(!should_restart(&config, 1),   "max_restarts=0 disables restart even on crash");
+        assert!(!should_restart(&config, -11), "max_restarts=0 disables restart even on signal");
+    }
+
+    #[test]
+    fn test_worker_sandbox_combines_config_and_limits() {
+        // The sandbox must carry both halves of the L5 containment
+        // (syscall filter via config, resource ceilings via limits).
+        let config = WorkerConfig {
+            trust_level: TrustLevel::Sandboxed,
+            max_restarts: 5,
+            timeout_ms: 2_000,
+        };
+        let limits = ResourceLimits {
+            cpu_time_ms: 500,
+            max_memory_bytes: 8 * 1024 * 1024,
+            max_ipc_messages: 100,
+            max_file_descriptors: 8,
+        };
+        let sandbox = WorkerSandbox::new(config.clone(), limits.clone());
+        assert_eq!(sandbox.config, config);
+        assert_eq!(sandbox.limits, limits);
+    }
+
+    #[test]
+    fn test_worker_sandbox_seccomp_filter_is_well_formed() {
+        // The sandbox must actually delegate to generate_seccomp_filter
+        // (the L5 wire-up): the result is a BPF program whose length is
+        // a multiple of 8, starting with the LD of seccomp_data.nr and
+        // ending with the KILL action.
+        let sandbox = WorkerSandbox::new(
+            WorkerConfig {
+                trust_level: TrustLevel::Untrusted,
+                ..Default::default()
+            },
+            ResourceLimits::default(),
+        );
+        let filter = sandbox.seccomp_filter();
+        assert!(filter.len() >= 16, "filter must have at least LD + KILL ({})", filter.len());
+        assert_eq!(filter.len() % 8, 0, "BPF instructions are 8 bytes each");
+        // First instruction opcode: BPF_LD | BPF_W | BPF_ABS == 0x20.
+        assert_eq!(filter[0], 0x20, "filter must start with BPF_LD of seccomp_data.nr");
+        // Last instruction: BPF_RET | BPF_K (0x06) with SECCOMP_RET_KILL (0).
+        let last = filter.len() - 8;
+        assert_eq!(filter[last], 0x06, "filter must end with BPF_RET");
+        assert_eq!(
+            &filter[last + 4..last + 8],
+            &[0, 0, 0, 0],
+            "default action is SECCOMP_RET_KILL"
+        );
+    }
+
+    #[test]
+    fn test_worker_sandbox_filter_scales_with_trust_level() {
+        // Higher trust ⇒ more allowed syscalls ⇒ longer filter. This
+        // pins the wiring: sandbox.seccomp_filter() →
+        // generate_seccomp_filter(WorkerConfig) → allowed_syscalls(TrustLevel).
+        let mk = |trust: TrustLevel| {
+            WorkerSandbox::new(
+                WorkerConfig { trust_level: trust, ..Default::default() },
+                ResourceLimits::default(),
+            )
+            .seccomp_filter()
+            .len()
+        };
+        let sandboxed = mk(TrustLevel::Sandboxed);
+        let untrusted = mk(TrustLevel::Untrusted);
+        let verified = mk(TrustLevel::Verified);
+        let kernel = mk(TrustLevel::Kernel);
+        assert!(sandboxed < untrusted, "Sandboxed allows fewer syscalls than Untrusted");
+        assert!(untrusted < verified, "Untrusted allows fewer syscalls than Verified");
+        assert!(verified < kernel, "Verified allows fewer syscalls than Kernel");
+    }
+
+    #[test]
+    fn test_worker_sandbox_apply_does_not_trap_on_construction() {
+        // On x86_64 Linux, calling apply() would install a real seccomp
+        // filter on the test runner — so we deliberately do NOT call it
+        // here. We instead verify the sandbox can be built and its
+        // filter inspected, which is the safe subset of the contract.
+        // On non-x86_64/non-Linux targets apply() is a documented no-op
+        // returning Ok(0) and is safe to invoke.
+        let sandbox = WorkerSandbox::new(WorkerConfig::default(), ResourceLimits::default());
+        assert!(!sandbox.seccomp_filter().is_empty());
+
+        #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+        {
+            let rc = sandbox
+                .apply()
+                .expect("apply() must succeed on non-native targets");
+            assert_eq!(rc, 0, "non-native apply() must return Ok(0)");
+        }
+        // On x86_64 Linux we intentionally skip apply() to avoid
+        // trapping the test process; the seccomp_filter() inspection
+        // above already exercises the wire-up.
     }
 }
