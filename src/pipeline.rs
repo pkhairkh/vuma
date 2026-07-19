@@ -9661,17 +9661,69 @@ pub fn flatten_expr(
                 ctx.state_var_layouts.insert(temp.clone(), name.clone());
                 // For each field, emit a Store at the field's offset.
                 for (field_name, field_expr) in fields {
-                    // Find the field's offset and type from the layout registry.
-                    let (offset, _size, field_ty) = layout_fields.iter()
-                        .find_map(|(fn_, ir_ty, off, sz, _tn)| {
+                    // Find the field's offset, size, and type_name from the layout registry.
+                    let (offset, _size, field_ty, type_name) = layout_fields.iter()
+                        .find_map(|(fn_, ir_ty, off, sz, tn)| {
                             if fn_ == field_name {
-                                Some((*off, *sz, ir_ty.clone()))
+                                Some((*off, *sz, ir_ty.clone(), tn.clone()))
                             } else {
                                 None
                             }
                         })
-                        .unwrap_or((0, 0, vuma_codegen::ir::IRType::U64));
-                    // Compute address: base + offset.
+                        .unwrap_or((0, 0, vuma_codegen::ir::IRType::U64, String::new()));
+
+                    // Wave 33: Handle nested struct literal fields inline.
+                    // If the field's type_name is a known layout AND the field
+                    // expression is a StructInit, write the nested struct's
+                    // fields directly into the parent buffer at the cumulative
+                    // offset (rather than allocating a separate temp and storing
+                    // its pointer). This makes `b.a.x` resolve correctly because
+                    // the nested fields are inline in the parent buffer.
+                    if ctx.layouts.contains_key(&type_name) {
+                        if let vuma_parser::ast::Expr::StructInit { name: nested_name, fields: nested_fields, .. } = field_expr {
+                            if let Some((_nested_total, nested_layout_fields)) = ctx.layouts.get(&type_name).cloned() {
+                                // Write each nested field directly into the parent buffer
+                                // at (parent_base + field_offset + nested_field_offset).
+                                for (nested_fname, nested_fexpr) in nested_fields {
+                                    let (nested_off, nested_fty) = nested_layout_fields.iter()
+                                        .find_map(|(fn_, ir_ty, off, _sz, _tn)| {
+                                            if fn_ == nested_fname {
+                                                Some((*off, ir_ty.clone()))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or((0, vuma_codegen::ir::IRType::U64));
+                                    let cum_offset = offset + nested_off;
+                                    let nptr = if cum_offset == 0 {
+                                        ScgExpr::Var(temp.clone())
+                                    } else {
+                                        let naddr = ctx.alloc_temp();
+                                        stmts.push(ScgStatement::Computation(ComputationNode {
+                                            dst: naddr.clone(),
+                                            op: BinOpKind::Add,
+                                            lhs: ScgExpr::Var(temp.clone()),
+                                            rhs: ScgExpr::Int(cum_offset as i64),
+                                            tail_call: false,
+                                            reassigns: None,
+                                        }));
+                                        ScgExpr::Var(naddr)
+                                    };
+                                    let nval = flatten_expr(nested_fexpr, stmts, ctx);
+                                    stmts.push(ScgStatement::Access(AccessNode::Store {
+                                        ptr: nptr,
+                                        offset: None,
+                                        value: nval,
+                                        ty: Some(nested_fty),
+                                    }));
+                                }
+                                // Skip the default Store below — nested fields written inline.
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Default: compute address: base + offset.
                     let ptr = if offset == 0 {
                         ScgExpr::Var(temp.clone())
                     } else {
