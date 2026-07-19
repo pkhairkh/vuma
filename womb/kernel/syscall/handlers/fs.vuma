@@ -1,0 +1,533 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/handlers/fs.vuma
+// VWK Syscall Handlers — Filesystem (open, close, mkdir, rmdir, unlink,
+// chdir, getcwd) (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the filesystem syscall-handler layer. It implements the
+// path/directory-manipulation syscalls that sibling io.vuma (write/read)
+// and mm.vuma (brk/mmap/munmap) don't cover:
+//   - sys_open_handler   (asm-generic __NR_openat = 56 — but the handler
+//                         calls the host `open` stub, which is x86_64
+//                         syscall #2; K11 may re-route to openat)
+//   - sys_close_handler  (asm-generic __NR_close = 57)
+//   - sys_mkdir_handler  (asm-generic __NR_mkdirat = 34 — host `mkdir`
+//                         stub is x86_64 syscall #83)
+//   - sys_rmdir_handler  (asm-generic __NR_rmdir = 84; host stub = #84)
+//   - sys_unlink_handler (asm-generic __NR_unlinkat = 35 — host `unlink`
+//                         stub is x86_64 syscall #87)
+//   - sys_chdir_handler  (asm-generic __NR_chdir = 49; host stub = #80)
+//   - sys_getcwd_handler (asm-generic __NR_getcwd = 17; host stub = #79)
+// Sibling io.vuma implements sys_write / sys_read; sibling proc.vuma
+// implements sys_getpid / sys_exit; sibling mm.vuma implements sys_brk /
+// sys_mmap / sys_munmap.
+//
+// ── Handler signature: `(tf: Address) -> u64` ───────────────────────────────
+// Unlike the io/proc/mm siblings (whose handlers take individual scalar
+// args — e.g. `fn sys_write(fd, buf, count)`), this file's handlers take
+// a single `tf: Address` parameter that points at the canonical TrapFrame
+// buffer. The dispatcher (sibling dispatch.vuma's R4c surface) invokes
+// each handler via `__call_indirect1(handler, tf as Address)` — the Wave 5
+// indirect-call runtime stub — so the handler receives the TrapFrame's
+// base address as its sole argument and reads its arguments out of the
+// canonical GPR slots via the `syscall_get_arg(tf, slot)` helper.
+//
+// This matches the R4c canonical slot mapping (see dispatch.vuma's header
+// "Canonical GPR slot mapping"):
+//     slot 0 = nr   (syscall number — already consumed by dispatch)
+//     slot 1 = a0   (1st arg)
+//     slot 2 = a1   (2nd arg)
+//     slot 3 = a2   (3rd arg)
+//     slot 4 = a3   (4th arg)
+//     slot 5 = a4   (5th arg)
+//     slot 6 = a5   (6th arg)
+//     slot 7 = ret  (return value — written by syscall_set_ret)
+//
+// Each handler reads only the slots it needs:
+//   sys_open_handler   : slots 1 (path), 2 (flags), 3 (mode)
+//   sys_close_handler  : slot  1 (fd)
+//   sys_mkdir_handler  : slots 1 (path), 2 (mode)
+//   sys_rmdir_handler  : slot  1 (path)
+//   sys_unlink_handler : slot  1 (path)
+//   sys_chdir_handler  : slot  1 (path)
+//   sys_getcwd_handler : slots 1 (buf), 2 (size)
+//
+// ── Why `tf: Address` and not `tf: State<TrapFrame>`? ──────────────────────
+// dispatch.vuma's R4c dispatch path hands the handler `tf as Address`
+// (the State<TrapFrame> → Address cast yields the buffer's base pointer).
+// VUMA's codegen conservatively invalidates State<T> bindings across
+// extern calls (the marshal pass's "Invalidate" mode — see
+// src/codegen/src/marshal.rs::ArgMode). If the handler signature were
+// `tf: State<TrapFrame>`, the first extern call inside the handler
+// (e.g. `__vuma_load_u64` or `open`) would invalidate `tf`, breaking
+// subsequent `tf.field` accesses AND breaking the post-call
+// `syscall_set_ret(tf, ret)` write-back.
+//
+// Taking `tf: Address` (a raw u64) side-steps the invalidation entirely:
+//   - The Address is a value type (just a 64-bit integer), not a State<T>.
+//   - Extern calls don't invalidate Addresses (they're not state-typed).
+//   - The handler reads its args via `__vuma_load_u64(tf + slot * 8)`
+//     (a raw memory load — same PMT-pure pattern as womb/kernel/drivers/
+//     uart.vuma's `__vuma_load_u32(base + 5)` for MMIO reads).
+//   - The handler writes its return value via the dispatcher's slot-7
+//     write-back (the dispatcher does `tf_set_gpr(tf, 7, result)` AFTER
+//     the handler returns — see dispatch.vuma::syscall_dispatch_from_trap).
+//
+// This is the same pattern the R4c dispatch header documents: "the
+// handler reads its arguments from the canonical GPR slots via
+// tf_get_gpr and writes its return value via tf_set_gpr before returning
+// a u64 result code." The `tf: Address` form is the natural shape for a
+// handler invoked via `__call_indirect1(handler, tf as Address)`.
+//
+// ── Why `__vuma_load_u64` instead of `tf_get_gpr`? ──────────────────────────
+// dispatch.vuma's `tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64`
+// does an 8-iteration byte-loop unpacking `tf.gpr[idx*8..idx*8+8]` into
+// a u64. That works when the caller holds a `State<TrapFrame>` (which
+// gives typed access to the `gpr` array). But our handlers receive a
+// raw `Address`, not a `State<TrapFrame>` — they can't use `tf.gpr[i]`
+// (no State-typed binding to index into).
+//
+// The PMT-pure alternative is `__vuma_load_u64(addr: u64) -> u64` — a
+// 4-byte runtime stub (`mov rax, [rdi]; ret` = `48 8B 07 C3`) emitted by
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (the "Wave
+// 7: __vuma_load_u64" entry). It performs a single 64-bit memory load
+// from the supplied address — no pointer syntax (`*ptr`) in VUMA source,
+// preserving PMT purity. Same category as the `write`/`read`/`exit`
+// syscall stubs and the `__vuma_load_u32` stub used by uart.vuma for
+// MMIO reads.
+//
+// `syscall_get_arg(tf, slot)` is the per-arch-agnostic wrapper:
+//     fn syscall_get_arg(tf: Address, slot: u32) -> u64 {
+//         return __vuma_load_u64(tf + (slot * 8));
+//     }
+// The `slot * 8` byte offset matches the canonical GPR layout (each slot
+// is 8 bytes — see dispatch.vuma's "Canonical GPR slot mapping" header).
+// slot 0 = nr (offset 0), slot 1 = a0 (offset 8), slot 2 = a1 (offset 16),
+// slot 3 = a2 (offset 24), etc.
+//
+// ── Hosted vs bare-metal swap ───────────────────────────────────────────────
+// In hosted mode (compile_dump on x86_64), the `open`/`close`/`mkdir`/
+// `rmdir`/`unlink`/`chdir`/`getcwd` externs resolve to the pre-registered
+// runtime stubs in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_
+// stubs. Each is the canonical "mov eax,#num; syscall; ret" simple_stub
+// form (they all take ≤3 args in SysV AMD64 registers RDI/RSI/RDX, which
+// already match the syscall-ABI registers RDI/RSI/RDX for syscalls with
+// ≤3 args):
+//   - open   = sys_open     (syscall #2  on x86_64, 3 args)
+//   - close  = sys_close    (syscall #3  on x86_64, 1 arg)
+//   - mkdir  = sys_mkdir    (syscall #83 on x86_64, 2 args)
+//   - rmdir  = sys_rmdir    (syscall #84 on x86_64, 1 arg)
+//   - unlink = sys_unlink   (syscall #87 on x86_64, 1 arg)
+//   - chdir  = sys_chdir    (syscall #80 on x86_64, 1 arg)
+//   - getcwd = sys_getcwd   (syscall #79 on x86_64, 2 args)
+// In bare-metal mode (K11), these will route through the VFS (K5) for
+// path resolution + the PMM (K2a) for any inode-table allocations. The
+// handler signatures (`(tf: Address) -> u64`) stay byte-identical across
+// modes — only the extern block is the swap point. Same pattern as
+// io.vuma re-declaring its `write`/`read` externs.
+//
+// ── Return-value convention (u64 with sign-extended errno) ─────────────────
+// The host externs return i32 (open/close/mkdir/rmdir/unlink/chdir) or
+// u64 (getcwd). Linux's syscall convention is:
+//   - On success: return a non-negative value (fd for open, 0 for
+//     close/mkdir/rmdir/unlink/chdir, buf pointer for getcwd).
+//   - On failure: return -errno as a negative i64 (in the range
+//     [-4095, -1]) — e.g. open returns -ENOENT = -2 if the path doesn't
+//     exist, close returns -EBADF = -9 if the fd is invalid.
+//
+// VUMA's handlers return u64. The `fd as u64` / `ret as u64` cast
+// sign-extends the i32 result to i64, then reinterprets as u64 (two's-
+// complement bit-pattern identity — same convention as mm.vuma's
+// sys_mmap `ret as u64` cast for the Address return value, and proc.vuma's
+// documented "the kernel returns -errno as a negative i64" convention).
+// The dispatcher (dispatch.vuma::syscall_dispatch_from_trap) writes the
+// u64 result to canonical slot 7; the trap_entry stub (K11) reloads slot
+// 7 into rax for the user-space return. The libc wrapper at the user-
+// space boundary translates `(-retval)` to `errno = -retval`.
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// handlers take a raw `tf: Address` and read their args via the
+// `__vuma_load_u64` runtime stub (a 4-byte `mov rax,[rdi]; ret` trampoline
+// — same PMT-pure pattern as womb/kernel/drivers/uart.vuma's
+// `__vuma_load_u32(base + 5)` for MMIO reads, and womb/kernel/ipc/
+// futex.vuma's `__vuma_load_u32(uaddr)` for the futex word load). No
+// State<T> bindings cross an extern-call boundary (the State<SyscallArgs>
+// in the self-test is allocated, populated, and Address-cast BEFORE any
+// extern call — the post-cast Address is a value type, immune to the
+// codegen's State-invalidation-on-extern-call).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the K3f contract's
+// "IMPORTANT" rule:
+//     1, 2, 3 = syscall_get_arg slot indices (a0, a1, a2)
+//     8       = bytes per u64 slot (slot * 8 byte offset)
+//     42, 17, 256 = self-test sentinel values (verify slot round-trip)
+// Decimal avoids the parser's hex-literal path (parse_int_radix width-
+// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header for
+// the same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. The `extern "C" { fn open, fn close, ... }`
+// declarations are byte-identical to:
+//   - womb/kernel/arch/x86_64/trampoline.vuma (K1a — same extern block)
+//   - womb/kernel/hosted/host.vuma (K1a — host_* wrappers around the
+//     same syscall stubs)
+//   - womb/kernel/tty/console.vuma (K1d — re-declares `write` from the
+//     same stub family)
+// The SyscallArgs layout (used by the self-test as the TrapFrame buffer)
+// is re-declared byte-identically to:
+//   - womb/kernel/syscall/abi.vuma (K3e — the canonical source)
+// Future files that want to call these handlers (e.g. K11's kmain when
+// it bootstraps the syscall table via syscall_register(tbl, 56,
+// &sys_open_handler)) must either re-declare them locally OR wait for
+// VUMA to gain an import mechanism.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/handlers/fs.vuma \
+//         /tmp/fs.bin x86_64 --verify
+//     /tmp/fs.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (the self-test allocates a SyscallArgs,
+// populates slots 1/2/3 with sentinel values 42/17/256, reads them back
+// via syscall_get_arg, and verifies the round-trip — proving the helper
+// compiles AND that the __vuma_load_u64 stub correctly reads the
+// State<SyscallArgs> buffer's typed fields).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations — filesystem syscall stubs (byte-identical to K1a's
+// trampoline.vuma and the runtime stub table in src/codegen/src/x86_64/
+// mod.rs::build_runtime_syscall_stubs).
+// ────────────────────────────────────────────────────────────────────────────
+// Hosted mode: each extern resolves to a simple_stub
+// ("mov eax,#num; syscall; ret") — all take ≤3 args, so the SysV AMD64
+// argument registers (RDI/RSI/RDX) already match the syscall-ABI
+// argument registers (RDI/RSI/RDX) for syscalls with ≤3 args. No
+// register shuffling needed (contrast with mmap/mremap/clone which need
+// the RCX→R10 fixup for the 4th arg).
+//
+// The `path: Address` / `buf: Address` params are raw u64 pointers (the
+// user-space path string / buffer address, handed through verbatim from
+// the TrapFrame's slot-1 / slot-2 value). The marshal pass treats
+// `Address` as a value type (no State<T> invalidation, no scratchpad
+// copy) — same as io.vuma's `write(fd, buf: Address, count)`.
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn open(path: Address, flags: i32, mode: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn read(fd: i32, buf: Address, count: i64) -> i64;
+    fn mkdir(path: Address, mode: u32) -> i32;
+    fn rmdir(path: Address) -> i32;
+    fn unlink(path: Address) -> i32;
+    fn chdir(path: Address) -> i32;
+    fn getcwd(buf: Address, size: u64) -> u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// VUMA intrinsic memory-load stub (Wave 7).
+// ────────────────────────────────────────────────────────────────────────────
+// `__vuma_load_u64(addr: u64) -> u64` is a 4-byte runtime stub emitted
+// by src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs under
+// the "Wave 7: __vuma_load_u64" entry. It lowers to:
+//     mov rax, [rdi] ; ret  =  48 8B 07 C3  (4 bytes)
+// (REX.W prefix 0x48 + 0x8B 0x07 = `mov rax, [rdi]` + 0xC3 = `ret`).
+//
+// This is the PMT-pure way to perform a raw 64-bit memory load: the
+// language has no `*ptr` dereference syntax (it's a hard parse error in
+// VUMA 2.0 — see src/parser/src/parser.rs::check_pointer_syntax), so
+// loads from arbitrary addresses are delegated to a runtime stub (same
+// category as the write/read/exit syscall stubs and the
+// __vuma_load_u32 / __vuma_store_u32 stubs used by uart.vuma for MMIO).
+//
+// `__vuma_load_u64` is the u64-sized sibling of uart.vuma's
+// `__vuma_load_u32` (which is a 3-byte `mov eax, [rdi]; ret` stub). The
+// u64 form is needed here because TrapFrame GPR slots are 8 bytes wide
+// (each slot holds a full u64 register value — see dispatch.vuma's
+// "Canonical GPR slot mapping" header).
+extern "C" {
+    fn __vuma_load_u64(addr: u64) -> u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// syscall_get_arg — read canonical GPR slot `slot` from the TrapFrame at
+// base address `tf`.
+// ────────────────────────────────────────────────────────────────────────────
+// The TrapFrame's canonical GPR array is laid out as 32 × u64 slots
+// (see dispatch.vuma's layout TrapFrame = { gpr: [u8; 256], ... }).
+// The R4c syscall contract assigns the first 8 slots:
+//     slot 0 = nr    (offset 0)
+//     slot 1 = a0    (offset 8)
+//     slot 2 = a1    (offset 16)
+//     slot 3 = a2    (offset 24)
+//     slot 4 = a3    (offset 32)
+//     slot 5 = a4    (offset 40)
+//     slot 6 = a5    (offset 48)
+//     slot 7 = ret   (offset 56)
+//
+// `slot * 8` is the byte offset of slot `slot` from the TrapFrame base.
+// `tf + (slot * 8)` is the address of that slot's first byte.
+// `__vuma_load_u64(...)` loads the 8-byte little-endian u64 value at
+// that address.
+//
+// This is the Address-typed analog of dispatch.vuma's
+// `syscall_get_arg(tf: State<TrapFrame>, arg_idx: u32) -> u64` (which
+// uses `tf_get_gpr(tf, arg_idx + 1)` and the byte-loop unpack). The
+// State<TrapFrame> version uses typed field access (`tf.gpr[off + i]`);
+// the Address version uses a raw load via the runtime stub. Both
+// produce the same u64 value for the same slot.
+//
+// The `slot * 8` multiplication yields a u32 (slot is u32, 8 is a u32
+// literal). VUMA's `Address + u32` arithmetic yields an Address (the
+// result is implicitly convertible to u64 for the extern call — same
+// implicit Address→u64 conversion that makes `(c as Address) + 8` work
+// in womb/kernel/tty/console.vuma's documented "Hand-compute the
+// offset" pattern).
+fn syscall_get_arg(tf: Address, slot: u32) -> u64 {
+    return __vuma_load_u64(tf + (slot * 8));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_open_handler — open a file at `path` with `flags` and `mode`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux open(2) takes 3 args: pathname, flags, mode. If O_CREAT is set
+// in flags, mode is used; otherwise mode is ignored. Returns the new
+// file descriptor (a non-negative int) on success, or -errno on failure
+// (e.g. -ENOENT = -2 if the path doesn't exist, -EACCES = -13 if
+// permission denied).
+//
+// Slot reads:
+//   slot 1 (a0) = path  — user-space pointer to NUL-terminated pathname
+//   slot 2 (a1) = flags — bitmask of O_RDONLY/O_WRONLY/O_RDWR/O_CREAT/...
+//   slot 3 (a2) = mode  — file permission bits (0644 etc.), used iff
+//                         O_CREAT is set in flags
+//
+// The `path as Address` cast reinterprets the u64 slot value as an
+// Address (no-op on x86_64 — both are 64-bit). The `flags as i32` /
+// `mode as i32` casts truncate the u64 slot value to the low 32 bits
+// (the syscall ABI only uses the low 32 bits for these args — same
+// truncation pattern as mm.vuma's `prot as i32` / `flags as i32`).
+//
+// The `fd as u64` return cast sign-extends the i32 result to u64 (see
+// the file header's "Return-value convention" section).
+fn sys_open_handler(tf: Address) -> u64 {
+    let path = syscall_get_arg(tf, 1);
+    let flags = syscall_get_arg(tf, 2);
+    let mode = syscall_get_arg(tf, 3);
+    let fd = open(path as Address, flags as i32, mode as i32);
+    return fd as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_close_handler — close the file descriptor `fd`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux close(2) takes 1 arg: fd. Returns 0 on success, -errno on
+// failure (e.g. -EBADF = -9 if fd is not a valid open file descriptor).
+//
+// Slot reads:
+//   slot 1 (a0) = fd — the file descriptor to close
+fn sys_close_handler(tf: Address) -> u64 {
+    let fd = syscall_get_arg(tf, 1);
+    let ret = close(fd as i32);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_mkdir_handler — create a directory at `path` with `mode`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux mkdir(2) takes 2 args: pathname, mode. Returns 0 on success,
+// -errno on failure (e.g. -EEXIST = -17 if the path already exists,
+// -ENAMETOOLONG = -36 if the path is too long).
+//
+// Slot reads:
+//   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
+//   slot 2 (a1) = mode — file permission bits (0755 etc.)
+//
+// The `mode as u32` cast truncates the u64 slot value to the low 32
+// bits (mode is a u32 per the extern signature, matching the Linux
+// mkdir signature `int mkdir(const char *, mode_t)` where mode_t is
+// `unsigned int`).
+fn sys_mkdir_handler(tf: Address) -> u64 {
+    let path = syscall_get_arg(tf, 1);
+    let mode = syscall_get_arg(tf, 2);
+    let ret = mkdir(path as Address, mode as u32);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_rmdir_handler — remove the empty directory at `path`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux rmdir(2) takes 1 arg: pathname. Returns 0 on success, -errno
+// on failure (e.g. -ENOTEMPTY = -39 if the directory is not empty,
+// -ENOTDIR = -20 if the path is not a directory).
+//
+// Slot reads:
+//   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
+fn sys_rmdir_handler(tf: Address) -> u64 {
+    let path = syscall_get_arg(tf, 1);
+    let ret = rmdir(path as Address);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_unlink_handler — remove the file (or other non-directory fs entry)
+// at `path`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux unlink(2) takes 1 arg: pathname. Returns 0 on success, -errno
+// on failure (e.g. -ENOENT = -2 if the path doesn't exist, -EISDIR = -21
+// if the path is a directory — use rmdir for directories).
+//
+// Slot reads:
+//   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
+fn sys_unlink_handler(tf: Address) -> u64 {
+    let path = syscall_get_arg(tf, 1);
+    let ret = unlink(path as Address);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_chdir_handler — change the current working directory to `path`.
+// ────────────────────────────────────────────────────────────────────────────
+// Linux chdir(2) takes 1 arg: pathname. Returns 0 on success, -errno
+// on failure (e.g. -ENOENT = -2 if the path doesn't exist, -EACCES = -13
+// if permission denied, -ENOTDIR = -20 if a path component is not a
+// directory).
+//
+// Slot reads:
+//   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
+fn sys_chdir_handler(tf: Address) -> u64 {
+    let path = syscall_get_arg(tf, 1);
+    let ret = chdir(path as Address);
+    return ret as u64;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_getcwd_handler — get the current working directory as a NUL-
+// terminated string into `buf` (size `size`).
+// ────────────────────────────────────────────────────────────────────────────
+// Linux getcwd(2) takes 2 args: buf, size. Returns a pointer to a
+// string containing the path (which may be `buf` itself, or an
+// internal static buffer in some libc implementations) on success, or
+// 0 (NULL) on failure with errno set (e.g. -ERANGE = -34 if `size` is
+// too small for the path, -EFAULT = -14 if `buf` points to an
+// inaccessible address).
+//
+// Unlike the other handlers (whose externs return i32), getcwd's extern
+// returns u64 (the buf pointer — same type as the Address arg). The
+// `return ret;` passes the u64 through verbatim (no cast needed — the
+// handler's return type is already u64).
+//
+// Slot reads:
+//   slot 1 (a0) = buf  — user-space pointer to the output buffer
+//   slot 2 (a1) = size — size of the output buffer in bytes
+fn sys_getcwd_handler(tf: Address) -> u64 {
+    let buf = syscall_get_arg(tf, 1);
+    let size = syscall_get_arg(tf, 2);
+    let ret = getcwd(buf as Address, size);
+    return ret;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+// SyscallArgs is re-declared byte-identically to womb/kernel/syscall/
+// abi.vuma (K3e — the canonical source). It's a 7-word struct (nr, a0..a5)
+// matching the asm-generic MAX_ARGS = 6 convention. The self-test uses
+// it as the TrapFrame buffer (its 7 u64 fields occupy offsets 0..48,
+// exactly covering the syscall-arg slots 0..6 that syscall_get_arg
+// reads via `tf + slot * 8`).
+//
+// Field offsets (each u64 is 8 bytes):
+//     nr @ 0   (slot 0)
+//     a0 @ 8   (slot 1)  ← read by all 7 handlers as path/buf
+//     a1 @ 16  (slot 2)  ← read by sys_open/mkdir/getcwd as flags/mode/size
+//     a2 @ 24  (slot 3)  ← read by sys_open as mode
+//     a3 @ 32  (slot 4)
+//     a4 @ 40  (slot 5)
+//     a5 @ 48  (slot 6)
+layout SyscallArgs = {
+    nr: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test.
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SyscallArgs via state_new (the canonical PMT allocation
+// pattern — same as io.vuma's `state_new(ByteBuf)` and abi.vuma's
+// `state_new(SyscallArgs)`). Populate slots 1, 2, 3 (a0, a1, a2) with
+// sentinel values 42, 17, 256 (the canonical decimal test constants —
+// 42 = the Answer, 17 = a prime, 256 = a power of 2 that catches any
+// u8 truncation in the slot-write path). Cast the State to an Address
+// (the `tf as Address` pattern from io.vuma's `buf_state as Address`),
+// then read each slot back via syscall_get_arg and verify the round-
+// trip preserves the value.
+//
+// The test exercises:
+//   - state_new(SyscallArgs) — PMT allocation
+//   - tf.a0 = N — typed State.field write (IVE state_write verifier
+//     checks the binding is state-typed and the field is valid)
+//   - tf as Address — PMT-to-pointer cast (the canonical pattern from
+//     K1d's console_flush and K3e's syscall_args_from_frame caller)
+//   - syscall_get_arg(addr, slot) — the helper under test (calls
+//     __vuma_load_u64, which loads the 8-byte u64 at `addr + slot * 8`)
+//   - value comparison — verifies the load returned the value written
+//     by the State.field write (proving the Address arithmetic and the
+//     __vuma_load_u64 stub both work end-to-end)
+//
+// The test does NOT call the 7 handler functions directly because:
+//   - sys_open/mkdir/rmdir/unlink/chdir would invoke real host
+//     filesystem syscalls on whatever path string lives at the slot-1
+//     address. With slot 1 = 42 (an unmapped low address), the syscall
+//     would return -EFAULT, but invoking it at all is impolite to the
+//     host (and in bare-metal K11 mode, would route through the VFS
+//     before the path-validation step exists).
+//   - sys_close would invoke the real close(2) on fd 42 — most likely
+//     returning -EBADF (fd 42 is not open in the test process), but
+//     again impolite.
+//   - sys_getcwd would invoke the real getcwd(2) on buf address 42 —
+//     returning -EFAULT.
+// The handler functions are still compiled + IVE-verified (the IVE
+// checks every fn in the SCG, not just ones reachable from main), so
+// their compile-time correctness is verified without the runtime
+// syscall side-effects.
+//
+// Returns 0 on success, 1/2/3 on per-slot round-trip failure (so a
+// future CI failure pinpoints the broken slot).
+//
+// Per the K3f contract's "IMPORTANT" rule: all non-zero constants in
+// the self-test use DECIMAL (1, 2, 3, 8, 42, 17, 256) — decimal avoids
+// the parser's hex-literal path (parse_int_radix width-extension
+// subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the same
+// rationale, and K3a's trap_trampoline.vuma for the same rule applied
+// to vector=14 and rip=4096).
+
+fn main() -> i32 {
+    let tf = state_new(SyscallArgs);
+    // Populate slots 1, 2, 3 with sentinel values.
+    tf.a0 = 42;    // slot 1
+    tf.a1 = 17;    // slot 2
+    tf.a2 = 256;   // slot 3
+
+    // Cast the State<SyscallArgs> to an Address — yields the buffer's
+    // base pointer (the address of `nr`, which is at offset 0). The
+    // State stays live in ___pmt_buffer for the duration of the test
+    // (the Address is a borrowed view, not a transfer of ownership).
+    let tf_addr = tf as Address;
+
+    // Read each slot back via syscall_get_arg and verify round-trip.
+    let a0 = syscall_get_arg(tf_addr, 1);
+    let a1 = syscall_get_arg(tf_addr, 2);
+    let a2 = syscall_get_arg(tf_addr, 3);
+
+    if a0 != 42 { return 1; }
+    if a1 != 17 { return 2; }
+    if a2 != 256 { return 3; }
+
+    return 0;
+}
