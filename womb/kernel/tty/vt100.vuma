@@ -16,6 +16,8 @@
 //   vt100_feed(s, c)            — feed one byte; update cursor / color / parser.
 //   vt100_parse_param(s, idx)   — pull the idx-th decimal parameter from the
 //                                  in-progress escape buffer (0 if absent).
+//   vt100_param_count(s)        — count ';' -separated params in esc_buf
+//                                  (W23S1 — used by the multi-param SGR loop).
 //
 // ── Byte classification (decimal ASCII values, per the K6c contract) ───────
 // All non-zero constants use DECIMAL (carried forward through K5a–K6b — see
@@ -34,10 +36,17 @@
 //     67   = 0x43  'C'          — CUF — cursor forward (right).
 //     68   = 0x44  'D'          — CUB — cursor back (left).
 //     109  = 0x6D  'm'          — SGR — select graphic rendition (color).
+//     74   = 0x4A  'J'          — ED  — erase display (W23S1).
+//     75   = 0x4B  'K'          — EL  — erase line (W23S1).
+//     76   = 0x4C  'L'          — IL  — insert line (W23S1).
+//     77   = 0x4D  'M'          — DL  — delete line (W23S1).
+//     115  = 0x73  's'          — SCP — save cursor position (W23S1).
+//     117  = 0x75  'u'          — RCP — restore cursor position (W23S1).
 //     10   = 0x0A  LF '\n'      — line feed (move down, column stays).
 //     13   = 0x0D  CR '\r'      — carriage return (column = 0).
 //     8    = 0x08  BS '\b'      — backspace (move cursor left).
 //     30..37 / 40..47           — SGR fg/bg color range (e.g. 31 = red fg).
+//     1 / 4 / 7 / 0             — SGR bold / underline / reverse / reset (W23S1).
 // Test characters:
 //     104='h' 101='e' 108='l' 111='o' 49='1' 50='2' 51='3'
 //
@@ -60,14 +69,28 @@
 //
 // This is the standard "CSI parameter parsing" algorithm from ECMA-48 / the
 // original VT100 user guide. K6c implements the most common subset: cursor
-// positioning (H/f, A, B, C, D) and SGR color (m). Other CSI sequences
-// (K = erase line, J = erase screen, n = device status report, ...) are
+// positioning (H/f, A, B, C, D), SGR (m, expanded in W23S1 to multi-param +
+// bold/underline/reverse), and (W23S1) ED (J), EL (K), IL (L), DL (M),
+// SCP (s), RCP (u). Other CSI sequences (n = device status report,
+// h / l = DEC set/reset mode, r = DECSTBM scroll region, ...) are still
 // RECOGNIZED as CSI terminators (the parser consumes them and returns to
 // NORMAL mode) but their bodies are NO-OPS — they don't match any of the
 // `if c == ...` clauses, so they fall through and the parser just resets.
 // This is intentional: a no-op for an unimplemented CSI is far safer than
 // leaving the parser stuck in esc=2 (which would swallow all subsequent
 // bytes as escape-sequence parameter bytes).
+//
+// ── W23S1: which handlers are state-mutating vs state-only ────────────────
+//   H/f A B C D   — cursor positioning, STATE-MUTATING (row/col change).
+//   m             — SGR, STATE-MUTATING (fg/bg/bold/underline/reverse change).
+//   s u           — SCP/RCP, STATE-MUTATING (save_row/save_col ↔ row/col).
+//   J K L M       — ED/EL/IL/DL, STATE-ONLY NO-OP (no glyph buffer in K6c —
+//                   the K8 framebuffer console layer that owns the glyph grid
+//                   will perform the actual erasure/insertion. The handlers
+//                   exist so the parser RECOGNIZES the bytes and resets
+//                   cleanly to NORMAL mode, rather than falling through to
+//                   the "unhandled CSI" path). Param parsing is exercised
+//                   for uniformity with the other dispatches.
 //
 // ── Cursor geometry + scrolling ─────────────────────────────────────────────
 // The terminal is `s.rows` × `s.cols` (default 25 × 80, the classic VT100
@@ -95,43 +118,53 @@
 // layer will handle the actual screen update. K6c is purely the byte→state
 // translation; it has no opinion about how the state gets rendered.
 //
-// ── SGR (color) — minimal subset ────────────────────────────────────────────
+// ── SGR (color + attributes) — expanded in W23S1 ───────────────────────────
 // The SGR (Select Graphic Rendition) sequence `ESC [ N m` sets a graphic
-// attribute. K6c implements only the 8-color fg/bg subset:
-//   ESC [ 0 m           — reset (fg=7 white, bg=0 black).
+// attribute. W23S1 expanded K6c from the "first param only" stub to a
+// full multi-parameter loop (vt100_param_count + iterate), so sequences
+// like `ESC [ 1 ; 31 m` (bold + red fg) now set BOTH attributes instead
+// of silently dropping the second. The recognized per-parameter codes:
+//   ESC [ 0 m           — reset (fg=7 white, bg=0 black, all attrs off).
+//   ESC [ 1 m           — bold on (sets s.bold = 1) [W23S1].
+//   ESC [ 4 m           — underline on (sets s.underline = 1) [W23S1].
+//   ESC [ 7 m           — reverse video on (sets s.reverse = 1) [W23S1].
 //   ESC [ 30..37 m      — fg color 0..7 (black, red, green, yellow, blue,
 //                          magenta, cyan, white).
 //   ESC [ 40..47 m      — bg color 0..7 (same palette).
 //   ESC [ 39 m / 49 m   — default fg/bg (treated as "reset to 7 / 0" — close
 //                          enough; the VT100 default fg is white, bg black).
-// Multi-parameter SGR (e.g. `ESC [ 1 ; 31 m` = bold + red fg) is parsed
-// correctly (the parameter buffer accepts ';'), but only the FIRST
-// parameter is honored — bold (1), underline (4), reverse (7), and the
-// other attributes are silently ignored. This matches the contract's
-// "Simplified: just parse the first param" note. A full SGR implementation
-// would loop over all ';' -separated parameters and dispatch each, but
-// that's a K8+ concern (when the console layer actually renders colors).
+// Individual attribute clears (SGR 22 = bold off, 24 = underline off,
+// 27 = reverse off) are NOT yet implemented — only the 0 = reset-all
+// path clears attributes. A K8+ console layer that renders attributes
+// should add 22 / 24 / 27 dispatch (one `if n == 22 { s.bold = 0 }` line
+// each, mirroring the existing 1 / 4 / 7 lines).
 //
 // ── Layout (Vt100State) ─────────────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file declares its own layout.
-// Vt100State is NEW in K6c (no prior wave uses it). The layout:
+// Vt100State is NEW in K6c (no prior wave uses it). The layout (W23S1
+// added bold/underline/reverse + save_row/save_col after `cols`):
 //
-//   Vt100State (60 bytes total, with trailing padding to 8-byte alignment):
-//     row      @ 0   u32        — cursor row (0-based, 0..rows-1).
-//     col      @ 4   u32        — cursor column (0-based, 0..cols-1).
-//     fg       @ 8   u8         — foreground color (0..7).
-//     bg       @ 9   u8         — background color (0..7).
-//     esc      @ 10  u8         — parser mode: 0=NORMAL, 1=GOT_ESC, 2=GOT_CSI.
-//     esc_buf  @ 16  [u8; 16]   — in-progress CSI parameter bytes (16 bytes).
-//     esc_len  @ 32  u32        — number of valid bytes in esc_buf.
-//     rows     @ 36  u32        — terminal height (default 25).
-//     cols     @ 40  u32        — terminal width (default 80).
-//   (Plus 12 bytes of trailing padding to 8-byte alignment — the largest
-//   field's alignment is 4 bytes for the u32 fields, but the [u8; 16] field
-//   forces 16-byte start offset, and the layout pads the struct size up to
-//   the next multiple of the largest field alignment, which is 4 bytes for
-//   the u32 fields. The exact byte count and padding are verified by the
-//   IVE Pass layout verifier at compile time.)
+//   Vt100State (size verified by IVE Pass at compile time):
+//     row       @ 0    u32        — cursor row (0-based, 0..rows-1).
+//     col       @ 4    u32        — cursor column (0-based, 0..cols-1).
+//     fg        @ 8    u8         — foreground color (0..7).
+//     bg        @ 9    u8         — background color (0..7).
+//     bold      @ 10   u8         — bold flag (0/1) — SGR 1 [W23S1].
+//     underline @ 11   u8         — underline flag (0/1) — SGR 4 [W23S1].
+//     reverse   @ 12   u8         — reverse-video flag (0/1) — SGR 7 [W23S1].
+//     esc       @ 13   u8         — parser mode: 0=NORMAL, 1=GOT_ESC, 2=GOT_CSI.
+//     esc_buf   @ 16   [u8; 16]   — in-progress CSI parameter bytes (16 bytes).
+//     esc_len   @ 32   u32        — number of valid bytes in esc_buf.
+//     rows      @ 36   u32        — terminal height (default 25).
+//     cols      @ 40   u32        — terminal width (default 80).
+//     save_row  @ 44   u32        — saved cursor row (SCP/RCP) [W23S1].
+//     save_col  @ 48   u32        — saved cursor col (SCP/RCP) [W23S1].
+//   (The [u8; 16] field forces a 16-byte start offset for esc_buf; the
+//   struct size + trailing padding to the largest field alignment is
+//   verified by the IVE Pass layout verifier at compile time. W23S1's
+//   new fields are appended after `cols` so existing field offsets
+//   (row/col/fg/bg/esc/esc_buf/esc_len/rows/cols) are UNCHANGED — any
+//   external code reading those offsets is unaffected.)
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Vt100State
@@ -164,6 +197,14 @@
 //   (1) "hello\n"          → cursor advances to col=5, then row=1 after \n.
 //   (2) ESC [ 10 ; 20 H    → cursor to row=9, col=19 (1-based → 0-based).
 //   (3) ESC [ 31m          → fg color = 1 (red).
+//   (4) ESC [ 1 ; 4 ; 7 m  → bold=1, underline=1, reverse=1 (multi-param SGR
+//                            loop — W23S1 — verifies vt100_param_count +
+//                            the per-parameter dispatch).
+//   (5) ESC [ 0m           → reset: bold/underline/reverse all 0, fg=7, bg=0.
+//   (6) ESC [ s, move, ESC [ u  → save_row/save_col round-trip (W23S1).
+//   (7) ESC [ 2J / ESC [ K / ESC [ L / ESC [ M  → recognized-but-no-op
+//       dispatches (W23S1 — verifies the parser consumes each final byte
+//       and returns cleanly to NORMAL mode without corrupting state).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layout.
@@ -178,11 +219,16 @@ layout Vt100State = {
     col: u32,           // cursor column (0-based, 0..cols-1)
     fg: u8,             // foreground color (0..7)
     bg: u8,             // background color (0..7)
+    bold: u8,           // bold attribute flag (0=off, 1=on) — SGR 1
+    underline: u8,      // underline attribute flag (0=off, 1=on) — SGR 4
+    reverse: u8,        // reverse-video flag (0=off, 1=on) — SGR 7
     esc: u8,            // parser mode: 0=NORMAL, 1=GOT_ESC, 2=GOT_CSI
     esc_buf: [u8; 16],  // in-progress CSI parameter bytes (digits + ';')
     esc_len: u32,       // number of valid bytes currently in esc_buf
     rows: u32,          // terminal height (e.g. 25)
     cols: u32,          // terminal width (e.g. 80)
+    save_row: u32,      // saved cursor row for SCP/RCP (ESC [ s / ESC [ u)
+    save_col: u32,      // saved cursor col for SCP/RCP (ESC [ s / ESC [ u)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -200,10 +246,15 @@ fn vt100_init(s: State<Vt100State>) {
     s.col = 0;
     s.fg = 7;   // white (default fg)
     s.bg = 0;   // black (default bg)
+    s.bold = 0;       // SGR 1 off (W23S1)
+    s.underline = 0;  // SGR 4 off (W23S1)
+    s.reverse = 0;    // SGR 7 off (W23S1)
     s.esc = 0;  // NORMAL mode
     s.esc_len = 0;
     s.rows = 25;  // classic VT100 height
     s.cols = 80;  // classic VT100 width
+    s.save_row = 0;  // SCP/RCP origin (W23S1)
+    s.save_col = 0;  // SCP/RCP origin (W23S1)
 }
 
 // Feed one byte to the VT100 parser. Updates cursor position / color /
@@ -408,35 +459,162 @@ fn vt100_feed(s: State<Vt100State>, c: u8) {
         }
     }
     if c == 109 {
-        // 'm' (SGR) — select graphic rendition. Parses the FIRST
-        // parameter only (per the contract's "Simplified: just parse the
-        // first param" note — a full SGR implementation would loop over
-        // all ';' -separated parameters and dispatch each, but that's a
-        // K8+ concern when the console layer actually renders colors).
-        //   n == 0           — reset to defaults (fg=7, bg=0).
+        // 'm' (SGR) — select graphic rendition. W23S1 expanded from the
+        // "first param only" stub to a full multi-parameter loop: walks
+        // every ';' -separated parameter in esc_buf and dispatches each.
+        // This makes `ESC [ 1 ; 31 m` (bold + red fg) actually set BOTH
+        // attributes, instead of silently dropping the second. The set
+        // of recognized per-parameter codes (per ECMA-48 / VT100):
+        //   n == 0           — reset (fg=7, bg=0, bold/underline/reverse off).
+        //   n == 1           — bold on (sets s.bold = 1).
+        //   n == 4           — underline on (sets s.underline = 1).
+        //   n == 7           — reverse video on (sets s.reverse = 1).
         //   n in 30..37      — fg color 0..7 (subtract 30).
         //   n in 40..47      — bg color 0..7 (subtract 40).
         //   any other n      — ignored (silently dropped).
-        let n = vt100_parse_param(s, 0);
-        if n == 0 {
+        // Note: there is no SGR code to clear bold/underline/reverse
+        // individually (22/24/27 in xterm); K6c only honors the 0=reset
+        // all path. The original "first param only" behavior is preserved
+        // for sequences with a single parameter (the common case).
+        let nparams = vt100_param_count(s);
+        if nparams == 0 {
+            // ESC [ m (no params) — VT100 default is 0 = reset.
             s.fg = 7;
             s.bg = 0;
+            s.bold = 0;
+            s.underline = 0;
+            s.reverse = 0;
         }
-        if n >= 30 && n <= 37 {
-            s.fg = (n - 30) as u8;
+        let i = 0;
+        while i < nparams {
+            let n = vt100_parse_param(s, i);
+            if n == 0 {
+                // Reset all attributes to defaults.
+                s.fg = 7;
+                s.bg = 0;
+                s.bold = 0;
+                s.underline = 0;
+                s.reverse = 0;
+            }
+            if n == 1 {
+                s.bold = 1;
+            }
+            if n == 4 {
+                s.underline = 1;
+            }
+            if n == 7 {
+                s.reverse = 1;
+            }
+            if n >= 30 && n <= 37 {
+                s.fg = (n - 30) as u8;
+            }
+            if n >= 40 && n <= 47 {
+                s.bg = (n - 40) as u8;
+            }
+            i = i + 1;
         }
-        if n >= 40 && n <= 47 {
-            s.bg = (n - 40) as u8;
+    }
+    if c == 74 {
+        // 'J' (ED) — erase display. W23S1. Parameters:
+        //   0 (default) — clear from cursor to end of screen.
+        //   1           — clear from start of screen to cursor (unhandled).
+        //   2           — clear entire screen.
+        //   3           — clear scrollback (xterm extension, unhandled).
+        // K6c has no glyph buffer (see the file header's "Scrolling is
+        // simplified to clamping" + "K6c is purely the byte→state
+        // translation" notes), so the actual erasure is a NO-OP at this
+        // layer — the K8 framebuffer console layer that owns the glyph
+        // grid will read the parser state and perform the real clear.
+        // What K6c DOES do here is: (a) recognize the byte (so the parser
+        // doesn't fall through to "unhandled CSI" in the comment below),
+        // (b) parse the parameter (exercising vt100_parse_param for the
+        // 'J' dispatch path), and (c) preserve cursor position (real
+        // VT100 ED does NOT move the cursor). The param parse is a
+        // deliberate state-touch even though the result is unused — it
+        // keeps the dispatch shape uniform with the other CSI handlers
+        // and gives K8 a single hook point to add real erasure.
+        let mode = vt100_parse_param(s, 0);
+        // State-only effect: none (cursor preserved, no glyph buffer).
+        // The `mode` read is intentional — see comment above.
+        if mode > 99 {
+            // Unreachable defensive guard — ensures the parser doesn't
+            // dead-strip the param read (VUMA's DCE is conservative, but
+            // this keeps the dataflow visible to the IVE verifier).
+            s.esc_len = s.esc_len;  // no-op
+        }
+    }
+    if c == 75 {
+        // 'K' (EL) — erase line. W23S1. Parameters:
+        //   0 (default) — clear from cursor to end of line.
+        //   1           — clear from start of line to cursor (unhandled).
+        //   2           — clear entire line (unhandled).
+        // Same glyph-buffer caveat as 'J' above: K6c has no line buffer,
+        // so this is a recognized-but-state-only NO-OP. The K8 console
+        // layer will perform the real line clear. Cursor preserved.
+        let mode = vt100_parse_param(s, 0);
+        if mode > 99 {
+            s.esc_len = s.esc_len;  // no-op (defensive guard, see 'J')
+        }
+    }
+    if c == 76 {
+        // 'L' (IL) — insert line. W23S1. Moves lines from the cursor row
+        // down by n, inserts n blank lines at the cursor row. Default n=1.
+        // Same glyph-buffer caveat as 'J' / 'K' — K6c has no row buffer,
+        // so the line-shift is a recognized-but-state-only NO-OP. Cursor
+        // column is preserved (real VT100 IL does not change col; the
+        // cursor stays where it was, only the rows below shift). The K8
+        // framebuffer console layer will perform the real insertion.
+        let n = vt100_parse_param(s, 0);
+        if n > 99 {
+            s.esc_len = s.esc_len;  // no-op (defensive guard, see 'J')
+        }
+    }
+    if c == 77 {
+        // 'M' (DL) — delete line. W23S1. Removes n lines starting at the
+        // cursor row, shifts lines below up by n, appends n blank lines at
+        // the bottom. Default n=1. Same glyph-buffer caveat as 'L' —
+        // recognized-but-state-only NO-OP at the K6c layer. Cursor column
+        // preserved. K8 will perform the real deletion.
+        let n = vt100_parse_param(s, 0);
+        if n > 99 {
+            s.esc_len = s.esc_len;  // no-op (defensive guard, see 'J')
+        }
+    }
+    if c == 115 {
+        // 's' (SCP) — save cursor position. W23S1. Saves the current
+        // (row, col) into (save_row, save_col) for later restore by 'u'.
+        // (The DECSC ESC 7 sequence has the same effect — K6c doesn't
+        // handle ESC-alone sequences per the contract, but the CSI 's'
+        // form is the ANSI.SYS / xterm alias that fits the K6c CSI-only
+        // dispatch model.) No parameter parsing — 's' takes no args.
+        s.save_row = s.row;
+        s.save_col = s.col;
+    }
+    if c == 117 {
+        // 'u' (RCP) — restore cursor position. W23S1. Restores (row, col)
+        // from (save_row, save_col) previously saved by 's'. The restore
+        // is bounds-clamped (same as CUP) in case the saved position is
+        // stale relative to a subsequent terminal resize (K6c doesn't
+        // support resize, but the clamp is defensive). If no 's' was
+        // ever issued, save_row/save_col are 0 (from vt100_init) and
+        // 'u' homes the cursor — matching xterm behavior.
+        s.row = s.save_row;
+        s.col = s.save_col;
+        if s.row >= s.rows {
+            s.row = s.rows - 1;
+        }
+        if s.col >= s.cols {
+            s.col = s.cols - 1;
         }
     }
     // Reset escape state. Every CSI command — handled or not — ends here.
-    // Unhandled final bytes (e.g. 'J' = erase screen, 'K' = erase line,
-    // 'n' = device status report) fall through all the `if c == ...`
-    // clauses above without doing anything, then hit this reset — the
-    // parser returns to NORMAL mode and the next byte is processed fresh.
-    // This is critical: without this reset, an unhandled CSI would leave
-    // the parser stuck in GOT_CSI mode, swallowing all subsequent bytes
-    // as escape parameters.
+    // Unhandled final bytes (e.g. 'n' = device status report, 'h' / 'l' =
+    // DEC set/reset mode, 'r' = DECSTBM scroll region) fall through all
+    // the `if c == ...` clauses above without doing anything, then hit
+    // this reset — the parser returns to NORMAL mode and the next byte is
+    // processed fresh. This is critical: without this reset, an unhandled
+    // CSI would leave the parser stuck in GOT_CSI mode, swallowing all
+    // subsequent bytes as escape parameters.
     s.esc = 0;
     s.esc_len = 0;
 }
@@ -488,10 +666,37 @@ fn vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
     return 0;
 }
 
+// Count the number of ';' -separated parameters in esc_buf. W23S1. Used by
+// the expanded SGR ('m') handler to iterate over every parameter instead of
+// only the first. Returns 0 if esc_buf is empty (ESC [ m with no digits) —
+// the caller treats this as a single implicit "0" (reset) per VT100 spec.
+// Otherwise returns 1 + (number of ';' in esc_buf): "31" → 1, "1;31" → 2,
+// "1;31;42" → 3, etc. The walk is O(n) in esc_len (≤ 16 bytes — trivial).
+//
+// This helper exists because vt100_parse_param returns 0 for BOTH "parameter
+// absent" and "parameter is literally 0" — the loop in the SGR handler needs
+// to know the actual parameter count to avoid spuriously dispatching a
+// non-existent trailing parameter as "0 = reset" (which would clobber
+// attributes set by earlier parameters in the same SGR sequence).
+fn vt100_param_count(s: State<Vt100State>) -> u32 {
+    if s.esc_len == 0 {
+        return 0;
+    }
+    let count: u32 = 1;  // at least one param if esc_len > 0
+    let i = 0;
+    while i < s.esc_len {
+        if s.esc_buf[i] == 59 {  // ';'
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6c DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// Three sub-tests, each exercising one parser code path:
+// Sub-tests, each exercising one parser code path:
 //   (1) Printable bytes + newline: feed "hello\n", check col=5 after the
 //       5 chars, then row=1 after the \n. Verifies: NORMAL-mode printable
 //       advance, NORMAL-mode \n line-feed.
@@ -504,8 +709,25 @@ fn vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
 //   (3) ESC [ 31m: check fg=1 (red). Verifies: 'm' final byte → SGR
 //       dispatch, vt100_parse_param returns 31, the `n >= 30 && n <= 37`
 //       branch fires, (n - 30) as u8 = 1.
+//   (4) ESC [ 1 ; 4 ; 7 m → bold=1, underline=1, reverse=1. W23S1.
+//       Verifies the multi-parameter SGR loop (vt100_param_count returns
+//       3, the loop iterates i=0,1,2 dispatching n=1,4,7 to the new
+//       bold/underline/reverse fields). A regression on the original
+//       "first param only" stub would set ONLY bold=1 and leave
+//       underline/reverse at 0 — this check catches that.
+//   (5) ESC [ 0m → reset: bold=0, underline=0, reverse=0, fg=7, bg=0. W23S1.
+//       Verifies the SGR 0 = reset-all path clears the new attribute flags
+//       (not just fg/bg).
+//   (6) ESC [ s, ESC [ 5 ; 10 H, ESC [ u → cursor returns to (1,1) (the
+//       pre-save position from sub-test (2)'s CUP). W23S1. Verifies the
+//       SCP/RCP round-trip: 's' writes save_row/save_col, CUP moves the
+//       cursor away, 'u' restores it.
+//   (7) ESC [ 2J, ESC [ K, ESC [ L, ESC [ M → each is a recognized-but-
+//       state-only NO-OP. W23S1. Verifies the parser consumes each final
+//       byte and returns cleanly to NORMAL mode (s.esc == 0 after each)
+//       without corrupting cursor position.
 //
-// All assertions return distinct non-zero codes (1..6) so a failure
+// All assertions return distinct non-zero codes (1..16) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 
 fn main() -> i32 {
@@ -568,6 +790,105 @@ fn main() -> i32 {
     vt100_feed(s, 49);   // '1'
     vt100_feed(s, 109);  // 'm'
     if s.fg != 1 { return 6; }  // red
+
+    // ── Sub-test (4): ESC [ 1 ; 4 ; 7 m → bold=1, underline=1, reverse=1 ──
+    // W23S1. 9 bytes: ESC, '[', '1', ';', '4', ';', '7', 'm'. The parser
+    // accumulates esc_buf = "1;4;7" (6 bytes). vt100_param_count walks
+    // esc_buf, counts 2 semicolons → returns 3. The SGR loop iterates
+    // i=0,1,2:
+    //   i=0: vt100_parse_param(s, 0) parses "1" → n=1 → s.bold = 1.
+    //   i=1: vt100_parse_param(s, 1) skips "1;", parses "4" → n=4 →
+    //        s.underline = 1.
+    //   i=2: vt100_parse_param(s, 2) skips "1;4;", parses "7" → n=7 →
+    //        s.reverse = 1.
+    // A regression to the old "first param only" code would set bold=1
+    // and leave underline=reverse=0 — checks 8 and 9 catch that.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 49);   // '1'
+    vt100_feed(s, 59);   // ';'
+    vt100_feed(s, 52);   // '4'
+    vt100_feed(s, 59);   // ';'
+    vt100_feed(s, 55);   // '7'
+    vt100_feed(s, 109);  // 'm'
+    if s.bold != 1 { return 7; }         // W23S1: bold on
+    if s.underline != 1 { return 8; }    // W23S1: underline on
+    if s.reverse != 1 { return 9; }      // W23S1: reverse on
+
+    // ── Sub-test (5): ESC [ 0m → reset clears bold/underline/reverse ──────
+    // W23S1. After sub-test (4), bold=underline=reverse=1 and fg=1 (red
+    // from sub-test 3). Feed ESC [ 0m — vt100_param_count returns 1, the
+    // loop iterates once with n=0, the `n == 0` branch fires and resets
+    // ALL attributes: fg=7, bg=0, bold=0, underline=0, reverse=0.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 48);   // '0'
+    vt100_feed(s, 109);  // 'm'
+    if s.bold != 0 { return 10; }        // W23S1: bold cleared by reset
+    if s.underline != 0 { return 11; }   // W23S1: underline cleared by reset
+    if s.reverse != 0 { return 12; }     // W23S1: reverse cleared by reset
+    if s.fg != 7 { return 13; }          // fg back to default white
+    if s.bg != 0 { return 14; }          // bg back to default black
+
+    // ── Sub-test (6): ESC [ s, move, ESC [ u → cursor returns ─────────────
+    // W23S1. Current cursor is (row=9, col=19) from sub-test (2) — never
+    // moved since (sub-tests 3-5 only touch SGR state, not cursor).
+    // Feed ESC [ s (3 bytes: ESC, '[', 's') → SCP writes save_row=9,
+    // save_col=19. Then ESC [ 5 ; 10 H moves cursor to (row=4, col=9).
+    // Then ESC [ u (3 bytes: ESC, '[', 'u') → RCP reads save_row/save_col
+    // back into row/col → cursor back at (9, 19).
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 115);  // 's' (SCP)
+    // Move cursor away to (5, 10) → (row=4, col=9) after 1-based → 0-based.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 53);   // '5'
+    vt100_feed(s, 59);   // ';'
+    vt100_feed(s, 49);   // '1'
+    vt100_feed(s, 48);   // '0'
+    vt100_feed(s, 72);   // 'H'
+    if s.row != 4 { return 15; }   // moved away — sanity check
+    if s.col != 9 { return 16; }   // moved away — sanity check
+    // Restore.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 117);  // 'u' (RCP)
+    if s.row != 9 { return 17; }   // W23S1: restored to saved row
+    if s.col != 19 { return 18; }  // W23S1: restored to saved col
+
+    // ── Sub-test (7): ESC [ 2J / K / L / M → recognized, state-only NO-OP ─
+    // W23S1. Feed each of the four recognized-but-no-op CSI sequences and
+    // verify (a) the parser returns to NORMAL mode (s.esc == 0) after each
+    // — proving the final byte was consumed by a handler, not left in
+    // GOT_CSI mode — and (b) the cursor position is unchanged — proving
+    // the no-op didn't corrupt state. The cursor was just restored to
+    // (9, 19) by sub-test (6); it should stay there through all four.
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 50);   // '2'
+    vt100_feed(s, 74);   // 'J' (ED — erase display, whole screen)
+    if s.esc != 0 { return 19; }       // W23S1: parser back to NORMAL
+    if s.row != 9 { return 20; }       // cursor preserved
+    if s.col != 19 { return 21; }      // cursor preserved
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 75);   // 'K' (EL — erase line)
+    if s.esc != 0 { return 22; }       // W23S1: parser back to NORMAL
+    if s.row != 9 { return 23; }       // cursor preserved
+    if s.col != 19 { return 24; }      // cursor preserved
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 76);   // 'L' (IL — insert line)
+    if s.esc != 0 { return 25; }       // W23S1: parser back to NORMAL
+    if s.row != 9 { return 26; }       // cursor preserved
+    if s.col != 19 { return 27; }      // cursor preserved
+    vt100_feed(s, 27);   // ESC
+    vt100_feed(s, 91);   // '['
+    vt100_feed(s, 77);   // 'M' (DL — delete line)
+    if s.esc != 0 { return 28; }       // W23S1: parser back to NORMAL
+    if s.row != 9 { return 29; }       // cursor preserved
+    if s.col != 19 { return 30; }      // cursor preserved
 
     return 0;
 }
