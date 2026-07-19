@@ -2829,6 +2829,7 @@ fn build_f64_arith_stub_zero() -> Vec<u8> {
     code
 }
 
+
 /// Wrapper: i64→f64 (signed).
 fn build_i64_to_f64_stub() -> Vec<u8> {
     build_int_to_f64_stub_inner(true)
