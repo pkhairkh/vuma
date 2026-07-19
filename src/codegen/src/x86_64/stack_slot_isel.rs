@@ -2050,7 +2050,135 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                     }
 
+                    // ── Channel builtins (Wave 3 / Task 3) ──
+                    // `channel_open`/`send`/`recv`/`close` are parsed as
+                    // ordinary `Expr::Call` (Wave 2c — the parser cannot add
+                    // dedicated AST variants), so they reach the backend as
+                    // `IRInstr::Call { func: "channel_open", .. }`.  Intercept
+                    // them here and inline the corresponding Linux
+                    // pipe2/read/write/close syscalls.  (The dedicated
+                    // `IRInstr::Channel*` arms below handle the future
+                    // SCG-NodePayload path which is currently unreachable
+                    // from surface syntax.)
+                    let mut channel_builtin_matched = false;
                     if !float_builtin_matched {
+                        match call_target.as_str() {
+                            "channel_open" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                // pipe2(&int[2], flags=0)
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 293)); // sys_pipe2
+                                code.extend(encode_syscall());
+                                // read_fd at [rsp], write_fd at [rsp+4]
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 4));
+                                let dst_off = slot_offset(dst_id);
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off,     Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rcx));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                instr_opcode = Some("channel_open".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "channel_send" if args.len() == 2 => {
+                                let ch  = &args[0];
+                                let msg = &args[1];
+                                // write_fd = high 32 bits of the handle
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 4));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+                                // 8-byte message buffer
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                code.extend(load_value(msg, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                // write() returns the byte count (8) on
+                                // success — store it for callers that inspect
+                                // the call's nominal return value.
+                                if let Some(d) = dst {
+                                    if let Some(dst_id) = d.as_register() {
+                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                    }
+                                }
+                                instr_opcode = Some("channel_send".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "channel_recv" if args.len() == 1 && dst.is_some() => {
+                                let ch = &args[0];
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                // read_fd = low 32 bits of the handle
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+                                // read directly into dst's stack slot
+                                let dst_off = slot_offset(dst_id);
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                                code.extend(encode_syscall());
+                                instr_opcode = Some("channel_recv".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "channel_close" if args.len() == 1 => {
+                                let ch = &args[0];
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        // close(read_fd)
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                        code.extend(encode_syscall());
+                                        // close(write_fd)
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                        code.extend(encode_syscall());
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                        code.extend(encode_syscall());
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 4));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                        code.extend(encode_syscall());
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+                                instr_opcode = Some("channel_close".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !float_builtin_matched && !channel_builtin_matched {
                         // Load arguments from stack into SystemV arg registers
                         let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
                         // SysV ABI: args 7+ go on the stack (pushed in reverse order).
@@ -2258,10 +2386,160 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                     code
                 }
-                // ── Channel operations (Wave 1d / Task 2a) ──
-                // Backend lowering not yet implemented; emit no bytes.
-                IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
+                // ── Channel operations (Wave 3 / Task 3) ─────────────────────
+                // VUMA channels are lowered to Linux pipes.  The opaque
+                // channel handle is an 8-byte value laid out as:
+                //
+                //     bytes 0..4 = read_fd  (low  32 bits)
+                //     bytes 4..8 = write_fd (high 32 bits)
+                //
+                // The same process both writes and reads, so the pipe acts
+                // as a FIFO buffer (up to the kernel's pipe capacity).
+                //
+                // x86_64 syscall numbers used here:
+                //   sys_pipe2 = 293   (rdi=int[2]*, rsi=flags)
+                //   sys_read  = 0     (rdi=fd, rsi=buf, rdx=count)
+                //   sys_write = 1     (rdi=fd, rsi=buf, rdx=count)
+                //   sys_close = 3     (rdi=fd)
+
+                // ChannelOpen { dst, elem_ty } — pipe2(flags=0), pack the two
+                // returned fds into dst's stack slot.
+                IRInstr::ChannelOpen { dst, elem_ty: _ } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    // Reserve an 8-byte scratch slot for pipe2's int[2].
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                    // rdi = &int[0]  (the just-allocated scratch slot)
+                    code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                    // rsi = 0  (flags: no O_NONBLOCK / O_CLOEXEC)
+                    code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi));
+                    // rax = 293  (sys_pipe2)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 293));
+                    // syscall — kernel fills int[2] at [rsp]
+                    code.extend(encode_syscall());
+                    // Load read_fd (low 32 bits) and write_fd (high 32 bits)
+                    // into scratch registers.  The 32-bit MOV zero-extends
+                    // into the 64-bit register so the upper half is clean.
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 4));
+                    // Store the packed handle into dst's stack slot.
+                    let dst_off = slot_offset(dst_id);
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off,     Gpr::Rax));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rcx));
+                    // Deallocate the scratch slot.
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                    instr_opcode = Some("channel_open".to_string());
+                    code
+                }
+
+                // ChannelSend { ch, msg, ty } — write(write_fd, &msg, 8).
+                // The message is treated as a fixed 8-byte value regardless
+                // of `ty` (sufficient for i32/i64/f64/i8-with-padding).
+                IRInstr::ChannelSend { ch, msg, ty: _ } => {
+                    let mut code = Vec::new();
+                    // Extract write_fd (high 32 bits of the handle).
+                    match ch {
+                        IRValue::Register(id) => {
+                            let off = slot_offset(*id);
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
+                        }
+                        _ => {
+                            // Spill the full 8-byte handle to a scratch slot
+                            // and load the upper 32 bits from there.
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                            code.extend(load_value(ch, Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 4));
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                        }
+                    }
+                    // Reserve an 8-byte buffer on the stack for the message
+                    // and fill it with the msg value.
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                    code.extend(load_value(msg, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                    // rsi = &buffer
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                    // rdx = 8 (byte count)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                    // rax = 1  (sys_write) — clobbers RAX, but msg is already
+                    // safely on the stack.
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                    code.extend(encode_syscall());
+                    // Deallocate the message buffer.
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                    instr_opcode = Some("channel_send".to_string());
+                    code
+                }
+
+                // ChannelRecv { ch, dst, ty } — read(read_fd, &dst, 8).
+                // The kernel writes 8 bytes directly into dst's stack slot.
+                IRInstr::ChannelRecv { ch, dst, ty: _ } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    // Extract read_fd (low 32 bits of the handle).
+                    match ch {
+                        IRValue::Register(id) => {
+                            let off = slot_offset(*id);
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                        }
+                        _ => {
+                            // Spill the full 8-byte handle and load the low
+                            // 32 bits (read_fd) from there.
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                            code.extend(load_value(ch, Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                        }
+                    }
+                    // rsi = &dst_stack_slot — read() writes the 8 bytes
+                    // straight into the destination vreg's slot.
+                    let dst_off = slot_offset(dst_id);
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
+                    // rdx = 8 (byte count)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                    // rax = 0  (sys_read)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));
+                    code.extend(encode_syscall());
+                    instr_opcode = Some("channel_recv".to_string());
+                    code
+                }
+
+                // ChannelClose { ch } — close(read_fd); close(write_fd).
+                IRInstr::ChannelClose { ch } => {
+                    let mut code = Vec::new();
+                    match ch {
+                        IRValue::Register(id) => {
+                            let off = slot_offset(*id);
+                            // close(read_fd)
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                            code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                            code.extend(encode_syscall());
+                            // close(write_fd)
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
+                            code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                            code.extend(encode_syscall());
+                        }
+                        _ => {
+                            // Spill the full 8-byte handle and load each half.
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                            code.extend(load_value(ch, Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                            // close(read_fd)
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                            code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                            code.extend(encode_syscall());
+                            // close(write_fd)
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 4));
+                            code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                            code.extend(encode_syscall());
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                        }
+                    }
+                    instr_opcode = Some("channel_close".to_string());
+                    code
+                }
             };
 
             if !encoded.is_empty() {
