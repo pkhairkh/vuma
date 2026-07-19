@@ -1969,6 +1969,17 @@ fn run_optimizations_inner(
 ///
 /// Removes functions that are unreachable from any entry point (main or
 /// functions marked as extern). This is the LTO equivalent of --gc-sections.
+///
+/// (Wave 39) Reachability now also accounts for `IRInstr::GetAddress`
+/// references — a function whose address is taken via `fn_name as u64`
+/// (Wave 5 FnAddr feature) but which is never directly CALLED must still
+/// survive DCE, because the address is registered in a runtime table
+/// (e.g. SyscallTable) and may be invoked indirectly through
+/// `__call_indirect1` later. Without this, the function body is removed,
+/// `func_offsets` no longer contains the symbol, and the R_X86_64_64
+/// relocation emitted by the GetAddress lowering falls through to the
+/// "Unresolved external symbol" warning — leaving the registered address
+/// as the placeholder 0.
 pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
     // Collect all function names that are called.
     let mut reachable: HashSet<String> = HashSet::new();
@@ -2035,6 +2046,21 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
                                     .iter().any(|f| &f.name == call_target);
                                 if is_internal && !f_name_is_runtime(call_target) {
                                     keep.insert(call_target.clone());
+                                    changed2 = true;
+                                }
+                            }
+                        }
+                        // Wave 39: a GetAddress reference (`fn_name as u64`)
+                        // keeps the named function alive even if it is never
+                        // directly called. The address may be stored in a
+                        // runtime table (SyscallTable, IrqTable, ...) and
+                        // invoked indirectly via __call_indirect1.
+                        if let IRInstr::GetAddress { name: sym, .. } = instr {
+                            if !keep.contains(sym) {
+                                let is_internal = program.functions
+                                    .iter().any(|f| &f.name == sym);
+                                if is_internal && !f_name_is_runtime(sym) {
+                                    keep.insert(sym.clone());
                                     changed2 = true;
                                 }
                             }
@@ -2295,6 +2321,22 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
                 if let IRInstr::Call { func: call_target, .. } = instr {
                     if let Some(canonical) = merge_map.get(call_target) {
                         *call_target = canonical.clone();
+                    }
+                }
+                // Wave 39: also redirect GetAddress references. Without
+                // this, a `fn_name as u64` expression that names a
+                // merged-away function leaves an unresolved R_X86_64_64
+                // relocation, which the static-ELF patcher can't resolve
+                // (the symbol is no longer in `func_offsets`), so the
+                // registered handler address silently becomes 0. This
+                // breaks the W39 syscall_init contract: the SyscallTable
+                // would be full of 0 entries for any handler whose body
+                // happened to be structurally identical to an earlier
+                // handler's body (a common case for stub handlers like
+                // `return 0;`).
+                if let IRInstr::GetAddress { name: sym, .. } = instr {
+                    if let Some(canonical) = merge_map.get(sym) {
+                        *sym = canonical.clone();
                     }
                 }
             }
