@@ -241,6 +241,22 @@ extern "C" {
     fn mmio_write32(addr: u64, val: u32);
 }
 
+// VUMA intrinsic MMIO stubs (Wave 7+). These are 3-byte runtime stubs
+// registered in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
+//   __vuma_load_u32(addr)  -> u32  = `mov eax, [rdi]; ret`  (8B 07 C3)
+//   __vuma_store_u32(a, v)        = `mov [rdi], esi; ret`  (89 37 C3)
+// They take a raw u64 address and a u32 value (no pointer syntax in VUMA
+// source — PMT-pure). Used by uart_init_8250 (W22S2) and uart_getc_8250
+// (W22S2) for real MMIO to the 8250 register file. In hosted mode the
+// stubs are still real `mov [rdi], esi` instructions, so callers MUST
+// guard with `if base == 0 { return; }` to skip MMIO when the hosted
+// self-test passes base=0 (otherwise a store to a low unmapped address
+// like 0x3F8 would segfault).
+extern "C" {
+    fn __vuma_store_u32(addr: u64, val: u32);
+    fn __vuma_load_u32(addr: u64) -> u32;
+}
+
 // Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
 // sys_write on x86_64 / aarch64 hosted backends). Same declaration as
 // womb/kernel/tty/console.vuma / kmain.vuma / arch/x86_64/trampoline.vuma.
@@ -267,30 +283,49 @@ extern "C" {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Initialize the 8250 UART at the given base address.
-// In hosted mode, this is a no-op (no real UART to configure).
+// In hosted mode (base == 0), this is a no-op (the `if base == 0` guard
+// returns early before any MMIO store).
 //
-// In bare-metal mode (K11), this will run the standard 8250 init sequence
-// (115200 baud, 8N1, FIFO enabled, DTR + RTS):
-//     mmio_write8(base + 3, 128);  // LCR: set DLAB (128 = 1 << 7)
-//     mmio_write8(base + 0, 1);    // divisor low (115200 baud = divisor 1)
-//     mmio_write8(base + 1, 0);    // divisor high
-//     mmio_write8(base + 3, 3);    // LCR: 8N1 (3 = 8 bits + 1 stop), clear DLAB
-//     mmio_write8(base + 2, 193);  // FCR: enable FIFO, 14-byte trigger
-//                                   //       (193 = 0xC1 = 0x80 | 0x40 | 0x01)
-//     mmio_write8(base + 4, 3);    // MCR: DTR + RTS (3 = 0x03)
-// The constants 128 / 1 / 0 / 3 / 193 / 3 are the 8250 register values;
-// the offsets 0 / 1 / 2 / 3 / 4 match the Uart8250Regs layout above. K11
-// will replace `return;` with the six mmio_write8 calls.
+// In bare-metal mode (or any caller passing a real MMIO base), this runs
+// the standard 8250 init sequence (115200 baud, 8N1, FIFO enabled,
+// DTR + RTS + OUT2) via the VUMA intrinsic `__vuma_store_u32` (W22S2):
+//     __vuma_store_u32(base + 3, 128);  // LCR: set DLAB (128 = 1 << 7)
+//     __vuma_store_u32(base + 0, 1);    // divisor low (115200 baud = divisor 1)
+//     __vuma_store_u32(base + 1, 0);    // divisor high
+//     __vuma_store_u32(base + 3, 3);    // LCR: 8N1 (3 = 8 bits + 1 stop), clear DLAB
+//     __vuma_store_u32(base + 2, 199);  // FCR: enable FIFO, 14-byte trigger
+//                                       //       (199 = 0xC7 = 0x80 | 0x40 | 0x07)
+//     __vuma_store_u32(base + 4, 11);   // MCR: DTR + RTS + OUT2
+//                                       //       (11 = 0x0B = 0x08 | 0x02 | 0x01)
+// The constants 128 / 1 / 0 / 3 / 199 / 11 are the 8250 register values;
+// the offsets 0 / 1 / 2 / 3 / 4 match the Uart8250Regs layout above.
+// W22S2 replaced the previous stub `return;` with the six MMIO stores,
+// using __vuma_store_u32 (3-byte `mov [rdi], esi; ret` runtime stub)
+// instead of the per-arch mmio_write8 trampoline — same bus effect (the
+// 8250 accepts 32-bit accesses to its byte registers, only the low 8
+// bits land on the bus), PMT-pure (no pointer dereference in source).
 fn uart_init_8250(base: u64) {
-    // In bare-metal mode:
-    // mmio_write8(base + 3, 128);  // LCR: set DLAB
-    // mmio_write8(base + 0, 1);    // divisor low (115200 baud)
-    // mmio_write8(base + 1, 0);    // divisor high
-    // mmio_write8(base + 3, 3);    // LCR: 8N1, clear DLAB
-    // mmio_write8(base + 2, 193);  // FCR: enable FIFO, 14-byte trigger
-    // mmio_write8(base + 4, 3);    // MCR: DTR + RTS
-    // In hosted mode: no-op.
-    return;
+    // Hosted mode (base == 0): no real UART to configure — skip MMIO.
+    // The __vuma_store_u32 stub is a real `mov [rdi], esi` instruction,
+    // so calling it with an unmapped low address (e.g. 0x3F8) would
+    // segfault in hosted mode. The guard lets the same source file
+    // build for both hosted (base=0) and bare-metal (base=MMIO base).
+    if base == 0 { return; }
+    // Standard 8250 init sequence (115200 baud, 8N1, FIFO enabled,
+    // DTR + RTS + OUT2). Uses __vuma_store_u32 (3-byte `mov [rdi], esi; ret`
+    // runtime stub) instead of the per-arch mmio_write8 trampoline — the
+    // 8250 register file accepts 32-bit accesses to its byte registers
+    // (only the low 8 bits land on the bus), and the VUMA intrinsic is
+    // PMT-pure (no pointer dereference in source). Constants are decimal
+    // per the K5a contract.
+    __vuma_store_u32(base + 3, 128);  // LCR: set DLAB (128 = 1 << 7)
+    __vuma_store_u32(base + 0, 1);    // divisor low (115200 baud = divisor 1)
+    __vuma_store_u32(base + 1, 0);    // divisor high
+    __vuma_store_u32(base + 3, 3);    // LCR: 8N1 (3 = 8 bits + 1 stop), clear DLAB
+    __vuma_store_u32(base + 2, 199);  // FCR: enable FIFO, 14-byte trigger
+                                      //      (199 = 0xC7 = 0x80 | 0x40 | 0x07)
+    __vuma_store_u32(base + 4, 11);   // MCR: DTR + RTS + OUT2
+                                      //      (11 = 0x0B = 0x08 | 0x02 | 0x01)
 }
 
 // Send one byte via the 8250 UART.
@@ -326,27 +361,42 @@ fn uart_putc_8250(base: u64, c: u8) {
 
 // Receive one byte from the 8250 UART. Returns the byte, or 0 if no data.
 //
-// In hosted mode, there's no real UART to read from, so we always return
-// 0. (The hosted kernel uses the regular sys_read syscall for keyboard
-// input via stdin, not this UART driver — the UART driver is for the
-// serial console, which in hosted mode is just stdout.)
+// In hosted mode (base == 0), there's no real UART to read from, so the
+// `if base == 0` guard returns 0 immediately (no MMIO load attempted —
+// the __vuma_load_u32 stub is a real `mov eax, [rdi]` instruction, so
+// calling it with an unmapped low address would segfault).
 //
-// In bare-metal mode (K11), this will check LSR.RX-ready (bit 0 of the
-// LSR register at base + 5) and, if set, read the byte from the RBR
-// (base + 0):
-//     if (mmio_read8(base + 5) & 1) != 0 {
-//         return mmio_read8(base + 0);
+// In bare-metal mode (or any caller passing a real MMIO base), this
+// checks LSR.RX-ready (bit 0 of the LSR register at base + 5) and, if
+// set, reads the byte from the RBR (base + 0) via the VUMA intrinsic
+// `__vuma_load_u32` (W22S2):
+//     let lsr = __vuma_load_u32(base + 5);
+//     if (lsr & 1) != 0 {
+//         let rbr = __vuma_load_u32(base + 0);
+//         return rbr as u8;
 //     }
 //     return 0;
-// (1 = 0x01 = bit 0 = RX-ready flag.) K11 will replace `return 0;` with
-// the LSR-check + RBR-read sequence.
+// (1 = 0x01 = bit 0 = RX-ready flag.) W22S2 replaced the previous stub
+// `return 0;` with the LSR-check + RBR-read sequence, using
+// __vuma_load_u32 (3-byte `mov eax, [rdi]; ret` runtime stub) instead
+// of the per-arch mmio_read8 trampoline — PMT-pure (no pointer
+// dereference in source).
 fn uart_getc_8250(base: u64) -> u8 {
-    // In bare-metal mode:
-    // if (mmio_read8(base + 5) & 1) != 0 {
-    //     return mmio_read8(base + 0);
-    // }
-    // return 0;
-    // In hosted mode: return 0 (no real UART).
+    // Hosted mode (base == 0): no real UART to read from — return 0.
+    // The __vuma_load_u32 stub is a real `mov eax, [rdi]; ret`
+    // instruction, so calling it with an unmapped low address would
+    // segfault in hosted mode. The guard lets the same source file
+    // build for both hosted (base=0) and bare-metal (base=MMIO base).
+    if base == 0 { return 0; }
+    // Check LSR.RX-ready (bit 0 of the LSR register at base + 5). If
+    // set, read the RBR (base + 0) and return its low byte. Otherwise
+    // return 0 (no data). Uses __vuma_load_u32 (3-byte `mov eax, [rdi];
+    // ret` runtime stub) — PMT-pure, no pointer dereference in source.
+    let lsr = __vuma_load_u32(base + 5);
+    if (lsr & 1) != 0 {
+        let rbr = __vuma_load_u32(base + 0);
+        return rbr as u8;
+    }
     return 0;
 }
 
@@ -428,19 +478,29 @@ fn uart_putc_pl011(base: u64, c: u8) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K6a DoD).
+// Self-test (the K6a DoD, updated for W22S2 real MMIO).
 // ────────────────────────────────────────────────────────────────────────────
-//   (1) uart_init_8250(1016)         — no-op in hosted mode (must not trap).
-//   (2) uart_putc_8250(1016, 72)     — 'H' to stdout.
+//   (1) uart_init_8250(0)            — hosted: base=0 guard skips MMIO.
+//   (2) uart_putc_8250(1016, 72)     — 'H' to stdout (hosted `write` path;
+//                                      base value unused by hosted putc).
 //   (3) uart_putc_8250(1016, 105)    — 'i' to stdout.
 //   (4) uart_putc_8250(1016, 10)     — '\n' to stdout.
-//   (5) uart_init_pl011(150994944)   — no-op in hosted mode (must not trap).
+//   (5) uart_init_pl011(150994944)   — no-op (PL011 init still stubbed).
 //   (6) uart_putc_pl011(150994944, 80) — 'P' to stdout (same path as 8250).
 //   (7) uart_putc_pl011(150994944, 10)  — '\n' to stdout.
-//   (8) uart_getc_8250(1016)         — returns 0 in hosted mode (no UART).
+//   (8) uart_getc_8250(0)            — hosted: base=0 guard returns 0.
 // Returns 0 on success, 1 if uart_getc_8250 returns non-zero (which would
 // indicate a hosted backend that unexpectedly wires MMIO reads to
 // something nonzero — a regression).
+//
+// W22S2 note: the init/getc calls now pass base=0 (hosted) so the
+// `if base == 0` guard in uart_init_8250 / uart_getc_8250 skips the real
+// MMIO path (which would segfault on the unmapped low address 0x3F8 in
+// hosted mode). The putc calls keep base=1016 as documentation — the
+// hosted putc path uses the `write` extern and never touches MMIO, so
+// the base value is unused. In bare-metal mode (K11+), the boot path
+// will call uart_init_8250(1016) with the real COM1 base and the full
+// 6-step MMIO init will run.
 //
 // Expected stdout: "Hi\nP\n" (4 bytes from the 8250 + 2 bytes from the
 // PL011 = 6 bytes total). The 8250 + PL011 paths share the same hosted
@@ -450,7 +510,11 @@ fn uart_putc_pl011(base: u64, c: u8) {
 
 fn main() -> i32 {
     // Self-test: init + putc + puts (hosted mode = write to stdout).
-    uart_init_8250(1016);  // 0x3F8 = COM1
+    // W22S2: init/getc pass base=0 so the MMIO guard skips real MMIO
+    // (which would segfault in hosted mode on the unmapped COM1 base).
+    // The putc calls keep base=1016 as documentation — the hosted putc
+    // path uses `write` and never touches MMIO, so base is unused there.
+    uart_init_8250(0);  // hosted: skip MMIO (bare-metal would pass 1016)
     uart_putc_8250(1016, 72);  // 'H'
     uart_putc_8250(1016, 105);  // 'i'
     uart_putc_8250(1016, 10);  // '\n'
@@ -458,8 +522,8 @@ fn main() -> i32 {
     uart_init_pl011(150994944);  // 0x09000000
     uart_putc_pl011(150994944, 80);  // 'P'
     uart_putc_pl011(150994944, 10);  // '\n'
-    // Test getc (returns 0 in hosted mode).
-    let c = uart_getc_8250(1016);
+    // Test getc (returns 0 in hosted mode — base=0 guard skips MMIO).
+    let c = uart_getc_8250(0);  // hosted: skip MMIO (bare-metal would pass 1016)
     if c != 0 { return 1; }
     return 0;
 }
