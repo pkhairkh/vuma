@@ -19,15 +19,23 @@
 //                              available units. count = initial,
 //                              _pad0 = 0, waitq_count = 0. Called once
 //                              per semaphore before any sema_down / sema_up.
-//   sema_down(s)            — acquire one unit. Atomically decrement
+//   sema_down(s) -> i32     — acquire one unit. Atomically decrement
 //                              count if count > 0; if count == 0, bump
-//                              waitq_count and busy-wait (in a real
-//                              kernel: sleep_on(waitq)) until count > 0,
-//                              then retry. Always returns with count
-//                              decremented by exactly 1.
+//                              waitq_count and retry atomic_load in a
+//                              BOUNDED loop (max 1000 — hosted stand-in
+//                              for sleep_on(waitq) + schedule()). On
+//                              success returns 0 with count decremented
+//                              by exactly 1. On retry-cap exhaustion
+//                              returns -EAGAIN (-11 = `0 - 11`) — the
+//                              caller can retry, defer, or surface
+//                              "Resource temporarily unavailable".
+//                              (W42 — same pattern as W16S1's mutex fix.)
 //   sema_up(s)              — release one unit. Atomically increment
-//                              count via CAS loop. (In a real kernel:
-//                              wake_one(waitq) to release a waiter.)
+//                              count via CAS loop, then (W42) if
+//                              waitq_count > 0 decrement it — the
+//                              wake_one(waitq) simulation. The woken
+//                              waiter's sema_down retries its CAS and
+//                              succeeds (the count was just incremented).
 //
 // ── What is a counting semaphore? ──────────────────────────────────────────
 // A counting semaphore is the oldest synchronization primitive in
@@ -161,11 +169,13 @@
 // K8c uses a simplified `waitq_count: u32` counter (same as K8b's
 // Mutex) instead of the full WaitQueue from K7e (womb/kernel/ipc/
 // waitq.vuma, which has head/tail/count). The counter is bumped by
-// sema_down on the slow path (before the busy-wait) and decremented
-// after the slow path's CAS succeeds. In the hosted single-threaded
-// self-test, the slow path is never taken (no contention — the first
-// CAS always succeeds because count > 0 after init or sema_up), so
-// waitq_count stays at 0 throughout.
+// sema_down on the slow path (before the bounded retry loop — the
+// hosted stand-in for sleep_on(waitq)) and decremented by sema_up
+// (the wake_one(waitq) simulation — matching the W16S1 mutex pattern
+// where the unlocker pops the waiter, not the acquirer). In the hosted
+// single-threaded self-test, the slow path is never taken (no
+// contention — the first CAS always succeeds because count > 0 after
+// init or sema_up), so waitq_count stays at 0 throughout.
 //
 // A real kernel would:
 //   - Embed a full WaitQueue (K7e) instead of just the count.
@@ -274,18 +284,21 @@
 //   waitq_count — number of waiters (simplified WaitQueue — see
 //                 "Wait queue (simplified)" in the file header).
 //                 Modified by sema_down (incremented on the slow
-//                 path before the busy-wait, decremented after the
-//                 CAS succeeds). NOT modified by sema_up (the
-//                 contract specifies sema_up as a pure CAS-loop
-//                 increment — wake_one would happen in a real
-//                 kernel, but the count is the woken-waiter's
-//                 responsibility to decrement). Read by no one in
-//                 the hosted single-threaded self-test (no direct
-//                 check in main — the field is touched only on the
-//                 slow path, which is never taken). The increment /
-//                 decrement logic is present and correct so a real
-//                 kernel that does encounter contention will see
-//                 accurate counts.
+//                 path before the bounded retry loop) and by sema_up
+//                 (decremented after the CAS-loop increment if > 0 —
+//                 the wake_one(waitq) simulation, matching W16S1's
+//                 mutex pattern where the unlocker pops the waiter).
+//                 sema_down does NOT decrement waitq_count on success
+//                 — sema_up's wake_one simulation handles that, so
+//                 each sema_up wakes exactly one waiter. sema_down
+//                 DOES decrement waitq_count on retry-cap exhaustion
+//                 (cleanup — we're bailing, no one will wake_one us).
+//                 Read by no one in the hosted single-threaded self-
+//                 test (no direct check in main — the field is
+//                 touched only on the slow path, which is never
+//                 taken). The increment / decrement logic is present
+//                 and correct so a real kernel that does encounter
+//                 contention will see accurate counts.
 layout Semaphore = {
     count:       u32,  // available count (0 = would block); CAS target word
     _pad0:       u32,  // padding so 8-byte CAS only sees count + _pad0
@@ -325,9 +338,14 @@ fn sema_init(s: State<Semaphore>, initial: u32) {
 }
 
 // sema_down: acquire one unit. Atomically decrement count if count > 0;
-// if count == 0, bump waitq_count and busy-wait (in a real kernel:
-// sleep_on(waitq)) until count > 0, then retry. Always returns with
-// count decremented by exactly 1.
+// if count == 0, bump waitq_count and retry atomic_load in a BOUNDED
+// loop (max 1000 — hosted stand-in for sleep_on(waitq) + schedule()).
+// Returns 0 on success (count decremented by exactly 1), or -EAGAIN
+// (-11 = `0 - 11`) if the slow path exhausts its 1000-retry cap without
+// seeing count > 0. (W42 — same bounded-retry pattern as W16S1's mutex
+// fix; before W42 the slow path was an unbounded `while atomic_load
+// (s as Address) == 0 { }` busy-wait that would lock up the hosted
+// runtime if the slow path were ever taken.)
 //
 //   s: the Semaphore to acquire from.
 //
@@ -338,29 +356,48 @@ fn sema_init(s: State<Semaphore>, initial: u32) {
 // threaded self-test, ONLY the fast path is ever taken (count > 0
 // after init=2, after the first sema_down leaves count=1, after the
 // sema_up leaves count=1). The slow path is exercised only by the
-// bookkeeping increments / decrements of s.waitq_count — which never
-// execute in the self-test because the fast path always succeeds.
+// bookkeeping increment of s.waitq_count — which never executes in
+// the self-test because the fast path always succeeds.
 //
-// The slow path's busy-wait loop is identical in shape to K8a's
-// spinlock busy-wait and K8b's mutex slow-path busy-wait — but the
-// SEMANTICS are different. K8a's spinlock is SUPPOSED to spin (it's
-// a spinlock). K8b's mutex and K8c's semaphore are NOT supposed to
-// spin — in a real kernel, the slow path would call into the
-// scheduler (sleep_on(waitq)), which would context-switch to another
-// task. The hosted-mode stub just spins because there's no scheduler
-// yet (K9 builds the scheduler). The waitq_count counter is the
-// diagnostic that tells you "this would have slept in a real kernel."
+// The slow path's bounded retry loop is the W42 fix. Before W42 the
+// slow path was an unbounded `while atomic_load(s as Address) == 0
+// { }` busy-wait — identical in shape to K8a's spinlock busy-wait and
+// the pre-W16S1 K8b mutex slow-path busy-wait. K8a's spinlock is
+// SUPPOSED to spin (it's a spinlock), but K8b's mutex and K8c's
+// semaphore are NOT supposed to spin — in a real kernel, the slow
+// path would call into the scheduler (sleep_on(waitq)), which would
+// context-switch to another task. The hosted-mode stub just spun
+// because there's no scheduler yet (K9 builds the scheduler). W42
+// replaces the unbounded spin with a bounded retry: 1000 attempts,
+// then -EAGAIN. This bounds the wait — a deadlocked or very slow
+// producer can't hang the consumer forever, and the caller can retry,
+// defer, or surface "Resource temporarily unavailable" to user-space.
 //
-// The slow path's inner busy-wait loop (`while atomic_load(s as
-// Address) == 0`) terminates because:
+// The bounded retry loop terminates because:
 //   - In hosted mode, only one task is running (single-threaded self-
 //     test), so the slow path is never taken — the fast path's CAS
 //     succeeds immediately (count was > 0 after init or after a prior
 //     sema_up).
 //   - In a real SMP/preemptive kernel, the loop terminates when some
 //     other task calls sema_up, which increments count via CAS. At
-//     that point our outer loop's next iteration sees count > 0 and
-//     proceeds with the decrement CAS.
+//     that point our bounded retry's next iteration sees count > 0,
+//     exits the inner loop, and falls through to the outer loop's
+//     re-iteration, which re-loads cur (now > 0) and tries the
+//     decrement CAS.
+//   - If the producer is deadlocked or very slow, the loop terminates
+//     at the 1000-retry cap and returns -EAGAIN (the hosted-mode
+//     safety net — prevents the consumer from hanging the runtime).
+//
+// Wait-queue bookkeeping (W42, mirrors W16S1's mutex pattern):
+//   - Slow-path ENTRY: `s.waitq_count = s.waitq_count + 1` (the
+//     waitq_add simulation — we're now a waiter).
+//   - Slow-path EXIT on success (ready == 1, count > 0): leave
+//     waitq_count bumped — sema_up's wake_one simulation will
+//     decrement it. Matches W16S1 mutex's "acquirer leaves count
+//     bumped on success, unlocker pops the waiter" pattern.
+//   - Slow-path EXIT on retry-cap exhaustion (retries >= 1000):
+//     decrement waitq_count (cleanup — we're bailing, no one will
+//     wake_one us) before returning -EAGAIN.
 //
 // Note: sema_down does NOT take a task_idx parameter (unlike K8b's
 // mutex_acquire). This is because the semaphore has no concept of
@@ -380,7 +417,7 @@ fn sema_init(s: State<Semaphore>, initial: u32) {
 // when count == 1 — for count == 2 it would write 0 instead of 1
 // (decrementing by 2 instead of 1, corrupting the count). The
 // `cur - 1` form correctly handles any count > 0.
-fn sema_down(s: State<Semaphore>) {
+fn sema_down(s: State<Semaphore>) -> i32 {
     // Loop until we successfully decrement count.
     //   `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur).
     let success = 0;
@@ -419,44 +456,87 @@ fn sema_down(s: State<Semaphore>) {
             //   sleep_on(waitq) — mark the current task BLOCKED, add
             //   it to the Semaphore's wait queue, and call schedule()
             //   to context-switch to another task. The task would be
-            //   woken by sema_up's wake_one(waitq) (which we don't
-            //   have yet — K7e's waitq_wake_one exists, but K8c's
-            //   Semaphore doesn't embed a full WaitQueue, just the
-            //   count). For hosted mode: just bump the counter for
-            //   diagnostics, then busy-wait until count > 0.
+            //   woken by sema_up's wake_one(waitq) (W42 simulates
+            //   wake_one by decrementing waitq_count in sema_up —
+            //   K7e's waitq_wake_one exists, but K8c's Semaphore
+            //   doesn't embed a full WaitQueue, just the count).
+            //   For hosted mode: bump the counter (waitq_add
+            //   simulation), then retry atomic_load in a BOUNDED
+            //   loop (W42 — hosted stand-in for sleep_on + schedule).
             s.waitq_count = s.waitq_count + 1;
-            // Busy-wait until count > 0 (in real kernel: sleep).
-            //   `atomic_load(s as Address) == 0` means count is still
-            //   0 — keep spinning. The moment some other task calls
-            //   sema_up, count becomes 1, the load returns 1, and we
-            //   exit the inner loop. Then we decrement waitq_count
-            //   (we're no longer a waiter — about to retry the outer
-            //   loop's CAS) and fall through to the outer loop's
-            //   re-iteration, which re-loads cur (now 1) and tries
-            //   the CAS(1 → 0). If that CAS succeeds, success = 1
-            //   and we exit the outer loop with count decremented.
-            //   In hosted single-threaded mode, this inner loop is
-            //   never entered (the slow path itself is never taken).
-            while atomic_load(s as Address) == 0 {
-                // spin — no body needed (the loop condition does the
-                // load). A real kernel would call schedule() here to
-                // yield the CPU instead of busy-waiting.
+            // Bounded retry loop (W42). `retries` counts atomic_load
+            //   attempts that returned 0 since entering the slow
+            //   path. `ready` is 0 until an atomic_load returns > 0
+            //   (count is now available — exit to retry the outer
+            //   CAS loop). The loop exits via either `ready == 1`
+            //   (count > 0 — retry outer CAS) or `retries >= 1000`
+            //   (gave up — return -EAGAIN). This is the hosted-mode
+            //   stand-in for sleep_on(waitq) + schedule(): in a real
+            //   kernel we'd sleep and be woken by sema_up's
+            //   wake_one; here we just retry atomic_load up to 1000
+            //   times. The 1000-retry cap is the safety net —
+            //   prevents a deadlocked or very slow producer from
+            //   hanging the consumer forever. Before W42 this was
+            //   an unbounded `while atomic_load(s as Address) == 0
+            //   { }` busy-wait that would lock up the hosted runtime
+            //   if the slow path were ever taken.
+            let retries = 0;
+            let ready = 0;
+            while ready == 0 {
+                let cur2 = atomic_load(s as Address);
+                if cur2 > 0 {
+                    // Count is now available — exit the bounded
+                    // retry loop and fall through to the outer
+                    // loop's re-iteration (which re-loads cur and
+                    // tries the CAS).
+                    ready = 1;
+                } else {
+                    // Still 0 — bump the retry counter. If we've
+                    //   hit the cap, give up: simulate removing
+                    //   ourselves from the wait queue (decrement
+                    //   waitq_count — no one will wake_one us since
+                    //   we're bailing), then return -EAGAIN
+                    //   (-11 = `0 - 11` — see K7e's waitq.vuma
+                    //   header for the "negative literal via Sub"
+                    //   discipline) so the caller can retry, queue
+                    //   work for later, or surface "Resource
+                    //   temporarily unavailable" to user-space.
+                    retries = retries + 1;
+                    if retries >= 1000 {
+                        if s.waitq_count > 0 {
+                            s.waitq_count = s.waitq_count - 1;
+                        }
+                        return 0 - 11;  // -EAGAIN
+                    }
+                }
             }
-            // We're no longer a waiter (we're about to retry the
-            // outer loop's CAS). Decrement wait count.
-            s.waitq_count = s.waitq_count - 1;
+            // ready == 1 → count > 0 now. Fall through to the outer
+            // loop's re-iteration, which re-loads cur (now > 0) and
+            // tries the CAS(cur → cur-1). If that CAS succeeds,
+            // success = 1 and we exit the outer loop with count
+            // decremented.
+            //   Note (W42): we do NOT decrement waitq_count here.
+            //   sema_up's wake_one simulation handles that —
+            //   matching W16S1 mutex's pattern where the unlocker
+            //   pops the waiter from the queue, not the acquirer.
+            //   Each sema_up decrements waitq_count once (if > 0),
+            //   so each release wakes exactly one waiter. In the
+            //   hosted single-threaded self-test this branch is
+            //   never reached (the slow path itself is never taken).
         }
     }
+    return 0;
 }
 
-// sema_up: release one unit. Atomically increment count via CAS loop.
-// (In a real kernel: wake_one(waitq) to release a waiter — the woken
-// waiter's sema_down retries its CAS and succeeds.)
+// sema_up: release one unit. Atomically increment count via CAS loop,
+// then (W42) if waitq_count > 0 decrement it — the wake_one(waitq)
+// simulation. The woken waiter's sema_down retries its CAS and
+// succeeds (the count was just incremented).
 //
 //   s: the Semaphore to release to.
 //
-// State<T> params: 1 (s). No reads, no writes to plain fields. Calls
-// two IR builtins (atomic_load, atomic_cas).
+// State<T> params: 1 (s). Reads s.waitq_count (wake_one guard). Writes
+// s.waitq_count. Calls two IR builtins (atomic_load, atomic_cas).
 //
 // The CAS loop here is the canonical "atomic increment via CAS" pattern:
 //   1. Load the current value (cur).
@@ -482,14 +562,23 @@ fn sema_down(s: State<Semaphore>) {
 // consumer semantic (see "What is a counting semaphore?" in the
 // file header).
 //
-// Note: sema_up does NOT decrement waitq_count. The woken waiter's
-// sema_down is responsible for decrementing its own waitq_count
-// after its CAS succeeds (see the slow path in sema_down). This
-// matches the K8b mutex pattern (mutex_release's atomic_store(0)
-// doesn't decrement waitq_count — the woken acquirer's mutex_acquire
-// does). It also matches Linux's struct semaphore's up() — up()
-// wakes one waiter but doesn't directly manipulate the wait queue;
-// the woken __down() removes itself from the queue.
+// wake_one simulation (W42): after the CAS-loop increment succeeds,
+//   `if s.waitq_count > 0 { s.waitq_count = s.waitq_count - 1 }`.
+//   This is the hosted-mode stand-in for waitq_wake_one(&s.waitq) —
+//   in a real kernel we'd pop exactly one waiter from the queue
+//   (avoiding thundering herd) and mark it RUNNABLE. The decrement
+//   happens AFTER the CAS-loop increment so a contended consumer's
+//   next atomic_load sees count > 0 first. The `if > 0` guard
+//   prevents underflow in the uncontended case (no waiters — the
+//   fast path was taken, waitq_count is still 0). This matches the
+//   W16S1 mutex pattern (mutex_release's wake_one simulation), and
+//   also matches Linux's struct semaphore's up() — up() wakes one
+//   waiter and pops it from the queue. The woken waiter's sema_down
+//   leaves waitq_count bumped on its slow-path ENTRY and lets the
+//   unlocker clean it up — so each sema_up wakes exactly one waiter.
+//   In the hosted single-threaded self-test, this branch is never
+//   taken (waitq_count stays at 0 because the slow path is never
+//   entered).
 fn sema_up(s: State<Semaphore>) {
     // Loop until we successfully increment count.
     //   `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
@@ -512,14 +601,21 @@ fn sema_up(s: State<Semaphore>) {
         // load and our CAS — retry the loop (re-load cur). In
         // hosted single-threaded mode, this branch is never taken.
     }
-    // In a real kernel: wake_one(waitq) here — wake exactly one
-    // waiter (avoiding thundering herd). The woken waiter's sema_down
-    // retries its CAS; if count > 0 (which it now is, because we just
-    // incremented), the CAS succeeds and the waiter exits its slow
-    // path. We don't have wake_one yet (K7e's waitq_wake_one exists,
-    // but K8c doesn't embed a full WaitQueue, just the count) — the
-    // woken waiter's busy-wait loop in sema_down will see count > 0
-    // on its next atomic_load iteration and proceed.
+    // wake_one simulation (W42): if there are waiters, decrement
+    //   waitq_count to simulate popping one waiter from the queue.
+    //   The `if > 0` guard prevents underflow in the uncontended
+    //   case (no waiters — the fast path was taken, waitq_count is
+    //   still 0). The decrement happens AFTER the CAS-loop increment
+    //   so a contended consumer's next atomic_load sees count > 0
+    //   first. Matches W16S1 mutex's mutex_release wake_one pattern.
+    //   In the hosted single-threaded self-test this branch is never
+    //   taken (waitq_count stays at 0 because the slow path is never
+    //   entered); a real SMP kernel with concurrent waiters would
+    //   decrement once per release, matching wake_one's "pop one"
+    //   semantics.
+    if s.waitq_count > 0 {
+        s.waitq_count = s.waitq_count - 1;  // simulate waitq_wake_one
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -533,6 +629,15 @@ fn sema_up(s: State<Semaphore>) {
 //   4. sema_down once — count should be 0.
 // Exit 0 on all-pass, exit 1..3 on the corresponding check failure.
 //
+// sema_down now returns i32 (W42 — 0 on success, -EAGAIN on retry-cap
+// exhaustion). The return value is discarded in `main` because the
+// self-test never hits the slow path (single-threaded hosted mode →
+// the fast-path CAS always succeeds on the first try, so waitq_count
+// stays at 0 throughout and the -EAGAIN / wake_one-decrement paths
+// are never exercised). A real caller would check `if ret != 0 { ... }`
+// — same discard pattern W16S1's mutex self-test uses for
+// `mutex_acquire`'s i32 return.
+//
 // The self-test runs single-threaded in hosted mode, so:
 //   - The fast path is always taken on sema_down (count > 0 after
 //     init=2, after the first sema_down leaves count=1, after the
@@ -544,14 +649,19 @@ fn sema_up(s: State<Semaphore>) {
 //     threaded mode).
 //
 // The test exercises:
-//   - The sema_down fast path (count > 0, CAS(cur → cur-1) succeeds).
-//   - The sema_up CAS loop (CAS(cur → cur+1) succeeds on first try).
+//   - The sema_down fast path (count > 0, CAS(cur → cur-1) succeeds,
+//     returns 0 — discarded).
+//   - The sema_up CAS loop (CAS(cur → cur+1) succeeds on first try,
+//     wake_one guard evaluates false — no waiters).
 //   - The `atomic_load(s as Address)` self-test check (verifies the
 //     8-byte CAS window's value = count, since _pad0 is always 0).
 // It does NOT exercise:
-//   - The sema_down slow path (would require count == 0 at sema_down
-//     entry — K8e covers this with the SMP contention test
-//     infrastructure).
+//   - The sema_down slow path / bounded retry loop (would require
+//     count == 0 at sema_down entry — K8e covers this with the SMP
+//     contention test infrastructure).
+//   - The -EAGAIN return on retry-cap exhaustion (would require a
+//     deadlocked producer — could add as a 4th check, but the
+//     contract specifies 3).
 //   - The waitq_count increment / decrement (would require the slow
 //     path to be taken — same reason).
 //   - The CAS retry loop (would require SMP contention — K8e covers).
@@ -564,17 +674,21 @@ fn main() -> i32 {
     // Down twice — should succeed immediately (fast path: count > 0).
     //   After first sema_down: count = 2 → 1 (CAS(2 → 1) succeeds).
     //   After second sema_down: count = 1 → 0 (CAS(1 → 0) succeeds).
+    //   Return value (0 on success) discarded — self-test never hits
+    //   the slow path, so -EAGAIN is impossible here.
     sema_down(s);
     sema_down(s);
     // Count should be 0 now. atomic_load returns the 8-byte value at
     // s = count | (_pad0 << 32) = 0 | 0 = 0.
     if atomic_load(s as Address) != 0 { return 1; }
     // Up once — should succeed immediately (CAS(0 → 1) succeeds).
+    //   wake_one guard evaluates false (waitq_count still 0 — no
+    //   waiters ever queued).
     sema_up(s);
     // Count should be 1 now.
     if atomic_load(s as Address) != 1 { return 2; }
     // Down once — should succeed immediately (fast path: count = 1 > 0,
-    // CAS(1 → 0) succeeds).
+    // CAS(1 → 0) succeeds). Return value (0) discarded.
     sema_down(s);
     // Count should be 0 now.
     if atomic_load(s as Address) != 0 { return 3; }
