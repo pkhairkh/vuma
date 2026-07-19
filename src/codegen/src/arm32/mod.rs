@@ -5714,6 +5714,193 @@ impl Backend for Arm32Backend {
                     // ── Call ──
                     crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
+                        // ── Channel builtins (Wave 4 / Task 4cd) ──
+                        // `channel_open`/`send`/`recv`/`close` are parsed as
+                        // ordinary `Expr::Call` (Wave 2c), so they reach the
+                        // backend as `IRInstr::Call { func: "channel_open", .. }`.
+                        // Intercept them here and inline the corresponding
+                        // Linux pipe2/read/write/close syscalls.
+                        // ARM EABI: r7=syscall_nr, r0-r5=args, SVC #0.
+                        // Handle layout: 8 bytes — low 32 = read_fd, high 32 = write_fd.
+                        let channel_builtin_matched = match target_func.as_str() {
+                            "channel_open" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // SUB SP, SP, #8 — space for int fds[2]
+                                code.extend(emit_sub_sp(8));
+                                // MOV R0, SP — r0 = &fds
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), Gpr::R13.encoding(),
+                                ));
+                                // MOV R1, #0 — flags = 0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), 0, 0,
+                                ));
+                                // MOV R7, #359 — sys_pipe2 (ARM EABI)
+                                code.extend(load_immediate_arm32(Gpr::R7, 359));
+                                // SVC #0
+                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // LDR R2, [SP] — read_fd (low word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R2.encoding(), 0,
+                                ));
+                                // LDR R3, [SP, #4] — write_fd (high word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R3.encoding(), 4,
+                                ));
+                                // Store fds into dst slot: low=read_fd, high=write_fd
+                                code.extend(ss_store_64(Gpr::R2, Gpr::R3, dst_offset));
+                                // ADD SP, SP, #8 — cleanup
+                                code.extend(emit_add_sp(8));
+                                true
+                            }
+                            "channel_send" if args.len() == 2 => {
+                                let ch = &args[0];
+                                let msg = &args[1];
+                                // Extract write_fd (high 32 bits of handle) into R0
+                                match ch {
+                                    crate::ir::IRValue::Register(id) => {
+                                        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                        // write_fd is at high word (offset+4)
+                                        code.extend(ss_load_from_slot(Gpr::R0, off + 4));
+                                    }
+                                    _ => {
+                                        // Spill 8-byte handle: R0=low, R2=high
+                                        code.extend(ss_load_value_64(
+                                            Gpr::R0, Gpr::R2, ch, &vreg_stack_slots,
+                                        ));
+                                        // MOV R0, R2 — move write_fd to R0
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_MOV, false, 0,
+                                            Gpr::R0.encoding(), Gpr::R2.encoding(),
+                                        ));
+                                    }
+                                }
+                                // SUB SP, SP, #8 — message buffer
+                                code.extend(emit_sub_sp(8));
+                                // Load msg (64-bit) into R2:R3, store to [SP]
+                                code.extend(ss_load_value_64(
+                                    Gpr::R2, Gpr::R3, msg, &vreg_stack_slots,
+                                ));
+                                code.extend(str_sp_offset(Gpr::R2, 0));
+                                code.extend(str_sp_offset(Gpr::R3, 4));
+                                // MOV R1, SP — buf pointer
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), Gpr::R13.encoding(),
+                                ));
+                                // MOV R2, #8 — count
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R2.encoding(), 0, 8,
+                                ));
+                                // MOV R7, #4 — sys_write (ARM EABI)
+                                code.extend(load_immediate_arm32(Gpr::R7, 4));
+                                // SVC #0
+                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // ADD SP, SP, #8 — cleanup
+                                code.extend(emit_add_sp(8));
+                                // Store write() return value to dst if present
+                                if let Some(d) = dst {
+                                    if let Some(dst_id) = d.as_register() {
+                                        let dst_offset =
+                                            vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                    }
+                                }
+                                true
+                            }
+                            "channel_recv" if args.len() == 1 && dst.is_some() => {
+                                let ch = &args[0];
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // Extract read_fd (low 32 bits of handle) into R0
+                                match ch {
+                                    crate::ir::IRValue::Register(id) => {
+                                        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                        code.extend(ss_load_from_slot(Gpr::R0, off));
+                                    }
+                                    _ => {
+                                        // Spill 8-byte handle: R0=low (read_fd), R2=high
+                                        code.extend(ss_load_value_64(
+                                            Gpr::R0, Gpr::R2, ch, &vreg_stack_slots,
+                                        ));
+                                        // R0 already has read_fd
+                                    }
+                                }
+                                // SUB SP, SP, #8 — recv buffer
+                                code.extend(emit_sub_sp(8));
+                                // MOV R1, SP — buf pointer
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), Gpr::R13.encoding(),
+                                ));
+                                // MOV R2, #8 — count
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R2.encoding(), 0, 8,
+                                ));
+                                // MOV R7, #3 — sys_read (ARM EABI)
+                                code.extend(load_immediate_arm32(Gpr::R7, 3));
+                                // SVC #0
+                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // LDR R2, [SP] — low word
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R2.encoding(), 0,
+                                ));
+                                // LDR R3, [SP, #4] — high word
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R3.encoding(), 4,
+                                ));
+                                // Store to dst slot
+                                code.extend(ss_store_64(Gpr::R2, Gpr::R3, dst_offset));
+                                // ADD SP, SP, #8 — cleanup
+                                code.extend(emit_add_sp(8));
+                                true
+                            }
+                            "channel_close" if args.len() == 1 => {
+                                let ch = &args[0];
+                                match ch {
+                                    crate::ir::IRValue::Register(id) => {
+                                        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                        // MOV R7, #6 — sys_close (ARM EABI)
+                                        code.extend(load_immediate_arm32(Gpr::R7, 6));
+                                        // close(read_fd) — low word at offset
+                                        code.extend(ss_load_from_slot(Gpr::R0, off));
+                                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                        // close(write_fd) — high word at offset+4
+                                        code.extend(ss_load_from_slot(Gpr::R0, off + 4));
+                                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                    }
+                                    _ => {
+                                        // Spill 8-byte handle: R0=low, R2=high
+                                        code.extend(ss_load_value_64(
+                                            Gpr::R0, Gpr::R2, ch, &vreg_stack_slots,
+                                        ));
+                                        // MOV R7, #6 — sys_close
+                                        code.extend(load_immediate_arm32(Gpr::R7, 6));
+                                        // close(read_fd) — R0 already has low word
+                                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                        // MOV R0, R2 — move write_fd to R0
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_MOV, false, 0,
+                                            Gpr::R0.encoding(), Gpr::R2.encoding(),
+                                        ));
+                                        // close(write_fd)
+                                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                    }
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !channel_builtin_matched {
                         let num_args = args.len();
 
                         // Look up the callee's parameter types to determine
@@ -5882,6 +6069,7 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             }
                         }
+                        } // close if !channel_builtin_matched
 
                         code
                     }
