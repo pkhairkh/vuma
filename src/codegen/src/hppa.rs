@@ -3485,6 +3485,103 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 code.extend(ss_load_imm(S0, 0));
                                 code.extend(ss_st(S0, d_off));
                             }
+                        } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                            // 64-bit integer comparison.
+                            // Load hi/lo for both operands: S0=lhs_lo, S4=lhs_hi, S1=rhs_lo, S5=rhs_hi
+                            let d_id = dst.as_register().unwrap_or(0);
+                            let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                            code.extend(ss_load_value_64(lhs, &vreg_stack_slots, S0, S4));
+                            code.extend(ss_load_value_64(rhs, &vreg_stack_slots, S1, S5));
+                            // Result in S2, default 1 (true).
+                            code.extend_from_slice(&encode_ldi(1, S2));
+                            match kind {
+                                CmpKind::Eq => {
+                                    // Eq = (hi_eq AND lo_eq). S2=1; if hi!=0, S2=0; if lo!=0, S2=0.
+                                    let hi_ne = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    let lo_ne = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&encode_ldi(0, S2));
+                                    let done = code.len() as i64;
+                                    for &off in &[hi_ne, lo_ne] {
+                                        let disp = ((done - off as i64 - 8) as i32) & !3;
+                                        let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+                                        let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                        code[off..off+4].copy_from_slice(&p.to_be_bytes());
+                                    }
+                                }
+                                CmpKind::Ne => {
+                                    // Ne = (hi!=0 OR lo!=0). S2=0; if hi!=0, S2=1; if lo!=0, S2=1.
+                                    code.extend_from_slice(&encode_ldi(0, S2));
+                                    let hi_ne = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    let lo_ne = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    let done = code.len() as i64;
+                                    for &off in &[hi_ne, lo_ne] {
+                                        let disp = ((done - off as i64 - 8) as i32) & !3;
+                                        let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+                                        let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                        code[off..off+4].copy_from_slice(&p.to_be_bytes());
+                                    }
+                                }
+                                CmpKind::SLt | CmpKind::ULt | CmpKind::SLe | CmpKind::ULe
+                                | CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe => {
+                                    let is_signed = matches!(kind, CmpKind::SLt | CmpKind::SLe | CmpKind::SGt | CmpKind::SGe);
+                                    let is_gt = matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe);
+                                    let is_eq = matches!(kind, CmpKind::SLe | CmpKind::ULe | CmpKind::SGe | CmpKind::UGe);
+
+                                    let hi_cond = if is_signed {
+                                        if is_gt { 0b011 } else { 0b010 }
+                                    } else {
+                                        if is_gt { 0b101 } else { 0b100 }
+                                    };
+                                    let hi_opp_cond = if is_signed {
+                                        if is_gt { 0b010 } else { 0b011 }
+                                    } else {
+                                        if is_gt { 0b100 } else { 0b101 }
+                                    };
+                                    let lo_cond = if is_eq {
+                                        if is_gt { 0b100 } else { 0b101 }
+                                    } else {
+                                        if is_gt { 0b101 } else { 0b100 }
+                                    };
+
+                                    // If hi matches primary direction → S2=1, skip to done.
+                                    let hi_match = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    // If hi matches opposite direction → S2=0, skip to ldi0.
+                                    let hi_opp = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_opp_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    // hi == hi: compare lo. If lo matches → S2=1, skip to done.
+                                    let lo_match = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, lo_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_nop());
+                                    // lo doesn't match → S2=0.
+                                    let ldi0_off = code.len() as i64;
+                                    code.extend_from_slice(&encode_ldi(0, S2));
+                                    let done = code.len() as i64;
+                                    // Patch hi_match and lo_match to branch to done (S2=1).
+                                    for &off in &[hi_match, lo_match] {
+                                        let disp = ((done - off as i64 - 8) as i32) & !3;
+                                        let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+                                        let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                        code[off..off+4].copy_from_slice(&p.to_be_bytes());
+                                    }
+                                    // Patch hi_opp to branch to ldi0_off (S2=0).
+                                    let disp = ((ldi0_off - hi_opp as i64 - 8) as i32) & !3;
+                                    let w = u32::from_be_bytes([code[hi_opp], code[hi_opp+1], code[hi_opp+2], code[hi_opp+3]]);
+                                    let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                    code[hi_opp..hi_opp+4].copy_from_slice(&p.to_be_bytes());
+                                }
+                            }
+                            code.extend(ss_st(S2, d_off));
                         } else {
                             // Integer comparison: existing cmpb path.
                             // Materialize a boolean comparison result into S0.
