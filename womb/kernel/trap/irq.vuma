@@ -267,6 +267,13 @@ extern "C" {
     // K11 stub: `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to
     // the master PIC's command port).
     fn pic_eoi(irq: u8);
+    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // at `ptr` with `arg` in RDI (SysV AMD64). Used by irq_dispatch_loop
+    // to invoke the per-vector IRQ handler before sending EOI. Same stub
+    // category as write/read/exit — NOT a C library function. Real asm
+    // body registered in src/codegen/src/x86_64/mod.rs::build_runtime_
+    // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -418,9 +425,12 @@ fn register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
 //      call (valid IRQ vectors are 0..255 / 0..63, all fit in a u8; the
 //      9999 sentinel is caught at step 2 before the narrowing).
 //   4. Look up the handler via `irq_get_handler(tbl, irq)`.
-//   5. If non-zero: send EOI via `pic_eoi(irq)` (simplified — K11 adds
-//      the real fn-pointer handler call before the EOI; VUMA has no
-//      fn-pointer call today).
+//   5. If non-zero: invoke the handler via `__call_indirect1(handler,
+//      irq as u64)` (Wave 5 — passes the IRQ vector as the handler's
+//      first argument in RDI per SysV AMD64), then send EOI via
+//      `pic_eoi(irq)`. The handler's u64 return is currently discarded
+//      (IRQ handlers conventionally return void or a status the
+//      dispatcher ignores; K11 may inspect it to flag handler faults).
 //   6. If zero (spurious IRQ): the contract's "simplified" path skips
 //      the EOI — K11 will add the spurious-IRQ EOI (the 8259 PIC re-
 //      delivers spurious IRQ 7 / 15 if you don't EOI them). For now,
@@ -457,8 +467,18 @@ fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
         let irq = v as u8;
         let handler = irq_get_handler(tbl, irq);
         if handler != 0 {
-            // Handler registered — send EOI (simplified; K11 adds the
-            // real fn-pointer handler call before the EOI).
+            // Wave 5: invoke the per-vector IRQ handler via the indirect-
+            // call trampoline. The handler receives `irq as u64` (the
+            // vector number) as its first SysV AMD64 argument (RDI). The
+            // u64 return is currently ignored — IRQ handlers conventionally
+            // return void or a status the dispatcher does not act on.
+            // `tbl` (State<IrqTable>) is preserved across the extern call
+            // because it is passed as a regular VUMA-fn borrow, NOT as an
+            // extern #[borrow] param (only extern #[borrow] State<T>
+            // params are conservatively invalidated).
+            let handler_ret = __call_indirect1(handler, irq as u64);
+            // Send EOI after the handler returns so the PIC re-arms the
+            // IRQ line for the next interrupt.
             pic_eoi(irq);
         }
         // Spurious IRQ (handler == 0): the contract's "simplified" path
