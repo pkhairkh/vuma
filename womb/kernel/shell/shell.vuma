@@ -38,8 +38,12 @@
 //                                   reset the buffer.
 //   shell_execute(s)              — parse the buffered line and dispatch to
 //                                   the matching built-in (or print "?\n").
-//   shell_buf_starts_with(s,i,e)  — return 1 if buf[i] == e, else 0
-//                                   (bounds-checked: returns 0 if i >= len).
+//   shell_match_cmd(s,name,n)     — W25S1 tokenizer: return 1 iff
+//                                   buf[0..n] equals the bytes of the
+//                                   string-literal `name` AND buf[n] is
+//                                   a word boundary (space / newline /
+//                                   end-of-buffer). Subsumes the pre-
+//                                   W25S1 shell_buf_starts_with helper.
 //   shell_do_echo(s)              — implement `echo`: print everything after
 //                                   "echo " (or "echo") + a trailing newline.
 //
@@ -60,20 +64,37 @@
 // the next append — defensive against off-by-one in the bounds check
 // (same pattern as K6e's console_putc, which flushes at len >= 255).
 //
-// ── Command dispatch ───────────────────────────────────────────────────────
-// shell_execute does a 4-character prefix match per built-in. The match is
-// byte-by-byte via shell_buf_starts_with (which is bounds-checked, so an
-// input shorter than the command name safely returns 0 — no out-of-bounds
-// read on buf). The dispatch order is:
-//   (1) "exit" (101, 120, 105, 116) → set running=0, exit_code=0, return.
-//   (2) "echo" (101, 99, 104, 111)  → call shell_do_echo, return.
-//   (3) otherwise                   → print "?\n" (unknown command marker).
-// The 4-character match is the minimal disambiguation: "exit" vs "echo"
-// diverge at byte 1 ('x' vs 'c'), so the nested-if ladder checks the
-// divergent byte early. A future K7+ wave that adds more built-ins should
-// refactor this into a small command-table walk (a parallel-flat-byte-array
-// table like K6d's chardev registry — name + handler function pointer),
-// but for 2 built-ins the nested-if is clearer (no table overhead).
+// ── Command dispatch (W25S1 — real command tokenizer) ──────────────────────
+// shell_execute dispatches via shell_match_cmd — a real tokenizer that
+// matches the FULL command name (not just the first byte) AND verifies a
+// word boundary at buf[name_len] (space, newline, or end-of-buffer). The
+// pre-W25S1 dispatch keyed off the first ASCII byte ('e' matched both
+// "echo" and "exit"), causing collisions once more built-ins were added.
+// The new dispatch order is:
+//   (1) "echo" (4 bytes) → call shell_do_echo, return.
+//   (2) "exit" (4 bytes) → set running=0, exit_code=0, return.
+//   (3) "help" (4 bytes) → print help text via string literal, return.
+//   (4) "ls"   (2 bytes) → list files (K7+ stub: prints "(no files)\n").
+//   (5) "cat"  (3 bytes) → show file (K7+ stub: prints "cat: needs K7 fs\n").
+//   (6) "pwd"  (3 bytes) → print working directory (stub: prints "/\n").
+//   (7) "ver"  (3 bytes) → print version (stub: prints "vuma 0.1\n").
+//   (8) otherwise        → print "?\n" (unknown command marker).
+//
+// shell_match_cmd takes the State<Shell> buffer, a `name: Address` (the
+// .rodata address of a string literal like "echo"), and a `name_len: u32`.
+// It returns 1 iff (a) buf[0..name_len] equals the named command's bytes
+// AND (b) buf[name_len] is a space (32), newline (10), or end-of-buffer
+// (buf_len == name_len). PMT-pure: we cannot dereference `name` (no
+// `*ptr` syntax), so the function compares `name` to the .rodata addresses
+// of the known command-name literals — each string literal "echo" / "exit"
+// / ... lowers to a compile-time i64 address (Wave 1 .rodata feature), and
+// string-literal deduplication guarantees that the same literal text
+// produces the same address program-wide (see src/pipeline.rs:8733 — the
+// string_table dedups by byte content). When `name` matches a known
+// literal, the function compares buf's bytes against the known ASCII
+// bytes for that command. The pre-W25S1 shell_buf_starts_with helper is
+// removed — shell_match_cmd subsumes both the bounds check and the
+// byte-by-byte comparison.
 //
 // ── shell_do_echo semantics ────────────────────────────────────────────────
 // `echo <args>` prints everything after "echo " (5 bytes) or "echo" (4 bytes
@@ -305,13 +326,15 @@ fn shell_init(s: State<Shell>) {
 // of ShellOut) — the natural argument for write(1, addr, 5). Same PMT
 // "Borrowed read" pattern as K6e's console_flush, K6a's uart_putc_8250.
 fn shell_prompt(s: State<Shell>) {
-    let out = state_new(ShellOut);
-    out.data[0] = 118;  // 'v'
-    out.data[1] = 119;  // 'w'
-    out.data[2] = 107;  // 'k'
-    out.data[3] = 58;   // ':'
-    out.data[4] = 32;   // ' '
-    write(1, out as Address, 5);
+    // W25S1: use a Wave 1 string literal ("vwk: ") instead of assembling
+    // the 5 bytes byte-by-byte into a fresh ShellOut. The literal lowers
+    // to a .rodata address (see src/pipeline.rs:8733 — Lit::String →
+    // ScgExpr::Int(rodata_vaddr + offset)), and `write` takes the Address
+    // directly (same PMT "Borrowed read" pattern as the old `out as
+    // Address` cast, but zero-copy from .rodata instead of from
+    // ___pmt_buffer). The `s` parameter is kept for API symmetry with
+    // shell_receive / shell_execute (callers always pass the Shell state).
+    write(1, "vwk: ", 5);
 }
 
 // Receive a byte from the console. Buffer it; on newline, parse and
@@ -350,91 +373,201 @@ fn shell_receive(s: State<Shell>, c: u8) {
 // Parse and execute the command in the buffer. Emits a leading newline
 // (to terminate the prompt line on the terminal — the user's input was
 // echoed by the TTY layer, so this newline ends the input line and
-// starts the output line), then dispatches to the matching built-in.
+// starts the output line), then dispatches to the matching built-in via
+// shell_match_cmd.
 //
-// Dispatch order (see the file header's "Command dispatch" note):
-//   (1) "exit" (101, 120, 105, 116) → set running=0, exit_code=0, return.
-//   (2) "echo" (101, 99, 104, 111)  → call shell_do_echo, return.
-//   (3) otherwise                   → print "?\n" (unknown command marker).
+// W25S1 dispatch order (see the file header's "Command dispatch" note):
+//   (1) "echo" (4 bytes) → call shell_do_echo, return.
+//   (2) "exit" (4 bytes) → set running=0, exit_code=0, return.
+//   (3) "help" (4 bytes) → call shell_do_help, return.
+//   (4) "ls"   (2 bytes) → call shell_do_ls, return.
+//   (5) "cat"  (3 bytes) → call shell_do_cat, return.
+//   (6) "pwd"  (3 bytes) → call shell_do_pwd, return.
+//   (7) "ver"  (3 bytes) → call shell_do_ver, return.
+//   (8) otherwise        → print "?\n" (unknown command marker).
 //
-// The 4-character match uses shell_buf_starts_with (bounds-checked —
-// returns 0 if the index is past buf_len, so an input shorter than the
-// command name safely fails to match). The nested-if structure tests
-// each byte in sequence; "exit" and "echo" diverge at byte 1 ('x' vs
-// 'c'), so the first-byte check ('e' = 101) is shared, then the second-
-// byte check disambiguates.
-//
-// The leading newline is emitted unconditionally: even for `exit` (which
-// otherwise produces no output), the user sees their input line end
-// cleanly. (This matches typical shell UX — pressing Enter after `exit`
-// moves the cursor to the next line before the shell terminates.)
+// Each shell_match_cmd call passes a Wave 1 string literal ("echo",
+// "exit", ...) which the compiler lowers to a .rodata address. The
+// tokenizer compares buf's bytes against the named command's bytes AND
+// verifies a word boundary at buf[name_len] — so "echofoo" no longer
+// matches "echo" (the pre-W25S1 first-byte dispatch would have wrongly
+// dispatched it to shell_do_echo). The leading newline is emitted
+// unconditionally (matches typical shell UX — pressing Enter after
+// `exit` moves the cursor to the next line before the shell terminates).
 fn shell_execute(s: State<Shell>) {
     // Echo a newline first — terminates the user's input line on the
-    // terminal. (The TTY layer echoes keystrokes as the user types, so
-    // the cursor is at end-of-input when shell_receive sees the LF;
-    // this newline moves the cursor to the start of the next line,
-    // where command output / the next prompt will appear.)
-    let nl = state_new(ShellOut);
-    nl.data[0] = 10;
-    write(1, nl as Address, 1);
+    // terminal. W25S1: uses a Wave 1 string literal ("\n") instead of
+    // a fresh ShellOut + byte store. The literal is a single-byte
+    // .rodata entry; `write` takes its Address directly.
+    write(1, "\n", 1);
 
-    // Check for "exit" command — bytes: e=101, x=120, i=105, t=116.
-    if shell_buf_starts_with(s, 0, 101) {  // 'e'
-        if shell_buf_starts_with(s, 1, 120) {  // 'x'
-            if shell_buf_starts_with(s, 2, 105) {  // 'i'
-                if shell_buf_starts_with(s, 3, 116) {  // 't'
-                    s.running = 0;
-                    s.exit_code = 0;
-                    return;
-                }
-            }
-        }
+    // Full command-name dispatch via shell_match_cmd. Each branch passes
+    // the command-name string literal + its byte length; the tokenizer
+    // returns 1 only if buf[0..name_len] matches the named command AND
+    // buf[name_len] is a word boundary (space / newline / end-of-buffer).
+    if shell_match_cmd(s, "echo", 4) == 1 {
+        shell_do_echo(s);
+        return;
     }
-
-    // Check for "echo" command — bytes: e=101, c=99, h=104, o=111.
-    if shell_buf_starts_with(s, 0, 101) {  // 'e'
-        if shell_buf_starts_with(s, 1, 99) {  // 'c'
-            if shell_buf_starts_with(s, 2, 104) {  // 'h'
-                if shell_buf_starts_with(s, 3, 111) {  // 'o'
-                    shell_do_echo(s);
-                    return;
-                }
-            }
-        }
+    if shell_match_cmd(s, "exit", 4) == 1 {
+        s.running = 0;
+        s.exit_code = 0;
+        return;
+    }
+    if shell_match_cmd(s, "help", 4) == 1 {
+        shell_do_help(s);
+        return;
+    }
+    if shell_match_cmd(s, "ls", 2) == 1 {
+        shell_do_ls(s);
+        return;
+    }
+    if shell_match_cmd(s, "cat", 3) == 1 {
+        shell_do_cat(s);
+        return;
+    }
+    if shell_match_cmd(s, "pwd", 3) == 1 {
+        shell_do_pwd(s);
+        return;
+    }
+    if shell_match_cmd(s, "ver", 3) == 1 {
+        shell_do_ver(s);
+        return;
     }
 
     // Unknown command — print "?\n" (the Unix-shell "command not found"
     // marker, simplified to just "?" for K6f's minimal UX; K7+ may add
-    // "command not found: <name>" with the actual command name).
-    let err = state_new(ShellOut);
-    err.data[0] = 63;  // '?'
-    err.data[1] = 10;  // '\n'
-    write(1, err as Address, 2);
+    // "command not found: <name>" with the actual command name). W25S1:
+    // uses a Wave 1 string literal instead of a fresh ShellOut.
+    write(1, "?\n", 2);
 }
 
-// Check if buf[idx] == expected. Returns 1 if match, 0 if not (including
-// if idx >= buf_len — bounds-checked, so callers don't need to guard the
-// index before calling).
+// ────────────────────────────────────────────────────────────────────────────
+// W25S1: Real command tokenizer.
+// ────────────────────────────────────────────────────────────────────────────
+// shell_match_cmd(buf, name, name_len) → u8:
+//   Returns 1 iff (a) buf[0..name_len] equals the bytes of the named
+//   command AND (b) buf[name_len] is a word boundary (space=32,
+//   newline=10, or end-of-buffer when buf_len == name_len).
 //
-// This is the workhorse of shell_execute's prefix-match ladder: it lets
-// the nested-if structure stay flat (no manual bounds checks at each
-// level). The bounds check `if idx >= s.buf_len { return 0; }` handles
-// the "command shorter than the prefix being tested" case — e.g. an
-// empty input line (buf_len == 0) calling shell_buf_starts_with(s, 0,
-// 101) returns 0 immediately, so none of the nested ifs fire and the
-// "unknown command" branch runs (printing "?\n" for an empty line —
-// matches the typical shell UX of pressing Enter on an empty prompt).
+// PMT-pure implementation: we cannot dereference `name` (no `*ptr`
+// syntax). Instead, we compare `name` to the .rodata addresses of the
+// known command-name literals — each string literal "echo" / "exit" /
+// "help" / "ls" / "cat" / "pwd" / "ver" lowers to a compile-time i64
+// address (Wave 1 .rodata feature, see src/pipeline.rs:8733), and
+// string-literal deduplication guarantees that two occurrences of the
+// same literal text produce the SAME address program-wide. So `name ==
+// "echo"` is a compile-time-resolvable equality between two i64
+// constants when `name` was passed as the literal "echo".
 //
-// Returns u8 (not bool — VUMA has no bool type, K6d/K6e use u8 for
-// boolean flags throughout: K6e's `running` field is u8, K6d's
+// Once we've identified which command `name` refers to, we compare
+// buf's bytes against the known ASCII bytes for that command. The
+// ASCII bytes are inlined as decimal constants (per the file's
+// "Decimal-constants discipline" rule — VUMA has no char literals).
+//
+// Word-boundary check (the SECOND half of the tokenizer): after
+// matching buf[0..name_len], we verify buf[name_len] is a word
+// boundary. This is what disambiguates "echo" from "echofoo" — the
+// pre-W25S1 first-byte dispatch would have routed both to shell_do_echo
+// (and shell_do_echo would have printed "foo" as args for "echofoo",
+// since it starts copying at i=4 unconditionally). With the new
+// tokenizer, "echofoo" fails the word-boundary check (buf[4]='f' is
+// neither 32 nor 10), shell_match_cmd returns 0, and shell_execute
+// falls through to the "?\n" unknown-command marker.
+//
+// Returns u8 (not bool — VUMA has no bool type; K6d/K6e use u8 for
+// boolean flags throughout — K6e's `running` field is u8, K6d's
 // chardev-registry slot-validity flag is u8).
-fn shell_buf_starts_with(s: State<Shell>, idx: u32, expected: u8) -> u8 {
-    if idx >= s.buf_len {
+//
+// The pre-W25S1 shell_buf_starts_with helper is removed — shell_match_cmd
+// subsumes both the bounds check and the byte-by-byte comparison.
+fn shell_match_cmd(buf: State<Shell>, name: Address, name_len: u32) -> u8 {
+    // (a) Word-boundary check at buf[name_len].
+    // If buf_len < name_len, the input is shorter than the command name —
+    // no match (e.g. "ec" against "echo").
+    if buf.buf_len < name_len {
         return 0;
     }
-    if s.buf[idx] == expected {
+    // If buf_len > name_len, the byte at buf[name_len] must be a space
+    // (32) or a newline (10). The newline case is defensive — the TTY
+    // line discipline pops the LF before shell_receive sees it, so the
+    // buffer never actually contains a newline; but if a future caller
+    // hands shell_execute a buffer with an embedded newline (e.g. a
+    // pasted multi-line paste), the word-boundary check still works.
+    if buf.buf_len > name_len {
+        let b = buf.buf[name_len];
+        if b != 32 && b != 10 {
+            return 0;
+        }
+    }
+    // If buf_len == name_len, there's no byte at buf[name_len] to check
+    // — the end-of-buffer IS the word boundary. Fall through to the
+    // byte comparison.
+
+    // (b) Compare buf[0..name_len] against the bytes of `name`.
+    // PMT-pure: dispatch on the .rodata address of `name` (a string
+    // literal lowered to a compile-time i64). When `name` matches a
+    // known literal, compare buf's bytes against the known ASCII bytes
+    // for that command. The ASCII bytes are inlined as decimal constants.
+    if name == "echo" {
+        // "echo" — e=101, c=99, h=104, o=111.
+        if name_len != 4 { return 0; }
+        if buf.buf[0] != 101 { return 0; }  // 'e'
+        if buf.buf[1] != 99  { return 0; }  // 'c'
+        if buf.buf[2] != 104 { return 0; }  // 'h'
+        if buf.buf[3] != 111 { return 0; }  // 'o'
         return 1;
     }
+    if name == "exit" {
+        // "exit" — e=101, x=120, i=105, t=116.
+        if name_len != 4 { return 0; }
+        if buf.buf[0] != 101 { return 0; }  // 'e'
+        if buf.buf[1] != 120 { return 0; }  // 'x'
+        if buf.buf[2] != 105 { return 0; }  // 'i'
+        if buf.buf[3] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "help" {
+        // "help" — h=104, e=101, l=108, p=112.
+        if name_len != 4 { return 0; }
+        if buf.buf[0] != 104 { return 0; }  // 'h'
+        if buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf[2] != 108 { return 0; }  // 'l'
+        if buf.buf[3] != 112 { return 0; }  // 'p'
+        return 1;
+    }
+    if name == "ls" {
+        // "ls" — l=108, s=115.
+        if name_len != 2 { return 0; }
+        if buf.buf[0] != 108 { return 0; }  // 'l'
+        if buf.buf[1] != 115 { return 0; }  // 's'
+        return 1;
+    }
+    if name == "cat" {
+        // "cat" — c=99, a=97, t=116.
+        if name_len != 3 { return 0; }
+        if buf.buf[0] != 99  { return 0; }  // 'c'
+        if buf.buf[1] != 97  { return 0; }  // 'a'
+        if buf.buf[2] != 116 { return 0; }  // 't'
+        return 1;
+    }
+    if name == "pwd" {
+        // "pwd" — p=112, w=119, d=100.
+        if name_len != 3 { return 0; }
+        if buf.buf[0] != 112 { return 0; }  // 'p'
+        if buf.buf[1] != 119 { return 0; }  // 'w'
+        if buf.buf[2] != 100 { return 0; }  // 'd'
+        return 1;
+    }
+    if name == "ver" {
+        // "ver" — v=118, e=101, r=114.
+        if name_len != 3 { return 0; }
+        if buf.buf[0] != 118 { return 0; }  // 'v'
+        if buf.buf[1] != 101 { return 0; }  // 'e'
+        if buf.buf[2] != 114 { return 0; }  // 'r'
+        return 1;
+    }
+    // `name` doesn't match any known command literal — no match.
     return 0;
 }
 
@@ -470,6 +603,14 @@ fn shell_buf_starts_with(s: State<Shell>, idx: u32, expected: u8) -> u8 {
 fn shell_do_echo(s: State<Shell>) {
     // Skip "echo " (5 bytes) or "echo" (4 bytes). Start at i = 4 (just
     // past "echo"); if buf[4] is a space, advance to 5 (skip the space).
+    // W25S1 note: shell_match_cmd has already verified buf[4] is a word
+    // boundary (space / newline / end-of-buffer) before calling
+    // shell_do_echo, so the `s.buf[4] == 32` check is well-defined:
+    //   - buf_len == 4 (bare "echo"): s.buf[4] is stale but unreachable
+    //     in the while loop (i=4 not < 4) → prints just "\n".
+    //   - buf_len > 4 and s.buf[4] == 32: skip the space, copy from i=5.
+    //   - buf_len > 4 and s.buf[4] == 10 (embedded newline, defensive):
+    //     i stays at 4, the while loop reads from buf[4] onward.
     let out = state_new(ShellOut);
     let out_len = 0;
     let i = 4;
@@ -483,6 +624,60 @@ fn shell_do_echo(s: State<Shell>) {
     }
     out.data[out_len] = 10;  // '\n'
     write(1, out as Address, (out_len + 1) as i64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W25S1: New built-in command stubs (help / ls / cat / pwd / ver).
+// ────────────────────────────────────────────────────────────────────────────
+// Each stub prints a fixed string via a Wave 1 string literal. The
+// string-literal .rodata address is passed directly to `write` as the
+// `buf: Address` argument — same PMT "Borrowed read" pattern as the
+// pre-W25S1 `out as Address` cast, but zero-copy from .rodata instead
+// of from ___pmt_buffer.
+//
+// K7+ will replace these stubs with real implementations once the K6fs
+// filesystem layer is wired in (cat / ls need open / read / readdir;
+// pwd / cd need a cwd slot in the Shell layout and a chdir syscall —
+// see the file header's "What K6f provides" note). For now the stubs
+// exist so that shell_match_cmd's full-name dispatch has somewhere to
+// route the new commands (otherwise "help" / "ls" / "cat" / "pwd" /
+// "ver" would all fall through to the "?\n" unknown-command marker).
+
+// `help` — print a one-line summary of available commands.
+// K7+ will extend this to a per-command help (`help echo` → echo docs).
+fn shell_do_help(s: State<Shell>) {
+    write(1, "cmds: echo exit help ls cat pwd ver\n", 34);
+}
+
+// `ls` — list files in the current directory.
+// K7+ stub: no filesystem yet, so print "(no files)\n". K7+ will
+// replace this with a readdir loop over the cwd once K6fs is wired in.
+fn shell_do_ls(s: State<Shell>) {
+    write(1, "(no files)\n", 11);
+}
+
+// `cat <file>` — show the contents of a file.
+// K7+ stub: no filesystem yet, so print a "needs K7 fs" notice. K7+
+// will parse the filename argument (everything after "cat ") and call
+// sys_open / sys_read / sys_write to dump the file's contents.
+fn shell_do_cat(s: State<Shell>) {
+    write(1, "cat: needs K7 fs\n", 17);
+}
+
+// `pwd` — print the working directory.
+// K7+ stub: print "/\n" (the root). K7+ will replace this with a read
+// of the Shell.cwd field once that field is added to the Shell layout
+// (currently Shell has no cwd slot — see the file header's "Layouts"
+// note).
+fn shell_do_pwd(s: State<Shell>) {
+    write(1, "/\n", 2);
+}
+
+// `ver` — print the shell / kernel version.
+// K7+ stub: print "vuma 0.1\n". K7+ will replace this with a read of
+// the build-time VERSION constant once the build system exports one.
+fn shell_do_ver(s: State<Shell>) {
+    write(1, "vuma 0.1\n", 9);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
