@@ -283,12 +283,16 @@
 //         womb/kernel/shell/shell.vuma \
 //         /tmp/shell.bin x86_64 --verify
 //     /tmp/shell.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0. The self-test runs 4 sub-tests (echo,
-// tab-single, tab-multi, exit) and asserts:
+// Expected: IVE Pass, exit=0. The self-test runs sub-tests (1), (1.5),
+// (1.6), (3), (4a), (4b), (2), and (5) and asserts:
 //   (1) After "echo hello\n", s.running == 1 (shell still running).
 //   (1.5) After "ec"+Tab, s.buf_len == 5 and buf == "echo " (W26S1).
 //   (1.6) After "e"+Tab, s.buf_len == 1 and buf == "e" (W26S1 multi).
 //   (2) After "exit\n", s.running == 0 (shell exited).
+//   (5) W27S7 integration test: after re-init, feeds "help\n", "echo
+//       hello\n", "ver\n", "pwd\n", "ls\n", "foo\n", "exit\n" — s.running
+//       stays 1 after each non-exit command and transitions to 0 after
+//       the final "exit\n".
 
 // ────────────────────────────────────────────────────────────────────────────
 // Extern "C" trampolines.
@@ -1781,17 +1785,33 @@ fn shell_tab_complete(s: State<Shell>) {
 //       exited (s.running == 0).
 //       Verifies: shell_receive buffering + newline-triggered execute
 //       + "exit" prefix match + running/exit_code state mutation.
+//   (5) W27S7 end-to-end integration test — re-inits the shell (sub-test
+//       (2) above left running=0), then feeds a scripted sequence of 7
+//       commands one byte at a time through shell_receive: "help\n",
+//       "echo hello\n", "ver\n", "pwd\n", "ls\n", "foo\n" (unknown),
+//       "exit\n". Each non-exit command must leave s.running == 1 (the
+//       shell didn't crash); the final "exit\n" must set s.running == 0.
+//       Since PMT-pure VUMA can't easily capture stdout, "verify" here
+//       means "the shell survived" — running stays 1 after each non-exit
+//       command and transitions to 0 after exit. Exercises 6 distinct
+//       dispatch branches: shell_do_help, shell_do_echo, shell_do_ver,
+//       shell_do_pwd, shell_do_ls, the unknown-command "?\n" fall-through,
+//       and the exit built-in. Return codes 20-26 (one per command).
 //
-// All assertions return distinct non-zero codes (1-10) so a failure
+// All assertions return distinct non-zero codes (1-26) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 //
 // Visible stdout side-effect: the test emits "\nhello\n" (sub-test 1:
 // leading "\n" + "hello\n"), then "\n\n" (sub-test 1.5: leading "\n"
 // from shell_execute + "\n" from echo-of-empty-args), then "\necho exit
 // \n\n?\n" (sub-test 1.6: "\necho exit \n" from multi-match tab +
-// "\n?\n" from executing unknown "e"), then "\n" (sub-test 2: leading
-// "\n" from shell_execute before exit sets running=0). Total visible
-// output doesn't affect the exit code.
+// "\n?\n" from executing unknown "e"), then "\nhi\n" (sub-test 3: pipe),
+// then "\n" (sub-test 4a: redir-out) + "\nhi\n" (sub-test 4b: redir-in),
+// then "\n" (sub-test 2: leading "\n" from shell_execute before exit
+// sets running=0), then sub-test (5)'s sequence: "\n" + help text +
+// "\nhello\n" + "\nvuma 0.1\n" + "\n/\n" + "\n" + ls entries + "\n?\n"
+// + "\n" (final exit). Total visible output doesn't affect the exit
+// code.
 
 fn main() -> i32 {
     let s = state_new(Shell);
@@ -2008,5 +2028,107 @@ fn main() -> i32 {
     shell_receive(s, 10);   // '\n'
     // Shell should have exited.
     if s.running != 0 { return 2; }
+
+    // ── Sub-test (5): W27S7 end-to-end integration test ───────────────────
+    // Scripted smoke test: feed a realistic sequence of commands one byte
+    // at a time through shell_receive and verify the shell survives each
+    // one. Since we can't easily capture stdout in PMT-pure VUMA, "verify"
+    // here means "the shell didn't crash" — s.running stays 1 after each
+    // non-exit command and transitions to 0 after `exit`. Each command
+    // exercises a different dispatch branch:
+    //   (5a) "help\n"  → shell_do_help   (shell_print_paged × 13)
+    //   (5b) "echo hello\n" → shell_do_echo (ShellOut build + write)
+    //   (5c) "ver\n"   → shell_do_ver    (shell_puts literal write)
+    //   (5d) "pwd\n"   → shell_do_pwd    (cwd copy into ShellOut + write)
+    //   (5e) "ls\n"    → shell_do_ls     (5 × shell_ls_entry + newline)
+    //   (5f) "foo\n"   → unknown command (shell_puts "?\n" marker)
+    //   (5g) "exit\n"  → running=0, exit_code=0
+    // Re-initialize the shell first: sub-test (2) above set running=0,
+    // and the integration test needs running=1 to start the new sequence.
+    // shell_init also zeroes buf_len, exit_code, redirect_len/mode, and
+    // resets cwd to "/" + line_count to 0 — a clean slate.
+    shell_init(s);
+
+    // (5a) "help\n" — help built-in (4 bytes + newline). Dispatches to
+    // shell_do_help, which calls shell_print_paged 13 times (header +
+    // 12 command rows). Each shell_print_paged call may bump line_count
+    // and emit "--More--\n" on overflow (W27S3); here line_count starts
+    // at 0 and the 13 lines fit under the 24-line threshold, so no
+    // "--More--" prompt fires. running stays 1. Return 20 on failure.
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 112);  // 'p'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 20; }
+
+    // (5b) "echo hello\n" — echo built-in (10 bytes + newline). Same
+    // path as sub-test (1) above: shell_do_echo builds "hello\n" in a
+    // ShellOut and writes 6 bytes to stdout. running stays 1.
+    // Return 21 on failure.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 32);   // ' '
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 21; }
+
+    // (5c) "ver\n" — ver built-in (3 bytes + newline). Dispatches to
+    // shell_do_ver, which calls shell_puts(s, "vuma 0.1\n", 9). running
+    // stays 1. Return 22 on failure.
+    shell_receive(s, 118);  // 'v'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 114);  // 'r'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 22; }
+
+    // (5d) "pwd\n" — pwd built-in (3 bytes + newline). Dispatches to
+    // shell_do_pwd, which copies cwd ("/", 1 byte after shell_init)
+    // into a ShellOut, appends '\n', and writes 2 bytes to stdout.
+    // running stays 1. Return 23 on failure.
+    shell_receive(s, 112);  // 'p'
+    shell_receive(s, 119);  // 'w'
+    shell_receive(s, 100);  // 'd'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 23; }
+
+    // (5e) "ls\n" — ls built-in (2 bytes + newline). Dispatches to
+    // shell_do_ls, which calls shell_ls_entry 5 times (bin, etc, dev,
+    // README.txt, hello.txt) — directories get ANSI blue color codes
+    // (W27S1) — then writes a trailing '\n'. running stays 1.
+    // Return 24 on failure.
+    shell_receive(s, 108);  // 'l'
+    shell_receive(s, 115);  // 's'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 24; }
+
+    // (5f) "foo\n" — unknown command (3 bytes + newline). shell_execute
+    // writes "\n" (leading newline) then shell_dispatch falls through
+    // all 12 shell_match_cmd checks (none match "foo") and calls
+    // shell_puts(s, "?\n", 2). running stays 1 — unknown commands
+    // don't terminate the shell. Return 25 on failure.
+    shell_receive(s, 102);  // 'f'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 25; }
+
+    // (5g) "exit\n" — exit built-in (4 bytes + newline). shell_dispatch
+    // matches "exit" and sets s.running=0, s.exit_code=0. After this,
+    // s.running should be 0 — the shell has terminated cleanly.
+    // Return 26 on failure.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 120);  // 'x'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 0 { return 26; }
+
     return 0;
 }
