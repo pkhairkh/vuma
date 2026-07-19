@@ -1,0 +1,480 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// scripts/real_kat_tests/test_aes128_real.vuma
+// Real KAT test: AES-128 ECB encryption of the FIPS-197 Appendix B test
+// vector, compared against the published ciphertext (byte 0 only).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// W52: This is the SECOND real-KAT test (after W51's SHA-256("abc")) that
+// compiles under the PMT-only parser. It reuses the W49 AES primitives
+// from womb/kernel/crypto/aes.vuma — aes_init_sbox, aes_sub_bytes,
+// aes_shift_rows, aes_encrypt_block — to encrypt the canonical FIPS-197
+// Appendix B.1 test vector:
+//
+//     key        = 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
+//     plaintext  = 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF
+//     ciphertext = 69 C4 E0 D8 6A 7B 04 30 D8 CD B7 80 70 B4 C5 5A
+//
+// On match: writes 105 (0x69 — the expected first byte) to stdout.
+// On mismatch: writes 0 (the failure sentinel).
+//
+// ── Documented limitation (MixColumns deferred) ─────────────────────────────
+//   The W52 cipher uses the W49 AES skeleton: real FIPS-197 S-box (W29S1)
+//   + real SubBytes (W49) + real ShiftRows (W49) + AddRoundKey per round,
+//   with the W29S1 STUB key schedule (all 11 round keys = the original
+//   16-byte key — K10b). MixColumns (FIPS-197 §5.1.3 — the GF(2^8) column
+//   mixing via the fixed matrix [2,3,1,1; 1,2,3,1; 1,1,2,3; 3,1,1,2]) is
+//   DEFERRED. Without MixColumns + the real Rijndael key schedule, the
+//   cipher does NOT produce the FIPS-197 expected ciphertext — every
+//   output byte depends only on the corresponding input byte (via the
+//   SubBytes chain) plus AddRoundKey, not on all 16 input bytes (no
+//   column diffusion).
+//
+//   For the FIPS-197 Appendix B test vector, key[0]=0 and pt[0]=0, so
+//   after AddRoundKey(0) state[0] = 0. Round 1 SubBytes: sbox[0] = 99.
+//   Because key[0]=0 (round_keys[round*16+0] = 0 for all 11 rounds per
+//   the stub schedule), AddRoundKey is a no-op for byte 0. Byte 0
+//   therefore cycles through the S-box chain:
+//     0 → sbox[0]=99 → sbox[99]=251 → sbox[251]=15 → sbox[15]=118 →
+//     sbox[118]=56 → sbox[56]=7 → sbox[7]=197 → sbox[197]=166 →
+//     sbox[166]=36 → sbox[36]=54.
+//   After 10 rounds: output[0] = 54 (0x36). The expected first byte is
+//   0x69 = 105 (real AES with MixColumns + the real key schedule).
+//   The W52 test therefore EXPECTS the comparison to fail (write 0) —
+//   it is a regression-detection framework: when W53+ adds MixColumns
+//   and the real Rijndael key schedule, output[0] will start matching
+//   105, and the test will start emitting 105 (pass).
+//
+// ── Why compare only byte 0? ─────────────────────────────────────────────────
+//   (1) The W49 cipher's ShiftRows swap pattern is wrong for rows 1 and 3
+//       (the W49 worklog documents this — the 2-swap pattern produces
+//       [b,a,d,c] instead of the canonical FIPS-197 left-rotate-by-1
+//       [b,c,d,a]). Comparing only byte 0 (row 0, which ShiftRows does
+//       NOT touch) sidesteps this known bug — byte 0's value is purely
+//       a function of input[0], key[0], and the SubBytes chain.
+//   (2) Byte 0's behavior is fully determined by the SubBytes chain on
+//       input[0] XOR key[0] (the row-0 byte at column 0) — independent
+//       of ShiftRows, MixColumns, or any other byte's value. So byte 0
+//       is the cleanest signal for "did the cipher's round function
+//       run at all?" — and a regression detector for "did MixColumns
+//       + the real key schedule land yet?"
+//   (3) When MixColumns lands (W53+), byte 0 will start depending on
+//       bytes 0, 1, 2, 3 (the entire first column) — so the test will
+//       then be a meaningful end-to-end KAT, not just a SubBytes trace.
+//
+// ── PMT discipline ──────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `as *`, `allocate`, or `free` anywhere in this file.
+//   All buffers are State<T> allocated via state_new(Layout). All non-zero
+//   constants are DECIMAL per the K10d/K11 contract (no hex literals —
+//   hex literals have width-extension issues per aes.vuma's header note).
+//   The `out as Address` cast hands the State<OutByte> base pointer to
+//   write() — the canonical PMT-to-FFI pattern from K3f's
+//   womb/kernel/syscall/handlers/io.vuma and W51's test_sha256_abc_real.vuma.
+//
+// ── VUMA Key Concepts ──────────────────────────────────────────────────────
+//   - PMT layouts with [u8; N] fixed-size array fields
+//   - `state_new(Layout)` arena allocation of crypto contexts
+//   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
+//   - Byte-granular array indexing (sbox.data[i] reads byte i)
+//   - `as u32` widening cast on u8 operands before array indexing
+//   - `as u8` truncating cast from the default integer type to u8
+//   - XOR operator (`^`) on u8 values for AddRoundKey
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//   . "$HOME/.cargo/env" && \
+//   ./target/release-fast/compile_dump \
+//       scripts/real_kat_tests/test_aes128_real.vuma \
+//       /tmp/aeskat.bin x86_64 --verify
+//   /tmp/aeskat.bin | od -An -tx1
+// Expected: IVE Pass, stdout = single byte 0x00 (mismatch — MixColumns
+// deferred, see "Documented limitation" above). When W53+ adds MixColumns
+// + the real Rijndael key schedule, stdout will become 0x69 (105 — match).
+
+// ────────────────────────────────────────────────────────────────────────────
+// FFI declaration — write(2) syscall wrapper.
+// ────────────────────────────────────────────────────────────────────────────
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+// Re-declared byte-identically to womb/kernel/crypto/aes.vuma (K2c
+// byte-identical-redeclaration invariant, extended to layouts in K3d —
+// see womb/kernel/crypto/asym.vuma:140-142 for the canonical statement
+// of the invariant). The re-declaration is required because VUMA has no
+// `import` — each PMT-pure file is self-contained.
+
+// AES S-box — the real 256-entry FIPS-197 table (W29S1).
+layout AesSbox = { data: [u8; 256] }
+
+// AES context: the expanded key schedule + the round count (10 for
+// AES-128 — K11 will dispatch on ctx.nr for AES-192/256).
+layout AesCtx = {
+    round_keys: [u8; 176],  // expanded key schedule (11 × 16 bytes)
+    nr: u32,                // number of rounds (10 for AES-128)
+}
+
+// AES-128 key wrapper (16 bytes).
+layout AesKey = { data: [u8; 16] }
+
+// AES block (always 16 bytes — the Rijndael block size).
+layout AesBlock = { data: [u8; 16] }
+
+// AES working state — the 16-byte column-major byte matrix that the round
+// function (SubBytes + ShiftRows + MixColumns + AddRoundKey) transforms
+// in place. Same 16-byte shape as AesBlock but a different role. Byte
+// at (row, col) = data[col*4 + row] (column-major per FIPS-197 §3.4).
+layout AesState = { data: [u8; 16] }
+
+// Single-byte output buffer for write(2). The `byte` field is at offset 0
+// so `out as Address` yields the address of the byte — the natural arg
+// for write(1, addr, 1).
+layout OutByte = { byte: u8 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// AES S-box loader — the real 256-entry FIPS-197 table (decimal literals).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical copy of womb/kernel/crypto/aes.vuma:aes_init_sbox (W29S1).
+// All literals are decimal per the VUMA convention (hex literals have
+// width-extension issues per aes.vuma's header note). The full table is
+// written as 256 explicit assignments rather than a runtime loop so the
+// constants are visible to static analysis and IVE.
+fn aes_init_sbox(sbox: State<AesSbox>) {
+    sbox.data[0] = 99; sbox.data[1] = 124; sbox.data[2] = 119; sbox.data[3] = 123;
+    sbox.data[4] = 242; sbox.data[5] = 107; sbox.data[6] = 111; sbox.data[7] = 197;
+    sbox.data[8] = 48; sbox.data[9] = 1; sbox.data[10] = 103; sbox.data[11] = 43;
+    sbox.data[12] = 254; sbox.data[13] = 215; sbox.data[14] = 171; sbox.data[15] = 118;
+    sbox.data[16] = 202; sbox.data[17] = 130; sbox.data[18] = 201; sbox.data[19] = 125;
+    sbox.data[20] = 250; sbox.data[21] = 89; sbox.data[22] = 71; sbox.data[23] = 240;
+    sbox.data[24] = 173; sbox.data[25] = 212; sbox.data[26] = 162; sbox.data[27] = 175;
+    sbox.data[28] = 156; sbox.data[29] = 164; sbox.data[30] = 114; sbox.data[31] = 192;
+    sbox.data[32] = 183; sbox.data[33] = 253; sbox.data[34] = 147; sbox.data[35] = 38;
+    sbox.data[36] = 54; sbox.data[37] = 63; sbox.data[38] = 247; sbox.data[39] = 204;
+    sbox.data[40] = 52; sbox.data[41] = 165; sbox.data[42] = 229; sbox.data[43] = 241;
+    sbox.data[44] = 113; sbox.data[45] = 216; sbox.data[46] = 49; sbox.data[47] = 21;
+    sbox.data[48] = 4; sbox.data[49] = 199; sbox.data[50] = 35; sbox.data[51] = 195;
+    sbox.data[52] = 24; sbox.data[53] = 150; sbox.data[54] = 5; sbox.data[55] = 154;
+    sbox.data[56] = 7; sbox.data[57] = 18; sbox.data[58] = 128; sbox.data[59] = 226;
+    sbox.data[60] = 235; sbox.data[61] = 39; sbox.data[62] = 178; sbox.data[63] = 117;
+    sbox.data[64] = 9; sbox.data[65] = 131; sbox.data[66] = 44; sbox.data[67] = 26;
+    sbox.data[68] = 27; sbox.data[69] = 110; sbox.data[70] = 90; sbox.data[71] = 160;
+    sbox.data[72] = 82; sbox.data[73] = 59; sbox.data[74] = 214; sbox.data[75] = 179;
+    sbox.data[76] = 41; sbox.data[77] = 227; sbox.data[78] = 47; sbox.data[79] = 132;
+    sbox.data[80] = 83; sbox.data[81] = 209; sbox.data[82] = 0; sbox.data[83] = 237;
+    sbox.data[84] = 32; sbox.data[85] = 252; sbox.data[86] = 177; sbox.data[87] = 91;
+    sbox.data[88] = 106; sbox.data[89] = 203; sbox.data[90] = 190; sbox.data[91] = 57;
+    sbox.data[92] = 74; sbox.data[93] = 76; sbox.data[94] = 88; sbox.data[95] = 207;
+    sbox.data[96] = 208; sbox.data[97] = 239; sbox.data[98] = 170; sbox.data[99] = 251;
+    sbox.data[100] = 67; sbox.data[101] = 77; sbox.data[102] = 51; sbox.data[103] = 133;
+    sbox.data[104] = 69; sbox.data[105] = 249; sbox.data[106] = 2; sbox.data[107] = 127;
+    sbox.data[108] = 80; sbox.data[109] = 60; sbox.data[110] = 159; sbox.data[111] = 168;
+    sbox.data[112] = 81; sbox.data[113] = 163; sbox.data[114] = 64; sbox.data[115] = 143;
+    sbox.data[116] = 146; sbox.data[117] = 157; sbox.data[118] = 56; sbox.data[119] = 245;
+    sbox.data[120] = 188; sbox.data[121] = 182; sbox.data[122] = 218; sbox.data[123] = 33;
+    sbox.data[124] = 16; sbox.data[125] = 255; sbox.data[126] = 243; sbox.data[127] = 210;
+    sbox.data[128] = 205; sbox.data[129] = 12; sbox.data[130] = 19; sbox.data[131] = 236;
+    sbox.data[132] = 95; sbox.data[133] = 151; sbox.data[134] = 68; sbox.data[135] = 23;
+    sbox.data[136] = 196; sbox.data[137] = 167; sbox.data[138] = 126; sbox.data[139] = 61;
+    sbox.data[140] = 100; sbox.data[141] = 93; sbox.data[142] = 25; sbox.data[143] = 115;
+    sbox.data[144] = 96; sbox.data[145] = 129; sbox.data[146] = 79; sbox.data[147] = 220;
+    sbox.data[148] = 34; sbox.data[149] = 42; sbox.data[150] = 144; sbox.data[151] = 136;
+    sbox.data[152] = 70; sbox.data[153] = 238; sbox.data[154] = 184; sbox.data[155] = 20;
+    sbox.data[156] = 222; sbox.data[157] = 94; sbox.data[158] = 11; sbox.data[159] = 219;
+    sbox.data[160] = 224; sbox.data[161] = 50; sbox.data[162] = 58; sbox.data[163] = 10;
+    sbox.data[164] = 73; sbox.data[165] = 6; sbox.data[166] = 36; sbox.data[167] = 92;
+    sbox.data[168] = 194; sbox.data[169] = 211; sbox.data[170] = 172; sbox.data[171] = 98;
+    sbox.data[172] = 145; sbox.data[173] = 149; sbox.data[174] = 228; sbox.data[175] = 121;
+    sbox.data[176] = 231; sbox.data[177] = 200; sbox.data[178] = 55; sbox.data[179] = 109;
+    sbox.data[180] = 141; sbox.data[181] = 213; sbox.data[182] = 78; sbox.data[183] = 169;
+    sbox.data[184] = 108; sbox.data[185] = 86; sbox.data[186] = 244; sbox.data[187] = 234;
+    sbox.data[188] = 101; sbox.data[189] = 122; sbox.data[190] = 174; sbox.data[191] = 8;
+    sbox.data[192] = 186; sbox.data[193] = 120; sbox.data[194] = 37; sbox.data[195] = 46;
+    sbox.data[196] = 28; sbox.data[197] = 166; sbox.data[198] = 180; sbox.data[199] = 198;
+    sbox.data[200] = 232; sbox.data[201] = 221; sbox.data[202] = 116; sbox.data[203] = 31;
+    sbox.data[204] = 75; sbox.data[205] = 189; sbox.data[206] = 139; sbox.data[207] = 138;
+    sbox.data[208] = 112; sbox.data[209] = 62; sbox.data[210] = 181; sbox.data[211] = 102;
+    sbox.data[212] = 72; sbox.data[213] = 3; sbox.data[214] = 246; sbox.data[215] = 14;
+    sbox.data[216] = 97; sbox.data[217] = 53; sbox.data[218] = 87; sbox.data[219] = 185;
+    sbox.data[220] = 134; sbox.data[221] = 193; sbox.data[222] = 29; sbox.data[223] = 158;
+    sbox.data[224] = 225; sbox.data[225] = 248; sbox.data[226] = 152; sbox.data[227] = 17;
+    sbox.data[228] = 105; sbox.data[229] = 217; sbox.data[230] = 142; sbox.data[231] = 148;
+    sbox.data[232] = 155; sbox.data[233] = 30; sbox.data[234] = 135; sbox.data[235] = 233;
+    sbox.data[236] = 206; sbox.data[237] = 85; sbox.data[238] = 40; sbox.data[239] = 223;
+    sbox.data[240] = 140; sbox.data[241] = 161; sbox.data[242] = 137; sbox.data[243] = 13;
+    sbox.data[244] = 191; sbox.data[245] = 230; sbox.data[246] = 66; sbox.data[247] = 104;
+    sbox.data[248] = 65; sbox.data[249] = 153; sbox.data[250] = 45; sbox.data[251] = 15;
+    sbox.data[252] = 176; sbox.data[253] = 84; sbox.data[254] = 187; sbox.data[255] = 22;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Stub key expansion (W29S1 — K10b placeholder).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical copy of womb/kernel/crypto/aes.vuma:aes_key_expansion (K10b
+// STUB). Writes the 16-byte key verbatim into all 11 round keys (round 0 =
+// key, rounds 1..10 = key copied). K11 will replace this with the real
+// Rijndael key expansion (RotWord + SubWord + Rcon XOR — FIPS-197 §5.2).
+fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
+    // Round 0: copy the key verbatim.
+    let i = 0;
+    while i < 16 {
+        ctx.round_keys[i] = key.data[i];
+        i = i + 1;
+    }
+    // Rounds 1..10: copy the first 16 bytes to all 11 round keys (stub).
+    let round = 1;
+    while round < 11 {
+        let j = 0;
+        while j < 16 {
+            ctx.round_keys[round * 16 + j] = key.data[j];
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+    ctx.nr = 10;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SubBytes (W49 — FIPS-197 §5.1.1).
+// ────────────────────────────────────────────────────────────────────────────
+// For each i in 0..16: state.data[i] = sbox.data[state.data[i] as u32].
+// The `as u32` widening cast is required because VUMA's array index is
+// u32-typed while state.data[i] yields a u8 (byte-granular indexing).
+fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
+    let i = 0;
+    while i < 16 {
+        state.data[i] = sbox.data[state.data[i] as u32];
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// ShiftRows (W49 — FIPS-197 §5.1.2).
+// ────────────────────────────────────────────────────────────────────────────
+// State is column-major — byte at (row, col) = data[col*4 + row]. Each row
+// r is left-rotated by r positions (row 0 unchanged, row 1 by 1, row 2 by
+// 2, row 3 by 3). Expressed as 6 in-place byte swaps via the standard
+// `tmp = a; a = b; b = tmp;` idiom (same as K6e scheduler.vuma's
+// decimal-reverse helper).
+//
+// NOTE (W49 known limitation, see W49 worklog): the 2-swap pattern for
+// rows 1 and 3 does NOT achieve the canonical FIPS-197 left-rotate
+// (row 1 produces [b,a,d,c] instead of [b,c,d,a]; row 3 produces
+// [d,c,b,a] instead of [d,a,b,c]). Only row 2 is correct. This W52
+// test compares only byte 0 (row 0, which ShiftRows does NOT touch), so
+// the bug is sidestepped — but a future W53+ fix to the swap pattern
+// would not affect this test's result either way.
+fn aes_shift_rows(state: State<AesState>) {
+    let tmp = state.data[1];
+    // Row 1: left-rotate by 1.
+    state.data[1] = state.data[5];
+    state.data[5] = tmp;
+    tmp = state.data[9];
+    state.data[9] = state.data[13];
+    state.data[13] = tmp;
+    // Row 2: left-rotate by 2.
+    tmp = state.data[2];
+    state.data[2] = state.data[10];
+    state.data[10] = tmp;
+    tmp = state.data[6];
+    state.data[6] = state.data[14];
+    state.data[14] = tmp;
+    // Row 3: left-rotate by 3.
+    tmp = state.data[3];
+    state.data[3] = state.data[15];
+    state.data[15] = tmp;
+    tmp = state.data[7];
+    state.data[7] = state.data[11];
+    state.data[11] = tmp;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 10-round cipher (W49 — FIPS-197 §5.1.1, MixColumns deferred).
+// ────────────────────────────────────────────────────────────────────────────
+// AddRoundKey(0) → 9× (SubBytes + ShiftRows + AddRoundKey) → final
+// SubBytes + ShiftRows + AddRoundKey(10). MixColumns (§5.1.3) is deferred
+// — see the file header's "Documented limitation" note.
+fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+    // Working state (column-major 4×4 byte matrix, AES-128 = 16 bytes).
+    let state = state_new(AesState);
+    // S-box (rebuilt per call — VUMA has no import / cross-call caching).
+    let sbox = state_new(AesSbox);
+    aes_init_sbox(sbox);
+
+    // Step 1: AddRoundKey(0) — state = input XOR round_keys[0..15].
+    let i = 0;
+    while i < 16 {
+        state.data[i] = input.data[i] ^ ctx.round_keys[i];
+        i = i + 1;
+    }
+
+    // Step 2: rounds 1..9 — SubBytes, ShiftRows, AddRoundKey.
+    let round = 1;
+    while round < 10 {
+        aes_sub_bytes(state, sbox);
+        aes_shift_rows(state);
+        // AddRoundKey(round): state[i] ^= round_keys[round*16 + i].
+        let j = 0;
+        while j < 16 {
+            state.data[j] = state.data[j] ^ ctx.round_keys[round * 16 + j];
+            j = j + 1;
+        }
+        round = round + 1;
+    }
+
+    // Step 3: round 10 (final) — SubBytes, ShiftRows, AddRoundKey(10).
+    // No MixColumns on the final round per FIPS-197 §5.1.1 (and MixColumns
+    // is deferred entirely for W49/W52 — see the file header note).
+    aes_sub_bytes(state, sbox);
+    aes_shift_rows(state);
+    let k = 0;
+    while k < 16 {
+        state.data[k] = state.data[k] ^ ctx.round_keys[10 * 16 + k];
+        k = k + 1;
+    }
+
+    // Step 4: copy `state` into `output`.
+    let m = 0;
+    while m < 16 {
+        output.data[m] = state.data[m];
+        m = m + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FIPS-197 Appendix B test vector loaders.
+// ────────────────────────────────────────────────────────────────────────────
+// All literals DECIMAL per the VUMA convention. Hex equivalents in inline
+// comments for cross-checking against the FIPS-197 publication.
+
+// load_fips_key: Key = 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F.
+// Decimal: 0, 1, 2, ..., 15 — the canonical "incrementing byte" test key
+// used in FIPS-197 Appendix B.1 (the worked AES-128 example).
+fn load_fips_key(key: State<AesKey>) {
+    key.data[0] = 0;     // 0x00
+    key.data[1] = 1;     // 0x01
+    key.data[2] = 2;     // 0x02
+    key.data[3] = 3;     // 0x03
+    key.data[4] = 4;     // 0x04
+    key.data[5] = 5;     // 0x05
+    key.data[6] = 6;     // 0x06
+    key.data[7] = 7;     // 0x07
+    key.data[8] = 8;     // 0x08
+    key.data[9] = 9;     // 0x09
+    key.data[10] = 10;   // 0x0A
+    key.data[11] = 11;   // 0x0B
+    key.data[12] = 12;   // 0x0C
+    key.data[13] = 13;   // 0x0D
+    key.data[14] = 14;   // 0x0E
+    key.data[15] = 15;   // 0x0F
+}
+
+// load_fips_plaintext: PT = 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF.
+// Decimal: 0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221,
+// 238, 255 — the canonical FIPS-197 Appendix B.1 test plaintext (16-byte
+// sequence where byte i = i * 17 mod 256).
+fn load_fips_plaintext(pt: State<AesBlock>) {
+    pt.data[0] = 0;      // 0x00
+    pt.data[1] = 17;     // 0x11
+    pt.data[2] = 34;     // 0x22
+    pt.data[3] = 51;     // 0x33
+    pt.data[4] = 68;     // 0x44
+    pt.data[5] = 85;     // 0x55
+    pt.data[6] = 102;    // 0x66
+    pt.data[7] = 119;    // 0x77
+    pt.data[8] = 136;    // 0x88
+    pt.data[9] = 153;    // 0x99
+    pt.data[10] = 170;   // 0xAA
+    pt.data[11] = 187;   // 0xBB
+    pt.data[12] = 204;   // 0xCC
+    pt.data[13] = 221;   // 0xDD
+    pt.data[14] = 238;   // 0xEE
+    pt.data[15] = 255;   // 0xFF
+}
+
+// load_fips_expected: CT = 69 C4 E0 D8 6A 7B 04 30 D8 CD B7 80 70 B4 C5 5A.
+// Decimal: 105, 196, 224, 216, 106, 123, 4, 48, 216, 205, 183, 128, 112,
+// 180, 197, 90 — the canonical FIPS-197 Appendix B.1 expected ciphertext
+// (real AES-128 ECB encryption of the test key + plaintext).
+fn load_fips_expected(ct: State<AesBlock>) {
+    ct.data[0] = 105;    // 0x69
+    ct.data[1] = 196;    // 0xC4
+    ct.data[2] = 224;    // 0xE0
+    ct.data[3] = 216;    // 0xD8
+    ct.data[4] = 106;    // 0x6A
+    ct.data[5] = 123;    // 0x7B
+    ct.data[6] = 4;      // 0x04
+    ct.data[7] = 48;     // 0x30
+    ct.data[8] = 216;    // 0xD8
+    ct.data[9] = 205;    // 0xCD
+    ct.data[10] = 183;   // 0xB7
+    ct.data[11] = 128;   // 0x80
+    ct.data[12] = 112;   // 0x70
+    ct.data[13] = 180;   // 0xB4
+    ct.data[14] = 197;   // 0xC5
+    ct.data[15] = 90;    // 0x5A
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// W52 verifies the W49 AES skeleton end-to-end against the canonical
+// FIPS-197 Appendix B.1 test vector:
+//
+//   key        = 000102030405060708090a0b0c0d0e0f
+//   plaintext  = 00112233445566778899aabbccddeeff
+//   ciphertext = 69c4e0d86a7b0430d8cdb78070b4c55a
+//
+// The test wires up the FIPS-197 test vector (load_fips_key,
+// load_fips_plaintext, load_fips_expected), runs the W49 cipher (10 rounds
+// of SubBytes + ShiftRows + AddRoundKey, NO MixColumns, stub key schedule),
+// then compares ONLY output.data[0] against the expected first byte
+// (0x69 = 105). On match: writes 105 to stdout. On mismatch: writes 0.
+//
+// The W52 test EXPECTS the comparison to fail (write 0) because the W49
+// cipher omits MixColumns + the real Rijndael key schedule. For this test
+// vector, output[0] cycles through the S-box chain on input[0] XOR key[0]
+// = 0 (since key[0] = 0 makes AddRoundKey a no-op for byte 0 across all
+// 11 rounds): 0 → sbox[0]=99 → sbox[99]=251 → ... → sbox[36]=54. Final
+// output[0] = 54 (0x36) — does NOT match the expected 105 (0x69). When
+// W53+ adds MixColumns + the real Rijndael key schedule (RotWord +
+// SubWord + Rcon XOR per FIPS-197 §5.2), output[0] will start matching
+// 105, and the test will start emitting 105 (pass). The IVE: Pass verdict
+// verifies the test FRAMEWORK compiles + verifies correctly — the runtime
+// output byte (0 vs 105) is the regression signal.
+fn main() -> i32 {
+    // ── Step 1: load the FIPS-197 test vector. ──
+    let key = state_new(AesKey);
+    load_fips_key(key);
+
+    // Expand the key into 11 round keys (W29S1 STUB: 11 identical copies).
+    let ctx = state_new(AesCtx);
+    aes_key_expansion(ctx, key);
+
+    // Load the FIPS-197 Appendix B.1 plaintext.
+    let pt = state_new(AesBlock);
+    load_fips_plaintext(pt);
+
+    // ── Step 2: encrypt with the W49 cipher (no MixColumns). ──
+    let out = state_new(AesBlock);
+    aes_encrypt_block(ctx, pt, out);
+
+    // ── Step 3: load the expected FIPS-197 ciphertext. ──
+    let expected = state_new(AesBlock);
+    load_fips_expected(expected);
+
+    // ── Step 4: compare byte 0 against the expected 0x69 (105). ──
+    // W52 limitation: the W49 cipher omits MixColumns + the real Rijndael
+    // key schedule. The output[0] cycles through the S-box chain on
+    // input[0] XOR key[0] = 0 → sbox[0]=99 → sbox[99]=251 → ... → 54.
+    // The expected first byte is 105 (0x69). The comparison therefore
+    // fails (writes 0) until W53+ adds MixColumns + the real key schedule.
+    let out_byte = state_new(OutByte);
+    if out.data[0] == expected.data[0] {
+        out_byte.byte = 105;  // 0x69 — pass (MixColumns + real key schedule landed)
+    } else {
+        out_byte.byte = 0;    // mismatch — MixColumns deferred (W52 documented limitation)
+    }
+    let addr = out_byte as Address;
+    write(1, addr, 1);
+
+    return 0;
+}
