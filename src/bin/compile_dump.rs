@@ -178,6 +178,9 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
 
+    for ds in &ir_program.data_sections {
+    }
+
     // Wave 2: Run the full post-IR-build O2 pipeline via the shared
     // `run_ir_pipeline` helper (same path as `compile_with_path`). This
     // runs Wave 34 lowering (monomorphize, closures, switches, tail-calls,
@@ -210,7 +213,13 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     })
     .map_err(|e| format!("regalloc: {}", e))?;
     let total_code: usize = allocated.iter().map(|f| f.code_size).sum();
-    let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0 };
+    // Wave 1: Collect all ReadOnly data sections (string literals) into a
+    // single rodata byte vector for the backend to emit in .rodata.
+    let rodata_data: Vec<u8> = ir_program.data_sections.iter()
+        .filter(|ds| ds.kind == vuma_codegen::ir::DataSectionKind::ReadOnly)
+        .flat_map(|ds| ds.data.iter().copied())
+        .collect();
+    let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0, rodata_data };
     let binary = backend.encode_program(&program).map_err(|e| format!("encode: {}", e))?;
     Ok((binary, ive_status))
 }
