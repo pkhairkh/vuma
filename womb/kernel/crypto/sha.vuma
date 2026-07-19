@@ -1,36 +1,60 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/crypto/sha.vuma
-// SHA-256 — simplified PMT-native implementation.
+// SHA-256 — full FIPS-180-4 PMT-native implementation (W48).
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// NOT a full KAT-verified SHA-256. This is a structural skeleton with
-// the round function as a stub. K11+ adds real SHA-256.
+// W48: real 64-round SHA-256 compression + FIPS-180-4 §5.1.1 padding +
+// §5.1.2 big-endian digest serialization. The digest now matches the
+// canonical SHA-256 test vectors (verified in main):
+//   SHA-256("")    = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+//   SHA-256("a")   = ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+//   SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 //
-// ── What W29S2 provides ────────────────────────────────────────────────────
+// ── What W48 provides ───────────────────────────────────────────────────────
 //   sha256_init(ctx)         — seed ALL 8 SHA-256 IV words (byte-by-byte,
 //                              little-endian) into ctx.state, zero ctx.buf
-//                              + ctx.len + ctx.total. (K10c only seeded the
-//                              first 4 IV words and zeroed words 4..7; W29S2
-//                              seeds all 8 — the digest now contains the
-//                              full FIPS-180-4 §5.3.3 initial hash value.)
-//   sha256_update(ctx,data,n) — copy up to 64 bytes of input into ctx.buf,
-//                              bump ctx.total by n. Compression is a STUB:
-//                              when ctx.len reaches 64 a real SHA-256 would
-//                              run the 64-round compression (FIPS-180-4
-//                              §6.2.2) and fold the block into ctx.state —
-//                              W29S2 does NOT do this (K11 will). The
-//                              digest therefore still equals the IV.
-//   sha256_final(ctx,out)    — copy ctx.state's 32 bytes verbatim into out
-//                              (no padding, no final compression).
+//                              + ctx.len + ctx.total (unchanged from W29S2).
+//   sha256_update(ctx,data,n) — copy input bytes into ctx.buf. When the
+//                              64-byte buffer fills, invoke the real
+//                              64-round compression (sha256_compress) and
+//                              reset ctx.len = 0. Multi-block streaming
+//                              via repeated update calls is supported
+//                              (each call may carry up to 64 bytes — the
+//                              ShaData layout's block size).
+//   sha256_compress(ctx)     — W48 NEW. Read ctx.buf as one 512-bit block,
+//                              build the 64-word message schedule W[0..63]
+//                              (BE load of W[0..15] from ctx.buf, expand
+//                              W[16..63] via the σ0/σ1 message-schedule
+//                              recurrence), run the 64 SHA-256 rounds
+//                              (T1 = h + Σ1(e) + Ch(e,f,g) + K[i] + W[i];
+//                              T2 = Σ0(a) + Maj(a,b,c); h=g; g=f; f=e;
+//                              e=d+T1; d=c; c=b; b=a; a=T1+T2), and fold
+//                              the working variables a..h back into
+//                              ctx.state (H[i] += working[i] mod 2^32).
+//   sha256_final(ctx,out)    — W48 REWRITE. Append 0x80 + zero-pad to 56
+//                              mod 64 + 64-bit big-endian bit-count, run
+//                              the final compression (or two compressions
+//                              when the padding overflows into a second
+//                              block — the len >= 56 case), and serialize
+//                              ctx.state as 8 big-endian u32 words into
+//                              out (FIPS-180-4 §5.1.2).
 //
 // ── VUMA Key Concepts ──────────────────────────────────────────────────────
-//   - PMT layouts with [u8; N] fixed-size array fields
-//   - `state_new(Layout)` arena allocation of crypto contexts
+//   - PMT layouts with [u8; N] / [u32; N] fixed-size array fields
+//   - `state_new(Layout)` arena allocation of crypto contexts + scratch
+//     buffers (message schedule W, round constants K) — usable inside
+//     any function, not just main
 //   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
-//   - Byte-granular array indexing (ctx.state[i] reads byte i)
-//   - u64 streaming-length counter (ctx.total)
+//   - Byte-granular indexing on [u8; N] (ctx.state[i] reads byte i)
+//   - Typed-array scaling on [u32; N] (W.w[i] reads/writes the u32 word
+//     at slot i — VUMA's "Fix 2" typed-array index scaling, see
+//     api.vuma's HashCtx comment)
+//   - `as u32` widening cast on u8 operands before `<<` / `+` (avoids
+//     u8+u8 overflow at the IVE layer — same idiom as K10d's asym.vuma)
+//   - u64 streaming-length counter (ctx.total) for the FIPS-180-4 §5.1.1
+//     message-length padding suffix (64-bit big-endian bit count)
 //
-// ── Decimal SHA-256 IV bytes (little-endian) ───────────────────────────────
+// ── Decimal SHA-256 IV bytes (little-endian — unchanged from W29S2) ────────
 //   Word 0: 0x6a09e667 = 1779033703 → LE bytes 67 e6 09 6a → 103 230 9 106
 //   Word 1: 0xbb67ae85 = 3144134277 → LE bytes 85 ae 67 bb → 133 174 103 187
 //   Word 2: 0x3c6ef372 = 1013904242 → LE bytes 72 f3 6e 3c → 114 243 110 60
@@ -39,14 +63,23 @@
 //   Word 5: 0x9b05688c = 2600822924 → LE bytes 8c 68 05 9b → 140 104 5 155
 //   Word 6: 0x1f83d9ab =  528734635 → LE bytes ab d9 83 1f → 171 217 131 31
 //   Word 7: 0x5be0cd19 = 1541459225 → LE bytes 19 cd e0 5b → 25 205 224 91
+//
+//   The state is stored LE because that's what W29S2 established — W48
+//   preserves the on-disk state layout for compatibility (init's IV
+//   bytes, the self-test's state[0]==103 check) and adapts the
+//   compression + digest-serialization layers to load/store u32 words
+//   with explicit LE/BE byte ordering. The digest output is BE per
+//   FIPS-180-4 §5.1.2 (out.data[0] = high byte of H0), so the empty-
+//   input digest starts with 0xe3 (high byte of 0xe3b0c442) — not 0x42
+//   (low byte).
 
 // SHA-256 context: 32-byte hash state (8 × 4-byte IV words, stored as
-// bytes), 64-byte input buffer (SHA-256's block size), in-buffer byte
-// count, and total-bytes-processed counter (used by the real
+// little-endian bytes), 64-byte input buffer (SHA-256's block size),
+// in-buffer byte count, and total-bytes-processed counter (used by
 // sha256_final for the FIPS-180-4 §5.1.1 message-length padding suffix).
 layout Sha256Ctx = {
-    state: [u8; 32],   // 8 * 4 bytes (hash state, stored as bytes)
-    buf: [u8; 64],     // input buffer
+    state: [u8; 32],   // 8 * 4 bytes (hash state, stored as LE bytes)
+    buf: [u8; 64],     // input buffer (one SHA-256 block)
     len: u32,          // bytes in buffer
     total: u64,        // total bytes processed
 }
@@ -55,10 +88,179 @@ layout Sha256Ctx = {
 layout ShaData = { data: [u8; 64] }
 
 // SHA-256 digest output (32 bytes — eight 32-bit hash words serialized
-// big-endian per FIPS-180-4 §5.1.2, but W29S2's stub writes the
-// little-endian IV bytes verbatim — K11 will serialize the words in
-// the correct big-endian digest order).
+// big-endian per FIPS-180-4 §5.1.2). W48 writes the real digest (no
+// longer the IV verbatim — the digest now reflects the actual
+// compression of the input message).
 layout ShaDigest = { data: [u8; 32] }
+
+// SHA-256 message schedule (64 × u32 words = 256 bytes). Allocated via
+// state_new(Sha256W) inside sha256_compress. W[0..15] are big-endian
+// loads of the 64-byte input block; W[16..63] are expanded via the
+// σ0/σ1 recurrence (FIPS-180-4 §6.2.2). Held as [u32; 64] for typed-
+// array indexing — W.w[i] returns the u32 word at slot i (VUMA's
+// typed-array scaling per "Fix 2" in api.vuma's HashCtx comment).
+layout Sha256W = { w: [u32; 64] }
+
+// SHA-256 round-constants table (64 × u32 = 256 bytes). The 64 K[i]
+// values are the first 32 bits of the fractional parts of the cube
+// roots of the first 64 primes (FIPS-180-4 §4.2.2). Loaded once per
+// compression call via sha256_load_k. Held as [u32; 64] for typed-
+// array indexing — K.k[i] returns the u32 constant at slot i.
+layout Sha256K = { k: [u32; 64] }
+
+// 32-bit mask. VUMA's default integer literal type widens u32
+// arithmetic to u64; the explicit & MASK32 keeps each round's
+// additions within 32-bit range, matching FIPS-180-4's mod-2^32
+// arithmetic. (Same idiom as womb/crypto/hash/sha256_sha224.vuma.)
+const MASK32: u32 = 4294967295;
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 helper functions (FIPS-180-4 §4.1.2).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Right-rotate a 32-bit word by n positions (1 <= n <= 31).
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & MASK32;
+}
+
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)  [FIPS-180-4 §4.1.2]
+// (NOT x is computed as x XOR MASK32 — VUMA has no unary NOT on u32;
+// same idiom as womb/crypto/hash/sha256_sha224.vuma's ch32.)
+fn ch32(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ ((x ^ MASK32) & z);
+}
+
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)  [§4.1.2]
+fn maj32(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+// Big Sigma0(x) = ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x)  [§4.1.2]
+fn bsig0_32(x: u32) -> u32 {
+    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+// Big Sigma1(x) = ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x)  [§4.1.2]
+fn bsig1_32(x: u32) -> u32 {
+    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+// Small sigma0(x) = ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x)  [§4.1.2]
+fn ssig0_32(x: u32) -> u32 {
+    return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
+}
+
+// Small sigma1(x) = ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x)  [§4.1.2]
+fn ssig1_32(x: u32) -> u32 {
+    return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Round-constants loader.
+// ────────────────────────────────────────────────────────────────────────────
+
+// sha256_load_k: fill K.k[0..63] with the 64 FIPS-180-4 §4.2.2 round
+// constants (the first 32 bits of the fractional parts of the cube
+// roots of the first 64 primes). All literals are decimal per the
+// VUMA convention (hex literals have width-extension issues — see
+// aes.vuma's header note). K.k[i] is written as a u32 store (typed-
+// array scaling) so the 64 words land at byte offsets 0, 4, 8, ...,
+// 252 — ready for u32 load via K.k[i] in the round loop.
+fn sha256_load_k(K: State<Sha256K>) {
+    K.k[0] = 1116352408;
+    K.k[1] = 1899447441;
+    K.k[2] = 3049323471;
+    K.k[3] = 3921009573;
+    K.k[4] = 961987163;
+    K.k[5] = 1508970993;
+    K.k[6] = 2453635748;
+    K.k[7] = 2870763221;
+    K.k[8] = 3624381080;
+    K.k[9] = 310598401;
+    K.k[10] = 607225278;
+    K.k[11] = 1426881987;
+    K.k[12] = 1925078388;
+    K.k[13] = 2162078206;
+    K.k[14] = 2614888103;
+    K.k[15] = 3248222580;
+    K.k[16] = 3835390401;
+    K.k[17] = 4022224774;
+    K.k[18] = 264347078;
+    K.k[19] = 604807628;
+    K.k[20] = 770255983;
+    K.k[21] = 1249150122;
+    K.k[22] = 1555081692;
+    K.k[23] = 1996064986;
+    K.k[24] = 2554220882;
+    K.k[25] = 2821834349;
+    K.k[26] = 2952996808;
+    K.k[27] = 3210313671;
+    K.k[28] = 3336571891;
+    K.k[29] = 3584528711;
+    K.k[30] = 113926993;
+    K.k[31] = 338241895;
+    K.k[32] = 666307205;
+    K.k[33] = 773529912;
+    K.k[34] = 1294757372;
+    K.k[35] = 1396182291;
+    K.k[36] = 1695183700;
+    K.k[37] = 1986661051;
+    K.k[38] = 2177026350;
+    K.k[39] = 2456956037;
+    K.k[40] = 2730485921;
+    K.k[41] = 2820302411;
+    K.k[42] = 3259730800;
+    K.k[43] = 3345764771;
+    K.k[44] = 3516065817;
+    K.k[45] = 3600352804;
+    K.k[46] = 4094571909;
+    K.k[47] = 275423344;
+    K.k[48] = 430227734;
+    K.k[49] = 506948616;
+    K.k[50] = 659060556;
+    K.k[51] = 883997877;
+    K.k[52] = 958139571;
+    K.k[53] = 1322822218;
+    K.k[54] = 1537002063;
+    K.k[55] = 1747873779;
+    K.k[56] = 1955562222;
+    K.k[57] = 2024104815;
+    K.k[58] = 2227730452;
+    K.k[59] = 2361852424;
+    K.k[60] = 2428436474;
+    K.k[61] = 2756734187;
+    K.k[62] = 3204031479;
+    K.k[63] = 3329325298;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// State load/store helpers (LE byte <-> u32 word).
+// ────────────────────────────────────────────────────────────────────────────
+
+// load_state_le: read 4 LE bytes from ctx.state[base..base+3] as a u32.
+// The state is stored little-endian (per sha256_init's IV seeding), so
+// byte 0 is the low byte and byte 3 is the high byte of each u32 word.
+fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
+    let b0 = ctx.state[base] as u32;
+    let b1 = ctx.state[base + 1] as u32;
+    let b2 = ctx.state[base + 2] as u32;
+    let b3 = ctx.state[base + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+}
+
+// add_state_word: fold a working-variable value into the running state.
+// new_state[base..base+3] (LE) = old_state[base..base+3] (LE) + val
+// (mod 2^32). Used by sha256_compress's step 4 to add the post-round
+// working variables a..h back into ctx.state (FIPS-180-4 §6.2.2 step f:
+// H0 = a + H0, H1 = b + H1, ..., H7 = h + H7).
+fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
+    let old = load_state_le(ctx, base);
+    let acc = (val + old) & MASK32;
+    ctx.state[base] = (acc & 255) as u8;
+    ctx.state[base + 1] = ((acc >> 8) & 255) as u8;
+    ctx.state[base + 2] = ((acc >> 16) & 255) as u8;
+    ctx.state[base + 3] = ((acc >> 24) & 255) as u8;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // SHA-256 API functions.
@@ -69,8 +271,9 @@ layout ShaDigest = { data: [u8; 32] }
 //   ctx: caller-allocated State<Sha256Ctx> (output — modified in place).
 //
 // Writes ALL 8 SHA-256 IV words (byte-by-byte, little-endian) into
-// ctx.state[0..31] (W29S2 — K10c only seeded the first 4 IV words and
-// zeroed words 4..7), zeroes ctx.buf, and sets ctx.len = ctx.total = 0.
+// ctx.state[0..31] (unchanged from W29S2), zeroes ctx.buf (implicit —
+// the caller's state_new zeroes fresh allocations, and update/final
+// only read buf[0..ctx.len]), and sets ctx.len = ctx.total = 0.
 fn sha256_init(ctx: State<Sha256Ctx>) {
     // H0 = 0x6a09e667 = 1779033703 → LE bytes: 67 e6 09 6a.
     ctx.state[0] = 103; ctx.state[1] = 230; ctx.state[2] = 9; ctx.state[3] = 106;
@@ -80,65 +283,239 @@ fn sha256_init(ctx: State<Sha256Ctx>) {
     ctx.state[8] = 114; ctx.state[9] = 243; ctx.state[10] = 110; ctx.state[11] = 60;
     // H3 = 0xa54ff53a = 2773480762 → LE: 3a f5 4f a5.
     ctx.state[12] = 58; ctx.state[13] = 245; ctx.state[14] = 79; ctx.state[15] = 165;
-    // H4 = 0x510e527f = 1359893119 → LE: 7f 52 0e 51. (W29S2 — was 0 in K10c.)
+    // H4 = 0x510e527f = 1359893119 → LE: 7f 52 0e 51.
     ctx.state[16] = 127; ctx.state[17] = 82; ctx.state[18] = 14; ctx.state[19] = 81;
-    // H5 = 0x9b05688c = 2600822924 → LE: 8c 68 05 9b. (W29S2 — was 0 in K10c.)
+    // H5 = 0x9b05688c = 2600822924 → LE: 8c 68 05 9b.
     ctx.state[20] = 140; ctx.state[21] = 104; ctx.state[22] = 5; ctx.state[23] = 155;
-    // H6 = 0x1f83d9ab = 528734635 → LE: ab d9 83 1f. (W29S2 — was 0 in K10c.)
+    // H6 = 0x1f83d9ab = 528734635 → LE: ab d9 83 1f.
     ctx.state[24] = 171; ctx.state[25] = 217; ctx.state[26] = 131; ctx.state[27] = 31;
-    // H7 = 0x5be0cd19 = 1541459225 → LE: 19 cd e0 5b. (W29S2 — was 0 in K10c.)
+    // H7 = 0x5be0cd19 = 1541459225 → LE: 19 cd e0 5b.
     ctx.state[28] = 25; ctx.state[29] = 205; ctx.state[30] = 224; ctx.state[31] = 91;
     ctx.len = 0;
     ctx.total = 0;
+}
+
+// sha256_compress: fold one 64-byte block (ctx.buf) into ctx.state via
+// the FIPS-180-4 §6.2.2 64-round SHA-256 compression.
+//
+//   ctx: caller-allocated State<Sha256Ctx> with ctx.buf populated (read)
+//        and ctx.state updated in place (write). ctx.len is not modified
+//        by compress (the caller — update or final — manages len).
+//
+// W48: full real compression. Steps:
+//   1. Build the 64-word message schedule W[0..63]:
+//        W[0..15] = big-endian load of ctx.buf[i*4..i*4+3]
+//        W[i] (16 <= i < 64) = W[i-16] + σ0(W[i-15]) + W[i-7] + σ1(W[i-2])
+//      (all additions mod 2^32).
+//   2. Initialize working variables a..h from ctx.state[0..31] (LE):
+//        a = H0, b = H1, c = H2, d = H3, e = H4, f = H5, g = H6, h = H7.
+//   3. Run 64 rounds (i = 0..63):
+//        T1 = h + Σ1(e) + Ch(e,f,g) + K[i] + W[i]   (mod 2^32)
+//        T2 = Σ0(a) + Maj(a,b,c)                     (mod 2^32)
+//        h = g; g = f; f = e; e = (d + T1) mod 2^32;
+//        d = c; c = b; b = a; a = (T1 + T2) mod 2^32.
+//   4. Fold a..h back into ctx.state (mod 2^32):
+//        H0 += a; H1 += b; ...; H7 += h.
+fn sha256_compress(ctx: State<Sha256Ctx>) {
+    // Scratch buffers: 64-word message schedule + 64-word round-constants.
+    let W = state_new(Sha256W);
+    let K = state_new(Sha256K);
+    sha256_load_k(K);
+
+    // Step 1: build the message schedule.
+    // W[0..15] = big-endian load of ctx.buf[i*4..i*4+3] (FIPS-180-4 §5.1.2:
+    // the input message is interpreted as 16 big-endian 32-bit words).
+    let i = 0;
+    while i < 16 {
+        let off = i * 4;
+        let b0 = ctx.buf[off] as u32;
+        let b1 = ctx.buf[off + 1] as u32;
+        let b2 = ctx.buf[off + 2] as u32;
+        let b3 = ctx.buf[off + 3] as u32;
+        W.w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
+        i = i + 1;
+    }
+    // W[16..63] = W[i-16] + ssig0(W[i-15]) + W[i-7] + ssig1(W[i-2])  (§6.2.2).
+    i = 16;
+    while i < 64 {
+        let w15 = W.w[i - 15];
+        let w2 = W.w[i - 2];
+        let w7 = W.w[i - 7];
+        let w16 = W.w[i - 16];
+        W.w[i] = (w16 + ssig0_32(w15) + w7 + ssig1_32(w2)) & MASK32;
+        i = i + 1;
+    }
+
+    // Step 2: initialize working variables a..h from ctx.state (LE load).
+    let a = load_state_le(ctx, 0);
+    let b = load_state_le(ctx, 4);
+    let c = load_state_le(ctx, 8);
+    let d = load_state_le(ctx, 12);
+    let e = load_state_le(ctx, 16);
+    let f = load_state_le(ctx, 20);
+    let g = load_state_le(ctx, 24);
+    let h = load_state_le(ctx, 28);
+
+    // Step 3: 64 SHA-256 rounds (FIPS-180-4 §6.2.2).
+    // T1 captures the OLD e/f/g/h (used to update e = d + T1); T2 captures
+    // the OLD a/b/c (used to update a = T1 + T2). The 8 variable rotations
+    // (h=g, g=f, ..., b=a) happen AFTER T1/T2 are computed, so the round
+    // function is correct.
+    let r = 0;
+    while r < 64 {
+        let ki = K.k[r];
+        let wi = W.w[r];
+        let t1 = (h + bsig1_32(e) + ch32(e, f, g) + ki + wi) & MASK32;
+        let t2 = (bsig0_32(a) + maj32(a, b, c)) & MASK32;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+        r = r + 1;
+    }
+
+    // Step 4: fold a..h back into ctx.state (H[i] += working[i] mod 2^32).
+    add_state_word(ctx, 0, a);
+    add_state_word(ctx, 4, b);
+    add_state_word(ctx, 8, c);
+    add_state_word(ctx, 12, d);
+    add_state_word(ctx, 16, e);
+    add_state_word(ctx, 20, f);
+    add_state_word(ctx, 24, g);
+    add_state_word(ctx, 28, h);
 }
 
 // sha256_update: absorb `len` bytes of data into the hash state.
 //
 //   ctx:  caller-allocated State<Sha256Ctx> (modified in place).
 //   data: caller-allocated State<ShaData> holding the input bytes.
-//   len:  number of bytes to absorb (0..64).
+//   len:  number of bytes to absorb (0..64 per call — multiple update
+//         calls chain into a multi-block hash via repeated compress).
 //
-// W29S2 STUB: copies up to 64 bytes of data into ctx.buf (capped at the
-// 64-byte buffer — once full, subsequent bytes are silently dropped),
-// then bumps ctx.total by len. The compression-function call site is
-// marked inline below — when ctx.len reaches 64 a real SHA-256 would
-// invoke sha256_compress(ctx, ctx.buf) (FIPS-180-4 §6.2.2 — the 64-round
-// compression that folds the block into ctx.state) and reset ctx.len = 0.
-// W29S2 does NOT implement compression (K11 will). The digest therefore
-// still equals the IV regardless of input.
+// W48: buffers input bytes into ctx.buf. When ctx.len reaches 64, calls
+// sha256_compress to fold the block into ctx.state and resets ctx.len
+// to 0 (ready for the next chunk). Multi-block streaming via repeated
+// update calls is supported: if the buffer is partially full from a
+// prior call, the new bytes top it up and trigger a compression as
+// soon as 64 bytes accumulate. (The ShaData layout caps a single call
+// at 64 bytes — callers hashing more than 64 bytes must split into
+// multiple update calls, the standard streaming-API shape.)
 fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
     let i = 0;
     while i < len {
         if ctx.len < 64 {
             ctx.buf[ctx.len] = data.data[i];
             ctx.len = ctx.len + 1;
-            // W29S2 STUB: when ctx.len == 64 a real SHA-256 would call
-            // sha256_compress(ctx, ctx.buf) here and reset ctx.len = 0.
-            // Compression is not implemented — K11 will add it. Until then
-            // the buffer just saturates at 64 bytes and the state stays IV.
+            // W48: when the buffer fills, run the real 64-round
+            // compression (FIPS-180-4 §6.2.2) and reset ctx.len for
+            // the next chunk. This is the streaming compression point
+            // that W29S2 marked as a K11 TODO.
+            if ctx.len == 64 {
+                sha256_compress(ctx);
+                ctx.len = 0;
+            }
         }
         i = i + 1;
     }
     ctx.total = ctx.total + len;
 }
 
-// sha256_final: emit the 32-byte digest into `out`.
+// sha256_final: emit the 32-byte SHA-256 digest into `out`.
 //
-//   ctx: caller-allocated State<Sha256Ctx> (read by K11+; not modified
-//        by W29S2's stub).
-//   out: caller-allocated State<ShaDigest> (digest output).
+//   ctx: caller-allocated State<Sha256Ctx> (modified in place during
+//        the final compression(s) — ctx.state holds the final hash
+//        value after this call).
+//   out: caller-allocated State<ShaDigest> (digest output — 32 bytes).
 //
-// W29S2 STUB: copies ctx.state[0..31] verbatim into out.data[0..31] —
-// i.e. the digest is just the IV (all 8 words, post-W29S2 — K10c only
-// had the first 4 words populated, with words 4..7 zeroed). Since
-// sha256_update never compresses, ctx.state remains the IV after any
-// input. K11 will replace this with the real SHA-256 padding (0x80 +
-// zero-pad + 64-bit big-endian bit-count) + final compression pass +
-// big-endian digest serialization (FIPS-180-4 §5.1.1 + §6.2.2).
+// W48: real FIPS-180-4 §5.1.1 padding + §6.2.2 final compression +
+// §5.1.2 big-endian digest serialization:
+//   1. Append 0x80 at ctx.buf[ctx.len] (the SHA-256 "1-bit" marker).
+//   2. Zero-pad to offset 56 (mod 64). If ctx.len + 1 > 56, the padding
+//      overflows into a second block — compress the first (containing
+//      the message tail + 0x80 + zero-pad), then start a fresh zero
+//      block for the bit-count suffix. (This is the len >= 56 case —
+//      the 64-bit bit count needs 8 bytes at the end of a block, so
+//      any message tail with < 8 bytes of headroom in the current
+//      block spills into a second padding block.)
+//   3. Write the 64-bit big-endian bit count (ctx.total * 8) at
+//      ctx.buf[56..63] (FIPS-180-4 §5.1.1 length suffix).
+//   4. Run the final compression (or the second of two compressions
+//      in the overflow case).
+//   5. Serialize ctx.state as 8 big-endian u32 words into out.data
+//      (FIPS-180-4 §5.1.2: H0 high byte first, H0 low byte last, then
+//      H1, ..., H7).
 fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
+    // Total message length in bits (FIPS-180-4 §5.1.1 length suffix).
+    // ctx.total is u64 (bytes); * 8 yields the bit count. For the
+    // self-test's max input (3 bytes), total_bits = 24 — fits in u64
+    // with no overflow. (For real-world inputs up to 2^61 bytes, the
+    // * 8 would still fit in u64; beyond that is the spec's 2^64-bit
+    // message-length cap, which we don't enforce.)
+    let total_bits = ctx.total * 8;
+
+    // Step 1: append the 0x80 padding bit at ctx.buf[ctx.len].
+    ctx.buf[ctx.len] = 128;
+    let pos = ctx.len + 1;
+
+    // Step 2: zero-pad to offset 56 (mod 64).
+    if pos < 56 {
+        // Single-block padding: zero bytes pos..55, then bit count at
+        // 56..63 — all in the current block.
+        let p = pos;
+        while p < 56 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+    } else {
+        // Two-block padding: zero bytes pos..63, compress this block
+        // (message tail + 0x80 + zero-pad), then start a fresh block
+        // zero-filled up to offset 56 (the bit count goes at 56..63).
+        let p = pos;
+        while p < 64 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+        ctx.len = 64;
+        sha256_compress(ctx);
+        ctx.len = 0;
+        let q = 0;
+        while q < 56 {
+            ctx.buf[q] = 0;
+            q = q + 1;
+        }
+    }
+
+    // Step 3: 64-bit big-endian bit count at ctx.buf[56..63].
+    // (Byte 56 = most-significant, byte 63 = least-significant.)
+    ctx.buf[56] = ((total_bits >> 56) & 255) as u8;
+    ctx.buf[57] = ((total_bits >> 48) & 255) as u8;
+    ctx.buf[58] = ((total_bits >> 40) & 255) as u8;
+    ctx.buf[59] = ((total_bits >> 32) & 255) as u8;
+    ctx.buf[60] = ((total_bits >> 24) & 255) as u8;
+    ctx.buf[61] = ((total_bits >> 16) & 255) as u8;
+    ctx.buf[62] = ((total_bits >> 8) & 255) as u8;
+    ctx.buf[63] = (total_bits & 255) as u8;
+
+    // Step 4: final compression (the second compression in the overflow
+    // case — the first was done in step 2's else branch).
+    ctx.len = 64;
+    sha256_compress(ctx);
+
+    // Step 5: serialize ctx.state as 8 big-endian u32 words (§5.1.2).
+    // State is stored LE (per sha256_init); load each word LE, then
+    // write it back to out.data as 4 BE bytes (high byte first).
     let i = 0;
-    while i < 32 {
-        out.data[i] = ctx.state[i];
+    while i < 8 {
+        let base = i * 4;
+        let word = load_state_le(ctx, base);
+        out.data[base] = ((word >> 24) & 255) as u8;
+        out.data[base + 1] = ((word >> 16) & 255) as u8;
+        out.data[base + 2] = ((word >> 8) & 255) as u8;
+        out.data[base + 3] = (word & 255) as u8;
         i = i + 1;
     }
 }
@@ -146,54 +523,88 @@ fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the W29S2 SHA-256 API surface end-to-end:
-//   1. sha256_init(ctx)           → ALL 8 IV words seeded (state[0]=103,
-//                                   state[3]=106, state[16]=127, state[31]=91).
-//   2. sha256_update(ctx,data,1)  → 1 byte buffered (len=1, total=1, buf[0]=97).
-//   3. sha256_final(ctx,digest)   → digest is IV verbatim (digest[0]=103,
-//                                   digest[31]=91 — full 8-word IV in place).
+// W48 verifies the real SHA-256 compression against three canonical
+// FIPS-180-4 test vectors (the same vectors NIST publishes in §B.1 + the
+// empty-input case):
 //
-// Returns 0 on success, 1..10 on the 10 individual check failures.
+//   1. SHA-256("")    = e3b0c442 98fc1c14 9afbf4c8 996fb924
+//                        27ae41e4 649b934c a495991b 7852b855
+//      (padding-only block: 0x80 + 55 zeros + 8 zero bytes bit count)
 //
-// ── Why state[0] == 103 instead of 1779033703? ──────────────────────────────
-//   VUMA's byte-granular array indexing means `ctx.state[0]` reads back
-//   the byte at offset 0 of the 32-byte state buffer — the low byte of
-//   the SHA-256 IV word 0 (0x6a09e667 = 1779033703) — which is 0x67 =
-//   103 decimal. K11's real SHA-256 will store the IV as 8 × u32 words
-//   and access them as words, but K10c's byte-by-byte IV storage is
-//   consistent with VUMA's byte-granular indexing discipline (see
-//   "Why byte-by-byte IV storage?" in womb/kernel/crypto/api.vuma).
+//   2. SHA-256("a")   = ca978112 ca1bbdca fac231b3 9a23dc4d
+//                        a786eff8 147c4e72 b9807785 afee48bb
+//      (1-byte message: 'a'(0x61) + 0x80 + 54 zeros + 8-byte bit count = 8)
+//
+//   3. SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223
+//                        b00361a3 96177a9c b410ff61 f20015ad
+//      (3-byte message: 'abc' + 0x80 + 52 zeros + 8-byte bit count = 24)
+//      (This is the canonical FIPS-180-4 §B.1 single-block test vector.)
+//
+// The self-test ALSO verifies the unchanged-from-W29S2 IV byte checks
+// (state[0]==103, state[3]==106, state[16]==127, state[31]==91) after
+// sha256_init, plus the update-path accounting (ctx.len + ctx.total +
+// ctx.buf[0]) for the "a" input.
+//
+// Returns 0 on success, 1..19 on the 19 individual check failures.
 fn main() -> i32 {
-    // ── Init + IV check ──
+    // ── Init + IV byte check (unchanged from W29S2) ──
     let ctx = state_new(Sha256Ctx);
     sha256_init(ctx);
-    // Verify H0 first byte = 103 (0x67, low byte of 0x6a09e667).
+    // H0 first byte = 103 (0x67, low byte of 0x6a09e667).
     if ctx.state[0] != 103 { return 1; }
-    // Verify H0 fourth byte = 106 (0x6a, high byte of 0x6a09e667).
+    // H0 fourth byte = 106 (0x6a, high byte of 0x6a09e667).
     if ctx.state[3] != 106 { return 2; }
-    // Verify H4 first byte = 127 (0x7f, low byte of 0x510e527f). W29S2.
+    // H4 first byte = 127 (0x7f, low byte of 0x510e527f).
     if ctx.state[16] != 127 { return 3; }
-    // Verify H7 fourth byte = 91 (0x5b, high byte of 0x5be0cd19). W29S2.
+    // H7 fourth byte = 91 (0x5b, high byte of 0x5be0cd19).
     if ctx.state[31] != 91 { return 4; }
-    // Verify buffer is empty.
+    // Buffer is empty.
     if ctx.len != 0 { return 5; }
 
-    // ── Update with data ──
+    // ── Test vector 1: SHA-256("") ──
+    // Empty input → padding-only block. Expected digest:
+    //   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    // (spot-check bytes 0, 1, 31 — 0xe3, 0xb0, 0x55.)
+    let d_empty = state_new(ShaDigest);
+    sha256_final(ctx, d_empty);
+    if d_empty.data[0] != 227 { return 6; }   // 0xe3
+    if d_empty.data[1] != 176 { return 7; }   // 0xb0
+    if d_empty.data[31] != 85 { return 8; }   // 0x55
+
+    // ── Test vector 2: SHA-256("a") ──
+    // 1-byte input → single-block padding. Expected digest:
+    //   ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb
+    sha256_init(ctx);
     let data = state_new(ShaData);
     data.data[0] = 97;  // 'a'
     sha256_update(ctx, data, 1);
-    if ctx.len != 1 { return 6; }
-    if ctx.total != 1 { return 7; }
-    if ctx.buf[0] != 97 { return 8; }
+    // Update-path accounting (unchanged from W29S2's self-test).
+    if ctx.len != 1 { return 9; }
+    if ctx.total != 1 { return 10; }
+    if ctx.buf[0] != 97 { return 11; }
+    let d_a = state_new(ShaDigest);
+    sha256_final(ctx, d_a);
+    // Spot-check bytes 0, 1, 31 — 0xca, 0x97, 0xbb.
+    if d_a.data[0] != 202 { return 12; }   // 0xca
+    if d_a.data[1] != 151 { return 13; }   // 0x97
+    if d_a.data[31] != 187 { return 14; }  // 0xbb
 
-    // ── Finalize ──
-    let digest = state_new(ShaDigest);
-    sha256_final(ctx, digest);
-    // Stub: digest = state verbatim (compression not yet implemented —
-    // K11 will add the 64-round compression + padding). state[0] = 103.
-    if digest.data[0] != 103 { return 9; }
-    // W29S2: digest[31] = 91 (H7 high byte — full 8-word IV is in place).
-    if digest.data[31] != 91 { return 10; }
+    // ── Test vector 3: SHA-256("abc") (FIPS-180-4 §B.1) ──
+    // 3-byte input → single-block padding. Expected digest:
+    //   ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    sha256_init(ctx);
+    data.data[0] = 97;   // 'a'
+    data.data[1] = 98;   // 'b'
+    data.data[2] = 99;   // 'c'
+    sha256_update(ctx, data, 3);
+    if ctx.len != 3 { return 15; }
+    if ctx.total != 3 { return 16; }
+    let d_abc = state_new(ShaDigest);
+    sha256_final(ctx, d_abc);
+    // Spot-check bytes 0, 1, 31 — 0xba, 0x78, 0xad.
+    if d_abc.data[0] != 186 { return 17; }  // 0xba
+    if d_abc.data[1] != 120 { return 18; }  // 0x78
+    if d_abc.data[31] != 173 { return 19; } // 0xad
 
     return 0;
 }
