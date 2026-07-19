@@ -24,22 +24,26 @@
 // shell loop `while ((wpid = waitpid(-1, &status, 0)) > 0);` reaps all
 // children serially.
 //
-// The K4e contract specifies the simplified semantics (the contract's
-// sys_waitpid body literally says "For simplicity: only handle
-// pid == -1 (any child)"):
+// The K4e contract originally specified simplified semantics (the
+// contract's sys_waitpid body literally said "For simplicity: only
+// handle pid == -1 (any child)"). W12S4 lifts that simplification:
 //   * pid == -1 (any child): scan ProcessTable for any ZOMBIE (state == 4)
 //     whose PPID matches the calling parent's PID. If found, read the
 //     exit code, free the slot (task_free → state = 0), write the exit
 //     code to status, return the child's PID.
-//   * pid > 0 (specific child): NOT implemented in this stub — the
-//     contract says "For simplicity: only handle pid == -1". A future
-//     wave (K4f syscall handler) will dispatch on pid > 0 vs pid == -1
-//     and call a richer sys_waitpid_specific helper. THIS file's
-//     sys_waitpid accepts the pid parameter (for API symmetry with
-//     POSIX waitpid) but ignores it for branching — it always scans
-//     for any ZOMBIE child of the parent (parent_pid is hardcoded to
-//     1 = init for the self-test; K4f's syscall handler will pass the
-//     actual calling task's PID instead).
+//   * pid == 0: W12S4 treats this as "any child" (same as -1) — the
+//     POSIX pgrp semantics are not yet implemented.
+//   * pid > 0 (specific child): W12S4 IMPLEMENTED. sys_waitpid scans
+//     for a ZOMBIE whose PPID matches the parent AND whose PID matches
+//     `pid`. Non-matching ZOMBIEs are skipped (left for a future
+//     waitpid call). Previously this case was a stub that ignored
+//     `pid` and reaped any child; the old behavior was a correctness
+//     bug (a parent waiting for child X could silently reap child Y).
+//   * parent_idx: W12S4 fix. sys_waitpid now takes `parent_idx: u32`
+//     (the calling task's INDEX in the ProcessTable, NOT its PID) and
+//     resolves parent_pid = pt_get_pid(tbl, parent_idx). Previously
+//     parent_pid was hardcoded to 1 (init), which silently reaped
+//     init's children regardless of who actually called waitpid.
 //   * If a child is still running (state == RUNNING/READY/BLOCKED, not
 //     ZOMBIE), return -EAGAIN (-11). A real kernel would sleep the
 //     parent on a WaitQueue until the child exits; THIS stub returns
@@ -214,12 +218,14 @@
 //
 // State<T> params: per the K4b contract's "Keep State<T> params to 1-2
 // per function" rule (continued here), sys_waitpid takes 2
-// State<T> params (tbl + status) + 1 u64 (pid). Same discipline as
-// K4d's sys_exit(tbl, task_idx, code, zombie) (2 State params + u32 +
-// i32) and K4b's sched_enqueue(rq, tbl, task_idx) (2 State params +
-// u32). wait_reap_zombie takes 2 State params (tbl + status) + 1 u32
-// (parent_pid). wait_has_children takes 1 State param (tbl) + 1 u32
-// (parent_pid) — the minimal 1-State-param form.
+// State<T> params (tbl + status) + 1 u32 (parent_idx) + 1 u64 (pid).
+// Same discipline as K4d's sys_exit(tbl, task_idx, code, zombie)
+// (2 State params + u32 + i32) and K4b's sched_enqueue(rq, tbl,
+// task_idx) (2 State params + u32). wait_reap_zombie takes 2 State
+// params (tbl + status) + 2 u32 (parent_pid + target_pid). W12S4 added
+// target_pid (0 = any child, >0 = specific child PID). wait_has_children
+// takes 1 State param (tbl) + 2 u32 (parent_pid + target_pid) — the
+// minimal 1-State-param form.
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
@@ -249,20 +255,32 @@
 //     8    = bytes per u64 field (loop bound for vruntime pack/unpack)
 //     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
 //     4    = ZOMBIE state value (set by K4d's sys_exit; scanned for by
-//            wait_reap_zombie)
+//            wait_reap_zombie) + the targeted child's PID in the W12S4
+//            specific-pid test (slot 4 — note PID != slot + 1 here,
+//            deliberately, to exercise the pid-match path)
 //     0    = FREE state value (set by task_free; skipped by
 //            wait_has_children's "not FREE" check)
 //     1    = RUNNING state value (set on the parent task in the self-
-//            test) + the parent_pid hardcoded into sys_waitpid (init's
-//            PID — the contract's choice) + the PID offset (PID = slot
-//            + 1, so slot 0 → PID 1) + the "child found" sentinel for
+//            test) + the PID of the parent at slot 0 (resolved by
+//            sys_waitpid via pt_get_pid(tbl, parent_idx) — W12S4: no
+//            longer hardcoded) + the PID offset (PID = slot + 1, so
+//            slot 0 → PID 1) + the "child found" sentinel for
 //            wait_has_children's return
 //     2    = the child's PID in the self-test (slot 1 + 1)
+//     3    = the second parent's PID in the W12S4 specific-pid test
+//            (slot 2 + 1)
+//     5    = the "wrong sibling" PID in the W12S4 specific-pid test
+//            (slot 3 — placed at a LOWER index than the target to
+//            catch the "ignores pid" regression)
+//     7    = the wrong sibling's exit code (must NOT be read by
+//            sys_waitpid(pid=4))
 //     42   = the test exit code (the Douglas Adams value, same as
 //            K4d's exit.vuma self-test)
+//     99   = the targeted child's exit code in the W12S4 specific-pid
+//            test (a distinct value from 42 so a mix-up is caught)
 //     10   = ECHILD (POSIX errno — returned as 0 - 10 = -ECHILD as i64)
 //     11   = EAGAIN (POSIX errno — returned as 0 - 11 = -EAGAIN as i64)
-//   Self-test constants: 1, 2, 4, 0, 42 + the parent_pid 1 — all decimal.
+//   Self-test constants: 1, 2, 3, 4, 5, 7, 42, 99, 0, 10 — all decimal.
 //
 // ── The u64 -1 literal subtlety ─────────────────────────────────────────────
 // The K4e contract specifies `pid == -1 (or 18446744073709551615 as u64)`
@@ -278,17 +296,16 @@
 // 18446744073709551615 is u64 max (-1 as u64). VUMA may misinterpret
 // this literal; use `let neg_one: u64 = 0 - 1;` instead."
 //
-// THIS file's sys_waitpid follows the contract's "For simplicity: only
-// handle pid == -1 (any child)" — sys_waitpid accepts the pid parameter
-// but does NOT compare it against the literal `18446744073709551615`
-// (the comparison would always evaluate to false due to the parser
-// issue). Instead, sys_waitpid always treats the call as "wait for any
-// child of the parent" (parent_pid hardcoded to 1 = init for the self-
-// test). The self-test passes `let neg_one: u64 = 0 - 1;` as the pid
-// argument to exercise the API surface; sys_waitpid ignores it. K4f's
-// syscall handler will dispatch on pid > 0 vs pid == -1 (using `let
-// neg_one: u64 = 0 - 1;` for the comparison) and call the appropriate
-// helper — THIS file's sys_waitpid is the "any child" path only.
+// W12S4 update: THIS file's sys_waitpid NO LONGER follows the
+// contract's "For simplicity: only handle pid == -1" simplification.
+// sys_waitpid now dispatches on `pid` (pid > 0 → specific child;
+// pid == 0 or pid == -1 → any child) AND resolves parent_pid from
+// `parent_idx` instead of hardcoding 1. The u64 -1 literal subtlety
+// is still respected: sys_waitpid builds `let neg_one: u64 = 0 - 1;`
+// internally and uses `pid != neg_one` (NOT `pid ==
+// 18446744073709551615`) to detect the "any child" case — the literal
+// would always evaluate to false due to the parser issue. See the
+// sys_waitpid doc comment below for the full W12S4 control flow.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It re-declares ProcessTable + the 8
@@ -570,6 +587,14 @@ fn task_free(tbl: State<ProcessTable>, idx: u32) {
 // found, return 0 (NOT -ECHILD — that's sys_waitpid's job; this helper
 // just reports "no zombie to reap").
 //
+// `target_pid` selects the reaping mode (W12S4):
+//   * target_pid == 0 → "any child" mode (POSIX pid == -1 or pid == 0):
+//     reap the first ZOMBIE whose ppid matches `parent_pid`.
+//   * target_pid > 0 → "specific child" mode (POSIX pid > 0): reap the
+//     ZOMBIE whose ppid matches `parent_pid` AND whose pid matches
+//     `target_pid`. Non-matching ZOMBIEs are skipped (left for a
+//     future waitpid call).
+//
 // The scan walks all 256 slots, checking state == 4 (ZOMBIE) and
 // ppid == parent_pid. The first match wins (lowest slot index — same
 // policy as task_alloc's lowest-free-slot-wins). Once reaped, the
@@ -591,22 +616,26 @@ fn task_free(tbl: State<ProcessTable>, idx: u32) {
 // pids} (via the helpers) and writes status.code and tbl.{states,
 // count} (via task_free). Both State<T> params are borrowed for the
 // duration of the call (regular VUMA-fn borrow, not extern #[borrow]).
-fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, status: State<Status>) -> i64 {
+fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32, status: State<Status>) -> i64 {
     let i = 0;
     while i < 256 {
         let state = pt_get_state(tbl, i);
         if state == 4 {  // ZOMBIE
             let child_ppid = pt_get_ppid(tbl, i);
             if child_ppid == parent_pid {
-                // Reap: get exit code, free slot, return child pid.
-                // (exit_code is stored in vruntime field as a hack —
-                // K4d's sys_exit stores it there since ProcessTable
-                // has no exit_code field. Cast u64 to i32.)
-                let raw_code = pt_get_vruntime(tbl, i);
-                status.code = raw_code as i32;
                 let child_pid = pt_get_pid(tbl, i);
-                task_free(tbl, i);
-                return child_pid as i64;
+                // target_pid == 0 → "any child" (matches all).
+                // target_pid > 0 → only this specific child PID.
+                if target_pid == 0 || target_pid == child_pid {
+                    // Reap: get exit code, free slot, return child pid.
+                    // (exit_code is stored in vruntime field as a hack —
+                    // K4d's sys_exit stores it there since ProcessTable
+                    // has no exit_code field. Cast u64 to i32.)
+                    let raw_code = pt_get_vruntime(tbl, i);
+                    status.code = raw_code as i32;
+                    task_free(tbl, i);
+                    return child_pid as i64;
+                }
             }
         }
         i = i + 1;
@@ -620,6 +649,15 @@ fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, status: State<Sta
 // or zombie), 0 otherwise (parent has no children — sys_waitpid should
 // return -ECHILD).
 //
+// `target_pid` selects the match mode (W12S4), mirroring wait_reap_zombie:
+//   * target_pid == 0 → "any child": 1 if ANY non-FREE task has
+//     ppid == parent_pid.
+//   * target_pid > 0 → "specific child": 1 if a non-FREE task has
+//     ppid == parent_pid AND pid == target_pid. This is what makes
+//     waitpid(specific_pid, ...) return -EAGAIN (still running) rather
+//     than -ECHILD (no such child) when the targeted child exists but
+//     hasn't exited yet.
+//
 // The "state != 0" check is important: a reaped child (task_free'd)
 // has state == 0 (FREE) but its ppid field is stale (still set to the
 // old parent's PID until task_alloc reuses the slot and K4d's fork
@@ -629,16 +667,22 @@ fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, status: State<Sta
 // when there isn't). The state != 0 check filters out reaped slots.
 //
 // State<T> params: 1 (tbl), per the K4b contract's "1-2 per function"
-// rule. wait_has_children only reads tbl.{ppids, states} (via the
-// helpers). The function is a pure read — no writes to tbl.
-fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32) -> u8 {
+// rule. wait_has_children only reads tbl.{ppids, pids, states} (via
+// the helpers). The function is a pure read — no writes to tbl.
+fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32) -> u8 {
     let i = 0;
     while i < 256 {
         let child_ppid = pt_get_ppid(tbl, i);
         if child_ppid == parent_pid {
             let state = pt_get_state(tbl, i);
             if state != 0 {  // not FREE
-                return 1;
+                if target_pid == 0 {
+                    return 1;
+                }
+                let child_pid = pt_get_pid(tbl, i);
+                if target_pid == child_pid {
+                    return 1;
+                }
             }
         }
         i = i + 1;
@@ -647,32 +691,55 @@ fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32) -> u8 {
 }
 
 // sys_waitpid: the waitpid() syscall primitive. Returns the reaped
-// child's PID on success, -EAGAIN (-11) if a child is still running,
-// -ECHILD (-10) if the parent has no children.
+// child's PID on success, -EAGAIN (-11) if a matching child is still
+// running, -ECHILD (-10) if the parent has no matching children.
 //
-// Per the K4e contract's "For simplicity: only handle pid == -1 (any
-// child)" — sys_waitpid accepts the `pid: u64` parameter (for API
-// symmetry with POSIX waitpid(2)) but does NOT compare it against the
-// literal 18446744073709551615 (the literal is unparsable as i64 in
-// the current VUMA parser — see "The u64 -1 literal subtlety" in the
-// file header). Instead, sys_waitpid always scans for any ZOMBIE child
-// of the parent (parent_pid hardcoded to 1 = init for the self-test;
-// K4f's syscall handler will pass the actual calling task's PID).
+// W12S4 fix: sys_waitpid now takes `parent_idx: u32` — the calling
+// task's INDEX in the ProcessTable (NOT its PID) — and resolves the
+// parent's PID via `pt_get_pid(tbl, parent_idx)`. This replaces the
+// previous hardcoded `parent_pid = 1` (init), which silently reaped
+// children of init regardless of who actually called waitpid. The
+// caller (K4f's syscall handler) knows the calling task's slot index
+// directly from the trap frame / current-task pointer; looking up the
+// PID from the index is one pt_get_pid call.
+//
+// W12S4 fix #2: sys_waitpid now ALSO dispatches on the `pid` argument
+// instead of ignoring it (POSIX waitpid(2) semantics):
+//   * pid == 0          → wait for ANY child of this parent
+//                         (W12S4 treats pgrp==0 as "any" — same as
+//                         the K4e "For simplicity" simplification).
+//   * pid == 0 - 1 (-1) → wait for ANY child of this parent.
+//   * pid > 0 (and != -1 as u64) → wait for the SPECIFIC child whose
+//                         PID == pid (only reap that one; non-matching
+//                         ZOMBIEs are skipped).
+//
+// The u64 -1 literal subtlety (see file header) forces the pid == -1
+// case to be detected via `let neg_one: u64 = 0 - 1; if pid == neg_one`
+// rather than the literal `18446744073709551615`. We translate `pid`
+// to a `target_pid: u32` consumed by the helpers: 0 means "any child",
+// >0 means "this specific child PID". The neg_one / 0 cases both map
+// to target_pid = 0; pid > 0 (and != neg_one) maps to target_pid =
+// `pid as u32` (low 32 bits — PIDs are u32 in ProcessTable).
 //
 // The control flow:
-//   1. Call wait_reap_zombie(tbl, 1, status). If a ZOMBIE child is
-//      found, this writes status.code, frees the slot, and returns
-//      the child's PID (> 0). sys_waitpid returns that PID.
-//   2. If wait_reap_zombie returned 0 (no zombie), check
-//      wait_has_children(tbl, 1). If the parent has any children
-//      (running or blocked, not FREE), return -EAGAIN (-11). A real
-//      kernel would sleep the parent on a WaitQueue here; THIS stub
-//      returns -EAGAIN so the caller can poll (or K4f's syscall
-//      handler can spin/sleep on the parent's WaitQueue — see the
-//      WaitQueue layout declaration above).
-//   3. If wait_has_children returned 0 (no children at all), return
-//      -ECHILD (-10). This matches Linux's do_wait() returning
-//      -ECHILD when `list_empty(&current->children)`.
+//   1. Resolve parent_pid = pt_get_pid(tbl, parent_idx).
+//   2. Compute target_pid from pid (0 = any, >0 = specific).
+//   3. Call wait_reap_zombie(tbl, parent_pid, target_pid, status). If
+//      a matching ZOMBIE child is found, this writes status.code,
+//      frees the slot, and returns the child's PID (> 0). sys_waitpid
+//      returns that PID.
+//   4. If wait_reap_zombie returned 0 (no zombie), check
+//      wait_has_children(tbl, parent_pid, target_pid). If a matching
+//      child still exists (running or blocked, not FREE), return
+//      -EAGAIN (-11). A real kernel would sleep the parent on a
+//      WaitQueue here; THIS stub returns -EAGAIN so the caller can
+//      poll (or K4f's syscall handler can spin/sleep on the parent's
+//      WaitQueue — see the WaitQueue layout declaration above).
+//   5. If wait_has_children returned 0 (no matching children at all),
+//      return -ECHILD (-10). This matches Linux's do_wait() returning
+//      -ECHILD when `list_empty(&current->children)` (for the any-child
+//      case) or when the specific PID is not a child of the caller
+//      (for the pid > 0 case).
 //
 // The `0 - 11` and `0 - 10` forms avoid the codegen's signed-literal
 // subtleties — see "-ECHILD = -10, -EAGAIN = -11 (decimal)" in the
@@ -683,37 +750,43 @@ fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32) -> u8 {
 // State<T> params: 2 (tbl + status), per the K4b contract's "1-2 per
 // function" rule. sys_waitpid passes both through to wait_reap_zombie
 // (which writes status.code and frees the slot via task_free).
-fn sys_waitpid(tbl: State<ProcessTable>, pid: u64, status: State<Status>) -> i64 {
-    // Per the K4e contract's "For simplicity: only handle pid == -1
-    // (any child)" — accept the pid parameter but ignore it for
-    // branching. Always scan for any ZOMBIE child of the parent
-    // (parent_pid hardcoded to 1 = init for the self-test).
-    //
-    // NOTE: pid is intentionally unused. VUMA silently drops unused
-    // parameters (no warning, no error — same as C's `void f(u64 x)
-    // { (void)x; }` pattern, and the same convention as K4d's sys_exec
-    // accepting entry/stack but not referencing them in the body). The
-    // pid parameter is in the signature for API symmetry with POSIX
-    // waitpid(2); K4f's syscall handler will dispatch on pid > 0 vs
-    // pid == -1 (using `let neg_one: u64 = 0 - 1;` for the comparison
-    // — see "The u64 -1 literal subtlety" in the file header) and call
-    // a richer sys_waitpid_specific helper for the pid > 0 case.
-    let reaped = wait_reap_zombie(tbl, 1, status);
+fn sys_waitpid(tbl: State<ProcessTable>, parent_idx: u32, pid: u64, status: State<Status>) -> i64 {
+    // Resolve the calling parent's PID from its task index (W12S4).
+    // Previously this was hardcoded to 1 (init), which silently reaped
+    // init's children regardless of the actual caller.
+    let parent_pid = pt_get_pid(tbl, parent_idx);
+
+    // Translate `pid` (u64, POSIX waitpid(2) semantics) into the
+    // `target_pid: u32` consumed by the helpers. 0 means "any child";
+    // >0 means "this specific child PID". Both pid == 0 and
+    // pid == 0 - 1 (-1 as u64) map to target_pid = 0. The neg_one
+    // exclusion is critical: without it, pid == -1 would wrap to
+    // 0xFFFFFFFF as u32 and never match a real child PID.
+    let neg_one: u64 = 0 - 1;
+    let target_pid: u32 = 0;
+    if pid != 0 {
+        if pid != neg_one {
+            target_pid = pid as u32;
+        }
+    }
+
+    // (1) Try to reap a matching ZOMBIE child.
+    let reaped = wait_reap_zombie(tbl, parent_pid, target_pid, status);
     if reaped > 0 {
         return reaped;
     }
-    // No zombie found. If the parent still has any children (running
-    // or blocked), return -EAGAIN — a real kernel would sleep here on
-    // a WaitQueue (see the WaitQueue layout declaration above).
-    if wait_has_children(tbl, 1) == 1 {
+    // (2) No zombie found. If the parent still has any matching child
+    //     (running or blocked), return -EAGAIN — a real kernel would
+    //     sleep here on a WaitQueue (see the WaitQueue layout above).
+    if wait_has_children(tbl, parent_pid, target_pid) == 1 {
         return 0 - 11;  // -EAGAIN
     }
-    // No children at all — return -ECHILD.
+    // (3) No matching children at all — return -ECHILD.
     return 0 - 10;  // -ECHILD
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K4e DoD).
+// Self-test (the K4e DoD + W12S4 specific-pid extension).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a ProcessTable and a Status via state_new, init the
 // ProcessTable via pt_init, then:
@@ -724,21 +797,41 @@ fn sys_waitpid(tbl: State<ProcessTable>, pid: u64, status: State<Status>) -> i64
 //   (4) Build neg_one = 0 - 1 as u64 (the "wait for any child" pid
 //       argument — see "The u64 -1 literal subtlety" in the file
 //       header for why we don't use the literal 18446744073709551615).
-//   (5) Call sys_waitpid(tbl, neg_one, status) — should reap the
-//       child, return 2 (child's PID), and write status.code = 42.
+//   (5) Call sys_waitpid(tbl, 0, neg_one, status) — W12S4: pass
+//       parent_idx=0 (the parent task's slot index, NOT its PID).
+//       sys_waitpid resolves parent_pid = pt_get_pid(tbl, 0) = 1
+//       internally. pid=-1 means "any child". Should reap the child
+//       at slot 1, return 2 (child's PID), and write status.code = 42.
 //   (6) Check status.code == 42 IMMEDIATELY after sys_waitpid returns
 //       (BEFORE any other function call — see "Status layout" in the
 //       file header for the state-typedness ordering constraint).
 //   (7) Check ret == 2 (sys_waitpid returned the child's PID).
 //   (8) Check pt_get_state(tbl, 1) == 0 (child slot was freed by
 //       task_free inside wait_reap_zombie).
-//   (9) Call sys_waitpid(tbl, neg_one, status) AGAIN — no zombie to
+//   (9) Call sys_waitpid(tbl, 0, neg_one, status) AGAIN — no zombie to
 //       reap (child was freed in step 5), no children at all (parent
-//       has ppid=0, not 1; child slot is FREE), so sys_waitpid should
-//       return -ECHILD = -10. The self-test does NOT check the return
-//       value (per the K4e contract's "Actually, let's just return 0
-//       if no crash") — just verifies no crash.
-//   (10) Return 0 (success).
+//       at slot 0 has no remaining non-FREE children), so sys_waitpid
+//       should return -ECHILD = (0 - 10) = -10. W12S4: we now CHECK
+//       this return value (the original K4e self-test didn't, but the
+//       parent_idx + pid dispatch is now exercised enough that a
+//       regression here would be caught).
+//   ── W12S4 specific-pid (pid > 0) extension ────────────────────────
+//   (10) Set up a second parent at slot 2 (pid=3, state=1 RUNNING)
+//        with TWO zombie children. The "wrong" sibling (pid=5) is at
+//        the LOWER slot index (3) and the target (pid=4) is at the
+//        HIGHER slot index (4). This ordering is deliberate — if
+//        sys_waitpid silently ignored `pid`, wait_reap_zombie would
+//        return the first ZOMBIE match (slot 3, pid=5) and the test
+//        would catch the regression via status.code (7 vs 99), ret
+//        (5 vs 4), and the slot-state checks.
+//   (11) Call sys_waitpid(tbl, 2, 4, status) — parent_idx=2 (parent
+//        pid=3), pid=4 (specific child). Should SKIP slot 3 (pid=5),
+//        reap slot 4 (pid=4), return 4, write status.code=99.
+//   (12) Check status.code == 99 IMMEDIATELY.
+//   (13) Check ret3 == 4.
+//   (14) Check pt_get_state(tbl, 3) == 4 (wrong sibling still ZOMBIE).
+//   (15) Check pt_get_state(tbl, 4) == 0 (target child was reaped).
+//   (16) Return 0 (success).
 //
 // Returns 0 on success, 1..N on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
@@ -750,9 +843,9 @@ fn sys_waitpid(tbl: State<ProcessTable>, pid: u64, status: State<Status>) -> i64
 // caveat, "the codegen does NOT propagate State-typedness through
 // function return values" — extended to "and may lose it across
 // function calls"). The K4e self-test works around this by reading
-// status.code IMMEDIATELY after sys_waitpid returns (step 6), BEFORE
-// any other function call (step 8's pt_get_state, step 9's second
-// sys_waitpid). Once status.code is read into a local i32, subsequent
+// status.code IMMEDIATELY after sys_waitpid returns (step 6 + step
+// 12), BEFORE any other function call (step 8's / step 14's
+// pt_get_state). Once status.code is read into a local i32, subsequent
 // function calls don't affect the local. Verified by /home/z/probes/
 // probe_wait*.vuma — the pattern `let ret = sys_waitpid(tbl, ...,
 // status); if status.code != 42 { return ...; }` works; the pattern
@@ -760,11 +853,11 @@ fn sys_waitpid(tbl: State<ProcessTable>, pid: u64, status: State<Status>) -> i64
 // status.code != 42 { return ...; }` fails (status.code reads as 0).
 //
 // Per the K4e contract's "decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (1, 2, 4, 42) — decimal
-// avoids the parser's hex-literal path (parse_int_radix width-
-// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
-// for the same rationale, and K3a's trap_trampoline.vuma for the same
-// rule applied to vector=14 and rip=4096).
+// constants in the self-test use DECIMAL (1, 2, 3, 4, 5, 42, 99, 7)
+// — decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same rationale, and K3a's trap_trampoline.vuma for
+// the same rule applied to vector=14 and rip=4096).
 
 fn main() -> i32 {
     let tbl = state_new(ProcessTable);
@@ -792,9 +885,12 @@ fn main() -> i32 {
     //     header for why we don't use the literal 18446744073709551615).
     let neg_one: u64 = 0 - 1;
 
-    // (5) Call sys_waitpid(tbl, neg_one, status) — should reap the
-    //     child, return 2 (child's PID), and write status.code = 42.
-    let ret = sys_waitpid(tbl, neg_one, status);
+    // (5) Call sys_waitpid(tbl, 0, neg_one, status) — W12S4: pass
+    //     parent_idx=0 (the parent task's slot index). sys_waitpid
+    //     resolves parent_pid = pt_get_pid(tbl, 0) = 1 internally.
+    //     pid=-1 means "any child". Should reap slot 1, return 2,
+    //     and write status.code = 42.
+    let ret = sys_waitpid(tbl, 0, neg_one, status);
 
     // (6) Check status.code == 42 IMMEDIATELY after sys_waitpid
     //     returns, BEFORE any other function call (see the state-
@@ -811,16 +907,64 @@ fn main() -> i32 {
     let child_state = pt_get_state(tbl, 1);
     if child_state != 0 { return 3; }
 
-    // (9) Call sys_waitpid(tbl, neg_one, status) AGAIN — no zombie to
-    //     reap (child was freed in step 5), no children at all (parent
-    //     has ppid=0, not 1; child slot is FREE), so sys_waitpid
-    //     should return -ECHILD = -10. The self-test does NOT check
-    //     the return value (per the K4e contract's "Actually, let's
-    //     just return 0 if no crash") — just verifies no crash.
-    let ret2 = sys_waitpid(tbl, neg_one, status);
+    // (9) Call sys_waitpid(tbl, 0, neg_one, status) AGAIN — no zombie
+    //     to reap (child was freed in step 5), no children at all
+    //     (parent at slot 0 has no remaining non-FREE children), so
+    //     sys_waitpid should return -ECHILD = (0 - 10) = -10.
+    let ret2 = sys_waitpid(tbl, 0, neg_one, status);
+    if ret2 != 0 - 10 { return 4; }  // expected -ECHILD
 
-    // (10) Return 0 (success). ret2 is intentionally unused (VUMA
-    //      silently drops unused locals — same as the unused `pid`
-    //      parameter in sys_waitpid).
+    // ── W12S4 specific-pid (pid > 0) extension ─────────────────────
+    // (10) Set up a second parent at slot 2 (pid=3, RUNNING) with TWO
+    //      zombie children. The "wrong" sibling (pid=5) is placed at
+    //      the LOWER slot index (3) and the target (pid=4) at the
+    //      HIGHER slot index (4). This ordering is deliberate: if
+    //      sys_waitpid silently ignored `pid` and reaped "any child",
+    //      wait_reap_zombie would return the first ZOMBIE match
+    //      (slot 3, pid=5) — the test would catch the regression via
+    //      status.code (7 vs 99), ret (5 vs 4), and the slot-state
+    //      checks (slot 3 still ZOMBIE vs reaped). count is now 4:
+    //      slots 0, 2, 3, 4 (slot 1 was freed in step 5).
+    pt_set_pid(tbl, 2, 3);
+    pt_set_state(tbl, 2, 1);  // RUNNING (second parent)
+    pt_set_pid(tbl, 3, 5);
+    pt_set_ppid(tbl, 3, 3);   // child of parent at slot 2 (pid=3)
+    pt_set_state(tbl, 3, 4);  // ZOMBIE
+    pt_set_vruntime(tbl, 3, 7);   // exit code 7 (WRONG sibling, lower index)
+    pt_set_pid(tbl, 4, 4);
+    pt_set_ppid(tbl, 4, 3);   // also child of parent at slot 2
+    pt_set_state(tbl, 4, 4);  // ZOMBIE
+    pt_set_vruntime(tbl, 4, 99);  // exit code 99 (target, higher index)
+    tbl.count = 4;
+
+    // (11) Call sys_waitpid(tbl, 2, 4, status) — parent_idx=2 (parent
+    //      pid=3), pid=4 (specific child). Should SKIP slot 3 (pid=5
+    //      != 4), reap slot 4 (pid=4 == 4), return 4, write
+    //      status.code=99, and leave slot 3 alone.
+    let ret3 = sys_waitpid(tbl, 2, 4, status);
+
+    // (12) Check status.code == 99 IMMEDIATELY (BEFORE step 14's
+    //      pt_get_state call — state-typedness ordering constraint).
+    //      Catches the "ignores pid" regression: would be 7 (slot 3's
+    //      exit code) if sys_waitpid reaped any-child.
+    if status.code != 99 { return 5; }
+
+    // (13) Check ret3 == 4 (sys_waitpid returned the targeted PID).
+    //      Catches the "ignores pid" regression: would be 5.
+    if ret3 != 4 { return 6; }
+
+    // (14) Check pt_get_state(tbl, 3) == 4 (the WRONG sibling at slot 3
+    //      is still ZOMBIE — sys_waitpid(pid=4) did NOT touch it).
+    //      This is the FIRST function call after step 11's sys_waitpid
+    //      — status.code is no longer accessible.
+    let wrong_state = pt_get_state(tbl, 3);
+    if wrong_state != 4 { return 7; }
+
+    // (15) Check pt_get_state(tbl, 4) == 0 (the TARGET child at slot 4
+    //      was reaped by task_free inside wait_reap_zombie).
+    let target_state = pt_get_state(tbl, 4);
+    if target_state != 0 { return 8; }
+
+    // (16) Return 0 (success).
     return 0;
 }
