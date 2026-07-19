@@ -146,12 +146,29 @@
 // ────────────────────────────────────────────────────────────────────────────
 // Extern declarations.
 // ────────────────────────────────────────────────────────────────────────────
-// In hosted mode these are __ffi_fallback_stubs (no-op). The real DNS
-// transport (UDP socket send/recv on port 53) is K9g+. Same extern
-// declaration style as K6f's shell.vuma (write + exit) + K6a's uart.vuma.
+// W47: the UDP transport externs (socket / sendto / recv / close) are now
+// declared + called by dns_resolve. In hosted mode these resolve to real
+// Linux x86_64 syscalls (sys_socket=41, sys_sendto=44, sys_recv=45,
+// sys_close=3 — see src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs).
+// The legacy write + read externs are retained for parity with K6f's
+// shell.vuma + K6a's uart.vuma (K9e's self-test does not call them, but
+// the declaration documents the K9e→K6 I/O surface for K9g+ callers).
+//
+// `buf: Address` / `addr: Address` (NOT State<T>) means the marshal pass
+// does NOT invalidate any state on the call — the Address is a raw u64
+// pointer handed to the syscall. This is the documented PMT "Borrowed
+// read" pattern (same as K6f's `out as Address` in shell_putc). For recv
+// (which WRITES through the Address), the writes land directly in
+// ___pmt_buffer and are visible to subsequent `resp.data[i]` reads —
+// same pattern as shell.vuma's `read(fd, in_buf as Address, 256)`
+// followed by `in_buf.data[j]`.
 extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
     fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32;
+    fn sendto(fd: i32, buf: Address, len: i64, flags: i32, addr: Address, addrlen: u32) -> i64;
+    fn recv(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
+    fn close(fd: i32) -> i32;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -191,6 +208,23 @@ layout DnsName = {
 layout DnsQuery = {
     data: [u8; 64],  // raw DNS query packet
     len: u32,        // packet length in bytes (0..64)
+}
+
+// SockAddrIn: 16-byte IPv4 socket address (struct sockaddr_in, RFC 3493).
+// Used by dns_resolve (W47) to pass the DNS server address (8.8.8.8:53)
+// to the sendto syscall. The `data` byte array is at offset 0 so
+// `addr as Address` yields the address of the sockaddr_in struct (same
+// "data at offset 0" convention as DnsQuery / DnsName).
+// Byte layout (Linux sockaddr_in, AF_INET=2):
+//   [0..2]   sin_family  (u16, host byte order — AF_INET=2, LE bytes [2,0])
+//   [2..4]   sin_port    (u16, network byte order — htons(53)=[0,53])
+//   [4..8]   sin_addr    (u32, network byte order — 8.8.8.8=[8,8,8,8])
+//   [8..16]  sin_zero    (8 bytes padding, zeroed)
+// The byte-array representation avoids any u16/u32 endianness ambiguity
+// (fields are written byte-by-byte, same convention as DnsHeader's
+// wire-format bytes in dns_build_query).
+layout SockAddrIn = {
+    data: [u8; 16],  // raw sockaddr_in (16 bytes)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -265,16 +299,90 @@ fn dns_build_query(query: State<DnsQuery>, name: State<DnsName>, id: u16) {
 //
 //   buf: caller-allocated State<DnsQuery> holding the raw response
 //        packet (re-uses the DnsQuery layout — same byte-array shape).
+//        buf.len must be set to the actual response byte count by the
+//        caller (dns_resolve sets it from the recv return value).
 //
-// Returns the IPv4 address as a host-order u32, or 0 on failure. K9e
-// STUB: in hosted mode, the response buffer is always empty (no real
-// DNS server is reachable from the compile_dump runtime), so this
-// function unconditionally returns 0. The real parsing path
-// (skip header + question, walk answer records, extract first A
-// record's 4-byte RDATA field) is K9g+.
+// Returns the IPv4 address as a host-order u32, or 0 on failure.
+//
+// W47: real parser (replaces the K9e stub). Walks the DNS wire format:
+//   1. Validate buf.len >= 12 (header size).
+//   2. Check the QR bit (buf.data[2] >= 128 — high bit of flags high byte).
+//   3. Read ANCOUNT (bytes 6-7, big-endian); must be > 0.
+//   4. Skip the question section: scan QNAME labels (each length-prefixed)
+//      until a 0 terminator, then skip QTYPE (2) + QCLASS (2) + the 0
+//      terminator = 5 bytes past the last label.
+//   5. Skip the answer NAME (either a 2-byte compression pointer
+//      [first byte >= 192] or a full label sequence ending with 0).
+//   6. Read TYPE (2 bytes), skip CLASS (2) + TTL (4), read RDLENGTH (2).
+//   7. If TYPE==1 (A) and RDLENGTH==4, extract the 4-byte RDATA as a
+//      host-order u32 (big-endian → host: byte0*16777216 + byte1*65536 +
+//      byte2*256 + byte3).
+//
+// All multi-byte fields are big-endian (network byte order) per RFC 1035.
+// Decimal multipliers (no hex literals) per the K9e decimal-constants rule.
 fn dns_parse_response(buf: State<DnsQuery>) -> u32 {
-    // Simplified: skip the header + question, read the first answer.
-    // In hosted mode, the response is empty → return 0.
+    // (1) Need at least 12 bytes for the DNS header.
+    if buf.len < 12 { return 0; }
+
+    // (2) Check QR bit: high bit of flags high byte (buf.data[2]).
+    // QR=1 means response. buf.data[2] >= 128 (0x80) checks the high bit.
+    if buf.data[2] < 128 { return 0; }
+
+    // (3) Read ANCOUNT (bytes 6-7, big-endian). Must be > 0.
+    let ancount = (buf.data[6] as u32) * 256 + (buf.data[7] as u32);
+    if ancount == 0 { return 0; }
+
+    // (4) Skip the question section: scan QNAME labels until 0 terminator.
+    let pos = 12;
+    while (pos as u32) < buf.len {
+        let lab = buf.data[pos];
+        if lab == 0 { break; }
+        // Compression pointers (>= 192) should not appear in the question,
+        // but guard against malformed responses.
+        if (lab as u32) >= 192 { break; }
+        pos = pos + (lab as i32) + 1;
+    }
+    // Skip the 0 terminator + QTYPE (2) + QCLASS (2) = 5 bytes.
+    let pos = pos + 5;
+
+    // (5) Skip the answer NAME.
+    if (pos as u32) >= buf.len { return 0; }
+    let first = buf.data[pos];
+    if (first as u32) >= 192 {
+        // Compression pointer: 2 bytes (0xC0 + offset).
+        pos = pos + 2;
+    } else {
+        // Full name: scan labels until 0 terminator.
+        let p = pos;
+        while (p as u32) < buf.len {
+            let lab = buf.data[p];
+            if lab == 0 { p = p + 1; break; }
+            p = p + (lab as i32) + 1;
+        }
+        pos = p;
+    }
+
+    // (6) Read TYPE (2 bytes big-endian), skip CLASS (2) + TTL (4),
+    //     read RDLENGTH (2 bytes big-endian).
+    if (pos as u32) + 2 > buf.len { return 0; }
+    let rtype = (buf.data[pos] as u32) * 256 + (buf.data[pos + 1] as u32);
+    let pos = pos + 2;   // past TYPE
+    let pos = pos + 2;   // past CLASS
+    let pos = pos + 4;   // past TTL
+    if (pos as u32) + 2 > buf.len { return 0; }
+    let rdlen = (buf.data[pos] as u32) * 256 + (buf.data[pos + 1] as u32);
+    let pos = pos + 2;   // past RDLENGTH
+
+    // (7) If TYPE=1 (A record) and RDLENGTH=4, extract the IPv4 address.
+    if rtype == 1 && rdlen == 4 {
+        if (pos as u32) + 4 > buf.len { return 0; }
+        let addr = (buf.data[pos] as u32) * 16777216
+                 + (buf.data[pos + 1] as u32) * 65536
+                 + (buf.data[pos + 2] as u32) * 256
+                 + (buf.data[pos + 3] as u32);
+        return addr;
+    }
+
     return 0;
 }
 
@@ -283,17 +391,72 @@ fn dns_parse_response(buf: State<DnsQuery>) -> u32 {
 //   name: caller-allocated State<DnsName> holding the null-terminated
 //         ASCII domain name to resolve.
 //
-// Returns the IPv4 address as a host-order u32, or 0 on failure. K9e
-// STUB: in hosted mode, returns 0 (no real DNS server — the build_query
-// path is exercised, but the actual UDP send/recv is a no-op). The
-// real resolver path (build query → sys_send UDP socket → sys_recv
-// response → dns_parse_response) is K9g+.
+// Returns the IPv4 address as a host-order u32, or 0 on failure.
+//
+// W47: real UDP round-trip (replaces the K9e stub). Steps:
+//   1. Build the DNS A-record query via dns_build_query (id=1234).
+//   2. Guard: if name is empty (name.data[0]==0), return 0 immediately
+//      (no query to send — avoids a malformed packet + a wasted syscall).
+//   3. Build a sockaddr_in for 8.8.8.8:53 (Google Public DNS).
+//   4. Create a UDP socket: socket(AF_INET=2, SOCK_DGRAM=2, 0).
+//   5. Send the query: sendto(fd, query, query.len, 0, &dst, 16).
+//   6. Receive the response: recv(fd, resp, 64, 0).
+//   7. Close the socket.
+//   8. Parse the response via dns_parse_response + return the IPv4 addr.
+//
+// In hosted mode (compile_dump on Linux x86_64), the socket/sendto/recv/
+// close externs resolve to real syscalls — so dns_resolve actually sends
+// a UDP packet to 8.8.8.8:53 and parses the real response. If the network
+// is unreachable, sendto/recv return negative errno and dns_resolve
+// returns 0 (lookup failed). The K9e self-test does NOT call dns_resolve
+// (it only tests dns_build_query), so the self-test is unaffected by
+// network availability.
 fn dns_resolve(name: State<DnsName>) -> u32 {
     let query = state_new(DnsQuery);
     dns_build_query(query, name, 1234);
-    // In hosted mode: can't actually send/receive DNS packets.
-    // Return 0 (lookup failed).
-    return 0;
+
+    // Guard: empty name → skip the network call, return 0.
+    if name.data[0] == 0 { return 0; }
+
+    // Build sockaddr_in for 8.8.8.8:53 (Google Public DNS).
+    // sin_family = AF_INET (2), host byte order on LE: [2, 0].
+    // sin_port = htons(53) = 0x0035, network byte order: [0, 53].
+    // sin_addr = 8.8.8.8 = 0x08080808, network byte order: [8, 8, 8, 8].
+    // sin_zero = 8 zero bytes (mmap-backed state_new zeroes the buffer,
+    // but we zero explicitly for documentation + defensive correctness).
+    let dst = state_new(SockAddrIn);
+    dst.data[0] = 2;    // AF_INET (host byte order, low byte)
+    dst.data[1] = 0;    // AF_INET (host byte order, high byte)
+    dst.data[2] = 0;    // sin_port high byte (network order: 53 = 0x0035)
+    dst.data[3] = 53;   // sin_port low byte
+    dst.data[4] = 8;    // sin_addr byte 0 (8.8.8.8, network order)
+    dst.data[5] = 8;    // sin_addr byte 1
+    dst.data[6] = 8;    // sin_addr byte 2
+    dst.data[7] = 8;    // sin_addr byte 3
+    dst.data[8] = 0; dst.data[9] = 0; dst.data[10] = 0; dst.data[11] = 0;
+    dst.data[12] = 0; dst.data[13] = 0; dst.data[14] = 0; dst.data[15] = 0;
+
+    // Create a UDP socket: socket(AF_INET=2, SOCK_DGRAM=2, 0).
+    // Protocol 0 = default (UDP for SOCK_DGRAM). Returns fd >= 0 on
+    // success, negative errno on failure.
+    let fd = socket(2, 2, 0);
+    if fd < 0 { return 0; }
+
+    // Send the DNS query via UDP. sendto(fd, query, query.len, flags=0,
+    // &dst, addrlen=16). Returns bytes sent (>= 0) or negative errno.
+    let sent = sendto(fd, query as Address, query.len as i64, 0, dst as Address, 16);
+    if sent < 0 { close(fd); return 0; }
+
+    // Receive the DNS response. recv(fd, resp, 64, flags=0). Returns bytes
+    // received (>= 0) or negative errno. 64 = DnsQuery.data buffer size.
+    let resp = state_new(DnsQuery);
+    let n = recv(fd, resp as Address, 64, 0);
+    close(fd);
+    if n <= 0 { return 0; }
+
+    // Parse the response + return the first A record's IPv4 address.
+    resp.len = n as u32;
+    return dns_parse_response(resp);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
