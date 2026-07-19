@@ -36,6 +36,33 @@ impl MessageFlags {
     pub fn empty() -> Self { Self(0) }
     pub fn bits(&self) -> u16 { self.0 }
     pub fn from_bits_truncate(v: u16) -> Self { Self(v) }
+    /// True if every bit set in `other` is also set in `self`.
+    pub fn contains(&self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl std::ops::BitOr for MessageFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
+impl std::ops::BitOrAssign for MessageFlags {
+    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+}
+
+impl std::ops::BitAnd for MessageFlags {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) }
+}
+
+impl std::ops::BitAndAssign for MessageFlags {
+    fn bitand_assign(&mut self, rhs: Self) { self.0 &= rhs.0; }
+}
+
+impl std::ops::Not for MessageFlags {
+    type Output = Self;
+    fn not(self) -> Self { Self(!self.0) }
 }
 
 #[derive(Clone, Debug)]
@@ -110,13 +137,209 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-pub fn type_hash_str(s: &str) -> u64 {
+/// FNV-1a 64-bit hash of a type string.
+///
+/// This is the canonical type-hash function used to populate
+/// `MessageHeader::type_hash` and to key the protocol state machine.
+/// Initial value 0xcbf29ce484222325, prime 0x100000001b3 — the standard
+/// FNV-1a 64 constants.
+pub fn type_hash(ty: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in s.as_bytes() {
+    for byte in ty.as_bytes() {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// Legacy alias kept for source-level backwards compatibility.
+/// New code should call [`type_hash`] directly.
+pub fn type_hash_str(s: &str) -> u64 {
+    type_hash(s)
+}
+
+// ── L1: Framing Errors ───────────────────────────────────────────────
+
+/// Errors raised by [`deframe_message`] while parsing the L1 wire format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    /// Fewer than `HEADER_SIZE + CRC32_SIZE` bytes were supplied.
+    TooShort,
+    /// Magic bytes did not match [`MAGIC`].
+    BadMagic { expected: [u8; 4], actual: [u8; 4] },
+    /// Protocol version mismatch (expected [`PROTOCOL_VERSION`]).
+    UnsupportedVersion { expected: u16, actual: u16 },
+    /// Declared `payload_len` exceeded [`MAX_PAYLOAD_SIZE`].
+    PayloadTooLarge { declared: u64, limit: u64 },
+    /// Buffer length did not match header-declared lengths.
+    LengthMismatch { expected: usize, actual: usize },
+    /// Stored CRC32 trailer did not match the value recomputed over the body.
+    CrcMismatch { expected: u32, actual: u32 },
+    /// A capability token failed to decode.
+    CapabilityDecodeError(String),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::TooShort => write!(f, "frame too short (< {} bytes)", HEADER_SIZE + CRC32_SIZE),
+            FrameError::BadMagic { expected, actual } => write!(
+                f,
+                "bad magic: expected {:?}, got {:?}",
+                expected, actual
+            ),
+            FrameError::UnsupportedVersion { expected, actual } => write!(
+                f,
+                "unsupported protocol version: expected {}, got {}",
+                expected, actual
+            ),
+            FrameError::PayloadTooLarge { declared, limit } => write!(
+                f,
+                "payload too large: declared {} bytes, limit {} bytes",
+                declared, limit
+            ),
+            FrameError::LengthMismatch { expected, actual } => write!(
+                f,
+                "frame length mismatch: expected {} bytes, got {} bytes",
+                expected, actual
+            ),
+            FrameError::CrcMismatch { expected, actual } => write!(
+                f,
+                "CRC32 mismatch: stored {:#010x}, recomputed {:#010x}",
+                expected, actual
+            ),
+            FrameError::CapabilityDecodeError(msg) => {
+                write!(f, "capability decode error: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+/// Parse a framed message produced by [`frame_message`].
+///
+/// Wire layout (all integers little-endian):
+/// ```text
+///  [0..4]    magic         ("VUMA")
+///  [4..6]    version       u16
+///  [6..8]    flags         u16  (MessageFlags bits)
+///  [8..16]   channel_id    u64
+///  [16..24]  sequence      u64
+///  [24..32]  type_hash     u64
+///  [32..40]  payload_len   u64
+///  [40..44]  cap_count     u32
+///  [44..44+payload_len]                 payload bytes
+///  [..+cap_count*CAPABILITY_TOKEN_SIZE] capability tokens
+///  [last 4]  crc32         u32  (over everything preceding it)
+/// ```
+///
+/// Validates magic, version, payload size, total length, and CRC32 before
+/// returning the reconstructed [`EncapsulatedMessage`].
+pub fn deframe_message(data: &[u8]) -> Result<EncapsulatedMessage, FrameError> {
+    // Minimum envelope: header + CRC32 trailer.
+    if data.len() < HEADER_SIZE + CRC32_SIZE {
+        return Err(FrameError::TooShort);
+    }
+
+    // ── Magic ────────────────────────────────────────────────────────
+    let magic: [u8; 4] = data[0..4].try_into().unwrap();
+    if magic != MAGIC {
+        return Err(FrameError::BadMagic {
+            expected: MAGIC,
+            actual: magic,
+        });
+    }
+
+    // ── Version ──────────────────────────────────────────────────────
+    let version = u16::from_le_bytes(data[4..6].try_into().unwrap());
+    if version != PROTOCOL_VERSION {
+        return Err(FrameError::UnsupportedVersion {
+            expected: PROTOCOL_VERSION,
+            actual: version,
+        });
+    }
+
+    // ── Remaining header fields ──────────────────────────────────────
+    let flags = MessageFlags::from_bits_truncate(u16::from_le_bytes(
+        data[6..8].try_into().unwrap(),
+    ));
+    let channel_id = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    let sequence = u64::from_le_bytes(data[16..24].try_into().unwrap());
+    let type_hash = u64::from_le_bytes(data[24..32].try_into().unwrap());
+    let payload_len = u64::from_le_bytes(data[32..40].try_into().unwrap());
+    let cap_count = u32::from_le_bytes(data[40..44].try_into().unwrap());
+
+    // ── Payload size guard ───────────────────────────────────────────
+    if payload_len > MAX_PAYLOAD_SIZE {
+        return Err(FrameError::PayloadTooLarge {
+            declared: payload_len,
+            limit: MAX_PAYLOAD_SIZE,
+        });
+    }
+
+    // ── Length consistency ───────────────────────────────────────────
+    let caps_size = (cap_count as usize)
+        .checked_mul(capability::CAPABILITY_TOKEN_SIZE)
+        .ok_or(FrameError::PayloadTooLarge {
+            declared: payload_len,
+            limit: MAX_PAYLOAD_SIZE,
+        })?;
+    let expected_total = HEADER_SIZE
+        .checked_add(payload_len as usize)
+        .and_then(|n| n.checked_add(caps_size))
+        .and_then(|n| n.checked_add(CRC32_SIZE))
+        .ok_or(FrameError::PayloadTooLarge {
+            declared: payload_len,
+            limit: MAX_PAYLOAD_SIZE,
+        })?;
+    if data.len() != expected_total {
+        return Err(FrameError::LengthMismatch {
+            expected: expected_total,
+            actual: data.len(),
+        });
+    }
+
+    // ── CRC32 verification ───────────────────────────────────────────
+    let body_end = data.len() - CRC32_SIZE;
+    let stored_crc = u32::from_le_bytes(data[body_end..].try_into().unwrap());
+    let computed_crc = crc32(&data[..body_end]);
+    if stored_crc != computed_crc {
+        return Err(FrameError::CrcMismatch {
+            expected: stored_crc,
+            actual: computed_crc,
+        });
+    }
+
+    // ── Payload + capability extraction ──────────────────────────────
+    let payload_start = HEADER_SIZE;
+    let payload_end = payload_start + payload_len as usize;
+    let payload = data[payload_start..payload_end].to_vec();
+
+    let mut capabilities = Vec::with_capacity(cap_count as usize);
+    let mut cap_offset = payload_end;
+    for _ in 0..cap_count {
+        let cap_slice = &data[cap_offset..cap_offset + capability::CAPABILITY_TOKEN_SIZE];
+        let cap = capability::CapabilityToken::decode(cap_slice)
+            .map_err(FrameError::CapabilityDecodeError)?;
+        capabilities.push(cap);
+        cap_offset += capability::CAPABILITY_TOKEN_SIZE;
+    }
+
+    Ok(EncapsulatedMessage {
+        header: MessageHeader {
+            magic,
+            version,
+            flags,
+            channel_id,
+            sequence,
+            type_hash,
+            payload_len,
+            cap_count,
+        },
+        payload,
+        capabilities,
+    })
 }
 
 // ── L2: Capability Tokens ────────────────────────────────────────────
@@ -783,12 +1006,33 @@ mod tests {
     }
 
     #[test]
+    fn test_crc32_known_vector() {
+        // Canonical CRC32 (IEEE 802.3 / zlib) check value for "123456789".
+        // See e.g. https://reveng.sourceforge.io/crc-catalogue/17plus.htm#crc.cat.crc-32
+        assert_eq!(crc32(b"123456789"), 0xCBF43926);
+    }
+
+    #[test]
     fn test_type_hash() {
         let h1 = type_hash_str("i32");
         let h2 = type_hash_str("i32");
         let h3 = type_hash_str("i64");
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_type_hash_canonical_matches_alias() {
+        // The new canonical name and the legacy alias must agree.
+        assert_eq!(type_hash("String"), type_hash_str("String"));
+        assert_eq!(type_hash(""), 0xcbf29ce484222325);
+    }
+
+    #[test]
+    fn test_type_hash_fnv1a_vector() {
+        // FNV-1a 64-bit of "foobar" — well-known reference value.
+        // Computed independently: 0x85944171f73967e8
+        assert_eq!(type_hash("foobar"), 0x85944171f73967e8);
     }
 
     #[test]
@@ -800,6 +1044,184 @@ mod tests {
         // Verify CRC
         let crc = u32::from_le_bytes(framed[framed.len()-4..].try_into().unwrap());
         assert_eq!(crc, crc32(&framed[..framed.len()-4]));
+
+        // Roundtrip via deframe_message.
+        let decoded = deframe_message(&framed).expect("deframe should succeed");
+        assert_eq!(decoded.header.magic, MAGIC);
+        assert_eq!(decoded.header.version, PROTOCOL_VERSION);
+        assert_eq!(decoded.header.channel_id, 1);
+        assert_eq!(decoded.header.sequence, 0);
+        assert_eq!(decoded.header.type_hash, type_hash_str("i32"));
+        assert_eq!(decoded.header.payload_len, 4);
+        assert_eq!(decoded.header.cap_count, 0);
+        assert_eq!(decoded.payload, vec![42, 0, 0, 0]);
+        assert!(decoded.capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_deframe_roundtrip_with_caps_and_flags() {
+        let token = capability::CapabilityToken {
+            id: 0xDEAD_BEEF_CAFE_BABE_0123_4567_89AB_CDEF,
+            source_pid: 7,
+            target_pid: 9,
+            resource: capability::Resource::Channel(42),
+            permissions: capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            delegation_depth: 1,
+            created_at: 1_000,
+            expires_at: 2_000,
+            signature: [0x5A; 32],
+        };
+
+        let mut msg = EncapsulatedMessage::new(
+            0xCAFE,
+            0xBEEF,
+            type_hash("Vec<u8>"),
+            (0u32..16).flat_map(|x| x.to_le_bytes()).collect(),
+        );
+        msg.header.flags = MessageFlags::HAS_CAPS | MessageFlags::ENCRYPTED;
+        msg.capabilities = vec![token.clone()];
+
+        let framed = frame_message(&msg);
+
+        // Expected layout: header + payload + 1 cap token + CRC32.
+        let expected_len = HEADER_SIZE + msg.payload.len()
+            + capability::CAPABILITY_TOKEN_SIZE
+            + CRC32_SIZE;
+        assert_eq!(framed.len(), expected_len);
+
+        let decoded = deframe_message(&framed).expect("deframe should succeed");
+        assert_eq!(decoded.header.channel_id, 0xCAFE);
+        assert_eq!(decoded.header.sequence, 0xBEEF);
+        assert_eq!(decoded.header.type_hash, type_hash("Vec<u8>"));
+        assert_eq!(decoded.header.flags, MessageFlags::HAS_CAPS | MessageFlags::ENCRYPTED);
+        assert_eq!(decoded.header.cap_count, 1);
+        assert_eq!(decoded.payload, msg.payload);
+        assert_eq!(decoded.capabilities.len(), 1);
+        assert_eq!(decoded.capabilities[0].id, token.id);
+        assert_eq!(decoded.capabilities[0].source_pid, token.source_pid);
+        assert_eq!(decoded.capabilities[0].target_pid, token.target_pid);
+        assert_eq!(decoded.capabilities[0].permissions.read, true);
+        assert_eq!(decoded.capabilities[0].permissions.write, true);
+        assert_eq!(decoded.capabilities[0].permissions.execute, false);
+        assert_eq!(decoded.capabilities[0].signature, token.signature);
+    }
+
+    #[test]
+    fn test_deframe_too_short() {
+        let too_short = [0u8; HEADER_SIZE]; // header only, no CRC
+        assert!(matches!(
+            deframe_message(&too_short),
+            Err(FrameError::TooShort)
+        ));
+        assert!(matches!(
+            deframe_message(&[]),
+            Err(FrameError::TooShort)
+        ));
+    }
+
+    #[test]
+    fn test_deframe_bad_magic() {
+        let msg = EncapsulatedMessage::new(1, 0, type_hash("x"), vec![]);
+        let mut framed = frame_message(&msg);
+        // Corrupt the magic.
+        framed[0] = 0xFF;
+        let err = deframe_message(&framed).unwrap_err();
+        assert!(matches!(err, FrameError::BadMagic { .. }));
+    }
+
+    #[test]
+    fn test_deframe_bad_version() {
+        let msg = EncapsulatedMessage::new(1, 0, type_hash("x"), vec![]);
+        let mut framed = frame_message(&msg);
+        // Overwrite version field (bytes 4..6) with an unsupported version.
+        framed[4..6].copy_from_slice(&(u16::MAX).to_le_bytes());
+        let err = deframe_message(&framed).unwrap_err();
+        match err {
+            FrameError::UnsupportedVersion { expected, actual } => {
+                assert_eq!(expected, PROTOCOL_VERSION);
+                assert_eq!(actual, u16::MAX);
+            }
+            other => panic!("expected UnsupportedVersion, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deframe_bad_crc() {
+        let msg = EncapsulatedMessage::new(1, 0, type_hash("x"), vec![1, 2, 3, 4]);
+        let mut framed = frame_message(&msg);
+        // Flip a payload byte (CRC is over body, so this must mismatch).
+        let payload_byte = HEADER_SIZE;
+        framed[payload_byte] ^= 0xFF;
+        let err = deframe_message(&framed).unwrap_err();
+        match err {
+            FrameError::CrcMismatch { expected, actual } => {
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected CrcMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_deframe_truncated_body() {
+        let msg = EncapsulatedMessage::new(1, 0, type_hash("x"), vec![0xAB; 32]);
+        let framed = frame_message(&msg);
+        // Drop the last 4 bytes (CRC) plus one body byte.
+        let truncated = &framed[..framed.len() - 5];
+        let err = deframe_message(truncated).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn test_deframe_extra_trailing_bytes() {
+        let msg = EncapsulatedMessage::new(1, 0, type_hash("x"), vec![1, 2, 3]);
+        let mut framed = frame_message(&msg);
+        framed.push(0xEE); // stray byte
+        let err = deframe_message(&framed).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn test_deframe_empty_payload_roundtrip() {
+        let msg = EncapsulatedMessage::new(0, 0, type_hash("()"), vec![]);
+        let framed = frame_message(&msg);
+        assert_eq!(framed.len(), HEADER_SIZE + CRC32_SIZE);
+        let decoded = deframe_message(&framed).expect("empty payload should roundtrip");
+        assert!(decoded.payload.is_empty());
+        assert!(decoded.capabilities.is_empty());
+        assert_eq!(decoded.header.payload_len, 0);
+        assert_eq!(decoded.header.cap_count, 0);
+    }
+
+    #[test]
+    fn test_frame_message_sets_has_caps_flag_consistency() {
+        // When capabilities are present, the framing layer copies them but
+        // does not mutate header.flags — the producer must set HAS_CAPS.
+        // This test pins that contract.
+        let mut msg = EncapsulatedMessage::new(1, 1, type_hash("T"), vec![0]);
+        assert_eq!(msg.header.flags, MessageFlags::EMPTY);
+
+        let cap = capability::CapabilityToken {
+            id: 1,
+            source_pid: 1,
+            target_pid: 2,
+            resource: capability::Resource::Memory(0, 0),
+            permissions: capability::MemoryPermissions::default(),
+            delegation_depth: 0,
+            created_at: 0,
+            expires_at: 0,
+            signature: [0; 32],
+        };
+        msg.capabilities.push(cap);
+        msg.header.flags = MessageFlags::HAS_CAPS;
+
+        let framed = frame_message(&msg);
+        let decoded = deframe_message(&framed).unwrap();
+        assert_eq!(decoded.header.flags.bits() & MessageFlags::HAS_CAPS.bits(), MessageFlags::HAS_CAPS.bits());
+        assert_eq!(decoded.capabilities.len(), 1);
     }
 
     #[test]
