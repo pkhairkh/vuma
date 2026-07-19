@@ -1514,8 +1514,57 @@ pub struct ChannelState {
     pub protocol_state: ProtocolState,
 }
 
+/// Compute the 32-byte integrity hash stamped onto a [`Checkpoint`].
+///
+/// This is the canonical hash shared by [`checkpoint_state`] (which
+/// stamps a fresh checkpoint) and [`restore_state`] (which verifies a
+/// received checkpoint before restoring it). Both ends must agree on it
+/// byte-for-byte, so it is a free function rather than an inherent
+/// method — the verifier reconstructs it independently of the producer.
+///
+/// # Construction
+/// The hash input is the concatenation, per channel, of:
+///   * `channel_id`     as little-endian u64 (8 bytes),
+///   * `sequence`       as little-endian u64 (8 bytes),
+///   * `protocol_state.as_tag()` as UTF-8 bytes,
+///   * a single `0xFF` separator.
+/// The 32-byte hash is then built as **eight independent CRC32** (IEEE
+/// 802.3 — the same primitive L1 uses for frame integrity) values, each
+/// computed over `(lane_index, hash_input)`, laid out little-endian.
+/// CRC32 is sensitive to every input byte, so unlike the previous
+/// XOR-fold (which silently collapsed reorderings and repeated blocks)
+/// any single-bit change to any field flips bits in the hash.
+pub fn compute_integrity_hash(channels: &[ChannelState]) -> [u8; 32] {
+    let mut hash_input: Vec<u8> = Vec::with_capacity(channels.len() * 24);
+    for ch in channels {
+        hash_input.extend_from_slice(&ch.channel_id.to_le_bytes());
+        hash_input.extend_from_slice(&ch.sequence.to_le_bytes());
+        hash_input.extend_from_slice(ch.protocol_state.as_tag().as_bytes());
+        hash_input.push(0xFF);
+    }
+    let mut hash = [0u8; 32];
+    for lane in 0..8u8 {
+        let mut prefixed = Vec::with_capacity(hash_input.len() + 1);
+        prefixed.push(lane);
+        prefixed.extend_from_slice(&hash_input);
+        let crc = crc32(&prefixed);
+        hash[(lane as usize) * 4..(lane as usize + 1) * 4]
+            .copy_from_slice(&crc.to_le_bytes());
+    }
+    hash
+}
+
 /// Create a checkpoint of the current process state.
-/// In a real implementation, this uses copy-on-write to snapshot memory.
+///
+/// Captures every `(channel_id, sequence, protocol_state)` triple into
+/// a [`ChannelState`] and stamps the resulting vector with an
+/// [`integrity_hash`] computed by [`compute_integrity_hash`]. The
+/// `pid` and `timestamp` fields are left zeroed here — in a deployed
+/// runtime they are filled in by the kernel side of the checkpoint
+/// syscall (the userspace caller is untrusted and must not be able to
+/// forge them), but the hash is computable purely from the channel
+/// vector so that [`restore_state`] can validate it without needing
+/// kernel metadata.
 pub fn checkpoint_state(channels: &[(u64, u64, ProtocolState)]) -> Checkpoint {
     let channel_states: Vec<ChannelState> = channels.iter()
         .map(|(id, seq, state)| ChannelState {
@@ -1524,21 +1573,38 @@ pub fn checkpoint_state(channels: &[(u64, u64, ProtocolState)]) -> Checkpoint {
             protocol_state: state.clone(),
         })
         .collect();
-    let mut hash_input = Vec::new();
-    for ch in &channel_states {
-        hash_input.extend_from_slice(&ch.channel_id.to_le_bytes());
-        hash_input.extend_from_slice(&ch.sequence.to_le_bytes());
-    }
-    let mut integrity_hash = [0u8; 32];
-    for (i, byte) in hash_input.iter().enumerate() {
-        integrity_hash[i % 32] ^= byte;
-    }
+    let integrity_hash = compute_integrity_hash(&channel_states);
     Checkpoint {
-        pid: 0, // would be filled by kernel
+        pid: 0,       // filled by kernel at checkpoint syscall time
+        timestamp: 0, // filled by kernel at checkpoint syscall time
         channels: channel_states,
-        timestamp: 0, // would be filled by kernel
         integrity_hash,
     }
+}
+
+/// Restore process state from a previously captured [`Checkpoint`].
+///
+/// This is the receive side of L6. Before handing the channel vector
+/// back to the caller, it recomputes the integrity hash from the
+/// checkpoint's `channels` and compares it against the stamped
+/// `integrity_hash`. Any mismatch — whether from corruption in
+/// transit, a buggy producer, or deliberate tampering — surfaces as
+/// [`IpcError::CheckpointIntegrityFailed`] and the checkpoint is
+/// refused. On success the caller receives an owned copy of the
+/// verified [`ChannelState`] vector, which it can then apply to its
+/// live channel table.
+///
+/// Note that `pid` and `timestamp` are **not** covered by the hash:
+/// they are kernel-supplied metadata that the receiver is expected to
+/// sanity-check separately (e.g. against its own clock). The hash
+/// covers only the restorable userspace state — the channel vector —
+/// so that a forged `pid` cannot be hidden behind a valid hash.
+pub fn restore_state(checkpoint: &Checkpoint) -> Result<Vec<ChannelState>, IpcError> {
+    let recomputed = compute_integrity_hash(&checkpoint.channels);
+    if recomputed != checkpoint.integrity_hash {
+        return Err(IpcError::CheckpointIntegrityFailed);
+    }
+    Ok(checkpoint.channels.clone())
 }
 
 // ── L7: Error Encapsulation (fault containment) ──────────────────────
@@ -1601,6 +1667,13 @@ pub enum IpcError {
     TooManyChannels,
     OutOfMemory,
     KernelError,
+
+    // Checkpoint (L6)
+    /// The integrity hash stamped on a [`Checkpoint`] does not match the
+    /// hash recomputed from its `channels` vector. Raised by
+    /// [`restore_state`] when the receive side detects corruption or
+    /// tampering before applying the checkpoint.
+    CheckpointIntegrityFailed,
 }
 
 impl std::fmt::Display for IpcError {
@@ -1611,43 +1684,270 @@ impl std::fmt::Display for IpcError {
 
 impl std::error::Error for IpcError {}
 
+/// Concrete fault observed by the supervisor when reaping a worker
+/// process. This is the input to [`handle_worker_error`], which maps
+/// it to a [`RecoveryAction`].
+///
+/// Field semantics follow the **shell convention** for `waitpid(2)`:
+///   * `exit_code` is `WEXITSTATUS(status)` (0–255) when `WIFEXITED` is
+///     true, **or** `128 + WTERMSIG(status)` when `WIFSIGNALED` is
+///     true. The shell convention (used by `bash`, `sh`, `git`, etc.)
+///     encodes the signal in the exit code so that `exit_code == 0`
+///     unambiguously means a clean `exit(0)` — a signal death always
+///     has `exit_code >= 128`. This lets [`handle_worker_error`]
+///     decide on `exit_code` alone for the Terminate arm, without a
+///     separate `signal == 0` check.
+///   * `signal` is `WTERMSIG(status)` when `WIFSIGNALED` is true, and
+///     0 otherwise. 11 = `SIGSEGV`, 9 = `SIGKILL`, 6 = `SIGABRT`.
+///   * `stderr_capture` is the tail of the worker's stderr pipe,
+///     truncated to a reasonable size for inclusion in crash reports.
+///   * `timestamp` is a monotonic clock reading at reap time, in
+///     milliseconds since some fixed epoch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerError {
+    /// `WEXITSTATUS(status)` for a normal exit, or `128 + WTERMSIG(status)`
+    /// for a signal death (shell convention). `0` iff the worker called
+    /// `exit(0)` — a signal death always has `exit_code >= 128`.
+    pub exit_code: i32,
+    /// `WTERMSIG(status)` if the worker was killed by a signal; 0 if
+    /// it exited normally. 11 = `SIGSEGV`, 9 = `SIGKILL`, 6 = `SIGABRT`.
+    pub signal: i32,
+    /// Captured tail of the worker's stderr (UTF-8, lossy). Bounded by
+    /// the supervisor's ring buffer so a chatty worker cannot OOM it.
+    pub stderr_capture: String,
+    /// Monotonic timestamp (ms) at which the supervisor reaped the worker.
+    pub timestamp: u64,
+}
+
+/// Action the supervisor takes in response to a [`WorkerError`].
+///
+/// The three-valued enum is the L7 fault-containment contract: every
+/// worker fault is classified into exactly one of these, and the
+/// supervisor's state machine branches on it. There is no fourth
+/// "ignore" arm — every fault gets a disposition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Restart the worker from its last good checkpoint. The supervisor
+    /// still has to consult its restart budget (how many restarts have
+    /// already been consumed in the current window) before acting on
+    /// this; the budget check is stateful and lives in the
+    /// `Supervisor`, not in this stateless policy function.
+    Restart,
+    /// The worker exited cleanly and should not be restarted. Its slot
+    /// is freed and its last checkpoint (if any) is discarded.
+    Terminate,
+    /// The fault is outside the restart policy — unknown signal,
+    /// non-zero exit code, or `SIGSEGV` with no restart budget.
+    /// Escalate to the parent supervisor (or, if there is none, abort
+    /// the job) rather than silently spinning on a restart loop.
+    Escalate,
+}
+
+/// L7 fault-containment policy.
+///
+/// Maps a [`WorkerError`] to a [`RecoveryAction`] using the worker's
+/// [`WorkerConfig`]. The policy is deliberately small and explicit so
+/// that the supervisor's behaviour is auditable:
+///
+///   * A `SIGSEGV` (signal 11) with a non-zero `max_restarts` budget
+///     is the canonical crash-restart case → [`RecoveryAction::Restart`].
+///     SIGSEGV is singled out because it is the signature of a
+///     transient memory-safety fault (use-after-free, null deref) that
+///     a fresh process is likely to survive.
+///   * A clean exit (`exit_code == 0`) is terminal — a worker that
+///     called `exit(0)` finished its job and must not be restarted.
+///     Because `exit_code` follows the shell convention (128 + signal
+///     for signal deaths, see [`WorkerError`]), `exit_code == 0`
+///     unambiguously means a clean `exit(0)`; a signal death always
+///     has `exit_code >= 128` and so falls through to Escalate.
+///   * Anything else (timeouts, `SIGKILL`, non-zero exit codes,
+///     `SIGSEGV` with `max_restarts == 0`) is escalated rather than
+///     silently restarted — `SIGKILL` typically means the OOM killer,
+///     a non-zero exit means the worker detected an unrecoverable
+///     invariant violation, and a `SIGSEGV` with no budget means the
+///     restart policy has been exhausted.
+///
+/// This is the stateless decision; the stateful restart *budget* (how
+/// many restarts have already been consumed in the current window) is
+/// enforced by the `Supervisor` before honouring a `Restart`. It
+/// complements the older [`should_restart`] predicate, which is the
+/// same policy expressed as a bool on the raw exit code for callers
+/// that do not yet have a full [`WorkerError`].
+///
+/// # Examples
+/// ```
+/// # use vuma_codegen::ipc::{WorkerError, RecoveryAction, handle_worker_error, WorkerConfig};
+/// let err = WorkerError {
+///     exit_code: 139, signal: 11, // 128 + SIGSEGV(11), shell convention
+///     stderr_capture: String::from("segfault at 0x0"),
+///     timestamp: 1_000,
+/// };
+/// let cfg = WorkerConfig { max_restarts: 3, ..Default::default() };
+/// assert_eq!(handle_worker_error(&err, &cfg), RecoveryAction::Restart);
+/// ```
+pub fn handle_worker_error(error: &WorkerError, config: &WorkerConfig) -> RecoveryAction {
+    const SIGSEGV: i32 = 11;
+    if error.signal == SIGSEGV && config.max_restarts > 0 {
+        return RecoveryAction::Restart;
+    }
+    if error.exit_code == 0 {
+        return RecoveryAction::Terminate;
+    }
+    RecoveryAction::Escalate
+}
+
 // ── L8: Cryptographic Encapsulation (AEAD) ───────────────────────────
 
-/// ChaCha20-Poly1305 AEAD encryption for IPC messages.
-/// In a real implementation, this would use a crypto library.
-/// For now, this is a stub that passes through plaintext.
+/// Per-message cryptographic state for the L8 layer.
+///
+/// # SECURITY WARNING — NOT CRYPTOGRAPHICALLY SECURE
+///
+/// This struct implements a **structurally correct AEAD frame**, not a
+/// secure AEAD. It exists so that the rest of the IPC stack can be
+/// built and tested against a real encrypt / decrypt / tag-verify
+/// contract without pulling in a vetted crypto crate (which is a
+/// deliberate non-goal of the current review wave).
+///
+/// Concretely:
+///   * The cipher is a **XOR stream** built by repeating the 32-byte
+///     key to the plaintext length and XOR-folding each byte with a
+///     per-message nonce byte. This is trivially malleable and leaks
+///     any plaintext structure that is repeated across nonce reuse.
+///   * The tag is a **CRC32** of the ciphertext. CRC32 is a linear
+///     integrity check, not a MAC: it detects accidental corruption
+///     (bit-flips, truncation) but is forgeable by anyone who knows
+///     the ciphertext.
+///
+/// Both halves are deliberately *real* — they actually transform the
+/// plaintext (the ciphertext differs from the plaintext) and actually
+/// detect single-bit tampering (the tag is a genuine CRC32, not a
+/// zero placeholder) — so that downstream code, e.g. [`NoiseChannel::send`],
+/// exercises a genuine encrypt→decrypt round-trip rather than a
+/// pass-through stub. But **no production deployment may rely on this
+/// for confidentiality or authenticity**.
+///
+/// Replacing this with a real AEAD (ChaCha20-Poly1305 or AES-GCM-SIV)
+/// is a drop-in: keep the wire layout (8-byte nonce ‖ ciphertext ‖
+/// tag) and swap the stream cipher and the 4-byte CRC tag for a
+/// 16-byte Poly1305/GCM tag. The [`encrypt`] / [`decrypt`] signatures
+/// do not change.
+///
+/// # Wire layout
+/// ```text
+///   ┌────────────┬──────────────────────┬──────────┐
+///   │ nonce (8B) │ ciphertext (N bytes) │ tag (4B) │
+///   └────────────┴──────────────────────┴──────────┘
+/// ```
+/// `nonce` is the little-endian `nonce_counter` at encrypt time. The
+/// counter is monotonic per `CryptoState` instance and MUST NOT wrap
+/// within a single channel's lifetime — doing so would reuse a
+/// key/nonce pair, which is catastrophic for any real stream cipher.
 pub struct CryptoState {
     pub key: [u8; 32],
     pub nonce_counter: u64,
 }
+
+/// Type alias retaining the conceptual AEAD-cipher name used in the
+/// L8 design notes. [`CryptoState`] and `AeadCipher` are the same
+/// type; downstream code may use whichever name is clearer at the
+/// call site.
+pub type AeadCipher = CryptoState;
 
 impl CryptoState {
     pub fn new(key: [u8; 32]) -> Self {
         Self { key, nonce_counter: 0 }
     }
 
-    /// Encrypt plaintext (stub: returns plaintext + fake tag)
+    /// Build the key stream for a message of length `len`, keyed by
+    /// `nonce`.
+    ///
+    /// The stream is the 32-byte key repeated to `len` bytes, each byte
+    /// XOR-folded with `nonce[i % 8]` so that distinct nonces yield
+    /// distinct streams (i.e. the same plaintext encrypted under two
+    /// different nonces produces two different ciphertexts). This is
+    /// NOT a secure key-derivation function — it is the minimum
+    /// construction that makes the encrypt/decrypt round-trip real and
+    /// makes nonce reuse visibly wrong.
+    fn key_stream(&self, len: usize, nonce: &[u8; 8]) -> Vec<u8> {
+        let mut stream = Vec::with_capacity(len);
+        for i in 0..len {
+            stream.push(self.key[i % 32] ^ nonce[i % 8]);
+        }
+        stream
+    }
+
+    /// Encrypt `plaintext` under this state's key and the current
+    /// `nonce_counter`.
+    ///
+    /// Returns a fresh allocation laid out as `nonce ‖ ciphertext ‖
+    /// tag` (see the struct doc). The `nonce_counter` is then
+    /// incremented so the next call uses a fresh nonce. The ciphertext
+    /// is exactly as long as the plaintext — there is no padding,
+    /// which is correct for a stream cipher.
+    ///
+    /// Tag computation: `tag = crc32(ciphertext).to_le_bytes()`. The
+    /// tag is computed *over the ciphertext*, not the plaintext, so
+    /// the receiver can verify it before running the inverse XOR.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Vec<u8> {
-        let mut output = Vec::with_capacity(plaintext.len() + 12 + 16);
-        // Nonce (12 bytes)
         let nonce = self.nonce_counter.to_le_bytes();
+        let key_stream = self.key_stream(plaintext.len(), &nonce);
+        let ciphertext: Vec<u8> = plaintext
+            .iter()
+            .zip(key_stream.iter())
+            .map(|(p, k)| p ^ k)
+            .collect();
+        let tag = crc32(&ciphertext).to_le_bytes();
+
+        let mut output = Vec::with_capacity(8 + ciphertext.len() + 4);
         output.extend_from_slice(&nonce);
-        output.extend_from_slice(&[0u8; 4]); // padding
-        // Ciphertext (same as plaintext for stub)
-        output.extend_from_slice(plaintext);
-        // Tag (16 bytes, fake)
-        output.extend_from_slice(&[0u8; 16]);
-        self.nonce_counter += 1;
+        output.extend_from_slice(&ciphertext);
+        output.extend_from_slice(&tag);
+        self.nonce_counter = self.nonce_counter.wrapping_add(1);
         output
     }
 
-    /// Decrypt ciphertext (stub: extracts plaintext)
+    /// Decrypt a frame produced by [`encrypt`].
+    ///
+    /// Verifies the trailing 4-byte CRC32 tag against the ciphertext
+    /// *before* running the inverse XOR — so a tampered frame is
+    /// rejected without ever revealing decrypted bytes to the caller.
+    /// On tag mismatch the error is [`IpcError::CrcMismatch`] (the
+    /// same variant L1 uses for frame integrity), carrying the
+    /// expected and observed tag values for diagnostics. Frames too
+    /// short to contain even an empty ciphertext (8-byte nonce + 4-byte
+    /// tag = 12 bytes) are rejected as [`IpcError::DeserializationError`].
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, IpcError> {
-        if ciphertext.len() < 28 {
+        // Minimum frame: 8-byte nonce + 0-byte ciphertext + 4-byte tag.
+        if ciphertext.len() < 12 {
             return Err(IpcError::DeserializationError);
         }
-        // Skip nonce (12) and tag (16)
-        Ok(ciphertext[12..ciphertext.len()-16].to_vec())
+        let nonce_bytes = &ciphertext[..8];
+        let ct_end = ciphertext.len() - 4;
+        let ct = &ciphertext[8..ct_end];
+        let tag_bytes = &ciphertext[ct_end..];
+
+        let mut nonce = [0u8; 8];
+        nonce.copy_from_slice(nonce_bytes);
+
+        // Tag verification FIRST — never decrypt before verifying.
+        let expected = crc32(ct);
+        let actual = u32::from_le_bytes([
+            tag_bytes[0],
+            tag_bytes[1],
+            tag_bytes[2],
+            tag_bytes[3],
+        ]);
+        if expected != actual {
+            return Err(IpcError::CrcMismatch { expected, actual });
+        }
+
+        let key_stream = self.key_stream(ct.len(), &nonce);
+        let plaintext: Vec<u8> = ct
+            .iter()
+            .zip(key_stream.iter())
+            .map(|(c, k)| c ^ k)
+            .collect();
+        Ok(plaintext)
     }
 }
 
@@ -3565,5 +3865,473 @@ mod tests {
         // On x86_64 Linux we intentionally skip apply() to avoid
         // trapping the test process; the seccomp_filter() inspection
         // above already exercises the wire-up.
+    }
+
+    // ── L6: checkpoint / restore_state tests ────────────────────────
+
+    #[test]
+    fn test_checkpoint_state_stamps_nonzero_integrity_hash() {
+        // A real checkpoint must produce a non-zero, non-trivial
+        // integrity hash that depends on every channel field. The
+        // previous XOR-fold stub collapsed many inputs to zero (e.g.
+        // any channel set whose bytes XOR-cancelled); this pins that
+        // we no longer do, for both populated and empty inputs.
+        let channels = vec![
+            (1u64, 100u64, ProtocolState::Idle),
+            (2u64, 200u64, ProtocolState::WaitingForSend),
+        ];
+        let cp = checkpoint_state(&channels);
+        assert_ne!(
+            cp.integrity_hash, [0u8; 32],
+            "integrity hash must not be all-zero for a non-empty channel set"
+        );
+        // Empty input still hashes to a defined, non-zero value —
+        // eight CRC32s of single-byte lane prefixes, which are
+        // individually non-zero by construction.
+        let empty = checkpoint_state(&[]);
+        assert_ne!(
+            empty.integrity_hash, [0u8; 32],
+            "empty-input hash must still be non-zero (lane prefixes are non-zero)"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_hash_is_sensitive_to_every_field() {
+        // The hash must change when ANY field of ANY channel changes —
+        // channel_id, sequence, or protocol_state. This is the property
+        // restore_state relies on to detect tampering. The previous
+        // XOR-fold stub did not cover protocol_state at all, so a
+        // Closed→Idle swap was invisible; the new CRC32-based hash
+        // covers the tag bytes too.
+        let base = vec![(42u64, 7u64, ProtocolState::Idle)];
+        let h0 = checkpoint_state(&base).integrity_hash;
+
+        let h_id   = checkpoint_state(&[(43u64, 7u64, ProtocolState::Idle)]).integrity_hash;
+        let h_seq  = checkpoint_state(&[(42u64, 8u64, ProtocolState::Idle)]).integrity_hash;
+        let h_state = checkpoint_state(&[(42u64, 7u64, ProtocolState::Closed)]).integrity_hash;
+
+        assert_ne!(h_id,    h0, "changing channel_id must change the hash");
+        assert_ne!(h_seq,   h0, "changing sequence must change the hash");
+        assert_ne!(h_state, h0, "changing protocol_state must change the hash");
+    }
+
+    #[test]
+    fn test_restore_state_verifies_integrity_hash_and_returns_channels() {
+        // Happy path: a freshly-minted checkpoint restores cleanly and
+        // hands back the channel vector in order, with every field
+        // preserved.
+        let channels = vec![
+            (10u64, 1u64, ProtocolState::Idle),
+            (20u64, 2u64, ProtocolState::WaitingForRecv),
+        ];
+        let cp = checkpoint_state(&channels);
+        let restored = restore_state(&cp).expect("fresh checkpoint must restore");
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].channel_id, 10);
+        assert_eq!(restored[0].sequence, 1);
+        assert_eq!(restored[0].protocol_state, ProtocolState::Idle);
+        assert_eq!(restored[1].channel_id, 20);
+        assert_eq!(restored[1].sequence, 2);
+        assert_eq!(restored[1].protocol_state, ProtocolState::WaitingForRecv);
+    }
+
+    #[test]
+    fn test_restore_state_detects_tampered_sequence() {
+        // The canonical L6 tamper-detection test:
+        //   checkpoint → mutate a channel's sequence without recomputing
+        //   the hash → restore_state MUST refuse with the dedicated
+        //   CheckpointIntegrityFailed error. Without this, a buggy or
+        //   malicious producer could swap in a different sequence
+        //   number and the receiver would apply it silently.
+        let channels = vec![
+            (1u64, 100u64, ProtocolState::Idle),
+            (2u64, 200u64, ProtocolState::WaitingForSend),
+        ];
+        let mut cp = checkpoint_state(&channels);
+        assert!(restore_state(&cp).is_ok(), "untampered checkpoint must restore");
+
+        // Tamper: bump a sequence number without updating the hash.
+        cp.channels[1].sequence = 999;
+        let err = restore_state(&cp)
+            .expect_err("tampered sequence must fail restore");
+        assert_eq!(err, IpcError::CheckpointIntegrityFailed);
+    }
+
+    #[test]
+    fn test_restore_state_detects_tampered_protocol_state() {
+        // Same shape as the sequence test but mutating the
+        // protocol_state field. The previous hash only covered
+        // channel_id + sequence, so this swap would have passed
+        // silently; the new CRC32-based hash covers the tag too, so
+        // it must now be detected.
+        let channels = vec![(5u64, 5u64, ProtocolState::Idle)];
+        let mut cp = checkpoint_state(&channels);
+        cp.channels[0].protocol_state = ProtocolState::Closed;
+        let err = restore_state(&cp)
+            .expect_err("tampered protocol_state must fail restore");
+        assert_eq!(err, IpcError::CheckpointIntegrityFailed);
+    }
+
+    #[test]
+    fn test_restore_state_detects_tampered_channel_id() {
+        // Third field of the tamper trilogy: mutate channel_id.
+        let channels = vec![(7u64, 3u64, ProtocolState::Idle)];
+        let mut cp = checkpoint_state(&channels);
+        cp.channels[0].channel_id = 8;
+        let err = restore_state(&cp)
+            .expect_err("tampered channel_id must fail restore");
+        assert_eq!(err, IpcError::CheckpointIntegrityFailed);
+    }
+
+    #[test]
+    fn test_restore_state_detects_forged_hash() {
+        // If an attacker forges a hash to match a tampered channel
+        // vector, they'd need to invert eight CRC32s — out of scope
+        // here. We test the simpler case: a random wrong hash is
+        // rejected even when the channels are unchanged, so a
+        // truncated/garbled hash in transit is caught.
+        let channels = vec![(1u64, 1u64, ProtocolState::Idle)];
+        let mut cp = checkpoint_state(&channels);
+        cp.integrity_hash = [0xFF; 32]; // wrong hash, channels unchanged
+        let err = restore_state(&cp)
+            .expect_err("wrong hash must fail restore");
+        assert_eq!(err, IpcError::CheckpointIntegrityFailed);
+    }
+
+    #[test]
+    fn test_restore_state_detects_appended_channel() {
+        // A producer that appends an extra channel to the vector
+        // (without recomputing the hash) must be caught — this is
+        // the canonical "rollback / replay an old channel" attack.
+        let channels = vec![(1u64, 1u64, ProtocolState::Idle)];
+        let mut cp = checkpoint_state(&channels);
+        cp.channels.push(ChannelState {
+            channel_id: 999,
+            sequence: 999,
+            protocol_state: ProtocolState::Closed,
+        });
+        let err = restore_state(&cp)
+            .expect_err("appended channel must fail restore");
+        assert_eq!(err, IpcError::CheckpointIntegrityFailed);
+    }
+
+    // ── L7: error containment tests ────────────────────────────────
+
+    #[test]
+    fn test_handle_worker_error_sigsegv_with_budget_restarts() {
+        // The canonical crash-restart case: SIGSEGV (signal 11) with a
+        // non-zero restart budget. The supervisor is asked to restart.
+        // exit_code follows the shell convention (128 + 11 = 139) so
+        // the test data is realistic for a signal-killed worker.
+        let err = WorkerError {
+            exit_code: 139, // 128 + SIGSEGV(11)
+            signal: 11,
+            stderr_capture: String::from("segfault at 0x0"),
+            timestamp: 1_000,
+        };
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Restart,
+            "SIGSEGV with budget must Restart"
+        );
+    }
+
+    #[test]
+    fn test_handle_worker_error_clean_exit_terminates() {
+        // exit(0) means the worker finished its job — Terminate,
+        // regardless of config. This is the second arm of the policy.
+        let err = WorkerError {
+            exit_code: 0,
+            signal: 0,
+            stderr_capture: String::new(),
+            timestamp: 2_000,
+        };
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Terminate,
+            "clean exit must Terminate"
+        );
+    }
+
+    #[test]
+    fn test_handle_worker_error_nonzero_exit_escalates() {
+        // A non-zero exit code (and no signal) is an explicit failure
+        // the worker chose to report — escalate rather than restart,
+        // because the worker already decided the situation was
+        // unrecoverable.
+        let err = WorkerError {
+            exit_code: 1,
+            signal: 0,
+            stderr_capture: String::from("panic: inventory underflow"),
+            timestamp: 3_000,
+        };
+        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Escalate,
+            "non-zero exit must Escalate"
+        );
+    }
+
+    #[test]
+    fn test_handle_worker_error_sigsegv_no_budget_escalates() {
+        // SIGSEGV with max_restarts == 0: the restart policy is
+        // disabled, so even a restartable-looking crash must escalate
+        // rather than spin forever. This is the key difference from
+        // should_restart, which would just return false here —
+        // handle_worker_error makes the escalation explicit. exit_code
+        // is 139 (128 + 11) per the shell convention, so it falls past
+        // the Terminate arm (exit_code != 0) into Escalate.
+        let err = WorkerError {
+            exit_code: 139, // 128 + SIGSEGV(11)
+            signal: 11,
+            stderr_capture: String::from("segfault"),
+            timestamp: 4_000,
+        };
+        let config = WorkerConfig { max_restarts: 0, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Escalate,
+            "SIGSEGV with no restart budget must Escalate"
+        );
+    }
+
+    #[test]
+    fn test_handle_worker_error_sigkill_escalates() {
+        // Only SIGSEGV triggers Restart. SIGKILL (9) — e.g. OOM killer
+        // — is escalated even with a budget, because it usually
+        // indicates an environmental problem that restarting won't fix.
+        // exit_code is 137 (128 + 9) per the shell convention, so the
+        // Terminate arm (exit_code == 0) does not fire.
+        let err = WorkerError {
+            exit_code: 137, // 128 + SIGKILL(9)
+            signal: 9,
+            stderr_capture: String::from("killed"),
+            timestamp: 5_000,
+        };
+        let config = WorkerConfig { max_restarts: 5, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Escalate,
+            "SIGKILL must Escalate even with budget"
+        );
+    }
+
+    #[test]
+    fn test_handle_worker_error_sigabrt_escalates() {
+        // SIGABRT (6) — typically from an assertion or double-free in
+        // the allocator — is escalated, not restarted. SIGSEGV is the
+        // only signal in the Restart arm by design. exit_code is 134
+        // (128 + 6) per the shell convention.
+        let err = WorkerError {
+            exit_code: 134, // 128 + SIGABRT(6)
+            signal: 6,
+            stderr_capture: String::from("abort"),
+            timestamp: 6_000,
+        };
+        let config = WorkerConfig { max_restarts: 5, ..Default::default() };
+        assert_eq!(
+            handle_worker_error(&err, &config),
+            RecoveryAction::Escalate,
+            "SIGABRT must Escalate even with budget"
+        );
+    }
+
+    #[test]
+    fn test_worker_error_struct_carries_full_diagnostic_payload() {
+        // The struct is the supervisor's crash report; every field
+        // must round-trip so the escalation path can log it. This
+        // pins the field set: exit_code, signal, stderr_capture,
+        // timestamp — no more, no less.
+        let err = WorkerError {
+            exit_code: 134, // 128 + SIGABRT(6), the shell convention
+            signal: 6,
+            stderr_capture: String::from("assertion failed: x > 0"),
+            timestamp: 7_700_000,
+        };
+        assert_eq!(err.exit_code, 134);
+        assert_eq!(err.signal, 6);
+        assert_eq!(err.stderr_capture, "assertion failed: x > 0");
+        assert_eq!(err.timestamp, 7_700_000);
+    }
+
+    // ── L8: cryptographic encapsulation tests ──────────────────────
+
+    #[test]
+    fn test_crypto_encrypt_decrypt_roundtrip() {
+        // The fundamental L8 contract: encrypt then decrypt with the
+        // same key must recover the original plaintext, byte-for-byte.
+        // This is the test the previous stub passed trivially (because
+        // it copied plaintext); it must still pass now that the cipher
+        // is a real XOR stream.
+        let mut crypto = CryptoState::new([0x42; 32]);
+        let plaintext = b"the quick brown fox jumps over the lazy dog";
+        let framed = crypto.encrypt(plaintext);
+        let recovered = crypto.decrypt(&framed).expect("roundtrip must succeed");
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn test_crypto_roundtrip_empty_plaintext() {
+        // Edge case: zero-length plaintext must still produce a valid
+        // frame (nonce + empty ct + tag) and round-trip cleanly. The
+        // tag is crc32(b"") == 0, which is a legitimate (if weak) tag
+        // value — the test confirms the wire layout handles the
+        // degenerate case rather than panicking on an empty slice.
+        let mut crypto = CryptoState::new([0xAB; 32]);
+        let framed = crypto.encrypt(b"");
+        assert_eq!(framed.len(), 12, "empty-plaintext frame = nonce(8) + tag(4)");
+        let recovered = crypto.decrypt(&framed).expect("empty roundtrip must succeed");
+        assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn test_crypto_tag_is_real_crc32_not_zeros() {
+        // Pin that the tag is a real CRC32 of the ciphertext, not the
+        // all-zero placeholder the previous stub emitted. We verify
+        // both halves: the tag is non-zero AND it equals crc32(ct).
+        let mut crypto = CryptoState::new([0x11; 32]);
+        let framed = crypto.encrypt(b"VUMA");
+        assert!(framed.len() >= 12);
+        let tag = &framed[framed.len() - 4..];
+        assert_ne!(tag, &[0, 0, 0, 0], "tag must not be all-zero");
+        // And it must equal crc32 of the ciphertext slice.
+        let ct = &framed[8..framed.len() - 4];
+        assert_eq!(tag, &crc32(ct).to_le_bytes()[..]);
+    }
+
+    #[test]
+    fn test_crypto_ciphertext_differs_from_plaintext() {
+        // The previous stub copied plaintext as ciphertext verbatim.
+        // The real cipher must produce a ciphertext that differs from
+        // the plaintext — otherwise there is no encryption at all and
+        // the "ENCRYPTED" message flag is a lie. We pick a plaintext
+        // of all-same-bytes so any non-trivial key stream guarantees a
+        // difference.
+        let mut crypto = CryptoState::new([0x55; 32]);
+        let plaintext = b"AAAAAAAAAAAAAAAA";
+        let framed = crypto.encrypt(plaintext);
+        let ct = &framed[8..framed.len() - 4];
+        assert_ne!(
+            ct, plaintext,
+            "ciphertext must not equal plaintext — XOR stream must actually transform bytes"
+        );
+    }
+
+    #[test]
+    fn test_crypto_distinct_nonces_produce_distinct_ciphertexts() {
+        // Encrypting the same plaintext twice must produce two
+        // different ciphertexts, because the nonce advances. (Nonce
+        // reuse in a real cipher would be catastrophic; here we just
+        // check the streams actually differ.) This is the property
+        // that makes the per-message nonce meaningful.
+        let mut crypto = CryptoState::new([0x77; 32]);
+        let pt = b"nonce-unique-test";
+        let f1 = crypto.encrypt(pt);
+        let f2 = crypto.encrypt(pt);
+        // Nonces differ...
+        assert_ne!(&f1[..8], &f2[..8], "nonce counter must advance");
+        // ...and so do ciphertexts.
+        let ct1 = &f1[8..f1.len() - 4];
+        let ct2 = &f2[8..f2.len() - 4];
+        assert_ne!(ct1, ct2, "distinct nonces must yield distinct ciphertexts");
+    }
+
+    #[test]
+    fn test_crypto_decrypt_rejects_tampered_ciphertext() {
+        // Flip a single bit in the ciphertext. The CRC32 tag must no
+        // longer match and decrypt must return CrcMismatch — without
+        // leaking the (now-wrong) decrypted bytes to the caller. This
+        // is the L8 tamper-detection test, analogous to L6's
+        // test_restore_state_detects_tampered_sequence.
+        let mut crypto = CryptoState::new([0x33; 32]);
+        let plaintext = b"sensitive payload";
+        let mut framed = crypto.encrypt(plaintext);
+
+        // Tamper: flip a bit in the ciphertext body (not the tag).
+        let ct_start = 8;
+        let ct_end = framed.len() - 4;
+        framed[ct_start] ^= 0x01;
+
+        let err = crypto
+            .decrypt(&framed)
+            .expect_err("tampered ciphertext must fail tag verification");
+        match err {
+            IpcError::CrcMismatch { expected, actual } => {
+                assert_ne!(expected, actual, "expected and actual tags must differ");
+            }
+            other => panic!("expected CrcMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_crypto_decrypt_rejects_tampered_tag() {
+        // Flip a bit in the tag itself. Same outcome: CrcMismatch.
+        // This confirms the tag is actually being checked, not just
+        // present in the wire format.
+        let mut crypto = CryptoState::new([0x44; 32]);
+        let plaintext = b"another payload";
+        let mut framed = crypto.encrypt(plaintext);
+        let last = framed.len() - 1;
+        framed[last] ^= 0x80;
+        let err = crypto
+            .decrypt(&framed)
+            .expect_err("tampered tag must fail verification");
+        assert!(matches!(err, IpcError::CrcMismatch { .. }));
+    }
+
+    #[test]
+    fn test_crypto_decrypt_rejects_truncated_frame() {
+        // A frame shorter than the 12-byte minimum (8 nonce + 4 tag)
+        // is a protocol violation, not a crypto failure — surface it
+        // as DeserializationError so the L1 framer can distinguish
+        // truncation from a bad tag.
+        let crypto = CryptoState::new([0x00; 32]);
+        let err = crypto
+            .decrypt(&[0u8; 5])
+            .expect_err("truncated frame must fail");
+        assert_eq!(err, IpcError::DeserializationError);
+    }
+
+    #[test]
+    fn test_crypto_wrong_key_fails_tag_or_garbles() {
+        // Decrypting a frame with the wrong key must NOT silently
+        // return garbage plaintext. Because the tag is a CRC32 of the
+        // *ciphertext* (not of plaintext+key), a wrong key produces a
+        // valid-looking frame only if the wrong key stream happens to
+        // cancel — which it won't, because the ciphertext is unchanged
+        // and so its CRC32 still matches. So the wrong key actually
+        // *succeeds* at tag verification but returns wrong plaintext.
+        //
+        // This is exactly the "structurally correct, not secure"
+        // property documented on CryptoState: the tag protects
+        // integrity of the ciphertext in transit, NOT
+        // authentication of the sender. We pin that behaviour here so
+        // the limitation is explicit rather than surprising.
+        let mut enc = CryptoState::new([0xAA; 32]);
+        let dec = CryptoState::new([0xBB; 32]);
+        let framed = enc.encrypt(b"secret");
+        let recovered = dec.decrypt(&framed).expect("tag verifies (it covers ct, not key)");
+        assert_ne!(
+            recovered, b"secret",
+            "wrong key must NOT recover the plaintext — pins the documented weakness"
+        );
+    }
+
+    #[test]
+    fn test_aead_cipher_alias_is_crypto_state() {
+        // The L8 design notes call the cipher `AeadCipher`; the
+        // implementation reuses `CryptoState` (which NoiseChannel::send
+        // already constructs). The type alias must keep both names
+        // interchangeable so downstream code can use either name at
+        // the call site.
+        let mut aead: AeadCipher = AeadCipher::new([0x99; 32]);
+        let framed = aead.encrypt(b"alias check");
+        // `aead` mut borrow ends here; now borrow the same value as
+        // CryptoState to call decrypt.
+        let recovered = CryptoState::decrypt(&aead, &framed).expect("alias roundtrip");
+        assert_eq!(recovered, b"alias check");
     }
 }
