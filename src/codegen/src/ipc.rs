@@ -2672,6 +2672,344 @@ impl CapabilityRegistry {
     }
 }
 
+// ── W41-48: Kernel/User Split (Microkernel) ─────────────────────────
+//
+// The microkernel split: a single privileged KernelProcess runs with
+// full capability authority and dispatches syscalls via the IPC layer;
+// each UserProcess runs with a restricted TrustLevel, a capability
+// token list, and a ResourceUsage/ResourceLimits pair enforced by the
+// supervisor. The ProcessTable owns the kernel slot plus a flat map of
+// user processes keyed by pid.
+//
+// This is the L4-style split: the kernel is a service like any other,
+// reachable only through `KernelProcess::handle_syscall`. The real
+// trap-and-dispatch lives in the runtime backend; here we expose the
+// bookkeeping the supervisor needs to reason about who-can-call-what.
+
+/// A privileged kernel-space process. There is at most one of these
+/// per [`ProcessTable`]. It holds the master [`CapabilityRegistry`]
+/// and answers [`KernelProcess::handle_syscall`] by routing the call
+/// through IPC — the actual trap into the backend is the caller's
+/// responsibility, this method just resolves the dispatch and returns
+/// a mock value indicating "syscall accepted, caller may now trap".
+#[derive(Clone, Debug)]
+pub struct KernelProcess {
+    pub pid: u64,
+    pub name: String,
+    pub capabilities: CapabilityRegistry,
+}
+
+impl KernelProcess {
+    /// Construct a fresh kernel process with an empty capability
+    /// registry. The caller picks `pid` (conventionally 1, the L4
+    /// "sigma0" / init slot) and a human-readable `name` for
+    /// diagnostics.
+    pub fn new(pid: u64, name: impl Into<String>) -> Self {
+        Self {
+            pid,
+            name: name.into(),
+            capabilities: CapabilityRegistry::new(),
+        }
+    }
+
+    /// Dispatch a syscall from `caller_pid` through the kernel IPC
+    /// path. `nr` is the syscall number (see [`allowed_syscalls`] for
+    /// the per-trust-level filter lists), `args` is the raw argument
+    /// slice. Returns a mock `Ok(0)` on acceptance — the real trap
+    /// into the backend happens after this method returns, so the
+    /// return value here is a placeholder the backend overwrites.
+    ///
+    /// Returns [`IpcError::PermissionDenied`] if `caller_pid` is not
+    /// the kernel itself *and* is not currently registered in the
+    /// kernel's [`CapabilityRegistry`] as holding any capability —
+    /// this is the kernel's "default deny" stance: a process that has
+    /// never been granted a capability cannot even initiate a syscall.
+    pub fn handle_syscall(
+        &mut self,
+        caller_pid: u64,
+        nr: u32,
+        args: &[u64],
+    ) -> Result<u64, IpcError> {
+        // Default-deny: the caller must be a known capability holder.
+        // The kernel itself (pid == self.pid) is always allowed to
+        // call its own syscalls (e.g. for boot-time initialization).
+        if caller_pid != self.pid
+            && self.capabilities.get_process_capabilities(caller_pid).is_empty()
+        {
+            return Err(IpcError::PermissionDenied);
+        }
+        // Mock dispatch: encode the syscall number in the high 32 bits
+        // of the return value so a test can confirm the call was
+        // routed and the syscall number survived the round-trip. The
+        // real backend replaces this with the actual trap result.
+        let _ = args;
+        Ok((nr as u64) << 32)
+    }
+
+    /// Always true: this is a [`KernelProcess`]. Provided so a caller
+    /// with a generic process handle can ask "is this the kernel?"
+    /// without downcasting.
+    pub fn is_kernel_process(&self) -> bool {
+        true
+    }
+}
+
+/// A user-space process running under a restricted trust level. Each
+/// `UserProcess` carries its own capability token IDs (mirroring the
+/// kernel's [`CapabilityRegistry`] reverse-index entry for this pid),
+/// the live [`ResourceUsage`] measurement, and the [`ResourceLimits`]
+/// ceiling the supervisor enforces. [`UserProcess::check_resources`]
+/// delegates to [`ResourceLimits::check_limits`] so the supervisor can
+/// poll between IPC turns and kill the process when it overshoots.
+#[derive(Clone, Debug)]
+pub struct UserProcess {
+    pub pid: u64,
+    pub parent_pid: u64,
+    pub trust_level: TrustLevel,
+    /// Capability token IDs currently held by this process. Mirrors
+    /// the kernel's per-pid [`CapabilityRegistry`] entry — kept here
+    /// so the process can self-audit without crossing the IPC
+    /// boundary.
+    pub capabilities: Vec<u128>,
+    pub resource_usage: ResourceUsage,
+    pub resource_limits: ResourceLimits,
+}
+
+impl UserProcess {
+    /// Construct a fresh user process under `parent_pid` with the
+    /// given trust level and resource limits. `resource_usage` starts
+    /// at zero (no CPU time, no memory, no IPC messages, no FDs) —
+    /// the supervisor populates it as the process runs.
+    pub fn new(
+        pid: u64,
+        parent_pid: u64,
+        trust_level: TrustLevel,
+        limits: ResourceLimits,
+    ) -> Self {
+        Self {
+            pid,
+            parent_pid,
+            trust_level,
+            capabilities: Vec::new(),
+            resource_usage: ResourceUsage::default(),
+            resource_limits: limits,
+        }
+    }
+
+    /// True iff the current [`ResourceUsage`] is within every ceiling
+    /// of [`ResourceLimits`]. Delegates to
+    /// [`ResourceLimits::check_limits`] so the policy lives in one
+    /// place. The supervisor polls this between IPC turns and kills
+    /// the process when it returns false.
+    pub fn check_resources(&self) -> bool {
+        self.resource_limits.check_limits(&self.resource_usage)
+    }
+
+    /// Always true: this is a [`UserProcess`]. Provided so a caller
+    /// with a generic process handle can ask "is this a user?" without
+    /// downcasting.
+    pub fn is_user_process(&self) -> bool {
+        true
+    }
+}
+
+/// Per-process resource accounting. Tracks CPU time, memory,
+/// IPC-message count, and open file-descriptor count for every pid
+/// the supervisor has seen, in one flat `HashMap<u64, ResourceUsage>`.
+///
+/// This is the L5 accounting half of the sandbox: the supervisor
+/// calls [`account_cpu`](Self::account_cpu) /
+/// [`account_memory`](Self::account_memory) /
+/// [`account_ipc`](Self::account_ipc) /
+/// [`account_fd`](Self::account_fd) as it observes the process, and
+/// [`get_usage`](Self::get_usage) when it needs to poll the limits.
+/// The struct deliberately does *not* enforce any ceiling — that is
+/// [`ResourceLimits::check_limits`]'s job — so the accounting can be
+/// shared across multiple limit policies (e.g. a per-call ceiling vs.
+/// a lifetime ceiling).
+#[derive(Clone, Debug, Default)]
+pub struct ResourceAccount {
+    usage: HashMap<u64, ResourceUsage>,
+}
+
+impl ResourceAccount {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add `ms` to `pid`'s accumulated CPU time, saturating on
+    /// overflow. Creates a fresh zeroed [`ResourceUsage`] for `pid`
+    /// if it is new.
+    pub fn account_cpu(&mut self, pid: u64, ms: u64) {
+        let entry = self.usage.entry(pid).or_default();
+        entry.cpu_time_ms = entry.cpu_time_ms.saturating_add(ms);
+    }
+
+    /// Set `pid`'s peak memory to the max of (current, `bytes`).
+    /// Memory is reported as a high-water mark rather than a delta
+    /// because `getrusage(2)` reports `ru_maxrss` that way and we
+    /// mirror the kernel's accounting model.
+    pub fn account_memory(&mut self, pid: u64, bytes: u64) {
+        let entry = self.usage.entry(pid).or_default();
+        if bytes > entry.memory_bytes {
+            entry.memory_bytes = bytes;
+        }
+    }
+
+    /// Increment `pid`'s IPC-message counter by one, saturating on
+    /// overflow.
+    pub fn account_ipc(&mut self, pid: u64) {
+        let entry = self.usage.entry(pid).or_default();
+        entry.ipc_messages = entry.ipc_messages.saturating_add(1);
+    }
+
+    /// Increment `pid`'s open-FD counter by one, saturating on
+    /// overflow.
+    pub fn account_fd(&mut self, pid: u64) {
+        let entry = self.usage.entry(pid).or_default();
+        entry.file_descriptors = entry.file_descriptors.saturating_add(1);
+    }
+
+    /// Snapshot of `pid`'s accumulated usage. Returns a zeroed
+    /// [`ResourceUsage`] for an unknown pid so callers can poll
+    /// without a separate `contains_key` check.
+    pub fn get_usage(&self, pid: u64) -> ResourceUsage {
+        self.usage.get(&pid).cloned().unwrap_or_default()
+    }
+
+    /// Number of distinct pids currently tracked.
+    pub fn tracked_count(&self) -> usize {
+        self.usage.len()
+    }
+}
+
+/// Borrowed view of a process entry in the [`ProcessTable`] — the
+/// L4-style tagged union of "kernel slot" vs. "user slot", returned by
+/// [`ProcessTable::get_process`].
+///
+/// We expose this as a borrow rather than cloning the underlying
+/// [`KernelProcess`] / [`UserProcess`] so callers can inspect either
+/// slot without paying for a clone. The lifetime parameter ties the
+/// borrowed reference to the originating `&ProcessTable`.
+#[derive(Clone, Copy, Debug)]
+pub enum Process<'a> {
+    Kernel(&'a KernelProcess),
+    User(&'a UserProcess),
+}
+
+impl<'a> Process<'a> {
+    /// PID of the underlying process, regardless of variant.
+    pub fn pid(&self) -> u64 {
+        match self {
+            Process::Kernel(k) => k.pid,
+            Process::User(u) => u.pid,
+        }
+    }
+
+    /// True iff this is the kernel slot.
+    pub fn is_kernel(&self) -> bool {
+        matches!(self, Process::Kernel(_))
+    }
+
+    /// True iff this is a user slot.
+    pub fn is_user(&self) -> bool {
+        matches!(self, Process::User(_))
+    }
+}
+
+/// The microkernel process table: one optional kernel slot plus a
+/// flat map of user processes keyed by pid. [`ProcessTable::spawn_user`]
+/// mints a new user pid; [`ProcessTable::kill_user`] evicts it;
+/// [`ProcessTable::get_process`] returns the tagged [`Process`] for
+/// either slot.
+///
+/// User pids are assigned from a monotonically increasing counter
+/// starting at `1001` (mirroring [`FfiWorkerLifecycle`]'s convention
+/// of starting at `1000`, but bumped by one so user pids never
+/// collide with the FFI worker pid space).
+#[derive(Clone, Debug)]
+pub struct ProcessTable {
+    pub kernel: Option<KernelProcess>,
+    pub users: HashMap<u64, UserProcess>,
+    next_user_pid: u64,
+}
+
+impl Default for ProcessTable {
+    fn default() -> Self {
+        Self {
+            kernel: None,
+            users: HashMap::new(),
+            // Start user pids at 1001 so they never collide with the
+            // FFI worker pid space (1000+) or the conventional kernel
+            // pid (1).
+            next_user_pid: 1001,
+        }
+    }
+}
+
+impl ProcessTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install the kernel process. Only one kernel slot exists; a
+    /// second call replaces the prior kernel process (the kernel is
+    /// never killed, only hot-swapped during early boot).
+    pub fn set_kernel(&mut self, kernel: KernelProcess) {
+        self.kernel = Some(kernel);
+    }
+
+    /// Spawn a fresh user process under `parent_pid` with the given
+    /// trust level and resource limits. Returns the assigned pid.
+    /// Returns [`IpcError::TooManyProcesses`] if the pid counter
+    /// overflows (a supervisor bug).
+    pub fn spawn_user(
+        &mut self,
+        parent_pid: u64,
+        trust_level: TrustLevel,
+        limits: ResourceLimits,
+    ) -> Result<u64, IpcError> {
+        let pid = self.next_user_pid;
+        self.next_user_pid = self
+            .next_user_pid
+            .checked_add(1)
+            .ok_or(IpcError::TooManyProcesses)?;
+        let user = UserProcess::new(pid, parent_pid, trust_level, limits);
+        self.users.insert(pid, user);
+        Ok(pid)
+    }
+
+    /// Kill (evict) the user process `pid`. Returns
+    /// [`IpcError::WorkerNotFound`] if `pid` is not a known user
+    /// process. The kernel slot is never affected — use
+    /// [`set_kernel`](Self::set_kernel) with `None` semantics by
+    /// dropping the table if you need to tear down the kernel.
+    pub fn kill_user(&mut self, pid: u64) -> Result<(), IpcError> {
+        if self.users.remove(&pid).is_some() {
+            Ok(())
+        } else {
+            Err(IpcError::WorkerNotFound)
+        }
+    }
+
+    /// Look up a process by pid. Returns `Some(Process::Kernel(_))`
+    /// if `pid` matches the kernel slot, `Some(Process::User(_))` if
+    /// it matches a user slot, `None` otherwise.
+    pub fn get_process(&self, pid: u64) -> Option<Process<'_>> {
+        if let Some(k) = &self.kernel {
+            if k.pid == pid {
+                return Some(Process::Kernel(k));
+            }
+        }
+        self.users.get(&pid).map(Process::User)
+    }
+
+    /// Number of user processes currently tracked.
+    pub fn user_count(&self) -> usize {
+        self.users.len()
+    }
+}
+
 // ── Supervisor (Fault Tolerance) ─────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -5639,5 +5977,214 @@ mod tests {
         assert!(!set.verify(&a, 1_500));
         assert!(!set.verify(&b, 1_500));
         assert!(!set.verify(&c, 1_500));
+    }
+
+    // ── W41-48: Kernel/User Split tests ──────────────────────────────
+
+    #[test]
+    fn test_kernel_process_handle_syscall_returns_value() {
+        // A freshly-minted kernel process must accept the kernel's own
+        // syscalls (caller_pid == self.pid) and return a mock value
+        // indicating the call was routed. Callers with no granted
+        // capability are denied by the default-deny rule.
+        let mut k = KernelProcess::new(1, "kernel");
+        assert!(k.is_kernel_process());
+        assert_eq!(k.pid, 1);
+        assert_eq!(k.name, "kernel");
+
+        // Kernel calling itself: allowed. The mock return value
+        // encodes the syscall number in the high 32 bits.
+        let nr: u32 = 60; // exit
+        let rc = k
+            .handle_syscall(1, nr, &[0])
+            .expect("kernel calling itself must succeed");
+        assert_eq!(rc, (nr as u64) << 32, "mock return must encode syscall nr");
+
+        // Unknown caller with no capability: denied by default-deny.
+        let err = k.handle_syscall(999, nr, &[0]).unwrap_err();
+        assert_eq!(err, IpcError::PermissionDenied);
+    }
+
+    #[test]
+    fn test_kernel_process_handle_syscall_allows_capability_holder() {
+        // A caller that has been granted at least one capability in
+        // the kernel's CapabilityRegistry must pass the default-deny
+        // gate. We don't need a real signed token here — the registry
+        // only tracks token IDs, so we mint a synthetic one via
+        // grant_capability and grant it to the caller.
+        let key = [0xAAu8; 32];
+        let token = capability::grant_capability(
+            0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000_1111,
+            1, // issuer = kernel pid
+            7, // target = caller pid
+            capability::Resource::Channel(42),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 5_000, 10_000, &key,
+        );
+        let mut k = KernelProcess::new(1, "kernel");
+        k.capabilities.grant_to_process(7, &token);
+
+        // Now pid 7 is a known capability holder — syscall allowed.
+        let rc = k.handle_syscall(7, 0, &[]).expect("capability holder must be allowed");
+        assert_eq!(rc, 0, "mock return for nr=0 must be 0");
+    }
+
+    #[test]
+    fn test_user_process_check_resources_within_limits() {
+        // A fresh user process with zero usage must be within limits.
+        // `limits` is moved into UserProcess::new; afterwards we read
+        // the ceilings back out of `u.resource_limits` so we don't
+        // need to clone the struct just for the assertions.
+        let limits = ResourceLimits {
+            cpu_time_ms: 1_000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_ipc_messages: 500,
+            max_file_descriptors: 32,
+        };
+        let cpu_limit = limits.cpu_time_ms;
+        let mem_limit = limits.max_memory_bytes;
+        let ipc_limit = limits.max_ipc_messages;
+        let fd_limit = limits.max_file_descriptors;
+        let mut u = UserProcess::new(1001, 1, TrustLevel::Untrusted, limits);
+        assert!(u.is_user_process());
+        assert_eq!(u.pid, 1001);
+        assert_eq!(u.parent_pid, 1);
+        assert_eq!(u.trust_level, TrustLevel::Untrusted);
+        assert!(u.capabilities.is_empty(), "fresh process has no capabilities");
+        assert!(
+            u.check_resources(),
+            "fresh user process with zero usage must be within limits"
+        );
+
+        // Bump usage past the CPU ceiling: check_resources must fail.
+        u.resource_usage.cpu_time_ms = cpu_limit + 1;
+        assert!(
+            !u.check_resources(),
+            "cpu over budget must fail check_resources"
+        );
+
+        // Reset CPU, bump memory past ceiling: must fail.
+        u.resource_usage.cpu_time_ms = 0;
+        u.resource_usage.memory_bytes = mem_limit + 1;
+        assert!(
+            !u.check_resources(),
+            "memory over budget must fail check_resources"
+        );
+
+        // Reset memory, bump IPC count past ceiling: must fail.
+        u.resource_usage.memory_bytes = 0;
+        u.resource_usage.ipc_messages = ipc_limit + 1;
+        assert!(
+            !u.check_resources(),
+            "ipc over budget must fail check_resources"
+        );
+
+        // Reset IPC, bump FD count past ceiling: must fail.
+        u.resource_usage.ipc_messages = 0;
+        u.resource_usage.file_descriptors = fd_limit + 1;
+        assert!(
+            !u.check_resources(),
+            "fd over budget must fail check_resources"
+        );
+    }
+
+    #[test]
+    fn test_resource_account_tracks_usage_correctly() {
+        // Each account_* method must update exactly the right field
+        // and leave the others untouched; get_usage must return the
+        // accumulated snapshot. Memory is a high-water mark (max, not
+        // sum); CPU, IPC, and FD are cumulative.
+        let mut acct = ResourceAccount::new();
+        assert_eq!(acct.tracked_count(), 0, "fresh account tracks no pids");
+
+        acct.account_cpu(7, 100);
+        acct.account_cpu(7, 50);   // accumulate → 150
+        acct.account_memory(7, 4096);
+        acct.account_memory(7, 2048); // high-water → stays 4096
+        acct.account_memory(7, 8192); // high-water → grows to 8192
+        acct.account_ipc(7);
+        acct.account_ipc(7);
+        acct.account_ipc(7);       // 3 IPC messages
+        acct.account_fd(7);        // 1 FD
+
+        let usage = acct.get_usage(7);
+        assert_eq!(usage.cpu_time_ms, 150, "cpu_time must accumulate");
+        assert_eq!(usage.memory_bytes, 8192, "memory must be high-water mark");
+        assert_eq!(usage.ipc_messages, 3, "ipc count must increment");
+        assert_eq!(usage.file_descriptors, 1, "fd count must increment");
+        assert_eq!(acct.tracked_count(), 1, "exactly one pid tracked");
+
+        // Unknown pid returns a zeroed snapshot (no panic).
+        let unknown = acct.get_usage(999);
+        assert_eq!(unknown, ResourceUsage::default());
+
+        // Different pids are tracked independently.
+        acct.account_cpu(8, 200);
+        assert_eq!(acct.get_usage(8).cpu_time_ms, 200, "pid 8 tracked separately");
+        assert_eq!(acct.get_usage(7).cpu_time_ms, 150, "pid 7 must be untouched");
+        assert_eq!(acct.tracked_count(), 2, "two pids now tracked");
+    }
+
+    #[test]
+    fn test_process_table_spawn_kill_user_process() {
+        // spawn_user mints monotonically-increasing pids starting at
+        // 1001, kill_user evicts them, get_process resolves either
+        // slot. The kernel slot is never affected by kill_user.
+        let mut table = ProcessTable::new();
+        assert!(table.kernel.is_none(), "fresh table has no kernel");
+        assert_eq!(table.user_count(), 0);
+
+        table.set_kernel(KernelProcess::new(1, "kernel"));
+        assert!(table.kernel.is_some(), "kernel must be installed");
+
+        let pid_a = table
+            .spawn_user(1, TrustLevel::Untrusted, ResourceLimits::default())
+            .expect("spawn_user must succeed");
+        let pid_b = table
+            .spawn_user(1, TrustLevel::Sandboxed, ResourceLimits::default())
+            .expect("spawn_user must succeed");
+        assert_ne!(pid_a, pid_b, "pids must be distinct");
+        assert!(pid_a >= 1001, "user pids must start at 1001");
+        assert_eq!(table.user_count(), 2, "two users spawned");
+
+        // get_process resolves kernel, both users, and rejects unknowns.
+        let kern = table.get_process(1).expect("kernel pid must resolve");
+        assert!(kern.is_kernel(), "kernel slot must report is_kernel");
+        assert!(!kern.is_user());
+        assert_eq!(kern.pid(), 1);
+
+        let user_a = table.get_process(pid_a).expect("user pid must resolve");
+        assert!(user_a.is_user(), "user slot must report is_user");
+        assert!(!user_a.is_kernel());
+        assert_eq!(user_a.pid(), pid_a);
+
+        assert!(
+            table.get_process(999_999).is_none(),
+            "unknown pid must not resolve"
+        );
+
+        // kill_user evicts the entry; a second kill fails.
+        table.kill_user(pid_a).expect("kill_user must succeed");
+        assert!(
+            table.get_process(pid_a).is_none(),
+            "killed pid must not resolve"
+        );
+        assert_eq!(table.user_count(), 1, "one user left after kill");
+        let err = table.kill_user(pid_a).unwrap_err();
+        assert_eq!(err, IpcError::WorkerNotFound, "second kill must fail");
+
+        // Other users survive.
+        assert!(
+            table.get_process(pid_b).is_some(),
+            "other users must survive a sibling kill"
+        );
+
+        // kill_user never touches the kernel slot.
+        let err = table.kill_user(1).unwrap_err();
+        assert_eq!(
+            err, IpcError::WorkerNotFound,
+            "kill_user on kernel pid must fail (kernel is not a user)"
+        );
+        assert!(table.kernel.is_some(), "kernel slot must survive kill_user");
     }
 }
