@@ -49,9 +49,9 @@ use vuma_codegen::{
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
-        Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
+        Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
     },
-    CastKind as CodegenCastKind, CodegenError,
+    CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
 // (Wave 32) Escape analysis + effect analysis are wired into the O2+
 // codegen-opt stage.  We import the modules so the pipeline can call
@@ -5898,6 +5898,7 @@ pub fn compile_modules(
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+        rodata_data: Vec::new(),
     };
     let binary = match backend.encode_program(&allocated_program) {
         Ok(bytes) => bytes,
@@ -7900,6 +7901,13 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     //
     // We use a dedicated BridgeCtx (separate from any function's ctx) so
     // temp names don't collide with those used inside `main`'s body.
+
+    // Wave 1: Create a shared string table for all function contexts.
+    // Each ctx gets a clone of the Rc, so string literals are deduplicated
+    // program-wide. After all functions are processed, the table is drained
+    // and emitted as a single ScgNode::Data (ReadOnly) section.
+    let shared_string_table: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut top_level_stmts: Vec<ScgStatement> = Vec::new();
     {
         let mut tl_ctx = BridgeCtx::new();
@@ -7909,6 +7917,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         tl_ctx.extern_fn_decls = extern_fn_decls.clone();
         tl_ctx.layout_decls = layout_decls.clone();
         tl_ctx.state_returning_fns = state_returning_fns.clone();
+        tl_ctx.string_table = shared_string_table.clone();
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
                 top_level_stmts.extend(bridge_stmt_to_scg(stmt, &mut tl_ctx));
@@ -7975,6 +7984,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.extern_fn_decls = extern_fn_decls.clone();
             ctx.layout_decls = layout_decls.clone();
             ctx.state_returning_fns = state_returning_fns.clone();
+            ctx.string_table = shared_string_table.clone();
             // PMT (Wave 2): register state-typed params (those with
             // `State<L>` type annotation) so `param.field` accesses inside
             // the body lower to Loads with the layout's field offsets.
@@ -8053,6 +8063,27 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         }
     }
 
+    // Wave 1: Emit the string table as a read-only data section.
+    // All string literals collected by flatten_expr are concatenated
+    // (NUL-terminated) and placed in .rodata. The addresses were already
+    // computed as compile-time constants (rodata_vaddr + offset).
+    {
+        let table = shared_string_table.borrow();
+        if !table.is_empty() {
+            let mut string_data: Vec<u8> = Vec::new();
+            for (_label, bytes) in table.iter() {
+                string_data.extend_from_slice(bytes);
+                string_data.push(0); // NUL terminator
+            }
+            nodes.push(ScgNode::Data(ScgData {
+                name: "vuma_strings".to_string(),
+                kind: DataSectionKind::ReadOnly,
+                align: 1,
+                data: string_data,
+            }));
+        }
+    }
+
     Scg { nodes }
 }
 
@@ -8110,6 +8141,12 @@ pub struct BridgeCtx {
     /// `c.field` accesses resolve to Loads at the right offset — without
     /// requiring the caller to annotate `let c: State<L> = ...`.
     pub state_returning_fns: HashMap<String, String>,
+    /// Wave 1: program-wide string literal table. Each entry is
+    /// (label, bytes_including_NUL). Shared across all function contexts
+    /// via Rc<RefCell<>> so string literals are deduplicated program-wide.
+    /// The table is drained after all functions are processed and emitted
+    /// as a single ScgNode::Data (ReadOnly) section.
+    pub string_table: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>,
 }
 
 impl Default for BridgeCtx {
@@ -8133,6 +8170,7 @@ impl BridgeCtx {
             extern_fn_decls: HashMap::new(),
             layout_decls: HashMap::new(),
             state_returning_fns: HashMap::new(),
+            string_table: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
     }
 
@@ -8669,9 +8707,52 @@ pub fn flatten_expr(
             Lit::Float(f) => ScgExpr::Float(*f),
             Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
             Lit::Address(a) => ScgExpr::Int(*a as i64),
-            Lit::String(_) => {
-                eprintln!("[vuma] WARNING: string literals are not supported in codegen; using 0");
-                ScgExpr::Int(0)
+            Lit::String(s) => {
+                // Wave 1: Lower string literals to .rodata addresses.
+                //
+                // The ELF layout for hosted Linux ET_EXEC is deterministic:
+                //   base_addr = 0x400000
+                //   headers_total = 64 (ehdr) + 56*3 (3 phdrs) = 232
+                //   rodata_vaddr = base_addr + headers_total = 0x4000E8
+                //
+                // The string table is emitted as a single ScgNode::Data
+                // (ReadOnly, align=1) containing all unique string literals
+                // NUL-terminated and concatenated. Each string's absolute
+                // address is rodata_vaddr + offset_within_table.
+                //
+                // This avoids IRValue::Label (which isn't fully wired in all
+                // backends) by computing the address as a compile-time i64.
+                const BASE_ADDR_LINUX: i64 = 0x400000;
+                const EHDR_SIZE: i64 = 64;
+                const PHDR_SIZE: i64 = 56;
+                // 4 program headers: rodata + text + bss + gnu_stack
+                // (bss is always present because of runtime argv storage)
+                const NUM_PHDRS: i64 = 4;
+                const RODATA_VADDR: i64 = BASE_ADDR_LINUX + EHDR_SIZE + PHDR_SIZE * NUM_PHDRS;
+
+                let bytes = s.as_bytes();
+                // Deduplicate: check if this exact string is already in the table.
+                let mut table = ctx.string_table.borrow_mut();
+                let mut offset: i64 = 0;
+                let mut found = false;
+                for (_existing_label, existing_bytes) in table.iter() {
+                    if existing_bytes == bytes {
+                        // Found a duplicate — reuse the existing label.
+                        // The offset is the sum of all preceding strings' lengths (including NUL).
+                        found = true;
+                        break;
+                    }
+                    offset += existing_bytes.len() as i64 + 1; // +1 for NUL
+                }
+                if !found {
+                    let label = format!("__vuma_str_{}", table.len());
+                    offset = table.iter().map(|(_, b)| b.len() as i64 + 1).sum();
+                    table.push((label, bytes.to_vec()));
+                }
+                drop(table);
+
+                let addr = RODATA_VADDR + offset;
+                ScgExpr::Int(addr)
             }
         },
 

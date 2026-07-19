@@ -465,6 +465,9 @@ pub struct AllocatedProgram {
     pub total_code_size: usize,
     /// Total data section size in bytes.
     pub total_data_size: usize,
+    /// Wave 1: Read-only data (string literals) to be placed in .rodata.
+    /// Concatenated bytes of all ReadOnly data sections.
+    pub rodata_data: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------

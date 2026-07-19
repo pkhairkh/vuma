@@ -2738,7 +2738,7 @@ fn decode_modrm_xmm_rm(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize)
 /// segment. It has `p_filesz = 0` and `p_memsz = bss_size`, so the kernel
 /// zero-fills it at load time. This provides writable memory for global
 /// variables (e.g., those created by `allocate()` in VUMA source).
-fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u8> {
+fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64, rodata_data: &[u8]) -> Vec<u8> {
     // Use 4K for file offset alignment (keeps the file small) but 64K for
     // virtual address alignment.  QEMU 10.x on hosts with 16K or 64K page
     // sizes requires MAP_FIXED_NOREPLACE addresses to be host-page-aligned.
@@ -2761,19 +2761,31 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    // Program headers: (1) text LOAD, (2) BSS LOAD (if any BSS), (3) PT_GNU_STACK.
+    // Wave 1: Program headers now include a rodata LOAD segment when rodata_data
+    // is non-empty. Layout: (1) rodata LOAD [if rodata], (2) text LOAD,
+    // (3) BSS LOAD [if bss], (4) PT_GNU_STACK.
     // PT_GNU_STACK is always emitted so the kernel explicitly marks the stack
     // non-executable; without it, some loaders default to an executable stack
-    // (security risk). The +1 for PT_GNU_STACK keeps e_phnum in sync.
+    // (security risk).
+    let has_rodata = !rodata_data.is_empty();
     let has_bss = bss_size > 0;
-    let num_phdrs: u64 = if has_bss { 3 } else { 2 };
+    let num_phdrs: u64 = 1 /* text */ + 1 /* gnu_stack */
+        + if has_rodata { 1 } else { 0 }
+        + if has_bss { 1 } else { 0 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
+
+    // Wave 1: .rodata is placed right after the ELF headers (before .text).
+    // Its virtual address is base_addr + rodata_offset (not page-aligned,
+    // but within the first page — valid for ET_EXEC with PF_R).
+    let rodata_offset: u64 = phdr_end; // right after program headers
+    let rodata_size: u64 = rodata_data.len() as u64;
+    let rodata_vaddr: u64 = if has_rodata { base_addr + rodata_offset } else { 0 };
+
     // Page-align the text segment start for mmap compatibility (required by QEMU).
-    let text_offset = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+    // .text follows .rodata in the file.
+    let text_offset = (rodata_offset + rodata_size).div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
     let text_size = code.len() as u64;
     // Align the text virtual address to 64K for host page size compatibility.
-    // p_offset (text_offset, 4K-aligned) and p_vaddr (64K-aligned) are both
-    // 0 mod 4K, satisfying the p_align congruence requirement.
     let text_vaddr = (base_addr + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
     let entry_point = text_vaddr;
 
@@ -2825,7 +2837,22 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     elf.extend_from_slice(&(num_shdrs as u16).to_le_bytes()); // e_shnum
     elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
-    // --- Program Header 1: LOAD segment for .text (PF_R | PF_X) ---
+    // --- Program Header 1 (if rodata): LOAD segment for .rodata (PF_R) ---
+    // Wave 1: read-only string data. Placed before .text at a known address
+    // (base_addr + phdr_end) so string literal addresses are compile-time
+    // constants computable in the SCG bridge.
+    if has_rodata {
+        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&4u32.to_le_bytes()); // p_flags = PF_R (read-only)
+        elf.extend_from_slice(&rodata_offset.to_le_bytes()); // p_offset
+        elf.extend_from_slice(&rodata_vaddr.to_le_bytes()); // p_vaddr
+        elf.extend_from_slice(&rodata_vaddr.to_le_bytes()); // p_paddr
+        elf.extend_from_slice(&rodata_size.to_le_bytes()); // p_filesz
+        elf.extend_from_slice(&rodata_size.to_le_bytes()); // p_memsz
+        elf.extend_from_slice(&1u64.to_le_bytes()); // p_align (1 byte — strings are byte-packed)
+    }
+
+    // --- Program Header (text): LOAD segment for .text (PF_R | PF_X) ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
@@ -2872,6 +2899,15 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
     elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
+
+    // --- rodata data (Wave 1) ---
+    // Emit read-only string data right after the program headers (at file
+    // offset rodata_offset = phdr_end). This is before the text section.
+    if has_rodata {
+        // The ELF header + program headers end at phdr_end. rodata_offset
+        // equals phdr_end, so the data goes right here.
+        elf.extend_from_slice(rodata_data);
+    }
 
     // --- Padding + Code section ---
     // Pad to page-aligned text_offset
@@ -3928,12 +3964,17 @@ impl Backend for X86_64Backend {
         const FILE_PAGE_SIZE: u64 = 0x1000;
         const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
-        // Mirrors build_minimal_x86_64_elf: (text LOAD) + (BSS LOAD if any) +
-        // (PT_GNU_STACK, always). Keep this in sync with the emitter or
-        // text_offset / text_vaddr will diverge from the emitted ELF.
-        let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
+        // Mirrors build_minimal_x86_64_elf: (rodata LOAD if any) + (text LOAD) +
+        // (BSS LOAD if any) + (PT_GNU_STACK, always). Keep this in sync with
+        // the emitter or text_offset / text_vaddr will diverge from the emitted ELF.
+        let has_rodata = !program.rodata_data.is_empty();
+        let num_phdrs: u64 = 1 /* text */ + 1 /* gnu_stack */
+            + if has_rodata { 1 } else { 0 }
+            + if bss_size > 0 { 1 } else { 0 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
-        let text_offset = phdr_end.div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+        let rodata_size = program.rodata_data.len() as u64;
+        let rodata_offset = phdr_end;
+        let text_offset = (rodata_offset + rodata_size).div_ceil(FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
         let text_vaddr: u64 = (BASE_ADDR + text_offset).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
         let bss_vaddr: u64 = if bss_size > 0 {
@@ -4097,7 +4138,7 @@ impl Backend for X86_64Backend {
             );
         }
 
-        Ok(build_minimal_x86_64_elf(&all_code, BASE_ADDR, bss_size))
+        Ok(build_minimal_x86_64_elf(&all_code, BASE_ADDR, bss_size, &program.rodata_data))
     }
 
     fn return_stub(&self) -> Vec<u8> {
@@ -4592,7 +4633,7 @@ mod tests {
     #[test]
     fn test_elf_header() {
         let code = encode_ret();
-        let elf = build_minimal_x86_64_elf(&code, 0x400000, 0);
+        let elf = build_minimal_x86_64_elf(&code, 0x400000, 0, &[]);
 
         // Check ELF magic
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -4631,7 +4672,7 @@ mod tests {
     #[test]
     fn test_elf_header_with_bss() {
         let code = encode_ret();
-        let elf = build_minimal_x86_64_elf(&code, 0x400000, 16); // 16 bytes of BSS
+        let elf = build_minimal_x86_64_elf(&code, 0x400000, 16, &[]); // 16 bytes of BSS
 
         // Check ELF magic
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
