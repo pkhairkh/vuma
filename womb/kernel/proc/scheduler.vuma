@@ -95,8 +95,11 @@
 //     ProcessTable.)
 //   * schedule(rq, tbl) is just sched_dequeue — the CFS "pick next" step.
 //     R4a+b REMOVES the TrapFrame parameter that K4b's schedule() had.
-//   * sched_tick(tbl, task_idx, delta) bumps the current task's vruntime
-//     by delta (called by the timer IRQ handler on every tick).
+//   * sched_tick(rq, tbl, task_idx, delta) bumps the current task's vruntime
+//     by delta (called by the timer IRQ handler on every tick), then runs
+//     the CFS preemption check (W11S2): walks the runqueue linked list to
+//     find the min vruntime among READY tasks, and if current.vruntime
+//     - min > PREEMPT_THRESHOLD (1000000) sets rq.need_resched = 1.
 //   * sched_yield(rq, tbl, current) re-enqueues the current task and
 //     picks the next one (cooperative yield).
 //
@@ -109,9 +112,12 @@
 // (RUNNING) on the picked task before returning it.
 //
 // ── Runqueue layout ─────────────────────────────────────────────────────────
-//   head:  u32 — index of the first task in the runqueue, or 256 = empty
-//   tail:  u32 — index of the last task in the runqueue, or 256 = empty
-//   count: u32 — number of tasks currently in the runqueue (0..256)
+//   head:         u32 — index of the first task in the runqueue, or 256 = empty
+//   tail:         u32 — index of the last task in the runqueue, or 256 = empty
+//   count:        u32 — number of tasks currently in the runqueue (0..256)
+//   need_resched: u32 — W11S2 preemption flag (0 = no resched, 1 = sched_tick
+//                        observed vruntime drift > PREEMPT_THRESHOLD and the
+//                        timer-IRQ handler should call schedule()).
 // head/tail are u32 (not u64) to match ProcessTable's index type —
 // pt_set_next takes idx: u32, and rq.head / rq.tail are passed directly
 // to pt_set_next as the prev-of-new-tail argument. 256 is the "empty"
@@ -174,10 +180,13 @@
 //   sched_enqueue(rq, tbl, task_idx)        — 2 params + u32
 //   sched_dequeue(rq, tbl)                  — 2 params
 //   schedule(rq, tbl)                       — 2 params
-//   sched_tick(tbl, task_idx, delta)        — 1 param + u32 + u64
+//   sched_tick(rq, tbl, task_idx, delta)    — 2 params + u32 + u64 (W11S2:
+//                                              rq added for need_resched)
 //   sched_yield(rq, tbl, current)           — 2 params + u32
 //   sched_save_context(tbl, task_idx, tf)   — 2 params + u32
 //   sched_restore_context(tbl, task_idx, tf) — 2 params + u32
+//   sched_check_resched(rq)                 — 1 param (W11S2)
+//   sched_clear_resched(rq)                 — 1 param (W11S2)
 // Same discipline as K2a's pmm_alloc(pool, pmm, order) (2 State params +
 // 1 small arg), K3d's trap_frame_save(tf) (1 State param).
 //
@@ -203,7 +212,11 @@
 //     2     = READY state value (set by sched_enqueue on the new task)
 //     1     = RUNNING state value (set by sched_dequeue on the picked task)
 //     0     = FREE state value (set by tf_init and state_new's zero-fill)
-//   Self-test constants: 100, 50, 4096 — all decimal.
+//     1000000 = PREEMPT_THRESHOLD (W11S2): vruntime-drift gap in ns above
+//             which sched_tick sets rq.need_resched = 1. Decimal (not
+//             0xF4240) per the decimal-constants rule.
+//     1     = need_resched "request preemption" value (W11S2)
+//   Self-test constants: 100, 50, 4096, 2000000 — all decimal.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It re-declares TrapFrame + tf_init +
@@ -222,8 +235,11 @@
 //     /tmp/scheduler.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0 (the self-test enqueues 2 tasks with
 // different vruntimes, calls schedule() and verifies the min-vruntime
-// task is picked, then exercises sched_save_context + sched_restore_context
-// round-trip through tf.pc = 4096).
+// task is picked, exercises sched_save_context + sched_restore_context
+// round-trip through tf.pc = 4096, and — W11S2 extension — verifies
+// sched_tick's preemption check sets rq.need_resched = 1 when the
+// current vruntime drifts > 1000000 above the runqueue min, then
+// exercises sched_check_resched + sched_clear_resched).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -248,10 +264,22 @@ layout TrapFrame = {
 // Runqueue: head/tail are Task indices (0..255) or 256 (empty). count is
 // the number of tasks currently in the runqueue (0..256). The next-link
 // field lives in ProcessTable.nexts (not here).
+//
+// need_resched is the preemption flag set by sched_tick (W11S2) when the
+// current task's vruntime has drifted more than PREEMPT_THRESHOLD
+// (1000000 ns) above the minimum vruntime among the READY tasks in the
+// runqueue. The timer-IRQ handler (R4c) reads it via sched_check_resched
+// to decide whether to call schedule(), and clears it via
+// sched_clear_resched once the preemption has been serviced. Semantically
+// equivalent to Linux's TIF_NEED_RESCHED thread flag, but stored on the
+// Runqueue (VUMA has no globals — see "Why init-style?" header) rather
+// than per-task, because only the currently-running task can be the
+// preemptee and the runqueue is the natural per-CPU container.
 layout Runqueue = {
     head: u32,
     tail: u32,
     count: u32,
+    need_resched: u32,
 }
 
 // ProcessTable: re-declared byte-identically to K4a's task.vuma. 10
@@ -492,11 +520,13 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // sched_init: initialize an empty runqueue. Idempotent. Called by kmain
 // at boot before the first sched_enqueue. head = tail = 256 (empty
-// sentinel), count = 0.
+// sentinel), count = 0, need_resched = 0 (no preemption requested until
+// sched_tick observes vruntime drift > PREEMPT_THRESHOLD).
 fn sched_init(rq: State<Runqueue>) {
     rq.head = 256;
     rq.tail = 256;
     rq.count = 0;
+    rq.need_resched = 0;
 }
 
 // sched_enqueue: add task `task_idx` to the tail of the runqueue. Sets
@@ -577,14 +607,87 @@ fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     return sched_dequeue(rq, tbl);
 }
 
-// sched_tick: bump task `task_idx`'s vruntime by `delta`. Called by the
-// timer-IRQ handler (R4c) on every tick — delta is typically the tick
-// interval in nanoseconds. The current task's vruntime monotonically
-// increases, so it eventually becomes the largest in the runqueue, at
-// which point sched_dequeue picks a different task.
-fn sched_tick(tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
+// sched_tick: bump task `task_idx`'s vruntime by `delta`, then run the
+// CFS preemption check (W11S2). Called by the timer-IRQ handler (R4c) on
+// every tick — delta is typically the tick interval in nanoseconds.
+//
+// After bumping vruntime, walks the runqueue linked list (the set of
+// READY tasks waiting for a CPU) to find the minimum vruntime among
+// them. If `current.vruntime - min_vruntime` exceeds PREEMPT_THRESHOLD
+// (1000000 ns — decimal, see the "Decimal-constants discipline" header),
+// sets `rq.need_resched = 1` so the timer-IRQ handler knows to call
+// schedule() on the next iteration.
+//
+// The currently-running task is NOT in the runqueue at tick time
+// (sched_dequeue removed it when it transitioned RUNNING — see the
+// sched_dequeue comment), so the linked-list walk only sees READY tasks
+// — exactly the candidates we want to compare against. If the runqueue
+// is empty (no other tasks are waiting), `need_resched` is left
+// unchanged: there is nothing to preempt TO, so we don't request a
+// reschedule (the timer-IRQ handler will keep running the current task).
+//
+// The `current.vruntime < min_vruntime` case (current task is still the
+// most-fair candidate — should not be preempted) is guarded by an
+// explicit `if cur_vruntime > min_vruntime` check, because u64
+// subtraction would underflow otherwise (VUMA u64 is unsigned wrap; the
+// guard avoids relying on wrap semantics for correctness).
+//
+// State<T> params: 2 (rq + tbl). rq is written (need_resched flag),
+// tbl is read (vruntime get/set + linked-list walk). No `*ptr`/`&x`/
+// `allocate`/`free` anywhere — pure State<T> field access.
+fn sched_tick(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
+    // Step 1: bump vruntime (K4b behavior — unchanged).
     let v = pt_get_vruntime(tbl, task_idx);
     pt_set_vruntime(tbl, task_idx, v + delta);
+    // Step 2: preemption check (W11S2). If the runqueue is empty there
+    // is nothing to preempt to — leave need_resched alone.
+    if rq.head == 256 {
+        return;
+    }
+    // Walk the runqueue linked list to find the minimum vruntime among
+    // the READY tasks. Same walk pattern as sched_dequeue's min-vruntime
+    // search, but without the prev-tracking (we don't remove anything).
+    let min_vruntime = pt_get_vruntime(tbl, rq.head);
+    let cur = pt_get_next(tbl, rq.head);
+    while cur != 256 {
+        let v2 = pt_get_vruntime(tbl, cur as u32);
+        if v2 < min_vruntime {
+            min_vruntime = v2;
+        }
+        cur = pt_get_next(tbl, cur as u32);
+    }
+    // Compare current's (post-bump) vruntime to the min. Guard the
+    // subtraction so u64 underflow can't make an unfair task look fair.
+    let cur_vruntime = pt_get_vruntime(tbl, task_idx);
+    if cur_vruntime > min_vruntime {
+        let diff = cur_vruntime - min_vruntime;
+        if diff > 1000000 {
+            rq.need_resched = 1;
+        }
+    }
+}
+
+// sched_check_resched: return the current need_resched flag. Called by
+// the timer-IRQ handler (R4c) after sched_tick to decide whether to
+// invoke schedule(). Returns 1 if a preemption is requested, 0
+// otherwise. Pure State<T> field read — no pointer syntax.
+//
+// State<T> params: 1 (rq — read only).
+fn sched_check_resched(rq: State<Runqueue>) -> u32 {
+    return rq.need_resched;
+}
+
+// sched_clear_resched: clear the need_resched flag. Called by the
+// timer-IRQ handler (or whichever caller serviced the preemption
+// request) after it has either called schedule() OR decided to ignore
+// the request (e.g. preempt_count != 0 — see womb/kernel/smp/percpu.vuma
+// percpu_preemptable). Resets the flag so subsequent ticks start from a
+// clean slate — without this, a single preemption request would persist
+// forever and every subsequent tick would re-trigger schedule().
+//
+// State<T> params: 1 (rq — write only).
+fn sched_clear_resched(rq: State<Runqueue>) {
+    rq.need_resched = 0;
 }
 
 // sched_yield: re-enqueue the current task (add it to the tail of the
@@ -646,7 +749,7 @@ fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<Trap
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the R4a+b DoD).
+// Self-test (the R4a+b DoD + W11S2 preemption extension).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a Runqueue, a ProcessTable, and a TrapFrame via state_new.
 // Init the runqueue (sched_init) and the TrapFrame (tf_init). Manually
@@ -657,12 +760,26 @@ fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<Trap
 //   (3) sched_save_context(tbl, 1, tf) with tf.pc = 4096, then
 //       sched_restore_context(tbl, 1, tf) on a fresh TrapFrame yields
 //       tf.pc == 4096 — round-trip through the saved-context overload.
-// Returns 0 on success, 1..3 on the corresponding check failure.
+// W11S2 preemption extension (Task 1 is RUNNING, Task 0 is the only
+// READY task in the runqueue with vruntime=100):
+//   (4) rq.need_resched == 0 right after sched_init (clean slate).
+//   (5) sched_tick with a SMALL delta (100) — Task 1 vruntime goes
+//       50→150, min in runqueue is 100, diff=50 < PREEMPT_THRESHOLD
+//       (1000000) — need_resched stays 0.
+//   (6) sched_tick with a LARGE delta (2000000) — Task 1 vruntime goes
+//       150→2000150, min=100, diff=2000050 > threshold — need_resched
+//       flips to 1.
+//   (7) sched_check_resched(rq) returns 1 (flag is observable).
+//   (8) sched_clear_resched(rq) clears it.
+//   (9) sched_check_resched(rq) returns 0 (clear is observable).
+// Returns 0 on success, 1..9 on the corresponding check failure.
 //
 // Per the contract's "decimal constants" rule: all non-zero constants
-// use DECIMAL (100, 50, 4096) — decimal avoids the parser's hex-literal
-// path (see womb/kernel/arch/x86_64/pt.vuma header for the rationale).
-// (4096 = 0x1000, 100 and 50 are arbitrary test vruntimes.)
+// use DECIMAL (100, 50, 4096, 2000000, 1000000) — decimal avoids the
+// parser's hex-literal path (see womb/kernel/arch/x86_64/pt.vuma header
+// for the rationale). (4096 = 0x1000, 100 and 50 are arbitrary test
+// vruntimes, 2000000 ns = 2 ms — a typical tick interval scaled up to
+// exceed the 1 ms threshold in one tick for test speed.)
 
 fn main() -> i32 {
     let rq = state_new(Runqueue);
@@ -694,5 +811,24 @@ fn main() -> i32 {
     tf.status = 0;
     sched_restore_context(tbl, 1, tf);
     if tf.pc != 4096 { return 3; }
+    // ── W11S2 preemption checks ─────────────────────────────────────────
+    // After schedule() above, Task 1 is RUNNING (dequeued), Task 0 is
+    // the only READY task in the runqueue (vruntime=100).
+    // (4) need_resched must start at 0 (sched_init zeroed it).
+    if rq.need_resched != 0 { return 4; }
+    // (5) Small tick — diff stays below threshold, no preemption.
+    sched_tick(rq, tbl, 1, 100);
+    if rq.need_resched != 0 { return 5; }
+    // (6) Large tick — diff exceeds threshold, need_resched flips to 1.
+    //     Task 1 vruntime: 150 → 2000150. Min in rq: 100. Diff = 2000050.
+    sched_tick(rq, tbl, 1, 2000000);
+    if rq.need_resched != 1 { return 6; }
+    // (7) sched_check_resched observes the flag.
+    if sched_check_resched(rq) != 1 { return 7; }
+    // (8) sched_clear_resched clears it.
+    sched_clear_resched(rq);
+    if rq.need_resched != 0 { return 8; }
+    // (9) sched_check_resched observes the cleared flag.
+    if sched_check_resched(rq) != 0 { return 9; }
     return 0;
 }
