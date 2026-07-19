@@ -17,8 +17,11 @@
 // PMM is 100% arch-independent. No externs, no arch-conditional code. Compiles
 // identically for all 19 backends.
 //
-// Verified R3a: zero `if arch == ...`, zero `extern` blocks, zero arch-
-// specific constants. The buddy allocator is a pure PMT transform over
+// Verified R3a: zero `if arch == ...`, zero arch-specific constants.
+// NOTE (W7S1): one `extern "C"` block added for `__vuma_store_u32` —
+// the pmm_zero_page stub. This is a VUMA intrinsic (registered in the
+// x86_64 codegen as a 3-byte `mov [rdi], esi; ret` stub), not an arch-
+// specific syscall. The buddy allocator is a pure PMT transform over
 // State<FlatPool> + State<PmmState> — it tracks physical page frames as
 // opaque u64 addresses and never inspects their content or layout. Every
 // arch (x86_64, aarch64, riscv64, and the 16 other backends) sees the
@@ -32,7 +35,7 @@
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:
-//   - State<FlatPool>  — the free-list node pool (256 FreeNode slots)
+//   - State<FlatPool>  — the free-list node pool (4096 FreeNode slots)
 //   - State<PmmState>  — the per-PMM bookkeeping (free-list heads + stats)
 // Both are allocated via `state_new(...)` by the CALLER (init-style API —
 // see "Why init-style?" below) and passed by reference (State<T> is a
@@ -81,7 +84,7 @@
 // compliance but were dead code — no production path referenced them;
 // removed during the CLEANUP-1 dead-code sweep). When the codegen
 // gains proper typed-array index lowering, this file can collapse
-// back to `nodes: [FreeNode; 256]` with `pool.nodes[i].base` access.
+// back to `nodes: [FreeNode; 4096]` with `pool.nodes[i].base` access.
 //
 // ── Why are PmmState.free_lists [u8; 88] instead of [u64; 11]? ──────────────
 // Same codegen limitation as above. `[u8; 88]` = 11 packed-little-endian
@@ -99,7 +102,7 @@
 // Working layouts — what the implementation actually uses.
 // ────────────────────────────────────────────────────────────────────────────
 
-// Flat free-list node pool. Holds 256 FreeNode records laid out as three
+// Flat free-list node pool. Holds 4096 FreeNode records laid out as three
 // parallel byte arrays (bases, orders, nexts) so each field can be
 // accessed via `state.array[idx]` (which the codegen only lowers
 // correctly for [u8; N] arrays — see file header). `count` is the
@@ -109,26 +112,26 @@
 // then returned via pool_free_node (e.g. when a buddy is coalesced away
 // in pmm_free). pool_alloc_node drains free_head before bump-allocating,
 // so the pool can sustain an unbounded sequence of alloc/free cycles
-// without exhausting the 256-slot capacity (Fix 4). The sentinel 256
-// means "empty" (no slot at that index exists — slots are 0..255).
+// without exhausting the 4096-slot capacity (Fix 4). The sentinel 4096
+// means "empty" (no slot at that index exists — slots are 0..4095).
 layout FlatPool = {
-    bases: [u8; 2048],   // 256 * 8 bytes — u64 base address per node, LE-packed
-    orders: [u8; 256],   // 256 bytes    — u8 buddy order per node
-    nexts: [u8; 2048],   // 256 * 8 bytes — u64 next-node index per node, LE-packed
-    count: u32,          // bump-alloc high-water mark (0..256), never decreases
-    free_head: u32,      // head of recycle list, or 256 if empty (Fix 4)
+    bases: [u8; 32768],  // 4096 * 8 bytes — u64 base address per node, LE-packed
+    orders: [u8; 4096],  // 4096 bytes     — u8 buddy order per node
+    nexts: [u8; 32768],  // 4096 * 8 bytes — u64 next-node index per node, LE-packed
+    count: u32,          // bump-alloc high-water mark (0..4096), never decreases
+    free_head: u32,      // head of recycle list, or 4096 if empty (Fix 4)
 }
 
 // The PMM state. `pool` stores the FlatPool state's address (via
 // `pool as Address` — for debug; the implementation reads the pool
 // through the explicit `pool` parameter to every function).
 // `free_lists` is 11 packed u64 slots (one per buddy order 0..10),
-// each holding the index (0..255) of the head FreeNode in that
-// order's free list, or 256 (sentinel) if the list is empty.
+// each holding the index (0..4095) of the head FreeNode in that
+// order's free list, or 4096 (sentinel) if the list is empty.
 // `total_pages` / `free_pages` are stats in 4 KB-page units.
 layout PmmState = {
     pool: u64,            // FlatPool state address (debug; impl uses explicit param)
-    free_lists: [u8; 88], // 11 * 8 bytes — head FreeNode index per order, 256 = empty
+    free_lists: [u8; 88], // 11 * 8 bytes — head FreeNode index per order, 4096 = empty
     total_pages: u64,     // total 4 KB pages managed
     free_pages: u64,      // currently free 4 KB pages
 }
@@ -139,8 +142,22 @@ layout PmmState = {
 // ────────────────────────────────────────────────────────────────────────────
 // PAGE_SIZE  = 4096                 (4 KB base page; sizes are 4096 << order)
 // MAX_ORDER  = 10                   (free_lists has 11 slots, orders 0..10)
-// EMPTY      = 256                  (sentinel: free-list head index = "empty")
-// POOL_CAP   = 256                  (FlatPool capacity — 256 FreeNode slots)
+// EMPTY      = 4096                 (sentinel: free-list head index = "empty")
+// POOL_CAP   = 4096                 (FlatPool capacity — 4096 FreeNode slots)
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern — VUMA intrinsic for the pmm_zero_page stub (W7S1).
+// ────────────────────────────────────────────────────────────────────────────
+// `__vuma_store_u32` is a Wave 7 VUMA intrinsic registered in the x86_64
+// codegen as a 3-byte stub (`mov [rdi], esi; ret`). It stores a u32 value
+// to an arbitrary memory address. Used by `pmm_zero_page` (below) to zero
+// the first 4 bytes of a freshly allocated page as a stub — a full zero
+// of all 4096 bytes would need a loop (future work). On non-x86_64
+// backends the symbol resolves to `__ffi_fallback_stub` (returns 0),
+// which is a safe no-op for the store.
+extern "C" {
+    fn __vuma_store_u32(addr: u64, val: u32);
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Byte-array pack/unpack helpers for FlatPool.bases / .nexts
@@ -214,8 +231,8 @@ fn pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
 
 // Allocate a FreeNode slot from the pool. Tries the recycle list
 // (free_head) first; if empty, bump-allocates a new slot from the count
-// high-water mark. Returns the slot index (0..255), or 256 if the pool
-// is exhausted (both free_head empty AND count >= 256).
+// high-water mark. Returns the slot index (0..4095), or 4096 if the pool
+// is exhausted (both free_head empty AND count >= 4096).
 //
 // The recycle path (Fix 4) is what prevents the documented "buddy block
 // is lost" leak: when pmm_free coalesces a buddy, it calls pool_free_node
@@ -223,10 +240,10 @@ fn pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
 // reuses it instead of consuming a fresh bump-alloc slot. This lets the
 // pool sustain an unbounded alloc/free cycle without growing count past
 // the steady-state high-water mark (rather than monotonically consuming
-// all 256 slots and leaking buddy blocks once exhausted).
+// all 4096 slots and leaking buddy blocks once exhausted).
 fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
     // Try to reuse a freed node first.
-    if pool.free_head < 256 {
+    if pool.free_head < 4096 {
         let node = pool.free_head;
         // The recycle list chains through each slot's `nexts` field
         // (a recycled slot is not on any free_list, so nexts is free
@@ -236,13 +253,13 @@ fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
         // overwrites nexts via pool_set_next before linking the slot
         // into a free_list, but this prevents a stale recycle-link
         // from corrupting state if a caller forgets).
-        pool_set_next(pool, node, 256);
+        pool_set_next(pool, node, 4096);
         return node;
     }
     // Bump-allocate a new slot.
     let idx = pool.count;
-    if idx >= 256 {
-        return 256;
+    if idx >= 4096 {
+        return 4096;
     }
     pool.count = idx + 1;
     return idx;
@@ -250,7 +267,7 @@ fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
 
 // Return a FreeNode slot to the pool's recycle list (Fix 4). The slot is
 // pushed onto free_head; the next pool_alloc_node will reuse it. `node`
-// must be a valid slot index (0..255). The recycle list chains through
+// must be a valid slot index (0..4095). The recycle list chains through
 // each slot's `nexts` field (read by pool_alloc_node). After this call,
 // `node` is NO LONGER on any free_list — the caller must have already
 // unlinked it (e.g. via the prev2/cur2 walk in pmm_free's coalesce path).
@@ -264,7 +281,7 @@ fn pool_free_node(pool: State<FlatPool>, node: u32) {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Read the head FreeNode index for buddy `order` from PmmState.free_lists.
-// Returns 256 (EMPTY sentinel) if the list is empty.
+// Returns 4096 (EMPTY sentinel) if the list is empty.
 fn pmm_get_free_list(pmm: State<PmmState>, order: u8) -> u64 {
     let off = (order as u32) * 8;
     let v: u64 = 0;
@@ -311,6 +328,22 @@ fn pmm_buddy(addr: u64, order: u8) -> u64 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// pmm_zero_page — stub: zero the first 4 bytes of a page (W7S1).
+// ────────────────────────────────────────────────────────────────────────────
+// A full zero of all 4096 bytes would need a loop over the page writing
+// u32 zeros at offsets 0, 4, 8, ..., 4092 (1024 stores). This stub only
+// zeroes the first 4 bytes via `__vuma_store_u32(addr, 0)` — sufficient
+// to prove the extern wiring compiles and the intrinsic resolves. The
+// full loop will be added when the codegen supports efficient indexed
+// store loops (or when a `__vuma_zero_page` intrinsic is registered).
+//
+// pmm_alloc documents (but does not yet call) this stub — see the
+// "page should be zeroed" comments at each return path in pmm_alloc.
+fn pmm_zero_page(addr: u64) {
+    __vuma_store_u32(addr, 0);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // pmm_init — initialize the PMM over a contiguous physical region.
 // ────────────────────────────────────────────────────────────────────────────
 // Walks [mem_start, mem_start+mem_size) in max-order (4 MB) blocks,
@@ -330,19 +363,19 @@ fn pmm_buddy(addr: u64, order: u8) -> u64 {
 
 fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_size: u64) {
     // Reset pool: count = 0 (no slots bump-allocated yet) and free_head
-    // = 256 (recycle list empty — Fix 4). Both fields are u32.
+    // = 4096 (recycle list empty — Fix 4). Both fields are u32.
     pool.count = 0;
-    pool.free_head = 256;
+    pool.free_head = 4096;
 
     // Capture pool address in pmm.pool for diagnostic use.
     pmm.pool = pool as Address;
     pmm.total_pages = 0;
     pmm.free_pages = 0;
 
-    // Zero all 11 free_lists slots to the EMPTY sentinel (256).
+    // Zero all 11 free_lists slots to the EMPTY sentinel (4096).
     let oi = 0;
     while oi < 11 {
-        pmm_set_free_list(pmm, oi as u8, 256);
+        pmm_set_free_list(pmm, oi as u8, 4096);
         oi = oi + 1;
     }
 
@@ -388,7 +421,7 @@ fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_siz
         } else {
             // Allocate a FreeNode for this block.
             let idx = pool_alloc_node(pool);
-            if idx == 256 {
+            if idx == 4096 {
                 // Pool exhausted. Stop.
                 cur = end;
             } else {
@@ -426,7 +459,7 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
     }
 
     let head = pmm_get_free_list(pmm, order);
-    if head != 256 {
+    if head != 4096 {
         // Direct pop: take the head of free_lists[order].
         let next = pool_get_next(pool, head as u32);
         let base = pool_get_base(pool, head as u32);
@@ -434,6 +467,11 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
         // free_pages -= 2^order
         let pages = 1 as u64 << order;
         pmm.free_pages = pmm.free_pages - pages;
+        // W7S1: the returned page should be zeroed before use (call
+        // pmm_zero_page). Not called here because the self-test runs in
+        // hosted mode where the physical addresses (1 MB, 5 MB, ...) are
+        // not mapped — calling __vuma_store_u32 on them would segfault.
+        // Production callers (after boot) MUST zero the page.
         return base;
     }
 
@@ -452,12 +490,12 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
     // (at `bigger`) is returned to the caller.
     let buddy = bigger + pmm_order_size(order);
     let idx = pool_alloc_node(pool);
-    if idx == 256 {
+    if idx == 4096 {
         // Pool exhausted — can't record the buddy. To avoid leaking
         // the buddy block, we'd ideally free `bigger` back; instead,
         // we just return 0 (caller treats as OOM). The buddy block is
         // lost. With Fix 4's recycling, the pool only reaches exhaustion
-        // when count >= 256 AND free_head is empty (i.e. every slot is
+        // when count >= 4096 AND free_head is empty (i.e. every slot is
         // live on some free_list), which requires ~1 GB of in-flight
         // buddy traffic — far beyond the K2a self-test's needs.
         return 0;
@@ -475,6 +513,9 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
     let pages = 1 as u64 << order;
     pmm.free_pages = pmm.free_pages + pages;
 
+    // W7S1: the returned page should be zeroed before use (call
+    // pmm_zero_page). See the direct-pop path above for rationale on
+    // why this is documented but not yet called in the self-test.
     return bigger;
 }
 
@@ -490,10 +531,10 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
     // attempting coalescing.
     if order >= 10 {
         let idx = pool_alloc_node(pool);
-        if idx == 256 {
+        if idx == 4096 {
             // Pool exhausted — block is leaked. With Fix 4's recycling
             // this requires every slot to be live on a free_list (count
-            // = 256 AND free_head empty). Acceptable for K2a.
+            // = 4096 AND free_head empty). Acceptable for K2a.
             return;
         }
         pool_set_base(pool, idx, addr);
@@ -508,11 +549,11 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
 
     // Search free_lists[order] for the buddy block.
     let buddy = pmm_buddy(addr, order);
-    let found = 256;  // 256 = "buddy not found"
+    let found = 4096;  // 4096 = "buddy not found"
     let cur2 = pmm_get_free_list(pmm, order);
-    let prev2: u64 = 256;  // 256 = "no previous" (head of list)
+    let prev2: u64 = 4096;  // 4096 = "no previous" (head of list)
     // Walk the list looking for a node whose base == buddy.
-    while cur2 != 256 {
+    while cur2 != 4096 {
         let cur_base = pool_get_base(pool, cur2 as u32);
         if cur_base == buddy {
             found = cur2;
@@ -523,9 +564,9 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
         }
     }
 
-    if found != 256 {
+    if found != 4096 {
         // Buddy found. Remove `found` from free_lists[order].
-        if prev2 == 256 {
+        if prev2 == 4096 {
             // `found` was the head.
             let next = pool_get_next(pool, found as u32);
             pmm_set_free_list(pmm, order, next);
@@ -536,7 +577,7 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
         // Recycle the buddy's FreeNode slot — Fix 4. Without this, the
         // slot would be "lost": still counted in pool.count but not on any
         // free_list, never reusable. Over many alloc/free cycles the pool
-        // would exhaust (count >= 256) and the documented "buddy block is
+        // would exhaust (count >= 4096) and the documented "buddy block is
         // lost" leak would surface. pool_free_node pushes `found` onto
         // free_head so the next pool_alloc_node (e.g. the prepend at the
         // top of this recursive coalesce chain) reuses it instead of
@@ -556,7 +597,7 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
 
     // Buddy not found. Add addr to free_lists[order].
     let idx = pool_alloc_node(pool);
-    if idx == 256 {
+    if idx == 4096 {
         // Pool exhausted — block is leaked. With Fix 4's recycling
         // this requires every slot to be live on a free_list.
         return;
@@ -598,8 +639,8 @@ fn main() -> i32 {
     if pmm.free_pages != pmm.total_pages {
         return 101;
     }
-    // Fix 4: free_head should be 256 (empty) after init.
-    if pool.free_head != 256 {
+    // Fix 4: free_head should be 4096 (empty) after init.
+    if pool.free_head != 4096 {
         return 102;
     }
 
@@ -640,10 +681,10 @@ fn main() -> i32 {
     // (counted in pool.count but never reusable). With Fix 4, each
     // coalesce step calls pool_free_node, pushing the buddy's slot onto
     // free_head. The final order-10 prepend reuses one slot, so free_head
-    // should hold 8+ recycled slots (non-256 = non-empty).
+    // should hold 8+ recycled slots (non-4096 = non-empty).
 
     // Check 1: free_head is non-empty (recycling happened).
-    if pool.free_head == 256 {
+    if pool.free_head == 4096 {
         return 111;
     }
 
