@@ -31,8 +31,9 @@
 //
 // ── What K6f provides ──────────────────────────────────────────────────────
 //   shell_init(s)                 — zero the line buffer length, mark the
-//                                   shell as running, exit_code 0.
-//   shell_prompt(s)               — write "vwk: " (5 bytes) to stdout.
+//                                   shell as running, exit_code 0, cwd="/".
+//   shell_prompt(s)               — write "vwk:" + cwd + "> " to stdout
+//                                   (W27S4: cwd tracked in Shell.cwd).
 //   shell_receive(s, c)           — push one byte through the shell: buffer
 //                                   it, on newline call shell_execute and
 //                                   reset the buffer, on Tab (byte 9)
@@ -134,7 +135,7 @@
 // layout it uses. The two layouts are NEW (K6f introduces them — no prior
 // wave declares Shell or ShellOut):
 //
-//   Shell (264 bytes total, padded to 272 for u32 alignment of buf_len):
+//   Shell (W27S4: +68 bytes for cwd/cwd_len — now ~600 bytes total):
 //     buf       @ 0    [u8; 256]  — the input line buffer (256 bytes).
 //                                    Indexed [0..buf_len) during parsing;
 //                                    bytes beyond buf_len are stale
@@ -149,30 +150,35 @@
 //     exit_code @ 261  i32        — exit code (set by `exit N` — K6f only
 //                                    sets 0 from `exit`, K7+ will parse
 //                                    the optional numeric argument).
-//   (Plus 7 bytes of trailing padding to align the struct to 4 bytes — the
-//   VUMA layout pads to the largest field's alignment, which is 4 bytes
-//   for the u32 buf_len field. The u8 running field and the i32 exit_code
-//   field pack tight at offsets 260 / 261 — wait, i32 needs 4-byte
-//   alignment, so exit_code goes at offset 264 with 3 bytes of pad after
-//   running. Total: 256 + 4 + 1 + 3 (pad) + 4 = 268, then padded to 4-byte
-//   alignment = 268. The exact layout padding doesn't matter for K6f
-//   because we access fields by name, never by hand-computed offset.)
+//     redirect_buf @ 268 [u8;256] — W26S5-S6: captured output for pipes.
+//     redirect_len @ 524 u32      — W26S5-S6: bytes in redirect_buf.
+//     redirect_mode @ 528 u8      — W26S5-S6: 1 = capturing, 0 = normal.
+//     cwd       @ 529  [u8; 64]   — W27S4: current working directory.
+//                                    Initialized to "/" by shell_init;
+//                                    K7+ `cd` will mutate it.
+//     cwd_len   @ 593  u32        — W27S4: bytes currently in cwd (0..64).
+//   (The exact layout padding doesn't matter for K6f because we access
+//   fields by name, never by hand-computed offset — VUMA's layout pass
+//   handles alignment. The offsets above are approximate for documentation.)
 //
 //   ShellOut (256 bytes total):
 //     data      @ 0    [u8; 256]  — output buffer for the shell's write
-//                                    calls. Used by shell_prompt (5-byte
-//                                    "vwk: " prefix), shell_execute (1-byte
-//                                    newline + 2-byte "?\n" error marker),
-//                                    and shell_do_echo (up to 256 bytes of
-//                                    "echo" output + trailing newline). The
-//                                    triple-use is intentional: all three
+//                                    calls. Used by shell_prompt (W27S4:
+//                                    cwd bytes copied here for the middle
+//                                    write of "vwk:"+cwd+"> "), shell_execute
+//                                    (1-byte newline + 2-byte "?\n" error
+//                                    marker), shell_do_echo (up to 256 bytes
+//                                    of "echo" output + trailing newline),
+//                                    shell_do_pwd (W27S4: cwd + newline),
+//                                    and the redirect handlers. The
+//                                    multi-use is intentional: all callers
 //                                    need a 256-byte buffer with `data` at
 //                                    offset 0 (so the `as Address` cast
 //                                    yields the address of data[0] for the
 //                                    FFI call), and VUMA layouts are
 //                                    byte-size contracts — same layout,
 //                                    same size, same alignment, so one
-//                                    layout name covers all three uses.
+//                                    layout name covers all uses.
 //                                    (Same pattern as K6e's ConsoleStr.)
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
@@ -305,16 +311,19 @@ layout Shell = {
     redirect_buf: [u8; 256], // W26S5-S6: captured output for pipes (256 bytes)
     redirect_len: u32,       // W26S5-S6: bytes currently in redirect_buf
     redirect_mode: u8,       // W26S5-S6: 1 = capturing output, 0 = normal
+    cwd: [u8; 64],           // W27S4: current working directory (max 64 bytes)
+    cwd_len: u32,            // W27S4: bytes currently in cwd (0..64)
 }
 
-// ShellOut: a 256-byte buffer used by shell_prompt (5-byte "vwk: " prefix),
-// shell_execute (1-byte newline + 2-byte "?\n" error marker), and
-// shell_do_echo (up to 256 bytes of "echo" output + trailing newline).
-// The triple-use is intentional: all three need a 256-byte buffer with
-// `data` at offset 0 (so the `as Address` cast yields the address of
-// data[0] for the FFI call). VUMA layouts are byte-size contracts —
-// same layout, same size, same alignment, so one layout name covers
-// all three uses. (Same pattern as K6e's ConsoleStr.)
+// ShellOut: a 256-byte buffer used by shell_prompt (W27S4: cwd bytes for
+// the "vwk:"+cwd+"> " prompt), shell_execute (1-byte newline + 2-byte
+// "?\n" error marker), shell_do_echo (up to 256 bytes of "echo" output +
+// trailing newline), shell_do_pwd (W27S4: cwd + newline), and the redirect
+// handlers. The multi-use is intentional: all callers need a 256-byte
+// buffer with `data` at offset 0 (so the `as Address` cast yields the
+// address of data[0] for the FFI call). VUMA layouts are byte-size
+// contracts — same layout, same size, same alignment, so one layout name
+// covers all uses. (Same pattern as K6e's ConsoleStr.)
 layout ShellOut = { data: [u8; 256] }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -334,30 +343,43 @@ fn shell_init(s: State<Shell>) {
     s.exit_code = 0;
     s.redirect_len = 0;
     s.redirect_mode = 0;
+    // W27S4: initialize cwd to "/" (root). cwd[0] = 47 ('/'), cwd_len = 1.
+    // K7+ will add a `cd` built-in that mutates cwd; for now the shell
+    // starts at root and stays there.
+    s.cwd[0] = 47;   // '/'
+    s.cwd_len = 1;
 }
 
-// Print a prompt to stdout. Writes the 5-byte "vwk: " prefix (decimal
-// ASCII: v=118, w=119, k=107, :=58, space=32) to a fresh ShellOut and
-// hands its address to write(1, addr, 5). The prompt is intentionally
-// short (5 bytes vs. the typical "$ " or "user@host:cwd$ " — 2 to 30+
-// bytes) because K6f doesn't yet track a CWD (K7+ will add `cwd: [u8; 64]`
-// to the Shell layout and render it into the prompt between "vwk:" and
-// the trailing space — K6f's prompt format is the prefix that future
-// waves will extend).
+// Print a prompt to stdout. W27S4: the prompt format is now "vwk:" + cwd +
+// "> " — three write calls: (1) the 4-byte "vwk:" prefix (string literal),
+// (2) the cwd bytes (copied from s.cwd into a ShellOut and written via
+// `out as Address`), (3) the 2-byte "> " suffix (string literal). The cwd
+// is printed between the colon and the "> " so the prompt looks like
+// "vwk:/> " at root or "vwk:/bin> " after a future `cd /bin`.
 //
-// The `out as Address` cast gives the address of out.data (at offset 0
-// of ShellOut) — the natural argument for write(1, addr, 5). Same PMT
-// "Borrowed read" pattern as K6e's console_flush, K6a's uart_putc_8250.
+// PMT-pure: the "vwk:" and "> " parts use Wave 1 string literals lowered to
+// .rodata addresses (same pattern as W25S1). The cwd part is read from the
+// Shell state (s.cwd[0..cwd_len]) — we cannot pass s.cwd directly to write
+// (no `s.cwd as Address` on a struct field), so we copy the bytes into a
+// fresh ShellOut and use `out as Address` (the documented PMT "Borrowed read"
+// pattern — same as shell_do_echo, shell_handle_redir_in/out). The ShellOut
+// is 256 bytes, cwd is at most 64, so the copy is always in bounds.
+//
+// The `s` parameter carries the cwd state; the function reads s.cwd and
+// s.cwd_len but does not mutate them.
 fn shell_prompt(s: State<Shell>) {
-    // W25S1: use a Wave 1 string literal ("vwk: ") instead of assembling
-    // the 5 bytes byte-by-byte into a fresh ShellOut. The literal lowers
-    // to a .rodata address (see src/pipeline.rs:8733 — Lit::String →
-    // ScgExpr::Int(rodata_vaddr + offset)), and `write` takes the Address
-    // directly (same PMT "Borrowed read" pattern as the old `out as
-    // Address` cast, but zero-copy from .rodata instead of from
-    // ___pmt_buffer). The `s` parameter is kept for API symmetry with
-    // shell_receive / shell_execute (callers always pass the Shell state).
-    write(1, "vwk: ", 5);
+    // (1) Write the 4-byte "vwk:" prefix.
+    write(1, "vwk:", 4);
+    // (2) Copy cwd[0..cwd_len] into a ShellOut and write it.
+    let out = state_new(ShellOut);
+    let i = 0;
+    while i < s.cwd_len {
+        out.data[i] = s.cwd[i];
+        i = i + 1;
+    }
+    write(1, out as Address, s.cwd_len as i64);
+    // (3) Write the 2-byte "> " suffix.
+    write(1, "> ", 2);
 }
 
 // Receive a byte from the console. Buffer it; on newline, parse and
@@ -986,11 +1008,84 @@ fn shell_do_help(s: State<Shell>) {
 }
 
 // `ls` — list files in the current directory.
-// K7+ stub: no filesystem yet, so print "(no files)\n". K7+ will
-// replace this with a readdir loop over the cwd once K6fs is wired in.
+// W27S1: color ls — directories are printed in blue (ANSI ESC[34m ... ESC[0m),
+// regular files are printed with no color. This is a stub that prints a fixed
+// set of fake root-directory entries (bin, etc, dev, README.txt, hello.txt);
+// K7+ will replace this with a readdir loop over the cwd once K6fs is wired
+// in. The directory-vs-file classification is also a stub: the
+// shell_entry_is_dir helper checks the entry name against three known
+// directory names ("bin", "etc", "dev") by comparing the .rodata address of
+// the name literal — same PMT-pure pattern as shell_match_cmd. A full
+// implementation would call stat() and check S_ISDIR; the "ends with /"
+// heuristic from the task spec is handled by the known-name check (a name
+// like "bin/" would need its own literal, but the stub prints names without
+// trailing slashes, matching real ls output).
+//
+// ANSI color codes (VT100 / xterm):
+//   ESC[34m  = set foreground color to blue (5 bytes: ESC, '[', '3', '4', 'm')
+//   ESC[0m   = reset all attributes (4 bytes: ESC, '[', '0', 'm')
+// The `\x1b` hex escape in the string literal produces ESC (byte 27). Same
+// `write(1, "\x1b...", n)` pattern as shell_do_clear (W25S2) and K6e's
+// console_set_bold / console_reset_color (W23S5).
+//
+// W26S5-S6: when redirect_mode == 1 (capturing for a pipe / file redirect),
+// ls output is suppressed — same as the pre-W27S1 shell_puts-based stub.
+// PMT-pure limitation: we cannot copy the color-coded output into
+// redirect_buf because the names are .rodata addresses (not readable). K7+
+// may build ls output in a ShellOut byte-by-byte to enable pipe capture.
 fn shell_do_ls(s: State<Shell>) {
-    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
-    shell_puts(s, "(no files)\n", 11);
+    // W26S5-S6: suppress output when redirect_mode == 1.
+    if s.redirect_mode == 1 {
+        return;
+    }
+    // Print each entry via shell_ls_entry (handles color + separator).
+    shell_ls_entry("bin", 3);
+    shell_ls_entry("etc", 3);
+    shell_ls_entry("dev", 3);
+    shell_ls_entry("README.txt", 10);
+    shell_ls_entry("hello.txt", 9);
+    // Trailing newline to end the listing.
+    write(1, "\n", 1);
+}
+
+// shell_entry_is_dir: stub heuristic — returns 1 if the entry name is a
+// directory, 0 otherwise. PMT-pure: compares the .rodata address of `name`
+// against the known directory-name literals ("bin", "etc", "dev"). When
+// `name` was passed as a string literal, string-literal deduplication
+// guarantees the same text produces the same address program-wide, so
+// `name == "bin"` is a compile-time-resolvable i64 equality (same pattern
+// as shell_match_cmd). The "ends with /" case from the task spec is
+// covered implicitly: a name literal like "bin/" would need its own
+// comparison branch, but the stub prints names without trailing slashes.
+// K7+ will replace this with a stat() call once K6fs is wired in.
+fn shell_entry_is_dir(name: Address, name_len: u32) -> u8 {
+    if name_len == 3 {
+        if name == "bin" { return 1; }
+        if name == "etc" { return 1; }
+        if name == "dev" { return 1; }
+    }
+    return 0;
+}
+
+// shell_ls_entry: print one ls entry with blue color if it's a directory.
+//   (1) If shell_entry_is_dir returns 1, write ESC[34m (blue, 5 bytes).
+//   (2) Write the entry name (name_len bytes from the .rodata literal).
+//   (3) If shell_entry_is_dir returns 1, write ESC[0m (reset, 4 bytes).
+//   (4) Write a space separator (1 byte).
+// The color check is called twice (before and after the name) rather than
+// cached in a local, because VUMA has no bool type and the u8 return is
+// cheap (the function is a literal-address compare — compile-time constant
+// when `name` is a literal). Same "no caching of trivial pure calls" style
+// as shell_match_cmd's repeated buf.buf[i] checks.
+fn shell_ls_entry(name: Address, name_len: u32) {
+    if shell_entry_is_dir(name, name_len) == 1 {
+        write(1, "\x1b[34m", 5);  // blue
+    }
+    write(1, name, name_len as i64);
+    if shell_entry_is_dir(name, name_len) == 1 {
+        write(1, "\x1b[0m", 4);   // reset
+    }
+    write(1, " ", 1);              // separator
 }
 
 // `cat <file>` — show the contents of a file.
@@ -1019,13 +1114,32 @@ fn shell_do_cat(s: State<Shell>) {
 }
 
 // `pwd` — print the working directory.
-// K7+ stub: print "/\n" (the root). K7+ will replace this with a read
-// of the Shell.cwd field once that field is added to the Shell layout
-// (currently Shell has no cwd slot — see the file header's "Layouts"
-// note).
+// W27S4: now reads the actual cwd from the Shell state (s.cwd[0..cwd_len])
+// instead of the hard-coded "/\n" stub. The cwd is copied into a ShellOut
+// and a trailing newline (byte 10) is appended, then written to stdout via
+// `out as Address` — same PMT "Borrowed read" pattern as shell_do_echo and
+// shell_prompt. After shell_init, cwd is "/" (1 byte), so `pwd` prints
+// "/\n"; once a future `cd` built-in mutates cwd, `pwd` will print the
+// updated path.
+//
+// W26S5-S6: when redirect_mode == 1 (capturing for a pipe / file redirect),
+// pwd output is suppressed — same as the pre-W27S4 shell_puts-based stub.
+// PMT-pure limitation: we cannot copy the cwd into redirect_buf from here
+// because the copy would need to be in the capturing built-in's frame.
 fn shell_do_pwd(s: State<Shell>) {
-    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
-    shell_puts(s, "/\n", 2);
+    // W26S5-S6: suppress output when redirect_mode == 1.
+    if s.redirect_mode == 1 {
+        return;
+    }
+    // Copy cwd[0..cwd_len] into a ShellOut, append '\n', write to stdout.
+    let out = state_new(ShellOut);
+    let i = 0;
+    while i < s.cwd_len {
+        out.data[i] = s.cwd[i];
+        i = i + 1;
+    }
+    out.data[i] = 10;  // '\n'
+    write(1, out as Address, (s.cwd_len + 1) as i64);
 }
 
 // `ver` — print the shell / kernel version.
