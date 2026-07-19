@@ -521,7 +521,13 @@ impl MsgBuilder {
             | ScgNodeType::ArenaNew
             | ScgNodeType::ArenaAlloc
             | ScgNodeType::ArenaGrow
-            | ScgNodeType::ArenaFree => ScgNodeMapping::None,
+            | ScgNodeType::ArenaFree
+            // Wave 2b: channel operations produce no MSG constructs of
+            // their own — skip them (same as StructDef/EnumDef/etc.).
+            | ScgNodeType::ChannelOpen
+            | ScgNodeType::ChannelSend
+            | ScgNodeType::ChannelRecv
+            | ScgNodeType::ChannelClose => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);

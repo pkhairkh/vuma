@@ -215,6 +215,28 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             lhs: sv(lhs),
             rhs: sv(rhs),
         },
+        // Wave 1d / Task 2a: channel instructions.
+        // Channel handles (ch) and freshly-defined destinations (dst) are
+        // opaque capability tokens — they pass through substitution
+        // unchanged.  The message value (msg) is a normal data value and
+        // is substituted normally.  See substitute_value doc comment.
+        IRInstr::ChannelOpen { dst, elem_ty } => IRInstr::ChannelOpen {
+            dst: dst.clone(),
+            elem_ty: elem_ty.clone(),
+        },
+        IRInstr::ChannelSend { ch, msg, ty } => IRInstr::ChannelSend {
+            ch: ch.clone(),
+            msg: sv(msg),
+            ty: ty.clone(),
+        },
+        IRInstr::ChannelRecv { ch, dst, ty } => IRInstr::ChannelRecv {
+            ch: ch.clone(),
+            dst: dst.clone(),
+            ty: ty.clone(),
+        },
+        IRInstr::ChannelClose { ch } => IRInstr::ChannelClose {
+            ch: ch.clone(),
+        },
     }
 }
 
@@ -399,17 +421,20 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::Free { .. }
         | IRInstr::Ret { .. }
         | IRInstr::Branch { .. }
-        | IRInstr::CondBranch { .. } => true,
+        | IRInstr::CondBranch { .. }
+        | IRInstr::ChannelOpen { .. }
+        | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelClose { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,
             BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
         ),
         IRInstr::Div { .. } => true,
-        // Wave 1a / Task 1a step 8: channel handle creation
-        // (a future IRInstr::CreateChannel variant added in Wave 1d) has
-        // no side effects - it merely materializes an opaque capability
-        // token in a virtual register.  Until that variant exists, the
-        // `_` arm below already returns `false` for it.
+        // (Wave 2d) All 4 channel instructions (ChannelOpen/Send/Recv/
+        // Close) are listed above as side-effecting: they perform I/O
+        // (allocate / block / wake / deallocate) and are observable even
+        // when their dst vreg is unused.  DCE must never remove them.
         _ => false,
     }
 }
@@ -435,6 +460,12 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
         IRInstr::Ret { .. } => false,
         IRInstr::Branch { .. } => false,
         IRInstr::CondBranch { .. } => false,
+        // (Wave 2d) Channel ops may block or wake other threads -- never
+        // speculate (LICM must keep them inside the loop).
+        IRInstr::ChannelOpen { .. } => false,
+        IRInstr::ChannelSend { .. } => false,
+        IRInstr::ChannelRecv { .. } => false,
+        IRInstr::ChannelClose { .. } => false,
         _ => true,
     }
 }
@@ -457,6 +488,10 @@ fn get_defined_value(instr: &IRInstr) -> Option<&IRValue> {
         IRInstr::Mul { dst, .. } => Some(dst),
         IRInstr::Div { dst, .. } => Some(dst),
         IRInstr::Cmp { dst, .. } => Some(dst),
+        // (Wave 2d) Channel ops that produce a value (handle / received msg).
+        // Send and Close write no vreg and fall through to `_ => None`.
+        IRInstr::ChannelOpen { dst, .. } => Some(dst),
+        IRInstr::ChannelRecv { dst, .. } => Some(dst),
         _ => None,
     }
 }
@@ -676,6 +711,13 @@ fn compute_expr_key(instr: &IRInstr) -> Option<ExprKey> {
         IRInstr::Cmp { kind, lhs, rhs, .. } => {
             Some(ExprKey::Compare(*kind, lhs.clone(), rhs.clone()))
         }
+        // (Wave 2d) Channel instructions have side effects -- two identical
+        // channel_send / channel_recv calls are NOT equivalent (each
+        // transfers a distinct message), so they are not CSE candidates.
+        IRInstr::ChannelOpen { .. }
+        | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelClose { .. } => None,
         _ => None,
     }
 }
@@ -971,11 +1013,18 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let result = try_fold_cmp(*kind, l, r)?;
             Some((dst_id, result))
         }
-        // Wave 1a / Task 1a step 9: channel handle operations (e.g. a
-        // future IRInstr::CreateChannel added in Wave 1d) cannot be
-        // constant-folded - each handle is a fresh opaque capability
-        // whose identity is known only at runtime.  The `_` arm returns
-        // `None`, leaving such instructions in place.
+        // (Wave 2d) Channel instructions cannot be constant-folded:
+        //  - ChannelOpen returns a fresh opaque handle (runtime identity).
+        //  - ChannelSend has no result and performs I/O.
+        //  - ChannelRecv returns a value sent by another thread (unknowable
+        //    at compile time).
+        //  - ChannelClose has no result and performs I/O.
+        // All four return None, leaving the instruction in place.
+        IRInstr::ChannelOpen { .. }
+        | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelClose { .. } => None,
+        // (Legacy) Any other instruction not handled above is not foldable.
         _ => None,
     }
 }
@@ -1161,6 +1210,13 @@ fn inline_cost(instr: &IRInstr) -> u32 {
         IRInstr::Div { .. } => 20,
         // Calls: don't inline functions that contain calls (unless very small)
         IRInstr::Call { .. } => 40,
+        // (Wave 2d) Channel ops lower to runtime calls (allocate / enqueue
+        // / dequeue / deallocate).  Cost them like a Call so the inliner
+        // treats functions containing channel ops conservatively.
+        IRInstr::ChannelOpen { .. }
+        | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. }
+        | IRInstr::ChannelClose { .. } => 40,
         // Atomics: expensive and side-effecting
         IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } => 30,
         // Control flow: moderate cost
@@ -2117,6 +2173,15 @@ fn f_name_is_runtime(name: &str) -> bool {
 ///   fn main() { return square(); }
 ///
 /// Then constant_fold folds 5*5 → 25, and DCE removes the now-trivial function.
+///
+/// (Wave 2d) Channel instructions (`ChannelOpen`/`Send`/`Recv`/`Close`) are
+/// NOT constants: channel handles are fresh opaque capabilities allocated at
+/// runtime, and received values come from other threads.  This pass only
+/// inspects `IRInstr::Call` (it propagates constant *arguments* into callee
+/// bodies), so channel instructions are inherently not treated as constants.
+/// A channel handle vreg passed as a Call argument is `IRValue::Register`
+/// (never `IRValue::Immediate`), so the constant-arg detection below skips
+/// it.  No special-casing is needed beyond documenting the invariant.
 pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
     // For each function, collect all call sites and check if any parameter
     // is always the same constant across all call sites.
@@ -2294,7 +2359,23 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
         IRInstr::CondBranch { cond, .. } => sub(cond, old_vreg, &new_val),
         // Free, Branch, Alloc have only one vreg operand or none.
         IRInstr::Free { ptr } => sub(ptr, old_vreg, &new_val),
-        // Alloc writes a vreg (the dst), no vreg reads — nothing to substitute.
+        // (Wave 2d) Channel instruction operand substitution.  Channel
+        // handles live in ordinary vregs, so a propagated constant must
+        // be substituted into `ch`/`msg`/`dst` just like any other vreg
+        // operand.  (Channel handles themselves are never constants, but
+        // a constant int passed as the *message* of ChannelSend still
+        // needs substitution.)
+        IRInstr::ChannelOpen { dst, .. } => sub(dst, old_vreg, &new_val),
+        IRInstr::ChannelSend { ch, msg, .. } => {
+            sub(ch, old_vreg, &new_val);
+            sub(msg, old_vreg, &new_val);
+        }
+        IRInstr::ChannelRecv { ch, dst, .. } => {
+            sub(ch, old_vreg, &new_val);
+            sub(dst, old_vreg, &new_val);
+        }
+        IRInstr::ChannelClose { ch } => sub(ch, old_vreg, &new_val),
+        // Alloc writes a vreg (the dst), no vreg reads -- nothing to substitute.
         // Branch has no vreg operands.
         _ => {}
     }
@@ -2397,6 +2478,12 @@ fn compute_function_hash(func: &IRFunction) -> String {
                 IRInstr::CondBranch { .. } => "condbranch".to_string(),
                 IRInstr::Free { .. } => "free".to_string(),
                 IRInstr::Phi { .. } => "phi".to_string(),
+                // (Wave 2d) Channel ops: include operand vregs so ICF
+                // distinguishes functions whose channel usage differs.
+                IRInstr::ChannelOpen { dst, elem_ty } => format!("chopen:{:?}:{:?}", dst, elem_ty),
+                IRInstr::ChannelSend { ch, msg, .. } => format!("chsend:{:?}:{:?}", ch, msg),
+                IRInstr::ChannelRecv { ch, dst, .. } => format!("chrecv:{:?}:{:?}", ch, dst),
+                IRInstr::ChannelClose { ch } => format!("chclose:{:?}", ch),
                 _ => "other".to_string(),
             });
         }

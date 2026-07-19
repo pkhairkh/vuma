@@ -386,6 +386,19 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(lhs, from, to);
                     sub(rhs, from, to);
                 }
+                // ── Channel operations (Wave 1d / Task 2a) ──
+                // Vreg renumbering applies to all operands (including opaque
+                // channel handles, which are ordinary vregs at the IR level).
+                IRInstr::ChannelOpen { dst, .. } => sub(dst, from, to),
+                IRInstr::ChannelSend { ch, msg, .. } => {
+                    sub(ch, from, to);
+                    sub(msg, from, to);
+                }
+                IRInstr::ChannelRecv { ch, dst, .. } => {
+                    sub(ch, from, to);
+                    sub(dst, from, to);
+                }
+                IRInstr::ChannelClose { ch } => sub(ch, from, to),
             }
         }
         match &mut block.terminator {

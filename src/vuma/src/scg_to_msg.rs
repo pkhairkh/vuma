@@ -382,7 +382,13 @@ fn process_node(
         | NodeType::ArenaNew
         | NodeType::ArenaAlloc
         | NodeType::ArenaGrow
-        | NodeType::ArenaFree => {
+        | NodeType::ArenaFree
+        // Wave 2b: channel operations are I/O-like side-effecting ops;
+        // they don't produce their own MSG entity — treat as passthrough.
+        | NodeType::ChannelOpen
+        | NodeType::ChannelSend
+        | NodeType::ChannelRecv
+        | NodeType::ChannelClose => {
             process_passthrough(scg, ctx, node)?;
         }
     }

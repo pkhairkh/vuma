@@ -2064,6 +2064,11 @@ fn emit_instr(
         // ── VectorOp (Wave 29) ──
         // s390x has no SIMD encoder in the Wave 29 suite; emit nothing.
         IRInstr::VectorOp { .. } => {}
+        // ── Channel operations (Wave 1d / Task 2a) ──
+        // Backend lowering not yet implemented; emit nothing (no frontend
+        // generates channel IR yet).  Will be lowered to runtime calls.
+        IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+        | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => {}
     }
 }
 

@@ -34,6 +34,7 @@ use crate::node::{
     ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
     ForeignConsumeNode,
     ArenaNewNode, ArenaAllocNode, ArenaGrowNode, ArenaFreeNode,
+    ChannelOpenNode, ChannelSendNode, ChannelRecvNode, ChannelCloseNode,
     StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
@@ -75,6 +76,11 @@ const NODE_TYPE_ARENA_NEW: u32 = 20;
 const NODE_TYPE_ARENA_ALLOC: u32 = 21;
 const NODE_TYPE_ARENA_GROW: u32 = 22;
 const NODE_TYPE_ARENA_FREE: u32 = 23;
+// Wave 2b channel node tags (sequential after ARENA_FREE=23).
+const NODE_TYPE_CHANNEL_OPEN: u32 = 24;
+const NODE_TYPE_CHANNEL_SEND: u32 = 25;
+const NODE_TYPE_CHANNEL_RECV: u32 = 26;
+const NODE_TYPE_CHANNEL_CLOSE: u32 = 27;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -383,6 +389,10 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::ArenaAlloc => NODE_TYPE_ARENA_ALLOC,
         NodeType::ArenaGrow => NODE_TYPE_ARENA_GROW,
         NodeType::ArenaFree => NODE_TYPE_ARENA_FREE,
+        NodeType::ChannelOpen => NODE_TYPE_CHANNEL_OPEN,
+        NodeType::ChannelSend => NODE_TYPE_CHANNEL_SEND,
+        NodeType::ChannelRecv => NODE_TYPE_CHANNEL_RECV,
+        NodeType::ChannelClose => NODE_TYPE_CHANNEL_CLOSE,
     }
 }
 
@@ -412,6 +422,10 @@ fn tag_to_node_type(tag: u32) -> Result<NodeType, DeserializeError> {
         NODE_TYPE_ARENA_ALLOC => Ok(NodeType::ArenaAlloc),
         NODE_TYPE_ARENA_GROW => Ok(NodeType::ArenaGrow),
         NODE_TYPE_ARENA_FREE => Ok(NodeType::ArenaFree),
+        NODE_TYPE_CHANNEL_OPEN => Ok(NodeType::ChannelOpen),
+        NODE_TYPE_CHANNEL_SEND => Ok(NodeType::ChannelSend),
+        NODE_TYPE_CHANNEL_RECV => Ok(NodeType::ChannelRecv),
+        NODE_TYPE_CHANNEL_CLOSE => Ok(NodeType::ChannelClose),
         _ => Err(DeserializeError::InvalidValue {
             field: "NodeType".to_string(),
             value: format!("{}", tag),
@@ -1045,6 +1059,27 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
             w.write_u32_le(NODE_TYPE_ARENA_FREE);
             w.write_u32_le(s.arena_vreg);
         }
+        NodePayload::ChannelOpen(c) => {
+            w.write_u32_le(NODE_TYPE_CHANNEL_OPEN);
+            w.write_string(&c.dst);
+            w.write_string(&c.elem_type);
+        }
+        NodePayload::ChannelSend(c) => {
+            w.write_u32_le(NODE_TYPE_CHANNEL_SEND);
+            w.write_string(&c.channel);
+            w.write_string(&c.message);
+            w.write_string(&c.ty);
+        }
+        NodePayload::ChannelRecv(c) => {
+            w.write_u32_le(NODE_TYPE_CHANNEL_RECV);
+            w.write_string(&c.dst);
+            w.write_string(&c.channel);
+            w.write_string(&c.ty);
+        }
+        NodePayload::ChannelClose(c) => {
+            w.write_u32_le(NODE_TYPE_CHANNEL_CLOSE);
+            w.write_string(&c.channel);
+        }
     }
 }
 
@@ -1415,6 +1450,27 @@ fn read_payload(
                 arena_vreg,
             }))
         }
+        NodeType::ChannelOpen => {
+            let dst = reader.read_string(&format!("{}.dst", context))?;
+            let elem_type = reader.read_string(&format!("{}.elem_type", context))?;
+            Ok(NodePayload::ChannelOpen(ChannelOpenNode { dst, elem_type }))
+        }
+        NodeType::ChannelSend => {
+            let channel = reader.read_string(&format!("{}.channel", context))?;
+            let message = reader.read_string(&format!("{}.message", context))?;
+            let ty = reader.read_string(&format!("{}.ty", context))?;
+            Ok(NodePayload::ChannelSend(ChannelSendNode { channel, message, ty }))
+        }
+        NodeType::ChannelRecv => {
+            let dst = reader.read_string(&format!("{}.dst", context))?;
+            let channel = reader.read_string(&format!("{}.channel", context))?;
+            let ty = reader.read_string(&format!("{}.ty", context))?;
+            Ok(NodePayload::ChannelRecv(ChannelRecvNode { dst, channel, ty }))
+        }
+        NodeType::ChannelClose => {
+            let channel = reader.read_string(&format!("{}.channel", context))?;
+            Ok(NodePayload::ChannelClose(ChannelCloseNode { channel }))
+        }
         // Womb data model variants were removed; tags 14..=25 now fall
         // through to the `tag_to_node_type` error path above before
         // reaching this match.
@@ -1759,6 +1815,18 @@ fn format_node_label(node: &NodeData) -> String {
         }
         NodePayload::ArenaFree(_) => {
             "arena_free".to_string()
+        }
+        NodePayload::ChannelOpen(c) => {
+            format!("channel_open<{}>", c.elem_type)
+        }
+        NodePayload::ChannelSend(c) => {
+            format!("channel_send({}, {})", c.channel, c.message)
+        }
+        NodePayload::ChannelRecv(c) => {
+            format!("channel_recv({})", c.channel)
+        }
+        NodePayload::ChannelClose(c) => {
+            format!("channel_close({})", c.channel)
         }
     };
 

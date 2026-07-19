@@ -4688,6 +4688,11 @@ impl InstructionSelector {
                 };
                 self.push(Instruction::NEON_RAW { enc, mnemonic });
             }
+            // ── Channel operations (Wave 1d / Task 2a) ──
+            // Backend lowering not yet implemented; emit nothing (no frontend
+            // generates channel IR yet).  Will be lowered to runtime calls.
+            IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+            | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => {}
         }
         Ok(())
     }

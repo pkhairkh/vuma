@@ -2164,6 +2164,11 @@ impl Emitter {
                 };
                 self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
             }
+            // ── Channel operations (Wave 1d / Task 2a) ──
+            // Backend lowering not yet implemented; emit nothing (no frontend
+            // generates channel IR yet).  Will be lowered to runtime calls.
+            IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+            | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => {}
         }
         Ok(())
     }
@@ -4323,6 +4328,11 @@ impl Emitter {
             // pushes a `NEON_RAW` instruction. This stack-slot emit path
             // treats VectorOp as a no-op (same as Phi/Select/CtSelect/CtEq).
             IRInstr::VectorOp { .. } => {}
+            // ── Channel operations (Wave 1d / Task 2a) ──
+            // Backend lowering not yet implemented; emit nothing (no frontend
+            // generates channel IR yet).  Will be lowered to runtime calls.
+            IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+            | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => {}
         }
         Ok(())
     }

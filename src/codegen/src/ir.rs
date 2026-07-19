@@ -1660,6 +1660,68 @@ pub enum IRInstr {
         /// Right source vreg (lane 0).
         rhs: IRValue,
     },
+
+    // ── Channel operations (Wave 1d / Task 2a) ──────────────────────
+    /// Allocate a new channel: `dst = channel_open <elem_ty>`.
+    ///
+    /// Allocates a channel capable of carrying messages of type `elem_ty`
+    /// and returns a pointer-sized opaque capability handle in `dst`.
+    /// The handle is later passed to [`IRInstr::ChannelSend`],
+    /// [`IRInstr::ChannelRecv`], and [`IRInstr::ChannelClose`].
+    ///
+    /// **Effects:** performs I/O (channel allocation touches shared runtime
+    /// state) and is therefore treated as side-effecting by DCE/LICM.
+    ChannelOpen {
+        /// Destination register (receives the pointer-sized channel handle).
+        dst: IRValue,
+        /// Element/message type the channel carries.
+        elem_ty: IRType,
+    },
+
+    /// Send a message on a channel: `channel_send ch, msg`.
+    ///
+    /// Enqueues `msg` on the channel identified by the opaque handle `ch`.
+    /// The optional `ty` records the message type for backends that need
+    /// to select a store width; `None` means "use the natural width of the
+    /// message vreg" (typically 64-bit).
+    ///
+    /// **Effects:** performs I/O (may block, may wake a receiver).
+    ChannelSend {
+        /// Channel handle (opaque capability).
+        ch: IRValue,
+        /// Message value to send.
+        msg: IRValue,
+        /// Optional message type (selects backend store width).
+        ty: Option<IRType>,
+    },
+
+    /// Receive a message from a channel: `dst = channel_recv ch`.
+    ///
+    /// Dequeues a message from the channel identified by `ch` and stores it
+    /// in `dst`.  The optional `ty` records the message type for backends
+    /// that need to select a load width; `None` means "use the natural width
+    /// of the destination vreg" (typically 64-bit).
+    ///
+    /// **Effects:** performs I/O (may block, may wake a sender).
+    ChannelRecv {
+        /// Channel handle (opaque capability).
+        ch: IRValue,
+        /// Destination register (receives the message).
+        dst: IRValue,
+        /// Optional message type (selects backend load width).
+        ty: Option<IRType>,
+    },
+
+    /// Close/deallocate a channel: `channel_close ch`.
+    ///
+    /// Releases the runtime resources associated with the channel handle
+    /// `ch`.  Using `ch` after this instruction is undefined behaviour.
+    ///
+    /// **Effects:** performs I/O (deallocates shared runtime state).
+    ChannelClose {
+        /// Channel handle (opaque capability).
+        ch: IRValue,
+    },
 }
 
 impl IRInstr {
@@ -1696,12 +1758,16 @@ impl IRInstr {
             | IRInstr::CtEq { dst, .. }
             | IRInstr::AtomicLoad { dst, .. }
             | IRInstr::AtomicCas { dst, .. } => dst.as_register().into_iter().collect(),
+            IRInstr::ChannelOpen { dst, .. }
+            | IRInstr::ChannelRecv { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
             | IRInstr::Branch { .. }
             | IRInstr::CondBranch { .. }
-            | IRInstr::AtomicStore { .. } => vec![],
+            | IRInstr::AtomicStore { .. }
+            | IRInstr::ChannelSend { .. }
+            | IRInstr::ChannelClose { .. } => vec![],
         }
     }
 
@@ -1787,6 +1853,14 @@ impl IRInstr {
                 r.extend(desired.as_register());
                 r
             }
+            IRInstr::ChannelOpen { .. } => vec![],
+            IRInstr::ChannelSend { ch, msg, .. } => {
+                let mut r = ch.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(msg.as_register());
+                r
+            }
+            IRInstr::ChannelRecv { ch, .. } => ch.as_register().into_iter().collect(),
+            IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
         }
     }
 }
@@ -1928,6 +2002,18 @@ impl fmt::Display for IRInstr {
             IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs } => {
                 write!(f, "{} = {}<{}x{}> {}, {}", dst, op, lanes, elem_size, lhs, rhs)
             }
+            IRInstr::ChannelOpen { dst, elem_ty } => {
+                write!(f, "{} = channel_open {}", dst, elem_ty)
+            }
+            IRInstr::ChannelSend { ch, msg, ty } => match ty {
+                Some(t) => write!(f, "channel_send {}, {} ({})", ch, msg, t),
+                None => write!(f, "channel_send {}, {}", ch, msg),
+            },
+            IRInstr::ChannelRecv { ch, dst, ty } => match ty {
+                Some(t) => write!(f, "{} = channel_recv {} ({})", dst, ch, t),
+                None => write!(f, "{} = channel_recv {}", dst, ch),
+            },
+            IRInstr::ChannelClose { ch } => write!(f, "channel_close {}", ch),
         }
     }
 }
