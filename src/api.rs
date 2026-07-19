@@ -1365,6 +1365,7 @@ fn run_backend_codegen(
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+        rodata_data: Vec::new(),
     };
 
     // Encode the program
