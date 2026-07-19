@@ -1,0 +1,8 @@
+// try_recv — Non-blocking recv returns 0 on empty channel
+// Expected exit code: 77
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    result = channel_try_recv(ch);
+    if result == 0 { return 77; }
+    return result;
+}

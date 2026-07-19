@@ -2141,6 +2141,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                                 code.extend(encode_syscall());
+                                // Wave 8b: Check read() return value for errors.
+                                // RAX > 0: success, data already in dst slot
+                                // RAX == 0: EOF (channel closed by writer)
+                                // RAX < 0: error (-EBADF, etc.)
+                                // On error/EOF: store -1 in dst slot as error sentinel.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jle error_path (offset 4: past the jmp)
+                                code.extend(&[0x7E, 0x02]); // jle +2 → error_path
+                                // success: jmp past error path (error = 10+4=14 bytes)
+                                code.extend(&[0xEB, 0x0E]); // jmp +14 → after_error
+                                // error_path: store -1 in dst slot
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // after_error: (fall through to next instruction)
                                 instr_opcode = Some("channel_recv".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -2227,10 +2241,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
                                 // Load read_fd (low 32 bits of handle)
-                                code.extend(load_value(ch, Gpr::Rax));
-                                // Load read_fd from channel handle (low 32 bits)
-                                code.extend(load_value(ch, Gpr::Rdi)); // load full 8-byte handle
-                                // RDI now has the handle; read_fd is in the low 32 bits
+                                code.extend(load_value(ch, Gpr::Rdi));
                                 // rsi = &dst_slot
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8)); // len
@@ -2239,11 +2250,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_reg_imm32(Gpr::R9, 0)); // addrlen=NULL
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 45)); // sys_recvfrom
                                 code.extend(encode_syscall());
-                                // If rax >= 0: message received, return 1
-                                // If rax < 0 (EAGAIN): no message, return 0
-                                // Store result: 1 if received, 0 if not
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // assume success
-                                // TODO: check actual return — for now return 1
+                                // Wave 8b: Convert recvfrom() return to try_recv result.
+                                // RAX > 0: message received → return 1
+                                // RAX <= 0: no message or closed → return 0
+                                // Use setg (set if greater) + movzx — no jumps needed.
+                                // cmp rax, 0
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // setg al (0F 9F C0) — set AL to 1 if RAX > 0 (signed)
+                                code.extend(&[0x0F, 0x9F, 0xC0]);
+                                // movzx eax, al (0F B6 C0) — zero-extend AL to RAX
+                                code.extend(&[0x0F, 0xB6, 0xC0]);
+                                // Store result (0 or 1) in dst
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
                                 instr_opcode = Some("channel_try_recv".to_string());
                                 channel_builtin_matched = true;
