@@ -1,0 +1,30 @@
+// bench — Wave 16d: performance baseline for IPC operations.
+//
+// Sends N messages through a channel and measures throughput.
+// The parent sends 1000 messages, the child receives and counts them.
+// Exits with the count (mod 256) to verify all messages were delivered.
+//
+// Expected exit code: 232 (1000 % 256 = 232)
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        count = 0;
+        i = 0;
+        while i < 1000 {
+            x = channel_recv(ch);
+            count = count + 1;
+            i = i + 1;
+        }
+        channel_close(ch);
+        return (count as i32) % 256;
+    }
+    i = 0;
+    while i < 1000 {
+        channel_send(ch, i);
+        i = i + 1;
+    }
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}

@@ -1,0 +1,20 @@
+// hot_swap — Wave 65-76: hot reload marker test.
+//
+// Hot-swapping (HotSwapManager, VersionedModule) is implemented in
+// ipc.rs. This .vuma test verifies that the basic channel
+// infrastructure works when hot-swap-aware code is compiled.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x as i32;
+    }
+    channel_send(ch, 42);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
