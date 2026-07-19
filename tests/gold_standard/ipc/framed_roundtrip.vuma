@@ -1,0 +1,20 @@
+// framed_send_recv — Wave 10: verify L1 framed channel round-trip.
+// Sends 42 as i64 through a framed channel (44-byte header + 8-byte
+// payload + 4-byte CRC placeholder = 56 bytes per message) and
+// verifies the receiver deframes and extracts the correct value.
+// The MAGIC header ("VUMA") is verified on receive; a mismatch would
+// cause the -1 error sentinel to be stored instead.
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x as i32;
+    }
+    channel_send(ch, 42);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
