@@ -281,6 +281,9 @@
 // shell loop moves into VUMA.
 extern "C" {
     fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn open(path: Address, flags: i64, mode: i64) -> i64;
+    fn close(fd: i64) -> i64;
     fn exit(code: i64);
 }
 
@@ -295,10 +298,13 @@ extern "C" {
 // matches K6e's Console and K1's stub Console; buf_len / running /
 // exit_code are scalar metadata trailing the array).
 layout Shell = {
-    buf: [u8; 256],     // offset 0:   input line buffer (256 bytes)
-    buf_len: u32,       // offset 256: bytes currently in buf (0..256)
-    running: u8,        // offset 260: 1 = running, 0 = exit requested
-    exit_code: i32,     // offset 264: exit code (from `exit N`)
+    buf: [u8; 256],          // offset 0:   input line buffer (256 bytes)
+    buf_len: u32,            // offset 256: bytes currently in buf (0..256)
+    running: u8,             // offset 260: 1 = running, 0 = exit requested
+    exit_code: i32,          // offset 264: exit code (from `exit N`)
+    redirect_buf: [u8; 256], // W26S5-S6: captured output for pipes (256 bytes)
+    redirect_len: u32,       // W26S5-S6: bytes currently in redirect_buf
+    redirect_mode: u8,       // W26S5-S6: 1 = capturing output, 0 = normal
 }
 
 // ShellOut: a 256-byte buffer used by shell_prompt (5-byte "vwk: " prefix),
@@ -326,6 +332,8 @@ fn shell_init(s: State<Shell>) {
     s.buf_len = 0;
     s.running = 1;
     s.exit_code = 0;
+    s.redirect_len = 0;
+    s.redirect_mode = 0;
 }
 
 // Print a prompt to stdout. Writes the 5-byte "vwk: " prefix (decimal
@@ -431,70 +439,277 @@ fn shell_receive(s: State<Shell>, c: u8) {
 fn shell_execute(s: State<Shell>) {
     // Echo a newline first — terminates the user's input line on the
     // terminal. W25S1: uses a Wave 1 string literal ("\n") instead of
-    // a fresh ShellOut + byte store. The literal is a single-byte
-    // .rodata entry; `write` takes its Address directly.
+    // a fresh ShellOut + byte store.
     write(1, "\n", 1);
 
-    // Full command-name dispatch via shell_match_cmd. Each branch passes
-    // the command-name string literal + its byte length; the tokenizer
-    // returns 1 only if buf[0..name_len] matches the named command AND
-    // buf[name_len] is a word boundary (space / newline / end-of-buffer).
-    if shell_match_cmd(s, "echo", 4) == 1 {
-        shell_do_echo(s);
+    // W26S5-S6: clear any leftover redirect state from a previous command.
+    s.redirect_len = 0;
+    s.redirect_mode = 0;
+
+    // W26S5-S6: scan for pipe (|, byte 124) and redirection (>, byte 62;
+    // <, byte 60) operators before dispatching. If found, route to the
+    // appropriate handler; otherwise dispatch directly.
+    let pipe_pos = shell_find_byte(s, 124);   // '|'
+    if pipe_pos < s.buf_len {
+        shell_handle_pipe(s, pipe_pos);
         return;
     }
+    let redir_out_pos = shell_find_byte(s, 62);  // '>'
+    if redir_out_pos < s.buf_len {
+        shell_handle_redir_out(s, redir_out_pos);
+        return;
+    }
+    let redir_in_pos = shell_find_byte(s, 60);   // '<'
+    if redir_in_pos < s.buf_len {
+        shell_handle_redir_in(s, redir_in_pos);
+        return;
+    }
+
+    // No pipe/redirection — dispatch the command directly.
+    shell_dispatch(s);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W26S5-S6: Pipes + redirection.
+// ────────────────────────────────────────────────────────────────────────────
+// shell_execute now scans the line buffer for three shell operators before
+// dispatching:
+//   '|' (byte 124) — pipe: split into left_cmd | right_cmd. Run left_cmd
+//     with output redirected to redirect_buf, then run right_cmd (which
+//     can read the captured output from redirect_buf as its input).
+//   '>' (byte 62)  — redirect output: run the left command with output
+//     captured, then write redirect_buf to the named file.
+//   '<' (byte 60)  — redirect input: read the named file into redirect_buf,
+//     then run the left command (which can read from redirect_buf).
+//
+// Only one operator is handled per line (the first found in scan order:
+// pipe → redir-out → redir-in). Chained operators (e.g. "a | b > c") are
+// not yet supported — K7+ may add multi-operator pipeline parsing.
+//
+// The redirect_buf is a 256-byte buffer in the Shell layout. When
+// redirect_mode == 1, built-ins that build output in a ShellOut (currently
+// only shell_do_echo) copy their output into redirect_buf instead of
+// writing to stdout. Built-ins that emit string-literal output via
+// shell_puts suppress their output while redirect_mode == 1 (PMT-pure
+// limitation: we cannot read from a .rodata Address, so literal output
+// cannot be captured — only ShellOut-backed output can be captured).
+//
+// shell_dispatch is the extracted match_cmd dispatch chain (the body that
+// was previously inline in shell_execute). It is called by shell_execute
+// for the no-operator path and by the pipe/redir handlers for the
+// sub-commands (left/right of |, left of >/<).
+
+// shell_dispatch: the command-name dispatch chain. Extracted from
+// shell_execute in W26S5-S6 so that the pipe/redir handlers can dispatch
+// sub-commands without re-scanning for operators (which would cause
+// infinite recursion or incorrect splits on chained operators).
+fn shell_dispatch(s: State<Shell>) {
+    if shell_match_cmd(s, "echo", 4) == 1 { shell_do_echo(s); return; }
     if shell_match_cmd(s, "exit", 4) == 1 {
         s.running = 0;
         s.exit_code = 0;
         return;
     }
-    if shell_match_cmd(s, "help", 4) == 1 {
-        shell_do_help(s);
-        return;
+    if shell_match_cmd(s, "help", 4) == 1 { shell_do_help(s); return; }
+    if shell_match_cmd(s, "ls", 2) == 1 { shell_do_ls(s); return; }
+    if shell_match_cmd(s, "cat", 3) == 1 { shell_do_cat(s); return; }
+    if shell_match_cmd(s, "pwd", 3) == 1 { shell_do_pwd(s); return; }
+    if shell_match_cmd(s, "ver", 3) == 1 { shell_do_ver(s); return; }
+    if shell_match_cmd(s, "ps", 2) == 1 { shell_do_ps(s); return; }
+    if shell_match_cmd(s, "memstat", 7) == 1 { shell_do_memstat(s); return; }
+    if shell_match_cmd(s, "clear", 5) == 1 { shell_do_clear(s); return; }
+    if shell_match_cmd(s, "true", 4) == 1 { shell_do_true(s); return; }
+    if shell_match_cmd(s, "false", 5) == 1 { shell_do_false(s); return; }
+
+    // Unknown command — print "?\n". Uses shell_puts so the marker is
+    // suppressed when redirect_mode == 1 (capturing for a pipe/file).
+    shell_puts(s, "?\n", 2);
+}
+
+// shell_set_redirect: enable output redirection. Sets redirect_mode = 1
+// and resets redirect_len = 0 (starts a fresh capture). Subsequent output
+// from shell_do_echo / shell_do_cat goes to redirect_buf instead of stdout.
+fn shell_set_redirect(s: State<Shell>) {
+    s.redirect_mode = 1;
+    s.redirect_len = 0;
+}
+
+// shell_clear_redirect: disable output redirection. Sets redirect_mode = 0
+// but does NOT clear redirect_len — the captured output remains available
+// for the right side of a pipe to read (e.g. "echo hi | cat" needs
+// redirect_buf to survive the mode-off transition so cat can print it).
+fn shell_clear_redirect(s: State<Shell>) {
+    s.redirect_mode = 0;
+}
+
+// shell_find_byte: linear scan for `target` in s.buf[0..s.buf_len].
+// Returns the index of the first match, or s.buf_len if not found.
+// The caller tests `pos < s.buf_len` to distinguish found vs not-found.
+fn shell_find_byte(s: State<Shell>, target: u8) -> u32 {
+    let i = 0;
+    while i < s.buf_len {
+        if s.buf[i] == target {
+            return i;
+        }
+        i = i + 1;
     }
-    if shell_match_cmd(s, "ls", 2) == 1 {
-        shell_do_ls(s);
-        return;
+    return s.buf_len;
+}
+
+// shell_puts: write a string literal to stdout, or suppress it when
+// redirect_mode == 1 (capturing for a pipe / file redirect).
+//
+// PMT-pure limitation: we cannot dereference `addr` (no `*ptr` syntax),
+// so string-literal output from stub built-ins cannot be copied into
+// redirect_buf. When redirect_mode == 1, literal output is dropped (only
+// shell_do_echo, which builds output in a ShellOut, captures real bytes).
+// This means "echo hi | cat" works (echo's ShellOut output is captured),
+// but "help | cat" does not transfer help's literal output (it's dropped).
+fn shell_puts(s: State<Shell>, addr: Address, len: i64) {
+    if s.redirect_mode == 1 {
+        // Capturing — drop literal output (cannot read from addr).
+    } else {
+        write(1, addr, len);
     }
-    if shell_match_cmd(s, "cat", 3) == 1 {
-        shell_do_cat(s);
-        return;
+}
+
+// shell_handle_pipe: split buf at pipe_pos into left_cmd | right_cmd.
+//   1. Temporarily set buf_len = pipe_pos (left_cmd = buf[0..pipe_pos]).
+//   2. shell_set_redirect — start capturing.
+//   3. shell_dispatch — run left_cmd; its output goes to redirect_buf.
+//   4. redirect_mode = 0 — stop capturing (keep redirect_len + redirect_buf).
+//   5. Shift buf[pipe_pos+1..saved_len] to buf[0..], skipping leading
+//      spaces after '|'. Set buf_len = right_len.
+//   6. shell_dispatch — run right_cmd. If right_cmd is cat, it checks
+//      redirect_len > 0 and prints the captured output (pipe feed).
+fn shell_handle_pipe(s: State<Shell>, pipe_pos: u32) {
+    let saved_len = s.buf_len;
+
+    // 1-4. Run left_cmd with output captured to redirect_buf.
+    s.buf_len = pipe_pos;
+    shell_set_redirect(s);
+    shell_dispatch(s);
+    shell_clear_redirect(s);
+
+    // 5. Set up right_cmd: shift bytes after '|' to the front of buf.
+    s.buf_len = saved_len;
+    let rs = pipe_pos + 1;
+    while rs < saved_len && s.buf[rs] == 32 {
+        rs = rs + 1;
     }
-    if shell_match_cmd(s, "pwd", 3) == 1 {
-        shell_do_pwd(s);
-        return;
+    let right_len = saved_len - rs;
+    let i = 0;
+    while i < right_len {
+        s.buf[i] = s.buf[rs + i];
+        i = i + 1;
     }
-    if shell_match_cmd(s, "ver", 3) == 1 {
-        shell_do_ver(s);
-        return;
+    s.buf_len = right_len;
+
+    // 6. Run right_cmd — redirect_buf holds left_cmd's captured output.
+    shell_dispatch(s);
+
+    // 7. Clean up redirect state for the next command.
+    s.redirect_len = 0;
+}
+
+// shell_handle_redir_out: redirect output to a file (">").
+//   1. Parse the filename from buf[redir_pos+1..buf_len] (skip leading
+//      spaces), build a null-terminated path in a ShellOut.
+//   2. Run left_cmd (buf[0..redir_pos]) with output captured.
+//   3. open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644) — flags=577,
+//      mode=420 (decimal). On success, write redirect_buf to the file.
+//   4. Close the fd and clean up redirect state.
+fn shell_handle_redir_out(s: State<Shell>, redir_pos: u32) {
+    let saved_len = s.buf_len;
+
+    // 1. Parse filename into a null-terminated ShellOut.
+    let fn_buf = state_new(ShellOut);
+    let fn_len = 0;
+    let k = redir_pos + 1;
+    while k < saved_len && s.buf[k] == 32 {
+        k = k + 1;
     }
-    // W25S2: five new built-ins (ps / memstat / clear / true / false).
-    if shell_match_cmd(s, "ps", 2) == 1 {
-        shell_do_ps(s);
-        return;
+    while k < saved_len && fn_len < 255 {
+        fn_buf.data[fn_len] = s.buf[k];
+        fn_len = fn_len + 1;
+        k = k + 1;
     }
-    if shell_match_cmd(s, "memstat", 7) == 1 {
-        shell_do_memstat(s);
-        return;
-    }
-    if shell_match_cmd(s, "clear", 5) == 1 {
-        shell_do_clear(s);
-        return;
-    }
-    if shell_match_cmd(s, "true", 4) == 1 {
-        shell_do_true(s);
-        return;
-    }
-    if shell_match_cmd(s, "false", 5) == 1 {
-        shell_do_false(s);
-        return;
+    fn_buf.data[fn_len] = 0;
+
+    // 2. Run left_cmd with output captured.
+    s.buf_len = redir_pos;
+    shell_set_redirect(s);
+    shell_dispatch(s);
+    shell_clear_redirect(s);
+
+    // 3. Write captured output to the file.
+    // O_WRONLY=1 + O_CREAT=64 + O_TRUNC=512 = 577. Mode 0644 = 420.
+    let fd = open(fn_buf as Address, 577, 420);
+    if fd >= 0 {
+        let out_buf = state_new(ShellOut);
+        let j = 0;
+        while j < s.redirect_len {
+            out_buf.data[j] = s.redirect_buf[j];
+            j = j + 1;
+        }
+        write(fd, out_buf as Address, s.redirect_len as i64);
+        close(fd);
     }
 
-    // Unknown command — print "?\n" (the Unix-shell "command not found"
-    // marker, simplified to just "?" for K6f's minimal UX; K7+ may add
-    // "command not found: <name>" with the actual command name). W25S1:
-    // uses a Wave 1 string literal instead of a fresh ShellOut.
-    write(1, "?\n", 2);
+    // 4. Clean up.
+    s.redirect_len = 0;
+    s.buf_len = saved_len;
+}
+
+// shell_handle_redir_in: redirect input from a file ("<").
+//   1. Parse the filename from buf[redir_pos+1..buf_len] (skip leading
+//      spaces), build a null-terminated path in a ShellOut.
+//   2. open(filename, O_RDONLY, 0) — flags=0. On success, read up to
+//      256 bytes into a ShellOut, then copy to redirect_buf.
+//   3. Run left_cmd (buf[0..redir_pos]). If left_cmd is cat, it checks
+//      redirect_len > 0 and prints the file contents.
+//   4. Clean up redirect state.
+fn shell_handle_redir_in(s: State<Shell>, redir_pos: u32) {
+    let saved_len = s.buf_len;
+
+    // 1. Parse filename into a null-terminated ShellOut.
+    let fn_buf = state_new(ShellOut);
+    let fn_len = 0;
+    let k = redir_pos + 1;
+    while k < saved_len && s.buf[k] == 32 {
+        k = k + 1;
+    }
+    while k < saved_len && fn_len < 255 {
+        fn_buf.data[fn_len] = s.buf[k];
+        fn_len = fn_len + 1;
+        k = k + 1;
+    }
+    fn_buf.data[fn_len] = 0;
+
+    // 2. Read file into redirect_buf.
+    let fd = open(fn_buf as Address, 0, 0);
+    if fd >= 0 {
+        let in_buf = state_new(ShellOut);
+        let n = read(fd, in_buf as Address, 256);
+        close(fd);
+        if n > 0 {
+            s.redirect_len = 0;
+            let j = 0;
+            while j < n && j < 255 {
+                s.redirect_buf[j] = in_buf.data[j];
+                s.redirect_len = s.redirect_len + 1;
+                j = j + 1;
+            }
+        }
+    }
+
+    // 3. Run left_cmd — redirect_buf holds the file's contents.
+    s.buf_len = redir_pos;
+    shell_dispatch(s);
+
+    // 4. Clean up.
+    s.redirect_len = 0;
+    s.buf_len = saved_len;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -731,7 +946,19 @@ fn shell_do_echo(s: State<Shell>) {
         i = i + 1;
     }
     out.data[out_len] = 10;  // '\n'
-    write(1, out as Address, (out_len + 1) as i64);
+    // W26S5-S6: if redirect_mode == 1, capture output to redirect_buf
+    // instead of writing to stdout. This is what makes "echo X | Y" work
+    // — the echo output lands in redirect_buf for the right command.
+    if s.redirect_mode == 1 {
+        let j = 0;
+        while j < out_len + 1 && s.redirect_len < 255 {
+            s.redirect_buf[s.redirect_len] = out.data[j];
+            s.redirect_len = s.redirect_len + 1;
+            j = j + 1;
+        }
+    } else {
+        write(1, out as Address, (out_len + 1) as i64);
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -754,14 +981,16 @@ fn shell_do_echo(s: State<Shell>) {
 // `help` — print a one-line summary of available commands.
 // K7+ will extend this to a per-command help (`help echo` → echo docs).
 fn shell_do_help(s: State<Shell>) {
-    write(1, "cmds: echo exit help ls cat pwd ver ps memstat clear true false\n", 64);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "cmds: echo exit help ls cat pwd ver ps memstat clear true false\n", 64);
 }
 
 // `ls` — list files in the current directory.
 // K7+ stub: no filesystem yet, so print "(no files)\n". K7+ will
 // replace this with a readdir loop over the cwd once K6fs is wired in.
 fn shell_do_ls(s: State<Shell>) {
-    write(1, "(no files)\n", 11);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "(no files)\n", 11);
 }
 
 // `cat <file>` — show the contents of a file.
@@ -769,7 +998,24 @@ fn shell_do_ls(s: State<Shell>) {
 // will parse the filename argument (everything after "cat ") and call
 // sys_open / sys_read / sys_write to dump the file's contents.
 fn shell_do_cat(s: State<Shell>) {
-    write(1, "cat: needs K7 fs\n", 17);
+    // W26S5-S6: if input was redirected from a file (redirect_len > 0),
+    // print the captured file contents. Otherwise, print the K7+ stub.
+    // This makes "cat < file" and "echo hi | cat" work.
+    if s.redirect_len > 0 {
+        if s.redirect_mode == 0 {
+            let out = state_new(ShellOut);
+            let i = 0;
+            while i < s.redirect_len {
+                out.data[i] = s.redirect_buf[i];
+                i = i + 1;
+            }
+            write(1, out as Address, s.redirect_len as i64);
+        }
+        // If redirect_mode == 1 (pipe capture), the data is already in
+        // redirect_buf — cat is a pass-through, no action needed.
+    } else {
+        shell_puts(s, "cat: needs K7 fs\n", 17);
+    }
 }
 
 // `pwd` — print the working directory.
@@ -778,14 +1024,16 @@ fn shell_do_cat(s: State<Shell>) {
 // (currently Shell has no cwd slot — see the file header's "Layouts"
 // note).
 fn shell_do_pwd(s: State<Shell>) {
-    write(1, "/\n", 2);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "/\n", 2);
 }
 
 // `ver` — print the shell / kernel version.
 // K7+ stub: print "vuma 0.1\n". K7+ will replace this with a read of
 // the build-time VERSION constant once the build system exports one.
 fn shell_do_ver(s: State<Shell>) {
-    write(1, "vuma 0.1\n", 9);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "vuma 0.1\n", 9);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -817,8 +1065,9 @@ fn shell_do_ver(s: State<Shell>) {
 // data row), matching how the task spec frames the output ("header" +
 // "row"). Both strings are Wave 1 literals.
 fn shell_do_ps(s: State<Shell>) {
-    write(1, "PID  PPID  STATE\n", 17);
-    write(1, "1   0     READY\n", 16);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "PID  PPID  STATE\n", 17);
+    shell_puts(s, "1   0     READY\n", 16);
 }
 
 // `memstat` — print memory usage.
@@ -829,7 +1078,8 @@ fn shell_do_ps(s: State<Shell>) {
 // string (both lines in a single literal) — matches the task spec, which
 // frames the output as one string with an embedded newline.
 fn shell_do_memstat(s: State<Shell>) {
-    write(1, "MemTotal: 16384 kB\nMemFree: 8192 kB\n", 36);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "MemTotal: 16384 kB\nMemFree: 8192 kB\n", 36);
 }
 
 // `clear` — clear the screen and home the cursor.
@@ -844,7 +1094,8 @@ fn shell_do_memstat(s: State<Shell>) {
 // escapes, the bytes are emitted as-is (no fallback — K6f assumes a
 // VT100-class terminal, same as K6c's vt100.vuma parser).
 fn shell_do_clear(s: State<Shell>) {
-    write(1, "\x1b[2J\x1b[H", 7);
+    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
+    shell_puts(s, "\x1b[2J\x1b[H", 7);
 }
 
 // `true` — exit-status success.
@@ -1387,6 +1638,92 @@ fn main() -> i32 {
     // command). shell_execute prints "\n" then "?\n". running stays 1.
     shell_receive(s, 10);   // '\n'
     if s.running != 1 { return 10; }
+
+    // ── Sub-test (3): "echo hi|cat\n" — pipe (W26S5-S6) ────────────────
+    // Feed "echo hi|cat" (11 bytes) + '\n' = 12 bytes. The pipe handler
+    // splits at '|', runs "echo hi" with output captured to redirect_buf,
+    // then runs "cat" which prints the captured "hi\n".
+    // Verifies: pipe scan + split + redirect capture + right-cmd dispatch.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 32);   // ' '
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 124);  // '|'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 97);   // 'a'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 10);   // '\n'
+    // Pipe should not exit; redirect state should be cleaned up.
+    if s.running != 1 { return 11; }
+    if s.redirect_len != 0 { return 12; }
+    if s.buf_len != 0 { return 13; }
+
+    // ── Sub-test (4): "echo hi>/tmp/vuma_redir.txt" + "cat</tmp/vuma_redir.txt"
+    // — output + input redirection (W26S5-S6) ───────────────────────────
+    // (4a) Feed "echo hi>/tmp/vuma_redir.txt" (26 bytes) + '\n'. The >
+    // handler captures "hi\n" to redirect_buf, then writes it to the file.
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 111);  // 'o'
+    shell_receive(s, 32);   // ' '
+    shell_receive(s, 104);  // 'h'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 62);   // '>'
+    shell_receive(s, 47);   // '/'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 109);  // 'm'
+    shell_receive(s, 112);  // 'p'
+    shell_receive(s, 47);   // '/'
+    shell_receive(s, 118);  // 'v'
+    shell_receive(s, 117);  // 'u'
+    shell_receive(s, 109);  // 'm'
+    shell_receive(s, 97);   // 'a'
+    shell_receive(s, 95);   // '_'
+    shell_receive(s, 114);  // 'r'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 100);  // 'd'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 114);  // 'r'
+    shell_receive(s, 46);   // '.'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 120);  // 'x'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 14; }
+    if s.redirect_len != 0 { return 15; }
+
+    // (4b) Feed "cat</tmp/vuma_redir.txt" (23 bytes) + '\n'. The < handler
+    // reads the file into redirect_buf, then runs "cat" which prints it.
+    shell_receive(s, 99);   // 'c'
+    shell_receive(s, 97);   // 'a'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 60);   // '<'
+    shell_receive(s, 47);   // '/'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 109);  // 'm'
+    shell_receive(s, 112);  // 'p'
+    shell_receive(s, 47);   // '/'
+    shell_receive(s, 118);  // 'v'
+    shell_receive(s, 117);  // 'u'
+    shell_receive(s, 109);  // 'm'
+    shell_receive(s, 97);   // 'a'
+    shell_receive(s, 95);   // '_'
+    shell_receive(s, 114);  // 'r'
+    shell_receive(s, 101);  // 'e'
+    shell_receive(s, 100);  // 'd'
+    shell_receive(s, 105);  // 'i'
+    shell_receive(s, 114);  // 'r'
+    shell_receive(s, 46);   // '.'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 120);  // 'x'
+    shell_receive(s, 116);  // 't'
+    shell_receive(s, 10);   // '\n'
+    if s.running != 1 { return 16; }
+    if s.redirect_len != 0 { return 17; }
 
     // ── Sub-test (2): "exit\n" — exit built-in ────────────────────────────
     // Feed "exit" (4 bytes) + '\n' (1 byte) = 5 bytes total.
