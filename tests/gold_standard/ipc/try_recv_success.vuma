@@ -1,0 +1,19 @@
+// try_recv_success — Non-blocking recv succeeds when message available
+// Expected exit code: 99
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 99);
+        channel_close(ch);
+        return 0;
+    }
+    result = 0;
+    while result == 0 {
+        result = channel_try_recv(ch);
+    }
+    wait_worker(pid);
+    channel_close(ch);
+    if result == 1 { return 99; }
+    return 0;
+}
