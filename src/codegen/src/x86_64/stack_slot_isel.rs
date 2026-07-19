@@ -2082,8 +2082,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_send" if args.len() == 2 => {
+                                // Wave 10a: framed write — builds a 56-byte
+                                // L1 frame (header + payload + CRC placeholder)
+                                // and writes it to the pipe.
                                 let ch  = &args[0];
                                 let msg = &args[1];
+                                // Compute type_hash at compile time. Default
+                                // "i64" since the Call path doesn't carry the
+                                // IR type; matches the existing 8-byte path.
+                                let th = crate::ipc::type_hash("i64");
                                 // write_fd = high 32 bits of the handle
                                 match ch {
                                     IRValue::Register(id) => {
@@ -2098,16 +2105,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                                     }
                                 }
-                                // 8-byte message buffer
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                // Build 56-byte frame on stack.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                                // [rsp+0] = MAGIC "VUMA" = 0x414D5556 (LE)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x414D5556));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax));
+                                // [rsp+4] = version(2) + flags(0) = 0x00020000
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x00020000));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rax));
+                                // [rsp+8] = channel_id = 0, [rsp+16] = sequence = 0
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                // [rsp+24] = type_hash
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, th));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                // [rsp+32] = payload_len = 8
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 8));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                // [rsp+36..40] = 0 (high payload_len), [rsp+40..44] = 0 (cap_count)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 36, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 40, Gpr::Rax));
+                                // [rsp+44] = payload (8 bytes)
                                 code.extend(load_value(msg, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 44, Gpr::Rax));
+                                // [rsp+52] = CRC32 = 0 (placeholder)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::Rax));
+                                // write(write_fd, &frame, 56)
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
                                 code.extend(encode_syscall());
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
-                                // write() returns the byte count (8) on
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                // write() returns the byte count (56) on
                                 // success — store it for callers that inspect
                                 // the call's nominal return value.
                                 if let Some(d) = dst {
@@ -2119,8 +2151,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_recv" if args.len() == 1 && dst.is_some() => {
+                                // Wave 10b: framed read — reads a 56-byte L1
+                                // frame, verifies MAGIC, extracts payload.
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
                                 // read_fd = low 32 bits of the handle
                                 match ch {
                                     IRValue::Register(id) => {
@@ -2135,26 +2170,58 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                                     }
                                 }
-                                // read directly into dst's stack slot
-                                let dst_off = slot_offset(dst_id);
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                // Allocate 56-byte frame buffer.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                                 code.extend(encode_syscall());
-                                // Wave 8b: Check read() return value for errors.
-                                // RAX > 0: success, data already in dst slot
-                                // RAX == 0: EOF (channel closed by writer)
-                                // RAX < 0: error (-EBADF, etc.)
-                                // On error/EOF: store -1 in dst slot as error sentinel.
+                                // Wave 8b: Check read() return for errors.
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                // jle error_path (offset 4: past the jmp)
-                                code.extend(&[0x7E, 0x02]); // jle +2 → error_path
-                                // success: jmp past error path (error = 10+4=14 bytes)
-                                code.extend(&[0xEB, 0x0E]); // jmp +14 → after_error
-                                // error_path: store -1 in dst slot
+                                // jle error_path (rel32, placeholder)
+                                let jle_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                                // Verify MAGIC (first 4 bytes == "VUMA")
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jne magic_fail (rel32, placeholder)
+                                let jne_magic_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Extract payload from [rsp+44] into dst slot.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
+                                let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // error_path / magic_fail: store -1 sentinel.
+                                let fail_off = code.len();
+                                // Patch jle_err and jne_magic to jump here.
+                                let fail_delta_from_jle = fail_off as i64 - (jle_err_patch as i64 + 6);
+                                let bd = (fail_delta_from_jle as i32).to_le_bytes();
+                                code[jle_err_patch+2] = bd[0];
+                                code[jle_err_patch+3] = bd[1];
+                                code[jle_err_patch+4] = bd[2];
+                                code[jle_err_patch+5] = bd[3];
+                                let fail_delta_from_jne = fail_off as i64 - (jne_magic_patch as i64 + 6);
+                                let bd = (fail_delta_from_jne as i32).to_le_bytes();
+                                code[jne_magic_patch+2] = bd[0];
+                                code[jne_magic_patch+3] = bd[1];
+                                code[jne_magic_patch+4] = bd[2];
+                                code[jne_magic_patch+5] = bd[3];
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF));
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
-                                // after_error: (fall through to next instruction)
+                                // cleanup: deallocate frame.
+                                let cleanup_off = code.len();
+                                let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
+                                let bd = (cleanup_delta as i32).to_le_bytes();
+                                code[jmp_cleanup_patch+1] = bd[0];
+                                code[jmp_cleanup_patch+2] = bd[1];
+                                code[jmp_cleanup_patch+3] = bd[2];
+                                code[jmp_cleanup_patch+4] = bd[3];
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
                                 instr_opcode = Some("channel_recv".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -2646,20 +2713,30 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ChannelSend { ch, msg, ty } — write(write_fd, &msg, 8).
-                // The message is treated as a fixed 8-byte value regardless
-                // of `ty` (sufficient for i32/i64/f64/i8-with-padding).
-                IRInstr::ChannelSend { ch, msg, ty: _ } => {
+                // ChannelSend { ch, msg, ty } — Wave 10a: framed write.
+                // Builds a 56-byte framed message on the stack:
+                //   [0..44)   MessageHeader (MAGIC + version + flags + channel_id
+                //             + sequence + type_hash + payload_len + cap_count)
+                //   [44..52)  8-byte payload (the message value)
+                //   [52..56)  CRC32 placeholder (0 — full CRC computation deferred)
+                // Then write(write_fd, &frame, 56).
+                //
+                // The type_hash is computed at compile time from the IR type
+                // via crate::ipc::type_hash(), matching the L1 wire format
+                // defined in src/codegen/src/ipc.rs.
+                IRInstr::ChannelSend { ch, msg, ty } => {
                     let mut code = Vec::new();
-                    // Extract write_fd (high 32 bits of the handle).
+                    // Compute type_hash at compile time.
+                    let type_name = ty.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "i64".to_string());
+                    let th = crate::ipc::type_hash(&type_name);
+
+                    // Step 1: load write_fd (high 32 bits of handle) into RDI.
                     match ch {
                         IRValue::Register(id) => {
                             let off = slot_offset(*id);
                             code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
                         }
                         _ => {
-                            // Spill the full 8-byte handle to a scratch slot
-                            // and load the upper 32 bits from there.
                             code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
                             code.extend(load_value(ch, Gpr::Rax));
                             code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
@@ -2667,39 +2744,74 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                         }
                     }
-                    // Reserve an 8-byte buffer on the stack for the message
-                    // and fill it with the msg value.
-                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+
+                    // Step 2: build the 56-byte frame on the stack.
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                    // [rsp+0] = MAGIC "VUMA" = 0x56,0x55,0x4D,0x41 → LE dword 0x414D5556
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x414D5556));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax));
+                    // [rsp+4] = version(2) + flags(0) → LE dword: 0x00020000
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x00020000));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rax));
+                    // [rsp+8] = channel_id = 0 (8 bytes)
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                    // [rsp+16] = sequence = 0 (8 bytes) — per-channel runtime
+                    // counter deferred; compile-time 0 for now.
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                    // [rsp+24] = type_hash (8 bytes, compile-time constant)
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, th));
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                    // [rsp+32] = payload_len = 8 (8 bytes)
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 8));
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                    // [rsp+36] = high 4 bytes of payload_len = 0
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 36, Gpr::Rax));
+                    // [rsp+40] = cap_count = 0 (4 bytes)
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 40, Gpr::Rax));
+                    // [rsp+44] = payload (8 bytes) — the message value
                     code.extend(load_value(msg, Gpr::Rax));
-                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
-                    // rsi = &buffer
+                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 44, Gpr::Rax));
+                    // [rsp+52] = CRC32 = 0 (4 bytes, placeholder — full CRC
+                    // computation requires an inline loop, deferred to a
+                    // follow-up; the field is present per the L1 spec).
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::Rax));
+
+                    // Step 3: write(write_fd, &frame, 56)
+                    // RDI already has write_fd (preserved across header build).
                     code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
-                    // rdx = 8 (byte count)
-                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
-                    // rax = 1  (sys_write) — clobbers RAX, but msg is already
-                    // safely on the stack.
-                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
                     code.extend(encode_syscall());
-                    // Deallocate the message buffer.
-                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+
+                    // Deallocate the frame.
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
                     instr_opcode = Some("channel_send".to_string());
                     code
                 }
 
-                // ChannelRecv { ch, dst, ty } — read(read_fd, &dst, 8).
-                // The kernel writes 8 bytes directly into dst's stack slot.
+                // ChannelRecv { ch, dst, ty } — Wave 10b: framed read.
+                // Reads a 56-byte framed message from the pipe, verifies the
+                // MAGIC header, and extracts the 8-byte payload into dst.
+                // On magic mismatch, stores -1 (error sentinel) in dst.
+                //
+                // Full CRC verification requires an inline CRC32 loop over
+                // 52 bytes — deferred; the magic check provides basic
+                // frame integrity validation per the L1 spec.
                 IRInstr::ChannelRecv { ch, dst, ty: _ } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Extract read_fd (low 32 bits of the handle).
+                    let dst_off = slot_offset(dst_id);
+
+                    // Step 1: load read_fd (low 32 bits of handle) into RDI.
                     match ch {
                         IRValue::Register(id) => {
                             let off = slot_offset(*id);
                             code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
                         }
                         _ => {
-                            // Spill the full 8-byte handle and load the low
-                            // 32 bits (read_fd) from there.
                             code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
                             code.extend(load_value(ch, Gpr::Rax));
                             code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
@@ -2707,15 +2819,53 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                         }
                     }
-                    // rsi = &dst_stack_slot — read() writes the 8 bytes
-                    // straight into the destination vreg's slot.
-                    let dst_off = slot_offset(dst_id);
-                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
-                    // rdx = 8 (byte count)
-                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
-                    // rax = 0  (sys_read)
-                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));
+
+                    // Step 2: allocate 56-byte frame buffer on stack.
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                    // read(read_fd, &frame, 56) — RDI has read_fd.
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                     code.extend(encode_syscall());
+
+                    // Step 3: verify MAGIC (first 4 bytes == "VUMA" = 0x414D5556).
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    // jne magic_fail (rel32, placeholder)
+                    let jne_magic_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                    // Step 4: extract payload from [rsp+44] into dst slot.
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                    // jmp cleanup (rel32, placeholder)
+                    let jmp_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // magic_fail: store -1 in dst slot (error sentinel).
+                    let magic_fail_off = code.len();
+                    let magic_delta = magic_fail_off as i64 - (jne_magic_patch as i64 + 6);
+                    let bd = (magic_delta as i32).to_le_bytes();
+                    code[jne_magic_patch+2] = bd[0];
+                    code[jne_magic_patch+3] = bd[1];
+                    code[jne_magic_patch+4] = bd[2];
+                    code[jne_magic_patch+5] = bd[3];
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                    // cleanup: deallocate frame.
+                    let cleanup_off = code.len();
+                    let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
+                    let bd = (cleanup_delta as i32).to_le_bytes();
+                    code[jmp_cleanup_patch+1] = bd[0];
+                    code[jmp_cleanup_patch+2] = bd[1];
+                    code[jmp_cleanup_patch+3] = bd[2];
+                    code[jmp_cleanup_patch+4] = bd[3];
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+
                     instr_opcode = Some("channel_recv".to_string());
                     code
                 }
