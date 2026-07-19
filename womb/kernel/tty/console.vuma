@@ -43,6 +43,13 @@
 //                                  (hosted: write(1, addr, len)).
 //   console_read(c, buf, max)    — read up to `max` bytes from the UART
 //                                  into buf (hosted: read(0, addr, max)).
+//   console_set_fg(c, color)     — W23S5: emit ESC[<color+30>m to set the
+//                                  ANSI foreground color (color 0..7).
+//   console_set_bg(c, color)     — W23S5: emit ESC[<color+40>m to set the
+//                                  ANSI background color (color 0..7).
+//   console_set_bold(c)          — W23S5: emit ESC[1m to enable bold.
+//   console_reset_color(c)       — W23S5: emit ESC[0m to reset all SGR
+//                                  attributes (fg + bg + bold) to defaults.
 //
 // ── Console layout & the offset-8 buf issue ────────────────────────────────
 // The K1 stub's Console layout put `buf: [u8; 256]` at offset 0 so that
@@ -196,6 +203,19 @@
 //   104   = 'h'    101   = 'e'    108   = 'l'    111   = 'o'
 //   105   = 'i'
 //   10    = '\n' (LF — newline, also the auto-flush trigger above).
+// W23S5 color constants (ANSI / ECMA-48 SGR escape-sequence bytes — same
+// 0..7 palette as K6c vt100.vuma's `s.fg` / `s.bg`):
+//   27    = 0x1B = ESC  (CSI introducer byte 1 of 2).
+//   91    = 0x5B = '['  (CSI introducer byte 2 of 2).
+//   109   = 0x6D = 'm'  (SGR final byte — Select Graphic Rendition).
+//   48    = 0x30 = '0'  (ASCII digit base for tens/ones of the SGR code).
+//   30    = SGR fg base (color 0..7 → 30..37).
+//   40    = SGR bg base (color 0..7 → 40..47).
+//   5     = byte count for the dynamic ESC[<NN>m sequences (always 2 digits
+//           for color 0..7, so the buffer is ESC '[' tens ones 'm' = 5).
+//   4     = byte count for the fixed ESC[1m / ESC[0m sequences (1 digit).
+//   2     = W23S5 self-test sub-test (4) bg color (green).
+//
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It re-declares Console (new — different
@@ -433,9 +453,125 @@ fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Color / attribute control (W23S5).
+// ────────────────────────────────────────────────────────────────────────────
+// Four small helpers that emit ANSI SGR (Select Graphic Rendition) escape
+// sequences directly to fd 1 via the `write` extern. W23S5 adds them so
+// kernel.vuma / shell.vuma / kmsg.vuma / future pretty-printers can color
+// their output without re-implementing the ESC-sequence byte-emission that
+// kernel.vuma currently open-codes one byte at a time (109+ separate
+// `kprint(ec, <byte>)` calls — see the W23S5 worklog entry for the audit).
+//
+// The four functions cover the 8-color ANSI set (the same 0..7 palette the
+// K6c vt100.vuma parser tracks in `s.fg` / `s.bg`):
+//   console_set_fg(con, color)  — ESC[<color+30>m   (FG, color 0..7 → 30..37)
+//   console_set_bg(con, color)  — ESC[<color+40>m   (BG, color 0..7 → 40..47)
+//   console_set_bold(con)       — ESC[1m            (SGR bold attribute)
+//   console_reset_color(con)    — ESC[0m            (SGR reset to defaults)
+//
+// Color constants (ANSI / ECMA-48 standard, same as vt100.vuma's fg/bg):
+//   0 = black, 1 = red, 2 = green, 3 = yellow,
+//   4 = blue, 5 = magenta, 6 = cyan, 7 = white.
+//
+// PMT discipline:
+//   - The fixed sequences (ESC[1m, ESC[0m) use Wave 1 string literals —
+//     `write(1, "\x1b[1m", 4)` — the lexer's `\x1b` hex escape produces
+//     the ESC byte (27), and Wave 1's .rodata lowering turns the literal
+//     into a compile-time address (see docs/language-reference.md §17.2 +
+//     the pipeline.rs Lit::String → ScgExpr::Int(addr) bridge). Same PMT
+//     "Borrowed read" pattern as trap.vuma's `write(1, "*** KERNEL PANIC
+//     ***\n", 21)` and procfs.vuma's `write(1, "MemTotal: ...\n", 36)`.
+//   - The dynamic sequences (ESC[<color+30>m, ESC[<color+40>m) build the
+//     byte buffer in a local State<ConsoleStr> the same way console_flush
+//     does — `let buf = state_new(ConsoleStr); buf.data[i] = <byte>; ...;
+//     let addr = buf as Address; write(1, addr, 5);`. The escape sequence
+//     is 5 bytes: ESC(27) '[' tens ones 'm'. The tens/ones digits are
+//     computed by `(code / 10)` and `(code % 10)` then offset by 48
+//     (ASCII '0') and cast back to u8 — same pattern as trap.vuma's
+//     trap_put_dec.
+//   - The `con: State<Console>` parameter is accepted for symmetry with
+//     console_putc / console_puts / console_flush / console_read but
+//     unused in the hosted path (the escape sequences go straight to fd 1
+//     via `write`, not through the Console line buffer — color codes are
+//     control bytes, not user-visible text, so buffering them in c.buf
+//     would risk flushing them out of order with respect to the buffered
+//     text bytes). K11's bare-metal path will use `con.uart_base` to call
+//     uart_putc_8250 byte-by-byte instead of `write`.
+//
+// The 5-byte buffer layout for the dynamic sequences:
+//   buf.data[0] = 27   (0x1B = ESC)
+//   buf.data[1] = 91   (0x5B = '[')
+//   buf.data[2] = 48 + (code / 10)   (tens digit ASCII '3' for fg, '4' for bg)
+//   buf.data[3] = 48 + (code % 10)   (ones digit ASCII '0'..'7' = color)
+//   buf.data[4] = 109  (0x6D = 'm')
+// For color in 0..7, code = color + 30 (fg) → 30..37, or color + 40 (bg)
+// → 40..47 — always two digits, so the buffer is always exactly 5 bytes
+// and the write count is always 5. (For color ≥ 8 the math would still
+// produce a valid two-digit code — e.g. color 8 → ESC[38m, the start of
+// the 256-color / truecolor escape — but the caller is responsible for
+// the extended semantics; W23S5 only covers the 0..7 base palette.)
+
+// Set the foreground color. `color` is 0..7 (black/red/green/yellow/blue/
+// magenta/cyan/white). Emits ESC[<color+30>m (5 bytes: ESC '[' tens ones 'm').
+//
+// The byte-by-byte build (rather than a string literal) is required because
+// the SGR code is dynamic — Wave 1 string literals lower to compile-time
+// .rodata addresses, so the color byte must be computed at runtime and
+// stored into a State<ConsoleStr> slot via `buf.data[i] = <byte>`. The
+// `let addr = buf as Address; write(1, addr, 5);` pattern is the same
+// PMT "Borrowed read" as console_flush (State<ConsoleStr> whose `data`
+// field IS at offset 0, so the cast yields the address of data[0]).
+fn console_set_fg(con: State<Console>, color: u8) {
+    let buf = state_new(ConsoleStr);
+    let code = (color as u64) + 30;
+    buf.data[0] = 27;                        // ESC
+    buf.data[1] = 91;                        // '['
+    buf.data[2] = (48 + (code / 10)) as u8;  // tens digit ('3' for fg)
+    buf.data[3] = (48 + (code % 10)) as u8;  // ones digit ('0'..'7')
+    buf.data[4] = 109;                       // 'm'
+    let addr = buf as Address;
+    write(1, addr, 5);
+}
+
+// Set the background color. `color` is 0..7. Emits ESC[<color+40>m (5 bytes).
+// Same byte-by-byte build as console_set_fg, but with the +40 SGR base
+// instead of +30 (so the tens digit is '4' instead of '3').
+fn console_set_bg(con: State<Console>, color: u8) {
+    let buf = state_new(ConsoleStr);
+    let code = (color as u64) + 40;
+    buf.data[0] = 27;                        // ESC
+    buf.data[1] = 91;                        // '['
+    buf.data[2] = (48 + (code / 10)) as u8;  // tens digit ('4' for bg)
+    buf.data[3] = (48 + (code % 10)) as u8;  // ones digit ('0'..'7')
+    buf.data[4] = 109;                       // 'm'
+    let addr = buf as Address;
+    write(1, addr, 5);
+}
+
+// Enable the bold SGR attribute. Emits ESC[1m (4 bytes). Uses a Wave 1
+// string literal — the `\x1b` hex escape produces ESC (byte 27), and Wave
+// 1's .rodata lowering turns the literal into a compile-time address
+// handed to `write` as `buf: Address`. Same PMT "Borrowed read" pattern
+// as trap.vuma's `write(1, "*** KERNEL PANIC ***\n", 21)`. The `con`
+// parameter is unused (hosted path goes straight to fd 1 via `write`).
+fn console_set_bold(con: State<Console>) {
+    write(1, "\x1b[1m", 4);
+}
+
+// Reset all SGR attributes (foreground, background, bold) to defaults.
+// Emits ESC[0m (4 bytes). Same Wave 1 string-literal pattern as
+// console_set_bold. A console_set_* call without a matching reset before
+// the next flush would leave the terminal in the colored/bold state —
+// callers should pair set/reset around the colored span (or call this at
+// process exit to restore the default terminal state).
+fn console_reset_color(con: State<Console>) {
+    write(1, "\x1b[0m", 4);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6e DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// Three sub-tests, each exercising one console code path:
+// Four sub-tests, each exercising one console code path:
 //   (1) console_putc without newline — buffer accumulates, no flush.
 //       Put "hello" (5 bytes, no newline), check con.len == 5.
 //       Verifies: putc store + len bump + no-flush-when-no-newline.
@@ -447,13 +583,25 @@ fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
 //       (flushed by the embedded newline).
 //       Verifies: puts walks until NUL + puts delegates per-byte flushing
 //       to putc (no separate puts-level flush needed).
+//   (4) W23S5 color functions smoke test — call each of the four new
+//       color functions once, verify con.len == 0 after (color functions
+//       emit escape sequences directly to fd 1 via `write`, NOT through
+//       con.buf, so the line buffer must stay empty).
+//       Verifies: console_set_fg / console_set_bg / console_set_bold /
+//       console_reset_color compile, link, and execute without faulting;
+//       the byte-by-byte buffer build (state_new + buf.data[i] = … +
+//       buf as Address + write) and the Wave 1 string-literal `write(1,
+//       "\x1b[1m", 4)` pattern both lower correctly.
 //
-// All assertions return distinct non-zero codes (1, 2, 3) so a failure
+// All assertions return distinct non-zero codes (1, 2, 3, 4) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 //
 // Visible stdout side-effect: the test emits "hello\nhi\n" (5 bytes from
-// sub-test 1+2, 3 bytes from sub-test 3) — visible if the test is run
-// interactively, but doesn't affect the exit code.
+// sub-test 1+2, 3 bytes from sub-test 3) followed by 5+5+4+4 = 18 bytes
+// of W23S5 ANSI SGR escape sequences from sub-test 4 (ESC[31m red-fg,
+// ESC[42m green-bg, ESC[1m bold, ESC[0m reset) — visible if the test is
+// run interactively (the trailing reset restores the default terminal
+// state), but doesn't affect the exit code.
 
 fn main() -> i32 {
     let con = state_new(Console);
@@ -497,6 +645,31 @@ fn main() -> i32 {
     s.data[3] = 0;    // NUL terminator
     console_puts(con, s);
     if con.len != 0 { return 3; }  // flushed by newline
+
+    // ── Sub-test (4): W23S5 color functions smoke test ───────────────────
+    // Call each of the four W23S5 color functions once. They emit ANSI SGR
+    // escape sequences directly to fd 1 via write(1, addr, n) — they do
+    // NOT buffer through con.buf (color codes are control bytes, not
+    // user-visible text — see the W23S5 section header for the rationale).
+    // The smoke test verifies they compile, link, and execute without
+    // faulting (a panic / segfault would surface as a non-zero exit code
+    // from the binary). The only state assertion is `con.len == 0` after
+    // the calls — the color functions don't touch the line buffer.
+    //
+    // Visible stdout side-effect (sub-test 4): 5+5+4+4 = 18 bytes of
+    // escape sequences emitted to fd 1 AFTER the "hello\nhi\n" from
+    // sub-tests 1-3:
+    //   console_set_fg(con, 1)   → ESC[31m   (5 bytes — red foreground)
+    //   console_set_bg(con, 2)   → ESC[42m   (5 bytes — green background)
+    //   console_set_bold(con)    → ESC[1m    (4 bytes — bold attribute)
+    //   console_reset_color(con) → ESC[0m    (4 bytes — reset to defaults)
+    // The trailing ESC[0m reset ensures any subsequent shell prompt isn't
+    // left in the red-on-green bold state.
+    console_set_fg(con, 1);       // red foreground  → ESC[31m
+    console_set_bg(con, 2);       // green background → ESC[42m
+    console_set_bold(con);        // bold             → ESC[1m
+    console_reset_color(con);     // reset            → ESC[0m
+    if con.len != 0 { return 4; } // color funcs bypass con.buf
 
     return 0;
 }
