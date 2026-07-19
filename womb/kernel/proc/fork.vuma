@@ -46,17 +46,62 @@
 //     Linux's fork is ~1500 lines of struct-task initialization; THIS
 //     file is the 30-line ProcessTable-only subset).
 //
-// ── ProcessTable re-declaration ─────────────────────────────────────────────
-// VUMA has no `import` (Open Work §7), so this file re-declares the
-// ProcessTable layout byte-identically to K4a's task.vuma. The byte-
-// identical-redeclaration invariant (K2c "extern signatures MUST stay
-// byte-identical" — extended to layouts in K3d) extends to ProcessTable:
-// this file's pt_get_* / pt_set_* MUST see the same field offsets, field
-// names, and field types as K4a's task.vuma. ProcessTable has 10 fields
-// (9 parallel flat [u8; N] arrays + count u32) totaling 14340 bytes —
-// same as K4a.
+// ── W37: COW refcount extension ─────────────────────────────────────────────
+// W37 adds a refcount mechanism to sys_fork so the mm_root pointer copy
+// is no longer "blind" — the kernel now RECORDS that the parent's and
+// child's mm_roots are shared, so sys_exit can decide whether to free
+// the mm_root (only when the last sharer exits). This is the stub
+// equivalent of Unix fork()'s copy-on-write address-space sharing.
 //
-// This file re-declares the 12 ProcessTable helpers it needs:
+// What W37 adds:
+//   * `refcounts: [u8; 1024]` field on ProcessTable (256 slots × 4
+//     bytes per u32) — per-task mm_root sharing counter.
+//   * pt_get_refcount / pt_set_refcount helpers (u32 4-byte LE
+//     pack/unpack, same pattern as pid/ppid).
+//   * sys_fork increments refcount[parent_idx] AND refcount[child_idx]
+//     (both tasks now share the parent's mm_root).
+//   * sys_exit(tbl, task_idx) -> u32 — decrements refcount[task_idx];
+//     returns the post-decrement value. When it reaches 0, the mm_root
+//     is unshared and (in a real kernel) could be freed. THIS STUB does
+//     NOT actually free — documented only (see sys_exit comments).
+//
+// What W37 does NOT add (documented as the COW fault path in sys_fork):
+//   * No real page-table walk (hosted mode has no CR3 to walk — the
+//     mm_root is a u64 token, not a real page-table root).
+//   * No per-page-frame refcount (Linux's page->_refcount). The
+//     per-task refcount is a coarse approximation: it tracks "how many
+//     tasks share this mm_root", not "how many tasks share this
+//     individual page frame".
+//   * No page-fault handler integration. In a real kernel, the COW
+//     fault path (vector 14, write to a read-only COW-marked PTE)
+//     would allocate a fresh page, copy, install a writable PTE, and
+//     decrement the original page's refcount. THIS stub has no fault
+//     path — the pointer copy means both tasks see the SAME bytes
+//     (writes from one are visible to the other), which is wrong for
+//     real fork() semantics but acceptable for the hosted-mode
+//     ProcessTable stub (no real memory is being shared).
+//
+// See sys_fork's "COW (copy-on-write) address-space sharing" comment
+// for the full real-kernel COW fault path documentation.
+//
+// ── ProcessTable re-declaration (W37-EXTENDED) ──────────────────────────────
+// VUMA has no `import` (Open Work §7), so this file re-declares the
+// ProcessTable layout. Pre-W37, this was byte-identical to K4a's
+// task.vuma (the "byte-identical-redeclaration invariant", K2c/K3d).
+// W37 EXTENDS the layout with a new `refcounts: [u8; 1024]` field (256
+// slots × 4 bytes per u32) to track per-task mm_root sharing for the
+// COW stub (see "W37: COW refcount extension" above). ProcessTable is
+// now 11 fields (10 parallel flat [u8; N] arrays + count u32) totaling
+// 13828 bytes — DIVERGED from K4a's 10-field / 12804-byte layout. The
+// other proc/ files (task/scheduler/exec/exit/wait) still use the
+// 10-field K4a layout; W37's refcounts field is local to fork.vuma
+// (the COW refcount machinery lives here). K5's mm_struct refactor will
+// unify the layouts when it introduces a real mm_struct with its own
+// refcount (replacing the per-task refcounts array with a per-mm
+// counter — see sys_exit's "two-level mm_users/mm_count" comment).
+//
+// This file re-declares the 12 ProcessTable helpers it needs + 2 new
+// W37 helpers for the refcount field:
 //   pt_get_state / pt_set_state     (u8 direct-index — needed by task_alloc)
 //   pt_get_pid  / pt_set_pid        (u32 4-byte LE pack/unpack — needed by
 //                                     task_alloc + fork's ppid setup)
@@ -68,14 +113,17 @@
 //                                     copies parent's fs_root)
 //   pt_get_fds  / pt_set_fds        (u64 8-byte LE pack/unpack — fork
 //                                     copies parent's fds)
-// These 12 helpers are byte-identical to K4a's task.vuma (same signature,
-// same body — 8-iteration while loop for u64, 4-iteration while loop for
-// u32, direct array index for u8). The other 6 helpers (prio get/set,
-// vruntime get/set, next get/set) are NOT re-declared here because
-// sys_fork doesn't touch them — K4b's scheduler.vuma re-declares those
-// for its runqueue management; K4d's fork leaves prio/vruntime/next
-// alone (task_alloc already zero-initializes them via the state_new
-// zero-fill of the ProcessTable).
+//   pt_get_refcount / pt_set_refcount (u32 4-byte LE pack/unpack — W37:
+//                                     fork increments on both parent +
+//                                     child; sys_exit decrements)
+// These 14 helpers (12 byte-identical to K4a + 2 new in W37) share the
+// same pack/unpack pattern (8-iteration while loop for u64, 4-iteration
+// while loop for u32, direct array index for u8). The other 6 helpers
+// (prio get/set, vruntime get/set, next get/set) are NOT re-declared
+// here because sys_fork doesn't touch them — K4b's scheduler.vuma
+// re-declares those for its runqueue management; K4d's fork leaves
+// prio/vruntime/next alone (task_alloc already zero-initializes them
+// via the state_new zero-fill of the ProcessTable).
 //
 // ── Why init-style? ─────────────────────────────────────────────────────────
 // The K4d contract's main() allocates `tbl = state_new(ProcessTable)` and
@@ -125,40 +173,51 @@
 //            READY" is satisfied by task_alloc's state=2 write)
 //     0    = FREE state value (checked by task_alloc's free-slot scan)
 //     1    = PID offset (PID = slot + 1, so slot 0 → PID 1)
-//   Self-test constants: 1000, 2000, 3000, 2, 1 — all decimal (the
+//   Self-test constants: 1000, 2000, 3000, 2, 1, 0 — all decimal (the
 //   parent's mm_root/fs_root/fds test values + the expected child
-//   PID/PPID after fork).
+//   PID/PPID after fork + W37's expected refcount values: 1 after
+//   sys_fork increments, 0 after sys_exit decrements).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. It re-declares ProcessTable + the 12
-// pt_get_* / pt_set_* helpers + pt_init + task_alloc byte-identically
-// to K4a's task.vuma (same pattern as K3d's irq.vuma re-declaring
-// irq_mask/irq_unmask/pic_eoi from K3a's trap_trampoline.vuma, and K3e's
-// dispatch.vuma re-declaring syscall_table_get / syscall_table_set from
-// table.vuma, and K4b's scheduler.vuma re-declaring ProcessTable +
-// pt_get_state/set_state/vruntime/next from K4a's task.vuma). K4d's
-// exec.vuma and exit.vuma will do the same subset for their own needs.
+// This file is self-contained. It re-declares ProcessTable + 12 of
+// K4a's pt_get_* / pt_set_* helpers (byte-identical) + 2 W37-new
+// refcount helpers + pt_init + task_alloc. The 12 byte-identical
+// helpers match K4a's task.vuma (same pattern as K3d's irq.vuma
+// re-declaring irq_mask/irq_unmask/pic_eoi from K3a's
+// trap_trampoline.vuma, and K3e's dispatch.vuma re-declaring
+// syscall_table_get / syscall_table_set from table.vuma, and K4b's
+// scheduler.vuma re-declaring ProcessTable +
+// pt_get_state/set_state/vruntime/next from K4a's task.vuma). The 2
+// W37-new helpers (pt_get_refcount / pt_set_refcount) are local to
+// fork.vuma (the refcounts field is W37-new — see "W37: COW refcount
+// extension" above). K4d's exec.vuma and exit.vuma do their own
+// subsets for their own needs.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
 //     ./target/release-fast/compile_dump \
 //         womb/kernel/proc/fork.vuma \
 //         /tmp/fork.bin x86_64 --verify
 //     /tmp/fork.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — parent
+// Expected: IVE Pass, exit=0 (all 16 self-test checks pass — parent
 // alloc returns slot 0 with PID 1, parent's mm_root/fs_root/fds set
 // to 1000/2000/3000, sys_fork returns slot 1 (child), child.state=2
 // (READY), child.pid=2 (slot 1 + 1), child.ppid=1 (parent's PID),
 // child.mm_root=1000 (copied), child.fs_root=2000 (copied),
-// child.fds=3000 (copied)).
+// child.fds=3000 (copied), refcount[0]=1 (W37: parent shares mm_root
+// with child), refcount[1]=1 (W37: child shares mm_root with parent),
+// sys_exit(child)=0 (W37: child refcount 1→0), refcount[1]=0,
+// sys_exit(parent)=0 (W37: parent refcount 1→0), refcount[0]=0).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
-// ProcessTable: re-declared byte-identically to K4a's task.vuma. 10
-// fields (9 parallel flat [u8; N] arrays + count u32) totaling 14340
-// bytes. See K4a's task.vuma header "Why parallel flat byte arrays?"
-// for the rationale (VUMA has no struct-array support).
+// ProcessTable: re-declared from K4a's task.vuma, W37-EXTENDED with
+// `refcounts`. 11 fields (10 parallel flat [u8; N] arrays + count u32)
+// totaling 13828 bytes — DIVERGED from K4a's 10-field / 12804-byte
+// layout (see "ProcessTable re-declaration (W37-EXTENDED)" above).
+// See K4a's task.vuma header "Why parallel flat byte arrays?" for the
+// rationale (VUMA has no struct-array support).
 layout ProcessTable = {
     pids: [u8; 1024],
     ppids: [u8; 1024],
@@ -169,6 +228,9 @@ layout ProcessTable = {
     fs_roots: [u8; 2048],
     fds: [u8; 2048],
     nexts: [u8; 2048],
+    refcounts: [u8; 1024],  // W37: per-task mm_root sharing refcount
+                            // (u32 × 256 slots; 0 = unshared, 1+ = N
+                            // other tasks share this task's mm_root)
     count: u32,
 }
 
@@ -355,6 +417,63 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// W37 refcount helpers (NEW — not in K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// pt_get_refcount / pt_set_refcount — u32 4-byte LE pack/unpack into
+// ProcessTable.refcounts (the W37-added [u8; 1024] array: 256 slots ×
+// 4 bytes per u32). Same pack/unpack pattern as pt_get_pid / pt_set_pid
+// (4-iteration while loop, byte mask 255, shift i*8).
+//
+// Semantics: refcount[task_idx] tracks how many OTHER tasks currently
+// share this task's mm_root. 0 = unshared (task is the sole owner;
+// mm_root can be freed on exit). 1+ = N other tasks share the mm_root
+// (COW page tables in use; mm_root must NOT be freed until all sharers
+// have exited). sys_fork increments refcount[parent_idx] AND
+// refcount[child_idx] (both tasks now share the parent's mm_root);
+// sys_exit decrements refcount[task_idx] (one fewer sharer).
+//
+// This is a simplification of Linux's two-level mm_struct refcount
+// (mm_users for threads sharing the mm, mm_count for /proc/[pid]/mm
+// kernel references) — collapsed into a single per-task counter. A
+// real implementation would refcount the mm_struct itself (one
+// counter per address space, not per task); this stub uses per-task
+// refcounts because the ProcessTable is a flat array of Task fields
+// and a per-mm counter would need a separate SideTable (K5's VFS
+// concern, not K4d's). See sys_exit's header comment for the full
+// mmput / __mmdrop path documentation.
+
+// Read the u32 `refcount` field of Task slot `idx` from
+// ProcessTable.refcounts. W37-new (same pattern as pt_get_pid).
+fn pt_get_refcount(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.refcounts[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `refcount` field of Task slot `idx` into
+// ProcessTable.refcounts. W37-new (same pattern as pt_set_pid).
+// sys_fork calls this to increment refcount[parent_idx] and
+// refcount[child_idx]; sys_exit calls this to decrement
+// refcount[task_idx].
+fn pt_set_refcount(tbl: State<ProcessTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.refcounts[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Lifecycle primitives (re-declared from K4a's task.vuma).
 // ────────────────────────────────────────────────────────────────────────────
 // pt_init + task_alloc, byte-identical to K4a's task.vuma. fork needs
@@ -461,10 +580,117 @@ transform sys_fork(tbl: State<ProcessTable>, parent_idx: u32) -> u32 {
     pt_set_fs_root(tbl, child_idx, fs);
     let fds = pt_get_fds(tbl, parent_idx);
     pt_set_fds(tbl, child_idx, fds);
+
+    // ── COW (copy-on-write) address-space sharing ───────────────────────
+    // The pointer copy above is the STUB equivalent of Unix fork()'s
+    // address-space duplication. In a real kernel (Linux's copy_mm() →
+    // copy_page_range()), fork() does NOT eagerly copy every page frame.
+    // Instead it:
+    //   (1) Walks the parent's page table (x86_64: PML4 → PDPT → PD → PT).
+    //   (2) For every PRESENT, WRITABLE leaf PTE, clears the W bit and
+    //       sets a software COW bit (x86_64 reuses bit 9 of the PTE, or
+    //       a separate _PAGE_SOFT bit in Linux's pte_t). The PTE now
+    //       maps read-only in BOTH the parent's and the child's tables.
+    //   (3) Increments the refcount on the underlying physical page
+    //       frame (Linux's page->_refcount, via get_page()). The page
+    //       is now shared between parent and child.
+    //   (4) Installs the (now read-only, COW-marked) PTE into the
+    //       child's page table at the same virtual address.
+    //
+    // The COW FAULT PATH (deferred to first write):
+    //   * When either task WRITES to a COW page, the CPU raises a page
+    //     fault (x86_64 vector 14, error code W=1, P=1 — write to a
+    //     present but read-only page).
+    //   * The page-fault handler (K3a's trap_trampoline → K3d's
+    //     do_page_fault) sees the COW bit on the faulting PTE:
+    //       (a) Allocates a fresh physical page via pmm_alloc (K2a).
+    //       (b) Copies the original page's 4096 bytes into the fresh
+    //           page (memcpy on the kernel-virtual alias).
+    //       (c) Installs a fresh PTE in the FAULTING task's table:
+    //           writable, pointing at the fresh page. The original
+    //           page's PTE in the OTHER task's table stays read-only.
+    //       (d) Decrements the original page's refcount via put_page.
+    //           If it reaches 0, the original page is freed back to
+    //           the PMM (the last sharer just unshared it by copying).
+    //       (e) Returns from the fault — the CPU re-executes the
+    //           faulting write instruction, which now succeeds against
+    //           the fresh writable page.
+    //
+    // This stub has no real page table to walk (hosted mode: the
+    // ProcessTable's mm_roots array holds a u64 token, not a real
+    // CR3 root). To track the SHARING relationship so sys_exit can
+    // decide whether to free the mm_root, W37 adds a per-task
+    // `refcounts` array: incrementing refcount[parent_idx] and
+    // refcount[child_idx] records that BOTH tasks now share this
+    // mm_root, so sys_exit can avoid freeing the mm_root until BOTH
+    // tasks have exited (refcount reaches 0).
+    //
+    // The per-task model is a simplification of Linux's two-level
+    // mm_struct refcount (mm_users for threads sharing the mm,
+    // mm_count for /proc/[pid]/mm-style kernel references). A real
+    // implementation would refcount the mm_struct itself (one counter
+    // per address space, not per task); this stub uses per-task
+    // refcounts because the ProcessTable is a flat array of Task
+    // fields and a per-mm counter would need a separate SideTable
+    // (K5's VFS concern, not K4d's).
+    let parent_rc = pt_get_refcount(tbl, parent_idx);
+    pt_set_refcount(tbl, parent_idx, parent_rc + 1);
+    let child_rc = pt_get_refcount(tbl, child_idx);
+    pt_set_refcount(tbl, child_idx, child_rc + 1);
+
     // task_alloc already set child.state = READY (2) — the contract's
     // "set child.state=READY" is satisfied by task_alloc; no redundant
     // state write here.
     return child_idx;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// sys_exit — the mm-release side of exit() (W37 COW refcount decrement).
+// ────────────────────────────────────────────────────────────────────────────
+// sys_exit(tbl, task_idx) -> u32 — decrements the mm_root refcount for
+// the exiting task. When the refcount reaches 0, no other task is
+// sharing this task's mm_root, so (in a real kernel) the page table
+// and its page frames could be freed. THIS STUB does NOT actually free
+// anything — the ProcessTable is in a ___pmt_buffer owned by the
+// caller, and freeing a single field would corrupt the layout. The
+// decrement is recorded so the caller / K4e waitpid can observe the
+// refcount transition.
+//
+// In a real kernel, this corresponds to Linux's mmput() called from
+// do_exit() (kernel/exit.c): decrement mm->mm_users; if 0, also
+// decrement mm->mm_count and, if THAT is 0, call __mmdrop()
+// (kernel/fork.c) which walks the page table, calls pmm_free on every
+// mapped page frame (decrementing each page's _refcount; freeing
+// pages whose refcount reaches 0), and frees the page-table pages
+// themselves. The two-level mm_users/mm_count refcount (threads vs
+// kernel refs) is collapsed here into a single per-task refcount.
+//
+// Relationship to exit.vuma's sys_exit: exit.vuma's sys_exit(tbl,
+// task_idx, code, zombie) handles the ZOMBIE-state bookkeeping
+// (state=4, exit_code in vruntime, ZombieTask struct for waitpid).
+// THIS sys_exit handles the mm-release side. In a real kernel,
+// do_exit() calls BOTH (mm_release → mmput, then exit_notify →
+// zombie state). The two stubs are split across files because
+// fork.vuma owns the mm_root/refcount machinery (W37) and exit.vuma
+// owns the zombie machinery (K4d-exit). K4e's waitpid will eventually
+// call both in sequence.
+//
+// Returns the post-decrement refcount value (so the caller / self-test
+// can verify the transition). Saturates at 0 (a double-exit on the same
+// task is a no-op rather than underflowing to 0xFFFFFFFF).
+transform sys_exit(tbl: State<ProcessTable>, task_idx: u32) -> u32 {
+    let rc = pt_get_refcount(tbl, task_idx);
+    if rc != 0 {
+        rc = rc - 1;
+        pt_set_refcount(tbl, task_idx, rc);
+    }
+    // If rc == 0 here, the mm_root is now unshared: the caller (or
+    // K4e's waitpid) MAY free it. Documented only — no real free in
+    // hosted mode (the ___pmt_buffer backing the State<ProcessTable>
+    // is owned by the caller; freeing a single field would corrupt
+    // the layout). In a real kernel, this is where __mmdrop() would
+    // walk the page table and pmm_free every mapped page frame.
+    return rc;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -485,7 +711,21 @@ transform sys_fork(tbl: State<ProcessTable>, parent_idx: u32) -> u32 {
 //   (8) pt_get_mm_root(1) == 1000 (child copied parent's mm_root).
 //   (9) pt_get_fs_root(1) == 2000 (child copied parent's fs_root).
 //  (10) pt_get_fds(1) == 3000 (child copied parent's fds).
-// Returns 0 on success, 1..10 on the corresponding check failure (so a
+//  (11) pt_get_refcount(0) == 1 (W37: parent's mm_root now shared
+//      with the child — refcount incremented by sys_fork).
+//  (12) pt_get_refcount(1) == 1 (W37: child's mm_root shared with
+//      the parent — refcount incremented by sys_fork).
+//  (13) sys_exit(tbl, 1) == 0 (W37: child's refcount decrements
+//      from 1 to 0; mm_root unshared — could be freed in a real
+//      kernel; documented only in hosted mode).
+//  (14) pt_get_refcount(1) == 0 (W37: after sys_exit, child's
+//      refcount is 0).
+//  (15) sys_exit(tbl, 0) == 0 (W37: parent's refcount decrements
+//      from 1 to 0; last sharer gone — mm_root truly freed in a
+//      real kernel).
+//  (16) pt_get_refcount(0) == 0 (W37: after sys_exit, parent's
+//      refcount is 0).
+// Returns 0 on success, 1..16 on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
 //
 // Per the K4d contract's "decimal constants" rule: all non-zero
@@ -544,6 +784,36 @@ fn main() -> i32 {
 
     // (10) The child should have copied the parent's fds = 3000.
     if pt_get_fds(tbl, 1) != 3000 { return 10; }
+
+    // (11) W37: after sys_fork, the parent's mm_root refcount should
+    // be 1 (the parent's mm_root is now shared with the child).
+    if pt_get_refcount(tbl, 0) != 1 { return 11; }
+
+    // (12) W37: the child's mm_root refcount should also be 1 (the
+    // child shares its mm_root with the parent).
+    if pt_get_refcount(tbl, 1) != 1 { return 12; }
+
+    // (13) W37: sys_exit(tbl, 1) should decrement the child's refcount
+    // from 1 to 0 and return 0. (This is the mm-release side of
+    // exit — exit.vuma's sys_exit handles the zombie bookkeeping;
+    // this fork.vuma sys_exit handles the mm_root refcount.)
+    let child_rc = sys_exit(tbl, 1);
+    if child_rc != 0 { return 13; }
+
+    // (14) W37: after sys_exit on the child, refcount[1] should be 0
+    // (the child no longer shares its mm_root — in a real kernel,
+    // __mmdrop() would walk the page table here).
+    if pt_get_refcount(tbl, 1) != 0 { return 14; }
+
+    // (15) W37: sys_exit(tbl, 0) should decrement the parent's refcount
+    // from 1 to 0 and return 0.
+    let parent_rc = sys_exit(tbl, 0);
+    if parent_rc != 0 { return 15; }
+
+    // (16) W37: after sys_exit on the parent, refcount[0] should be 0
+    // (the parent's mm_root is now unshared — last sharer gone,
+    // mm_root could be freed in a real kernel).
+    if pt_get_refcount(tbl, 0) != 0 { return 16; }
 
     return 0;
 }
